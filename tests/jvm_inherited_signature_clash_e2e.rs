@@ -166,13 +166,17 @@ fn an_unused_dependency_overload_takes_its_signature() {
     )
     .expect("kotlinc compiles the dependency");
     let stdlib = common::stdlib_jar();
-    let source = "import lib.Base\nclass Derived : Base() {\n    fun take(values: List<Int>) {}\n}\n";
+    let source =
+        "import lib.Base\nclass Derived : Base() {\n    fun take(values: List<Int>) {}\n}\n";
     let result = common::compiler_diagnostics(&[("Derived.kt", source)], &[library, stdlib]);
     assert_ne!(result.reference_code, 0, "kotlinc accepted {source:?}");
     assert_ne!(result.krusty_code, 0, "krusty accepted {source:?}");
     let mut observed = complete_errors(&result.krusty_stderr, false);
     observed.extend(complete_errors(&result.krusty_stdout, false));
     let expected = complete_errors(&result.reference_stderr, true);
-    assert!(!expected.is_empty(), "kotlinc reported no error for {source:?}");
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error for {source:?}"
+    );
     assert_eq!(observed, expected, "diagnostic mismatch for {source:?}");
 }
