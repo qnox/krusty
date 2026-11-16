@@ -316,10 +316,12 @@ impl FileClasses {
         PREFIX_FIELDS + self.base_fields(class) + self.tables.table(class).first_field + index
     }
 
-    /// Whether the table of `class`, a class with instances of its own, has a body for `member`:
-    /// `false` where the slot traps.
-    pub(super) fn realizes(&self, class: ClassId, member: AnyMember) -> bool {
-        self.realized[class as usize][member.slot() as usize]
+    /// Whether instances of `class` can reach a slot with no body. A declaration-only layout
+    /// has no runtime dispatch record: its entries can be inherited, but are not objects a call
+    /// can receive. Each concrete subclass is checked through its own record and entries.
+    pub(super) fn has_bodiless_instances(&self, class: ClassId, member: AnyMember) -> bool {
+        self.forms[class as usize].record.is_some()
+            && !self.realized[class as usize][member.slot() as usize]
     }
 
     /// How many fields of `class`'s struct, after the identity prefix, a base outside this file

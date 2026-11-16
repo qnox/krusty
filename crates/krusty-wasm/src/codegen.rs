@@ -583,7 +583,7 @@ mod tests {
                 diagnostics,
                 vec![format!(
                     "{}a `toString` of `Supplier` reaching a runtime object this target cannot \
-                     print yet",
+                     print; first witness: a lambda converted to `Supplier` yet",
                     super::DECLINE_PREFIX
                 )]
             );
@@ -621,7 +621,7 @@ mod tests {
                 diagnostics,
                 vec![format!(
                     "{}a `toString` of `kotlin.Any` reaching a runtime object this target cannot \
-                     print yet",
+                     print; first witness: a lambda converted to `Supplier` yet",
                     super::DECLINE_PREFIX
                 )]
             );

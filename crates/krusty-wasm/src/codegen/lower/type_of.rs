@@ -55,14 +55,18 @@ impl Body<'_> {
 
     /// Whether a class of this file implements `KType` and has no body for `member`. The runtime's
     /// own `KType` object answers every member, so only those classes can.
-    pub(super) fn ktype_reaches_unrealized(&self, member: AnyMember) -> Result<bool, Unsupported> {
+    pub(super) fn ktype_unrealized_class(
+        &self,
+        member: AnyMember,
+    ) -> Result<Option<ClassId>, Unsupported> {
         let Some(classes) = self.classes else {
-            return Ok(false);
+            return Ok(None);
         };
-        Ok(self.ir.classes.iter().enumerate().any(|(id, class)| {
-            !class.is_interface
+        Ok(self.ir.classes.iter().enumerate().find_map(|(id, class)| {
+            (!class.is_interface
                 && self.is_ktype_subtype(class.fq_name, &mut Vec::new())
-                && !classes.realizes(id as ClassId, member)
+                && classes.has_bodiless_instances(id as ClassId, member))
+            .then_some(id as ClassId)
         }))
     }
 

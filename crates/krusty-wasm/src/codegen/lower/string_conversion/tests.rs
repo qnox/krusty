@@ -141,3 +141,103 @@ fn unsigned_scalar_intrinsics_still_reject_nullable_and_erased_receivers() {
         }
     }
 }
+
+fn nameless_layout(is_abstract: bool, is_sealed: bool) -> krusty::ir::IrClass {
+    let mut class = krusty::ir::IrClass::synthetic(krusty::types::type_name("sample/Nameless"));
+    class.is_abstract = is_abstract;
+    class.is_sealed = is_sealed;
+    class
+}
+
+/// A real erased or hierarchy-typed parameter, not a constant whose initializer narrows it.
+fn rendering_parameter(ty: Ty) -> IrFile {
+    let mut ir = IrFile::default();
+    let parameter = ir.add_expr(IrExpr::GetValue(0));
+    ir.set_logical_type(parameter, ty);
+    let text = ir.add_expr(IrExpr::StringConcat(vec![parameter]));
+    ir.set_logical_type(text, Ty::String);
+    ir.add_fun(IrFunction {
+        name: "render".to_owned(),
+        params: vec![ty],
+        ret: Ty::String,
+        body: Some(text),
+        is_static: true,
+        dispatch_receiver: None,
+        param_checks: Vec::new(),
+    });
+    ir
+}
+
+fn lower_reach(
+    mut ir: IrFile,
+    started: &mut crate::codegen::Started,
+) -> Result<crate::codegen::any_member_reach::FileReach, String> {
+    let properties = krusty::backend::local_properties::realize(&mut ir).unwrap();
+    super::super::lower_alone(&ir, &properties, started).map(|file| file.reach)
+}
+
+#[test]
+fn only_a_nameless_layout_with_runtime_instances_blocks_a_reference_string_conversion() {
+    for target in WasmTarget::ALL {
+        for (is_abstract, is_sealed) in [(true, false), (false, true), (false, false)] {
+            for receiver in [Ty::obj("kotlin/Any"), Ty::obj("sample/Nameless")] {
+                let mut ir = rendering_parameter(receiver);
+                ir.classes.push(nameless_layout(is_abstract, is_sealed));
+                let mut started = crate::codegen::Started::new(target);
+                let result = lower_reach(ir, &mut started).map(|_| ());
+                if is_abstract || is_sealed {
+                    assert_eq!(result, Ok(()), "{target:?}, {receiver:?}");
+                } else {
+                    let receiver_name = if receiver == Ty::obj("kotlin/Any") {
+                        "kotlin.Any"
+                    } else {
+                        "sample.Nameless"
+                    };
+                    assert_eq!(
+                        result,
+                        Err(format!(
+                            "a `toString` of `{receiver_name}` reaching a runtime object this \
+                             target cannot print; first witness: a generated class \
+                             `sample.Nameless` without a source name"
+                        )),
+                        "{target:?}",
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn only_runtime_instances_contribute_a_bodiless_class_to_another_files_erased_call() {
+    for target in WasmTarget::ALL {
+        for (is_abstract, is_sealed) in [(true, false), (false, true), (false, false)] {
+            for class_first in [false, true] {
+                let mut declaration = IrFile::default();
+                declaration
+                    .classes
+                    .push(nameless_layout(is_abstract, is_sealed));
+                let call = rendering_parameter(Ty::obj("kotlin/Any"));
+                let files = if class_first {
+                    [declaration, call]
+                } else {
+                    [call, declaration]
+                };
+                let mut started = crate::codegen::Started::new(target);
+                let mut module_reach = crate::codegen::any_member_reach::ModuleReach::default();
+                for (index, file) in files.into_iter().enumerate() {
+                    let reached = module_reach.add(lower_reach(file, &mut started).unwrap());
+                    let expected = if index == 1 && !is_abstract && !is_sealed {
+                        Some(
+                            "a `toString` of `kotlin.Any` reaching an object another file creates"
+                                .to_owned(),
+                        )
+                    } else {
+                        None
+                    };
+                    assert_eq!(reached, expected, "{target:?}, class first={class_first}");
+                }
+            }
+        }
+    }
+}

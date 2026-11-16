@@ -429,7 +429,7 @@ pub(super) fn lower_file(
     if let Some(classes) = &classes {
         for class in 0..ir.classes.len() {
             for member in AnyMember::ALL {
-                if !classes.realizes(class as ClassId, member) {
+                if classes.has_bodiless_instances(class as ClassId, member) {
                     reach.bodiless_class(member);
                 }
             }
