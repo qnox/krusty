@@ -783,7 +783,14 @@ fn prepare_bodyless_externals(
                 }
             }
         } else {
-            bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+            let mut edges =
+                bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+            // Dispatch can run any member of an object the body reads, so the declarations those
+            // members call are retained with the body's own.
+            edges.extend(
+                bodies.emitted_object_members(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
+            );
+            edges
         };
         let mut edges = edges;
         // A member of a materialized class is lowered with the class its constructor creates.

@@ -1144,6 +1144,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 declarations: self.sources.declarations,
                 module: &module,
                 validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
+                applied_supertype: &|sub, owner| callees.applied_supertype(sub, owner),
             },
             callee,
             self.local_classes,
@@ -1153,6 +1154,26 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 self.install_local_class(ir, prepared)
             }
         }
+    }
+
+    fn local_object(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<TypeName, KlibBodyDeclineReason> {
+        let classifier =
+            self.local_class(signature)?
+                .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a file-private object value",
+                ))?;
+        let constructor = super::same_library_class::object_constructor(
+            self.sources.bodies,
+            &self.active_module,
+            signature,
+        )?;
+        // The object is installed with its instance once; a later read finds it in the cache.
+        self.link_local_constructor(ir, &constructor)?;
+        Ok(classifier)
     }
 
     fn link_local_function(
@@ -1644,47 +1665,9 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 Some(self.sources.bodies),
             )
             .map_err(callee_declined)?;
-            // A member of a generic class realized outside this unit, by the target or by its
-            // provider, is read at its class's type arguments, which the call binds from its
-            // dispatch receiver.
-            let class = match selected {
-                Some(selected)
-                    if matches!(purpose, HeaderPurpose::External)
-                        && selected
-                            .class_contract()
-                            .is_some_and(|class| !class.parameters.formals.is_empty()) =>
-                {
-                    Some(
-                        super::class_headers::authenticate(selected, self.sources.bodies)
-                            .map_err(callee_declined)?,
-                    )
-                }
-                _ => None,
-            };
-            let (header, class_type_parameters) = match class {
-                Some(class) => {
-                    super::class_headers::authenticate_receiver(
-                        class.contract,
-                        class.arena,
-                        class.function,
-                    )
-                    .map_err(callee_declined)?;
-                    let header = super::function_lowering::raw_function_header_with_class(
-                        selected,
-                        purpose,
-                        class.arena,
-                        class.function,
-                        class.types,
-                    )
-                    .map_err(callee_declined)?;
-                    (header, class.formals)
-                }
-                None => (
-                    raw_function_header(selected, purpose, arena, declaration)
-                        .map_err(callee_declined)?,
-                    Vec::new(),
-                ),
-            };
+            let (header, class_type_parameters) = self
+                .call_header(selected, purpose, arena, declaration)
+                .map_err(callee_declined)?;
             let (params, ret, context_count, extension_receiver, receiver) =
                 header.linked_signature();
             return Ok(LinkedCallee {
@@ -2004,16 +1987,13 @@ impl<'s> Linker<'_, 's> {
         .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
             "a call of a member function without a provider declaration",
         ))?;
-        if !selected
-            .class_contract()
-            .is_some_and(|class| class.parameters.formals.is_empty())
-        {
+        if selected.class_contract().is_none() {
             return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                "a call of a member of a generic class",
+                "a call of a member without a class contract",
             ));
         }
-        let header =
-            raw_function_header(Some(selected), HeaderPurpose::External, arena, declaration)?;
+        let (header, class_type_parameters) =
+            self.call_header(Some(selected), HeaderPurpose::External, arena, declaration)?;
         let (params, ret, context_count, extension_receiver, receiver) = header.linked_signature();
         Ok(LinkedCallee {
             callee: Callee::External {
@@ -2036,10 +2016,49 @@ impl<'s> Linker<'_, 's> {
             type_parameter_bounds: selected
                 .generic_signature()
                 .map(|signature| signature.formal_bounds.clone()),
-            class_type_parameters: Vec::new(),
+            class_type_parameters,
             parameter_defaults: Vec::new(),
             edge: self.external_member_edge(identity)?,
         })
+    }
+
+    /// The header a call of `declaration` reads, with the type parameters of its generic class
+    /// that the call binds from its dispatch receiver.
+    ///
+    /// A member of a generic class realized outside this unit, by the target or by its provider,
+    /// is read at its class's type arguments. Every other callee is read at its own header.
+    fn call_header(
+        &self,
+        selected: Option<KlibBodyCallable<'s>>,
+        purpose: HeaderPurpose,
+        arena: &'s KlibIrArena,
+        declaration: &'s KlibIrFunction,
+    ) -> Result<(FunctionHeader, Vec<String>), KlibBodyDeclineReason> {
+        let class = match selected {
+            Some(selected)
+                if matches!(purpose, HeaderPurpose::External)
+                    && selected
+                        .class_contract()
+                        .is_some_and(|class| !class.parameters.formals.is_empty()) =>
+            {
+                super::class_headers::authenticate(selected, self.sources.bodies)?
+            }
+            _ => {
+                return Ok((
+                    raw_function_header(selected, purpose, arena, declaration)?,
+                    Vec::new(),
+                ))
+            }
+        };
+        super::class_headers::authenticate_receiver(class.contract, class.arena, class.function)?;
+        let header = super::function_lowering::raw_function_header_with_class(
+            selected,
+            purpose,
+            class.arena,
+            class.function,
+            class.types,
+        )?;
+        Ok((header, class.formals))
     }
 
     /// The facts a call of the member `identity`, which a target realizes, carries, as the

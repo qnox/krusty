@@ -43,15 +43,26 @@ impl BodyLowering<'_> {
         if symbol.kind != KlibIrSymbolKind::Class {
             return Err(mismatch("an object value's symbol is not a class"));
         }
-        let KlibIrSignature::Public(object) = &symbol.signature else {
-            return unsupported("a file-private object value");
+        let classifier = match &symbol.signature {
+            KlibIrSignature::Public(object) => {
+                let classifier = super::super::klib_types::classifier_name(object)?;
+                let object =
+                    crate::types::builtin_semantic(classifier).unwrap_or(Ty::obj_name(classifier));
+                if ty != object {
+                    return Err(mismatch("an object value is typed apart from its object"));
+                }
+                self.linker.singleton(self.ir, classifier)?;
+                classifier
+            }
+            signature => {
+                let classifier = self.linker.local_object(self.ir, signature)?;
+                if ty != Ty::obj_name(classifier) {
+                    return Err(mismatch("an object value is typed apart from its object"));
+                }
+                classifier
+            }
         };
-        let classifier = super::super::klib_types::classifier_name(object)?;
         let object = crate::types::builtin_semantic(classifier).unwrap_or(Ty::obj_name(classifier));
-        if ty != object {
-            return Err(mismatch("an object value is typed apart from its object"));
-        }
-        self.linker.singleton(self.ir, classifier)?;
         // Recorded as checked FIR lowering records the source reference: `Unit` is its builtin
         // type rather than its class.
         let value = self.ir.add_expr(IrExpr::SingletonValue { classifier });

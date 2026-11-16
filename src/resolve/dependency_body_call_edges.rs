@@ -38,6 +38,9 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         pending.extend(
             bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
         );
+        pending.extend(
+            bodies.emitted_object_members(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
+        );
 
         // A reached constructor's initialization is serialized on its owning class. These are
         // declaration facts only: common class initialization still selects executable roots.

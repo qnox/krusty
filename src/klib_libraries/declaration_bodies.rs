@@ -46,18 +46,6 @@ pub(crate) enum LocatedClass<'a> {
     Several,
 }
 
-/// The class that directly declares one function, and the arena that owns both.
-pub(crate) enum LocatedMember<'a> {
-    Missing,
-    Several,
-    One {
-        module: String,
-        arena: &'a KlibIrArena,
-        class: &'a KlibIrClass,
-        function: &'a KlibIrFunction,
-    },
-}
-
 pub(crate) struct KlibClassMember<'a> {
     pub(crate) arena: &'a KlibIrArena,
     pub(crate) class: &'a crate::metadata::klib_ir::tree::KlibIrClass,
@@ -672,45 +660,6 @@ impl KlibDeclarationBodies {
         }
     }
 
-    /// The class in `module`'s producer graph that directly declares `signature`.
-    ///
-    /// The match is the function's serialized symbol, including a property accessor. Two classes
-    /// declaring one symbol are [`LocatedMember::Several`].
-    pub(crate) fn function_owner<'a>(
-        &'a self,
-        module: &str,
-        signature: &KlibIrSignature,
-    ) -> LocatedMember<'a> {
-        let mut found = None;
-        for owner in self.body_provider_modules(module) {
-            let Some(&library) = self.modules.get(&owner) else {
-                continue;
-            };
-            for tree in self.libraries[library].trees() {
-                let mut pending = vec![&tree.declaration];
-                while let Some(member) = pending.pop() {
-                    let Some(class) = class_of(&tree.arena, member) else {
-                        continue;
-                    };
-                    pending.extend(class.members.iter());
-                    let Some(function) = declared_function(&tree.arena, class, signature) else {
-                        continue;
-                    };
-                    if found.is_some() {
-                        return LocatedMember::Several;
-                    }
-                    found = Some(LocatedMember::One {
-                        module: owner.clone(),
-                        arena: &tree.arena,
-                        class,
-                        function,
-                    });
-                }
-            }
-        }
-        found.unwrap_or(LocatedMember::Missing)
-    }
-
     /// Whether the exact serialized declaration intentionally carries an executable body.
     pub(crate) fn function_has_body(&self, identity: &KlibDependencyCallable) -> Option<bool> {
         self.function(identity)
@@ -807,24 +756,8 @@ impl KlibDeclarationBodies {
         let Some((trees, arena, function)) = self.function_with_trees(identity) else {
             return Vec::new();
         };
-        let mut symbols = arena.emitted_callable_symbols(function, forms);
-        // A file-local class the body constructs, an object literal's among them, is
-        // materialized with the body, every member included, since dispatch can run any of them.
-        // A private class of the same file is its own declaration tree, so its members are read
-        // in the arena that serializes the class.
-        let mut classes = crate::fx_hash::HashSet::default();
-        let mut next = 0;
-        while let Some(symbol) = symbols.get(next).copied() {
-            next += 1;
-            if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
-                if classes.insert(&class.base.symbol) {
-                    let mut roots = class_arena.class_member_roots(class);
-                    roots.extend(class_arena.class_superclass_delegations(class));
-                    symbols.extend(class_arena.emitted_callable_symbols_from(roots, forms));
-                }
-            }
-        }
-        symbols
+        emitted_with_local_classes(trees, arena, function, forms)
+            .0
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(
@@ -846,22 +779,9 @@ impl KlibDeclarationBodies {
         let Some((trees, arena, function)) = self.function_with_trees(identity) else {
             return Vec::new();
         };
-        let mut objects = arena.emitted_object_symbols(function, forms);
-        let mut symbols = arena.emitted_callable_symbols(function, forms);
-        let mut classes = crate::fx_hash::HashSet::default();
-        let mut next = 0;
-        while let Some(symbol) = symbols.get(next).copied() {
-            next += 1;
-            if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
-                if classes.insert(&class.base.symbol) {
-                    let roots = class_arena.class_member_roots(class);
-                    objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
-                    symbols.extend(class_arena.emitted_callable_symbols_from(roots, forms));
-                }
-            }
-        }
         let mut seen = crate::fx_hash::HashSet::default();
-        objects
+        emitted_with_local_classes(trees, arena, function, forms)
+            .1
             .into_iter()
             .filter_map(|symbol| match &symbol.signature {
                 KlibIrSignature::Public(signature) => Some(signature.clone()),
@@ -869,6 +789,47 @@ impl KlibDeclarationBodies {
             })
             .filter(|signature| seen.insert(signature.clone()))
             .collect()
+    }
+
+    /// The constructors and members of the library objects the emitted body of `identity` reads.
+    ///
+    /// Dispatch can run any member of an object a body reads, so these are declaration facts the
+    /// checked graph freezes, as it does for the members of a file-local class the body
+    /// constructs. The object's initialization plan still selects the executable roots.
+    pub(crate) fn emitted_object_members(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<KlibDependencyCallable> {
+        let mut members = Vec::new();
+        for object in self.emitted_body_objects(identity, forms) {
+            for owner in self.body_provider_modules(&identity.module) {
+                let Ok(Some((arena, class))) = self.class_header(&owner, &object) else {
+                    continue;
+                };
+                for member in &class.members {
+                    let functions = match member {
+                        KlibIrMember::Function(function) => vec![*function],
+                        KlibIrMember::Property(property) => property
+                            .getter
+                            .iter()
+                            .chain(&property.setter)
+                            .copied()
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    members.extend(functions.into_iter().filter_map(|function| {
+                        let declaration =
+                            declaration_signature(&arena.function(function).base.symbol.signature)?;
+                        match self.linked_origin(&identity.module, &declaration) {
+                            KlibCalleeOrigin::Exact(callee) => Some(callee),
+                            KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+                        }
+                    }));
+                }
+            }
+        }
+        members
     }
 
     /// Declaration facts of the class whose exact reached constructor is `identity`. Field and
@@ -1153,6 +1114,60 @@ fn ir_signature(declaration: &KlibDeclarationSignature) -> KlibIrSignature {
 /// The file-local class whose constructor `symbol` names, resolved in `trees`, the decoded trees
 /// whose signature tables numbered the symbol, with the arena that serializes the class and its
 /// constructor.
+/// The calls and the object values the emitted body of `function` reaches, with those of every
+/// file-local class it materializes: one it constructs, an object literal's among them, or a
+/// file-local object whose value it reads. Such a class is materialized with the body, every
+/// member included, since dispatch can run any of them, and an object's initializers run when its
+/// instance is created. A private class of the same file is its own declaration tree, so its
+/// members are read in the arena that serializes the class.
+fn emitted_with_local_classes<'a>(
+    trees: &'a KlibIrModuleTrees,
+    arena: &'a KlibIrArena,
+    function: &'a KlibIrFunction,
+    forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+) -> (Vec<&'a KlibIrSymbol>, Vec<&'a KlibIrSymbol>) {
+    let mut calls = arena.emitted_callable_symbols(function, forms);
+    let mut objects = arena.emitted_object_symbols(function, forms);
+    let mut classes = HashSet::default();
+    let (mut next_call, mut next_object) = (0, 0);
+    loop {
+        let reached = if let Some(symbol) = calls.get(next_call).copied() {
+            next_call += 1;
+            constructed_local_class(trees, symbol).map(|class| (class, false))
+        } else if let Some(symbol) = objects.get(next_object).copied() {
+            next_object += 1;
+            read_local_object(trees, symbol).map(|class| (class, true))
+        } else {
+            break;
+        };
+        let Some(((class_arena, class), object)) = reached else {
+            continue;
+        };
+        if !classes.insert(&class.base.symbol) {
+            continue;
+        }
+        let mut roots = class_arena.class_member_roots(class);
+        roots.extend(class_arena.class_superclass_delegations(class));
+        if object {
+            roots.extend(class_arena.class_initializer_roots(class));
+        }
+        objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
+        calls.extend(class_arena.emitted_callable_symbols_from(roots, forms));
+    }
+    (calls, objects)
+}
+
+/// The file-local object whose value `symbol` reads.
+fn read_local_object<'a>(
+    trees: &'a KlibIrModuleTrees,
+    symbol: &KlibIrSymbol,
+) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
+    if !matches!(symbol.signature, KlibIrSignature::FileLocal { .. }) {
+        return None;
+    }
+    trees.local_class(&symbol.signature)
+}
+
 fn constructed_local_class<'a>(
     trees: &'a KlibIrModuleTrees,
     symbol: &KlibIrSymbol,

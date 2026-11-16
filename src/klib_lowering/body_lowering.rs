@@ -243,6 +243,16 @@ pub(super) trait CallLinker {
     /// materializes it in `ir` when its instance is the linker's to create.
     fn singleton(&mut self, ir: &mut IrFile, classifier: TypeName) -> Lowered<()>;
 
+    /// The classifier of the file-local object `signature` of the body's library, materialized
+    /// in `ir` with its instance as a file-local class is. Template linkers keep the refusal.
+    fn local_object(
+        &mut self,
+        _ir: &mut IrFile,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<TypeName> {
+        unsupported("a file-private object value")
+    }
+
     /// Whether the target owns the representation of `classifier`, which a class of this unit
     /// extends without the unit materializing it. A linker that knows no such class says no.
     fn target_represents(&self, _classifier: TypeName) -> bool {
