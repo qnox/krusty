@@ -124,11 +124,17 @@ pub(super) struct ArrayLists {
     /// `listIterator(index)`: an iterator whose next element is the one at `index`.
     pub(super) iterator_at: u32,
     pub(super) has_next: u32,
+    /// The element after the iterator, which advances; the caller has checked `has_next`
+    /// (`crate::list_iterator_ends`).
     pub(super) next: u32,
     pub(super) has_previous: u32,
+    /// The element before the iterator, which steps back; the caller has checked `has_previous`.
     pub(super) previous: u32,
     pub(super) next_index: u32,
     pub(super) previous_index: u32,
+    /// `next()` and `previous()` that throw `NoSuchElementException` past the list's ends, once
+    /// something calls them.
+    pub(super) checked_steps: [Option<u32>; 2],
 }
 
 impl ArrayLists {
@@ -191,6 +197,7 @@ impl ArrayLists {
             previous: module.declare(),
             next_index: module.declare(),
             previous_index: module.declare(),
+            checked_steps: [None; 2],
         };
         let layout = Layout {
             list,
@@ -715,12 +722,6 @@ impl ArrayLists {
         let (iter, index, list) = (0, 1, 2);
         let mut code = Code::default();
         code.local_get(iter)
-            .call(self.has_next)
-            .op(EQZ32)
-            .if_(BlockType::Empty)
-            .unreachable()
-            .end();
-        code.local_get(iter)
             .ref_cast(false, HeapType::Concrete(layout.iterator))
             .struct_get(layout.iterator, ITER_INDEX)
             .local_set(index);
@@ -767,12 +768,6 @@ impl ArrayLists {
         let ty = module.func_type(vec![REFERENCE], vec![REFERENCE]);
         let (iter, index) = (0, 1);
         let mut code = Code::default();
-        code.local_get(iter)
-            .call(self.has_previous)
-            .op(EQZ32)
-            .if_(BlockType::Empty)
-            .unreachable()
-            .end();
         iterator_index(&mut code, layout, iter);
         code.i32_const(-1).op(ADD32).local_set(index);
         code.local_get(iter)

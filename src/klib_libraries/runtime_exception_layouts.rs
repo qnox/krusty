@@ -21,6 +21,7 @@ pub(super) fn normalize(
         RuntimeExceptionKind::IllegalState,
         RuntimeExceptionKind::IllegalArgument,
         RuntimeExceptionKind::ClassCast,
+        RuntimeExceptionKind::NoSuchElement,
     ]
     .into_iter()
     .find(|kind| kind.classifier() == identity)?;

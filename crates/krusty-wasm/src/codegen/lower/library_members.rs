@@ -312,14 +312,23 @@ impl Body<'_> {
             self.runtime.reference_name_member(self.module, member)?;
         }
         if let Some(step) = super::array_lists::iterator_step(&fact) {
+            use super::array_lists::IteratorStep;
+            use crate::list_iterator_ends::EndedStep;
             let lists = &self.runtime.array_lists;
             let function = match step {
-                super::array_lists::IteratorStep::HasNext => lists.has_next,
-                super::array_lists::IteratorStep::Next => lists.next,
-                super::array_lists::IteratorStep::HasPrevious => lists.has_previous,
-                super::array_lists::IteratorStep::Previous => lists.previous,
-                super::array_lists::IteratorStep::NextIndex => lists.next_index,
-                super::array_lists::IteratorStep::PreviousIndex => lists.previous_index,
+                IteratorStep::HasNext => lists.has_next,
+                IteratorStep::HasPrevious => lists.has_previous,
+                IteratorStep::NextIndex => lists.next_index,
+                IteratorStep::PreviousIndex => lists.previous_index,
+                IteratorStep::Next | IteratorStep::Previous => {
+                    let ended = if matches!(step, IteratorStep::Next) {
+                        EndedStep::Next
+                    } else {
+                        EndedStep::Previous
+                    };
+                    self.runtime
+                        .checked_list_iterator_step(self.module, self.classifiers, ended)?
+                }
             };
             self.runtime.objects.interfaces.implement_representation(
                 member,

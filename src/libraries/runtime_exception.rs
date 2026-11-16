@@ -12,10 +12,11 @@ pub enum RuntimeExceptionKind {
     IllegalState,
     IllegalArgument,
     ClassCast,
+    NoSuchElement,
 }
 
 impl RuntimeExceptionKind {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Throwable,
         Self::Exception,
         Self::RuntimeException,
@@ -24,6 +25,7 @@ impl RuntimeExceptionKind {
         Self::IllegalState,
         Self::IllegalArgument,
         Self::ClassCast,
+        Self::NoSuchElement,
     ];
 
     /// The role whose language-runtime declaration is `classifier`, if any.
@@ -45,6 +47,7 @@ impl RuntimeExceptionKind {
             Self::IllegalState => "kotlin/IllegalStateException",
             Self::IllegalArgument => "kotlin/IllegalArgumentException",
             Self::ClassCast => "kotlin/ClassCastException",
+            Self::NoSuchElement => "kotlin/NoSuchElementException",
         })
     }
 }
@@ -74,12 +77,13 @@ mod tests {
             RuntimeExceptionKind::IllegalState => 5,
             RuntimeExceptionKind::IllegalArgument => 6,
             RuntimeExceptionKind::ClassCast => 7,
+            RuntimeExceptionKind::NoSuchElement => 8,
         };
         let positions: Vec<usize> = RuntimeExceptionKind::ALL
             .into_iter()
             .map(position)
             .collect();
-        assert_eq!(positions, (0..8).collect::<Vec<_>>());
+        assert_eq!(positions, (0..9).collect::<Vec<_>>());
         for kind in RuntimeExceptionKind::ALL {
             assert_eq!(RuntimeExceptionKind::of(kind.classifier()), Some(kind));
         }
