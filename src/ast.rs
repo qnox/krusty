@@ -481,6 +481,8 @@ pub struct TypeAliasDecl {
     pub span: Span,
     /// Exact span of the alias's NAME, like [`FunDecl::name_span`].
     pub name_span: Span,
+    /// The whole declaration, from its first annotation or modifier through its target.
+    pub declaration_span: Span,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1028,6 +1030,10 @@ pub struct ClassDecl {
     /// Span of the primary constructor's parameter list, `(` through `)`. Absent when the class
     /// writes no parameter list.
     pub primary_constructor_parameters_span: Option<Span>,
+    /// Span of the primary constructor's signature: its `constructor` keyword when written,
+    /// otherwise its `(`, through the `)`. Absent when the class writes no
+    /// parameter list; a declaration-level constructor diagnostic then names the class.
+    pub primary_constructor_signature_span: Option<Span>,
     /// `enum class Name { A, B }` — the entries in declaration order (extends `java/lang/Enum`). Each
     /// [`AstEnumEntry`] carries its own name / constructor args / body methods / body properties.
     pub enum_entries: Vec<AstEnumEntry>,
