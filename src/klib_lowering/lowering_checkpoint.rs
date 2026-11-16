@@ -11,6 +11,7 @@ pub(super) struct LoweringCheckpoint {
     classes: usize,
     /// Each existing class's method and secondary-constructor counts.
     class_members: Vec<(usize, usize)>,
+    statics: usize,
     class_self_types: crate::fx_hash::HashSet<crate::types::TypeName>,
 }
 
@@ -25,6 +26,7 @@ impl LoweringCheckpoint {
                 .iter()
                 .map(|class| (class.methods.len(), class.secondary_ctors.len()))
                 .collect(),
+            statics: ir.statics.len(),
             class_self_types: ir.declared_class_self_type_owners(),
         }
     }
@@ -33,6 +35,7 @@ impl LoweringCheckpoint {
     pub(super) fn restore(self, ir: &mut IrFile) -> FunId {
         let first = ExprId::try_from(self.expressions).expect("an expression id fits u32");
         ir.exprs.truncate(self.expressions);
+        ir.statics.truncate(self.statics);
         ir.truncate_types(first);
         ir.checked_return_depths
             .retain(|expression, _| *expression < first);
@@ -63,6 +66,11 @@ impl LoweringCheckpoint {
             class.methods.truncate(methods);
             class.secondary_ctors.truncate(secondaries);
         }
+        // An object literal's naming provenance is keyed by its class id, which a later class may
+        // reuse; a stale entry would also count toward the next anonymous ordinal.
+        let first_class = crate::ir::ClassId::try_from(self.classes).expect("a class id fits u32");
+        ir.local_class_name_provenance
+            .retain(|class, _| *class < first_class);
         for class in removed {
             ir.function_overrides.remove(&class);
             ir.property_overrides.remove(&class);
