@@ -427,14 +427,12 @@ closures/capturedVarsOptimization/kt44347.kt
 closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
 closures/closureInsideClosure/propertyAndFunctionNameClash.kt
-closures/closureInsideConstrucor.kt
 closures/closureOnTopLevel1.kt
 closures/closureOnTopLevel2.kt
 closures/closuresAsSingleton.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt11634_4.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
-closures/localFunInInit.kt
 closures/localFunctionInInitBlock.kt
 collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
@@ -455,7 +453,6 @@ constants/divisionByZero.kt
 constants/doNotTriggerInit.kt
 constants/float.kt
 constants/kt9532.kt
-contextParameters/contextOnInvokeResolve.kt
 contextParameters/contextPropertyInInterface.kt
 contextParameters/explicitPassing.kt
 contextParameters/inferGenericPropertyType.kt
@@ -1073,7 +1070,6 @@ defaultArguments/implementedByFake.kt
 defaultArguments/implementedByFake2.kt
 defaultArguments/implementedByFake3.kt
 defaultArguments/kt36853_fibonacci.kt
-defaultArguments/kt47073_nested.kt
 defaultArguments/useThisInLambda.kt
 delegatedProperty/DelegationByFunctionWithEnumUpperBound.kt
 delegatedProperty/accessTopLevelDelegatedPropertyInClinit.kt
@@ -1251,7 +1247,6 @@ enum/kt38540.kt
 enum/kt44744_innerClass.kt
 enum/kt7257_boundReference2.kt
 enum/kt7257_boundReferenceWithImplicitReceiver.kt
-enum/kt7257_namedLocalFun.kt
 enum/lambdaInDefault.kt
 enum/loop.kt
 enum/multipleModules.kt
@@ -1414,17 +1409,12 @@ functions/functionExpression/functionExpressionWithThisReference.kt
 functions/functionExpression/functionLiteralExpression.kt
 functions/invoke/kt3190.kt
 functions/kt1199.kt
-functions/kt1413.kt
 functions/kt395.kt
 functions/kt58825_arrayOverloads.kt
 functions/localFunctions/callInlineLocalInLambda.kt
 functions/localFunctions/definedWithinLambda.kt
 functions/localFunctions/definedWithinLambdaInnerUsage1.kt
 functions/localFunctions/definedWithinLambdaInnerUsage2.kt
-functions/localFunctions/kt3978_2.kt
-functions/localFunctions/liftThroughFunObjectLambda.kt
-functions/localFunctions/localFunctionInConstructor.kt
-functions/localFunctions/nameClashAcrossDifferentContainers.kt
 ieee754/asComparableToDouble.kt
 ieee754/asComparableToDouble_properIeeeComparisons.kt
 ieee754/comparableTypeCast.kt
@@ -1478,21 +1468,12 @@ inference/pcla/issues/kt76171.kt
 inference/pcla/memberScope.kt
 inference/pcla/nestedNonExhaustiveIf.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/AnonymousObject.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/DefinitelyNonNullableTypeParameter.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/EnclosingClass.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/EnclosingEnumerationEntryType.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/EnclosingEnumerationType.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/EnclosingExplicitlyGenericInnerClass.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/EnclosingGenericClass.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/EnclosingImplicitlyGenericInnerClass.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/EnclosingInnerClass.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/GenericLocalClass.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/GenericLocalClassWithLeakingTypeParameter.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/Int.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/IntersectionType.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/LocalClass.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/NullableTypeParameter.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/TypeParameter.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSinks/ImmutableExtensionProperties.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSinks/MutableExtensionPropertiesMaterializeCase.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
@@ -1521,7 +1502,6 @@ initializers/initializers7.kt
 initializers/initializers9.kt
 initializers/multipleModules1.kt
 initializers/object.kt
-initializers/sharedVarInInitBlock.kt
 initializers/static_arrays.kt
 initializers/static_list.kt
 initializers/static_varargChange.kt
@@ -2171,7 +2151,6 @@ intrinsics/stringFromCollection.kt
 intrinsics/throwableParamOrder.kt
 intrinsics/tostring.kt
 intrinsics/trimMarginWithBlankString.kt
-invokedynamic/extensionFunInvoke.kt
 invokedynamic/lambdas/kt52875.kt
 ir/anonymousClassLeak.kt
 ir/anonymousObjectInForLoopIteratorAndBody.kt
@@ -2239,7 +2218,6 @@ lateinit/notInitialized.kt
 literals/listof1.kt
 literals/strdedup1.kt
 localClass/innerTakesCapturedFromOuter.kt
-localClass/localFunctionInLocalClass.kt
 localClass/tryCatch.kt
 localClasses/closureWithSelfInstantiation.kt
 localClasses/inExtensionFunction.kt
@@ -2266,7 +2244,6 @@ lower/forLoopsLowering/withIndexUInt.kt
 lower/localDelegatedProperty.kt
 mangling/internalOverrideSuperCall.kt
 mangling/multipleConstructors.kt
-mangling/parentheses.kt
 mangling/publicOverrideSuperCall.kt
 mixedNamedPosition/varargsEvaluationOrder.kt
 multiDecl/component.kt
@@ -2470,7 +2447,6 @@ properties/generalAccess.kt
 properties/genericPropertyMultiModule.kt
 properties/kt10729.kt
 properties/kt1398.kt
-properties/kt2892.kt
 properties/kt4252.kt
 properties/kt4383.kt
 properties/kt78962.kt
@@ -2498,7 +2474,6 @@ properties/lazyInitializationCyclicImports.kt
 properties/lazyInitializationSplitPerModule.kt
 properties/primitiveOverrideDelegateAccessor.kt
 properties/privatePropertyInConstructor.kt
-properties/privatePropertyWithoutBackingField.kt
 properties/unreachableUninitializedProperty.kt
 propertyCallableReference/dynamicReceiver.kt
 propertyCallableReference/multipleModules.kt
@@ -3364,7 +3339,6 @@ regressions/kt33638.kt
 regressions/kt344.kt
 regressions/kt3442.kt
 regressions/kt35914.kt
-regressions/kt3903.kt
 regressions/kt5056.kt
 regressions/kt5953.kt
 regressions/kt6434.kt
