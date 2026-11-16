@@ -167,6 +167,7 @@ impl<'u, 's> Linker<'u, 's> {
             initialization: Some((class, super::PendingInitialization::Class(Box::new(plan)))),
             value_member: Some(member),
             local_body: None,
+            static_initialization: None,
         });
         Ok(())
     }
@@ -294,6 +295,7 @@ impl<'u, 's> Linker<'u, 's> {
                 contract: delegation.header.contract,
             }),
             local_body: None,
+            static_initialization: None,
         });
         Ok(())
     }

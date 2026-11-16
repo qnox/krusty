@@ -73,11 +73,7 @@ pub(super) fn checked_ir_file<'a>(
         diags.error(Span::new(0, 0), format!("internal error: {error}"));
         return None;
     }
-    if let Err(identity) = super::builtin_implementations::record_checked(
-        &mut callables,
-        &ir,
-        symbols.semantic_platform(),
-    ) {
+    if let Err(identity) = super::builtin_implementations::record_checked(&mut callables, &ir) {
         diags.error(
             Span::new(0, 0),
             format!(
@@ -230,7 +226,7 @@ pub(super) fn prepare_common_ir(
     })?;
     record_checked_klib_dependency_facts(&mut callables, provider)
         .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
-    super::builtin_implementations::record_checked(&mut callables, &file.ir, provider).map_err(
+    super::builtin_implementations::record_checked(&mut callables, &file.ir).map_err(
         |identity| {
             crate::backend::CommonIrPreparationError::Invariant(format!(
                 "prepared IR has no builtin implementation facts for external member {identity:?}"
