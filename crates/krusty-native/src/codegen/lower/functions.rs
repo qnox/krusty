@@ -739,6 +739,32 @@ impl<'a> FileLowering<'a> {
         if let Some(number) = sam_number {
             itable[number as usize] = thunk;
         }
+        // A functional interface that is itself a function type (`fun interface F : (Int) -> String`)
+        // is also called through the one invoke slot every function value declares, whose entry
+        // takes and returns references. The member above wears the interface's own signature, so
+        // the slot gets an entry of its own over the same lambda body.
+        if let Some(method) = method.filter(|method| {
+            self.ir.overrides_function_invoke(
+                self.ir.classes[interface as usize].fq_name_id(),
+                *method,
+            )
+        }) {
+            let arity = self.ir.functions[method as usize].params.len();
+            let boxed = self.declare_local_function(
+                &format!("{base}_function_invoke"),
+                &vec![any(); arity + 1],
+                any(),
+            )?;
+            self.define_sam_thunk(
+                boxed,
+                &format!("{base}_function"),
+                impl_fn,
+                captures,
+                &vec![any(); arity],
+                any(),
+            )?;
+            vtable[model::FUNCTION_SLOT as usize] = boxed;
+        }
 
         let mut interfaces: Vec<DataId> = Vec::new();
         for name in self.model.implemented[interface as usize].clone() {

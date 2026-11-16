@@ -1333,6 +1333,7 @@ impl Body<'_> {
                     }
                     (None, None) => match self.library_interface_of_type(tested) {
                         Some(interface) => self.library_interface_test(interface, nullable),
+                        None if self.box_test(tested, nullable)? => {}
                         None => {
                             return Err(format!(
                                 "a type test against `{}`",
