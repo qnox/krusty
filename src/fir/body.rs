@@ -726,7 +726,9 @@ pub enum FirCallableReferenceTarget {
     /// Reference to an exact compiler-supplied Kotlin array-factory declaration. The provider tag
     /// proves the declaration identity; these checked semantic types are the complete construction
     /// plan, so common lowering never reopens lookup or asks a backend for a nonexistent method.
+    /// `declaration` is the provider's identity of the factory, which the reference reflects.
     ArrayFactory {
+        declaration: ExternalCallableId,
         operation: crate::types::ArrayFactoryKind,
         array_type: ResolvedTy,
         element_type: ResolvedTy,
@@ -769,6 +771,9 @@ pub enum FirCallableReferenceTarget {
         /// The declaration itself is `suspend`; a suspend-converted reference to an ordinary
         /// function is not.
         suspend: bool,
+        /// The referenced declaration's inline kind, as a direct call of it records: the
+        /// generated adapter's call is that declaration's call.
+        inline: InlineKind,
     },
     Classifier {
         classifier: crate::types::TypeName,

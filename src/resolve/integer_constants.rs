@@ -549,6 +549,8 @@ mod tests {
             resolved_constants: &info.resolved_constants,
             resolved_calls: &info.resolved_calls,
             resolved_operator_calls: &info.resolved_operator_calls,
+            resolved_enum_entries: &info.resolved_enum_entries,
+            expr_lowers: &info.expr_lowers,
         };
         let division = file
             .expr_arena

@@ -303,6 +303,52 @@ impl BodyLowering<'_, '_, '_> {
                     self.runtime_call(symbol, &params, ret, &arguments)
                 })());
             }
+            Some(krusty::backend::BackendCompilerIntrinsic::StringRangeEquals) => {
+                let operands = match (receiver, args, extension_receiver_parameter) {
+                    (Some(this), [this_offset, other, other_offset, length], None) => {
+                        [this, *this_offset, *other, *other_offset, *length]
+                    }
+                    (None, &[this, this_offset, other, other_offset, length], Some(0)) => {
+                        [this, this_offset, other, other_offset, length]
+                    }
+                    _ => {
+                        return Some(Err(
+                            "a String range comparison with malformed operands".into()
+                        ))
+                    }
+                };
+                if ret != Ty::Boolean {
+                    return Some(Err(
+                        "a String range comparison with a non-Boolean result".into()
+                    ));
+                }
+                let string = Ty::obj("kotlin/String");
+                let params = [string, Ty::Int, string, Ty::Int, Ty::Int];
+                return Some((|| {
+                    let arguments = self.arguments(&operands, &params)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call("kt_string_range_equals", &params, ret, &arguments)
+                })());
+            }
+            Some(krusty::backend::BackendCompilerIntrinsic::ArrayCopy { array }) => {
+                let (None, [source, from, destination, to, count]) = (receiver, args) else {
+                    return Some(Err("an array copy with malformed operands".into()));
+                };
+                if ret != Ty::Unit {
+                    return Some(Err("an array copy with a result".into()));
+                }
+                let params = [array, Ty::Int, array, Ty::Int, Ty::Int];
+                return Some((|| {
+                    let arguments =
+                        self.arguments(&[*source, *from, *destination, *to, *count], &params)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call("kt_array_copy_range", &params, ret, &arguments)
+                })());
+            }
             Some(krusty::backend::BackendCompilerIntrinsic::FloatingIsNaN { operand }) => {
                 let Some(value) = floating_extension_operand(operand) else {
                     return Some(Err(

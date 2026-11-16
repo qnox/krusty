@@ -610,6 +610,23 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_function(signature)
     }
 
+    /// Whether `identity` is private to its library: a file-local function, or a constructor or
+    /// member of a class private to its enclosing class. No provider publishes it; the library's
+    /// own bodies link it as a file-local declaration.
+    pub(crate) fn is_library_private(&self, identity: &KlibDependencyCallable) -> bool {
+        let signature = match &identity.declaration {
+            KlibDeclarationSignature::FileLocal { .. } => return true,
+            KlibDeclarationSignature::Public(signature) => {
+                KlibIrSignature::Public(signature.clone())
+            }
+            KlibDeclarationSignature::Accessor(signature) => {
+                KlibIrSignature::Accessor(signature.clone())
+            }
+        };
+        self.module_local_function(&identity.module, &signature)
+            .is_some()
+    }
+
     /// The class in `module` that declares the file-local function `signature` directly.
     pub(crate) fn module_class_declaring<'a>(
         &'a self,
@@ -672,6 +689,54 @@ impl KlibDeclarationBodies {
         }
     }
 
+    /// The constructors the public class `signature` serialized by `module` or a library its
+    /// manifest depends on declares, in member order. `None` unless exactly one class has the
+    /// signature, or when a constructor's symbol is not public.
+    pub(crate) fn public_class_constructors(
+        &self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> Option<Vec<KlibPublicIdSignature>> {
+        let wanted = KlibIrSignature::Public(signature.clone());
+        let mut found = None;
+        for owner in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&owner) else {
+                continue;
+            };
+            for tree in self.libraries[library].trees() {
+                let mut pending = vec![&tree.declaration];
+                while let Some(member) = pending.pop() {
+                    let Some(class) = class_of(&tree.arena, member) else {
+                        continue;
+                    };
+                    pending.extend(class.members.iter());
+                    if class.base.symbol.signature != wanted {
+                        continue;
+                    }
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some((&tree.arena, class));
+                }
+            }
+        }
+        let (arena, class) = found?;
+        class
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                KlibIrMember::Function(function) => {
+                    Some(arena.function(*function)).filter(|function| function.constructor)
+                }
+                _ => None,
+            })
+            .map(|constructor| match &constructor.base.symbol.signature {
+                KlibIrSignature::Public(signature) => Some(signature.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The class in `module`'s producer graph that directly declares `signature`.
     ///
     /// The match is the function's serialized symbol, including a property accessor. Two classes
@@ -715,6 +780,26 @@ impl KlibDeclarationBodies {
     pub(crate) fn function_has_body(&self, identity: &KlibDependencyCallable) -> Option<bool> {
         self.function(identity)
             .map(|(_, function)| function.body.is_some())
+    }
+
+    /// Public classifiers present in the serialized type table of one exact body declaration.
+    ///
+    /// The arena can also contain nested declarations that share the body's storage. Including
+    /// those types is intentional: common lowering may emit their bodies as part of the same
+    /// dependency unit.
+    pub(crate) fn type_classifiers_in_body(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Vec<TypeName> {
+        let Some((arena, _)) = self.function(identity) else {
+            return Vec::new();
+        };
+        let mut names = HashSet::default();
+        arena
+            .classifier_signatures_in_types()
+            .filter_map(class_identity)
+            .filter(|name| names.insert(*name))
+            .collect()
     }
 
     /// Exact producer-resolved callees named directly by this function body. Missing and
@@ -805,6 +890,39 @@ impl KlibDeclarationBodies {
             }
         }
         symbols
+            .into_iter()
+            .filter_map(|symbol| declaration_signature(&symbol.signature))
+            .filter_map(
+                |declaration| match self.linked_origin(&identity.module, &declaration) {
+                    KlibCalleeOrigin::Exact(callee) => Some(callee),
+                    KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+                },
+            )
+            .collect()
+    }
+
+    /// Declaration facts of the class whose exact reached constructor is `identity`. Field and
+    /// anonymous initializers live beside that constructor, not in its function body. Reuse the
+    /// same structural initializer walker as local-class preparation; this inventory freezes facts
+    /// only and must not replace the initialization plan's executable root selection.
+    pub(crate) fn constructor_initializer_callables(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<KlibDependencyCallable> {
+        let Some((_, function)) = self.function(identity) else {
+            return Vec::new();
+        };
+        if !function.constructor {
+            return Vec::new();
+        }
+        let Some((arena, class)) =
+            self.module_class_declaring(&identity.module, &ir_signature(&identity.declaration))
+        else {
+            return Vec::new();
+        };
+        arena
+            .emitted_callable_symbols_from(arena.class_initializer_roots(class), forms)
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(
@@ -1062,16 +1180,16 @@ fn ir_signature(declaration: &KlibDeclarationSignature) -> KlibIrSignature {
     }
 }
 
-/// The file-local class whose constructor `symbol` names, resolved in `trees`, the decoded trees
+/// The library-private class whose constructor `symbol` names, resolved in `trees`, the decoded trees
 /// whose signature tables numbered the symbol, with the arena that serializes the class and its
 /// constructor.
 fn constructed_local_class<'a>(
     trees: &'a KlibIrModuleTrees,
     symbol: &KlibIrSymbol,
 ) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
-    if symbol.kind != KlibIrSymbolKind::Constructor
-        || !matches!(symbol.signature, KlibIrSignature::FileLocal { .. })
-    {
+    // `local_function` answers a file-local constructor and one of a class private to its
+    // enclosing class; a published constructor is not there.
+    if symbol.kind != KlibIrSymbolKind::Constructor {
         return None;
     }
     let (function_arena, function) = trees.local_function(&symbol.signature)?;

@@ -461,6 +461,65 @@ mod tests {
     }
 
     #[test]
+    fn graph_builtin_facts_compare_only_after_selected_evidence_is_recorded() {
+        let identity = ExternalCallableId::from_raw(1);
+        let expected = vec![BuiltinImplementation {
+            receiver: Ty::obj("kotlin/String"),
+            declaration: None,
+        }]
+        .into_boxed_slice();
+        let mut callables = accessor_facts();
+        let fact = callables.callables.get_mut(&identity).unwrap();
+        fact.kind = ExternalCallableKind::Member;
+        fact.declaration_owner = Some(SemanticCallableOwner::Classifier(crate::types::type_name(
+            "kotlin/CharSequence",
+        )));
+        assert!(fact.builtin_implementations.is_empty());
+        let mut graph_implementations = HashMap::default();
+        graph_implementations.insert(identity, expected.clone());
+        let graph = crate::ir::CheckedKlibDependencyFacts::new(
+            graph_implementations,
+            HashMap::default(),
+            None,
+        );
+        callables
+            .record_klib_dependency_facts(graph)
+            .expect("an uninitialized frozen slot is not contradictory evidence");
+        let mut selected = HashMap::default();
+        selected.insert(identity, expected.clone());
+        callables
+            .record_checked_builtin_implementations(&selected)
+            .unwrap();
+        assert_eq!(
+            callables.callables[&identity].builtin_implementations,
+            expected
+        );
+        // Both proofs are nonempty; retaining one real proof must never hide a conflicting one.
+        selected.insert(
+            identity,
+            vec![BuiltinImplementation {
+                receiver: Ty::obj("kotlin/Int"),
+                declaration: None,
+            }]
+            .into_boxed_slice(),
+        );
+        assert_eq!(
+            callables.record_checked_builtin_implementations(&selected),
+            Err(identity)
+        );
+        assert_eq!(
+            callables.callables[&identity].builtin_implementations,
+            expected
+        );
+        let conflicting_graph =
+            crate::ir::CheckedKlibDependencyFacts::new(selected, HashMap::default(), None);
+        assert_eq!(
+            callables.record_klib_dependency_facts(conflicting_graph),
+            Err(identity)
+        );
+    }
+
+    #[test]
     fn checked_builtin_implementation_handoff_rejects_missing_identity() {
         let identity = ExternalCallableId::from_raw(1);
         let mut callables = accessor_facts();
@@ -740,6 +799,8 @@ pub struct CheckedBackendCallables {
     /// Header-only declaration identities never participate in executable dependency closure.
     member_declarations: HashMap<ExternalCallableId, KlibDependencyCallable>,
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
+    /// The checker-owned immutable snapshot of this file's reached KLIB declarations.
+    klib_dependency_facts: crate::ir::CheckedKlibDependencyFacts,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
     singleton_selections: HashMap<ExternalCallableId, Vec<SingletonEdge>>,
     /// The runtime declarations native plugins selected at the handoff for their generated code,
@@ -759,6 +820,50 @@ impl CheckedBackendCallables {
                 }
                 _ => None,
             })
+    }
+
+    /// The runtime declarations native plugins selected, to reapply their ABI annotations after a
+    /// common lowering rewrites IR and the checked dependency view is rebuilt.
+    pub(crate) fn plugin_runtime_bindings(&self) -> Vec<(ExternalCallableId, Box<[Ty]>)> {
+        self.plugin_runtime
+            .iter()
+            .map(|(&identity, appended)| (identity, appended.clone()))
+            .collect()
+    }
+
+    /// Store the checked graph before completing the source callable facts. Only another checked
+    /// graph is evidence at this stage: freshly frozen callable implementation slots are empty.
+    /// Source-vs-graph consistency is checked when actual selected implementations are recorded.
+    pub(crate) fn record_klib_dependency_facts(
+        &mut self,
+        facts: crate::ir::CheckedKlibDependencyFacts,
+    ) -> Result<(), ExternalCallableId> {
+        for (&identity, implementations) in facts.builtin_implementations() {
+            if self
+                .klib_dependency_facts
+                .builtin_implementations()
+                .get(&identity)
+                .is_some_and(|previous| previous != implementations)
+            {
+                return Err(identity);
+            }
+        }
+        self.klib_dependency_facts = facts;
+        Ok(())
+    }
+
+    pub(crate) fn klib_builtin_implementations(
+        &self,
+    ) -> &HashMap<ExternalCallableId, Box<[BuiltinImplementation]>> {
+        self.klib_dependency_facts.builtin_implementations()
+    }
+
+    pub(crate) fn klib_dependency_facts(&self) -> &crate::ir::CheckedKlibDependencyFacts {
+        &self.klib_dependency_facts
+    }
+
+    pub(crate) fn klib_type_hierarchy(&self) -> Option<&crate::ir::CheckedKlibTypeFacts> {
+        self.klib_dependency_facts.type_hierarchy()
     }
 
     /// Whether native plugins selected `identity` at the handoff for the code they generate.
@@ -995,6 +1100,14 @@ impl CheckedBackendCallables {
             let Some(selected) = implementations.get(&identity) else {
                 return Err(identity);
             };
+            if self
+                .klib_dependency_facts
+                .builtin_implementations()
+                .get(&identity)
+                .is_some_and(|graph| graph != selected)
+            {
+                return Err(identity);
+            }
             fact.builtin_implementations = selected.clone();
         }
         Ok(())

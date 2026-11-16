@@ -33,6 +33,8 @@ mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
+mod interface_holders;
+use interface_holders::{attach_interface_holder, interface_holder_method};
 mod java_nullability;
 mod java_operator_convention;
 mod mapped_builtin_member_status;
@@ -43,6 +45,7 @@ mod parameter_plans;
 mod platform_abi;
 mod provider_normalization;
 #[cfg(test)]
+#[path = "jvm_libraries/tests/provider_normalization.rs"]
 mod provider_normalization_tests;
 mod raw_types;
 use provider_normalization::normalize_tail;
@@ -53,6 +56,7 @@ mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
 mod static_properties;
 mod synthetic_properties;
+mod type_safe_builtin_overrides;
 pub mod unsigned_intrinsics;
 use static_properties::StaticAccessor;
 use synthetic_properties::{accessor_property_name, setter_name_for_getter, AccessorInventory};
@@ -1128,85 +1132,6 @@ impl JvmLibraries {
         )
     }
 
-    /// Receiver type-parameter bindings at a classpath hierarchy node.
-    fn receiver_type_bindings_name(
-        &self,
-        receiver: Ty,
-        target_internal: TypeName,
-    ) -> crate::fx_hash::HashMap<String, Ty> {
-        let TyKind::Obj(start, start_args) = receiver.kind() else {
-            return crate::fx_hash::HashMap::default();
-        };
-        let target = super::jvm_class_map::to_jvm_type_name(target_internal);
-        let mut seen = crate::fx_hash::HashSet::default();
-        let mut q = std::collections::VecDeque::new();
-        q.push_back((
-            super::jvm_class_map::to_jvm_type_name(start),
-            start_args.to_vec(),
-        ));
-        while let Some((internal, targs)) = q.pop_front() {
-            if !seen.insert(internal) {
-                continue;
-            }
-            let ci = self.cp.find_name(internal);
-            // A Kotlin builtin whose mapped JVM class is absent (a no-JDK compile) has no `.class` and
-            // so no class `Signature`; its `.kotlin_builtins` declaration carries the same two facts —
-            // the formals and the argument-carrying supertypes — so bind through that instead.
-            let (formals, supers) = match &ci {
-                Some(ci) => ci
-                    .signature
-                    .as_deref()
-                    .and_then(parse_class_gsig)
-                    .map(|(formals, _, supertypes)| (formals, supertypes))
-                    .unzip(),
-                None => self.cp.builtin_class_gsig_name(internal).unzip(),
-            };
-            if ci.is_none() && formals.is_none() {
-                continue;
-            }
-            let formals = formals.unwrap_or_default();
-            let binds: crate::fx_hash::HashMap<String, Ty> =
-                formals.iter().cloned().zip(targs.iter().copied()).collect();
-            if internal == target {
-                return binds;
-            }
-            match (supers, &ci) {
-                (Some(supers), _) => {
-                    for sup in supers {
-                        if let TyKind::Obj(sup_internal, sup_args) = sup.kind() {
-                            let sup_targs = ty_subst_all(sup_args.as_slice(), &binds);
-                            q.push_back((
-                                super::jvm_class_map::to_jvm_type_name(sup_internal),
-                                sup_targs,
-                            ));
-                        }
-                    }
-                }
-                (None, Some(ci)) => {
-                    for i in ci.interfaces.iter_ids().chain(ci.super_class) {
-                        q.push_back((i, vec![]));
-                    }
-                }
-                (None, None) => {}
-            }
-        }
-        crate::fx_hash::HashMap::default()
-    }
-
-    /// Class bindings excluding method parameters that shadow them.
-    fn member_receiver_bindings_name(
-        &self,
-        receiver: Ty,
-        target_internal: TypeName,
-        method_formals: &[crate::types::TyParamName],
-    ) -> crate::fx_hash::HashMap<String, Ty> {
-        let mut bindings = self.receiver_type_bindings_name(receiver, target_internal);
-        for formal in method_formals {
-            bindings.remove(formal.as_str());
-        }
-        bindings
-    }
-
     fn sam_eligible_for_class(ci: &crate::jvm::classreader::ClassInfo) -> bool {
         ci.is_interface() && (!ci.meta.is_present() || ci.meta.is_fun_interface)
     }
@@ -1688,6 +1613,35 @@ impl JvmLibraries {
                             m.descriptor.as_str(),
                         )),
                     );
+                    if let Some(params) = (uses_java_type_semantics
+                        && !m.is_static()
+                        && m.name != "<init>"
+                        && !super::jvm_class_map::is_mapped_collection_face(internal_name))
+                    .then(|| {
+                        self.type_safe_builtin_override_params(
+                            &ci,
+                            &class_bounds,
+                            type_safe_builtin_overrides::JavaMethod {
+                                name: &m.name,
+                                descriptor: &m.descriptor,
+                                parameter_nullability: &m.parameter_nullability,
+                            },
+                        )
+                    })
+                    .flatten()
+                    {
+                        member
+                            .generic_sig
+                            .get_or_insert_with(|| GenericSig {
+                                formals: Vec::new(),
+                                formal_bounds: Vec::new(),
+                                receiver: None,
+                                params: Vec::new(),
+                                ret: member.ret,
+                                return_policy: Default::default(),
+                            })
+                            .params = params;
+                    }
                 }
                 let value_arity = member.params.len();
                 if member.suspend() {
@@ -1947,45 +1901,17 @@ impl JvmLibraries {
             // `StringBuilder : java.lang.CharSequence` reaches `kotlin.CharSequence`, and Java collection
             // implementations reach their Kotlin collection interfaces. The mapping table owns the
             // equivalence; extension resolution must not reconstruct a platform-name list.
-            let mut mapped: Vec<TypeName> = std::iter::once(internal_name)
+            let mapped: Vec<TypeName> = std::iter::once(internal_name)
                 .chain(supertypes.iter_ids())
                 .filter_map(super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name)
                 .collect();
-            // The MUTABLE face — but ONLY for a CONCRETE class (`java/util/ArrayList`, `HashMap`), never for
-            // the JVM collection INTERFACES: `java/util/List` is the shared realization of BOTH the read-only
-            // `kotlin/collections/List` and its mutable sibling, so tagging the interface mutable would make a
-            // read-only `List` (which reaches `java/util/List` in its supertypes) spuriously satisfy a
-            // `MutableCollection.plusAssign`. A concrete class is genuinely mutable, so its `MutableList`/
-            // `MutableSet`/`MutableMap` face is sound (derived from the java.util interface it implements).
-            // …and an ordinary Java INTERFACE that extends one (`javax.script.Bindings : Map`) is
-            // mutable in exactly the same way a class is: kotlinc sees it as the flexible
-            // `MutableMap!`, so `bindings["k"] = v` resolves. What must not carry the mutable face
-            // is a COLLECTION FACE itself — `java/util/List` and the Kotlin read-only builtin that
-            // realizes it.
-            let is_collection_face = super::jvm_class_map::is_mapped_collection_face(internal_name);
-            if !ci.is_interface() || !is_collection_face {
-                for m in std::iter::once(internal_name)
-                    .chain(supertypes.iter_ids())
-                    .filter_map(super::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name)
-                {
-                    if !mapped.contains(&m) {
-                        mapped.push(m);
-                    }
-                }
-            }
-            for k in mapped {
-                // A mapped CLASS face is the same superclass edge under its Kotlin identity; adding
-                // both (`java/lang/Object` and `kotlin/Any`) would publish two class parents. Mapped
-                // INTERFACE faces stay explicit: source assignability needs the Kotlin collection /
-                // CharSequence identity in addition to the physical Java interface realization.
-                let duplicate_class_face = self.cp.builtin_is_interface_name(k) == Some(false)
-                    && supertypes.iter_ids().any(|existing| {
-                        super::jvm_class_map::type_names_map_to_same_jvm_internal(existing, k)
-                    });
-                if !supertypes.contains_name(k) && !duplicate_class_face {
-                    supertypes.push_name(k);
-                }
-            }
+            supertypes = collection_canonicalization::publish_mapped_supertypes(
+                self,
+                internal_name,
+                ci.is_interface(),
+                supertypes,
+                mapped,
+            );
             // Kotlin metadata is authoritative for Kotlin companion identity. The structural field
             // pattern is only a Java/classfile fallback when no Kotlin companion fact exists.
             let metadata_companion = super::metadata::class_companion_name(&ci).map(|field| {
@@ -2622,42 +2548,6 @@ fn function_interface_signature(
     Some(Ty::fun(params.to_vec(), ret))
 }
 
-/// Exact nonvirtual realization of a legacy concrete interface declaration, if the classpath
-/// publishes one. Semantic selection stays on the metadata declaration; this only couples it to the
-/// matching receiver-first static method at the provider boundary.
-fn interface_holder_method(
-    cp: &crate::jvm::classpath::Classpath,
-    interface: TypeName,
-    name: &str,
-    descriptor: &str,
-) -> Option<Box<crate::libraries::NonvirtualCallRealization>> {
-    // `$DefaultImpls` also exists in compatibility mode, where the interface method itself is
-    // concrete and remains the dispatch target. Only the legacy shape has an ABSTRACT interface
-    // method whose implementation must be replaced by the receiver-first holder static. Keeping
-    // this representation test here makes functions and property accessors share one ABI rule.
-    let interface_class = cp.find_name(interface)?;
-    if !interface_class.methods.iter().any(|method| {
-        method.is_abstract() && method.name == name && method.descriptor == descriptor
-    }) {
-        return None;
-    }
-    let holder = crate::types::type_name_nested_child(interface, "DefaultImpls");
-    let class = cp.find_name(holder)?;
-    let method = class.methods.iter().find(|method| {
-        method.is_static()
-            && method.name == name
-            && crate::jvm::names::descriptor_prepends_classifier(
-                descriptor,
-                interface,
-                &method.descriptor,
-            )
-    })?;
-    Some(Box::new(crate::libraries::NonvirtualCallRealization {
-        owner: holder,
-        descriptor: method.descriptor.clone(),
-    }))
-}
-
 pub fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
@@ -2803,9 +2693,7 @@ impl JvmLibraries {
                     continue;
                 };
                 let Some(getter_public) = ci
-                    .methods
-                    .iter()
-                    .find(|method| method.name == getter.name && method.descriptor == getter.desc)
+                    .method(&getter.name, &getter.desc)
                     .map(|method| method.is_public())
                 else {
                     continue;
@@ -2873,6 +2761,7 @@ impl JvmLibraries {
                     getter.owner_is_interface = ci.is_interface();
                     getter.is_abstract = mp.is_abstract;
                     getter.inline = property_getter_inline(mp.getter_inline, getter_public);
+                    attach_interface_holder(&self.cp, cn, &mut getter);
                     getter.semantic_role =
                         crate::libraries::builtin_declaration::semantic_call_role(
                             crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
@@ -2893,6 +2782,7 @@ impl JvmLibraries {
                     }
                     parameter_plans::callable(&mut getter, value_dispatch, false);
                     let setter = mp.setter.clone().and_then(|setter| {
+                        ci.method(&setter.name, &setter.desc)?;
                         let (physical_params, physical_ret) = parse_method_desc(&setter.desc)?;
                         if physical_params.len() != extension_index + 2 || physical_ret != Ty::Unit
                         {
@@ -2918,6 +2808,7 @@ impl JvmLibraries {
                         callable.context_count = context_count;
                         callable.owner_is_interface = ci.is_interface();
                         callable.is_abstract = mp.is_abstract;
+                        attach_interface_holder(&self.cp, cn, &mut callable);
                         if value_dispatch {
                             callable.member_realization =
                                 crate::libraries::MemberRealization::Direct {
@@ -3018,12 +2909,7 @@ impl JvmLibraries {
                 getter.owner_is_interface = ci.is_interface();
                 getter.is_abstract = mp.is_abstract;
                 getter.inline = property_getter_inline(mp.getter_inline, getter_public);
-                getter.nonvirtual_realization = interface_holder_method(
-                    &self.cp,
-                    cn,
-                    getter.physical_name(),
-                    &getter.descriptor,
-                );
+                attach_interface_holder(&self.cp, cn, &mut getter);
                 let getter_signature = self
                     .member_functions(recv, &getter.name)
                     .overloads
@@ -3052,6 +2938,7 @@ impl JvmLibraries {
                     },
                 );
                 let setter = mp.setter.clone().and_then(|s| {
+                    ci.method(&s.name, &s.desc)?;
                     let (mut physical_params, physical_ret) = parse_method_desc(&s.desc)?;
                     if carrier_receiver {
                         if physical_params.is_empty() {
@@ -3080,12 +2967,7 @@ impl JvmLibraries {
                     setter.context_count = context_count;
                     setter.owner_is_interface = ci.is_interface();
                     setter.is_abstract = mp.is_abstract;
-                    setter.nonvirtual_realization = interface_holder_method(
-                        &self.cp,
-                        cn,
-                        setter.physical_name(),
-                        &setter.descriptor,
-                    );
+                    attach_interface_holder(&self.cp, cn, &mut setter);
                     Some(setter)
                 });
                 let mut property = PropertyInfo {

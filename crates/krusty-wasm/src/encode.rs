@@ -612,6 +612,11 @@ impl Code {
         self.op(0x10).index(function)
     }
 
+    /// `select`: the first of two values when the condition is non-zero, else the second.
+    pub(super) fn select(&mut self) -> &mut Self {
+        self.op(0x1b)
+    }
+
     pub(super) fn drop_(&mut self) -> &mut Self {
         self.op(0x1a)
     }

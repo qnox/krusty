@@ -19,6 +19,7 @@ use crate::types::{Ty, TypeName, TypeVariance};
 pub enum BackendFactError {
     UnpublishableClassifier(TypeName, UndeterminedType),
     IncompleteClassifier(TypeName),
+    IncompleteAnnotation(TypeName),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -248,6 +249,7 @@ pub struct BackendModuleFacts {
     /// The superclass and instance functions of every named source classifier, whichever file
     /// declares it: exactly the classifiers of [`Self::classifiers`].
     source_class_members: HashMap<TypeName, super::source_class_members::SourceClassMembers>,
+    source_member_annotations: super::source_class_members::SourceMemberAnnotations,
     /// Each dependency classifier the module's own classes stand behind, with the file of every
     /// source class that can be an instance of it, body-local ones included.
     dependency_implementors: HashMap<TypeName, Box<[crate::fir::SourceFileId]>>,
@@ -298,6 +300,8 @@ impl BackendModuleFacts {
         let mut generated_classifiers = Vec::new();
         let mut source_supertypes = HashMap::default();
         let mut source_class_members = HashMap::default();
+        let mut source_member_annotations =
+            super::source_class_members::SourceMemberAnnotations::default();
         let mut source_enum_constants = HashMap::default();
         let mut source_constructors = HashSet::default();
         let mut actualized_expects = HashMap::default();
@@ -556,6 +560,7 @@ impl BackendModuleFacts {
                 inherited_defaults
                     .insert(classifier.classifier, defaults.to_vec().into_boxed_slice());
             }
+            source_member_annotations.record_class(index, declaration)?;
             source_class_members.insert(
                 classifier.classifier,
                 super::source_class_members::from_resolved_index(
@@ -586,6 +591,7 @@ impl BackendModuleFacts {
                 .collect(),
             classes: Default::default(),
             source_class_members,
+            source_member_annotations,
             dependency_implementors: dependency_implementors(&source_supertypes),
             source_enum_constants,
             source_constructors,
@@ -637,6 +643,7 @@ impl BackendModuleFacts {
             file_annotations: HashMap::default(),
             classes: Default::default(),
             source_class_members: HashMap::default(),
+            source_member_annotations: Default::default(),
             dependency_implementors: HashMap::default(),
             source_enum_constants: HashMap::default(),
             source_constructors: HashSet::default(),
@@ -661,7 +668,8 @@ impl BackendModuleFacts {
                 .source_enum_constants
                 .get(&constant.classifier)
                 .is_some_and(|constants| constants.contains(&constant.name)),
-            super::instance_links::InstanceEntry::Constructor { declaration, .. } => {
+            super::instance_links::InstanceEntry::Constructor { declaration, .. }
+            | super::instance_links::InstanceEntry::ConstructorDefaults { declaration, .. } => {
                 self.source_constructors.contains(declaration)
             }
         }
@@ -718,6 +726,12 @@ impl BackendModuleFacts {
 
     pub fn source_value_classes(&self) -> &HashMap<TypeName, Ty> {
         &self.source_value_classes
+    }
+
+    pub fn source_member_annotations(
+        &self,
+    ) -> &super::source_class_members::SourceMemberAnnotations {
+        &self.source_member_annotations
     }
 
     pub fn metadata_readable_value_classes(&self) -> &HashSet<TypeName> {
