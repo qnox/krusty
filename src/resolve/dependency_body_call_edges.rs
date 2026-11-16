@@ -102,9 +102,11 @@ pub(crate) fn for_checked_klib_bodies<'a>(
             .class_contract()
             .is_some_and(crate::libraries::KlibBodyClassContract::has_unit_box)
         {
-            let overrides = crate::klib_lowering::value_class_overrides(selected, bodies)
-                .map_err(|_| external)?;
-            pending.extend(overrides.into_iter().map(|value| value.identity));
+            // A class whose overrides do not authenticate is declined by emission with its
+            // own reason; there are no override edges to freeze for it.
+            if let Ok(overrides) = crate::klib_lowering::value_class_overrides(selected, bodies) {
+                pending.extend(overrides.into_iter().map(|value| value.identity));
+            }
         }
         #[cfg(test)]
         if realization.kind == crate::libraries::ExternalCallableKind::Constructor {
