@@ -34,10 +34,12 @@ pub struct CallSite<'a> {
     /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
     /// the expansion binds it to, when it is one.
     pub crossinline_operands: &'a [Option<u32>],
+    /// The call-site copy whose body this expansion regenerates, when it is one.
+    pub parent: Option<ClassId>,
 }
 
 /// Point each copied construction of an anonymous object at a class specialized for this
-/// expansion. A class that does not use the reified binding and does not capture an inline lambda
+/// expansion, and return the declaration-to-copy classifier renames it made. A class that does not use the reified binding and does not capture an inline lambda
 /// is left alone. Once it is copied, a missing concrete body or accessor mapping fails the lowering
 /// instead of keeping the declaration class. An implementation already consumed by common inline
 /// lowering is explicitly bodyless and remains elided on the copy.
@@ -47,7 +49,7 @@ pub(super) fn specialize(
     bindings: &HashMap<String, Ty>,
     reified_bindings: &HashMap<String, Ty>,
     site: &CallSite<'_>,
-) -> Result<(), super::super::FirLoweringFailure> {
+) -> Result<HashMap<TypeName, TypeName>, super::super::FirLoweringFailure> {
     let expansion = Expansion {
         bindings,
         reified_bindings,
@@ -79,7 +81,7 @@ pub(super) fn specialize(
             &expansion,
         );
     }
-    Ok(())
+    Ok(renames)
 }
 
 struct Expansion<'a> {
@@ -350,7 +352,10 @@ fn specialized_class(
         &mut HashSet::default(),
     );
     let lambdas = inline_lambda_arguments(ir, source, order);
-    if !uses_reified && lambdas.is_empty() {
+    // kotlinc regenerates the class for a captured inline lambda whether its constructor keeps the
+    // lambda in a field or reads it only from the parameter in constructor code.
+    if !uses_reified && lambdas.is_empty() && inline_lambda_parameters(ir, source, order).is_empty()
+    {
         return Ok(None);
     }
     let class_name = ir.classes[source as usize].fq_name;
@@ -503,6 +508,7 @@ fn specialized_class(
             inline_callee: expansion.site.inline_callee,
             inline_callee_source_name: expansion.site.inline_callee_source_name.to_string(),
             crossinline_operands: expansion.site.crossinline_operands.to_vec(),
+            parent: expansion.site.parent,
             method_clones: cloned,
             bindings: expansion.bindings.clone(),
             reified_bindings: expansion.reified_bindings.clone(),
@@ -1008,29 +1014,71 @@ fn publish_one_copy(
             nested.push(body);
         }
     }
+    consume_parameter_lambdas(ir, copy_id, &spec, source_name)?;
     publish_property_members(ir, source, source_name, copy_name, &clones)?;
     retarget_caller_property_uses(ir, copy_id, &spec, source_name)?;
-    specialize(
-        ir,
-        nested,
-        &spec.bindings,
-        &spec.reified_bindings,
-        &CallSite {
-            caller_declaration: spec.caller_declaration,
-            caller: spec.caller,
-            caller_is_default: spec.caller_is_default,
-            caller_source_name: &spec.caller_source_name,
-            inline_callee: spec.inline_callee,
-            inline_callee_source_name: &spec.inline_callee_source_name,
-            crossinline_operands: &spec.crossinline_operands,
-        },
-    )?;
+    // Every construction in the copied bodies belongs to this expansion, so an anonymous object
+    // among them is regenerated for it as the copy is.
+    let mut nested = nested
+        .into_iter()
+        .flat_map(|body| expression_ids(ir, body))
+        .collect::<Vec<_>>();
+    nested.sort_unstable();
+    nested.dedup();
+    let site = CallSite {
+        caller_declaration: spec.caller_declaration,
+        caller: spec.caller,
+        caller_is_default: spec.caller_is_default,
+        caller_source_name: &spec.caller_source_name,
+        inline_callee: spec.inline_callee,
+        inline_callee_source_name: &spec.inline_callee_source_name,
+        crossinline_operands: &spec.crossinline_operands,
+        parent: Some(copy_id),
+    };
+    let regenerated = specialize(ir, nested, &spec.bindings, &spec.reified_bindings, &site)?;
+    rename_regenerated_classes(ir, copy_id, &regenerated, &spec, &site);
     retarget_copied_property_calls(ir, copy_id, source, source_name, &clones)?;
     finalize_construction_signature(ir, copy_id, &spec, source_name)?;
     if let Some(record) = ir.specialized_anonymous_classes.get_mut(&copy_id) {
         record.method_clones = clones;
     }
     Ok(())
+}
+
+/// An object regenerated in one of the copy's bodies is the class every body of the copy and its
+/// declaration now use: a method copied before the regeneration, such as one that only reads the
+/// nested object, still names the nested declaration.
+fn rename_regenerated_classes(
+    ir: &mut crate::ir::IrFile,
+    copy_id: ClassId,
+    renames: &HashMap<TypeName, TypeName>,
+    spec: &crate::ir::IrSpecializedAnonymousClass,
+    site: &CallSite<'_>,
+) {
+    if renames.is_empty() {
+        return;
+    }
+    let class = &ir.classes[copy_id as usize];
+    let roots = class
+        .methods
+        .iter()
+        .filter_map(|method| ir.functions[*method as usize].body)
+        .chain(class.init_body)
+        .collect::<Vec<_>>();
+    let owned = roots
+        .iter()
+        .flat_map(|root| expression_ids(ir, *root))
+        .collect::<HashSet<_>>();
+    let expansion = Expansion {
+        bindings: &spec.bindings,
+        reified_bindings: &spec.reified_bindings,
+        site,
+    };
+    let mut detached_impls = HashSet::default();
+    for root in roots {
+        remap_reachable_implementations(ir, renames, root, &owned, &mut detached_impls, &expansion);
+    }
+    ir.remap_copied_class_identities(copy_id, renames);
 }
 
 /// Finalize the copied construction only after the streamed class capture prefix is complete.
@@ -1714,6 +1762,257 @@ fn inline_lambda_arguments(
         });
     }
     found
+}
+
+/// Capture parameters of `class` that no field stores, which `construction` binds to an inline
+/// lambda: (parameter, lambda expression, inline body). Constructor code reads such a capture
+/// from its parameter.
+fn inline_lambda_parameters(
+    ir: &crate::ir::IrFile,
+    class: ClassId,
+    construction: ExprId,
+) -> Vec<(usize, ExprId, ExprId)> {
+    let IrExpr::New { args, .. } = ir.expr(construction) else {
+        return Vec::new();
+    };
+    ir.classes[class as usize]
+        .ctor_args
+        .iter()
+        .zip(args)
+        .enumerate()
+        .filter(|(_, (parameter, _))| {
+            parameter.provenance == crate::ir::IrCtorParameterProvenance::Capture
+                && parameter.field_index.is_none()
+        })
+        .filter_map(|(index, (_, &argument))| {
+            let (_, inline_body, _) = inline_lambda(ir, argument)?;
+            Some((index, argument, inline_body))
+        })
+        .collect()
+}
+
+/// Consume each capture-free, parameter-free inline lambda that the copy's constructor code reads
+/// only from its capture parameter, as kotlinc does when it regenerates the class.
+///
+/// Every read must be a zero-argument call, which takes the lambda's body, or a capture argument
+/// of a nested anonymous object's construction, which takes the lambda itself and regenerates
+/// that object in turn when the copy's constructor code is specialized. The parameter is then
+/// removed from the copy's constructor and from the construction. Any other read keeps the lambda
+/// a value.
+fn consume_parameter_lambdas(
+    ir: &mut crate::ir::IrFile,
+    copy_id: ClassId,
+    spec: &crate::ir::IrSpecializedAnonymousClass,
+    source_name: TypeName,
+) -> Result<(), super::super::FirLoweringFailure> {
+    let copy_name = ir.classes[copy_id as usize].fq_name_id();
+    if !matches!(ir.expr(spec.order), IrExpr::New { internal, .. } if *internal == copy_name) {
+        return Ok(());
+    }
+    let Some(body) = ir.classes[copy_id as usize].init_body else {
+        return Ok(());
+    };
+    let mut parameters = inline_lambda_parameters(ir, copy_id, spec.order);
+    // Removing a parameter renumbers the ones after it, so the last goes first.
+    parameters.reverse();
+    for (parameter, lambda, inline_body) in parameters {
+        let IrExpr::Lambda {
+            impl_fn, captures, ..
+        } = ir.expr(lambda).clone()
+        else {
+            return Err(malformed(source_name));
+        };
+        let function = ir
+            .functions
+            .get(impl_fn as usize)
+            .ok_or_else(|| malformed(source_name))?;
+        if !captures.is_empty()
+            || !function.params.is_empty()
+            || ir.suspend_funs.contains(&impl_fn)
+            || body_uses_values(ir, inline_body)
+        {
+            continue;
+        }
+        let slot = u32::try_from(parameter + 1).map_err(|_| malformed(source_name))?;
+        let Some(uses) = parameter_lambda_uses(ir, body, slot) else {
+            continue;
+        };
+        for invocation in &uses.invocations {
+            let (spliced, _) = crate::ir::clone_expression_dag(ir, inline_body);
+            ir.exprs[*invocation as usize] = IrExpr::Block {
+                stmts: Vec::new(),
+                value: Some(spliced),
+            };
+        }
+        for (index, (construction, argument)) in uses.forwards.iter().enumerate() {
+            // The copy's construction gives the lambda up below, so the first nested construction
+            // takes that same lambda and any further one a copy of it.
+            let value = if index == 0 {
+                lambda
+            } else {
+                crate::ir::clone_expression_dag(ir, lambda).0
+            };
+            if let IrExpr::New { args, .. } = &mut ir.exprs[*construction as usize] {
+                args[*argument] = value;
+            }
+        }
+        if uses.forwards.is_empty() {
+            ir.inline_only_fns.insert(impl_fn);
+            ir.functions[impl_fn as usize].body = None;
+        }
+        remove_capture_parameter(ir, copy_id, spec.order, body, parameter, source_name)?;
+    }
+    Ok(())
+}
+
+/// The reads of value `slot` in constructor code `body`, when every one is a zero-argument call or
+/// a nested anonymous object's capture argument.
+struct ParameterLambdaUses {
+    invocations: Vec<ExprId>,
+    forwards: Vec<(ExprId, usize)>,
+}
+
+fn parameter_lambda_uses(
+    ir: &crate::ir::IrFile,
+    body: ExprId,
+    slot: u32,
+) -> Option<ParameterLambdaUses> {
+    let parameter_read = |expression: ExprId| -> Option<ExprId> {
+        let mut current = expression;
+        loop {
+            match ir.expr(current) {
+                IrExpr::GetValue(read) if *read == slot => return Some(current),
+                IrExpr::NotNullAssert { operand, .. } => current = *operand,
+                _ => return None,
+            }
+        }
+    };
+    let mut pending = vec![body];
+    let mut seen = HashSet::default();
+    let mut reads = HashSet::default();
+    let mut consumed = HashSet::default();
+    let mut uses = ParameterLambdaUses {
+        invocations: Vec::new(),
+        forwards: Vec::new(),
+    };
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda { .. } = ir.expr(expression) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        match ir.expr(expression) {
+            IrExpr::GetValue(read) if *read == slot => {
+                reads.insert(expression);
+            }
+            IrExpr::InvokeFunction { func, args, .. } => {
+                if let Some(read) = parameter_read(*func) {
+                    if !args.is_empty() {
+                        return None;
+                    }
+                    consumed.insert(read);
+                    uses.invocations.push(expression);
+                }
+            }
+            IrExpr::New { internal, args, .. } => {
+                let Some(nested) = ir.class_id_by_name(*internal) else {
+                    continue;
+                };
+                let nested = &ir.classes[nested as usize];
+                if !nested.is_anonymous_object {
+                    continue;
+                }
+                for (position, (declared, argument)) in
+                    nested.ctor_args.iter().zip(args).enumerate()
+                {
+                    if declared.provenance != crate::ir::IrCtorParameterProvenance::Capture {
+                        continue;
+                    }
+                    if let Some(read) = parameter_read(*argument) {
+                        consumed.insert(read);
+                        uses.forwards.push((expression, position));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if reads.is_empty() || reads != consumed {
+        return None;
+    }
+    uses.forwards.sort_unstable();
+    Some(uses)
+}
+
+/// Remove capture parameter `parameter`, which no field stores, from `class`'s constructor and
+/// from `construction`, and renumber the later values of constructor code `body`.
+fn remove_capture_parameter(
+    ir: &mut crate::ir::IrFile,
+    class: ClassId,
+    construction: ExprId,
+    body: ExprId,
+    parameter: usize,
+    class_name: TypeName,
+) -> Result<(), super::super::FirLoweringFailure> {
+    let index = u32::try_from(parameter).map_err(|_| malformed(class_name))?;
+    crate::ir::lower_value_indices(ir, body, index + 2, 1);
+    let declaration = &mut ir.classes[class as usize];
+    // `ctor_param_count` counts only the parameters a field stores, so it keeps its value.
+    if parameter >= declaration.ctor_args.len()
+        || declaration.ctor_args[parameter].field_index.is_some()
+        || declaration.constructor_prefix_count == 0
+    {
+        return Err(malformed(class_name));
+    }
+    declaration.constructor_prefix_count -= 1;
+    declaration
+        .pre_super_param_fields
+        .retain(|(param, _)| *param != index);
+    for (param, _) in &mut declaration.pre_super_param_fields {
+        if *param > index {
+            *param -= 1;
+        }
+    }
+    if !declaration.ctor_param_annotations.is_empty() {
+        if declaration.ctor_param_annotations.len() != declaration.ctor_args.len() {
+            return Err(malformed(class_name));
+        }
+        declaration.ctor_param_annotations.remove(parameter);
+    }
+    declaration.ctor_args.remove(parameter);
+    shift_capture_map(&mut ir.class_capture_identities, class, index);
+    if let Some(order) = ir.class_capture_order.get_mut(&class) {
+        *order = order
+            .iter()
+            .filter(|&&capture| capture != index)
+            .map(|&capture| capture - u32::from(capture > index))
+            .collect();
+    }
+    let IrExpr::New {
+        args,
+        ctor_params,
+        default_prefix_count,
+        ..
+    } = &mut ir.exprs[construction as usize]
+    else {
+        return Err(malformed(class_name));
+    };
+    if parameter >= args.len() {
+        return Err(malformed(class_name));
+    }
+    args.remove(parameter);
+    if let Some(parameters) = ctor_params {
+        if parameter >= parameters.len() {
+            return Err(malformed(class_name));
+        }
+        parameters.remove(parameter);
+    }
+    if parameter < *default_prefix_count as usize {
+        *default_prefix_count -= 1;
+    }
+    Ok(())
 }
 
 /// Exact substituted capture edges owned by an anonymous-object copy.
