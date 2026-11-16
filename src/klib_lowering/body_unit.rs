@@ -12,7 +12,7 @@ use crate::fx_hash::{HashMap, HashSet};
 use std::collections::VecDeque;
 
 use super::body_lowering::{
-    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor, LinkedAccessorTarget,
+    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessorCall,
     LinkedCallableReference, LinkedCallee, LinkedConstructor, LoweredFunction,
 };
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
@@ -238,8 +238,6 @@ struct MaterializedConstructor {
 struct LocalFunction {
     function: FunId,
     class: super::same_library_class::LocalIdentity,
-    /// Whether the function is its property's setter.
-    setter: bool,
 }
 
 impl Default for DependencyBodyUnit {
@@ -1508,7 +1506,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         &mut self,
         ir: &mut IrFile,
         callee: &KlibAccessorIdSignature,
-    ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
+    ) -> Result<LinkedAccessorCall, KlibBodyDeclineReason> {
         let unsupported = || {
             KlibBodyDeclineReason::UnsupportedOperation(
                 "a call through a property accessor signature",
@@ -1528,50 +1526,19 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 )))
             }
         };
-        // A materialized class's accessor was installed with its class.
-        if let Some((linked, setter)) = self.installed_member(ir, &identity)? {
-            let Callee::Local(function) = linked.callee else {
-                unreachable!("an installed member is a local function");
-            };
-            return Ok(LinkedAccessor {
-                target: LinkedAccessorTarget::Local(function),
-                write: setter,
-                receiver: linked.receiver,
-                params: linked.params,
-                ret: linked.ret,
-                context_count: linked.context_count,
-                class_type_parameters: linked.class_type_parameters,
-                callable: None,
-                type_parameters: Vec::new(),
-                type_parameter_bounds: Vec::new(),
-                reified_type_parameters: Vec::new(),
-            });
+        // An accessor the unit emits is called as any function of the unit is: a member of a class
+        // it materializes, as the class's other members are, or a top-level accessor.
+        if let Some(linked) = self.installed_member(ir, &identity)? {
+            return Ok(LinkedAccessorCall::Function(linked));
         }
-        // An accessor with a body of a class the unit materializes is emitted here, as the class's
-        // other members are.
         if let Some(linked) = self.materialized_member_accessor(ir, &identity)? {
-            return Ok(linked);
+            return Ok(LinkedAccessorCall::Function(linked));
         }
         if let Some(linked) = self.private_class_member(ir, &identity)? {
-            let Callee::Local(function) = linked.callee else {
-                unreachable!("a value class member is a local function");
-            };
-            return Ok(LinkedAccessor {
-                target: LinkedAccessorTarget::Local(function),
-                write: false,
-                receiver: linked.receiver,
-                params: linked.params,
-                ret: linked.ret,
-                context_count: linked.context_count,
-                class_type_parameters: linked.class_type_parameters,
-                callable: None,
-                type_parameters: Vec::new(),
-                type_parameter_bounds: Vec::new(),
-                reified_type_parameters: Vec::new(),
-            });
+            return Ok(LinkedAccessorCall::Function(linked));
         }
         if let Some(linked) = self.top_level_accessor(ir, &identity)? {
-            return Ok(linked);
+            return Ok(LinkedAccessorCall::Function(linked));
         }
         // A complete retained export or positive target plan owns this edge. Other accessors
         // retain the explicit unsupported boundary instead of acquiring a header-only body path.
@@ -1599,7 +1566,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         // The exact external callable names an accessor's own formals in the substitutions its
         // read carries; an accessor without formals of its own needs no such name.
         if linked.type_parameters.is_empty() {
-            return Ok(linked);
+            return Ok(LinkedAccessorCall::Property(linked));
         }
         let (callable, realization) = self
             .sources
@@ -1624,7 +1591,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             ));
         }
         linked.callable = Some(callable);
-        Ok(linked)
+        Ok(LinkedAccessorCall::Property(linked))
     }
 
     fn requires_declaration(
@@ -1853,7 +1820,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 return Ok(linked);
             }
         }
-        if let Some((linked, _)) = self
+        if let Some(linked) = self
             .installed_member(ir, &identity)
             .map_err(callee_declined)?
         {
@@ -1901,20 +1868,34 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 .value_member(ir, &identity, selected, arena, declaration)
                 .map_err(callee_declined);
         }
-        let selected = selected_callable_for_header(selected, None, arena, declaration)
-            .map_err(callee_declined)?;
-        let function = match self.functions.get(&identity) {
+        self.top_level_function(ir, &identity, selected, arena, declaration)
+            .map_err(callee_declined)
+    }
+}
+
+impl<'s> Linker<'_, 's> {
+    /// A top-level function the unit emits, linked under the active selection: an ordinary
+    /// function or a top-level property's accessor, generic or not. A call of it binds the
+    /// selected declaration's own type parameters, as a call of any function the unit lowers does.
+    fn top_level_function(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        selected: Option<SelectedKlibCallables<'s, '_>>,
+        arena: &'s KlibIrArena,
+        declaration: &'s KlibIrFunction,
+    ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+        let selected = selected_callable_for_header(selected, None, arena, declaration)?;
+        let function = match self.functions.get(identity) {
             Some(function) => {
                 // The function was declared under another lowering's selection, or from its
                 // header alone; this lowering's selection must describe it too.
                 if let Some(selected) = selected {
-                    function_header(Some(selected), arena, declaration).map_err(callee_declined)?;
+                    function_header(Some(selected), arena, declaration)?;
                 }
                 *function
             }
-            None => self
-                .declare(ir, &identity, selected, arena, declaration)
-                .map_err(callee_declined)?,
+            None => self.declare(ir, identity, selected, arena, declaration)?,
         };
         let parameter_defaults = parameter_defaults(declaration);
         let declaration = &ir.functions[function as usize];
@@ -1936,17 +1917,13 @@ impl<'s> CallLinker for Linker<'_, 's> {
             edge: super::CallEdge::default(),
         })
     }
-}
 
-impl<'s> Linker<'_, 's> {
-    /// The type parameters of the generic class declaring `selected`, which a call of the member
-    /// binds from its dispatch receiver; none for a top-level function or a non-generic class.
     /// The accessor of a property of a class whose members the unit emits, when it has a body.
     fn materialized_member_accessor(
         &mut self,
         ir: &mut IrFile,
         identity: &KlibDependencyCallable,
-    ) -> Result<Option<LinkedAccessor>, KlibBodyDeclineReason> {
+    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
         if self.sources.externals.contains_key(identity) {
             return Ok(None);
         }
@@ -1954,13 +1931,10 @@ impl<'s> Linker<'_, 's> {
             return Ok(None);
         };
         let selected = callables[0];
-        let Some(accessor) = selected.accessor() else {
-            return Ok(None);
-        };
-        let write = accessor.role == crate::libraries::KlibAccessorRole::Setter;
-        if !selected
-            .class_contract()
-            .is_some_and(crate::libraries::KlibBodyClassContract::emits_members)
+        if selected.accessor().is_none()
+            || !selected
+                .class_contract()
+                .is_some_and(crate::libraries::KlibBodyClassContract::emits_members)
         {
             return Ok(None);
         }
@@ -1978,33 +1952,19 @@ impl<'s> Linker<'_, 's> {
             Some(self.sources.bodies),
         )?
         .expect("a selected bucket holds a callable");
-        let linked = self.value_member(ir, identity, selected, arena, declaration)?;
-        let Callee::Local(function) = linked.callee else {
-            unreachable!("a value class member is a local function");
-        };
-        Ok(Some(LinkedAccessor {
-            target: LinkedAccessorTarget::Local(function),
-            write,
-            receiver: linked.receiver,
-            params: linked.params,
-            ret: linked.ret,
-            context_count: linked.context_count,
-            class_type_parameters: linked.class_type_parameters,
-            callable: None,
-            type_parameters: Vec::new(),
-            type_parameter_bounds: Vec::new(),
-            reified_type_parameters: Vec::new(),
-        }))
+        self.value_member(ir, identity, selected, arena, declaration)
+            .map(Some)
     }
 
-    /// The accessor of a top-level property, when the unit emits its body: a non-generic
-    /// accessor with a body that no retained export realizes is emitted here, as a top-level
-    /// function the support body calls is.
+    /// The accessor of a top-level property, when the unit emits its body: an accessor with a
+    /// body that no retained export realizes is emitted here, as a top-level function the support
+    /// body calls is. Its serialized declaration must hold the selected accessor's slot of the
+    /// property group its signature names.
     fn top_level_accessor(
         &mut self,
         ir: &mut IrFile,
         identity: &KlibDependencyCallable,
-    ) -> Result<Option<LinkedAccessor>, KlibBodyDeclineReason> {
+    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
         if self.sources.externals.contains_key(identity) {
             return Ok(None);
         }
@@ -2014,7 +1974,15 @@ impl<'s> Linker<'_, 's> {
         let Some(accessor) = callables[0].accessor() else {
             return Ok(None);
         };
-        let write = accessor.role == crate::libraries::KlibAccessorRole::Setter;
+        if callables.iter().any(|callable| {
+            callable.accessor().is_none_or(|other| {
+                other.property != accessor.property || other.role != accessor.role
+            })
+        }) {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected variants name other accessors of the property".to_owned(),
+            ));
+        }
         let Some((arena, declaration)) = self.sources.bodies.function(identity) else {
             return Ok(None);
         };
@@ -2023,36 +1991,25 @@ impl<'s> Linker<'_, 's> {
         {
             return Ok(None);
         }
-        let selected = selected_callable_for_header(
+        let authenticated = self
+            .sources
+            .bodies
+            .top_level_accessor_header(identity, accessor.role)
+            .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
+        if !authenticated.is_some_and(|(_, header)| std::ptr::eq(header, declaration)) {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected accessor is not its top-level property's serialized accessor"
+                    .to_owned(),
+            ));
+        }
+        self.top_level_function(
+            ir,
+            identity,
             Some(SelectedKlibCallables::Variants(callables)),
-            None,
             arena,
             declaration,
-        )?;
-        if selected
-            .and_then(|selected| selected.generic_signature())
-            .is_some_and(|signature| !signature.formals.is_empty())
-        {
-            return Ok(None);
-        }
-        let function = match self.functions.get(identity) {
-            Some(function) => *function,
-            None => self.declare(ir, identity, selected, arena, declaration)?,
-        };
-        let declared = &ir.functions[function as usize];
-        Ok(Some(LinkedAccessor {
-            target: LinkedAccessorTarget::Local(function),
-            write,
-            receiver: None,
-            params: declared.params.clone(),
-            ret: declared.ret,
-            context_count: ir.declared_parameters(function).context_count,
-            class_type_parameters: Vec::new(),
-            callable: None,
-            type_parameters: Vec::new(),
-            type_parameter_bounds: Vec::new(),
-            reified_type_parameters: Vec::new(),
-        }))
+        )
+        .map(Some)
     }
 
     /// A call of a private member of the value class whose member is being lowered. No provider

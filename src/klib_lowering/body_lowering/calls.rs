@@ -11,8 +11,7 @@ use super::super::klib_types::{
     classifier_name, function_invocation_arity, member_owner, suspend_function_invocation_arity,
 };
 use super::{
-    mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorTarget, LinkedCallee,
-    Lowered,
+    mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorCall, LinkedCallee, Lowered,
 };
 use crate::fir::FirTypeParameterRef;
 use crate::ir::{
@@ -834,7 +833,12 @@ impl BodyLowering<'_> {
         if let Some(primitive) = self.linker.common_primitive(&signature)? {
             return self.primitive_call(primitive, access, ty);
         }
-        let mut linked = self.linker.link_accessor(self.ir, accessor)?;
+        let mut linked = match self.linker.link_accessor(self.ir, accessor)? {
+            LinkedAccessorCall::Property(linked) => linked,
+            // An accessor the unit emits is called as any function of the unit is, binding its
+            // own type parameters at the access's type arguments.
+            LinkedAccessorCall::Function(linked) => return self.linked_call(linked, access, ty),
+        };
         if linked.type_parameters.len() != access.type_arguments.len() {
             return Err(mismatch(
                 "a property access has another number of type arguments than its selected accessor",
@@ -948,17 +952,11 @@ impl BodyLowering<'_> {
                 }
             }
         }
-        let LinkedAccessor { target, write, .. } = linked;
-        let target = match target {
-            LinkedAccessorTarget::External(property) => property,
-            LinkedAccessorTarget::Local(function) => {
-                return Ok(self.ir.add_expr(IrExpr::Call {
-                    callee: Box::new(Callee::Local(function)),
-                    dispatch_receiver: receiver,
-                    args: arguments,
-                }));
-            }
-        };
+        let LinkedAccessor {
+            property: target,
+            write,
+            ..
+        } = linked;
         let dispatch = IrPropertyDispatch::Ordinary;
         Ok(self.ir.add_expr(IrExpr::Checked(Box::new(if write {
             IrCheckedOperation::ExternalPropertyWrite {
