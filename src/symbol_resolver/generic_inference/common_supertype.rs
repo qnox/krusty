@@ -327,12 +327,30 @@ pub(crate) struct ReifiedDeclarations<'a> {
 /// An unresolved component or an undeclared variance keeps the checked type: a missing declaration
 /// is not evidence that the components meet only at `Any`.
 pub(crate) fn reified_runtime_type(ty: Ty, declarations: &ReifiedDeclarations<'_>) -> Ty {
+    approximate_to_super(
+        ty,
+        &Approximation {
+            declarations,
+            join: None,
+        },
+    )
+}
+
+/// How an intersection is approximated where a supertype is wanted. A reified runtime type keeps
+/// only the components' single shared classifier; a published declaration type takes `join`, the
+/// components' semantic common supertype with its applied type arguments.
+struct Approximation<'a, 'b> {
+    declarations: &'a ReifiedDeclarations<'b>,
+    join: Option<&'a dyn Fn(&[Ty]) -> Option<Ty>>,
+}
+
+fn approximate_to_super(ty: Ty, approximation: &Approximation<'_, '_>) -> Ty {
     let nullable = ty.is_nullable();
     let inner = ty.non_null().projection_read_ty().non_null();
     if !matches!(inner.kind(), TyKind::Intersection(_)) {
-        return reified_approximation(ty, true, declarations);
+        return reified_approximation(ty, true, approximation);
     }
-    let approximated = reified_approximation(inner, true, declarations);
+    let approximated = reified_approximation(inner, true, approximation);
     if approximated == inner {
         ty
     } else if nullable {
@@ -347,27 +365,42 @@ pub(crate) fn reified_runtime_type(ty: Ty, declarations: &ReifiedDeclarations<'_
 /// `val marker get() = choose("text", 1)` publishes `Any`, and `val list = listOf(1, "a")`
 /// publishes `List<Any>`. A local variable keeps its intersection.
 pub(crate) fn published_declaration_type(source: &dyn SymbolSource, ty: Ty) -> Ty {
-    reified_runtime_type(
+    let declarations = ReifiedDeclarations {
+        direct_supertypes: &|name| Some(source.classifier(name)?.supertypes.iter_ids().collect()),
+        variance_at: &|name, index| {
+            source
+                .classifier(name)?
+                .type_param_variances()
+                .get(index)
+                .copied()
+        },
+    };
+    // The components' semantic join keeps applied type arguments (`Mid<String> & Zed<String>`
+    // publishes `Root<String>`). Components whose most specific shared supertypes are still
+    // several meet only at `Any`, as kotlinc publishes them.
+    let join = |parts: &[Ty]| {
+        let joined = CommonSupertypeSolver::new(source).common(parts);
+        if joined == Ty::Error {
+            None
+        } else if matches!(joined.non_null().kind(), TyKind::Intersection(_)) {
+            Some(Ty::obj_name(crate::types::wk::any()))
+        } else {
+            Some(joined)
+        }
+    };
+    approximate_to_super(
         ty,
-        &ReifiedDeclarations {
-            direct_supertypes: &|name| {
-                Some(source.classifier(name)?.supertypes.iter_ids().collect())
-            },
-            variance_at: &|name, index| {
-                source
-                    .classifier(name)?
-                    .type_param_variances()
-                    .get(index)
-                    .copied()
-            },
+        &Approximation {
+            declarations: &declarations,
+            join: Some(&join),
         },
     )
 }
 
-fn reified_approximation(ty: Ty, to_super: bool, declarations: &ReifiedDeclarations<'_>) -> Ty {
+fn reified_approximation(ty: Ty, to_super: bool, approximation: &Approximation<'_, '_>) -> Ty {
     match ty.kind() {
         TyKind::Nullable(inner) => {
-            let approximated = reified_approximation(inner, to_super, declarations);
+            let approximated = reified_approximation(inner, to_super, approximation);
             if approximated == inner {
                 ty
             } else {
@@ -375,8 +408,7 @@ fn reified_approximation(ty: Ty, to_super: bool, declarations: &ReifiedDeclarati
             }
         }
         TyKind::Intersection(parts) if to_super => {
-            approximate_reified_intersection(parts.as_slice(), declarations.direct_supertypes)
-                .unwrap_or(ty)
+            approximate_reified_intersection(parts.as_slice(), approximation).unwrap_or(ty)
         }
         TyKind::Intersection(_) => Ty::Nothing,
         TyKind::Obj(classifier, arguments) if !arguments.is_empty() => {
@@ -385,7 +417,7 @@ fn reified_approximation(ty: Ty, to_super: bool, declarations: &ReifiedDeclarati
                 .iter()
                 .enumerate()
                 .map(|(index, argument)| {
-                    reified_argument(classifier, index, *argument, to_super, declarations)
+                    reified_argument(classifier, index, *argument, to_super, approximation)
                 })
                 .collect::<Vec<_>>();
             if approximated.as_slice() == arguments.as_slice() {
@@ -403,21 +435,21 @@ fn reified_argument(
     index: usize,
     argument: Ty,
     to_super: bool,
-    declarations: &ReifiedDeclarations<'_>,
+    approximation: &Approximation<'_, '_>,
 ) -> Ty {
     match argument.kind() {
         TyKind::OutProjection(inner) => {
-            Ty::out_projection(reified_approximation(inner, to_super, declarations))
+            Ty::out_projection(reified_approximation(inner, to_super, approximation))
         }
         TyKind::InProjection(inner) => {
-            Ty::in_projection(reified_approximation(inner, !to_super, declarations))
+            Ty::in_projection(reified_approximation(inner, !to_super, approximation))
         }
         TyKind::StarProjection(_) | TyKind::RawProjection(_) => argument,
-        _ => match (declarations.variance_at)(classifier, index) {
-            Some(TypeVariance::Out) => reified_approximation(argument, to_super, declarations),
-            Some(TypeVariance::In) => reified_approximation(argument, !to_super, declarations),
+        _ => match (approximation.declarations.variance_at)(classifier, index) {
+            Some(TypeVariance::Out) => reified_approximation(argument, to_super, approximation),
+            Some(TypeVariance::In) => reified_approximation(argument, !to_super, approximation),
             Some(TypeVariance::Invariant) if to_super => {
-                let approximated = reified_approximation(argument, true, declarations);
+                let approximated = reified_approximation(argument, true, approximation);
                 if approximated == argument {
                     argument
                 } else {
@@ -431,10 +463,13 @@ fn reified_argument(
 
 fn approximate_reified_intersection(
     parts: &[Ty],
-    direct_supertypes: &dyn Fn(TypeName) -> Option<Vec<TypeName>>,
+    approximation: &Approximation<'_, '_>,
 ) -> Option<Ty> {
     if parts.is_empty() {
         return None;
+    }
+    if let Some(join) = approximation.join {
+        return Some(reified_approximation(join(parts)?, true, approximation));
     }
     let mut names = Vec::with_capacity(parts.len());
     for part in parts {
@@ -442,7 +477,7 @@ fn approximate_reified_intersection(
     }
     Some(Ty::obj_name(single_reified_supertype(
         &names,
-        direct_supertypes,
+        approximation.declarations.direct_supertypes,
     )?))
 }
 
