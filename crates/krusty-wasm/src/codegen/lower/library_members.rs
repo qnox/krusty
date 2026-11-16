@@ -1,7 +1,8 @@
 //! Calls of a library classifier's member that dispatch through the program
 //! (`crate::interface_dispatch`): an interface's member no dependency publishes a body for
-//! (`CharSequence.length` on a `CharSequence`), and a class's member that builtin classes override
-//! (`Number.toLong()` on a `Number`).
+//! (`CharSequence.length` on a `CharSequence`), a class's member that builtin classes override
+//! (`Number.toLong()` on a `Number`), and an abstract member of a library class
+//! (`IntIterator.nextInt()` on an `IntIterator`), which the program's subclasses implement.
 //!
 //! The member is named by its KLIB identity, which a class of the program implementing it records
 //! its override under (`super::super::interface_members`); the builtin classes' implementations
@@ -84,7 +85,9 @@ pub(in crate::codegen) fn dispatches_through_library_member(
         && fact.compiler_operation().is_none()
         && fact.dependency_callable.is_some()
         && library_member_owner(fact).is_some()
-        && (fact.owner_is_interface || !fact.builtin_implementations.is_empty())
+        && (fact.owner_is_interface
+            || !fact.builtin_implementations.is_empty()
+            || is_abstract_class_member(fact))
         && any_members::call_member(ir, callables, expression).is_none()
 }
 
@@ -92,6 +95,18 @@ pub(in crate::codegen) fn dispatches_through_library_member(
 /// (`crate::callable_references`).
 fn is_reference_name(property: &BackendPropertyFact) -> bool {
     &*property.name == "name" && property.owner.matches("kotlin/reflect/KCallable")
+}
+
+/// Whether `fact` is an abstract member of a library class: no body of its own runs, only the
+/// overrides the receiver's class and its superclasses supply, as an interface's member.
+pub(in crate::codegen) fn is_abstract_class_member(fact: &BackendCallableFact) -> bool {
+    !fact.owner_is_interface
+        && fact.kind == ExternalCallableKind::Member
+        && fact.member_realization == MemberRealization::Dispatch
+        && library_member_owner(fact).is_some()
+        && fact
+            .klib_body_declaration_modifiers
+            .is_some_and(|modifiers| modifiers.is_abstract())
 }
 
 impl Body<'_> {
