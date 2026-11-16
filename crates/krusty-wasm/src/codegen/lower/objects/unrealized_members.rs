@@ -2,9 +2,8 @@
 //!
 //! Every object answers `equals`, `hashCode` and `toString` through its table, and most tables
 //! hold a body for each (see `super::super::super::classes` and `crate::runtime`). A few
-//! still hold the trap of a member with no body: `toString` of a floating box, for which no printer
-//! writes Kotlin's form; `toString` of a function value; and `toString` of a class the compiler
-//! generated, which Kotlin gives no source name the default prints. Lowering declines a call that
+//! still hold the trap of a member with no body: `toString` of a function value, and of a class
+//! the compiler generated, which Kotlin gives no source name the default prints. Lowering declines a call that
 //! could reach one rather than emit a trap the program would run into.
 //!
 //! A value statically of a class of this file is an instance of that class's hierarchy; one of a
@@ -20,7 +19,7 @@ use krusty::backend::class_tables::AnyMember;
 use krusty::ir::{ClassId, IrExpr, IrFile};
 use krusty::types::{Ty, TyKind};
 
-use super::super::super::super::boxes::box_prints;
+use super::super::super::super::boxes::is_boxed_scalar;
 use super::super::super::super::encode::ValType;
 use super::super::super::any_member_reach::Receiver;
 use super::{carrier, Body, Unsupported};
@@ -56,9 +55,9 @@ impl Body<'_> {
             // A string answers every member itself.
             return Ok(false);
         }
-        if let Some(prints) = box_prints(value) {
-            // A scalar read as a reference is its box.
-            return Ok(member == AnyMember::ToString && !prints);
+        if is_boxed_scalar(value) {
+            // A scalar read as a reference is its box, which answers every member.
+            return Ok(false);
         }
         if matches!(value.kind(), TyKind::Fun(_)) {
             return Ok(member == AnyMember::ToString);
@@ -68,7 +67,7 @@ impl Body<'_> {
         }
         if value.obj_internal() == Some(super::super::super::super::type_objects::ktype()) {
             // The runtime object answers every member. Another file's class can implement
-            // `KType`; a floating box or a function value cannot, so this is not an erased call.
+            // `KType`; a box or a function value cannot, so this is not an erased call.
             self.record_call(member, ty, Receiver::Classes);
             return self.ktype_reaches_unrealized(member);
         }
@@ -141,9 +140,8 @@ fn runtime_exception_lacks_body(member: AnyMember) -> bool {
     }
 }
 
-/// Whether a reference of `ir` can hold a runtime object whose `toString` has no body: a floating
-/// box, which only a floating value the file emits becomes, or a function value, which only a
-/// lambda or a callable reference the file emits creates.
+/// Whether a reference of `ir` can hold a runtime object whose `toString` has no body: a function
+/// value, which only a lambda or a callable reference the file emits creates.
 pub(in super::super) fn holds_unprinted_values(ir: &IrFile) -> bool {
     krusty::ir::emitted_body_roots(ir)
         .into_iter()
@@ -152,9 +150,6 @@ pub(in super::super) fn holds_unprinted_values(ir: &IrFile) -> bool {
             matches!(
                 ir.expr(expression),
                 IrExpr::Lambda { .. } | IrExpr::CallableReference(_)
-            ) || ir
-                .checked_type(expression)
-                .and_then(|ty| box_prints(ty.non_null()))
-                == Some(false)
+            )
         })
 }

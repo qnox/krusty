@@ -124,6 +124,7 @@ impl<'u, 's> Linker<'u, 's> {
         let member = super::MemberClass {
             class,
             fields: plan.field_declarations.clone(),
+            properties: super::super::class_storage::backed_properties(&plan.header.class.members),
             contract: plan.header.contract,
         };
         if existing.is_none() {
@@ -262,6 +263,9 @@ impl<'u, 's> Linker<'u, 's> {
             value_member: Some(super::MemberClass {
                 class,
                 fields,
+                properties: super::super::class_storage::backed_properties(
+                    &delegation.header.class.members,
+                ),
                 contract: delegation.header.contract,
             }),
             local_body: None,
@@ -392,6 +396,7 @@ impl<'u, 's> Linker<'u, 's> {
             return Ok(super::MemberClass {
                 class,
                 fields: vec![field],
+                properties: super::super::class_storage::backed_properties(&header.class.members),
                 contract,
             });
         }
@@ -421,6 +426,7 @@ impl<'u, 's> Linker<'u, 's> {
         Ok(super::MemberClass {
             class,
             fields: vec![field],
+            properties: super::super::class_storage::backed_properties(&header.class.members),
             contract,
         })
     }
@@ -473,6 +479,7 @@ impl<'u, 's> Linker<'u, 's> {
         Ok(super::MemberClass {
             class,
             fields,
+            properties: super::super::class_storage::backed_properties(&header.class.members),
             contract,
         })
     }

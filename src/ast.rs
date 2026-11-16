@@ -31,6 +31,7 @@ mod property_shape;
 mod type_refs;
 pub use type_refs::{QualifierArgumentLists, QualifierSegmentArguments, TrFlags, TypeRef};
 mod use_site_annotations;
+mod value_class_syntax;
 pub use backing_field_reads::{accessor_uses_backing_field, getter_declares_field};
 pub use binary_reference_tokens::BinaryReferenceTokens;
 pub(crate) use call_shape::explicit_call_receiver;
@@ -49,6 +50,7 @@ pub use property_shape::{
     is_computed_member_prop,
 };
 pub use use_site_annotations::UseSiteAnnotation;
+pub use value_class_syntax::ValueClassKeyword;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct ExprId(pub u32);
@@ -1987,6 +1989,9 @@ pub struct File {
     /// `+NormalizeNaNValuesInConstContext`: every NaN a compile-time constant evaluates to is the
     /// canonical NaN of its type, whatever sign and payload the arithmetic produced.
     pub normalize_nan_in_const_context: bool,
+    /// `+IntrinsicConstEvaluation`: a constant context (an annotation argument, a `const val`)
+    /// also evaluates the intrinsic-const reads it otherwise rejects, such as an entry's `name`.
+    pub intrinsic_const_evaluation: bool,
     /// `+CustomEqualsInValueClasses`: permit the typed `equals(Self)` convention in a value class
     /// whose selected representation is inline rather than full/boxed.
     pub custom_equals_in_value_classes: bool,
