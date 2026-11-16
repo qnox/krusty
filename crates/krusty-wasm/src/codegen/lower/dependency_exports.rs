@@ -308,6 +308,42 @@ impl Body<'_> {
         self.coerce_emitted_value(signature.result(), *ret)
     }
 
+    /// `super.f(args)` of a method a dependency class declares, called directly through the entry
+    /// its module exports under the selected declaration's identity: the receiver, then each
+    /// operand at the carrier the declaration is exported with, and the result converted back to
+    /// what the checked call takes.
+    pub(super) fn dependency_super_call(
+        &mut self,
+        target: krusty::fir::ExternalCallableId,
+        parameters: usize,
+        ret: Ty,
+        receiver: u32,
+        arguments: &[u32],
+    ) -> Result<(), Unsupported> {
+        let function = self
+            .calls
+            .external(target)
+            .ok_or_else(|| "a `super` call to a dependency member no module exports".to_owned())?;
+        let signature = self
+            .calls
+            .signature(target)
+            .ok_or_else(|| {
+                "an exported dependency member without its declared signature".to_owned()
+            })?
+            .clone();
+        let declared = signature.parameters();
+        if parameters != arguments.len() || declared.len() != arguments.len() + 1 {
+            return Err(
+                "a `super` call whose operands disagree with the dependency member it selects"
+                    .into(),
+            );
+        }
+        self.value(receiver, declared[0])?;
+        self.dependency_arguments(arguments, &declared[1..])?;
+        self.code.call(function);
+        self.coerce_emitted_value(signature.result(), ret)
+    }
+
     /// The operands of `abi` in order: each supplied one evaluated, and a zero at each `omitted`
     /// position, whose default the declaration's default entry evaluates.
     fn dependency_arguments_omitting(

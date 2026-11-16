@@ -266,6 +266,13 @@ pub(super) enum Slot {
         target_slot: Option<u32>,
         target: FunId,
     },
+    /// See [`class_tables::Slot::DeclaredBridge`].
+    DeclaredBridge {
+        parameters: Box<[Ty]>,
+        result: Ty,
+        target_slot: u32,
+        target: FunId,
+    },
     /// See [`class_tables::Slot::FunctionBridge`]; the runtime names the number it stands in
     /// `KT_SLOT_INVOKE`.
     FunctionBridge {
@@ -332,6 +339,17 @@ impl Slot {
                 target,
             } => Self::Bridge {
                 declared,
+                target_slot,
+                target,
+            },
+            class_tables::Slot::DeclaredBridge {
+                parameters,
+                result,
+                target_slot,
+                target,
+            } => Self::DeclaredBridge {
+                parameters,
+                result,
                 target_slot,
                 target,
             },
@@ -405,8 +423,26 @@ fn any_member_symbol(root: &IrClass, member: AnyMember) -> &'static str {
 pub(super) fn module_plan(
     classes: &krusty::backend::class_tables::module_classes::ModuleClasses,
     values: &ValueClassInventory,
+    declarations: &krusty::backend::CheckedBackendCallables,
+    classifiers: &dyn krusty::backend::BackendClassifierSource,
+    laid_out: &LaidOutClasses,
 ) -> ModuleSlotPlan {
-    ModuleSlotPlan::build(classes, &NativeRepresentation(values))
+    ModuleSlotPlan::build_with_published_slots(
+        classes,
+        &NativeRepresentation(values),
+        declarations,
+        &|name| {
+            let Some(identity) = classifiers
+                .classifier(name)
+                .and_then(|fact| fact.klib_identity.clone())
+            else {
+                return Ok(None);
+            };
+            Ok(laid_out
+                .published_layout(&identity)?
+                .map(|layout| layout.slots.clone()))
+        },
+    )
 }
 
 /// How Native carries values, as the shared tables ask it.

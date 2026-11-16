@@ -53,7 +53,11 @@ pub(super) fn checked_ir_file<'a>(
     if module.common_ir_coroutines && !ir.suspend_funs.is_empty() {
         ir.coroutine_runtime = symbols.coroutine_runtime();
     }
-    let mut callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
+    let mut callables = match CheckedBackendCallables::freeze_with_class_declarations(
+        &ir,
+        symbols.semantic_platform(),
+        module_facts.classes(),
+    ) {
         Ok(callables) => callables,
         Err(error) => {
             diags.error(
@@ -69,11 +73,7 @@ pub(super) fn checked_ir_file<'a>(
         diags.error(Span::new(0, 0), format!("internal error: {error}"));
         return None;
     }
-    if let Err(identity) = super::builtin_implementations::record_checked(
-        &mut callables,
-        &ir,
-        symbols.semantic_platform(),
-    ) {
+    if let Err(identity) = super::builtin_implementations::record_checked(&mut callables, &ir) {
         diags.error(
             Span::new(0, 0),
             format!(
@@ -212,14 +212,21 @@ pub(super) fn prepare_common_ir(
         .map_err(crate::backend::CommonIrPreparationError::Suspend)?;
 
     let plugin_runtime = file.callables.plugin_runtime_bindings();
-    let mut callables = CheckedBackendCallables::freeze(&file.ir, provider).map_err(|error| {
+    // The refreeze keeps the declarations of the module's classes, as the handoff froze them:
+    // the slot plan binds a dependency superclass's published layout by those declarations.
+    let mut callables = CheckedBackendCallables::freeze_with_class_declarations(
+        &file.ir,
+        provider,
+        file.classifiers.module().classes(),
+    )
+    .map_err(|error| {
         crate::backend::CommonIrPreparationError::Invariant(format!(
             "cannot freeze prepared dependency declarations: {error:?}"
         ))
     })?;
     record_checked_klib_dependency_facts(&mut callables, provider)
         .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
-    super::builtin_implementations::record_checked(&mut callables, &file.ir, provider).map_err(
+    super::builtin_implementations::record_checked(&mut callables, &file.ir).map_err(
         |identity| {
             crate::backend::CommonIrPreparationError::Invariant(format!(
                 "prepared IR has no builtin implementation facts for external member {identity:?}"

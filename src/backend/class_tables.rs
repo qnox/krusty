@@ -137,6 +137,17 @@ pub enum Slot {
         target_slot: Option<u32>,
         target: FunId,
     },
+    /// The same stand-in as [`Slot::Bridge`] for a base method no file of the module declares, a
+    /// dependency class's (`Base<T>.value(input: T)` overridden by `value(input: Int)` in a
+    /// `Derived : Base<Int>`): there is no `FunId` to read the base's signature off, so the entry
+    /// carries the carriers the base declares itself. It forwards by DISPATCH for the same reason.
+    DeclaredBridge {
+        /// The operands, not counting the receiver, and the result as the BASE declares them.
+        parameters: Box<[Ty]>,
+        result: Ty,
+        target_slot: u32,
+        target: FunId,
+    },
     /// [`FUNCTION_SLOT`]'s own stand-in: `invoke` overriding `kotlin.Function{N}.invoke` where
     /// the override does not carry references throughout.
     ///
@@ -372,6 +383,13 @@ fn class_tables(
                     planned,
                     plan.interfaces(),
                 )?,
+                // The plan's own reason names the contract a planned class failed.
+                Some(Err(reason)) if laid_out.is_some() => {
+                    return Err(format!(
+                        "a class extending one of another file with no module-wide layout (`{}`): {reason}",
+                        class.fq_name()
+                    ))
+                }
                 _ if laid_out.is_some() => {
                     return Err(format!(
                         "a class extending one of another file with no module-wide layout (`{}`)",

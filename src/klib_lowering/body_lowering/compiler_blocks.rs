@@ -96,9 +96,7 @@ impl BodyLowering<'_> {
         statements: &[KlibIrStatement],
         ty: Ty,
     ) -> Lowered<ExprId> {
-        if ty != Ty::Unit && !self.compiler_sequence_diverges(statements) {
-            return unsupported("a value-returning block that may complete without a value");
-        }
+        let syntactically_diverges = self.compiler_sequence_diverges(statements);
         let condition = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
         let label = format!("$klib_return_{condition}");
         let result = if ty != Ty::Unit && ty != Ty::Nothing {
@@ -115,6 +113,16 @@ impl BodyLowering<'_> {
         let statements = self.compiler_statements(statements);
         self.returnable_frames.pop();
         let mut statements = statements?;
+        // The frame's result is read only after its last statement completes, so that statement
+        // must leave the frame: a jump, or a value of type `Nothing`, such as a call of a function
+        // declared to return `Nothing`, which never completes.
+        let completes = !syntactically_diverges
+            && statements
+                .last()
+                .is_none_or(|last| self.ir.logical_type(*last) != Some(Ty::Nothing));
+        if ty != Ty::Unit && completes {
+            return unsupported("a value-returning block that may complete without a value");
+        }
         statements.push(self.ir.add_expr(IrExpr::Break {
             label: Some(label.clone()),
         }));

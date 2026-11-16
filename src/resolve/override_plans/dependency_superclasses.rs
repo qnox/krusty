@@ -25,34 +25,59 @@ use super::{
     with_function_supertypes, OverridingFunction, PropertyImplementation,
 };
 
-/// The dependency classes among the hierarchies of `module_classes`: every class ancestor the
-/// module does not declare, other than `kotlin.Any`, with its dispatch shape.
+/// The dependency classes among the hierarchies of `module_classes` and of `template_superclasses`:
+/// every class ancestor the module does not declare, other than `kotlin.Any`, with its dispatch
+/// shape.
+///
+/// `template_superclasses` are the classes the local classes of dependency inline templates
+/// extend. Such a class is extended in whichever file a call expands the template, and which
+/// files do is known only once their bodies are checked, so every template the dependencies
+/// serialize contributes its superclasses here, as a fact of the libraries rather than of a call.
 pub(super) fn dependency_superclasses(
     index: &ResolvedModuleIndex,
     source: &dyn SymbolSource,
     module_classes: &[crate::fir::DeclarationId],
+    template_superclasses: &[TypeName],
     declared_by_module: impl Fn(TypeName) -> bool,
 ) -> Vec<ResolvedDependencySuperclass> {
+    let module_ancestors = module_classes.iter().flat_map(|&classifier| {
+        index
+            .classifier_hierarchy(classifier)
+            .unwrap_or_default()
+            .iter()
+            .filter(|ancestor| ancestor.depth != 0)
+            .map(|ancestor| ancestor.classifier)
+            .collect::<Vec<_>>()
+    });
+    let template_ancestors = template_superclasses.iter().flat_map(|&classifier| {
+        source
+            .classifier(classifier)
+            .map(|declaration| {
+                crate::symbol_resolver::applied_hierarchy(
+                    source,
+                    declaration.declared_self_type(classifier),
+                )
+                .into_iter()
+                .map(|(ancestor, _, _)| ancestor)
+                .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
     let mut seen = HashSet::default();
     let mut superclasses = Vec::new();
-    for &classifier in module_classes {
-        for ancestor in index.classifier_hierarchy(classifier).unwrap_or_default() {
-            let name = ancestor.classifier;
-            if ancestor.depth == 0
-                || name == crate::types::wk::any()
-                || declared_by_module(name)
-                || !seen.insert(name)
-            {
-                continue;
-            }
-            let Some(declaration) = source.classifier(name) else {
-                continue;
-            };
-            if declaration.is_interface() || declaration.is_object() {
-                continue;
-            }
-            superclasses.push(dependency_superclass(index, source, name, &declaration));
+    for name in module_ancestors.chain(template_ancestors) {
+        if name == crate::types::wk::any() || declared_by_module(name) || !seen.insert(name) {
+            continue;
         }
+        let Some(declaration) = source.classifier(name) else {
+            continue;
+        };
+        if declaration.is_interface() || declaration.is_object() {
+            continue;
+        }
+        let mut superclass = dependency_superclass(index, source, name, &declaration);
+        superclass.extended_by_inline_template = template_superclasses.contains(&name);
+        superclasses.push(superclass);
     }
     superclasses
 }
@@ -164,6 +189,7 @@ fn dependency_superclass(
         members: members.into_boxed_slice(),
         function_overrides: function_overrides.into_boxed_slice(),
         property_overrides: property_overrides.into_boxed_slice(),
+        extended_by_inline_template: false,
     }
 }
 
