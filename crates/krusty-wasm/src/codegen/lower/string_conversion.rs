@@ -50,6 +50,17 @@ impl Body<'_> {
             self.stacked_unsigned_string(ty);
             return Ok(());
         }
+        // An unsigned array is its own object over signed storage. The runtime table prints
+        // `UIntArray(storage=[…])` from that storage; it is not an erased `Any.toString`.
+        if ty
+            .non_null()
+            .array_elem()
+            .is_some_and(|element| matches!(element, Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong))
+        {
+            self.array_form(ty.non_null())?;
+            self.dispatch_to_string();
+            return Ok(());
+        }
         let nullable_scalar = match ty.kind() {
             TyKind::Nullable(inner) => self
                 .scalar_string_function(inner)
