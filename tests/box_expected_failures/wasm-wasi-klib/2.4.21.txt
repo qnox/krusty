@@ -238,7 +238,6 @@ callableReference/adaptedReferences/suspendConversion/simple.kt
 callableReference/adaptedReferences/suspendConversion/withContextParameterAsAPropertyType.kt
 callableReference/adaptedReferences/suspendConversion/withContextParameters.kt
 callableReference/adaptedReferences/suspendConversion/withContextParametersAsASupertype.kt
-callableReference/adaptedReferences/suspendConversion/withParameters.kt
 callableReference/adaptedReferences/suspendUnitConversion.kt
 callableReference/adaptedReferences/unboundReferences.kt
 callableReference/adaptedReferences/unitCoercionOverloads.kt
@@ -529,7 +528,6 @@ coroutines/beginWithExceptionNoHandleException.kt
 coroutines/bridges/interfaceGenericDefault.kt
 coroutines/bridges/interfaceSpecialization.kt
 coroutines/bridges/lambdaWithLongReceiver.kt
-coroutines/bridges/lambdaWithMultipleParameters.kt
 coroutines/bridges/mapSuspendAbstractClear.kt
 coroutines/bridges/mapSuspendClear.kt
 coroutines/builderInferenceAndGenericArrayAcessCall.kt
@@ -889,7 +887,6 @@ coroutines/multipleInvokeCallsInsideInlineLambda1.kt
 coroutines/multipleInvokeCallsInsideInlineLambda2.kt
 coroutines/multipleInvokeCallsInsideInlineLambda3.kt
 coroutines/nestedTryCatch.kt
-coroutines/noSuspensionPoints.kt
 coroutines/nonLocalReturn.kt
 coroutines/nonLocalReturnFromInlineLambda.kt
 coroutines/nonLocalReturnFromInlineLambdaDeep.kt
