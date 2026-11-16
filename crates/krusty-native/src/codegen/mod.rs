@@ -213,6 +213,10 @@ impl Backend for CraneliftBackend {
         true
     }
 
+    fn presets_constant_top_level_initializers(&self) -> bool {
+        true
+    }
+
     fn realizes_dependency_intrinsic(
         &self,
         operation: krusty::backend::BackendCompilerIntrinsic,
