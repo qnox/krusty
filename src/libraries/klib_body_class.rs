@@ -66,9 +66,13 @@ impl KlibBodyClassContract {
     }
 
     /// Whether a support unit materializes this class and emits its members as functions of the
-    /// class it materializes: a value class, or a class without type parameters that is not
-    /// sealed. A builtin type of the common type model is neither, and neither is `kotlin.Any`,
-    /// the root of every class, which each target lays out itself.
+    /// class it materializes: a value class, or a class that is not sealed and is either final or
+    /// declares no type parameters. A builtin type of the common type model is neither, and
+    /// neither is `kotlin.Any`, the root of every class, which each target lays out itself.
+    ///
+    /// A generic class that can be extended is not: a subclass applies its formals and overrides
+    /// its members with other carriers, which a materialized class's members do not bridge. A
+    /// final generic class has no subclass, so each member is carried as its declaration says.
     pub(crate) fn emits_members(&self) -> bool {
         if self.is_builtin_type() || self.classifier == crate::types::wk::any() {
             return false;
@@ -79,9 +83,9 @@ impl KlibBodyClassContract {
                     self.modality,
                     KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
                 )
+                && (self.parameters.formals.is_empty() || self.modality == KotlinModality::Final)
                 && !self.is_inner
-                && !self.is_expect
-                && self.parameters.formals.is_empty())
+                && !self.is_expect)
     }
 
     /// This class applied to its declared formals. A non-generic class is the bare classifier.
