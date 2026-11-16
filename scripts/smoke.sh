@@ -62,6 +62,9 @@ export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
 export KRUSTY_KOTLIN_NATIVE="${KRUSTY_KOTLIN_NATIVE:-$(just kotlin-native "$v")}"
 export KRUSTY_DEPS_CACHE="${KRUSTY_DEPS_CACHE:-$PWD/target/cache/krusty-deps}"
 export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}"
+# A local checkout has no published recorded-byte archive, so the reference compiler compiles a
+# missing class dump instead of refusing it, as the conformance-regressions run does.
+export KRUSTY_CLASS_DUMP_COMPILE_MISSING="${KRUSTY_CLASS_DUMP_COMPILE_MISSING:-1}"
 
 step "lib tests"
 for package in krusty krusty-native krusty-wasm krusty-jvm; do
