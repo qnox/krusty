@@ -411,10 +411,7 @@ fn specialized_class(
     copy.site_name = expansion
         .site
         .caller_site
-        .map(|container| crate::ir::IrSiteClassName {
-            container,
-            name: crate::backend::class_names::ANONYMOUS_OBJECT_NAME.into(),
-        });
+        .map(crate::ir::IrSiteClassName::anonymous_object);
     copy.enclosure = expansion.site.caller.or(copy.enclosure);
     copy.methods = cloned_methods.clone();
     for supertype in &mut copy.supertypes {

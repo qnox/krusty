@@ -22,6 +22,19 @@ pub struct IrSiteClassName {
     pub name: Box<str>,
 }
 
+impl IrSiteClassName {
+    /// Kotlin's own name for an anonymous object.
+    pub const ANONYMOUS_OBJECT: &'static str = "<no name provided>";
+
+    /// The site name of an anonymous object that `container`'s code declares.
+    pub fn anonymous_object(container: IrSiteClassContainer) -> Self {
+        Self {
+            container,
+            name: Self::ANONYMOUS_OBJECT.into(),
+        }
+    }
+}
+
 /// The declaration that names a local classifier with no source provenance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrSiteClassContainer {

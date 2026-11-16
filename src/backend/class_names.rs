@@ -15,7 +15,7 @@ use crate::types::{ClassifierDeclarationName, TypeName};
 use super::BackendClassifierSource;
 
 /// The simple name Kotlin's IR gives an anonymous object (`SpecialNames.NO_NAME_PROVIDED`).
-pub const ANONYMOUS_OBJECT_NAME: &str = "<no name provided>";
+pub const ANONYMOUS_OBJECT_NAME: &str = crate::ir::IrSiteClassName::ANONYMOUS_OBJECT;
 
 /// The qualified and simple name of a classifier.
 pub struct ClassNames {
