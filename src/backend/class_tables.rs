@@ -224,6 +224,10 @@ pub struct LaidOutSuperclass {
     /// than an interface's default, with the class slot that member stands at, or `None` for a
     /// bridge. A default is not listed: the class extending it finds the same one.
     pub interface_entries: HashMap<u32, Option<u32>>,
+    /// The slot of each member its class table dispatches, inherited ones too, by the member's
+    /// module-wide identity: where a local class of another file, which no module plan numbers,
+    /// finds the member it overrides.
+    pub members: HashMap<module_slots::PlanKey, u32>,
 }
 
 /// One class's place in the hierarchy and its dispatch table.
@@ -298,12 +302,59 @@ pub fn build_numbered(
         table.slots.retain(|_, slot| *slot <= FUNCTION_SLOT);
         table.interface_bridges.clear();
     }
+    let members = tables
+        .iter()
+        .map(|table| member_identities(ir, table, &superclasses))
+        .collect();
     Ok(NumberedClassTables {
         tables,
         order,
         interfaces,
         interface_tables,
+        members,
     })
+}
+
+/// The slot of each member `table` dispatches, by module-wide identity: its own members and those
+/// of the superclass another file laid out, which this file holds no function for.
+fn member_identities(
+    ir: &IrFile,
+    table: &ClassTable,
+    superclasses: &HashMap<TypeName, LaidOutSuperclass>,
+) -> HashMap<module_slots::PlanKey, u32> {
+    use module_slots::PlanKey;
+    let mut members = table
+        .laid_out_superclass
+        .map(|name| superclasses[&name].members.clone())
+        .unwrap_or_default();
+    let callables: HashMap<FunId, crate::fir::CallableId> = ir
+        .checked_callable_functions
+        .iter()
+        .map(|(&callable, &function)| (function, callable))
+        .collect();
+    let dependencies: HashMap<FunId, crate::fir::ExternalCallableId> = ir
+        .dependency_methods
+        .iter()
+        .map(|(&member, &function)| (function, member))
+        .collect();
+    for (key, &slot) in &table.slots {
+        let identity = match *key {
+            SlotKey::Any(_) => continue,
+            SlotKey::Function(function) => match callables.get(&function) {
+                Some(&callable) => PlanKey::Callable(callable),
+                // A support unit emits a dependency member, accessors included, as a method.
+                None => match dependencies.get(&function) {
+                    Some(&member) => PlanKey::DependencyCallable(member),
+                    // A method no other file can name, such as a private one.
+                    None => continue,
+                },
+            },
+            SlotKey::Getter(property) => PlanKey::accessor(property, false),
+            SlotKey::Setter(property) => PlanKey::accessor(property, true),
+        };
+        members.insert(identity, slot);
+    }
+    members
 }
 
 /// [`build_numbered`]'s answer.
@@ -314,6 +365,8 @@ pub struct NumberedClassTables {
     /// Every interface of this file each class implements, transitively. Indexed by `ClassId`.
     pub interfaces: Vec<Vec<ClassId>>,
     pub interface_tables: planned_itable::InterfaceTables,
+    /// Each class's [`LaidOutSuperclass::members`]. Indexed by `ClassId`.
+    pub members: Vec<HashMap<module_slots::PlanKey, u32>>,
 }
 
 impl NumberedClassTables {
@@ -328,6 +381,24 @@ impl NumberedClassTables {
 }
 
 type FileTables = (Vec<ClassTable>, Vec<ClassId>, Vec<Vec<ClassId>>);
+
+/// The class a table is built for, and what it extends.
+struct TabledClass<'t> {
+    id: ClassId,
+    /// Its superclass in this file, already tabled as `parent`.
+    superclass: Option<ClassId>,
+    parent: Option<&'t ClassTable>,
+    /// The nearest superclass another file laid out, which `superclass` (if any) extends in turn.
+    laid_out: Option<(TypeName, &'t LaidOutSuperclass)>,
+}
+
+/// Whether class `id` is local to a body, so no other file can name or extend it.
+fn is_local(ir: &IrFile, id: ClassId) -> bool {
+    let class = &ir.classes[id as usize];
+    class.is_local_class
+        || class.is_anonymous_object
+        || ir.local_class_name_provenance.contains_key(&id)
+}
 
 /// The superclasses of `ir`'s classes that no class of `ir` declares and another file laid out.
 fn laid_out_superclasses(
@@ -374,7 +445,7 @@ fn class_tables(
                 Some(Ok(planned)) => planned_vtable::planned_class_table(
                     representation,
                     ir,
-                    planned_vtable::PlannedClass {
+                    TabledClass {
                         id,
                         superclass,
                         parent,
@@ -383,7 +454,9 @@ fn class_tables(
                     planned,
                     plan.interfaces(),
                 )?,
-                _ if laid_out.is_some() => {
+                // A local class no other file names, so no other file numbers its members: it
+                // extends the superclass's table by the identities of the members it overrides.
+                _ if laid_out.is_some() && !is_local(ir, id) => {
                     return Err(format!(
                         "a class extending one of another file with no module-wide layout (`{}`)",
                         class.fq_name()
@@ -392,9 +465,12 @@ fn class_tables(
                 _ => class_vtable::class_table(
                     representation,
                     ir,
-                    id,
-                    superclass,
-                    parent,
+                    TabledClass {
+                        id,
+                        superclass,
+                        parent,
+                        laid_out,
+                    },
                     plan.interfaces(),
                 )?,
             }
