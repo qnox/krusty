@@ -11,9 +11,9 @@
 #      legacy and clippy baselines;
 #   3. the lib tests of krusty and the backend crates;
 #   4. the e2e modules (`tests/*_e2e.rs`) this branch changes;
-#   5. a box slice on JVM, Native, wasm-js and wasm-wasi: an even sample of the corpus, then every
-#      owned regression (`tests/box_regressions/`) the lane's inventory selects for the release
-#      under test.
+#   5. a box slice on JVM, Native, wasm-js and wasm-wasi: an even sample of the corpus, then the
+#      owned regressions (`tests/box_regressions/`): all of them on JVM and Wasm, the ones this
+#      branch changes on Native (see run_lane).
 #
 # Every test process runs under the harness's configurable deadlines (scripts/test-gate-defaults.sh).
 #
@@ -83,15 +83,23 @@ if [ "${#e2e_modules[@]}" -gt 0 ]; then
   run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$e2e_bin" "${e2e_modules[@]}"
 fi
 
+# The owned regressions this branch adds or changes, by their path under the repository.
+regressions=()
+while IFS= read -r file; do
+  regressions+=("/$file")
+done < <(changed 'tests/box_regressions/*.kt' 'tests/box_regressions/**/*.kt')
 
 step "building the conformance binary"
 bin="$(scripts/cargo-test-binary.sh conformance --test conformance)"
 
-# One lane: the sampled corpus slice, then the owned regressions. The lane's own inventory decides
-# which regressions apply to the release under test; a narrowed run checks the expected-failure
-# lists over exactly the cases it scanned.
+# One lane: the sampled corpus slice, then owned regressions. JVM, wasm-js and wasm-wasi run every
+# owned regression; their inventory keeps only the ones that apply to the release under test.
+# Native runs only the regressions this branch changes, because each multi-module one first runs
+# kotlinc-native as its oracle, which takes minutes for the whole set; a changed regression outside
+# the release under test selects nothing there. A narrowed run checks the expected-failure lists over
+# exactly the cases it scanned.
 run_lane() {
-  local lane=$1 infix test deadline
+  local lane=$1 infix test deadline only
   case "$lane" in
     jvm) infix="" test=kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance deadline=$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS ;;
     native) infix=NATIVE_ test=kotlin_box_native_conformance::kotlin_codegen_box_native_conformance deadline=$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS ;;
@@ -106,9 +114,17 @@ run_lane() {
     run_with_deadline "$deadline" env "${require[@]}" "KRUSTY_${infix}BOX_LIMIT=$limit" \
       "$bin" --exact "$test" --nocapture
   fi
-  step "$lane: owned regressions"
-  run_with_deadline "$deadline" env "${require[@]}" "KRUSTY_${infix}BOX_ONLY=/tests/box_regressions/" \
-    "$bin" --exact "$test" --nocapture
+  if [ "$lane" != native ]; then
+    step "$lane: owned regressions"
+    run_with_deadline "$deadline" env "${require[@]}" "KRUSTY_${infix}BOX_ONLY=/tests/box_regressions/" \
+      "$bin" --exact "$test" --nocapture
+    return
+  fi
+  for only in "${regressions[@]}"; do
+    step "$lane: changed regression $only"
+    run_with_deadline "$deadline" env "${require[@]}" "KRUSTY_${infix}BOX_ONLY=$only" \
+      "$bin" --exact "$test" --nocapture
+  done
 }
 
 for lane in $lanes; do
