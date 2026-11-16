@@ -9,8 +9,14 @@ const JAVA_CONSTANTS: (&str, &str) = (
     "first/KtNodeTypes.java",
     "package first;\npublic interface KtNodeTypes {\n    String SOME = \"Some\";\n}\n",
 );
-const SECOND_ENUM: (&str, &str) = ("SomeEnum.kt", "package second\nenum class SomeEnum { SOME; }\n");
-const THIRD_ENUM: (&str, &str) = ("OtherEnum.kt", "package third\nenum class SomeEnum { SOME; }\n");
+const SECOND_ENUM: (&str, &str) = (
+    "SomeEnum.kt",
+    "package second\nenum class SomeEnum { SOME; }\n",
+);
+const THIRD_ENUM: (&str, &str) = (
+    "OtherEnum.kt",
+    "package third\nenum class SomeEnum { SOME; }\n",
+);
 const TOP_LEVEL: (&str, &str) = ("Top.kt", "package fourth\nval SOME = 1\n");
 
 /// Require krusty's complete errors to be kotlinc's and to read exactly `expected`.
