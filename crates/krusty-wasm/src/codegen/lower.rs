@@ -51,6 +51,7 @@ use tests::lower_alone;
 
 pub(super) use exceptions::runtime_lays_out;
 pub(super) use scalar_instructions::is_scalar_operation;
+pub(super) use scalar_value_classes::runtime_value_declaration;
 pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerIntrinsic) -> bool {
@@ -429,7 +430,7 @@ pub(super) fn lower_file(
     if let Some(classes) = &classes {
         for class in 0..ir.classes.len() {
             for member in AnyMember::ALL {
-                if !classes.realizes(class as ClassId, member) {
+                if classes.has_bodiless_instances(class as ClassId, member) {
                     reach.bodiless_class(member);
                 }
             }
@@ -2489,11 +2490,21 @@ mod tests {
             &module_facts,
             &krusty::libraries::EmptySymbolSource,
         );
+        lower_with_classifiers(ir, properties, started, &module_facts, &classifiers)
+    }
+
+    pub(super) fn lower_with_classifiers(
+        ir: &IrFile,
+        properties: &RealizedProperties,
+        started: &mut super::super::Started,
+        module_facts: &krusty::backend::BackendModuleFacts,
+        classifiers: &dyn krusty::backend::BackendClassifierSource,
+    ) -> Result<LoweredFile, Unsupported> {
         lower_file(
             FileInput {
-                module_facts: &module_facts,
+                module_facts,
                 array_range_checks: super::super::super::array_access::default_range_checks(),
-                classifiers: &classifiers,
+                classifiers,
                 ir,
                 properties,
                 callables: &CheckedBackendCallables::default(),
