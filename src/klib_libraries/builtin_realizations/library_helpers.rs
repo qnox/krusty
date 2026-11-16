@@ -102,6 +102,45 @@ pub(super) fn realization(
     }
 }
 
+/// The Wasm stdlib's internal `startCoroutineUninterceptedOrReturnIntrinsicN(f, inputs.., completion)`,
+/// whose body only says the compiler implements it: `f`'s suspend entry called with its `N`
+/// inputs (a receiver first) and `completion` as its continuation, answering what that entry
+/// answers (`COROUTINE_SUSPENDED` or the value).
+fn start_coroutine_unintercepted_or_return(
+    facts: &BuiltinFunctionDeclaration<'_>,
+) -> Option<CompilerIntrinsic> {
+    let arity = match facts.name {
+        "startCoroutineUninterceptedOrReturnIntrinsic0" => 0,
+        "startCoroutineUninterceptedOrReturnIntrinsic1" => 1,
+        "startCoroutineUninterceptedOrReturnIntrinsic2" => 2,
+        _ => return None,
+    };
+    let (&function, rest) = facts.params.split_first()?;
+    let (&completion, inputs) = rest.split_last()?;
+    let TyKind::Fun(signature) = function.kind() else {
+        return None;
+    };
+    let continuation = completion.obj_internal().is_some_and(|internal| {
+        internal.matches("kotlin/coroutines/Continuation")
+            && completion.type_args() == [signature.ret]
+    });
+    (facts.receiver.is_none()
+        && facts.context_count == 0
+        && facts.vararg.is_none()
+        && !facts.is_suspend
+        && !facts.is_operator
+        && !facts.is_infix
+        && facts.type_parameter_count == arity + 1
+        && inputs.len() == arity
+        && !function.is_nullable()
+        && signature.suspend
+        && signature.context_count == 0
+        && signature.params.as_slice() == inputs
+        && continuation
+        && facts.ret == Ty::nullable(Ty::obj("kotlin/Any")))
+    .then_some(CompilerIntrinsic::StartCoroutineUninterceptedOrReturn)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,43 +328,4 @@ mod tests {
         wrong_result.type_parameter_count = 1;
         assert_eq!(realization(wrong_result, true), None);
     }
-}
-
-/// The Wasm stdlib's internal `startCoroutineUninterceptedOrReturnIntrinsicN(f, inputs.., completion)`,
-/// whose body only says the compiler implements it: `f`'s suspend entry called with its `N`
-/// inputs (a receiver first) and `completion` as its continuation, answering what that entry
-/// answers (`COROUTINE_SUSPENDED` or the value).
-fn start_coroutine_unintercepted_or_return(
-    facts: &BuiltinFunctionDeclaration<'_>,
-) -> Option<CompilerIntrinsic> {
-    let arity = match facts.name {
-        "startCoroutineUninterceptedOrReturnIntrinsic0" => 0,
-        "startCoroutineUninterceptedOrReturnIntrinsic1" => 1,
-        "startCoroutineUninterceptedOrReturnIntrinsic2" => 2,
-        _ => return None,
-    };
-    let (&function, rest) = facts.params.split_first()?;
-    let (&completion, inputs) = rest.split_last()?;
-    let TyKind::Fun(signature) = function.kind() else {
-        return None;
-    };
-    let continuation = completion.obj_internal().is_some_and(|internal| {
-        internal.matches("kotlin/coroutines/Continuation")
-            && completion.type_args() == [signature.ret]
-    });
-    (facts.receiver.is_none()
-        && facts.context_count == 0
-        && facts.vararg.is_none()
-        && !facts.is_suspend
-        && !facts.is_operator
-        && !facts.is_infix
-        && facts.type_parameter_count == arity + 1
-        && inputs.len() == arity
-        && !function.is_nullable()
-        && signature.suspend
-        && signature.context_count == 0
-        && signature.params.as_slice() == inputs
-        && continuation
-        && facts.ret == Ty::nullable(Ty::obj("kotlin/Any")))
-    .then_some(CompilerIntrinsic::StartCoroutineUninterceptedOrReturn)
 }

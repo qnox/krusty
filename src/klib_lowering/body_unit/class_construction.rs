@@ -535,14 +535,16 @@ impl<'u, 's> Linker<'u, 's> {
                 module: contract.module.clone(),
                 declaration: KlibDeclarationSignature::Public(primary.clone()),
             };
-            if !self.functions.contains_key(&constructor) {
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                self.functions.entry(constructor)
+            {
                 let entry = ir
                     .add_construction_entry(class, None)
                     .map(|entry| entry.function)
                     .ok_or(KlibBodyDeclineReason::SignatureMismatch(
                         "a value class box without its checked self type".to_owned(),
                     ))?;
-                self.functions.insert(constructor, entry);
+                slot.insert(entry);
             }
         }
         Ok(member)
