@@ -1430,7 +1430,7 @@ impl<'a> Body<'a> {
                             && array_lists::realized_array_list_member(fact))
                 }) =>
             {
-                self.array_list_call(*target, receiver, &args)?;
+                self.array_list_call(id, *target, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1789,7 +1789,7 @@ impl<'a> Body<'a> {
                                 .and_then(|property| self.callables.callable(property.getter))
                                 .is_some_and(array_lists::realized_array_list_member))) =>
             {
-                self.array_list_property(*target, *receiver)?;
+                self.array_list_property(id, *target, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::PropertyWrite {

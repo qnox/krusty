@@ -320,21 +320,31 @@ impl Body<'_> {
         )?;
         self.runtime.builtin_member(
             self.module,
+            self.classifiers,
             member,
             &name,
             &signature,
             &fact.builtin_implementations,
         )?;
-        if let Some(step) = super::array_lists::iterator_step(&fact) {
-            let function = match step {
-                super::array_lists::IteratorStep::HasNext => self.runtime.array_lists.has_next,
-                super::array_lists::IteratorStep::Next => self.runtime.array_lists.next,
-            };
-            self.runtime.objects.interfaces.implement_representation(
-                member,
-                self.runtime.array_lists.iterator,
-                function,
-            )?;
+        match super::array_lists::iterator_step(&fact) {
+            Some(Ok(step)) => {
+                let lists = &self.runtime.array_lists;
+                let function = match step {
+                    super::array_lists::IteratorStep::HasNext => lists.has_next,
+                    super::array_lists::IteratorStep::Next => lists.next,
+                    super::array_lists::IteratorStep::HasPrevious => lists.has_previous,
+                    super::array_lists::IteratorStep::Previous => lists.previous,
+                    super::array_lists::IteratorStep::NextIndex => lists.next_index,
+                    super::array_lists::IteratorStep::PreviousIndex => lists.previous_index,
+                };
+                self.runtime.objects.interfaces.implement_representation(
+                    member,
+                    self.runtime.array_lists.iterator,
+                    function,
+                )?;
+            }
+            Some(Err(reason)) => self.runtime.list_iterator_member_unanswered(member, reason),
+            None => {}
         }
         self.value(receiver, objects::any())?;
         for (&arg, &param) in args.iter().zip(params) {

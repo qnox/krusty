@@ -4,21 +4,109 @@
 //! iterator and the collections it inherits. This backend does not run that body. The runtime
 //! lays the list out instead: an identity object holding a growable array of references and the
 //! count in use. Its iterator is another identity object. Interface calls of `hasNext` and `next`
-//! reach that iterator by its struct type.
+//! reach that iterator by its struct type, and a call through a collection interface's member
+//! reaches the list's class (`super::builtin_members`).
 
 use super::encode::{BlockType, Code, CompositeType, FieldType, Function, HeapType, Module};
 use super::encode::{StorageType, SubType, ValType};
 use super::identity::{IdentityObjects, PREFIX_FIELDS};
+use super::interface_dispatch::ClassRef;
 use super::objects::{immutable, ObjectRoot, REFERENCE};
 use super::runtime::{ADD32, EQZ32, GE_S32, LT_S32, SHL32};
+use krusty::types::{Ty, TypeName};
 
 const ELEMENTS: u32 = PREFIX_FIELDS;
 const LENGTH: u32 = ELEMENTS + 1;
 const ITER_LIST: u32 = PREFIX_FIELDS;
 const ITER_INDEX: u32 = ITER_LIST + 1;
 
+/// Whether `classifier` is `kotlin.collections.ArrayList`, which the runtime lays out.
+pub(super) fn lays_out(classifier: TypeName) -> bool {
+    classifier.matches("kotlin/collections/ArrayList")
+}
+
+/// A collection operation the runtime realizes on its `ArrayList`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ListOperation {
+    Add,
+    AddAll,
+    Size,
+    IsEmpty,
+    Get,
+    Contains,
+    ContainsAll,
+    Remove,
+    RemoveAll,
+    RetainAll,
+    Clear,
+    Iterator,
+    ListIterator,
+    ListIteratorAt,
+}
+
+impl ListOperation {
+    /// The bound the operation's index argument must stay within, which it throws
+    /// `IndexOutOfBoundsException` past.
+    pub(super) fn index_bound(self) -> Option<IndexBound> {
+        match self {
+            Self::Get => Some(IndexBound::BelowSize),
+            Self::ListIteratorAt => Some(IndexBound::AtMostSize),
+            _ => None,
+        }
+    }
+}
+
+/// The indices a list operation accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum IndexBound {
+    /// An element's index: `0 until size`.
+    BelowSize,
+    /// A position between elements: `0..size`.
+    AtMostSize,
+}
+
+/// The operation the runtime runs for the `ArrayList` member `name` declared with `params`, or
+/// why it runs none. `ArrayList` inherits several of these from `AbstractMutableList` and
+/// `AbstractCollection`; a direct call and a call through an interface's member select alike.
+pub(super) fn list_operation(name: &str, params: &[Ty]) -> Result<ListOperation, String> {
+    use ListOperation::*;
+    Ok(match (name, params) {
+        ("add", [_]) => Add,
+        ("add", [Ty::Int, _]) => return Err("an ArrayList insertion at an index".into()),
+        ("addAll", [_]) => AddAll,
+        ("<get-size>" | "getSize" | "size", []) => Size,
+        ("isEmpty", []) => IsEmpty,
+        ("get", [Ty::Int]) => Get,
+        ("contains", [_]) => Contains,
+        ("containsAll", [_]) => ContainsAll,
+        ("remove", [Ty::Int]) => return Err("an ArrayList removal at an index".into()),
+        ("remove", [_]) => Remove,
+        ("removeAll", [_]) => RemoveAll,
+        ("retainAll", [_]) => RetainAll,
+        ("clear", []) => Clear,
+        ("iterator", []) => Iterator,
+        ("listIterator", []) => ListIterator,
+        ("listIterator", [Ty::Int]) => ListIteratorAt,
+        _ => {
+            return Err(format!(
+                "the ArrayList member `{name}`, which the runtime does not realize"
+            ));
+        }
+    })
+}
+
+/// A runtime function realizing one `ArrayList` member, with its wasm parameters (the list
+/// first) and results.
+pub(super) struct ListMember {
+    pub(super) function: u32,
+    pub(super) params: Vec<ValType>,
+    pub(super) results: Vec<ValType>,
+}
+
 /// The runtime's `ArrayList` and the iterator its `iterator` answers.
 pub(super) struct ArrayLists {
+    /// The list's class, which implements the collection members `ArrayList` overrides.
+    pub(super) class: ClassRef,
     pub(super) iterator: u32,
     pub(super) new: u32,
     pub(super) add: u32,
@@ -33,8 +121,14 @@ pub(super) struct ArrayLists {
     pub(super) retain_all: u32,
     pub(super) clear: u32,
     pub(super) iterator_new: u32,
+    /// `listIterator(index)`: an iterator whose next element is the one at `index`.
+    pub(super) iterator_at: u32,
     pub(super) has_next: u32,
     pub(super) next: u32,
+    pub(super) has_previous: u32,
+    pub(super) previous: u32,
+    pub(super) next_index: u32,
+    pub(super) previous_index: u32,
 }
 
 impl ArrayLists {
@@ -72,9 +166,10 @@ impl ArrayLists {
         });
         let list_text = empty_string_function(module, objects, chars, string);
         let iter_text = empty_string_function(module, objects, chars, string);
-        let list_table = dispatch_table(module, objects, identity, list, list_text);
-        let iter_table = dispatch_table(module, objects, identity, iterator, iter_text);
+        let (class, list_table) = dispatch_table(module, objects, identity, list, list_text);
+        let (_, iter_table) = dispatch_table(module, objects, identity, iterator, iter_text);
         let lists = Self {
+            class,
             iterator,
             new: module.declare(),
             add: module.declare(),
@@ -89,8 +184,13 @@ impl ArrayLists {
             retain_all: module.declare(),
             clear: module.declare(),
             iterator_new: module.declare(),
+            iterator_at: module.declare(),
             has_next: module.declare(),
             next: module.declare(),
+            has_previous: module.declare(),
+            previous: module.declare(),
+            next_index: module.declare(),
+            previous_index: module.declare(),
         };
         let layout = Layout {
             list,
@@ -113,7 +213,55 @@ impl ArrayLists {
         lists.define_iterator(module, identity, layout, iter_table);
         lists.define_has_next(module, layout);
         lists.define_next(module, layout);
+        lists.define_has_previous(module, layout);
+        lists.define_previous(module, layout);
+        lists.define_indices(module, layout);
         lists
+    }
+
+    /// The function realizing the list operation `operation`.
+    pub(super) fn member(&self, operation: ListOperation) -> ListMember {
+        use ListOperation::*;
+        let (function, params, results) = match operation {
+            Add => (self.add, vec![REFERENCE, REFERENCE], vec![ValType::I32]),
+            AddAll => (self.add_all, vec![REFERENCE, REFERENCE], vec![ValType::I32]),
+            Size => (self.size, vec![REFERENCE], vec![ValType::I32]),
+            IsEmpty => (self.is_empty, vec![REFERENCE], vec![ValType::I32]),
+            Get => (self.get, vec![REFERENCE, ValType::I32], vec![REFERENCE]),
+            Contains => (
+                self.contains,
+                vec![REFERENCE, REFERENCE],
+                vec![ValType::I32],
+            ),
+            ContainsAll => (
+                self.contains_all,
+                vec![REFERENCE, REFERENCE],
+                vec![ValType::I32],
+            ),
+            Remove => (self.remove, vec![REFERENCE, REFERENCE], vec![ValType::I32]),
+            RemoveAll => (
+                self.remove_all,
+                vec![REFERENCE, REFERENCE],
+                vec![ValType::I32],
+            ),
+            RetainAll => (
+                self.retain_all,
+                vec![REFERENCE, REFERENCE],
+                vec![ValType::I32],
+            ),
+            Clear => (self.clear, vec![REFERENCE], Vec::new()),
+            Iterator | ListIterator => (self.iterator_new, vec![REFERENCE], vec![REFERENCE]),
+            ListIteratorAt => (
+                self.iterator_at,
+                vec![REFERENCE, ValType::I32],
+                vec![REFERENCE],
+            ),
+        };
+        ListMember {
+            function,
+            params,
+            results,
+        }
     }
 
     fn define_new(
@@ -512,14 +660,25 @@ impl ArrayLists {
         layout: Layout,
         table: u32,
     ) {
-        let ty = module.func_type(vec![REFERENCE], vec![REFERENCE]);
+        let ty = module.func_type(vec![REFERENCE, ValType::I32], vec![REFERENCE]);
         let mut code = Code::default();
         code.global_get(table)
             .call(identity.allocate)
             .local_get(0)
             .ref_cast(false, HeapType::Concrete(layout.list))
-            .i32_const(0)
+            .local_get(1)
             .struct_new(layout.iterator);
+        module.define(
+            self.iterator_at,
+            Function {
+                ty,
+                locals: Vec::new(),
+                code,
+            },
+        );
+        let ty = module.func_type(vec![REFERENCE], vec![REFERENCE]);
+        let mut code = Code::default();
+        code.local_get(0).i32_const(0).call(self.iterator_at);
         module.define(
             self.iterator_new,
             Function {
@@ -587,6 +746,82 @@ impl ArrayLists {
     }
 }
 
+impl ArrayLists {
+    fn define_has_previous(&self, module: &mut Module, layout: Layout) {
+        let ty = module.func_type(vec![REFERENCE], vec![ValType::I32]);
+        let mut code = Code::default();
+        code.i32_const(0);
+        iterator_index(&mut code, layout, 0);
+        code.op(LT_S32);
+        module.define(
+            self.has_previous,
+            Function {
+                ty,
+                locals: Vec::new(),
+                code,
+            },
+        );
+    }
+
+    fn define_previous(&self, module: &mut Module, layout: Layout) {
+        let ty = module.func_type(vec![REFERENCE], vec![REFERENCE]);
+        let (iter, index) = (0, 1);
+        let mut code = Code::default();
+        code.local_get(iter)
+            .call(self.has_previous)
+            .op(EQZ32)
+            .if_(BlockType::Empty)
+            .unreachable()
+            .end();
+        iterator_index(&mut code, layout, iter);
+        code.i32_const(-1).op(ADD32).local_set(index);
+        code.local_get(iter)
+            .ref_cast(false, HeapType::Concrete(layout.iterator))
+            .local_get(index)
+            .struct_set(layout.iterator, ITER_INDEX);
+        code.local_get(iter)
+            .ref_cast(false, HeapType::Concrete(layout.iterator))
+            .struct_get(layout.iterator, ITER_LIST)
+            .local_get(index)
+            .call(self.get);
+        module.define(
+            self.previous,
+            Function {
+                ty,
+                locals: vec![ValType::I32],
+                code,
+            },
+        );
+    }
+
+    /// `nextIndex()`, the iterator's position, and `previousIndex()`, the one before it.
+    fn define_indices(&self, module: &mut Module, layout: Layout) {
+        let ty = module.func_type(vec![REFERENCE], vec![ValType::I32]);
+        for (function, offset) in [(self.next_index, 0), (self.previous_index, -1)] {
+            let mut code = Code::default();
+            iterator_index(&mut code, layout, 0);
+            if offset != 0 {
+                code.i32_const(offset).op(ADD32);
+            }
+            module.define(
+                function,
+                Function {
+                    ty,
+                    locals: Vec::new(),
+                    code,
+                },
+            );
+        }
+    }
+}
+
+/// Push the position of the iterator in local `iter`.
+fn iterator_index(code: &mut Code, layout: Layout, iter: u32) {
+    code.local_get(iter)
+        .ref_cast(false, HeapType::Concrete(layout.iterator))
+        .struct_get(layout.iterator, ITER_INDEX);
+}
+
 /// Trap unless local `other` is a list this runtime laid out.
 fn require_list(code: &mut Code, layout: Layout, other: u32) {
     code.local_get(other)
@@ -624,8 +859,8 @@ fn dispatch_table(
     identity: &IdentityObjects,
     structure: u32,
     to_string: u32,
-) -> u32 {
-    let (_, itable) = objects
+) -> (ClassRef, u32) {
+    let (class, itable) = objects
         .interfaces
         .class(module, objects.itable, vec![structure]);
     let mut init = Code::default();
@@ -636,7 +871,8 @@ fn dispatch_table(
     init.global_get(itable);
     objects.push_type_info(&mut init, None);
     init.struct_new(objects.any_table);
-    module.constant_global(ValType::reference(objects.any_table), init)
+    let table = module.constant_global(ValType::reference(objects.any_table), init);
+    (class, table)
 }
 
 /// A mutable struct field holding `value`.
