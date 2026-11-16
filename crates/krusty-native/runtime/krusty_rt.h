@@ -1349,6 +1349,23 @@ KRef kt_read_line_or_throw(void);
 
 typedef struct KThread KThread;
 
+/* Explicit embedding lifetime. A foreign host calls begin once at OS-thread routine entry, and
+   end with its returned token after the routine's final callback, immediately before thread exit.
+   Both run outside Kotlin, without holding the mutator lock. Begin is not nestable and rejects
+   an existing registration; the token is valid only until its one matching end on the same thread.
+   They do not detect OS exit and must not bracket individual callbacks. Main and kt_thread_start
+   threads are already managed and must not be registered or ended by the host.
+   Unregistered hosts retain the existing temporary callback behavior, without persistent slots. */
+KThread *kt_thread_lifetime_begin(void);
+void kt_thread_lifetime_end(KThread *thread);
+
+/* A declaration's reference slot in the current managed/registered OS-thread lifetime. The caller
+   holds the mutator lock. The nonnull token must identify the same exact declaration in every
+   module; the runtime never interprets it. The stable zero-initialized slot is a GC root until
+   the declared thread end, including gaps between callbacks. Allocation/initialization of its
+   value belongs to the caller. An unregistered temporary callback cannot use this operation. */
+KRef *kt_thread_object_slot(const void *canonical_declaration_token);
+
 /* Release the lock for a call into foreign code, recording the caller's callee-saved registers and
    stack pointer so its frames stay roots while it is away. Pass the answer to `kt_native_leave`
    when the foreign call returns. */
@@ -1360,6 +1377,8 @@ typedef struct KThreadEntry {
     KThread *thread;
     /* Whether this entry attached the thread, and so detaches it on the way out. */
     bool attached;
+    /* An explicitly registered thread was outside every callback, with no Kotlin stack. */
+    bool outer_dormant;
     /* A thread that was already attached, in a `kt_native_enter`: its released state, put back on
        the way out. */
     uintptr_t outer_registers[KT_SAVED_REGISTERS];
@@ -1369,7 +1388,8 @@ typedef struct KThreadEntry {
 
 /* Enter Kotlin from foreign code, taking the lock. `stack_bottom` is the address of a local in the
    caller's frame, above every Kotlin frame the callback will run; it matters only for a thread the
-   runtime has not seen, which is attached for the callback's duration. */
+   runtime has not seen, which is attached for the callback's duration, or a registered
+   thread reentering after its previous callback returned. */
 void kt_callback_enter(KThreadEntry *entry, void *stack_bottom);
 
 /* Leave Kotlin for the foreign code that called in, releasing the lock. An exception the callback
