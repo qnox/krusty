@@ -991,14 +991,15 @@ fn proven_context_and_lambda_receivers_are_ordinary_references() {
     assert_eq!(check_supported(&callable, class), Ok(()));
 
     let mut unidentified = copy_transport(&original);
-    unidentified.classes[class as usize].ctor_args[parameter as usize]
-        .capture
-        .as_mut()
-        .unwrap()
-        .receiver = Some(IrCapturedReceiver::Callable {
+    let argument = &mut unidentified.classes[class as usize].ctor_args[parameter as usize];
+    argument.capture.as_mut().unwrap().receiver = Some(IrCapturedReceiver::Callable {
         label: "callable".into(),
         owner: krusty::fir::CapturedCallableOwner::Declaration,
     });
+    argument.capture_identity = None;
+    unidentified
+        .class_capture_identities
+        .remove(&(class, parameter));
     assert_eq!(check_supported(&unidentified, class), Ok(()));
 
     let mut local_function = copy_transport(&callable);
