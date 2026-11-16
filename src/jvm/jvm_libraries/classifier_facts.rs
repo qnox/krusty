@@ -2,6 +2,29 @@
 
 use super::*;
 
+/// Normalize Kotlin metadata visibility or the Java declaration's effective access flags.
+pub(super) fn classifier_access(
+    class: &crate::jvm::classreader::ClassInfo,
+) -> crate::libraries::ClassifierAccess {
+    use crate::libraries::ClassifierAccess;
+    if let Some(visibility) = class.meta.class_visibility {
+        return visibility.into();
+    }
+    let access = class
+        .inner_class_self()
+        .map(|entry| entry.access)
+        .unwrap_or(class.access);
+    if access & 0x0001 != 0 {
+        ClassifierAccess::Public
+    } else if access & 0x0004 != 0 {
+        ClassifierAccess::Protected
+    } else if access & 0x0002 != 0 {
+        ClassifierAccess::Private
+    } else {
+        ClassifierAccess::PackagePrivate
+    }
+}
+
 pub(super) fn classifier_declaration_name(
     class: &crate::jvm::classreader::ClassInfo,
 ) -> Option<crate::types::ClassifierDeclarationName> {

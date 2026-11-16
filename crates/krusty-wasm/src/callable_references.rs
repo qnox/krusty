@@ -1,4 +1,8 @@
 //! Callable-reference objects compare their checked declaration, adaptation, and bound receiver.
+//!
+//! A reference is still an object with an identity: kotlinc-wasm's `toString` prints its identity
+//! hash, which its `hashCode`, the declaration's, is not. So the object extends `$Identified` and
+//! is given its hash when it is created.
 
 mod declarations;
 mod names;
@@ -16,9 +20,9 @@ use krusty::types::TypeName;
 use super::encode::{BlockType, Code, CompositeType, Function, HeapType, Module, SubType, ValType};
 use super::objects::{immutable, ObjectRoot, REFERENCE};
 
-pub(super) const DECLARATION_FIELD: u32 = 1;
-pub(super) const RECEIVER_FIELD: u32 = 2;
-pub(super) const PREFIX_FIELDS: u32 = 3;
+pub(super) const DECLARATION_FIELD: u32 = super::identity::PREFIX_FIELDS;
+pub(super) const RECEIVER_FIELD: u32 = DECLARATION_FIELD + 1;
+pub(super) const PREFIX_FIELDS: u32 = RECEIVER_FIELD + 1;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct ReferenceKind {
@@ -56,9 +60,10 @@ impl CallableReferences {
             composite: CompositeType::Struct(vec![
                 immutable(ValType::reference(objects.any_table)),
                 immutable(ValType::I32),
+                immutable(ValType::I32),
                 immutable(REFERENCE),
             ]),
-            supertype: Some(objects.object),
+            supertype: Some(objects.identified),
             open: true,
         });
         let equals = module.declare();

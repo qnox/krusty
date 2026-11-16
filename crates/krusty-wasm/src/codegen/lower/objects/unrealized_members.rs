@@ -2,8 +2,10 @@
 //!
 //! Every object answers `equals`, `hashCode` and `toString` through its table, and most tables
 //! hold a body for each (see `super::super::super::classes` and `crate::runtime`). A few
-//! still hold the trap of a member with no body: `toString` of a function value, and of a class
-//! the compiler generated, which Kotlin gives no source name the default prints. Lowering declines a call that
+//! still hold the trap of a member with no body: `toString` of a function value whose class
+//! kotlinc-wasm does not name for its shape (`crate::function_value_names`), a lambda converted to
+//! a `fun interface` or a reference to a property; and `toString` of a class the compiler
+//! generated, which Kotlin gives no source name the default prints. Lowering declines a call that
 //! could reach one rather than emit a trap the program would run into.
 //!
 //! A value statically of a class of this file is an instance of that class's hierarchy; one of a
@@ -21,6 +23,7 @@ use krusty::types::{Ty, TyKind};
 
 use super::super::super::super::boxes::is_boxed_scalar;
 use super::super::super::super::encode::ValType;
+use super::super::super::super::function_value_names::named_shape;
 use super::super::super::any_member_reach::Receiver;
 use super::{carrier, Body, Unsupported};
 
@@ -60,7 +63,13 @@ impl Body<'_> {
             return Ok(false);
         }
         if matches!(value.kind(), TyKind::Fun(_)) {
-            return Ok(member == AnyMember::ToString);
+            // Only a function value is of a function type. Most print their class name, but one
+            // of this file or another can be a reference to a property.
+            if member != AnyMember::ToString {
+                return Ok(false);
+            }
+            self.record_call(member, ty, Receiver::Erased);
+            return Ok(holds_unprinted_values(self.ir));
         }
         if !matches!(carrier(value)?, Some(ValType::Ref { .. })) {
             return Ok(false);
@@ -141,15 +150,15 @@ fn runtime_exception_lacks_body(member: AnyMember) -> bool {
 }
 
 /// Whether a reference of `ir` can hold a runtime object whose `toString` has no body: a function
-/// value, which only a lambda or a callable reference the file emits creates.
+/// value kotlinc-wasm does not name for its shape, which only a lambda or a callable reference the
+/// file emits creates.
 pub(in super::super) fn holds_unprinted_values(ir: &IrFile) -> bool {
     krusty::ir::emitted_body_roots(ir)
         .into_iter()
         .flat_map(|root| krusty::ir::value_namespace_expressions(ir, root))
         .any(|expression| {
-            matches!(
-                ir.expr(expression),
-                IrExpr::Lambda { .. } | IrExpr::CallableReference(_)
-            )
+            let node = ir.expr(expression);
+            matches!(node, IrExpr::Lambda { .. } | IrExpr::CallableReference(_))
+                && named_shape(node, ir.checked_type(expression)).is_none()
         })
 }

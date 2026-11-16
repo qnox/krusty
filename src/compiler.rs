@@ -524,8 +524,26 @@ fn emit_analyzed_into<B: Backend>(
         if diags.has_errors() {
             continue;
         }
-        backend
-            .lower_ir_file(file, state, diags)
+        let initializer_requests = if backend.emits_dependency_support() {
+            match crate::backend::initializer_declarations(&file) {
+                Ok(requests) => requests,
+                Err(reason) => {
+                    diags.error(Span::new(0, 0), format!("internal error: {reason}"));
+                    continue;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let outputs = backend.lower_ir_file(file, state, diags);
+        if !diags.has_errors() {
+            for declaration in &initializer_requests {
+                if backend.emitted_constructor_initializer(state, declaration) {
+                    dependency_support.record_initializer(declaration);
+                }
+            }
+        }
+        outputs
             .into_iter()
             .for_each(|artifact| artifacts(ArtifactOrigin::Source(raw_source), artifact));
     }
@@ -879,7 +897,7 @@ fn check_body_group(
             current = owner;
         }
     }
-    let info = crate::resolve::check_selected_declarations_in_pass_two(
+    let mut info = crate::resolve::check_selected_declarations_in_pass_two(
         crate::resolve::SourceFileUnit {
             file: active_file,
             file_index: raw_source as u32,
@@ -918,6 +936,22 @@ fn check_body_group(
             Span::new(0, 0),
             format!(
                 "internal error: checked local signatures were not publishable: {declarations:?}"
+            ),
+        );
+        return None;
+    }
+    // The body-local override plans published above can name external declarations no checked
+    // selection reached; freeze their builtin implementation facts with the unit's own.
+    if let Err(identity) = crate::resolve::record_override_edges(
+        &mut info.builtin_implementations,
+        index,
+        symbols.semantic_platform(),
+        raw_source as u32,
+    ) {
+        diags.error(
+            Span::new(0, 0),
+            format!(
+                "internal error: selected external member has incomplete builtin implementation facts: {identity:?}"
             ),
         );
         return None;
