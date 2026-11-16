@@ -1,5 +1,5 @@
-//! What a reference compile observed when it produced no class inventory, kept typed from the
-//! process status onward so a caller never decides a verdict from message text.
+//! Reference compilation failures, kept typed from process status onward so a caller never
+//! decides a verdict from message text.
 
 use std::fmt;
 use std::path::Path;
@@ -27,8 +27,8 @@ pub enum ReferenceFailure {
         code: i32,
         diagnostics: String,
     },
-    /// The case itself keeps the reference from a verdict: javac refuses its Java, its shape or a
-    /// directive is one the oracle does not model, or its compile emits no class.
+    /// The case itself keeps the reference from a verdict: javac refuses its Java, or its shape or
+    /// a directive is one the oracle does not model.
     NoVerdict(String),
     /// The harness could not observe the reference at all: a missing tool or JDK, its
     /// configuration, a scratch directory, or a transport failure. Never a property of the case.
