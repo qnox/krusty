@@ -25,12 +25,23 @@ impl UnitCodegenModes {
     /// source the last recognized directive counts; across sources, the first source that pins a
     /// non-default value selects that mode. Absent any, the unit keeps kotlinc's defaults.
     pub fn of_unit<'a>(sources: impl IntoIterator<Item = &'a str>) -> Self {
+        Self::of_unit_in_case("", sources)
+    }
+
+    /// The modes a unit of a case compiles under. Each kind of mode the unit's own sources select
+    /// as [`Self::of_unit`] does, whenever any of them carries that kind's directive, even one
+    /// naming kotlinc's default; a kind none of them mentions takes `case_region`'s, the directives
+    /// Kotlin's test infrastructure applies to every module.
+    pub fn of_unit_in_case<'a>(
+        case_region: &str,
+        sources: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
         let sources: Vec<&str> = sources.into_iter().collect();
         UnitCodegenModes {
-            jvm_default: first_pinned(&sources, jvm_default_mode),
+            jvm_default: unit_mode(case_region, &sources, jvm_default_mode),
             lambdas: LambdaModes {
-                lambdas: first_pinned(&sources, lambda_mode),
-                sam_conversions: first_pinned(&sources, sam_conversion_mode),
+                lambdas: unit_mode(case_region, &sources, lambda_mode),
+                sam_conversions: unit_mode(case_region, &sources, sam_conversion_mode),
             },
         }
     }
@@ -57,10 +68,17 @@ impl UnitCodegenModes {
     }
 }
 
-fn first_pinned<T: Default + PartialEq>(sources: &[&str], mode: impl Fn(&str) -> T) -> T {
-    sources
-        .iter()
-        .map(|source| mode(source))
+fn unit_mode<T: Copy + Default + PartialEq>(
+    case_region: &str,
+    sources: &[&str],
+    mode: impl Fn(&str) -> Option<T>,
+) -> T {
+    let pinned: Vec<T> = sources.iter().filter_map(|source| mode(source)).collect();
+    if pinned.is_empty() {
+        return mode(case_region).unwrap_or_default();
+    }
+    pinned
+        .into_iter()
         .find(|selected| *selected != T::default())
         .unwrap_or_default()
 }

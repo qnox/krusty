@@ -13,7 +13,6 @@ use crate::diag::{DiagSink, Span};
 use crate::fir::SourceFileId;
 use crate::resolve::PassTwoSymbols;
 
-mod coroutine_runtime;
 mod plugin_handoff;
 
 /// The module-wide facts every file of one emission hands its backend alongside its own IR.
@@ -51,9 +50,9 @@ pub(super) fn checked_ir_file<'a>(
         &classifiers,
     );
     // A suspend function's lowering calls two stdlib declarations the source need not name; select
-    // them now, so they are frozen with the file's other dependency declarations.
+    // them now from the identities resolution stored before backend entry.
     if module.common_ir_coroutines && !ir.suspend_funs.is_empty() {
-        ir.coroutine_runtime = coroutine_runtime::select(symbols.semantic_platform());
+        ir.coroutine_runtime = symbols.coroutine_runtime();
     }
     let mut callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
         Ok(callables) => callables,
@@ -65,6 +64,33 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     };
+    if let Some(dependency_bodies) = symbols.semantic_platform().klib_dependency_body_facts() {
+        let checked = match crate::resolve::for_checked_klib_bodies(
+            symbols.semantic_platform(),
+            dependency_bodies.bodies(),
+            callables.klib_body_callables(),
+        ) {
+            Ok(checked) => checked,
+            Err(identity) => {
+                diags.error(
+                    Span::new(0, 0),
+                    format!(
+                        "internal error: checked KLIB body graph has no exact member facts for {identity:?}"
+                    ),
+                );
+                return None;
+            }
+        };
+        if let Err(identity) = callables.record_klib_dependency_facts(checked) {
+            diags.error(
+                Span::new(0, 0),
+                format!(
+                    "internal error: checked KLIB body graph has conflicting facts for {identity:?}"
+                ),
+            );
+            return None;
+        }
+    }
     if let Err(identity) = super::builtin_implementations::record_checked(
         &mut callables,
         &ir,

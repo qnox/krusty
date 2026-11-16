@@ -65,6 +65,7 @@ pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
+    ConstructorCallConstraints,
 };
 pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate, ConstructorOrigin};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
@@ -111,7 +112,7 @@ use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName
 pub(crate) use array_factories::kotlin_array_factory_kind;
 pub(crate) use class_name_property::realize_class_name_property;
 pub use compiler_intrinsic::{
-    ClassNameKind, CompilerIntrinsic, IndicesReceiver, ListStorageConstruction,
+    AtomicOperation, ClassNameKind, CompilerIntrinsic, IndicesReceiver, ListStorageConstruction,
     ResultFailureIntrinsic,
 };
 pub(crate) use core_builtins::add_core_builtin_declarations;

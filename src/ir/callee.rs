@@ -87,15 +87,32 @@ pub enum Callee {
         /// masks independently from the receiver consumes this fact directly.
         extension_receiver_parameter: Option<u32>,
     },
-    /// The default-argument entry of a top-level callable in another source unit of the current
+    /// The default-argument entry of a callable in another source unit of the current
     /// module, published by the file that declares `target` under the identity of `provider`, the
     /// declaration whose defaults it evaluates. The argument vector holds the whole parameter
     /// frame of `params`, with an [`IrExpr::AbsentArgument`](super::IrExpr::AbsentArgument) for
-    /// each omitted parameter, followed by the omission mask words. A backend maps the identity to
+    /// each omitted parameter, followed by the omission mask words. A member's checked receiver
+    /// precedes that frame. A backend maps the identity to
     /// its physical entry; it does not rebuild the masks or the frame.
     ModuleDefaultEntry {
         target: crate::fir::CallableId,
         provider: crate::fir::CallableId,
+        params: Vec<Ty>,
+        ret: Ty,
+        /// An instance entry takes this checked receiver before the semantic parameter frame.
+        /// Omission masks continue to number only `params`, excluding this receiver.
+        dispatch_receiver_ty: Option<Ty>,
+    },
+    /// The default-argument entry of a constructor of a class another source unit of the current
+    /// module declares, published by that file under the checked constructor declaration
+    /// `constructor`. The entry answers the new instance. The argument vector holds an inner
+    /// class's enclosing instance, of type `outer`, then the whole parameter frame of `params`,
+    /// with an [`IrExpr::AbsentArgument`](super::IrExpr::AbsentArgument) for each omitted
+    /// parameter, followed by the omission mask words. A backend maps the identity to its physical
+    /// entry; it does not rebuild the masks or the frame.
+    ModuleConstructorDefaultEntry {
+        constructor: crate::fir::DeclarationId,
+        outer: Option<Ty>,
         params: Vec<Ty>,
         ret: Ty,
     },

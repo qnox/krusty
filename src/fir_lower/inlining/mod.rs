@@ -1848,7 +1848,7 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::GeneratedPropertyEquals { ty: operand }
         | IrIntrinsic::Ieee754Equals { operand }
         | IrIntrinsic::GeneratedPropertyHash { ty: operand }
-        | IrIntrinsic::DataClassArrayToString { ty: operand }
+        | IrIntrinsic::GeneratedPropertyArrayToString { ty: operand }
         | IrIntrinsic::TypeOf { ty: operand } => specialize_ty(operand, bindings),
         IrIntrinsic::Assert { .. }
         | IrIntrinsic::ArrayGet
@@ -1874,12 +1874,26 @@ fn specialize_callee(
         }
         Callee::CrossFile { params, ret, .. }
         | Callee::Module { params, ret, .. }
-        | Callee::ModuleDefaultEntry { params, ret, .. }
         | Callee::Super { params, ret, .. } => {
             specialize_tys(params, bindings);
             specialize_ty(ret, bindings);
         }
+        Callee::ModuleConstructorDefaultEntry {
+            outer, params, ret, ..
+        } => {
+            specialize_tys(params, bindings);
+            specialize_ty(ret, bindings);
+            if let Some(outer) = outer {
+                specialize_ty(outer, bindings);
+            }
+        }
         Callee::ModuleWithDefaults {
+            params,
+            ret,
+            dispatch_receiver_ty,
+            ..
+        }
+        | Callee::ModuleDefaultEntry {
             params,
             ret,
             dispatch_receiver_ty,
@@ -2090,6 +2104,7 @@ fn specialize_checked_operation(
         IrCheckedOperation::RangeContains { counter, .. }
         | IrCheckedOperation::RangeLoop { counter, .. } => specialize_ty(counter, bindings),
         IrCheckedOperation::IllegalProgressionStep { .. }
+        | IrCheckedOperation::AtomicField { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => {}
         IrCheckedOperation::PropertyReference {
             target,
