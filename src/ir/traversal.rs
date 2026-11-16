@@ -520,10 +520,19 @@ pub fn lower_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, by: u32) 
     remap_value_indices(ir, e, threshold, &|index| index - by);
 }
 
+fn remap_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, map: &dyn Fn(u32) -> u32) {
+    remap_forest_value_indices(ir, &[e], threshold, map);
+}
+
 /// Map every value index (`GetValue`/`SetValue`/`Variable`) `>= threshold` through `map`,
-/// throughout the expression tree rooted at `e`, with the same lambda boundary as
-/// [`shift_value_indices`].
-pub fn remap_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, map: &dyn Fn(u32) -> u32) {
+/// throughout the expression trees rooted at `roots`, with the same lambda boundary as
+/// [`shift_value_indices`]. An expression the roots share is rewritten once.
+pub fn remap_forest_value_indices(
+    ir: &mut IrFile,
+    roots: &[ExprId],
+    threshold: u32,
+    map: &dyn Fn(u32) -> u32,
+) {
     fn shift(
         ir: &mut IrFile,
         e: ExprId,
@@ -580,7 +589,9 @@ pub fn remap_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, map: &dyn
     }
 
     let mut visited = crate::fx_hash::HashSet::default();
-    shift(ir, e, threshold, map, &mut visited);
+    for &root in roots {
+        shift(ir, root, threshold, map, &mut visited);
+    }
 }
 
 /// The values a `when` or a `try` selects its own value from: each branch's result, or the `try`

@@ -713,21 +713,18 @@ fn read_copy_parameters(
             *slot = Some(u32::try_from(index).map_err(|_| malformed(source_name))? + 1);
         }
     }
-    let mut dropped = false;
-    for &root in roots {
-        let read = std::cell::Cell::new(false);
-        crate::ir::remap_value_indices(ir, root, 1, &|value| {
-            if value > declared {
-                return value - declared + copied;
-            }
-            slots[value as usize].unwrap_or_else(|| {
-                read.set(true);
-                value
-            })
-        });
-        dropped |= read.get();
-    }
-    if dropped {
+    // The roots are one cloned forest that can share operands: rewrite each expression once.
+    let dropped = std::cell::Cell::new(false);
+    crate::ir::remap_forest_value_indices(ir, roots, 1, &|value| {
+        if value > declared {
+            return value - declared + copied;
+        }
+        slots[value as usize].unwrap_or_else(|| {
+            dropped.set(true);
+            value
+        })
+    });
+    if dropped.get() {
         return Err(malformed(source_name));
     }
     Ok(())
