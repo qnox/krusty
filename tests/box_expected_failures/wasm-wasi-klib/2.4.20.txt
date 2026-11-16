@@ -305,7 +305,6 @@ callableReference/property/kt12982_protectedPropertyReference.kt
 callableReference/property/kt14330.kt
 callableReference/property/kt14330_2.kt
 callableReference/property/kt15447.kt
-callableReference/property/kt74104.kt
 callableReference/property/listOfStringsMapLength.kt
 callableReference/property/nullableExtensionProperty.kt
 callableReference/property/privateSetOuterClass.kt
