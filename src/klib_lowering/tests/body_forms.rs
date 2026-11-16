@@ -690,7 +690,7 @@ fn a_not_in_of_a_membership_call_negates_the_call() {
                     let has = body.call_signature(signature, vec![a], origin, T::Boolean);
                     body.builtin(not(), vec![has], origin)
                 }
-                _ => a,
+                _ => body.boolean(true),
             };
             Some(vec![body.ret(value)])
         });

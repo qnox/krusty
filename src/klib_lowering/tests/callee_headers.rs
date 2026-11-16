@@ -1626,7 +1626,8 @@ fn stdlib_calls_reach_header_declared_callees() {
     // inputs were measured on every release. A call of an inherited member no library serializes
     // now links to the declaration it inherits and declines there as a member function call. A
     // `for` loop over a range literal counts, and one over another progression declines at the
-    // loop rather than at its protocol calls.
+    // loop rather than at its protocol calls. A call of a generic private function now lowers
+    // that function and declines inside it.
     let expected = if crate::kotlin_version::target()
         >= crate::kotlin_version::KotlinVersion::V2_4_20
     {
@@ -1645,7 +1646,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                      indices)",
                     6,
                 ),
-                ("it uses a call of a member function)", 88),
+                ("it uses a call of a member function)", 91),
                 ("it uses a call through a property accessor signature)", 40),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses an access of a generic property)", 2),
