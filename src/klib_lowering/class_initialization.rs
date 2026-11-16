@@ -536,7 +536,7 @@ pub(crate) struct ValueClassOverride {
 /// The overrides with bodies of the value class declaring the member `selected`, each with the
 /// declarations it overrides: dispatch reaches them on a boxed instance of the class, which has no
 /// initialization of its own to carry them.
-pub(super) fn value_class_overrides(
+pub(crate) fn value_class_overrides(
     selected: KlibBodyCallable<'_>,
     bodies: &KlibDeclarationBodies,
 ) -> Result<Vec<ValueClassOverride>, KlibBodyDeclineReason> {

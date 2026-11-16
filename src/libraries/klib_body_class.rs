@@ -54,6 +54,14 @@ impl KlibBodyClassContract {
             || (!self.is_value && Ty::obj_name(self.classifier).is_array())
     }
 
+    /// Whether a support unit lays out a box of this value class, whose boxed instances dispatch
+    /// to its overrides. A value class the type model classifies as a builtin scalar or array (an
+    /// unsigned number or array) has none: its boxes are the target's.
+    pub(crate) fn has_unit_box(&self) -> bool {
+        let modeled = Ty::obj_name(self.classifier).canonical_semantic();
+        self.is_value && !modeled.is_builtin_scalar() && !modeled.is_array()
+    }
+
     /// Whether a support unit emits this class's members as functions of their receiver value,
     /// materializing no class: a final builtin type of the common type model that is not a value
     /// class, whose values the target carries itself, `Array<T>` included. Such a member

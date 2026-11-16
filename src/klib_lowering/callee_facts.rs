@@ -391,16 +391,6 @@ impl<'a> KlibCalleeFacts<'a> {
         super::class_initialization::object_initialization_objects(class, bodies, self)
     }
 
-    /// The overrides with bodies of the value class declaring the member `selected`, each with
-    /// the declarations it overrides.
-    pub(crate) fn value_class_overrides(
-        &self,
-        selected: crate::libraries::KlibBodyCallable<'_>,
-        bodies: &crate::klib_libraries::KlibDeclarationBodies,
-    ) -> Result<Vec<super::ValueClassOverride>, super::decline::KlibBodyDeclineReason> {
-        super::class_initialization::value_class_overrides(selected, bodies)
-    }
-
     /// The members dispatch reaches of the object `class`.
     pub(crate) fn object_dispatched_members(
         &self,

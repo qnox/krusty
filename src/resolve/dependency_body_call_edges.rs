@@ -69,6 +69,20 @@ pub(crate) fn for_checked_klib_bodies<'a>(
                 source, bodies, &identity, selected,
             ));
         }
+        // A boxed value class's instances dispatch to its overrides, which emission walks with
+        // a construction or a member of the class.
+        if matches!(
+            realization.kind,
+            crate::libraries::ExternalCallableKind::Constructor
+                | crate::libraries::ExternalCallableKind::Member
+        ) && selected
+            .class_contract()
+            .is_some_and(crate::libraries::KlibBodyClassContract::has_unit_box)
+        {
+            let overrides = crate::klib_lowering::value_class_overrides(selected, bodies)
+                .map_err(|_| external)?;
+            pending.extend(overrides.into_iter().map(|value| value.identity));
+        }
         #[cfg(test)]
         if realization.kind == crate::libraries::ExternalCallableKind::Constructor {
             facts.reached_constructors.insert(identity.clone());

@@ -8,7 +8,6 @@ use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, KlibBodyCallable, KlibDependencyCallable,
     SemanticPlatform,
 };
-use crate::types::Ty;
 use std::collections::VecDeque;
 
 /// The declarations a unit's closure freezes.
@@ -230,9 +229,9 @@ pub(super) fn declarations(
         if constructor
             && selected
                 .class_contract()
-                .is_some_and(unit_boxes_value_class)
+                .is_some_and(crate::libraries::KlibBodyClassContract::has_unit_box)
         {
-            walk_value_class_overrides(platform, bodies, &facts, selected, &mut state)?;
+            walk_value_class_overrides(platform, bodies, selected, &mut state)?;
         }
         let primitive = facts
             .common_primitive(&identity, bodies)
@@ -312,10 +311,10 @@ pub(super) fn declarations(
             // its overrides.
             if selected
                 .class_contract()
-                .is_some_and(unit_boxes_value_class)
+                .is_some_and(crate::libraries::KlibBodyClassContract::has_unit_box)
                 && selected.kind() == ExternalCallableKind::Member
             {
-                walk_value_class_overrides(platform, bodies, &facts, selected, &mut state)?;
+                walk_value_class_overrides(platform, bodies, selected, &mut state)?;
             }
             // A member of an object reads the instance the object's own initialization created,
             // which materializes the object once with every member dispatch reaches. So does a
@@ -568,7 +567,7 @@ pub(super) fn ordinary_roots<'a>(
             // A value class's box is materialized by the construction itself.
             if (selected
                 .class_contract()
-                .is_some_and(unit_boxes_value_class)
+                .is_some_and(crate::libraries::KlibBodyClassContract::has_unit_box)
                 || callees
                     .constructor_initialization_callees(selected.identity(), bodies)
                     .map_err(|reason| format!("an invalid constructor root: {reason:?}"))?
@@ -945,26 +944,16 @@ fn is_outside_units(
         && !is_materialized_class_member(platform, bodies, callees, callable)?)
 }
 
-/// Whether the unit lays out a box of the value class `class`. A value class the type model
-/// classifies as a builtin scalar or array (an unsigned number or array) has none: its boxes are
-/// the target's.
-fn unit_boxes_value_class(class: &crate::libraries::KlibBodyClassContract) -> bool {
-    let modeled = Ty::obj_name(class.classifier).canonical_semantic();
-    class.is_value && !modeled.is_builtin_scalar() && !modeled.is_array()
-}
-
 /// Walk the overrides a boxed instance of the value class `selected` belongs to dispatches to:
 /// each one with an exact provider declaration, as are the declarations it overrides, is walked
 /// with the class. The unit leaves any other slot unrealized.
 fn walk_value_class_overrides(
     platform: &dyn SemanticPlatform,
     bodies: &KlibDeclarationBodies,
-    facts: &crate::klib_lowering::KlibCalleeFacts<'_>,
     selected: crate::libraries::KlibBodyCallable<'_>,
     state: &mut ClosureState<'_, '_>,
 ) -> Result<(), String> {
-    let overrides = facts
-        .value_class_overrides(selected, bodies)
+    let overrides = crate::klib_lowering::value_class_overrides(selected, bodies)
         .map_err(|reason| format!("an invalid value class member: {reason:?}"))?;
     let provided =
         |identity: &KlibDependencyCallable| platform.external_callable_by_dependency(identity);
