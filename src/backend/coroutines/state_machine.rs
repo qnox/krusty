@@ -5,13 +5,11 @@ use crate::ir::{
     Callee, ClassId, ExprId, IrCatch, IrClass, IrCtorArg, IrCtorParameterProvenance, IrEnclosure,
     IrExpr, IrField, IrFile, IrFunction, IrFunctionOverride, IrGeneratedParameterRole,
     IrGenericSig, IrLocalClassNameProvenance, IrModuleSource, IrParameterIdentity,
-    IrPropertyOverride, IrTypeOp, IrTypeParameter,
+    IrPropertyOverride, IrTypeParameter,
 };
 use crate::types::{type_name, wk, Ty, TypeName};
 
-use super::class_storage::{
-    external_type_substitution, plan_frame_values, realize_frame_values, ContinuationFields,
-};
+use super::class_storage::{plan_frame_values, realize_frame_values, ContinuationFields};
 use super::label_reentry::{split_at_suspensions, ReentryDecline};
 use super::value_namespace::max_value_index;
 
@@ -21,7 +19,6 @@ struct ResumeContract {
     runtime: crate::ir::IrCoroutineRuntime,
     machine_result_ty: Ty,
     completion_result_ty: Ty,
-    function_result: Ty,
     any: Ty,
     completion_field: u32,
     result_field: u32,
@@ -175,7 +172,6 @@ pub(super) fn realize(
             runtime,
             machine_result_ty,
             completion_result_ty,
-            function_result,
             any,
             completion_field,
             result_field,
@@ -455,7 +451,6 @@ fn build_resume_with(ir: &mut IrFile, contract: ResumeContract) -> Result<u32, R
         runtime,
         machine_result_ty,
         completion_result_ty,
-        function_result,
         any,
         completion_field,
         result_field,
@@ -497,14 +492,7 @@ fn build_resume_with(ir: &mut IrFile, contract: ResumeContract) -> Result<u32, R
         value: None,
     });
     let exception = ir.add_expr(IrExpr::GetValue(exception_index));
-    let failed = failure_result(
-        ir,
-        runtime.result_failure,
-        runtime.result_companion,
-        completion_result_ty,
-        function_result,
-        exception,
-    )?;
+    let failed = failure_result(ir, runtime, completion_result_ty, exception);
     let notify_failure = notify_completion(
         ir,
         class,
@@ -551,36 +539,9 @@ fn build_resume_with(ir: &mut IrFile, contract: ResumeContract) -> Result<u32, R
         stmts: Vec::new(),
         value: None,
     });
+    // The step completed with its erased value, which a `Result` holds as it is.
     let value = ir.add_expr(IrExpr::GetValue(returned_index));
-    let success_value = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: value,
-        type_operand: function_result,
-    });
-    ir.set_logical_type(success_value, function_result);
-    let companion = runtime.result_companion;
-    let companion_value = ir.add_expr(IrExpr::SingletonValue {
-        classifier: companion,
-    });
-    ir.set_logical_type(companion_value, Ty::obj_name(companion));
-    let success = ir.add_expr(IrExpr::Call {
-        callee: Box::new(Callee::External {
-            target: runtime.result_success,
-            default_provider: None,
-            params: vec![function_result],
-            ret: completion_result_ty,
-            substitutions: vec![external_type_substitution(
-                runtime.result_success,
-                function_result,
-            )],
-            defaults: Vec::new(),
-            extension_receiver_parameter: None,
-        }),
-        dispatch_receiver: Some(companion_value),
-        args: vec![success_value],
-    });
-    ir.call_declared_ret.insert(success, completion_result_ty);
-    ir.external_singleton_dispatches.insert(success, companion);
+    let success = result_holding(ir, runtime, completion_result_ty, value);
     let notified = notify_completion(
         ir,
         class,
@@ -620,34 +581,51 @@ fn build_resume_with(ir: &mut IrFile, contract: ResumeContract) -> Result<u32, R
     Ok(resume)
 }
 
+/// `Result(createFailure(exception))`: the stdlib's inline `Result.failure`.
 fn failure_result(
     ir: &mut IrFile,
-    failure: crate::fir::ExternalCallableId,
-    companion: TypeName,
+    runtime: crate::ir::IrCoroutineRuntime,
     result_ty: Ty,
-    function_result: Ty,
     exception: ExprId,
-) -> Result<ExprId, ReentryDecline> {
-    let companion_value = ir.add_expr(IrExpr::SingletonValue {
-        classifier: companion,
-    });
-    ir.set_logical_type(companion_value, Ty::obj_name(companion));
-    let call = ir.add_expr(IrExpr::Call {
+) -> ExprId {
+    let failure = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::External {
-            target: failure,
+            target: runtime.create_failure,
             default_provider: None,
             params: vec![Ty::obj_name(type_name("kotlin/Throwable"))],
-            ret: result_ty,
-            substitutions: vec![external_type_substitution(failure, function_result)],
+            ret: Ty::obj_name(wk::any()),
+            substitutions: Vec::new(),
             defaults: Vec::new(),
             extension_receiver_parameter: None,
         }),
-        dispatch_receiver: Some(companion_value),
+        dispatch_receiver: None,
         args: vec![exception],
     });
-    ir.call_declared_ret.insert(call, result_ty);
-    ir.external_singleton_dispatches.insert(call, companion);
-    Ok(call)
+    ir.call_declared_ret
+        .insert(failure, Ty::obj_name(wk::any()));
+    result_holding(ir, runtime, result_ty, failure)
+}
+
+/// `Result(held)`, a `Result` holding a value or a failure: the stdlib's inline `Result.success`.
+fn result_holding(
+    ir: &mut IrFile,
+    runtime: crate::ir::IrCoroutineRuntime,
+    result_ty: Ty,
+    held: ExprId,
+) -> ExprId {
+    let any = Ty::nullable(Ty::obj_name(wk::any()));
+    let construction = ir.add_expr(IrExpr::New {
+        internal: type_name("kotlin/Result"),
+        args: vec![held],
+        ctor_params: Some(vec![any]),
+        declared_params: Some(Box::new([any])),
+        ctor_desc: None,
+        external_target: Some(runtime.result_constructor),
+        defaults: Box::new([]),
+        default_prefix_count: 0,
+    });
+    ir.set_logical_type(construction, result_ty);
+    construction
 }
 
 fn notify_completion(

@@ -247,27 +247,46 @@ impl MachineStorage for ContinuationFields {
         self.write(ir, self.label, label)
     }
 
+    /// The value a resumption delivers, as the stdlib's inline `Result.getOrThrow` reads it:
+    /// `result.throwOnFailure()`, then `result.value`.
     fn resumed_value(&self, ir: &mut IrFile) -> ExprId {
-        let result = self.read(ir, self.result);
         let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
         let result_ty = Ty::obj_args_name(crate::types::type_name("kotlin/Result"), &[any]);
-        let call = ir.add_expr(IrExpr::Call {
+        let result = self.read(ir, self.result);
+        let rethrown = ir.add_expr(IrExpr::Call {
             callee: Box::new(Callee::External {
-                target: self.runtime.get_or_throw,
+                target: self.runtime.throw_on_failure,
                 default_provider: None,
                 params: vec![result_ty],
-                ret: any,
-                substitutions: vec![external_type_substitution(self.runtime.get_or_throw, any)],
+                ret: Ty::Unit,
+                substitutions: Vec::new(),
                 defaults: Vec::new(),
-                // `getOrThrow` is a top-level extension on `Result<T>`.  Its receiver is
+                // `throwOnFailure` is a top-level extension on `Result<*>`. Its receiver is
                 // represented as argument zero in an external dependency call.
                 extension_receiver_parameter: Some(0),
             }),
             dispatch_receiver: None,
             args: vec![result],
         });
-        ir.call_declared_ret.insert(call, any);
-        call
+        ir.call_declared_ret.insert(rethrown, Ty::Unit);
+        let result = self.read(ir, self.result);
+        let value = ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::ExternalPropertyRead {
+                target: self.runtime.result_value,
+                dispatch: IrPropertyDispatch::Ordinary,
+                receiver: Some(result),
+                arguments: Vec::new(),
+                parameters: Vec::new(),
+                result: any,
+                substitutions: Vec::new(),
+                source_receiver: Some(result_ty),
+            },
+        )));
+        ir.set_logical_type(value, any);
+        ir.add_expr(IrExpr::Block {
+            stmts: vec![rethrown],
+            value: Some(value),
+        })
     }
 
     fn suspended_marker(&self, ir: &mut IrFile) -> ExprId {
@@ -381,21 +400,5 @@ impl MachineStorage for ContinuationFields {
         ir.take_physical_type(call);
         ir.set_logical_type(call, any);
         Ok(call)
-    }
-}
-
-pub(super) fn external_type_substitution(
-    target: crate::fir::ExternalCallableId,
-    value: Ty,
-) -> crate::ir::IrCheckedSubstitution {
-    crate::ir::IrCheckedSubstitution {
-        parameter: crate::fir::FirTypeParameterRef::External {
-            callable: target,
-            ordinal: 0,
-        },
-        reified: false,
-        value,
-        reified_runtime: value,
-        additional_bounds: Vec::new(),
     }
 }
