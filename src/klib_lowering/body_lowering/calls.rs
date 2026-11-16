@@ -62,6 +62,9 @@ impl BodyLowering<'_> {
         if let Some(operation) = self.linker.atomic_field(callee)? {
             return self.atomic_field(operation, access, ty);
         }
+        if let Some(operation) = self.linker.atomic_array_element(callee)? {
+            return self.atomic_array_element(operation, access, ty);
+        }
         if let Some(arity) = function_invocation_arity(callee) {
             if !access.type_arguments.is_empty() {
                 return Err(mismatch(
