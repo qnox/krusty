@@ -453,6 +453,9 @@ void kt_mutable_list_add_at(KRef self, kt_int index, KRef value);
 KRef kt_mutable_list_set(KRef self, kt_int index, KRef value);
 KRef kt_mutable_list_remove_at(KRef self, kt_int index);
 kt_boolean kt_mutable_list_remove(KRef self, KRef value);
+/* `removeAll` / `retainAll`: whether the list changed. See the definitions. */
+kt_boolean kt_mutable_list_remove_all(KRef self, KRef elements);
+kt_boolean kt_mutable_list_retain_all(KRef self, KRef elements);
 void kt_mutable_list_clear(KRef self);
 /* `list += element` and `list += elements`: Kotlin's `plusAssign`, which is `add`/`addAll` and
    answers `Unit`. */
@@ -838,6 +841,11 @@ KRef kt_string_substring_from(KRef self, kt_int start);
 /* `a.compareTo(b)`, by UTF-16 code unit and with Java's magnitude: the difference of the first
    units that differ, or of the lengths when one string is a prefix of the other. */
 kt_int kt_string_compare_to(KRef a, KRef b);
+
+/* Whether `length` UTF-16 units of `self` from `self_offset` equal `other`'s from `other_offset`;
+   both ranges are already within their strings (Kotlin/Native's `unsafeRangeEquals`). */
+kt_boolean kt_string_range_equals(KRef self, kt_int self_offset, KRef other, kt_int other_offset,
+                                  kt_int length);
 
 /* `s.removeSuffix(suffix)`: the receiver without it, cut by UTF-16 unit as `endsWith` and
    `substring` are; either may be a `StringBuilder`. A string that does not end there comes back

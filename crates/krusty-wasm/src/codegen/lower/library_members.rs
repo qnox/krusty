@@ -169,6 +169,17 @@ impl Body<'_> {
             &signature,
             &fact.builtin_implementations,
         )?;
+        if let Some(step) = super::array_lists::iterator_step(&fact) {
+            let function = match step {
+                super::array_lists::IteratorStep::HasNext => self.runtime.array_lists.has_next,
+                super::array_lists::IteratorStep::Next => self.runtime.array_lists.next,
+            };
+            self.runtime.objects.interfaces.implement_representation(
+                member,
+                self.runtime.array_lists.iterator,
+                function,
+            )?;
+        }
         self.value(receiver, objects::any())?;
         for (&arg, &param) in args.iter().zip(params) {
             self.value(arg, param)?;

@@ -55,14 +55,30 @@ impl Checker<'_> {
         } else {
             tt
         };
-        let narrowed = self.type_test_target(stable_ty, tt, nullable, ty.targs.is_empty());
-        // Only stable values smart-cast soundly — a `var`/computed property could change.
-        if stable_ty.is_none() {
-            if let Some(narrowed) = narrowed {
-                if let Some((name, _)) = self.closure_mutated_decline(scope, &path, site) {
-                    declined.push((name, narrowed));
+        let mut narrowed = self.type_test_target(stable_ty, tt, nullable, ty.targs.is_empty());
+        // Only stable values smart-cast soundly — a `var`/computed property could change. A local
+        // only a capturing closure mutates stays stable for a target every such write conforms to.
+        let closure_stable = stable_ty.is_none()
+            && match self.closure_mutated_decline(scope, &path, site) {
+                Some((name, declared)) => {
+                    let target =
+                        self.type_test_target(Some(declared), tt, nullable, ty.targs.is_empty());
+                    match target {
+                        Some(target) if self.closure_writes_conform(&name, site, target) => {
+                            narrowed = Some(target);
+                            true
+                        }
+                        _ => {
+                            if let Some(narrowed) = narrowed {
+                                declined.push((name, narrowed));
+                            }
+                            false
+                        }
+                    }
                 }
-            }
+                None => false,
+            };
+        if stable_ty.is_none() && !closure_stable {
             crate::trace_compiler!(
                 "smartcast",
                 "type test operand={} path={path:?} rejected: unstable",

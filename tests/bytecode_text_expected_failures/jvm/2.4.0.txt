@@ -24,7 +24,6 @@ coroutines/nonLocalReturn.kt
 coroutines/stateMachine/kt25893.kt
 coroutines/stateMachine/withTypeParameter.kt
 deadCodeElimination/unusedPrimitiveAndObjectEquals.kt
-defaultArguments/localVariablesInInlinedDefaultStubs.kt
 defaultArguments/maskAndArgumentElimination.kt
 defaultArguments/noAnonymousObjectRegenerationInDefaultStub.kt
 enum/enumEntriesIntrinsicForJava.kt
@@ -74,8 +73,6 @@ inlineClasses/boxingForNonLocalAndLabeledReturnsOfInlineClasses.kt
 inlineClasses/defaultParametersDontBox.kt
 inlineClasses/equalsIsCalledByInlineClass.kt
 inlineClasses/isCheckForInlineClass.kt
-inlineClasses/mangledSamWrappers.kt
-inlineClasses/mangledSamWrappersIndy.kt
 inlineClasses/noManglingForFunctionsWithJvmName.kt
 inlineClasses/passInlineClassesWithSpreadOperatorToVarargs.kt
 inlineClasses/resultApiDoesntCallSpecializedEquals.kt

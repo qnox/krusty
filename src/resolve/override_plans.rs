@@ -48,6 +48,12 @@ where
 {
     let nearest = candidates.iter().map(&rank_of).min()?;
     candidates.retain(|candidate| rank_of(candidate) == nearest);
+    if candidates
+        .iter()
+        .any(|candidate| target_of(candidate).is_none())
+    {
+        return None;
+    }
     let mut seen = HashSet::default();
     candidates.retain(|candidate| target_of(candidate).is_some_and(|target| seen.insert(target)));
     if candidates.len() != 1 {
@@ -126,16 +132,29 @@ fn target(
     index: &ResolvedModuleIndex,
     property: &PropertyInfo,
 ) -> Option<ResolvedPropertyOverrideTarget> {
-    property
-        .stable_declaration
-        .and_then(|declaration| index.property_for_declaration(declaration))
-        .map(ResolvedPropertyOverrideTarget::Module)
-        .or_else(|| {
-            property
-                .getter
+    property_accessor_target(index, property, false)
+}
+
+pub(super) fn property_accessor_target(
+    index: &ResolvedModuleIndex,
+    property: &PropertyInfo,
+    setter: bool,
+) -> Option<ResolvedPropertyOverrideTarget> {
+    match property.stable_declaration {
+        Some(declaration) => index
+            .property_for_declaration(declaration)
+            .map(ResolvedPropertyOverrideTarget::Module),
+        None => {
+            let accessor = if setter {
+                property.setter.as_deref()?
+            } else {
+                &property.getter
+            };
+            accessor
                 .external_identity
                 .map(ResolvedPropertyOverrideTarget::External)
-        })
+        }
+    }
 }
 
 /// The unsubstituted declared shape of the exact declaration a property selects: the signature a
@@ -188,16 +207,15 @@ pub(super) fn function_target(
     index: &ResolvedModuleIndex,
     function: &FunctionInfo,
 ) -> Option<ResolvedFunctionOverrideTarget> {
-    function
-        .stable_declaration
-        .and_then(|declaration| index.callable_for_declaration(declaration))
-        .map(|callable| ResolvedFunctionOverrideTarget::Module(callable.id))
-        .or_else(|| {
-            function
-                .callable
-                .external_identity
-                .map(ResolvedFunctionOverrideTarget::External)
-        })
+    match function.stable_declaration {
+        Some(declaration) => index
+            .callable_for_declaration(declaration)
+            .map(|callable| ResolvedFunctionOverrideTarget::Module(callable.id)),
+        None => function
+            .callable
+            .external_identity
+            .map(ResolvedFunctionOverrideTarget::External),
+    }
 }
 
 fn function_default_provider(
@@ -2032,5 +2050,56 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mu
     for (classifier, properties, functions) in plans {
         index.publish_property_overrides(classifier, properties);
         index.publish_function_overrides(classifier, functions);
+    }
+}
+
+#[cfg(test)]
+mod selection_identity_tests {
+    use super::{function_target, nearest_unique_by};
+
+    fn selected(candidates: &[(u32, Option<u32>)]) -> Option<(u32, Option<u32>)> {
+        nearest_unique_by(
+            candidates.to_vec(),
+            |candidate| candidate.0,
+            |candidate| candidate.1,
+        )
+    }
+
+    #[test]
+    fn an_unregistered_source_declaration_is_not_reinterpreted_as_external() {
+        let index = crate::fir::ResolvedModuleIndex::default();
+        let mut callable = crate::libraries::LibraryCallable::library(
+            crate::types::type_name("sample/Parent"),
+            "value",
+            vec![],
+            crate::types::Ty::String,
+            crate::types::Ty::String,
+            "()Ljava/lang/String;",
+        );
+        let external = crate::fir::ExternalCallableId::from_raw(7);
+        callable.external_identity = Some(external);
+        let mut function = crate::libraries::FunctionInfo::plain(
+            crate::libraries::FnKind::Member,
+            Some(crate::types::Ty::obj("sample/Parent")),
+            callable,
+        );
+        assert_eq!(
+            function_target(&index, &function),
+            Some(crate::fir::ResolvedFunctionOverrideTarget::External(
+                external
+            ))
+        );
+        function.stable_declaration = Some(crate::fir::DeclarationId::from_raw(99));
+        assert_eq!(function_target(&index, &function), None);
+    }
+
+    #[test]
+    fn nearest_selection_requires_every_nearest_identity() {
+        assert_eq!(selected(&[(0, Some(1)), (0, None)]), None);
+        assert_eq!(selected(&[(0, None), (0, Some(1))]), None);
+        assert_eq!(selected(&[(0, Some(1)), (0, Some(2))]), None);
+        assert_eq!(selected(&[(0, Some(1)), (0, Some(1))]), Some((0, Some(1))));
+        assert_eq!(selected(&[(0, Some(1)), (1, None)]), Some((0, Some(1))));
+        assert_eq!(selected(&[]), None);
     }
 }
