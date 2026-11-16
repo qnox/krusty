@@ -6,6 +6,7 @@ use super::common;
 
 const UNUSED: &str = include_str!("box_regressions/unusedCatchParameterName.kt");
 const INLINED: &str = include_str!("box_regressions/inlineCatchParameterNames.kt");
+const DOLLAR: &str = include_str!("box_regressions/inlineCatchParameterDollarNames.kt");
 
 fn assert_complete_module(file: &str, source: &str) {
     let classes = common::classes_against_kotlinc_module(&[(file, source)]);
@@ -38,4 +39,14 @@ fn the_complete_inlined_catch_names_program_matches_kotlin() {
 #[test]
 fn the_inlined_catch_names_program_runs_like_kotlin() {
     common::expect_box_same_as_kotlinc(INLINED, "InlineCatchParameterNames");
+}
+
+#[test]
+fn the_complete_inlined_dollar_names_program_matches_kotlin() {
+    assert_complete_module("inlineCatchParameterDollarNames.kt", DOLLAR);
+}
+
+#[test]
+fn the_inlined_dollar_names_program_runs_like_kotlin() {
+    common::expect_box_same_as_kotlinc(DOLLAR, "InlineCatchParameterDollarNames");
 }

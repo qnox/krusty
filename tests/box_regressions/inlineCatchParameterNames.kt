@@ -1,5 +1,6 @@
 // An inlined value keeps the name it was declared with and gains one `$iv` per expansion:
 // an unused catch parameter is `<unused var>$iv`, and a named or backticked one is not mangled.
+// `inlineCatchParameterDollarNames.kt` covers the names only the JVM accepts.
 inline fun guarded(block: () -> Int): Int {
     try {
         return block()
@@ -9,7 +10,7 @@ inline fun guarded(block: () -> Int): Int {
         return -2
     } catch (`a b`: UnsupportedOperationException) {
         return -3
-    } catch (`p$q`: RuntimeException) {
+    } catch (`r-s`: RuntimeException) {
         return -4
     }
 }
@@ -18,8 +19,8 @@ inline fun outer(block: () -> Int): Int = guarded(block)
 
 inline fun locals(block: (Int) -> Int): Int {
     val `x-y` = 1
-    val `p$q` = 2
-    return block(`x-y` + `p$q`)
+    val `p q` = 2
+    return block(`x-y` + `p q`)
 }
 
 fun box(): String {
