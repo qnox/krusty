@@ -99,6 +99,7 @@ impl<'a> BodyLowering<'a> {
         }
         self.instance_storage = Some(super::instance_storage::InstanceStorageFrame::member(
             class,
+            member.declaring,
             storage,
             member.properties.clone(),
             Some(receiver),
@@ -123,6 +124,7 @@ impl<'a> BodyLowering<'a> {
         self.instance_storage = Some(
             super::instance_storage::InstanceStorageFrame::local_initializer(
                 plan.class,
+                plan.declaring,
                 plan.receiver_ty,
                 &plan.fields,
             ),
@@ -150,6 +152,7 @@ impl<'a> BodyLowering<'a> {
     ) -> Self {
         self.instance_storage = Some(super::instance_storage::InstanceStorageFrame::local_member(
             member.class,
+            member.declaring,
             member.receiver,
             &member.fields,
         ));

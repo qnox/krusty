@@ -200,32 +200,7 @@ impl KlibDeclarationBodies {
         signature: &KlibPublicIdSignature,
         role: Option<crate::libraries::KlibAccessorRole>,
     ) -> Result<Option<KlibClassMember<'_>>, &'static str> {
-        let Some(&library) = self.modules.get(&identity.module) else {
-            return Ok(None);
-        };
-        let mut found = None;
-        for tree in self.libraries[library].trees() {
-            let mut pending = vec![&tree.declaration];
-            while let Some(member) = pending.pop() {
-                let class = match member {
-                    KlibIrMember::Class(id) => tree.arena.class(*id),
-                    KlibIrMember::EnumEntry(entry) => {
-                        let Some(id) = entry.class else { continue };
-                        tree.arena.class(id)
-                    }
-                    _ => continue,
-                };
-                pending.extend(class.members.iter());
-                if class.base.symbol.signature != KlibIrSignature::Public(signature.clone()) {
-                    continue;
-                }
-                if found.is_some() {
-                    return Err("duplicate serialized class headers");
-                }
-                found = Some((&tree.arena, class));
-            }
-        }
-        let Some((arena, class)) = found else {
+        let Some((arena, class)) = self.class_header(&identity.module, signature)? else {
             return Ok(None);
         };
         let target = ir_signature(&identity.declaration);
@@ -269,6 +244,40 @@ impl KlibDeclarationBodies {
             class,
             function: arena.function(*function),
         }))
+    }
+
+    /// The exact serialized class header, independently of any callable it declares.
+    pub(crate) fn class_header(
+        &self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> Result<Option<(&KlibIrArena, &KlibIrClass)>, &'static str> {
+        let Some(&library) = self.modules.get(module) else {
+            return Ok(None);
+        };
+        let mut found = None;
+        for tree in self.libraries[library].trees() {
+            let mut pending = vec![&tree.declaration];
+            while let Some(member) = pending.pop() {
+                let class = match member {
+                    KlibIrMember::Class(id) => tree.arena.class(*id),
+                    KlibIrMember::EnumEntry(entry) => {
+                        let Some(id) = entry.class else { continue };
+                        tree.arena.class(id)
+                    }
+                    _ => continue,
+                };
+                pending.extend(class.members.iter());
+                if class.base.symbol.signature != KlibIrSignature::Public(signature.clone()) {
+                    continue;
+                }
+                if found.is_some() {
+                    return Err("duplicate serialized class headers");
+                }
+                found = Some((&tree.arena, class));
+            }
+        }
+        Ok(found)
     }
 
     /// The class that declares the enum entry `entry` read by a body of `body_module`, resolved
@@ -680,6 +689,54 @@ impl KlibDeclarationBodies {
         }
     }
 
+    /// The constructors the public class `signature` serialized by `module` or a library its
+    /// manifest depends on declares, in member order. `None` unless exactly one class has the
+    /// signature, or when a constructor's symbol is not public.
+    pub(crate) fn public_class_constructors(
+        &self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> Option<Vec<KlibPublicIdSignature>> {
+        let wanted = KlibIrSignature::Public(signature.clone());
+        let mut found = None;
+        for owner in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&owner) else {
+                continue;
+            };
+            for tree in self.libraries[library].trees() {
+                let mut pending = vec![&tree.declaration];
+                while let Some(member) = pending.pop() {
+                    let Some(class) = class_of(&tree.arena, member) else {
+                        continue;
+                    };
+                    pending.extend(class.members.iter());
+                    if class.base.symbol.signature != wanted {
+                        continue;
+                    }
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some((&tree.arena, class));
+                }
+            }
+        }
+        let (arena, class) = found?;
+        class
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                KlibIrMember::Function(function) => {
+                    Some(arena.function(*function)).filter(|function| function.constructor)
+                }
+                _ => None,
+            })
+            .map(|constructor| match &constructor.base.symbol.signature {
+                KlibIrSignature::Public(signature) => Some(signature.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The class in `module`'s producer graph that directly declares `signature`.
     ///
     /// The match is the function's serialized symbol, including a property accessor. Two classes
@@ -764,6 +821,43 @@ impl KlibDeclarationBodies {
                     KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
                 },
             )
+            .collect()
+    }
+
+    /// The public classes the file-local classes of these bodies directly name as supertypes, each
+    /// once and in a stable order. Over the prepared-inline copies, these are the dependency
+    /// classes an object literal or local class extends wherever a call expands its template.
+    pub(crate) fn local_class_supertypes(&self) -> Vec<TypeName> {
+        let mut supertypes = self
+            .libraries
+            .iter()
+            .flat_map(|library| library.local_classes())
+            .flat_map(|(arena, class)| {
+                class
+                    .supertypes
+                    .iter()
+                    .filter_map(|&supertype| match arena.ty(supertype) {
+                        KlibIrType::Simple { classifier, .. }
+                            if classifier.kind == KlibIrSymbolKind::Class =>
+                        {
+                            match &classifier.signature {
+                                KlibIrSignature::Public(signature) => Some(signature),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        // Stable across processes: ordered by the serialized identity, not by interning order.
+        supertypes.sort_by(|left, right| {
+            (left.package().segments(), left.declaration().segments())
+                .cmp(&(right.package().segments(), right.declaration().segments()))
+        });
+        supertypes.dedup();
+        supertypes
+            .into_iter()
+            .filter_map(|signature| class_identity(&KlibIrSignature::Public(signature.clone())))
             .collect()
     }
 

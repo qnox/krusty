@@ -22,7 +22,7 @@ pub(super) enum FunctionEquality {
 impl Body<'_> {
     /// A new function value whose body is `function`, carrying `captures` as its leading
     /// arguments, of the checked type `instance`. With `sam`, the value is also an instance of that
-    /// `fun interface`, whose member it implements.
+    /// `fun interface`, whose member it implements. Answers the class the value is an instance of.
     pub(super) fn function_value(
         &mut self,
         function: FunId,
@@ -30,7 +30,7 @@ impl Body<'_> {
         equality: FunctionEquality,
         instance: Option<Ty>,
         sam: Option<&krusty::ir::IrSamTarget>,
-    ) -> Result<(), Unsupported> {
+    ) -> Result<crate::interface_dispatch::ClassRef, Unsupported> {
         let declaration = self
             .ir
             .functions
@@ -187,7 +187,7 @@ impl Body<'_> {
             self.code.local_get(local);
         }
         self.code.struct_new(structure);
-        Ok(())
+        Ok(class)
     }
 
     /// A new function value for the callable reference `id`. Its adapter takes the referenced
@@ -204,7 +204,7 @@ impl Body<'_> {
             .chain(reference.bound_receiver)
             .collect();
         let kind = self.callable_reference_kind(reference)?;
-        self.function_value(
+        let class = self.function_value(
             reference.adapter,
             &captures,
             FunctionEquality::Declaration {
@@ -213,7 +213,17 @@ impl Body<'_> {
             },
             self.type_of(id)?,
             None,
-        )
+        )?;
+        // A reference answers `KCallable.name` with its declaration's name, whatever type the
+        // program reads it through. One that cannot say its name gets no `name` member.
+        if let Some(name) = krusty::backend::reference_names::callable_reference_name(
+            self.ir,
+            self.callables,
+            reference,
+        ) {
+            self.runtime.reference_name(self.module, class, &name)?;
+        }
+        Ok(())
     }
 
     /// Make the function value of `record`, whose boxed entry is `invoke`, an instance of the
@@ -311,8 +321,12 @@ impl Body<'_> {
         self.code
             .ref_cast(false, HeapType::Concrete(object))
             .struct_get(object, 0)
-            .ref_cast(false, HeapType::Concrete(shape.table))
-            .struct_get(shape.table, INVOKE_FIELD)
+            .ref_cast(
+                false,
+                HeapType::Concrete(self.runtime.objects.function_table),
+            )
+            .struct_get(self.runtime.objects.function_table, INVOKE_FIELD)
+            .ref_cast(false, HeapType::Concrete(shape.invoke))
             .call_ref(shape.invoke);
         self.coerce_emitted_value(any, ret)
     }
@@ -343,7 +357,12 @@ impl Body<'_> {
         self.code
             .ref_cast(false, HeapType::Concrete(object))
             .struct_get(object, 0)
-            .ref_test(false, HeapType::Concrete(shape.table))
+            .ref_cast(
+                false,
+                HeapType::Concrete(self.runtime.objects.function_table),
+            )
+            .struct_get(self.runtime.objects.function_table, INVOKE_FIELD)
+            .ref_test(false, HeapType::Concrete(shape.invoke))
             .if_(BlockType::Empty)
             .else_()
             .unreachable()

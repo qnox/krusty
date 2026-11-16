@@ -899,6 +899,13 @@ impl Body<'_> {
                 Some(&function) => self.direct_member_call(function, receiver, args),
                 None => self.laid_out_super_call(*callable, (params, *ret), receiver, args),
             },
+            Callee::Super {
+                kind: IrSuperCallKind::Function,
+                declaration: Some(ResolvedFunctionOverrideTarget::External(target)),
+                params,
+                ret,
+                ..
+            } => self.dependency_super_call(*target, params.len(), *ret, receiver, args),
             Callee::Super { .. } => Err("a `super` call to a library member".to_string()),
             _ => Err("a member call through this calling convention".to_string()),
         }
@@ -1155,6 +1162,25 @@ impl Body<'_> {
         Ok(Some(storage))
     }
 
+    /// The physical class selected by a current-file identity or an exact frozen KLIB identity.
+    pub(super) fn class_structure(&self, ty: Ty) -> Result<Option<u32>, Unsupported> {
+        if self.interface_of_type(ty).is_some() {
+            return Ok(None);
+        }
+        if let Some(class) = self.class_of_type(ty) {
+            return Ok(Some(self.file_classes()?.structure(class)));
+        }
+        let Some(identity) = ty
+            .non_null()
+            .obj_internal()
+            .and_then(|name| self.classifiers.classifier(name))
+            .and_then(|fact| fact.klib_identity.clone())
+        else {
+            return Ok(None);
+        };
+        self.laid_out_classes.published_structure(&identity)
+    }
+
     /// `x as C`: the value, cast to class `C` of this file or to an interface of the module.
     pub(super) fn cast(&mut self, arg: u32, target: Ty, non_null: bool) -> Result<(), Unsupported> {
         self.value(arg, any())?;
@@ -1169,8 +1195,9 @@ impl Body<'_> {
                 .unreachable()
                 .end();
         } else {
-            let class = self.class_of_type(target).expect("checked by the caller");
-            let structure = self.file_classes()?.structure(class);
+            let structure = self
+                .class_structure(target)?
+                .ok_or_else(|| "a class cast without its selected physical layout".to_owned())?;
             self.code.ref_cast(!non_null, HeapType::Concrete(structure));
         }
         Ok(())
@@ -1261,9 +1288,46 @@ impl Body<'_> {
         }
         let nullable = matches!(target.kind(), TyKind::Nullable(_)) && op != IrTypeOp::SafeCast;
         let tested = target.non_null();
+        // A primitive's or an unsigned number's instances are its boxes, one box type per
+        // classifier (see `crate::boxes`).
+        let scalar_box = if crate::boxes::is_boxed_scalar(tested) {
+            self.boxed_form(tested)?
+        } else {
+            None
+        };
         let value = self.local(REFERENCE);
         self.value(arg, any())?;
         self.code.local_tee(value);
+        if let Some(form) = scalar_box {
+            self.code
+                .ref_test(nullable, HeapType::Concrete(form.structure));
+        } else {
+            self.reference_type_test(tested, nullable)?;
+        }
+        match op {
+            IrTypeOp::NotInstanceOf => {
+                self.code.op(EQZ32);
+            }
+            IrTypeOp::SafeCast => {
+                let (result, cast) = if tested == Ty::String {
+                    (STRING, Some(STRING_HEAP))
+                } else {
+                    (REFERENCE, None)
+                };
+                self.code.if_(BlockType::Value(result)).local_get(value);
+                if let Some(heap) = cast {
+                    self.code.ref_cast(true, heap);
+                }
+                self.code.else_().ref_null(HeapType::None).end();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Replace the reference on the stack with whether it is an instance of the reference type
+    /// `tested` — or null, when `nullable`.
+    fn reference_type_test(&mut self, tested: Ty, nullable: bool) -> Result<(), Unsupported> {
         match tested.kind() {
             TyKind::STRING => {
                 self.code.ref_test(nullable, STRING_HEAP);
@@ -1289,49 +1353,22 @@ impl Body<'_> {
                 self.code
                     .ref_test(nullable, HeapType::Concrete(form.object));
             }
-            _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
+            _ => match (
+                self.interface_of_type(tested),
+                self.class_structure(tested)?,
+            ) {
                 (Some(interface), _) => self.interface_test(interface, nullable),
-                (None, Some(class)) => self.instance_test(class, nullable)?,
+                (None, Some(structure)) => {
+                    self.code.ref_test(nullable, HeapType::Concrete(structure));
+                }
                 (None, None) => match self.library_interface_of_type(tested) {
                     Some(interface) => self.library_interface_test(interface, nullable),
-                    None if self.box_test(tested, nullable)? => {}
                     None => {
                         return Err(format!("a type test against `{}`", super::describe(tested)));
                     }
                 },
             },
         }
-        match op {
-            IrTypeOp::NotInstanceOf => {
-                self.code.op(EQZ32);
-            }
-            IrTypeOp::SafeCast => {
-                let (result, cast) = if tested == Ty::String {
-                    (STRING, Some(STRING_HEAP))
-                } else {
-                    (REFERENCE, None)
-                };
-                self.code.if_(BlockType::Value(result)).local_get(value);
-                if let Some(heap) = cast {
-                    self.code.ref_cast(true, heap);
-                }
-                self.code.else_().ref_null(HeapType::None).end();
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Replace the reference on the stack with whether it is an instance of `class` — or null,
-    /// when `nullable`.
-    fn instance_test(&mut self, class: ClassId, nullable: bool) -> Result<(), Unsupported> {
-        let declaration = &self.ir.classes[class as usize];
-        if declaration.is_interface {
-            self.interface_test(declaration.fq_name, nullable);
-            return Ok(());
-        }
-        let structure = self.file_classes()?.structure(class);
-        self.code.ref_test(nullable, HeapType::Concrete(structure));
         Ok(())
     }
 
@@ -1851,10 +1888,61 @@ impl Body<'_> {
     /// The constructor `ordinal` of the superclass of `class` an earlier file laid out, and the
     /// parameters it takes.
     fn laid_out_constructor(
-        &self,
+        &mut self,
         class: ClassId,
         ordinal: u32,
+        external: Option<krusty::fir::ExternalCallableId>,
     ) -> Result<(u32, Vec<Ty>), Unsupported> {
+        if let Some(external) = external {
+            let parent = self.ir.classes[class as usize].superclass;
+            let fact = self
+                .callables
+                .callable(external)
+                .ok_or("a selected superclass initializer without its frozen declaration")?;
+            if !fact.is_constructor()
+                || fact.declaration_owner
+                    != Some(krusty::types::SemanticCallableOwner::Classifier(parent))
+            {
+                return Err(
+                    "a selected superclass initializer with a different constructor owner".into(),
+                );
+            }
+            let identity = fact
+                .dependency_callable
+                .as_ref()
+                .ok_or("a selected superclass initializer without its canonical identity")?;
+            let (owner, function, signature) = self
+                .laid_out_classes
+                .published_initializer(identity, self.module)?
+                .ok_or("a selected superclass initializer without its published constructor")?;
+            if self
+                .classifiers
+                .classifier(parent)
+                .and_then(|fact| fact.klib_identity.clone())
+                .as_ref()
+                != Some(owner)
+            {
+                return Err(
+                    "a selected superclass initializer with a different producer class".into(),
+                );
+            }
+            let parameters = fact
+                .declared_params
+                .as_deref()
+                .unwrap_or(&fact.params)
+                .to_vec();
+            if !super::super::laid_out_classes::constructor_frame_matches(
+                self.module,
+                &parameters,
+                signature,
+            ) {
+                return Err(
+                    "a selected superclass initializer differing from its defined producer frame"
+                        .into(),
+                );
+            }
+            return Ok((function, parameters));
+        }
         self.file_classes()?
             .laid_out_superclass(class)
             .and_then(|superclass| superclass.constructors.get(ordinal as usize))
@@ -1945,8 +2033,14 @@ impl Body<'_> {
                 self.delegate(constructor, &params, 0, &declaration.super_args)?;
             }
             None if self.file_classes()?.laid_out_superclass(class).is_some() => {
-                let (constructor, params) =
-                    self.laid_out_constructor(class, declaration.super_ctor.ordinal)?;
+                let (constructor, params) = self.laid_out_constructor(
+                    class,
+                    declaration.super_ctor.ordinal,
+                    self.ir
+                        .external_super_constructors
+                        .get(&declaration.fq_name_id())
+                        .map(|edge| edge.declaration),
+                )?;
                 self.delegate(constructor, &params, 0, &declaration.super_args)?;
             }
             None if self.file_classes()?.exception_base(class).is_some() => {
@@ -2072,7 +2166,17 @@ impl Body<'_> {
                     self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
                 }
                 None if self.file_classes()?.laid_out_superclass(class).is_some() => {
-                    let (constructor, params) = self.laid_out_constructor(class, target.ordinal)?;
+                    let (constructor, params) = self.laid_out_constructor(
+                        class,
+                        target.ordinal,
+                        self.ir
+                            .external_secondary_super_constructors
+                            .get(&(
+                                declaration.fq_name_id(),
+                                u32::try_from(ordinal).expect("a constructor ordinal fits u32"),
+                            ))
+                            .map(|edge| edge.declaration),
+                    )?;
                     self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
                 }
                 None if self.file_classes()?.exception_base(class).is_some() => {
