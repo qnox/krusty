@@ -401,7 +401,6 @@ closures/closuresAsSingleton.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt11634_4.kt
 closures/localFunctionInInitBlock.kt
-collectionLiterals/companionBlockOf.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/addCollectionStubWithCovariantOverride.kt
