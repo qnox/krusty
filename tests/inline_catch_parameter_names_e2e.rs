@@ -6,6 +6,11 @@ use super::common;
 
 const UNUSED: &str = include_str!("box_regressions/unusedCatchParameterName.kt");
 const INLINED: &str = include_str!("box_regressions/inlineCatchParameterNames.kt");
+/// The original combined program, whole: its `$` names are accepted only on the JVM, so it lives
+/// beside the portable variant as a JVM artifact and runtime control instead of in the shared box
+/// inventory.
+const ORIGINAL: &str =
+    include_str!("fixtures/inline_catch_parameter_names/inlineCatchParameterNames.kt");
 const DOLLAR: &str = include_str!("box_regressions/inlineCatchParameterDollarNames.kt");
 
 fn assert_complete_module(file: &str, source: &str) {
@@ -49,4 +54,14 @@ fn the_complete_inlined_dollar_names_program_matches_kotlin() {
 #[test]
 fn the_inlined_dollar_names_program_runs_like_kotlin() {
     common::expect_box_same_as_kotlinc(DOLLAR, "InlineCatchParameterDollarNames");
+}
+
+#[test]
+fn the_complete_original_catch_names_program_matches_kotlin() {
+    assert_complete_module("inlineCatchParameterNames.kt", ORIGINAL);
+}
+
+#[test]
+fn the_original_catch_names_program_runs_like_kotlin() {
+    common::expect_box_same_as_kotlinc(ORIGINAL, "InlineCatchParameterNames");
 }
