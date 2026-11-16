@@ -7,8 +7,18 @@ use crate::metadata::klib_ir::tree::{
 };
 use crate::metadata::klib_ir::KlibIrSymbolKind;
 
-struct NoCalls;
+/// A linker with no calls, except that a call of any function is the atomic field access
+/// `atomic_field`, when one is set.
+struct NoCalls {
+    atomic_field: Option<crate::libraries::AtomicOperation>,
+}
 impl CallLinker for NoCalls {
+    fn atomic_field(
+        &self,
+        _: &KlibPublicIdSignature,
+    ) -> Lowered<Option<crate::libraries::AtomicOperation>> {
+        Ok(self.atomic_field)
+    }
     fn requires_declaration(&self, _: &KlibPublicIdSignature) -> Lowered<bool> {
         panic!("no call")
     }
@@ -74,6 +84,8 @@ struct Fixture {
     int_type: KlibIrTypeId,
     unit_type: KlibIrTypeId,
     owner: TypeName,
+    /// The atomic field access every call in a lowered body is.
+    atomic_field: Option<crate::libraries::AtomicOperation>,
 }
 
 impl Fixture {
@@ -200,6 +212,7 @@ impl Fixture {
             int_type,
             unit_type,
             owner,
+            atomic_field: None,
         }
     }
 
@@ -325,7 +338,9 @@ impl Fixture {
         let class = ir.add_class(class);
         let function = crate::klib_lowering::function_lowering::declare_function(&mut ir, &header);
         let builtins = IrBuiltinOperators::new();
-        let mut linker = NoCalls;
+        let mut linker = NoCalls {
+            atomic_field: self.atomic_field,
+        };
         let mut lowering = BodyLowering::new(
             &self.arena,
             LoweredFunction {
@@ -338,7 +353,7 @@ impl Fixture {
             &mut linker,
         );
         if matches!(access, Access::ValueReadOnly) {
-            lowering = lowering.reading_through(class, &[&self.fields[0]], true);
+            lowering = lowering.reading_through(class, &[&self.fields[0]], Vec::new(), true);
             if no_declared_receiver {
                 lowering.instance_storage.as_mut().unwrap().receiver = None;
             }
@@ -347,6 +362,7 @@ impl Fixture {
                 class,
                 receiver: Some(self.receiver_ty),
                 access,
+                properties: Vec::new(),
                 fields: self
                     .fields
                     .iter()
@@ -414,6 +430,40 @@ fn initializer_writes_final_and_mutable_fields_and_keeps_operand_order() {
         assert_eq!(ir.checked_type(receiver), Some(fixture.receiver_ty));
         assert_eq!(ir.checked_type(value), Some(fixture.field_ty));
         assert_eq!(ir.checked_type(result), Some(Ty::Unit));
+    }
+}
+
+#[test]
+fn an_atomic_field_access_without_arguments_is_a_shape_mismatch() {
+    for operation in [
+        crate::libraries::AtomicOperation::Load,
+        crate::libraries::AtomicOperation::CompareAndSet,
+    ] {
+        let mut fixture = Fixture::new(false);
+        fixture.atomic_field = Some(operation);
+        let call = fixture.arena.push_expr(
+            Some(fixture.field_type),
+            KlibIrExprKind::Call {
+                access: KlibIrMemberAccess {
+                    symbol: public_symbol(
+                        KlibIrSymbolKind::Function,
+                        KlibPublicIdSignature::classifier(crate::types::type_name(
+                            "kotlin/concurrent/atomicGetField",
+                        )),
+                    ),
+                    arguments: crate::metadata::klib_ir::tree::KlibIrArguments::Flat(vec![]),
+                    type_arguments: vec![],
+                    origin: None,
+                },
+                super_qualifier: None,
+            },
+        );
+        assert_eq!(
+            fixture.lower(call, Access::Member).1,
+            Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an atomic field access has no property reference".to_owned()
+            ))
+        );
     }
 }
 
