@@ -36,6 +36,16 @@ pub fn referenced_dependencies(ir: &IrFile) -> ReferencedDependencies {
         referenced.function_override(edge.implementation);
         referenced.function_override(edge.overridden);
     }
+    // A slot member is declaration evidence only: a target compares its exact method header and
+    // never calls it through this record.
+    for function in ir
+        .function_slot_families
+        .values()
+        .flatten()
+        .flat_map(|family| family.slots.iter().flatten())
+    {
+        referenced.function_override(function.target);
+    }
     for edge in ir.property_overrides.values().flatten() {
         referenced.property_override(edge.implementation);
         referenced.property_override(edge.overridden);

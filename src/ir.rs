@@ -1497,6 +1497,11 @@ pub struct IrFile {
     pub classifier_hierarchies: crate::fx_hash::HashMap<TypeName, Vec<IrAppliedClassifier>>,
     /// The interface defaults each source classifier inherits without overriding, as override
     /// resolution selected them; a target backend realizes each record without selecting one.
+    /// The function names of each source classifier that keep more than one member slot, as
+    /// override resolution grouped them. A target whose realization can merge two slots checks
+    /// these records; it never compares the declarations again.
+    pub function_slot_families:
+        crate::fx_hash::HashMap<TypeName, Vec<crate::fir::ResolvedFunctionSlotFamily>>,
     pub inherited_defaults:
         crate::fx_hash::HashMap<TypeName, Vec<crate::fir::ResolvedInheritedDefault>>,
     /// The frontend-selected custom serializer construction of each source classifier whose
