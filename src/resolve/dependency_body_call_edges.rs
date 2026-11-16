@@ -51,7 +51,7 @@ pub(crate) fn for_checked_klib_bodies<'a>(
             if sam_declarations.contains_key(&key) {
                 continue;
             }
-            if let Some((declaration, _)) =
+            if let Some(declaration) =
                 klib_sam_facts::freeze(source, bodies, &identity.module, &signature, name)
             {
                 sam_declarations.insert(key, declaration);
