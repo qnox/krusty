@@ -361,12 +361,10 @@ mod type_spellings;
 #[cfg(test)]
 pub(crate) use signature_collection::collect_signatures_with_cp_headers;
 use signature_collection::{
-    base_class_type_ref, commit_top_level_conflict_groups, compact_classifier_identity,
+    base_class_type_ref, commit_package_overload_conflicts, compact_classifier_identity,
     compact_source_imports, enum_entry_member_signature, has_projected_generic_return_hazard,
-    register_top_level_function_conflict, spelling_scope, supertype_components, supertype_graph,
-    TopLevelFunctionConflictCandidates, TopLevelFunctionConflictDecl,
-    TopLevelFunctionConflictDeclaration, TopLevelFunctionConflictDisplaySource,
-    TopLevelFunctionConflictGroups, TopLevelFunctionConflictKey,
+    spelling_scope, supertype_components, supertype_graph, TopLevelFunctionConflictCandidates,
+    TopLevelFunctionConflictDecl, TopLevelFunctionConflictDeclaration, TopLevelFunctionConflictKey,
     TopLevelFunctionConflictRegistration,
 };
 #[cfg(test)]
@@ -397,6 +395,7 @@ mod type_parameter_owners;
 use type_parameter_owners::ty_param_names_into;
 mod cyclic_upper_bounds;
 mod resolved_bound_view;
+mod type_argument_arity;
 mod uninferred_call_results;
 mod upper_bound_violations;
 mod value_class_parameters;
@@ -30269,6 +30268,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         ret_ty: Ty::Unit,
         type_parameter_owners: HashMap::default(),
         uninferred_type_parameters: HashMap::default(),
+        type_argument_arity: Default::default(),
         upper_bound_violations: Default::default(),
         expected: None,
         callable_reference_literal_constraints: HashMap::default(),
@@ -32739,6 +32739,7 @@ struct Checker<'a> {
     /// Selected call formals that remain unresolved, plus whether their provider declaration is a
     /// platform type parameter. This is diagnostic state scoped with [`Self::type_parameter_owners`].
     uninferred_type_parameters: HashMap<&'static str, bool>,
+    type_argument_arity: type_argument_arity::TypeArgumentArityState,
     upper_bound_violations: upper_bound_violations::UpperBoundViolationState,
     /// Expected type for the next expression. Consumed by [`Self::expr`]; result-position
     /// propagation must re-arm it through [`Self::expr_expected`].
@@ -39509,6 +39510,7 @@ impl<'a> Checker<'a> {
                             let applied = self.alias_application_ty_with_spelling(
                                 scope,
                                 alias_projection::SelectedAliasApplication {
+                                    identity: alias.identity,
                                     formals: alias.formals,
                                     expansion: alias.expansion,
                                     expansion_spelling: alias.expansion_spelling,
@@ -39522,8 +39524,13 @@ impl<'a> Checker<'a> {
                             applied.ty
                         })
                     } else {
-                        typeref_classifier(r, Some(internal))
-                            .map(|internal| self.obj_with_targs_name(scope, internal, r))
+                        typeref_classifier(r, Some(internal)).map(|internal| {
+                            if self.check_type_reference_arity(r, internal) {
+                                self.obj_with_targs_name(scope, internal, r)
+                            } else {
+                                Ty::Error
+                            }
+                        })
                     }
                 }
                 InheritedNestedClassifier::Ambiguous => {
@@ -39807,7 +39814,9 @@ impl<'a> Checker<'a> {
         })
         .flatten();
         let Some((formals, expansion)) = bare_alias else {
-            return self.type_ref_ty(scope, reference);
+            return self.with_bare_outermost_type(reference, |checker| {
+                checker.type_ref_ty(scope, reference)
+            });
         };
 
         // Source alias parameters cannot declare bounds, so their star-projected readable upper
@@ -49208,6 +49217,10 @@ impl<'a> Checker<'a> {
     /// Report the failed classifier binding recorded by [`Self::type_ref_ty`]. Unsupported shapes
     /// have no binding failure and continue to their shape-specific diagnostic.
     fn report_unresolved_type_ref(&mut self, r: &TypeRef) -> bool {
+        // A wrong argument count was already reported and explains the error type.
+        if self.rejected_type_argument_count(r) {
+            return true;
+        }
         if let Some(miss) = self.unresolved_type_segments.get(&(r.span.lo, r.span.hi)) {
             let message = match miss {
                 crate::symbol_resolver::ClassifierMiss::Unresolved(segment) => {
@@ -50703,9 +50716,6 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                if let Some(ty) = self.read_imported_enum_entry(e, &n) {
-                    return self.set(e, ty);
-                }
                 let lexical_classes = self.lexical_source_class_names();
                 let enum_entry_owner = lexical_classes.iter().copied().find(|owner| {
                     self.resolved_type_name(*owner)
@@ -50797,6 +50807,9 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(property) = self.lexical_associated_property(&n) {
                     let ty = self.record_associated_property(Some(e), property, true);
+                    return self.set(e, ty);
+                }
+                if let Some(ty) = self.read_imported_enum_entry(e, &n) {
                     return self.set(e, ty);
                 }
                 if self

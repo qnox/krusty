@@ -421,11 +421,18 @@ pub(in crate::resolve) fn source_type_universe(
                             }
                         }
                     } else {
-                        let classifier =
-                            classifier_from_imports(&source_name, &imap, &levels, &source).found();
-                        let unresolved = classifier.is_none().then(|| source_name.clone());
-                        let classifier_segment = classifier.map(|_| 0);
-                        (classifier, unresolved, classifier_segment)
+                        match classifier_from_imports(&source_name, &imap, &levels, &source) {
+                            InheritedNestedClassifier::Ambiguous => {
+                                file_ambiguous.insert(name.clone());
+                                (None, None, None)
+                            }
+                            selected => {
+                                let classifier = selected.found();
+                                let unresolved = classifier.is_none().then(|| source_name.clone());
+                                let classifier_segment = classifier.map(|_| 0);
+                                (classifier, unresolved, classifier_segment)
+                            }
+                        }
                     };
                 let full = full.map(|full| libraries.canonical_source_type_name(full));
                 if let Some(identity) = full.filter(|identity| source_aliases.contains(identity)) {

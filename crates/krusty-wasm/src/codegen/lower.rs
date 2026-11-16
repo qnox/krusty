@@ -1690,6 +1690,19 @@ impl<'a> Body<'a> {
                     })?;
                 self.code.call(entry);
             }
+            // So are `values()` and `valueOf`, which read those constants.
+            IrExpr::EnumValues { classifier } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::Values,
+                None,
+            )?,
+            IrExpr::EnumValueOf {
+                classifier, arg, ..
+            } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::ValueOf,
+                Some(arg),
+            )?,
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
                 ty,
@@ -1905,6 +1918,12 @@ impl<'a> Body<'a> {
             IrExpr::LocalDelegateAccess(access) => self.local_delegate_access(access)?,
             IrExpr::LocalPropertyReference(reference) => {
                 self.local_property_reference(&reference)?
+            }
+            IrExpr::Checked(ref operation)
+                if let Some(reference) = operation.module_property_reference()
+                    && reference.delegated =>
+            {
+                self.delegated_property_reference(reference.property)?
             }
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
