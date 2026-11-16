@@ -245,9 +245,8 @@ pub(super) fn prepare_common_ir(
             "cannot freeze prepared dependency declarations: {error:?}"
         ))
     })?;
-    record_checked_klib_dependency_facts(&mut callables, provider, represented)
-        .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
-    // The handoff froze the recorded CharSequence selection; the refreeze keeps it.
+    // The handoff froze the recorded CharSequence selection; the refreeze keeps it, before the
+    // checked KLIB graph is recorded, as the handoff orders them.
     if let Some(protocol) = char_sequence_protocol {
         callables
             .freeze_char_sequence_protocol(protocol, provider)
@@ -257,6 +256,8 @@ pub(super) fn prepare_common_ir(
                 ))
             })?;
     }
+    record_checked_klib_dependency_facts(&mut callables, provider, represented)
+        .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
     super::builtin_implementations::record_checked(
         &mut callables,
         &file.ir,
