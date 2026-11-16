@@ -853,12 +853,6 @@ impl CheckedBackendCallables {
         Ok(())
     }
 
-    pub(crate) fn klib_builtin_implementations(
-        &self,
-    ) -> &HashMap<ExternalCallableId, Box<[BuiltinImplementation]>> {
-        self.klib_dependency_facts.builtin_implementations()
-    }
-
     pub(crate) fn klib_dependency_facts(&self) -> &crate::ir::CheckedKlibDependencyFacts {
         &self.klib_dependency_facts
     }

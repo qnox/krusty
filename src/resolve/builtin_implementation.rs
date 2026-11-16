@@ -197,13 +197,15 @@ pub(crate) fn for_checked_external_members(
             Some(checked) => checked.to_vec(),
             None => builtin_implementation_facts(source, owner, &name, identity).into_vec(),
         };
-        implementations.extend(represented_implementation_facts(
-            source,
-            represented,
-            owner,
-            &name,
-            identity,
-        ));
+        // Facts a lowered KLIB unit carries from the checked body graph already hold the
+        // represented overrides; each joins the member's facts once.
+        for represented in
+            represented_implementation_facts(source, represented, owner, &name, identity)
+        {
+            if !implementations.contains(&represented) {
+                implementations.push(represented);
+            }
+        }
         facts.insert(identity, implementations.into_boxed_slice());
     }
     Ok(facts)
