@@ -1088,10 +1088,10 @@ mod tests {
         ir.local_class_name_provenance.insert(
             local_id,
             IrLocalClassNameProvenance {
-                source: IrModuleSource {
+                source: krusty::ir::IrLocalClassNameRoot::Source(IrModuleSource {
                     source: krusty::fir::SourceFileId::from_raw(0),
                     package: type_name("sample"),
-                },
+                }),
                 lexical_owner: Some(krusty::ir::IrLocalClassOwner::Class(owner_id)),
                 segments: vec!["make".to_string(), "Local".to_string()].into_boxed_slice(),
                 ordinal: None,

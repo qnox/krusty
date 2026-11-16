@@ -1635,6 +1635,9 @@ pub(super) fn construction_target(access: IrConstructorAccess) -> IrConstructorT
 /// list, and its fields are stored by the initializer rather than by parameter spelling.
 pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
     let mut class = IrClass::synthetic(prepared.classifier);
+    // A class private to its enclosing class is a member classifier its public signature names,
+    // as its source declares it; a file-local one has no name of its own here.
+    class.is_source_declared = matches!(prepared.key.signature, KlibIrSignature::Public(_));
     class.supertypes = prepared.supertypes.clone();
     for interface in &prepared.interfaces {
         class.interfaces.push_name(*interface);
