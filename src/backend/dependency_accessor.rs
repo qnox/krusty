@@ -1,6 +1,6 @@
 //! Join an already-selected property operation to its exact frozen accessor, without lookup.
 
-use super::{BackendCallableFact, CheckedBackendCallables};
+use super::{BackendCallableFact, BackendPropertyFact, CheckedBackendCallables};
 use crate::fir::ExternalCallableId;
 use crate::ir::{Callee, ExprId, IrCheckedOperation, IrPropertyDispatch};
 use crate::types::Ty;
@@ -8,6 +8,8 @@ use crate::types::Ty;
 pub struct DependencyAccessor<'a> {
     pub target: ExternalCallableId,
     pub callable: &'a BackendCallableFact,
+    /// The property the accessor reads or writes.
+    pub property: &'a BackendPropertyFact,
     pub receiver: Option<ExprId>,
     pub arguments: &'a [ExprId],
     parameters: &'a [Ty],
@@ -55,6 +57,7 @@ impl CheckedBackendCallables {
         Some(DependencyAccessor {
             target,
             callable: self.callable(target)?,
+            property,
             receiver,
             arguments,
             parameters,

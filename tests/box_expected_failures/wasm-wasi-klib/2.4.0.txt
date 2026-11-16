@@ -255,7 +255,6 @@ callableReference/bound/companionObjectReceiverInheritsFromOuter.kt
 callableReference/bound/emptyLHS.kt
 callableReference/bound/equals/nullableReceiverInEquals.kt
 callableReference/bound/genericValOnLHS.kt
-callableReference/bound/kCallableNameIntrinsic.kt
 callableReference/bound/multiCase.kt
 callableReference/bound/nullReceiver.kt
 callableReference/bound/simpleFunction.kt
@@ -264,15 +263,11 @@ callableReference/callableReferenceOfCompanionConst.kt
 callableReference/callableReferenceOfCompanionProperty.kt
 callableReference/callableReferencetoInnerAndLocal.kt
 callableReference/equality/conversionCombinations.kt
-callableReference/equality/extensionFunctionEquality.kt
 callableReference/equality/kpropertyWithCapturingInequality.kt
-callableReference/equality/lambdaNonEquality.kt
-callableReference/equality/overloadedFunctionEquality.kt
 callableReference/equality/suspendFunctionEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorIsKFunction.kt
 callableReference/function/booleanNotIntrinsic.kt
-callableReference/function/classMemberFromCompanionObject.kt
 callableReference/function/enumValueOfMethod.kt
 callableReference/function/extensionFunctionAsASuperTypePassToSAMInterface.kt
 callableReference/function/genericCallableReferenceArgumentsNonJVM.kt
@@ -283,11 +278,9 @@ callableReference/function/genericWithDependentType.kt
 callableReference/function/kt21787.kt
 callableReference/function/kt32462.kt
 callableReference/function/local/enumExtendsTrait.kt
-callableReference/function/local/localFunctionName.kt
 callableReference/function/overloadedFunVsVal.kt
 callableReference/function/referenceToCompanionMember.kt
 callableReference/function/sortListOfStrings.kt
-callableReference/genericConstructorReference.kt
 callableReference/generticReferences.kt
 callableReference/kt21014.kt
 callableReference/kt21092a.kt
@@ -395,7 +388,6 @@ closures/crossinlineLocalDeclaration.kt
 closures/kt11634_4.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
 closures/localFunctionInInitBlock.kt
-collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/addCollectionStubWithCovariantOverride.kt
@@ -1208,7 +1200,6 @@ evaluate/inJavaPackage.kt
 evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
 evaluate/intrinsicConst/kCallableNameWithSideEffect.kt
-evaluate/intrinsicConst/kt58717.kt
 evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/kt9443.kt
 evaluate/objectConstValInAnnotationArgument.kt
