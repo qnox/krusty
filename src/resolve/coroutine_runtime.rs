@@ -1,5 +1,4 @@
-//! Selects the stdlib declarations a suspend function's lowering calls (see
-//! [`crate::ir::IrCoroutineRuntime`]) among the declarations the compilation sees.
+//! Declarations selected for suspend lowering's coroutine runtime operations.
 
 use crate::ir::IrCoroutineRuntime;
 use crate::libraries::{FnKind, PropKind};
@@ -9,9 +8,8 @@ use crate::types::{type_name, SemanticCallableOwner};
 #[cfg(test)]
 mod tests;
 
-/// The runtime of a file that declares a suspend function, or `None` when the classpath does not
-/// publish the exact marker, completion, and continuation method declarations this lowering uses.
-pub(super) fn select(source: &dyn SymbolSource) -> Option<IrCoroutineRuntime> {
+/// The dependency declarations coroutine lowering may need for this compilation.
+pub(super) fn selected(source: &dyn SymbolSource) -> Option<IrCoroutineRuntime> {
     let intrinsics = source.symbols(
         SymbolNamespace::Package(type_name("kotlin/coroutines/intrinsics")),
         "COROUTINE_SUSPENDED",
@@ -24,6 +22,7 @@ pub(super) fn select(source: &dyn SymbolSource) -> Option<IrCoroutineRuntime> {
     let (Some(suspended), None) = (suspended.next(), suspended.next()) else {
         return None;
     };
+
     let kotlin = source.symbols(SymbolNamespace::Package(type_name("kotlin")), "getOrThrow");
     let result = type_name("kotlin/Result");
     let mut get_or_throw = kotlin.callables.functions().iter().filter(|function| {

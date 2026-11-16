@@ -13,7 +13,6 @@ use crate::diag::{DiagSink, Span};
 use crate::fir::SourceFileId;
 use crate::resolve::PassTwoSymbols;
 
-mod coroutine_runtime;
 mod plugin_handoff;
 
 /// The module-wide facts every file of one emission hands its backend alongside its own IR.
@@ -50,9 +49,9 @@ pub(super) fn checked_ir_file<'a>(
         &classifiers,
     );
     // A suspend function's lowering calls two stdlib declarations the source need not name; select
-    // them now, so they are frozen with the file's other dependency declarations.
+    // them now from the identities resolution stored before backend entry.
     if module.common_ir_coroutines && !ir.suspend_funs.is_empty() {
-        ir.coroutine_runtime = coroutine_runtime::select(symbols.semantic_platform());
+        ir.coroutine_runtime = symbols.coroutine_runtime();
     }
     let mut callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
         Ok(callables) => callables,
@@ -184,9 +183,12 @@ pub(super) fn prepare_common_ir(
     file: &mut CheckedIrFile<'_>,
     provider: &dyn crate::libraries::SemanticPlatform,
     preparation: crate::backend::CommonIrPreparation,
+    coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
 ) -> Result<(), crate::backend::CommonIrPreparationError> {
+    // Resolution selected the coroutine runtime declarations once; a unit whose preparation
+    // lowers a suspend function records that saved selection.
     if !file.ir.suspend_funs.is_empty() && file.ir.coroutine_runtime.is_none() {
-        file.ir.coroutine_runtime = coroutine_runtime::select(provider);
+        file.ir.coroutine_runtime = coroutine_runtime;
     }
     crate::backend::counted_loops::realize(&mut file.ir, preparation.counted_loops);
     crate::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);

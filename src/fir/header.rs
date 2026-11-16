@@ -1028,6 +1028,7 @@ fn extract_file_stub_inventory(
             kind: DeclarationKind::Classifier,
             sibling,
         });
+        let declares_inline = class.value_class_keyword(file).map(|k| k.declares_inline);
         out.push(DeclarationStub {
             id: class_id,
             source,
@@ -1042,13 +1043,10 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::INTERFACE, class.is_interface())
                 .with(DeclarationFlags::SINGLETON, class.is_singleton())
                 .with(DeclarationFlags::DATA, class.is_data)
-                .with(
-                    DeclarationFlags::VALUE,
-                    class.is_value && class.value_modifier_span.is_none(),
-                )
+                .with(DeclarationFlags::VALUE, declares_inline == Some(true))
                 .with(
                     DeclarationFlags::VALUE_KEYWORD,
-                    class.value_modifier_span.is_some(),
+                    declares_inline == Some(false),
                 )
                 .with(DeclarationFlags::ENUM, class.is_enum())
                 .with(DeclarationFlags::FUN_INTERFACE, class.is_fun_interface)

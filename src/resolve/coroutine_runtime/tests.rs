@@ -30,7 +30,7 @@ fn selected_runtime_declarations_keep_exact_provider_identities_without_inventin
 }
 
 fn assert_selected_runtime(provider: &KlibLibraries) {
-    let runtime = select(provider).expect("one exact coroutine runtime");
+    let runtime = selected(provider).expect("one exact coroutine runtime");
     let property = provider
         .external_property(runtime.suspended)
         .expect("the marker is the selected provider property");

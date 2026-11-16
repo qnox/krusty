@@ -568,9 +568,12 @@ pub(super) fn emit_dependencies<B: Backend>(
             .extend(materialized.iter().cloned());
 
         if let Some(preparation) = backend.common_ir_preparation() {
-            if let Err(error) =
-                super::backend_handoff::prepare_common_ir(&mut support, platform, preparation)
-            {
+            if let Err(error) = super::backend_handoff::prepare_common_ir(
+                &mut support,
+                platform,
+                preparation,
+                symbols.coroutine_runtime(),
+            ) {
                 release_unit_reservations(support_state, &published, &materialized);
                 backend.report_common_ir_preparation_error(&error, diags);
                 return Vec::new();
