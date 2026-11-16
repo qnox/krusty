@@ -238,6 +238,24 @@ pub fn base_member(
     declared_base_member(getter.declaration_owner, &property.name)
 }
 
+/// The `kotlin.Enum` property the dependency getter `getter` declares. A target answering `name`
+/// and `ordinal` from its enum base realizes a library body's call of that getter as it does a
+/// source read, in place of the getter's KLIB body, which reads a class layout the target does not
+/// give its enums.
+pub fn getter_base_member(
+    getter: crate::libraries::DependencyGetterSignature<'_>,
+) -> Option<BaseMember> {
+    if !getter.parameters.is_empty() {
+        return None;
+    }
+    declared_base_member(
+        Some(crate::types::SemanticCallableOwner::Classifier(
+            getter.owner,
+        )),
+        getter.name,
+    )
+}
+
 /// Which `kotlin.Enum` property a getter with this checked semantic owner declares. The physical
 /// owner never decides it: a JVM classpath realizes the getter on the mapped platform class, and a
 /// facade or a getter without a published owner is not `kotlin.Enum`'s.
