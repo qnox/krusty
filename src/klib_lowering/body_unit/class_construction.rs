@@ -139,6 +139,7 @@ impl<'u, 's> Linker<'u, 's> {
             initialization: Some((class, plan)),
             value_member: Some(member),
             local_body: None,
+            static_initialization: None,
         });
         Ok(())
     }

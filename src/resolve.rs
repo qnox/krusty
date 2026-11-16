@@ -37,11 +37,11 @@ mod argument_parameter_mapping;
 mod builtin_implementation;
 mod char_sequence_protocol;
 mod coroutine_runtime;
+mod selected_external_members;
 use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,
     named_whole_array_varargs,
 };
-pub(crate) use builtin_implementation::for_checked_external_members;
 mod call_site_publication;
 mod constructor_references;
 mod implicit_source_member_lambda;
@@ -81,6 +81,9 @@ pub(crate) mod operator_override_relations;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
+pub(crate) use builtin_implementation::{
+    published_override_facts, record_override_edges, RepresentedOverrides,
+};
 pub(crate) use checked_annotation_publication::publish_checked_declaration_annotations;
 pub(crate) use checked_constant_publication::publish_checked_compile_time_constants;
 pub(crate) use lexical_policies::publish_file_annotations;
@@ -24591,6 +24594,10 @@ fun box(): String {
                     );
                     exists.owner = Some(crate::types::type_name("test/Factory"));
                     exists.external_identity = Some(crate::fir::ExternalCallableId::from_raw(99));
+                    exists.declaration_owner =
+                        Some(crate::types::SemanticCallableOwner::Classifier(
+                            crate::types::type_name("test/Factory"),
+                        ));
                     exists.call_sig = CallSig {
                         required: 1,
                         vararg: true,
@@ -30223,7 +30230,9 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         },
     );
     let import_levels = function_import_scope.classifier_levels().to_vec();
+    let selected_external_members = selected_external_members::SelectedExternalMembers::default();
     let mut checker = Checker {
+        selected_external_members: selected_external_members.clone(),
         file,
         source_package: source_package::identity(file.package.as_deref()),
         libraries: syms.libraries(),
@@ -30323,9 +30332,11 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         local_function_receivers: crate::fx_hash::HashSet::default(),
         field_ty: None,
         field_receiver_identity: None,
-        expr_lowers: HashMap::default(),
+        expr_lowers: selected_external_members::SelectionTable::new(&selected_external_members),
         selected_callable_reference_diagnostics: HashMap::default(),
-        resolved_sam_conversions: HashMap::default(),
+        resolved_sam_conversions: selected_external_members::SelectionTable::new(
+            &selected_external_members,
+        ),
         inferred_fun_rets: HashMap::default(),
         inferred_ext_fun_rets: HashMap::default(),
         inferred_method_rets: HashMap::default(),
@@ -30347,7 +30358,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_body_local_supertypes: HashMap::default(),
         body_local_type_aliases: Default::default(),
         checked_local_supertypes: HashMap::default(),
-        stmt_lowers: HashMap::default(),
+        stmt_lowers: selected_external_members::SelectionTable::new(&selected_external_members),
         stmt_return_targets: HashMap::default(),
         expr_return_targets: HashMap::default(),
         discarded_exprs: crate::fx_hash::HashSet::default(),
@@ -30366,7 +30377,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         selected_function_value_conversions: HashMap::default(),
         narrowed_this_member: HashMap::default(),
         script_receiver_members: HashSet::default(),
-        resolved_calls: HashMap::default(),
+        resolved_calls: selected_external_members::SelectionTable::new(&selected_external_members),
         rejected_dependency_signatures: HashMap::default(),
         unbound_value_lambda_call_formals: HashMap::default(),
         open_lambda_result_call_formals: HashMap::default(),
@@ -30385,19 +30396,29 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_source_calls: HashMap::default(),
         extension_receiver_expr_uses: vec![Vec::new(); file.expr_arena.len()],
         extension_receiver_stmt_uses: vec![Vec::new(); file.stmt_arena.len()],
-        resolved_operator_calls: HashMap::default(),
+        resolved_operator_calls: selected_external_members::SelectionTable::new(
+            &selected_external_members,
+        ),
         resolved_builtin_operator_accesses: HashMap::default(),
         resolved_in_range_comparisons: HashMap::default(),
-        resolved_stmt_operator_calls: HashMap::default(),
+        resolved_stmt_operator_calls: selected_external_members::SelectionTable::new(
+            &selected_external_members,
+        ),
         resolved_stmt_builtin_operator_accesses: HashMap::default(),
         resolved_stmt_operator_arg_slots: HashMap::default(),
         indexed_operator_ambiguous: false,
         binary_operator_reported: false,
         resolved_inc_dec: HashMap::default(),
         resolved_index_store_get_returns: HashMap::default(),
-        resolved_destructure_components: HashMap::default(),
-        iterator_protocols: HashMap::default(),
-        for_range_iterator_protocols: HashMap::default(),
+        resolved_destructure_components: selected_external_members::SelectionTable::new(
+            &selected_external_members,
+        ),
+        iterator_protocols: selected_external_members::SelectionTable::new(
+            &selected_external_members,
+        ),
+        for_range_iterator_protocols: selected_external_members::SelectionTable::new(
+            &selected_external_members,
+        ),
         iteration_plans: IterationPlans::default(),
         resolved_constructors: HashMap::default(),
         call_owned_conditional_branches: HashMap::default(),
@@ -30405,7 +30426,9 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_enum_entry_constructors: HashMap::default(),
         resolved_ctor_delegations: HashMap::default(),
         resolved_primary_ctor_delegations: HashMap::default(),
-        resolved_super_calls: HashMap::default(),
+        resolved_super_calls: selected_external_members::SelectionTable::new(
+            &selected_external_members,
+        ),
         resolved_constants: HashMap::default(),
         constant_integer_coercion_reads: crate::fx_hash::HashSet::default(),
         constant_property_reads: HashMap::default(),
@@ -30417,11 +30440,19 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         platform_narrowings: HashMap::default(),
         enhanced_locals: Default::default(),
         flexible_values: Default::default(),
-        interface_delegate_calls: HashMap::default(),
+        interface_delegate_calls: selected_external_members::SelectionTable::new(
+            &selected_external_members,
+        ),
         synthetic_ext_calls: HashMap::default(),
-        delegate_getvalue_targets: HashMap::default(),
-        delegate_setvalue_targets: HashMap::default(),
-        delegate_provide_targets: HashMap::default(),
+        delegate_getvalue_targets: selected_external_members::SelectionTable::new(
+            &selected_external_members,
+        ),
+        delegate_setvalue_targets: selected_external_members::SelectionTable::new(
+            &selected_external_members,
+        ),
+        delegate_provide_targets: selected_external_members::SelectionTable::new(
+            &selected_external_members,
+        ),
         deprecation_use_sites: Default::default(),
         delegate_property_reference_type: None,
         super_ctor_params: HashMap::default(),
@@ -31804,17 +31835,18 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     let enhanced_values = c.enhanced_value_heads();
     let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
         Ok(implementations) => implementations,
-        Err(identity) => {
+        Err(error) => {
             c.diags.error(
                 Span::new(0, 0),
                 format!(
-                    "internal error: selected external member {identity:?} has no semantic owner"
+                    "internal error: selected external member has incomplete builtin implementation facts: {error:?}"
                 ),
             );
             HashMap::default()
         }
     };
     let Checker {
+        selected_external_members: _,
         expr_types,
         callable_reference_types,
         reflective_callable_references,
@@ -31903,6 +31935,20 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         lambda_body_results,
         ..
     } = c;
+    let expr_lowers = expr_lowers.into_entries();
+    let stmt_lowers = stmt_lowers.into_entries();
+    let resolved_calls = resolved_calls.into_entries();
+    let resolved_operator_calls = resolved_operator_calls.into_entries();
+    let resolved_stmt_operator_calls = resolved_stmt_operator_calls.into_entries();
+    let resolved_destructure_components = resolved_destructure_components.into_entries();
+    let iterator_protocols = iterator_protocols.into_entries();
+    let for_range_iterator_protocols = for_range_iterator_protocols.into_entries();
+    let resolved_super_calls = resolved_super_calls.into_entries();
+    let interface_delegate_calls = interface_delegate_calls.into_entries();
+    let delegate_getvalue_targets = delegate_getvalue_targets.into_entries();
+    let delegate_setvalue_targets = delegate_setvalue_targets.into_entries();
+    let delegate_provide_targets = delegate_provide_targets.into_entries();
+    let resolved_sam_conversions = resolved_sam_conversions.into_entries();
     if !capture_discovery && !fragment.publishes_annotation_metadata() {
         if let Some(syms) = syms.pass_one_symbols_mut() {
             publish_checked_primary_constructor_types(
@@ -32811,10 +32857,13 @@ struct Checker<'a> {
     /// accessor's dispatch instance reliably.
     field_receiver_identity: Option<(usize, usize)>,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
-    expr_lowers: HashMap<ExprId, ExprLowering>,
+    /// Every dependency declaration the unit's committed selections name.
+    selected_external_members: selected_external_members::SelectedExternalMembers,
+    expr_lowers: selected_external_members::SelectionTable<ExprId, ExprLowering>,
     selected_callable_reference_diagnostics:
         HashMap<ExprId, callable_reference_publication::SelectedReferenceDiagnostic>,
-    resolved_sam_conversions: HashMap<ExprId, ResolvedSamConversion>,
+    resolved_sam_conversions:
+        selected_external_members::SelectionTable<ExprId, ResolvedSamConversion>,
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
@@ -32883,7 +32932,7 @@ struct Checker<'a> {
     /// (see [`ClassSig::super_ctor_params`]). Stashed during checking (where the argument types are
     /// known) and applied to the `ClassSig` after, since `syms` is borrowed immutably while checking.
     super_ctor_params: HashMap<TypeName, Vec<Ty>>,
-    stmt_lowers: HashMap<StmtId, StmtLowering>,
+    stmt_lowers: selected_external_members::SelectionTable<StmtId, StmtLowering>,
     stmt_return_targets: HashMap<StmtId, ReturnTarget>,
     expr_return_targets: HashMap<ExprId, ReturnTarget>,
     discarded_exprs: crate::fx_hash::HashSet<ExprId>,
@@ -32923,7 +32972,7 @@ struct Checker<'a> {
     /// Calls resolved during checking, keyed by the `Expr::Call` `ExprId` (moved into
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
-    resolved_calls: HashMap<ExprId, ResolvedCall>,
+    resolved_calls: selected_external_members::SelectionTable<ExprId, ResolvedCall>,
     /// Declared return and value-parameter types of a dependency candidate a call rejected.
     /// Missing classes in that signature are still reported; type-parameter bounds are not stored.
     rejected_dependency_signatures: HashMap<ExprId, Vec<Ty>>,
@@ -32967,13 +33016,15 @@ struct Checker<'a> {
     resolved_source_calls: HashMap<ExprId, (u32, u32)>,
     extension_receiver_expr_uses: Vec<Vec<Span>>,
     extension_receiver_stmt_uses: Vec<Vec<Span>>,
-    resolved_operator_calls: HashMap<(ExprId, SyntheticOperatorCall), ResolvedCall>,
+    resolved_operator_calls:
+        selected_external_members::SelectionTable<(ExprId, SyntheticOperatorCall), ResolvedCall>,
     /// Builtin scalar operators lower without a callable target, but checking still records
     /// their exact semantic dispatch classifier for qualified-access diagnostics.
     resolved_builtin_operator_accesses:
         HashMap<(ExprId, SyntheticOperatorCall), SelectedBuiltinOperatorAccess>,
     resolved_in_range_comparisons: HashMap<ExprId, ResolvedInRangeComparison>,
-    resolved_stmt_operator_calls: HashMap<(StmtId, SyntheticOperatorCall), ResolvedCall>,
+    resolved_stmt_operator_calls:
+        selected_external_members::SelectionTable<(StmtId, SyntheticOperatorCall), ResolvedCall>,
     /// Statement counterpart of [`Self::resolved_builtin_operator_accesses`].
     resolved_stmt_builtin_operator_accesses:
         HashMap<(StmtId, SyntheticOperatorCall), SelectedBuiltinOperatorAccess>,
@@ -32984,9 +33035,11 @@ struct Checker<'a> {
     binary_operator_reported: bool,
     resolved_inc_dec: HashMap<IncDecSite, ResolvedIncDec>,
     resolved_index_store_get_returns: HashMap<StmtId, Ty>,
-    resolved_destructure_components: HashMap<(StmtId, usize), DestructureComponentTarget>,
-    iterator_protocols: HashMap<ExprId, IteratorProtocolTarget>,
-    for_range_iterator_protocols: HashMap<StmtId, ForRangeIteratorTarget>,
+    resolved_destructure_components:
+        selected_external_members::SelectionTable<(StmtId, usize), DestructureComponentTarget>,
+    iterator_protocols: selected_external_members::SelectionTable<ExprId, IteratorProtocolTarget>,
+    for_range_iterator_protocols:
+        selected_external_members::SelectionTable<StmtId, ForRangeIteratorTarget>,
     iteration_plans: IterationPlans,
     resolved_constructors: HashMap<ExprId, ResolvedConstructor>,
     /// Conditional branches whose terminal selected call stayed open while a callable candidate
@@ -32999,7 +33052,7 @@ struct Checker<'a> {
     resolved_enum_entry_constructors: HashMap<(u32, u32), ResolvedConstructor>,
     resolved_ctor_delegations: HashMap<(DeclId, usize), ResolvedCtorDelegation>,
     resolved_primary_ctor_delegations: HashMap<DeclId, ResolvedCtorDelegation>,
-    resolved_super_calls: HashMap<ExprId, ResolvedSuperCall>,
+    resolved_super_calls: selected_external_members::SelectionTable<ExprId, ResolvedSuperCall>,
     resolved_constants: HashMap<ExprId, crate::libraries::LibraryConst>,
     /// Selected reads of `const val`s carrying Kotlin's `ImplicitIntegerCoercion` declaration fact.
     /// Constant folding removes the property-get lowering, so applicability keeps this compact fact
@@ -33020,11 +33073,17 @@ struct Checker<'a> {
     enhanced_locals: enhanced_values::EnhancedLocals,
     flexible_values: declaration_publication::FlexibleValues,
     /// See [`TypeInfo::interface_delegate_calls`].
-    interface_delegate_calls: HashMap<ExprId, Box<[crate::fir::ResolvedDelegateMemberCalls]>>,
+    interface_delegate_calls: selected_external_members::SelectionTable<
+        ExprId,
+        Box<[crate::fir::ResolvedDelegateMemberCalls]>,
+    >,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
-    delegate_getvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
-    delegate_setvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
-    delegate_provide_targets: HashMap<ExprId, DelegateGetValueTarget>,
+    delegate_getvalue_targets:
+        selected_external_members::SelectionTable<ExprId, DelegateGetValueTarget>,
+    delegate_setvalue_targets:
+        selected_external_members::SelectionTable<ExprId, DelegateGetValueTarget>,
+    delegate_provide_targets:
+        selected_external_members::SelectionTable<ExprId, DelegateGetValueTarget>,
     deprecation_use_sites: deprecation_usage::DeprecationUseSites,
     /// See [`TypeInfo::delegate_property_reference_type`].
     delegate_property_reference_type: Option<Ty>,

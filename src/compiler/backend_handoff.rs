@@ -93,8 +93,10 @@ pub(super) fn checked_ir_file<'a>(
     if let Err(identity) = super::builtin_implementations::record_checked(
         &mut callables,
         &ir,
-        symbols.semantic_platform(),
-        module.dispatched_classes,
+        crate::resolve::RepresentedOverrides::new(
+            symbols.semantic_platform(),
+            module.dispatched_classes,
+        ),
     ) {
         diags.error(
             Span::new(0, 0),
@@ -255,12 +257,16 @@ pub(super) fn prepare_common_ir(
                 ))
             })?;
     }
-    super::builtin_implementations::record_checked(&mut callables, &file.ir, provider, represented)
-        .map_err(|identity| {
-            crate::backend::CommonIrPreparationError::Invariant(format!(
-                "prepared IR has no builtin implementation facts for external member {identity:?}"
-            ))
-        })?;
+    super::builtin_implementations::record_checked(
+        &mut callables,
+        &file.ir,
+        crate::resolve::RepresentedOverrides::new(provider, represented),
+    )
+    .map_err(|identity| {
+        crate::backend::CommonIrPreparationError::Invariant(format!(
+            "prepared IR has no builtin implementation facts for external member {identity:?}"
+        ))
+    })?;
     callables
         .freeze_plugin_runtime_callables(plugin_runtime, |identity| {
             provider.external_callable(identity)

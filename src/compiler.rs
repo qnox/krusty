@@ -883,7 +883,7 @@ fn check_body_group(
             current = owner;
         }
     }
-    let info = crate::resolve::check_selected_declarations_in_pass_two(
+    let mut info = crate::resolve::check_selected_declarations_in_pass_two(
         crate::resolve::SourceFileUnit {
             file: active_file,
             file_index: raw_source as u32,
@@ -922,6 +922,22 @@ fn check_body_group(
             Span::new(0, 0),
             format!(
                 "internal error: checked local signatures were not publishable: {declarations:?}"
+            ),
+        );
+        return None;
+    }
+    // The body-local override plans published above can name external declarations no checked
+    // selection reached; freeze their builtin implementation facts with the unit's own.
+    if let Err(identity) = crate::resolve::record_override_edges(
+        &mut info.builtin_implementations,
+        index,
+        symbols.semantic_platform(),
+        raw_source as u32,
+    ) {
+        diags.error(
+            Span::new(0, 0),
+            format!(
+                "internal error: selected external member has incomplete builtin implementation facts: {identity:?}"
             ),
         );
         return None;
