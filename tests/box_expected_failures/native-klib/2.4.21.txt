@@ -21,7 +21,6 @@ annotations/instances/multifileEqHc.kt
 annotations/instances/multimoduleTypeParams.kt
 annotations/instances/nested.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
-annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
 arithmetic/basic_charConversions.kt
 arithmetic/basic_charCornerCases.kt
 arithmetic/basic_compareIntToFloat.kt
@@ -121,7 +120,6 @@ boxingOptimization/taintedValues.kt
 boxingOptimization/unsafeRemoving.kt
 boxingOptimization/unsignedArrayForEach.kt
 boxingOptimization/variables.kt
-branching/when_with_try1.kt
 bridges/complexTraitImpl.kt
 bridges/delegationComplexWithList.kt
 bridges/internalMethodFakeOverrideInFriendModule.kt

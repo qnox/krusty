@@ -35,7 +35,6 @@ annotations/instances/typeAliasesAndGenericsInterop.kt
 annotations/instances/unsignedAndBooleanArrays.kt
 annotations/instances/withDefaults.kt
 annotations/selfReferentialAnnotation.kt
-annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
 arithmetic/basic_charConversions.kt
 arithmetic/basic_charCornerCases.kt
 arithmetic/basic_compareIntToFloat.kt

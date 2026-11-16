@@ -143,14 +143,16 @@ impl Backend for WasmBackend {
         true
     }
 
-    /// The runtime lays out text, its builders and its exception classes itself: a library
-    /// body of one of their members reads a layout this target does not have, and a library
-    /// class extending one of the exceptions delegates to the runtime's constructor.
+    /// The runtime lays out text, its builders, its exception classes and `Unit`'s one instance
+    /// itself: a library body of one of their members reads a layout this target does not have,
+    /// a library class extending one of the exceptions delegates to the runtime's constructor,
+    /// and a library body's `Unit` value is the runtime's, as a source reference of it is.
     fn represents_dependency_classifier(
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
         classifier == krusty::types::wk::string()
+            || classifier == krusty::types::wk::unit()
             || lower::is_string_builder(classifier)
             || lower::is_array_list(classifier)
             || lower::runtime_lays_out(classifier)

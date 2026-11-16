@@ -220,7 +220,8 @@ pub(super) fn emit_dependencies<B: Backend>(
         // reads them through that unit's exports.
         let mut unit = DependencyBodyUnit::reading_realized_enums(
             support_state.materialized_classes.keys().copied(),
-        );
+        )
+        .presetting_constant_statics(backend.presets_constant_top_level_initializers());
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
