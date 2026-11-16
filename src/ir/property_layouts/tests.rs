@@ -365,3 +365,179 @@ fn a_copied_anonymous_class_keeps_its_inherited_storage_and_accessors_on_the_bas
         assert_eq!(*owner, ir.classes[0].fq_name);
     }
 }
+
+/// A copied override with its declaration's PropertyId and its own accessor/storage coordinate.
+fn copied_override(explicit: bool) -> (IrFile, u32) {
+    let (mut ir, _) = fixture();
+    ir.classes[0].properties[0].is_open = true;
+    if explicit {
+        let body = ir.add_expr(IrExpr::Const(IrConst::String("declared".into())));
+        let getter = ir.add_fun(IrFunction {
+            name: "sourceAccessor".into(),
+            params: Vec::new(),
+            ret: Ty::String,
+            body: Some(body),
+            is_static: false,
+            dispatch_receiver: Some("p/Declaration".into()),
+            param_checks: Vec::new(),
+        });
+        ir.classes[0].properties[0].getter = Some(getter);
+        ir.classes[0].methods.push(getter);
+        if let Some(IrLocalPropertyLayout::Member {
+            getter: declared, ..
+        }) = ir.local_property_layouts.get_mut(&TARGET)
+        {
+            *declared = Some(getter);
+        }
+    }
+    let copied = copy(&mut ir, 0, "p/Copy", 2);
+    if !explicit {
+        ir.classes[copied as usize].properties[0].getter = None;
+        ir.classes[copied as usize].properties[0].setter = None;
+        ir.classes[copied as usize].methods.clear();
+    }
+    let mut base = IrClass::synthetic("p/Base".into());
+    base.is_open = true;
+    let mut property = IrProperty::stored_value("value".into(), Ty::String, 0);
+    property.is_open = true;
+    base.properties.push(property);
+    base.fields.push(IrField::new("value".into(), Ty::String));
+    let base = ir.add_class(base);
+    let base_target = PropertyId::from_raw(8);
+    let mut layout = ir.local_property_layouts[&TARGET].clone();
+    if let IrLocalPropertyLayout::Member {
+        class,
+        owner,
+        mutable,
+        getter,
+        setter,
+        ..
+    } = &mut layout
+    {
+        *getter = None;
+        *setter = None;
+        *class = base;
+        *owner = "p/Base".into();
+        *mutable = false;
+    }
+    ir.local_property_layouts.insert(base_target, layout);
+    for class in [0, copied] {
+        ir.classes[class as usize].superclass = "p/Base".into();
+        let owner = ir.classes[class as usize].fq_name;
+        ir.property_overrides.insert(
+            owner,
+            vec![crate::ir::IrPropertyOverride {
+                implementation: crate::fir::ResolvedPropertyOverrideTarget::Module(TARGET),
+                implementation_getter: ir.classes[class as usize].properties[0].getter,
+                implementation_setter: ir.classes[class as usize].properties[0].setter,
+                implementation_owner: owner,
+                overridden: crate::fir::ResolvedPropertyOverrideTarget::Module(base_target),
+                overridden_owner: "p/Base".into(),
+                overridden_is_interface: false,
+                name: "value".into(),
+                declared_type: Ty::String,
+                applied_type: Ty::String,
+                implementation_type: Ty::String,
+                declared_receiver: None,
+                implementation_receiver: None,
+                overridden_setter_value: None,
+                implementation_mutable: true,
+                has_kotlin_superclass_override: false,
+                depth: 1,
+            }],
+        );
+    }
+    (ir, copied)
+}
+
+struct ReferenceMembers;
+
+impl crate::backend::class_tables::Representation for ReferenceMembers {
+    fn same(&self, _: Ty, _: Ty) -> bool {
+        true
+    }
+    fn is_reference(&self, _: Ty) -> bool {
+        true
+    }
+    fn owns_base(&self, _: crate::types::TypeName) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_copied_default_field_override_keeps_its_declaration_slot_and_own_storage() {
+    use crate::backend::class_tables::{
+        build_numbered, local_property_target, module_slots::ModuleSlotPlan, Slot, SlotKey,
+    };
+    use crate::fir::ResolvedPropertyOverrideTarget::Module;
+    let (ir, copied) = copied_override(false);
+    assert_eq!(local_property_target(&ir, copied, 0), Some(Module(TARGET)));
+    let tables = build_numbered(&ReferenceMembers, &ir, &ModuleSlotPlan::empty(), &|_| None)
+        .expect("copied default accessors retain checked declaration authority");
+    let base = ir.class_id_by_name("p/Base".into()).unwrap();
+    let getter = tables
+        .slot(base, &SlotKey::Getter(Module(PropertyId::from_raw(8))))
+        .unwrap();
+    assert_eq!(
+        tables.slot(copied, &SlotKey::Getter(Module(TARGET))),
+        Some(getter)
+    );
+    assert_eq!(
+        tables.table(copied).vtable[getter as usize],
+        Slot::FieldGetter {
+            class: copied,
+            field: 2
+        }
+    );
+    let setter = tables
+        .slot(copied, &SlotKey::Setter(Module(TARGET)))
+        .unwrap();
+    assert_eq!(
+        tables.table(copied).vtable[setter as usize],
+        Slot::FieldSetter {
+            class: copied,
+            field: 2
+        }
+    );
+}
+
+#[test]
+fn a_copied_explicit_accessor_uses_the_same_property_key_as_its_default_override() {
+    use crate::backend::class_tables::{
+        build_numbered, function_key, module_slots::ModuleSlotPlan, Slot, SlotKey,
+    };
+    use crate::fir::ResolvedPropertyOverrideTarget::Module;
+    let (mut ir, copied) = copied_override(true);
+    let getter = ir.classes[copied as usize].properties[0].getter.unwrap();
+    let owner = ir.classes[copied as usize].fq_name;
+    let edge = ir.property_overrides.remove(&owner).unwrap();
+    // The copied declaration alone binds the accessor even without a second override edge.
+    assert_eq!(
+        function_key(&ir, copied, getter),
+        SlotKey::Getter(Module(TARGET))
+    );
+    ir.property_overrides.insert(owner, edge);
+    let tables =
+        build_numbered(&ReferenceMembers, &ir, &ModuleSlotPlan::empty(), &|_| None).unwrap();
+    let slot = tables
+        .slot(copied, &SlotKey::Getter(Module(TARGET)))
+        .unwrap();
+    assert_eq!(
+        tables.table(copied).vtable[slot as usize],
+        Slot::Function(getter)
+    );
+}
+
+#[test]
+fn a_cyclic_copy_cannot_claim_a_default_property_by_its_spelling_or_ordinal() {
+    use crate::backend::class_tables::{build_numbered, module_slots::ModuleSlotPlan};
+    let (mut ir, copied) = copied_override(false);
+    ir.specialized_anonymous_classes
+        .get_mut(&copied)
+        .unwrap()
+        .source = copied;
+    assert_eq!(
+        build_numbered(&ReferenceMembers, &ir, &ModuleSlotPlan::empty(), &|_| None).map(|_| ()),
+        Err("a virtual property without a stable declaration identity (`p/Copy.value`)".to_owned())
+    );
+}
