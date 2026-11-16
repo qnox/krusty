@@ -672,6 +672,10 @@ jobs:
       BOX_REFERENCES: box-reference-classes-${{ matrix.target != 'jvm' && format('{0}-', matrix.target) || '' }}${{ matrix.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # One label serves machines of different speeds. The last step reports which machine this
+      # row had and how much of its CPU time went to other guests or waited on CPU, disk or memory.
+      - name: start runner profile
+        run: scripts/runner-profile.sh start "$RUNNER_TEMP/runner-profile"
       - *mq-base
       - *just-on-path
       - *install-just
@@ -1061,6 +1065,9 @@ jobs:
           name: conformance-failures-${{ matrix.version }}-${{ matrix.target }}
           path: test-failures/
           if-no-files-found: ignore
+      - name: runner profile
+        if: always()
+        run: scripts/runner-profile.sh report "$RUNNER_TEMP/runner-profile"
 
 
   # The one check a ruleset requires: its context does not change with either matrix. A required

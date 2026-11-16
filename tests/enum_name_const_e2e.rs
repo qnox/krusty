@@ -79,3 +79,32 @@ fun through(value: Direction): String = value.name
         );
     }
 }
+
+/// Under `+IntrinsicConstEvaluation` a direct entry's `name` is a constant in an annotation
+/// argument, alone, as a vararg element and in an array, and in a `const val` initializer.
+#[test]
+fn a_direct_entry_name_is_an_annotation_and_const_val_constant() {
+    const SRC: &str = r#"
+// LANGUAGE: +IntrinsicConstEvaluation
+@Retention(AnnotationRetention.RUNTIME)
+annotation class Name(val value: String)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class Names(vararg val values: String)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class NameArray(val values: Array<String>)
+enum class E { OK, WITH_UNDERSCORE }
+const val NAME = E.OK.name
+@Name(E.OK.name) class Single
+@Names(E.WITH_UNDERSCORE.name, "x" + E.OK.name, "${E.OK.name}!") class Vararg
+@NameArray([E.OK.name, NAME]) class InArray
+fun box(): String {
+    val single = Single::class.java.getAnnotation(Name::class.java).value
+    val vararg = Vararg::class.java.getAnnotation(Names::class.java).values.joinToString()
+    val array = InArray::class.java.getAnnotation(NameArray::class.java).values.joinToString()
+    if (vararg != "WITH_UNDERSCORE, xOK, OK!") return "vararg $vararg"
+    if (array != "OK, OK") return "array $array"
+    return if (single == NAME) single else "single $single"
+}
+"#;
+    common::expect_box_same_as_kotlinc(SRC, "EnumNameAnnotationConstant");
+}

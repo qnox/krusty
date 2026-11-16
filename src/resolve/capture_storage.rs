@@ -1031,19 +1031,7 @@ impl Checker<'_> {
         {
             return AnonymousSuperDisposition::StayClosure;
         }
-        if checked_constant_expression(
-            CheckedConstantExpression {
-                file: self.file,
-                expression_types: &self.expr_types,
-                resolved_constants: &self.resolved_constants,
-                resolved_calls: &self.resolved_calls,
-                resolved_operator_calls: &self.resolved_operator_calls,
-            },
-            core,
-            ty,
-        )
-        .is_some()
-        {
+        if checked_constant_expression(self.checked_constant_context(), core, ty).is_some() {
             return AnonymousSuperDisposition::StayConstant;
         }
         match self.anonymous_super_read_provenance.get(&core) {

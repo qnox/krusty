@@ -279,7 +279,7 @@ fn admit<'a, 'b>(
     let (superclass, declared_superclass) = if root {
         if !arguments.is_empty() || !type_arguments.is_empty() {
             return Err(mismatch(
-                "a delegation to `Any`'s constructor passes arguments",
+                "a delegation to `Any`'s constructor passes arguments or type arguments",
             ));
         }
         (None, Ty::obj_name(crate::types::wk::any()))

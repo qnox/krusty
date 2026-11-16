@@ -54,6 +54,8 @@ impl SuperclassForwards {
 struct ObjectStorage<'a> {
     first_index: u32,
     fields: Vec<(&'a KlibIrSymbol, Ty, bool)>,
+    /// The object's properties with a backing field, each with that field.
+    properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
 }
 
 /// A member an object literal declares, which its own bodies call.
@@ -245,6 +247,7 @@ impl<'a> BodyLowering<'a> {
             &ObjectStorage {
                 first_index: capture_count,
                 fields: storage,
+                properties: super::super::class_storage::backed_properties(&class.members),
             },
         )?;
         self.initialize_object(class_id, owner, &capture_fields, &stored)?;
@@ -733,6 +736,7 @@ impl<'a> BodyLowering<'a> {
             class,
             storage.first_index,
             storage.fields.iter().copied(),
+            storage.properties.clone(),
             Ty::obj_name(owner),
         );
         Ok(MemberFrame {
