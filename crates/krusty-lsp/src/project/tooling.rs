@@ -264,6 +264,13 @@ fn slot(kind: ClientKind) -> &'static Mutex<Option<LiveClient>> {
     }
 }
 
+/// The one stdout line the tooling client is allowed to emit. Maven prints
+/// `[WARNING] The POM for ... is invalid` on stdout while a resolve is still running;
+/// that line does not deserialize, and treating it as the response stops the batch.
+fn is_tool_response(line: &str) -> bool {
+    serde_json::from_str::<ToolResponse>(line).is_ok()
+}
+
 fn transact(kind: ClientKind, line: &str, timeout: Duration) -> io::Result<ToolResponse> {
     let mutex = slot(kind);
     let mut slot = mutex
@@ -389,6 +396,11 @@ fn spawn(kind: ClientKind) -> io::Result<LiveClient> {
                         if line.ends_with('\r') {
                             line.pop();
                         }
+                    }
+                    // A resolver warning is not the response. Waiting for the JSON line lets the
+                    // rest of the batch finish; taking the warning ends the request.
+                    if !is_tool_response(&line) {
+                        continue;
                     }
                     if sender.send(Ok(line)).is_err() {
                         break;
@@ -677,6 +689,70 @@ mod tests {
         assert!(!MAVEN_CLIENT.contains("ProcessBuilder"));
         assert!(!MAVEN_CLIENT.contains("mvn"));
         assert!(!MAVEN_CLIENT.contains("dependency:resolve"));
+        assert!(MAVEN_CLIENT.contains("Protocol.capture()"));
+        assert!(GRADLE_CLIENT.contains("Protocol.capture()"));
+    }
+
+    #[test]
+    fn a_maven_pom_warning_is_not_the_protocol_response() {
+        let warning = "[WARNING] The POM for com.hankcs:aho-corasick-double-array-trie:jar:1.2.3 is invalid, transitive dependencies (if any) will not be available, enable debug logging for more details";
+        assert!(!is_tool_response(warning));
+        assert!(is_tool_response(
+            r#"{"status":1,"stdout":"","stderr":"missing"}"#
+        ));
+    }
+
+    #[test]
+    fn a_resolver_warning_stays_off_the_protocol_stream() {
+        let directory =
+            std::env::temp_dir().join(format!("krusty-protocol-stream-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let protocol = directory.join("Protocol.java");
+        let test = directory.join("ProtocolStreamTest.java");
+        std::fs::write(&protocol, PROTOCOL).unwrap();
+        std::fs::write(
+            &test,
+            include_str!("../../java/krusty/tooling/ProtocolStreamTest.java"),
+        )
+        .unwrap();
+        let javac = std::process::Command::new(java_bin("javac"))
+            .arg("-encoding")
+            .arg("UTF-8")
+            .arg("-proc:none")
+            .arg("-d")
+            .arg(&directory)
+            .arg(&protocol)
+            .arg(&test)
+            .output()
+            .expect("javac");
+        assert!(
+            javac.status.success(),
+            "javac: {}",
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = std::process::Command::new(java_bin("java"))
+            .arg("-cp")
+            .arg(&directory)
+            .arg("krusty.tooling.ProtocolStreamTest")
+            .output()
+            .expect("java");
+        let _ = std::fs::remove_dir_all(&directory);
+        let stdout = String::from_utf8_lossy(&java.stdout);
+        let stderr = String::from_utf8_lossy(&java.stderr);
+        assert!(
+            java.status.success(),
+            "stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert_eq!(
+            stdout.trim(),
+            r#"{"status":0,"stdout":"","stderr":""}"#,
+            "stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("[WARNING] The POM for example:example:jar:1.0 is invalid"),
+            "stderr:\n{stderr}"
+        );
     }
 
     #[test]
