@@ -493,6 +493,17 @@ struct FileContext<'a> {
     delegates: &'a local_delegates::Prepared,
 }
 
+/// The wasm value a parameter of type `ty` is passed as. A `Nothing` parameter holds no value any
+/// caller supplies, yet keeps its slot, so an implementation such as `contains(element: Nothing)`
+/// takes the operands its interface member passes: a reference, as an erased type parameter's is.
+/// A `Unit` parameter still has none.
+pub(super) fn parameter_carrier_of(ty: Ty) -> Result<Option<ValType>, Unsupported> {
+    if ty == Ty::Nothing {
+        return Ok(Some(REFERENCE));
+    }
+    carrier(ty)
+}
+
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
 /// `Nothing`).
 pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
@@ -1058,7 +1069,10 @@ impl<'a> Body<'a> {
                 return Err("a shared cell read as a value".to_string());
             }
             IrExpr::GetValue(slot) => {
-                if let Some(&(local, declared)) = self.values.get(&slot) {
+                if let Some(&(_, Ty::Nothing)) = self.values.get(&slot) {
+                    // A `Nothing` parameter holds no value: no call reaches a read of it.
+                    self.code.unreachable();
+                } else if let Some(&(local, declared)) = self.values.get(&slot) {
                     self.code.local_get(local);
                     // A smart cast reads the slot at a narrower type: `Int` out of an `Int?`
                     // local holding a box.
