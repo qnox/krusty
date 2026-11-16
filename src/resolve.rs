@@ -50682,13 +50682,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                if let Some((owner, declared_name)) = self.explicitly_imported_enum_entry(&n) {
-                    self.record_enum_entry(e, owner, &declared_name);
-                    return self.set(e, Ty::obj_name(owner));
-                }
-                if let Some(owner) = self.star_imported_enum_entry(scope, &n) {
-                    self.record_enum_entry(e, owner, &n);
-                    return self.set(e, Ty::obj_name(owner));
+                if let Some(ty) = self.read_imported_enum_entry(e, &n) {
+                    return self.set(e, ty);
                 }
                 let lexical_classes = self.lexical_source_class_names();
                 let enum_entry_owner = lexical_classes.iter().copied().find(|owner| {
