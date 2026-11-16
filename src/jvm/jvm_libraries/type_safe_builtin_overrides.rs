@@ -16,8 +16,7 @@ use crate::jvm::mapped_builtin_declarations::{
     collection_bridge_policy_for_declaration, MappedBuiltinMemberKind,
 };
 use crate::jvm::JavaNullability;
-use crate::symbol_resolver::ty_subst;
-use crate::types::{Ty, TypeName};
+use crate::types::{ty_subst, Ty, TypeName};
 
 /// One Java method's classfile identity, with the declared nullability of its parameters.
 pub(super) struct JavaMethod<'a> {
