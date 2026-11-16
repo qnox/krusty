@@ -302,9 +302,16 @@ impl SymbolSource for KlibLibraries {
         &self,
         identity: &crate::libraries::KlibDependencyCallable,
     ) -> bool {
-        self.inventory
-            .dependency_function(identity)
-            .is_some_and(|(_, function)| function.compiler_builtin_owner)
+        match &identity.declaration {
+            crate::libraries::KlibDeclarationSignature::Accessor(_) => self
+                .inventory
+                .dependency_property(identity)
+                .is_some_and(|(_, property, _)| property.compiler_builtin_owner),
+            _ => self
+                .inventory
+                .dependency_function(identity)
+                .is_some_and(|(_, function)| function.compiler_builtin_owner),
+        }
     }
 
     fn external_property(

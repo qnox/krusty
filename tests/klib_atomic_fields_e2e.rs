@@ -87,8 +87,8 @@ impl Backend for AtomicFieldProbe {
         self.native.emits_dependency_support()
     }
 
-    fn lowers_coroutines_on_common_ir(&self) -> bool {
-        self.native.lowers_coroutines_on_common_ir()
+    fn common_ir_preparation(&self) -> Option<krusty::backend::CommonIrPreparation> {
+        self.native.common_ir_preparation()
     }
 
     fn represents_dependency_classifier(
