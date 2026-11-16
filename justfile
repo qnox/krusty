@@ -186,8 +186,8 @@ test-fast:
     ./run-tests.sh
 
 # Pre-push smoke check (scripts/smoke.sh): attribution and outcome lists, rustfmt and the baselines,
-# lib tests, the changed e2e modules, and a sampled box slice plus the changed owned regressions on
-# JVM, Native, wasm-js and wasm-wasi. BASE is the PR's base: master, or the parent PR's branch.
+# lib tests, the changed e2e modules, and a sampled box slice plus the owned regressions on JVM,
+# Native, wasm-js and wasm-wasi. BASE is the PR's base: master, or the parent PR's branch.
 smoke BASE="origin/master":
     bash scripts/smoke.sh "{{BASE}}"
 

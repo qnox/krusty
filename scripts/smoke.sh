@@ -10,10 +10,13 @@
 #   2. rustfmt, then the clippy and legacy baselines;
 #   3. the lib tests of krusty and the backend crates;
 #   4. the e2e modules (`tests/*_e2e.rs`) this branch changes;
-#   5. a box slice on JVM, Native, wasm-js and wasm-wasi: an even sample of the corpus plus every
-#      owned regression (`tests/box_regressions/`) this branch adds or changes.
+#   5. a box slice on JVM, Native, wasm-js and wasm-wasi: an even sample of the corpus, then every
+#      owned regression (`tests/box_regressions/`) the lane's inventory selects for the release
+#      under test.
 #
-# Knobs: KRUSTY_SMOKE_BOX_LIMIT (corpus cases sampled per lane, default 150; 0 runs the changed
+# Every test process runs under the harness's configurable deadlines (scripts/test-gate-defaults.sh).
+#
+# Knobs: KRUSTY_SMOKE_BOX_LIMIT (corpus cases sampled per lane, default 150; 0 runs the owned
 # regressions only), KRUSTY_SMOKE_LANES (default "jvm native wasm-js wasm-wasi"),
 # KRUSTY_SMOKE_SKIP_CLIPPY=1 (skip step 2's clippy run, which is the slowest static check).
 set -euo pipefail
@@ -21,6 +24,8 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 cd "$repo_root"
+source scripts/test-gate-defaults.sh
+source scripts/test-deadline.sh
 
 base="${1:-origin/master}"
 git rev-parse --verify --quiet "$base^{commit}" >/dev/null || {
@@ -59,7 +64,10 @@ export KRUSTY_DEPS_CACHE="${KRUSTY_DEPS_CACHE:-$PWD/target/cache/krusty-deps}"
 export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}"
 
 step "lib tests"
-cargo test -q --profile gate -p krusty -p krusty-native -p krusty-wasm -p krusty-jvm --lib
+for package in krusty krusty-native krusty-wasm krusty-jvm; do
+  lib_bin="$(scripts/cargo-test-binary.sh "${package//-/_}" -p "$package" --lib)"
+  run_with_deadline "$KRUSTY_TEST_TIMEOUT_SECONDS" "$lib_bin" -q
+done
 
 e2e_modules=()
 while IFS= read -r file; do
@@ -68,38 +76,35 @@ done < <(changed 'tests/*_e2e.rs')
 if [ "${#e2e_modules[@]}" -gt 0 ]; then
   step "changed e2e modules: ${e2e_modules[*]}"
   e2e_bin="$(scripts/cargo-test-binary.sh e2e --test e2e)"
-  "$e2e_bin" "${e2e_modules[@]}"
+  run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$e2e_bin" "${e2e_modules[@]}"
 fi
 
-regressions=()
-while IFS= read -r file; do
-  regressions+=("regressions/${file#tests/box_regressions/}")
-done < <(changed 'tests/box_regressions/*.kt' 'tests/box_regressions/**/*.kt')
 
 step "building the conformance binary"
 bin="$(scripts/cargo-test-binary.sh conformance --test conformance)"
 
-# One lane: the sampled corpus slice, then each changed regression by its path. A narrowed run
-# checks the expected-failure lists over exactly the cases it scanned.
+# One lane: the sampled corpus slice, then the owned regressions. The lane's own inventory decides
+# which regressions apply to the release under test; a narrowed run checks the expected-failure
+# lists over exactly the cases it scanned.
 run_lane() {
-  local lane=$1 infix test only
+  local lane=$1 infix test deadline
   case "$lane" in
-    jvm) infix="" test=kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance ;;
-    native) infix=NATIVE_ test=kotlin_box_native_conformance::kotlin_codegen_box_native_conformance ;;
-    wasm-js) infix=WASM_JS_ test=kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance ;;
-    wasm-wasi) infix=WASM_WASI_ test=kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance ;;
+    jvm) infix="" test=kotlin_box_ir_jvm_conformance::kotlin_codegen_box_conformance deadline=$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS ;;
+    native) infix=NATIVE_ test=kotlin_box_native_conformance::kotlin_codegen_box_native_conformance deadline=$KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS ;;
+    wasm-js) infix=WASM_JS_ test=kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance deadline=$KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS ;;
+    wasm-wasi) infix=WASM_WASI_ test=kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance deadline=$KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS ;;
     *) echo "smoke: unknown lane: $lane" >&2; return 2 ;;
   esac
   local require=()
   [ -z "$infix" ] || require=("KRUSTY_REQUIRE_${infix}CONFORMANCE=1")
   if [ "$limit" -gt 0 ]; then
     step "$lane: $limit sampled corpus cases"
-    env "${require[@]}" "KRUSTY_${infix}BOX_LIMIT=$limit" "$bin" --exact "$test" --nocapture
+    run_with_deadline "$deadline" env "${require[@]}" "KRUSTY_${infix}BOX_LIMIT=$limit" \
+      "$bin" --exact "$test" --nocapture
   fi
-  for only in "${regressions[@]}"; do
-    step "$lane: regression $only"
-    env "${require[@]}" "KRUSTY_${infix}BOX_ONLY=$only" "$bin" --exact "$test" --nocapture
-  done
+  step "$lane: owned regressions"
+  run_with_deadline "$deadline" env "${require[@]}" "KRUSTY_${infix}BOX_ONLY=/tests/box_regressions/" \
+    "$bin" --exact "$test" --nocapture
 }
 
 for lane in $lanes; do
