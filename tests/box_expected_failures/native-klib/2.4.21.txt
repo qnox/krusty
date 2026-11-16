@@ -2265,7 +2265,6 @@ regressions/directInvokeNameBasedDestructuring.kt
 regressions/floatingRangeContainsMixedWidths.kt
 regressions/generic.kt
 regressions/kt15196.kt
-regressions/kt1779.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
 regressions/kt2246.kt

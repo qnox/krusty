@@ -3077,7 +3077,6 @@ regressions/floatingRangeContainsMixedWidths.kt
 regressions/generic.kt
 regressions/inlineCallsInInitializerLambda.kt
 regressions/kt15196.kt
-regressions/kt1779.kt
 regressions/kt1800.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
