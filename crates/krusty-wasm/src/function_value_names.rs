@@ -150,6 +150,7 @@ mod tests {
         fn classifier(&self, name: TypeName) -> Option<Arc<BackendClassifierFact>> {
             let &(_, underlying) = self.0.iter().find(|(class, _)| *class == name)?;
             Some(Arc::new(BackendClassifierFact {
+                klib_identity: None,
                 runtime_exception: None,
                 declaration_name: None,
                 access: krusty::libraries::ClassifierAccess::Public,
