@@ -474,10 +474,85 @@ fn overriding_members_do_not_publish_the_inherited_default_provider_twice() {
             .get_mut(&function)
             .unwrap()
             .inherited_default_provider = Some(ResolvedFunctionOverrideTarget::Module(provider));
+        let implementation = CallableId::from_raw(21 + ordinal);
         ir.checked_callable_functions
-            .insert(CallableId::from_raw(21 + ordinal), function);
+            .insert(implementation, function);
+        record_override(&mut ir, owner, implementation, provider);
         assert!(published_identities(&ir, function).is_empty());
     }
+}
+
+#[test]
+fn an_actual_member_publishes_its_entry_under_its_expect() {
+    let expected = CallableId::from_raw(30);
+    let actual = CallableId::from_raw(31);
+    let mut ir = IrFile::default();
+    let owner = type_name("demo/Renderer");
+    let read = ir.add_expr(IrExpr::GetValue(1));
+    let function = declare(
+        &mut ir,
+        "render",
+        vec![Ty::Int],
+        Ty::Int,
+        Some(read),
+        Some(owner),
+    );
+    method_of(&mut ir, "demo/Renderer", function);
+    ir.checked_callable_functions.insert(actual, function);
+    let default = int(&mut ir, 1);
+    with_defaults(&mut ir, function, vec![Some(default)]);
+    ir.fn_params
+        .get_mut(&function)
+        .unwrap()
+        .inherited_default_provider = Some(ResolvedFunctionOverrideTarget::Module(expected));
+
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
+
+    assert!(ir.default_entries.contains_key(&function));
+    assert_eq!(
+        published_identities(&ir, function),
+        [expected],
+        "an actual member overrides nothing; its expect's callers select its entry"
+    );
+}
+
+/// Record that `implementation`, a member of `owner`, overrides `overridden`.
+fn record_override(
+    ir: &mut IrFile,
+    owner: TypeName,
+    implementation: CallableId,
+    overridden: CallableId,
+) {
+    ir.function_overrides
+        .entry(owner)
+        .or_default()
+        .push(crate::ir::IrFunctionOverride {
+            implementation: ResolvedFunctionOverrideTarget::Module(implementation),
+            implementation_function: None,
+            implementation_owner: owner,
+            overridden: ResolvedFunctionOverrideTarget::Module(overridden),
+            overridden_owner: type_name("demo/Base"),
+            overridden_semantic_role: None,
+            collection_barrier: None,
+            overridden_is_interface: false,
+            name: "scale".to_owned(),
+            declared_parameters: vec![Ty::Int],
+            declared_result: Ty::Int,
+            applied_parameters: vec![Ty::Int],
+            applied_result: Ty::Int,
+            implementation_parameters: vec![Ty::Int],
+            implementation_parameter_identities: Vec::new(),
+            overridden_parameter_identities: Vec::new(),
+            implementation_result: Ty::Int,
+            suspend: false,
+            has_kotlin_superclass_override: false,
+            depth: 1,
+        });
 }
 
 #[test]
