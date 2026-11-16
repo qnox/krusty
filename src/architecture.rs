@@ -507,8 +507,10 @@ mod tests {
 
         let checker = source_path("src/compiler/builtin_implementations.rs");
         let text = fs::read_to_string(&checker).expect("read checked builtin fact finalizer");
-        assert!(text.contains("for_checked_external_members"));
-        assert!(text.contains("external_member_identities"));
+        assert!(!text.contains("symbol_source"));
+        assert!(!text.contains("for_checked_external_members"));
+        assert!(!text.contains("external_callable("));
+        assert!(text.contains("record_checked_builtin_implementations"));
     }
 
     #[test]
@@ -532,7 +534,7 @@ mod tests {
         let handoff = source_path("src/compiler/backend_handoff.rs");
         let text = fs::read_to_string(&handoff).expect("read checked backend handoff");
         let checked_facts = text
-            .find("record_klib_dependency_facts")
+            .find("record_checked_klib_dependency_facts(")
             .expect("freeze KLIB body checker facts before backend emission");
         let backend_facts = text
             .find("super::builtin_implementations::record_checked")
@@ -559,6 +561,12 @@ mod tests {
         let checked = source_path("src/backend/dependency_facts.rs");
         let text = fs::read_to_string(&checked).expect("read checked KLIB dependency facts");
         assert!(text.contains("klib_type_hierarchy"));
+        assert!(text.contains("crate::ir::CheckedKlibDependencyFacts"));
+        assert!(!text.contains("crate::fir::CheckedKlibDependencyFacts"));
+        let lowerer = source_path("src/klib_lowering/callee_facts.rs");
+        let text = fs::read_to_string(&lowerer).expect("read checked KLIB lowerer facts");
+        assert!(text.contains("crate::ir::CheckedKlibDependencyFacts"));
+        assert!(!text.contains("crate::fir::CheckedKlibDependencyFacts"));
         let checker = source_path("src/resolve/dependency_body_call_edges.rs");
         let text = fs::read_to_string(&checker).expect("read KLIB body hierarchy checker");
         assert!(text.contains("klib_type_facts::freeze"));

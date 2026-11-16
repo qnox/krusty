@@ -35,7 +35,7 @@ use declared_capabilities::{
     declares_its_own_comparable, implemented_collections, implemented_dependencies,
     overrides_a_throwable_accessor,
 };
-mod atomic_fields;
+mod atomic_accesses;
 mod functions;
 mod implementor_dispatch;
 mod imported_functions;
@@ -709,6 +709,20 @@ impl<'a> FileLowering<'a> {
                         Linkage::Hidden
                     }
                     krusty::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
+                    // A member of a local or anonymous class is reachable from no other file, and
+                    // an inline function that declares the class realizes it again in each file
+                    // it is expanded into, under the same class name. Like the class's
+                    // descriptor, its members stay inside the file.
+                    krusty::backend::CheckedIrUnitKind::Source
+                        if function
+                            .dispatch_receiver
+                            .and_then(|owner| self.ir.class_id_by_name(owner))
+                            .is_some_and(|class| {
+                                self.ir.local_class_name_provenance.contains_key(&class)
+                            }) =>
+                    {
+                        Linkage::Local
+                    }
                     krusty::backend::CheckedIrUnitKind::Source
                         if super::super::c_abi::is_file_level(self.ir, index)
                             || self.symbols.cross_file[index] =>
@@ -2272,6 +2286,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 } = &**checked_op =>
             {
                 self.atomic_field(*operation, *receiver, *class, *index, operands)
+            }
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::AtomicArrayElement {
+                    operation,
+                    array,
+                    index,
+                    operands,
+                } = &**checked_op =>
+            {
+                self.atomic_array_element(*operation, *array, *index, operands)
             }
             IrExpr::Return(_)
             | IrExpr::Variable { .. }

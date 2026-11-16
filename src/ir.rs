@@ -17,6 +17,11 @@
 use crate::kt_string::KtString;
 use crate::types::{Ty, TypeName, TypeNameList};
 
+mod checked_klib_facts;
+pub(crate) use checked_klib_facts::{CheckedKlibDependencyFacts, CheckedKlibTypeFacts};
+mod checked_member_call_edge;
+pub(crate) use checked_member_call_edge::CheckedMemberCallEdge;
+
 pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
@@ -2866,7 +2871,7 @@ mod external_overrides;
 mod generated_members;
 pub use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
-pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
+pub use debug_locals::{IrCatchBinding, IrCatchName, IrLambdaForm, IrLambdaOrigin};
 pub use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
 pub use generated_members::{IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember};
 pub use generated_members::{

@@ -128,22 +128,31 @@ impl Backend for WasmBackend {
         true
     }
 
-    fn lowers_coroutines_on_common_ir(&self) -> bool {
-        true
+    fn capability_decline(&self, construct: &str) -> String {
+        format!("{DECLINE_PREFIX}{construct} yet")
+    }
+
+    fn common_ir_preparation(&self) -> Option<krusty::backend::CommonIrPreparation> {
+        Some(krusty::backend::CommonIrPreparation {
+            counted_loops: COUNTED_LOOPS,
+            enums: krusty::backend::enums::Contract::KotlinWasm,
+        })
     }
 
     fn numbers_slots(&self) -> bool {
         true
     }
 
-    /// The runtime lays out text, its builders and its exception classes itself: a library
-    /// body of one of their members reads a layout this target does not have, and a library
-    /// class extending one of the exceptions delegates to the runtime's constructor.
+    /// The runtime lays out text, its builders, its exception classes and `Unit`'s one instance
+    /// itself: a library body of one of their members reads a layout this target does not have,
+    /// a library class extending one of the exceptions delegates to the runtime's constructor,
+    /// and a library body's `Unit` value is the runtime's, as a source reference of it is.
     fn represents_dependency_classifier(
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
         classifier == krusty::types::wk::string()
+            || classifier == krusty::types::wk::unit()
             || lower::is_string_builder(classifier)
             || lower::is_array_list(classifier)
             || lower::runtime_lays_out(classifier)
@@ -183,36 +192,6 @@ impl Backend for WasmBackend {
             parameters == krusty::backend::MainEntryParameters::Arguments
         }) {
             decline(state, "a `main` that takes its arguments".to_string());
-            return Vec::new();
-        }
-        krusty::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
-        // Before default arguments: a constant leaving constructor arguments out is then an
-        // ordinary construction for that lowering.
-        krusty::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
-        krusty::backend::enums::realize(
-            &mut file.ir,
-            krusty::backend::enums::Contract::KotlinWasm,
-            &mut file.dependency_exports,
-        );
-        krusty::backend::default_arguments::realize(
-            &mut file.ir,
-            &mut file.callables,
-            |function| file.dependency_exports.callable(function).is_some(),
-            |constructor| {
-                file.classifiers.module().declares_instance(
-                    &krusty::backend::instance_links::InstanceEntry::Constructor {
-                        module: file.module_name.into(),
-                        declaration: constructor,
-                    },
-                )
-            },
-        );
-        // After default arguments, so a `$default` entry's call of the declaration is the one
-        // that gains the continuation, and before dispatch entries, which copy the signature.
-        if let Err(declined) =
-            krusty::backend::coroutines::add_continuation_parameters(&mut file.ir)
-        {
-            decline(state, declined.construct().to_string());
             return Vec::new();
         }
         krusty::backend::construction_entries::publish_constructors(
@@ -410,10 +389,33 @@ mod tests {
     mod reference_array_size;
 
     use super::{WasmBackend, WasmTarget};
-    use krusty::backend::{Artifact, Entry};
+    use krusty::backend::{Artifact, Backend, CommonIrPreparationError, Entry};
     use krusty::diag::DiagSink;
     use krusty::libraries::EmptySymbolSource;
     use krusty::source::SourceInput;
+
+    /// A suspend shape common preparation cannot lower is this backend's capability decline,
+    /// reported with the prefix the box lanes classify declines by, never as an internal error.
+    #[test]
+    fn a_common_preparation_suspend_decline_is_a_wasm_capability_decline() {
+        let backend = WasmBackend::new(WasmTarget::Js);
+        let mut diags = DiagSink::new();
+        backend.report_common_ir_preparation_error(
+            &CommonIrPreparationError::Suspend(
+                krusty::backend::coroutines::ContinuationDecline::Suspends,
+            ),
+            &mut diags,
+        );
+        let messages = diags
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            ["krusty: the wasm backend does not support a suspend function that suspends yet"]
+        );
+    }
 
     /// Compile `sources`, the file stemmed `Main` first and then `Other1`, `Other2`, …, into a
     /// program starting in `entry`.
@@ -726,9 +728,9 @@ mod tests {
     }
 
     #[test]
-    fn a_local_class_cloned_from_another_files_inline_template_declines_by_name() {
-        // Backend contract: the clone realizes the template's callables a second time, which no
-        // Wasm function can carry twice.
+    fn a_local_class_cloned_from_another_files_inline_template_compiles_in_each_file() {
+        // Backend contract: the clone realizes the template's callables a second time, and each
+        // file binds them to its own clone's functions.
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile_program(
                 target,
@@ -739,11 +741,8 @@ mod tests {
                      inline fun make(): String = object : I { override fun run() = \"O\" }.run()",
                 ],
             );
-            assert_eq!(outputs, Vec::<Artifact>::new());
-            assert_eq!(
-                diagnostics,
-                ["krusty: the wasm backend does not support a callable realized by two functions yet"]
-            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
         }
     }
 

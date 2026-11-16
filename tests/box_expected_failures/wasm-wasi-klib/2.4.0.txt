@@ -35,7 +35,6 @@ annotations/instances/typeAliasesAndGenericsInterop.kt
 annotations/instances/unsignedAndBooleanArrays.kt
 annotations/instances/withDefaults.kt
 annotations/selfReferentialAnnotation.kt
-annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
 arithmetic/basic_charConversions.kt
 arithmetic/basic_charCornerCases.kt
 arithmetic/basic_compareIntToFloat.kt
@@ -64,7 +63,6 @@ arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
 arrays/hashMap.kt
 arrays/inProjectionOfList.kt
 arrays/indices.kt
-arrays/indicesChar.kt
 arrays/iteratorBooleanArray.kt
 arrays/iteratorByteArray.kt
 arrays/iteratorByteArrayNextByte.kt
@@ -87,7 +85,6 @@ arrays/kt950.kt
 arrays/multiArrayConstructors.kt
 arrays/nonLocalReturnArrayConstructor.kt
 arrays/primitiveArrays.kt
-arrays/stdlib.kt
 associatedObjects/associatedObjectNested.kt
 associatedObjects/findAssociatedObject.kt
 associatedObjects/findAssociatedObjectAndDCE.kt
@@ -183,11 +180,9 @@ boxingOptimization/unsafeRemoving.kt
 boxingOptimization/unsignedArrayForEach.kt
 boxingOptimization/variables.kt
 branching/when7.kt
-branching/when_with_try1.kt
 bridges/complexTraitImpl.kt
 bridges/covariantGenericDiamond.kt
 bridges/delegationComplexWithList.kt
-bridges/fakeGenericCovariantOverride.kt
 bridges/genericProperty.kt
 bridges/internalMethodFakeOverrideInFriendModule.kt
 bridges/internalMethodOverrideInFriendModule.kt
@@ -201,7 +196,6 @@ bridges/overridesTwoDeclarations/abstractDeclarationOverridesAbstractAndConcrete
 bridges/propertyDiamondFakeOverride.kt
 bridges/special.kt
 bridges/specialGeneric.kt
-bridges/strListContains.kt
 bridges/test10.kt
 bridges/test11.kt
 bridges/test12.kt
@@ -216,7 +210,6 @@ bridges/test24.kt
 bridges/test25.kt
 bridges/test3.kt
 bridges/test5.kt
-builtinStubMethods/customReadOnlyIterator.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/adaptedSecondArgArray.kt
 callableReference/adaptedReferences/adaptedSecondArgTypeVariable.kt
@@ -280,7 +273,6 @@ callableReference/bound/kt12738.kt
 callableReference/bound/multiCase.kt
 callableReference/bound/nullReceiver.kt
 callableReference/bound/primitiveReceiver.kt
-callableReference/bound/simpleFunction.kt
 callableReference/bound/simpleProperty.kt
 callableReference/callableReferenceOfCompanionConst.kt
 callableReference/callableReferenceOfCompanionProperty.kt
@@ -394,13 +386,11 @@ classDelegation/multipleModules.kt
 classLiteral/bound/primitives.kt
 classLiteral/classEquality.kt
 classes/comanionObjectFieldVsClassField.kt
-classes/implementComparableInSubclass.kt
 classes/kt1535.kt
 classes/kt1538.kt
 classes/kt2417.kt
 classes/kt2566_2.kt
 classes/kt343.kt
-classes/kt500.kt
 classes/kt508.kt
 classes/kt8011.kt
 classes/kt8011a.kt
@@ -421,7 +411,6 @@ closures/closureOnTopLevel2.kt
 closures/closuresAsSingleton.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt11634_4.kt
-closures/kt47894_inlineFunWithObjectWithNothing.kt
 closures/localFunctionInInitBlock.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
@@ -1275,7 +1264,6 @@ extensionFunctions/extensionFunctionAsSupertype.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
-extensionFunctions/extensionFunctionWithInlineModifier.kt
 extensionFunctions/kt3285.kt
 extensionFunctions/kt475.kt
 extensionFunctions/kt865.kt
@@ -1291,7 +1279,6 @@ extensionProperties/extensionPropertyDelegated.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
 extensionProperties/extensionPropertyWithExtensionAsReceiver.kt
 extensionProperties/genericContextOverride.kt
-fakeOverride/fakeOverrideWithMissingClassInSignature.kt
 fakeOverride/internalFromFriendModule.kt
 fakeOverride/intersectionInLocal.kt
 fakeOverride/privateFakeOverrides0.kt
@@ -1299,7 +1286,6 @@ fakeOverride/privateFakeOverrides1.kt
 fakeOverride/substitutionInLocal.kt
 fieldRename/delegates.kt
 finally/kt4134.kt
-finally/notChainCatch.kt
 finally/someStuff.kt
 fir/functionsDifferInTypeParameterBounds.kt
 fir/inferenceWithTypeAliasFromOtherModule.kt
@@ -1466,7 +1452,6 @@ initializers/static_list.kt
 initializers/static_varargChange.kt
 initializers/throw1.kt
 initializers/throw2.kt
-inline/LocalEntitiesInAnonymousObjectInInlineCallables.kt
 inline/anonymousFunction.kt
 inline/anonymousObjectInlineMethod.kt
 inline/blocksMaterialization.kt
@@ -1542,7 +1527,6 @@ inline/lambdaInLambda.kt
 inline/lambdaReassignment.kt
 inline/lambdaReassignmentWithCapture.kt
 inline/lateinitProperty.kt
-inline/localDeclarationsClash.kt
 inline/localInlineExtensionFunction.kt
 inline/localInlineFunction.kt
 inline/localInlineFunctionComplex.kt
@@ -1566,7 +1550,6 @@ inline/statementAsLastExprInBlock.kt
 inline/statementsAfterReturn.kt
 inline/thisImplicitlyCaptured.kt
 inline/thisLiteralAliasing.kt
-inline/twiceInlinedObject.kt
 inline/typeParameterSymbolIsUnbound.kt
 inline/vararg.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
@@ -2364,7 +2347,6 @@ primitiveTypes/numberToChar/abstractMethodInSuperinterface.kt
 primitiveTypes/reassignDestructured.kt
 primitiveTypes/smartCastOnNullableDoubleIdentityEquals.kt
 primitiveTypes/stringEqualsHashCodeToString.kt
-primitiveTypes/virtualCallToCustomNumber.kt
 privateConstructors/inline.kt
 properties/PrivatePropertyOfComplexGenericFunctionType.kt
 properties/accessorForProtectedPropertyWithPrivateSetter.kt
@@ -2546,7 +2528,6 @@ ranges/expression/simpleRange.kt
 ranges/expression/simpleRangeWithNonConstantEnds.kt
 ranges/expression/simpleSteppedDownTo.kt
 ranges/expression/simpleSteppedRange.kt
-ranges/forByteProgressionWithIntIncrement.kt
 ranges/forInCharSequenceLengthDecreasedInLoopBody.kt
 ranges/forInCharSequenceLengthIncreasedInLoopBody.kt
 ranges/forInCharSequenceWithCustomIterator.kt
@@ -3298,7 +3279,6 @@ regressions/resolvedCallForGetOperator.kt
 reified/callChain.kt
 reified/callableReferenceInlinedFun.kt
 reified/callableReferenceInlinedFunFromOtherModule.kt
-reified/capture.kt
 reified/catchParameter/nestedReifiedCatch.kt
 reified/catchParameter/nullableExceptionType.kt
 reified/catchParameter/reificationClash.kt
@@ -3377,13 +3357,8 @@ specialBuiltins/emptyMap.kt
 specialBuiltins/emptyStringMap.kt
 specialBuiltins/enumAsOrdinaled.kt
 specialBuiltins/exceptionCause.kt
-specialBuiltins/irrelevantRemoveAtOverride.kt
-specialBuiltins/maps.kt
-specialBuiltins/noSpecialBridgeInSuperClass.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
-specialBuiltins/redundantStubForSize.kt
-specialBuiltins/removeAtTwoSpecialBridges.kt
 specialBuiltins/throwable.kt
 specialBuiltins/throwableCause.kt
 specialBuiltins/throwableComplex.kt
@@ -3560,7 +3535,6 @@ wasm-new-exception-handling/finally7.kt
 wasm-new-exception-handling/finally8.kt
 wasm-new-exception-handling/finally9.kt
 wasm-new-exception-handling/kt4134.kt
-wasm-new-exception-handling/notChainCatch.kt
 wasm-new-exception-handling/rethrow.kt
 wasm-new-exception-handling/returnsDifferentTypes.kt
 wasm-new-exception-handling/someStuff.kt
@@ -3595,7 +3569,6 @@ wasm-old-exception-handling/finally7.kt
 wasm-old-exception-handling/finally8.kt
 wasm-old-exception-handling/finally9.kt
 wasm-old-exception-handling/kt4134.kt
-wasm-old-exception-handling/notChainCatch.kt
 wasm-old-exception-handling/rethrow.kt
 wasm-old-exception-handling/returnsDifferentTypes.kt
 wasm-old-exception-handling/someStuff.kt

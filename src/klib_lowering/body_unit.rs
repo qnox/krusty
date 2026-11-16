@@ -12,8 +12,9 @@ use crate::fx_hash::{HashMap, HashSet};
 use std::collections::VecDeque;
 
 use super::body_lowering::{
-    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor, LinkedAccessorTarget,
-    LinkedCallableReference, LinkedCallee, LinkedConstructor, LoweredFunction,
+    constant_value, publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor,
+    LinkedAccessorTarget, LinkedCallableReference, LinkedCallee, LinkedConstructor,
+    LoweredFunction, StaticField,
 };
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -39,6 +40,7 @@ mod class_construction;
 pub(crate) use class_construction::superclass_constructor_ordinal;
 mod enum_materialization;
 mod local_class;
+mod static_properties;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
 /// leaves and constructor calls have distinct realization contracts.
@@ -194,6 +196,16 @@ pub struct DependencyBodyUnit {
     >,
     /// Member functions of those classes, keyed by the same library and their file-local signature.
     local_functions: HashMap<super::same_library_class::LocalIdentity, LocalFunction>,
+    /// The static each top-level property's backing field is stored in, by that field.
+    statics: HashMap<static_properties::StaticIdentity, u32>,
+    /// The initialization of each library file whose top-level functions this unit emits and whose
+    /// initialization runs code, by its library and serialized file.
+    file_initializations: HashMap<static_properties::FileIdentity, FunId>,
+    /// The functions that already run their file's initialization first, or need none.
+    initialized_functions: HashSet<FunId>,
+    /// Whether the target stores constant top-level initializers before any code of their file
+    /// runs, rather than in its file's initialization order.
+    presets_constant_statics: bool,
     builtins: IrBuiltinOperators,
 }
 
@@ -236,6 +248,10 @@ impl Default for DependencyBodyUnit {
             member_receivers: HashMap::default(),
             local_classes: HashMap::default(),
             local_functions: HashMap::default(),
+            statics: HashMap::default(),
+            file_initializations: HashMap::default(),
+            initialized_functions: HashSet::default(),
+            presets_constant_statics: false,
             builtins: IrBuiltinOperators::new(),
         }
     }
@@ -277,6 +293,8 @@ struct PendingBody<'a> {
     )>,
     value_member: Option<MemberClass<'a>>,
     local_body: Option<super::same_library_class::LocalBody<'a>>,
+    /// The static a top-level property's initialization stores, and its serialized initializer.
+    static_initialization: Option<(StaticField, crate::metadata::klib_ir::tree::KlibIrExprId)>,
 }
 
 /// The declaration of a body this unit emits, and for a value class member, its class.
@@ -291,6 +309,8 @@ struct BodyHeader<'a> {
 #[derive(Clone)]
 struct MemberClass<'a> {
     class: crate::ir::ClassId,
+    /// The serialized declaration of `class`.
+    declaring: &'a KlibIrSymbol,
     fields: Vec<&'a KlibIrField>,
     /// The class's properties with a backing field, each with that field.
     properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
@@ -693,6 +713,20 @@ impl DependencyBodyUnit {
         }
     }
 
+    /// This unit for a target that stores constant top-level initializers before any code of
+    /// their file runs (`presets`), or one that runs them in their file's initialization order.
+    pub(crate) fn presetting_constant_statics(mut self, presets: bool) -> Self {
+        self.presets_constant_statics = presets;
+        self
+    }
+
+    /// The library and backing field of each top-level property this unit stores.
+    pub(crate) fn materialized_statics(&self) -> impl Iterator<Item = (&str, &KlibIrSymbol)> + '_ {
+        self.statics
+            .keys()
+            .map(|(module, field)| (module.as_str(), field))
+    }
+
     /// Classes owned by this closed unit, keyed by their authenticated constructor.
     pub(crate) fn materialized_classes(
         &self,
@@ -726,6 +760,10 @@ impl DependencyBodyUnit {
             member_receivers: &mut self.member_receivers,
             local_classes: &mut self.local_classes,
             local_functions: &mut self.local_functions,
+            statics: &mut self.statics,
+            file_initializations: &mut self.file_initializations,
+            initialized_functions: &mut self.initialized_functions,
+            presets_constant_statics: self.presets_constant_statics,
             pending: &mut pending,
             root: callable,
             active_module: callable.identity().module.clone(),
@@ -757,7 +795,18 @@ impl DependencyBodyUnit {
                 }
             })
             .map_err(|reason| KlibBodyDecline::new(callable.signature().clone(), reason))?;
-        while let Some(body) = linker.pending.pop_front() {
+        loop {
+            let Some(body) = linker.pending.pop_front() else {
+                // Every body is lowered. Each top-level function among them first runs its file's
+                // initialization, which may queue the bodies of that initialization.
+                linker
+                    .initialize_files(&mut self.ir)
+                    .map_err(|reason| KlibBodyDecline::new(callable.signature().clone(), reason))?;
+                if linker.pending.is_empty() {
+                    break;
+                }
+                continue;
+            };
             linker.active_module.clone_from(&body.identity.module);
             linker.active_identity.clone_from(&body.identity);
             linker.active_value_class.clone_from(&body.value_member);
@@ -773,7 +822,9 @@ impl DependencyBodyUnit {
                 &mut self.ir,
                 &mut linker,
             );
-            let lowered = if let Some(local) = &body.local_body {
+            let lowered = if let Some((field, initializer)) = body.static_initialization {
+                lowering.initialize_static(field, initializer)
+            } else if let Some(local) = &body.local_body {
                 match local {
                     super::same_library_class::LocalBody::Initialize(plan) => {
                         lowering.initialize_local(plan)
@@ -800,6 +851,7 @@ impl DependencyBodyUnit {
                         Some(member) => lowering
                             .reading_through(
                                 member.class,
+                                member.declaring,
                                 &member.fields,
                                 member.properties.clone(),
                                 member.contract.is_value,
@@ -847,6 +899,10 @@ struct Linker<'u, 's> {
         super::same_library_class::MaterializedLocalClass,
     >,
     local_functions: &'u mut HashMap<super::same_library_class::LocalIdentity, LocalFunction>,
+    statics: &'u mut HashMap<static_properties::StaticIdentity, u32>,
+    file_initializations: &'u mut HashMap<static_properties::FileIdentity, FunId>,
+    initialized_functions: &'u mut HashSet<FunId>,
+    presets_constant_statics: bool,
     pending: &'u mut VecDeque<PendingBody<'s>>,
     /// The declaration this lowering was asked for, which its own recursive calls select.
     root: KlibBodyCallable<'s>,
@@ -867,19 +923,18 @@ impl CallLinker for Linker<'_, '_> {
         &self,
         callee: &KlibPublicIdSignature,
     ) -> Result<Option<crate::libraries::AtomicOperation>, KlibBodyDeclineReason> {
-        let signature = KlibDeclarationSignature::Public(callee.clone());
-        Ok(
-            match self
-                .sources
-                .bodies
-                .linked_origin(&self.active_module, &signature)
-            {
-                KlibCalleeOrigin::Exact(identity) => {
-                    self.sources.intrinsics.atomic_field(&identity)
-                }
-                KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
-            },
-        )
+        Ok(self
+            .linked_identity(callee)
+            .and_then(|identity| self.sources.intrinsics.atomic_field(&identity)))
+    }
+
+    fn atomic_array_element(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<crate::libraries::AtomicOperation>, KlibBodyDeclineReason> {
+        Ok(self
+            .linked_identity(callee)
+            .and_then(|identity| self.sources.intrinsics.atomic_array_element(&identity)))
     }
 
     fn common_primitive(
@@ -1248,6 +1303,14 @@ impl CallLinker for Linker<'_, '_> {
         Ok((classifier, name))
     }
 
+    fn static_field(
+        &mut self,
+        ir: &mut IrFile,
+        field: &KlibIrSymbol,
+    ) -> Result<Option<StaticField>, KlibBodyDeclineReason> {
+        self.static_storage(ir, field)
+    }
+
     fn singleton(&self, classifier: TypeName) -> Result<(), KlibBodyDeclineReason> {
         // The target realizes the value of an object whose representation it owns, as it does for
         // a source reference of that object. Any other object would need its class materialized.
@@ -1382,6 +1445,13 @@ impl CallLinker for Linker<'_, '_> {
                 context_count: linked.context_count,
                 class_type_parameters: linked.class_type_parameters,
             });
+        }
+        // An accessor of a top-level property is a function of this unit, unless an earlier unit
+        // already emitted it.
+        if !self.sources.externals.contains_key(&identity) {
+            if let Some(linked) = self.top_level_accessor(ir, &identity)? {
+                return Ok(linked);
+            }
         }
         // A complete retained export or positive target plan owns this edge. Other accessors
         // retain the explicit unsupported boundary instead of acquiring a header-only body path.
@@ -1870,23 +1940,29 @@ impl<'s> Linker<'_, 's> {
         if class.is_value {
             return Ok(true);
         }
-        let Some(primary) = &class.primary_constructor else {
-            return Ok(false);
-        };
-        let identity = KlibDependencyCallable {
-            module: class.module.clone(),
-            declaration: KlibDeclarationSignature::Public(primary.clone()),
-        };
-        let Some(KlibCalleeFact::Selected(constructors)) = self.sources.callees.get(&identity)
+        // Every instance a member is called on was created by one of the constructors that
+        // initialize the class, so the unit materializes the class only when each of them does.
+        let Some(constructors) =
+            super::class_initialization::initializing_constructors(class, self.sources.bodies)
         else {
             return Ok(false);
         };
-        Ok(super::class_initialization::plan(
-            constructors[0],
-            self.sources.bodies,
-            self.sources.callees,
-        )?
-        .is_some())
+        for identity in &constructors {
+            let Some(KlibCalleeFact::Selected(selected)) = self.sources.callees.get(identity)
+            else {
+                return Ok(false);
+            };
+            if super::class_initialization::plan(
+                selected[0],
+                self.sources.bodies,
+                self.sources.callees,
+            )?
+            .is_none()
+            {
+                return Ok(false);
+            }
+        }
+        Ok(!constructors.is_empty())
     }
 
     /// A call of a member of a class this unit does not materialize, through the member's
@@ -2169,6 +2245,7 @@ impl<'s> Linker<'_, 's> {
             initialization: None,
             value_member,
             local_body: None,
+            static_initialization: None,
         });
         Ok(declared)
     }
@@ -2387,6 +2464,12 @@ impl UnitCheckpoint {
             .retain(|_, class| (class.class as usize) < unit.ir.classes.len());
         unit.local_functions
             .retain(|_, function| (function.function as usize) < unit.ir.functions.len());
+        unit.statics
+            .retain(|_, index| (*index as usize) < unit.ir.statics.len());
+        unit.file_initializations
+            .retain(|_, function| *function < first);
+        unit.initialized_functions
+            .retain(|function| *function < first);
         unit.ir.function_overrides.retain(|owner, _| {
             unit.ir
                 .classes
@@ -2409,6 +2492,17 @@ fn parameter_defaults(declaration: &KlibIrFunction) -> Vec<bool> {
 }
 
 impl Linker<'_, '_> {
+    /// The exact declaration a call of `callee` from the active module links to, if one does.
+    fn linked_identity(&self, callee: &KlibPublicIdSignature) -> Option<KlibDependencyCallable> {
+        match self.sources.bodies.linked_origin(
+            &self.active_module,
+            &KlibDeclarationSignature::Public(callee.clone()),
+        ) {
+            KlibCalleeOrigin::Exact(identity) => Some(identity),
+            KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+        }
+    }
+
     /// The primitive `select` reads for the declaration a call of `signature` names, unless the
     /// call is an exact declaration edge.
     fn primitive_at(

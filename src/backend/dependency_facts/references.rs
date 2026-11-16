@@ -296,7 +296,8 @@ impl ReferencedDependencies {
             | IrCheckedOperation::BackingFieldWrite { .. }
             | IrCheckedOperation::ComparableRangeContains { .. }
             | IrCheckedOperation::IllegalProgressionStep { .. }
-            | IrCheckedOperation::AtomicField { .. } => {}
+            | IrCheckedOperation::AtomicField { .. }
+            | IrCheckedOperation::AtomicArrayElement { .. } => {}
         }
     }
 

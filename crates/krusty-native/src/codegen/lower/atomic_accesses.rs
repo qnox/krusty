@@ -1,7 +1,8 @@
-//! Atomic accesses to an instance field: one cranelift atomic instruction per operation.
+//! Atomic accesses to an instance field or an array element: one cranelift atomic instruction
+//! per operation.
 //!
 //! The receiver and every operand are evaluated first, in order, before the instruction touches
-//! the field. `CompareAndSet` answers whether the stored word was the expected one. `Exchange`,
+//! the word. `CompareAndSet` answers whether the stored word was the expected one. `Exchange`,
 //! `CompareAndExchange` and `FetchAndAdd` answer the word the instruction found; an operation that
 //! returns the updated value adds the delta itself. A reference field is compared by identity.
 
@@ -51,12 +52,24 @@ impl BodyLowering<'_, '_, '_> {
         }
         let offset = self.file.model.layout(class).fields[index as usize].offset as i32;
         let address = self.builder.ins().iadd_imm_s(object, i64::from(offset));
+        Ok(self.atomic_access(operation, clif, address, &values))
+    }
+
+    /// The atomic access `operation` to the word of width `clif` at `address`, with `values` its
+    /// operation's operands: what it answers, or nothing for a store.
+    pub(super) fn atomic_access(
+        &mut self,
+        operation: AtomicOperation,
+        clif: types::Type,
+        address: Value,
+        values: &[Value],
+    ) -> Option<Value> {
         let flags = super::trusted();
-        let found = match operation {
+        Some(match operation {
             AtomicOperation::Load => self.builder.ins().atomic_load(clif, flags, address),
             AtomicOperation::Store => {
                 self.builder.ins().atomic_store(flags, values[0], address);
-                return Ok(None);
+                return None;
             }
             AtomicOperation::Exchange => {
                 self.builder
@@ -73,17 +86,56 @@ impl BodyLowering<'_, '_, '_> {
                     .builder
                     .ins()
                     .atomic_cas(flags, address, values[0], values[1]);
-                return Ok(Some(self.builder.ins().icmp(
-                    IntCC::Equal,
-                    found,
-                    values[0],
-                )));
+                self.builder.ins().icmp(IntCC::Equal, found, values[0])
             }
             AtomicOperation::CompareAndExchange => self
                 .builder
                 .ins()
                 .atomic_cas(flags, address, values[0], values[1]),
+        })
+    }
+}
+
+impl BodyLowering<'_, '_, '_> {
+    /// The atomic access `operation` to the element `index` of `array`, after proving the index
+    /// is inside the array. A reference array's element is compared by identity.
+    pub(super) fn atomic_array_element(
+        &mut self,
+        operation: AtomicOperation,
+        array: u32,
+        index: u32,
+        operands: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        if operands.len() != operation.operands() {
+            return Err("an atomic array element access without its operation's operands".into());
+        }
+        let (object, shape) = self.array_of(array)?;
+        let clif = match self.carrier(shape.stored) {
+            Carrier::Scalar(clif, _) if clif.is_int() => clif,
+            Carrier::Ref if operation != AtomicOperation::FetchAndAdd => types::I64,
+            Carrier::Ref => return Err("an atomic addition to a reference array element".into()),
+            Carrier::Scalar(..) | Carrier::Void => {
+                return Err(
+                    "an atomic access to an array element that is not integral or a reference"
+                        .into(),
+                )
+            }
         };
-        Ok(Some(found))
+        let index = self.coerce(index, Ty::Int)?;
+        let mut values = Vec::with_capacity(operands.len());
+        for &operand in operands {
+            let Some(value) = self.coerce(operand, shape.stored)? else {
+                return Ok(None);
+            };
+            values.push(value);
+        }
+        if self.terminated {
+            return Ok(None);
+        }
+        let Some(index) = index else {
+            return Err("an array index of no value".into());
+        };
+        let address = self.element_address(object, index, shape.stride)?;
+        Ok(self.atomic_access(operation, clif, address, &values))
     }
 }
