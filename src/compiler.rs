@@ -503,7 +503,7 @@ fn emit_analyzed_into<B: Backend>(
                 &mut file,
                 symbols.semantic_platform(),
                 preparation,
-                symbols.coroutine_runtime(),
+                symbols.runtime(),
                 &dispatched_classes,
             ) {
                 backend.report_common_ir_preparation_error(&error, diags);

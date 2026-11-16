@@ -671,7 +671,8 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
         };
         if let Some(protocol) = symbols
-            .char_sequence_protocol()
+            .runtime()
+            .char_sequence_protocol
             .filter(|_| backend.appends_char_sequences_by_index())
         {
             if let Err(error) = callables.freeze_char_sequence_protocol(protocol, platform) {
@@ -775,7 +776,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 &mut support,
                 platform,
                 preparation,
-                symbols.coroutine_runtime(),
+                symbols.runtime(),
                 &dispatched_classes,
             ) {
                 release_unit_reservations(support_state, &published, &materialized, &statics);

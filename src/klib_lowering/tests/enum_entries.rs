@@ -91,8 +91,10 @@ fn a_dependency_enum_constant_read_materializes_its_enum_class() {
     crate::backend::enums::realize(
         &mut realized,
         crate::backend::enums::Contract::KotlinNative,
+        None,
         &mut crate::backend::DependencyExportSignatures::default(),
-    );
+    )
+    .expect("the Native contract builds its own list");
     assert!(!realized
         .exprs
         .iter()

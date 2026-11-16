@@ -1795,7 +1795,7 @@ impl<'a> Body<'a> {
                     })?;
                 self.code.call(entry);
             }
-            // So are `values()` and `valueOf`, which read those constants.
+            // So are `values()`, `valueOf` and `entries`, which read those constants.
             IrExpr::EnumValues { classifier } => self.dependency_enum_member(
                 classifier,
                 krusty::backend::enums::StaticMember::Values,
@@ -1807,6 +1807,11 @@ impl<'a> Body<'a> {
                 classifier,
                 krusty::backend::enums::StaticMember::ValueOf,
                 Some(arg),
+            )?,
+            IrExpr::EnumEntries { classifier } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::Entries,
+                None,
             )?,
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
