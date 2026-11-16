@@ -212,6 +212,12 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// Whether `callee`, a public or accessor signature, is a constructor or member of a class private to the
+    /// library of the body being lowered. Such a call links as a file-local one does.
+    fn links_privately(&self, _callee: &crate::metadata::klib_ir::KlibIrSignature) -> bool {
+        false
+    }
+
     /// The constructor a file-local construction invokes. Template linkers keep the refusal.
     fn link_local_constructor(
         &mut self,
@@ -1002,12 +1008,20 @@ impl<'a> BodyLowering<'a> {
         if is_value_of(actual, declared) {
             return Ok(lowered);
         }
+        let parameters = self.header.type_parameters();
+        // A value of a subtype of `declared`, as `suspendCoroutine` passes its `SafeContinuation`
+        // to a `(Continuation<T>) -> Unit` block, is one by subsumption. It crosses as the checked
+        // source argument does, with the conversion the checker decides for the same two types.
+        if self.linker.is_subtype(parameters, actual, declared) {
+            return Ok(match crate::types::value_conversion(actual, declared) {
+                None => lowered,
+                Some(_) => self.coercion(lowered, declared),
+            });
+        }
         // A prepared copy also erases the type parameters of the inline functions it already
         // expanded, so the value may be typed with the erasure's bound: a supertype of `declared`.
         if actual != self.header.erased(declared)
-            && !self
-                .linker
-                .is_subtype(self.header.type_parameters(), declared, actual)
+            && !self.linker.is_subtype(parameters, declared, actual)
         {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         }

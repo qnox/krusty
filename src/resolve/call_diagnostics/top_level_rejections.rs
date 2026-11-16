@@ -33,6 +33,7 @@ pub(in crate::resolve) fn report_inapplicable_callable_candidates(
         );
         return true;
     }
+    let candidates = most_applicable_rejections(candidates, args, argument_names, trailing_lambda);
     crate::trace_compiler!(
         "resolve",
         "inapplicable callable {name}: candidates={} args={:?} names={argument_names:?}",
@@ -397,8 +398,11 @@ pub(in crate::resolve) fn report_inapplicable_callable_candidates(
             if displays.len() >= MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES {
                 break;
             }
-            let display = checker
-                .module_source_display(candidate, candidate.callable.ret)
+            let display = candidate
+                .constructor
+                .is_none()
+                .then(|| checker.module_source_display(candidate, candidate.callable.ret))
+                .flatten()
                 .unwrap_or_else(|| Checker::callable_candidate_display(name, candidate));
             let separator_bytes = if displays.is_empty() { 2 } else { 1 };
             if prefix
@@ -442,6 +446,61 @@ pub(in crate::resolve) fn report_inapplicable_callable_candidates(
         .diags
         .error(checker.call_callee_name_span(call), message);
     true
+}
+
+/// A call whose selection lacks a context argument while several rejected candidates map its
+/// arguments lists them; when the arguments map onto one candidate alone, that candidate's own
+/// missing-context diagnostic is the call's, and this reports nothing.
+pub(in crate::resolve) fn report_competing_missing_context(
+    site: InapplicableTopLevelCall<'_>,
+    candidates: Vec<crate::libraries::FunctionInfo>,
+    checker: &mut Checker<'_>,
+) -> bool {
+    let mapped = most_applicable_rejections(
+        candidates.clone(),
+        site.args,
+        site.argument_names,
+        site.trailing_lambda,
+    );
+    mapped.len() > 1 && {
+        report_inapplicable_callable_candidates(site, candidates, checker);
+        true
+    }
+}
+
+/// The rejected candidates kotlinc reports: when the arguments map onto some candidates, only
+/// those. A candidate whose arguments map but do not fit outranks one they cannot be mapped onto,
+/// whether it is a function or a constructor: `Box<String>(3)` against `class Box<T>(val a:
+/// Array<T>)` and `fun <T> Box(size: Int, init: (Int) -> T)` reports the constructor's argument
+/// mismatch, not the factory's missing `init`.
+fn most_applicable_rejections(
+    candidates: Vec<crate::libraries::FunctionInfo>,
+    args: &[ExprId],
+    argument_names: Option<&[Option<String>]>,
+    trailing_lambda: bool,
+) -> Vec<crate::libraries::FunctionInfo> {
+    let maps = |candidate: &crate::libraries::FunctionInfo| {
+        let context_count = candidate.context_count.min(candidate.callable.params.len());
+        map_call_sig_args_with_trailing(
+            args,
+            argument_names,
+            candidate
+                .semantic_signature()
+                .params
+                .len()
+                .saturating_sub(context_count),
+            &candidate.call_sig.suffix(context_count),
+            trailing_lambda,
+        )
+        .is_ok()
+    };
+    if !candidates.iter().any(maps) {
+        return candidates;
+    }
+    candidates
+        .into_iter()
+        .filter(|candidate| maps(candidate))
+        .collect()
 }
 
 /// Both overloads' explicit type arguments are outside their bounds, so neither shapes the lambda.

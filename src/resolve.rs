@@ -18946,9 +18946,7 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(selection) = top_level {
                     if matches!(selection, CallableCandidateSelection::MissingContext(_))
-                        && top_level_candidates.len() > 1
-                    {
-                        call_diagnostics::report_inapplicable_callable_candidates(
+                        && call_diagnostics::report_competing_missing_context(
                             InapplicableTopLevelCall {
                                 call,
                                 name: &fname,
@@ -18963,7 +18961,8 @@ impl<'a> Checker<'a> {
                             },
                             top_level_candidates,
                             self,
-                        );
+                        )
+                    {
                         return Ty::Error;
                     }
                     return self.finish_top_level_call(
@@ -19177,6 +19176,7 @@ impl<'a> Checker<'a> {
                 }
                 let mut candidates = inapplicable_associated;
                 candidates.extend(self.resolver().top_level_candidates(&fname));
+                candidates.extend(competing_constructors.iter().cloned());
                 candidates.extend(inapplicable_classifier_invoke.iter().cloned());
                 if let Some(result) = self.finish_deferred_lexical_invoke_failure(
                     scope,

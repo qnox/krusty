@@ -1056,6 +1056,17 @@ impl CallLinker for Linker<'_, '_> {
         super::same_library_class::classifier(self.sources.bodies, &self.active_module, signature)
     }
 
+    fn links_privately(&self, callee: &KlibIrSignature) -> bool {
+        matches!(
+            callee,
+            KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_)
+        ) && self
+            .sources
+            .bodies
+            .module_local_function(&self.active_module, callee)
+            .is_some()
+    }
+
     fn link_local_constructor(
         &mut self,
         ir: &mut IrFile,
@@ -1086,9 +1097,13 @@ impl CallLinker for Linker<'_, '_> {
         callee: &KlibIrSignature,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
         let &KlibIrSignature::FileLocal { file, slot } = callee else {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "a file-local call names a public signature".to_owned(),
-            ));
+            // A member of a class private to its enclosing class keeps its public signature.
+            if !self.links_privately(callee) {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a file-local call names a public signature".to_owned(),
+                ));
+            }
+            return self.link_local_member(ir, callee);
         };
         let signature = KlibDeclarationSignature::FileLocal { file, slot };
         // A top-level function private to its file is the declaration of its own tree; every

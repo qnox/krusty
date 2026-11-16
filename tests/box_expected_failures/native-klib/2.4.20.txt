@@ -189,7 +189,6 @@ callableReference/equality/conversionCombinations.kt
 callableReference/equality/suspendFunctionEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorIsKFunction.kt
-callableReference/function/extensionFunctionAsASuperTypePassToSAMInterface.kt
 callableReference/function/genericCallableReferenceArgumentsNonJVM.kt
 callableReference/function/genericCallableReferenceWithReifiedTypeParam.kt
 callableReference/function/genericCallableReferencesWithNullableTypes.kt
@@ -221,7 +220,6 @@ casts/toNativePointers.kt
 classDelegation/delegationToStarProjectedType.kt
 classDelegation/multipleModules.kt
 classLiteral/bound/primitives.kt
-classes/kt1535.kt
 classes/kt1538.kt
 classes/kt2566_2.kt
 classes/kt3001.kt
@@ -230,8 +228,6 @@ classes/typedDelegation.kt
 closures/capturedVarsOptimization/kt44347.kt
 closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
-closures/closureOnTopLevel1.kt
-closures/closureOnTopLevel2.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
 collectionLiterals/primitiveArrays.kt
@@ -867,7 +863,6 @@ dataObjects/toString.kt
 dataflow/scope1.kt
 dataflow/uninitialized_val.kt
 deadCodeElimination/emptyVariableRange.kt
-defaultArguments/constructor/anonymousObjectAsDefaultParam.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
 defaultArguments/function/defaultLambdaInline.kt
 delegatedProperty/DelegationByFunctionWithEnumUpperBound.kt
@@ -977,7 +972,6 @@ exceptions/catch1.kt
 exceptions/catch2.kt
 exceptions/rethrow.kt
 exceptions/throw_from_catch.kt
-extensionFunctions/extensionFunctionAsSupertype.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionWithInlineModifier.kt
 extensionFunctions/suspendConversionForExtensionFunAsAFunType.kt
@@ -1016,7 +1010,6 @@ funInterface/kt79092-sam.kt
 funInterface/kt79092.kt
 funInterface/multimodule.kt
 funInterface/nonTrivialProjectionInSuperType.kt
-funInterface/subtypeOfFunctionalTypeToFunInterfaceConversion.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
 function/defaults10.kt
@@ -1208,7 +1201,6 @@ inlineClass/nestedInlineClasses.kt
 inlineClass/secondaryConstructorWithGenerics.kt
 inlineClasses/anonymousObjectAsDefaultParam.kt
 inlineClasses/anonymousObjectAsDefaultParamFull.kt
-inlineClasses/anonymousObjectAsDefaultParamSingleFile.kt
 inlineClasses/boxReturnValueInLambda/kt27586_1.kt
 inlineClasses/boxReturnValueInLambda/kt27586_2.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideListVsMutableList.kt
@@ -1467,7 +1459,6 @@ multiplatform/k2/basic/overridesOfExpectMembers.kt
 multiplatform/k2/basic/substitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/widerVisibilityInActualClassifier.kt
 multiplatform/k2/defaultArguments/constructor.kt
-multiplatform/k2/defaultArguments/defaultArgumentInDelegatedFunction.kt
 multiplatform/k2/defaultArguments/function.kt
 multiplatform/k2/defaultArguments/inheritedFromCommonClass.kt
 multiplatform/k2/defaultArguments/inheritedFromExpectedClass.kt
@@ -1479,7 +1470,6 @@ multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/defaultArguments/withTypeParameter.kt
-multiplatform/k2/delegation/delegationToExpectInterfaceByExpectFun.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
 multiplatform/k2/enumStaticMethods.kt
 multiplatform/k2/expectStatic.kt
@@ -2439,8 +2429,6 @@ typeErasure/twoFunWithTypeParametersInlineFunWithReifiedTypeParameters.kt
 typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParameters.kt
 typealias/abbreviationWithCapturedType.kt
 typealias/typeAliasAsBareType.kt
-unitConversion/unitConversionForSubtype.kt
-unitConversion/unitConversionWithSamSubtype.kt
 unitConversion/unitConversionWithSuspend.kt
 unsignedTypes/forInUnsignedProgression.kt
 unsignedTypes/forInUnsignedRangeWithCoercion.kt
