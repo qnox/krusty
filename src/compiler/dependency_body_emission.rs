@@ -704,7 +704,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         let initializer_requests = match crate::backend::initializer_declarations(&support) {
             Ok(requests) => requests,
             Err(reason) => {
-                release_unit_reservations(support_state, &published, &materialized);
+                release_unit_reservations(support_state, &published, &materialized, &statics);
                 diags.error(Span::new(0, 0), format!("internal error: {reason}"));
                 return Vec::new();
             }
