@@ -2652,9 +2652,7 @@ pub(crate) fn install_streamed_anonymous_capture_declarations(
                 // physical field later; it must never replace the source-visible signature.
                 continue;
             }
-            let sibling = u32::MAX
-                .checked_sub(u32::try_from(ordinal).expect("too many anonymous-object captures"))
-                .expect("too many anonymous-object captures");
+            let sibling = DeclarationAnchor::capture_storage_sibling(ordinal);
             let declaration = headers.declarations.intern(DeclarationAnchor {
                 source: crate::fir::SourceFileId::from_raw(source),
                 range: class.span,
