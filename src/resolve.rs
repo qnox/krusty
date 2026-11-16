@@ -47112,16 +47112,7 @@ impl<'a> Checker<'a> {
     /// An explicit primitive unary-method call is admitted only when overload selection recorded
     /// the exact built-in operation; source/member spellings never manufacture this fact.
     fn integer_constant_provenance(&self, expression: ExprId) -> Option<IntegerConstant> {
-        let semantic = checked_integer_constant(
-            CheckedConstantExpression {
-                file: self.file,
-                expression_types: &self.expr_types,
-                resolved_constants: &self.resolved_constants,
-                resolved_calls: &self.resolved_calls,
-                resolved_operator_calls: &self.resolved_operator_calls,
-            },
-            expression,
-        );
+        let semantic = checked_integer_constant(self.checked_constant_context(), expression);
         semantic.or_else(|| {
             let ExprLowering::BuiltinUnaryCall { operation } = self.expr_lowers.get(&expression)?
             else {
