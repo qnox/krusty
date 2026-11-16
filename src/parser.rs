@@ -1637,6 +1637,11 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::Eq, "'='");
         let target = self.parse_type();
         let end = self.t[self.i.saturating_sub(1)].span;
+        let declaration_start = self
+            .file
+            .declaration_prefixes
+            .at(start.lo)
+            .map_or(start.lo, |prefix| prefix.declaration_start);
         crate::ast::TypeAliasDecl {
             name,
             type_params,
@@ -1644,6 +1649,7 @@ impl<'a> Parser<'a> {
             target,
             span: Span::new(start.lo, end.hi),
             name_span,
+            declaration_span: Span::new(declaration_start, end.hi),
         }
     }
 
@@ -1940,6 +1946,7 @@ impl<'a> Parser<'a> {
             is_value: false,
             value_modifier_span: None,
             primary_constructor_parameters_span: None,
+            primary_constructor_signature_span: None,
             enum_entries: Vec::new(),
             is_fun_interface: false,
             modality: crate::ast::Modality::Final,
@@ -2000,12 +2007,14 @@ impl<'a> Parser<'a> {
             ctor_open_offset = self.tok().span.lo;
         }
         let has_primary_ctor = self.at(TokenKind::LParen);
-        let (props, ctor_close_lo) = if has_primary_ctor {
+        let (props, ctor_close_lo, primary_constructor_parameters_span) = if has_primary_ctor {
             let parsed = self.parse_primary_constructor_parameters(false);
-            (parsed.parameters, parsed.close_lo)
+            (parsed.parameters, parsed.close_lo, parsed.span)
         } else {
-            (Vec::new(), 0)
+            (Vec::new(), 0, None)
         };
+        let primary_constructor_signature_span = primary_constructor_parameters_span
+            .map(|params| Span::new(ctor_open_offset.min(params.lo), params.hi));
         // Optional supertype list (`enum class E : I1, I2`): an enum may implement interfaces; the
         // abstract members are satisfied by the enum's own methods or per-entry overrides. (An enum can't
         // extend a class, so only the interface supertypes are kept.)
@@ -2242,7 +2251,8 @@ impl<'a> Parser<'a> {
             is_data: false,
             is_value: false,
             value_modifier_span: None,
-            primary_constructor_parameters_span: None,
+            primary_constructor_parameters_span,
+            primary_constructor_signature_span,
             kind: ClassKind::Enum,
             singleton: false,
             enum_entries: entries,
@@ -2808,6 +2818,13 @@ impl<'a> Parser<'a> {
             ctor_close_lo = parsed.close_lo;
             primary_constructor_parameters_span = parsed.span;
         }
+        let primary_constructor_signature_span =
+            primary_constructor_parameters_span.map(|params| {
+                Span::new(
+                    if header_ctor_kw { header_lo } else { params.lo },
+                    params.hi,
+                )
+            });
         // Optional supertype list: `: Iface1, Base(args), Iface2`. Supertypes with `()` are the
         // base class (v0: unsupported → flagged); the rest are implemented interfaces.
         let (
@@ -2916,6 +2933,7 @@ impl<'a> Parser<'a> {
             is_value: false,
             value_modifier_span: None,
             primary_constructor_parameters_span,
+            primary_constructor_signature_span,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3060,7 +3078,11 @@ impl<'a> Parser<'a> {
                 // recovers a member's concrete generic return — kept on the interface `TypeRef`. Also note
                 // whether any is a non-nullable primitive (`A<Long>` delegation needs substituted bridges).
                 let targs: Vec<TypeRef> = if self.at(TokenKind::Lt) {
-                    self.parse_type_args()
+                    let (targs, list) = self.parse_type_argument_list();
+                    if !targs.is_empty() {
+                        self.file.type_argument_list_spans.insert(sup_span, list);
+                    }
+                    targs
                 } else {
                     Vec::new()
                 };
@@ -3268,6 +3290,7 @@ impl<'a> Parser<'a> {
             is_value: false,
             value_modifier_span: None,
             primary_constructor_parameters_span: None,
+            primary_constructor_signature_span: None,
             kind: ClassKind::Interface,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3385,6 +3408,7 @@ impl<'a> Parser<'a> {
             is_value: false,
             value_modifier_span: None,
             primary_constructor_parameters_span: None,
+            primary_constructor_signature_span: None,
             kind: ClassKind::Class,
             singleton: false,
             enum_entries: Vec::new(),
@@ -3522,6 +3546,7 @@ impl<'a> Parser<'a> {
             is_value: false,
             value_modifier_span: None,
             primary_constructor_parameters_span: None,
+            primary_constructor_signature_span: None,
             kind: ClassKind::Class,
             singleton: true,
             enum_entries: Vec::new(),
@@ -3747,6 +3772,12 @@ impl<'a> Parser<'a> {
                 targs = segment_targs;
             }
             // The last segment's list is the classifier's own.
+            if let Some(own) = qualifier_arguments
+                .iter()
+                .find(|list: &&QualifierSegmentArguments| list.segment == segment)
+            {
+                self.file.type_argument_list_spans.insert(span, own.span);
+            }
             qualifier_arguments.retain(|list: &QualifierSegmentArguments| list.segment != segment);
             let nullable = self.eat_type_nullable(); // `T?`
             let base = TypeRef {

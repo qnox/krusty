@@ -12,6 +12,9 @@ use crate::resolve::source_signature_display::{
 pub(in crate::resolve) enum TopLevelFunctionConflictDeclaration {
     Legacy(DeclId),
     Stable(crate::fir::DeclarationId),
+    /// One constructor a class or typealias declaration names in its package: the declaration
+    /// and the constructor's ordinal in that classifier's constructor list.
+    Constructor(crate::fir::DeclarationId, u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -31,7 +34,10 @@ pub(in crate::resolve) struct TopLevelFunctionConflictCandidate {
 #[derive(Clone, Copy)]
 pub(in crate::resolve) enum TopLevelFunctionConflictDisplaySource<'a> {
     Legacy(&'a [File]),
-    Compact(&'a crate::fir::StreamedHeaderModule),
+    Compact(
+        &'a crate::fir::StreamedHeaderModule,
+        &'a crate::fir::ResolvedModuleIndex,
+    ),
 }
 
 #[derive(Default)]
@@ -61,9 +67,17 @@ pub(super) struct TopLevelFunctionConflictFile {
 pub(in crate::resolve) struct TopLevelFunctionConflictGroups {
     indexes: HashMap<TopLevelFunctionConflictKey, usize>,
     pub(super) groups: Vec<(TopLevelFunctionConflictKey, TopLevelFunctionConflictGroup)>,
+    /// Displays of the registered constructors. A constructor has no callable header of its own
+    /// to render from once it is a candidate.
+    pub(super) constructor_displays: HashMap<TopLevelFunctionConflictDeclaration, String>,
 }
 
 impl TopLevelFunctionConflictGroups {
+    /// Whether a declaration of overload shape `key` has registered.
+    pub(super) fn contains(&self, key: &TopLevelFunctionConflictKey) -> bool {
+        self.indexes.contains_key(key)
+    }
+
     fn get_or_insert(&mut self, key: TopLevelFunctionConflictKey) -> usize {
         if let Some(&index) = self.indexes.get(&key) {
             return index;
@@ -121,8 +135,16 @@ fn retain_conflict_diagnostic(
     );
 }
 
+/// Where a retained candidate's display comes from: a function's header, or a constructor's
+/// display recorded when it was registered.
+#[derive(Clone, Copy)]
+struct CandidateDisplays<'a> {
+    source: TopLevelFunctionConflictDisplaySource<'a>,
+    constructors: &'a HashMap<TopLevelFunctionConflictDeclaration, String>,
+}
+
 fn retain_conflict_candidate(
-    source: TopLevelFunctionConflictDisplaySource<'_>,
+    displays: CandidateDisplays<'_>,
     candidates: &mut Vec<TopLevelFunctionConflictCandidate>,
     retained_display_bytes: &mut usize,
     declaration: TopLevelFunctionConflictDecl,
@@ -141,7 +163,12 @@ fn retain_conflict_candidate(
         MAX_OVERLOAD_DIAGNOSTIC_BYTES.saturating_sub(INAPPLICABLE_OVERLOAD_PREFIX.len() + 2);
     let max_bytes = remaining_bytes.min(per_message_bytes);
     let display =
-        match (source, declaration.declaration) {
+        match (displays.source, declaration.declaration) {
+            (_, TopLevelFunctionConflictDeclaration::Constructor(..)) => displays
+                .constructors
+                .get(&declaration.declaration)
+                .filter(|display| display.len() <= max_bytes)
+                .cloned(),
             (
                 TopLevelFunctionConflictDisplaySource::Legacy(files),
                 TopLevelFunctionConflictDeclaration::Legacy(declaration_id),
@@ -154,9 +181,9 @@ fn retain_conflict_candidate(
                 }
             }),
             (
-                TopLevelFunctionConflictDisplaySource::Compact(headers),
+                TopLevelFunctionConflictDisplaySource::Compact(headers, index),
                 TopLevelFunctionConflictDeclaration::Stable(declaration_id),
-            ) => streamed_function_conflict_display(headers, declaration_id, max_bytes),
+            ) => streamed_function_conflict_display(headers, index, declaration_id, max_bytes),
             _ => None,
         };
     let Some(display) = display else {
@@ -203,6 +230,10 @@ pub(in crate::resolve) fn register_top_level_function_conflict(
         entry_point,
     } = registration;
     let group_index = groups.get_or_insert(key);
+    let displays = CandidateDisplays {
+        source,
+        constructors: &groups.constructor_displays,
+    };
     let group = &mut groups.groups[group_index].1;
     let file_state = group.files.get(&current.file);
     let first_in_file = file_state.and_then(|state| state.first_declaration);
@@ -238,7 +269,7 @@ pub(in crate::resolve) fn register_top_level_function_conflict(
         );
         if let Some(first_public) = first_file_public {
             retain_conflict_candidate(
-                source,
+                displays,
                 &mut group.public_candidates,
                 retained_display_bytes,
                 first_public,
@@ -246,7 +277,7 @@ pub(in crate::resolve) fn register_top_level_function_conflict(
         }
         if let Some(first_local) = first_file_local {
             retain_conflict_candidate(
-                source,
+                displays,
                 &mut group.files.entry(current.file).or_default().candidates,
                 retained_display_bytes,
                 first_local,
@@ -254,14 +285,14 @@ pub(in crate::resolve) fn register_top_level_function_conflict(
         }
         if local {
             retain_conflict_candidate(
-                source,
+                displays,
                 &mut group.files.entry(current.file).or_default().candidates,
                 retained_display_bytes,
                 current,
             );
         } else {
             retain_conflict_candidate(
-                source,
+                displays,
                 &mut group.public_candidates,
                 retained_display_bytes,
                 current,
@@ -284,14 +315,14 @@ pub(in crate::resolve) fn register_top_level_function_conflict(
         );
         if let Some(first_public) = group.first_public {
             retain_conflict_candidate(
-                source,
+                displays,
                 &mut group.public_candidates,
                 retained_display_bytes,
                 first_public,
             );
         }
         retain_conflict_candidate(
-            source,
+            displays,
             &mut group.files.entry(current.file).or_default().candidates,
             retained_display_bytes,
             current,
@@ -310,7 +341,7 @@ pub(in crate::resolve) fn register_top_level_function_conflict(
                     true,
                 );
                 retain_conflict_candidate(
-                    source,
+                    displays,
                     &mut group.public_candidates,
                     retained_display_bytes,
                     first_public,
@@ -324,7 +355,7 @@ pub(in crate::resolve) fn register_top_level_function_conflict(
                 true,
             );
             retain_conflict_candidate(
-                source,
+                displays,
                 &mut group.public_candidates,
                 retained_display_bytes,
                 current,
@@ -342,7 +373,7 @@ pub(in crate::resolve) fn register_top_level_function_conflict(
             if !prior_private.is_empty() {
                 group.conflicts = true;
                 retain_conflict_candidate(
-                    source,
+                    displays,
                     &mut group.public_candidates,
                     retained_display_bytes,
                     current,
@@ -356,7 +387,7 @@ pub(in crate::resolve) fn register_top_level_function_conflict(
                         true,
                     );
                     retain_conflict_candidate(
-                        source,
+                        displays,
                         &mut group.files.entry(declaration.file).or_default().candidates,
                         retained_display_bytes,
                         declaration,
@@ -384,4 +415,56 @@ pub(in crate::resolve) fn register_top_level_function_conflict(
         group.first_public.get_or_insert(current);
     }
     retained
+}
+
+/// Register a constructor no declaration outside its class can call. It reports the package
+/// functions it sees (every one in its own file and every package-visible one), but no function
+/// sees it, so it never becomes one of their candidates. Every function of the package must be
+/// registered first.
+pub(in crate::resolve) fn register_hidden_top_level_conflict(
+    source: TopLevelFunctionConflictDisplaySource<'_>,
+    groups: &mut TopLevelFunctionConflictGroups,
+    key: &TopLevelFunctionConflictKey,
+    current: TopLevelFunctionConflictDecl,
+    pending: &mut HashMap<TopLevelFunctionConflictDecl, PendingTopLevelFunctionConflict>,
+    reserved_diagnostic_bytes: &mut usize,
+    retained_display_bytes: &mut usize,
+) {
+    let Some(&group_index) = groups.indexes.get(key) else {
+        return;
+    };
+    let displays = CandidateDisplays {
+        source,
+        constructors: &groups.constructor_displays,
+    };
+    let group = &mut groups.groups[group_index].1;
+    let file_state = group.files.get(&current.file);
+    let first_local = file_state.and_then(|state| state.first_local);
+    if file_state.is_none_or(|state| state.first_declaration.is_none()) && group.public_count == 0 {
+        return;
+    }
+    group.conflicts = true;
+    retain_conflict_diagnostic(
+        pending,
+        reserved_diagnostic_bytes,
+        current,
+        group_index,
+        true,
+    );
+    if let Some(first_public) = group.first_public {
+        retain_conflict_candidate(
+            displays,
+            &mut group.public_candidates,
+            retained_display_bytes,
+            first_public,
+        );
+    }
+    if let Some(first_local) = first_local {
+        retain_conflict_candidate(
+            displays,
+            &mut group.files.entry(current.file).or_default().candidates,
+            retained_display_bytes,
+            first_local,
+        );
+    }
 }
