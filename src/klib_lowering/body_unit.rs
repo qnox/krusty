@@ -1418,6 +1418,11 @@ impl CallLinker for Linker<'_, '_> {
             .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
                 "a dependency property accessor without an exact accessor contract",
             ))?;
+        // The exact external callable names an accessor's own formals in the substitutions its
+        // read carries; an accessor without formals of its own needs no such name.
+        if linked.type_parameters.is_empty() {
+            return Ok(linked);
+        }
         let (callable, realization) = self
             .sources
             .declarations
