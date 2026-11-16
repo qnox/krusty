@@ -205,7 +205,6 @@ pub(super) fn plan<'a, 'b>(
         ));
     };
     if access.symbol.kind != KlibIrSymbolKind::Constructor
-        || !access.type_arguments.is_empty()
         || !matches!(&header.arena.expr(*initialize).kind,
             KlibIrExprKind::InstanceInitializerCall(class) if class == &header.class.base.symbol)
     {
@@ -233,12 +232,17 @@ pub(super) fn plan<'a, 'b>(
         callees.validate_root_constructor(&contract.module, signature, bodies)
     })?;
     let (superclass, declared_superclass) = if root {
-        if !arguments.is_empty() {
+        if !arguments.is_empty() || !access.type_arguments.is_empty() {
             return Err(mismatch(
-                "a delegation to `Any`'s constructor passes arguments",
+                "a delegation to `Any`'s constructor passes arguments or type arguments",
             ));
         }
         (None, Ty::obj_name(crate::types::wk::any()))
+    } else if !access.type_arguments.is_empty() {
+        // A delegation applying type arguments names a generic superclass, whose layout is that
+        // class applied to them. This plan does not describe it, so the class keeps its target
+        // boundary.
+        return Ok(None);
     } else {
         // The superclass constructor the delegation names, by its exact declaration.
         let constructor = match bodies.linked_origin(

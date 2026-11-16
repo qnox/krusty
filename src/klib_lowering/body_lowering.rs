@@ -142,6 +142,13 @@ pub(super) trait CallLinker {
     /// may be folded into a common-IR operation.
     fn requires_declaration(&self, callee: &KlibPublicIdSignature) -> Lowered<bool>;
 
+    /// Whether the serialized declaration of `callee` carries a body. A function this unit
+    /// declares gets its body only when its queued entry is lowered, so the declaration, not the
+    /// lowered function, proves a member concrete. A linker that cannot read it declines.
+    fn declares_implementation(&self, _callee: &KlibPublicIdSignature) -> Lowered<bool> {
+        unsupported("a `super` call whose member's implementation this linker cannot read")
+    }
+
     /// The serialized header of the member `callee` an `in` over a range literal calls, read
     /// only to prove it is the range's own membership operator: its dispatch receiver, value
     /// parameters and result. `None` keeps the membership an ordinary checked call, as template
@@ -183,6 +190,15 @@ pub(super) trait CallLinker {
         _callee: &crate::metadata::id_signature::KlibPublicIdSignature,
     ) -> Lowered<bool> {
         Ok(false)
+    }
+
+    /// The atomic field access `callee` is, when its exact declaration is the target stdlib's
+    /// authenticated intrinsic over a property reference. Template linkers keep an ordinary call.
+    fn atomic_field(
+        &self,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<Option<crate::libraries::AtomicOperation>> {
+        Ok(None)
     }
 
     /// The function a call of the public declaration `callee` invokes.
@@ -469,11 +485,13 @@ impl<'a> BodyLowering<'a> {
     }
 
     /// This body as a member of the materialized class `class`, which reads its receiver's
-    /// `fields`. A value class member reads its one value and writes nothing.
+    /// `fields`, the backing fields of `properties`. A value class member reads its one value
+    /// and writes nothing.
     pub(super) fn reading_through(
         mut self,
         class: crate::ir::ClassId,
         fields: &[&'a crate::metadata::klib_ir::tree::KlibIrField],
+        properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
         value: bool,
     ) -> Self {
         let declared = &self.ir.classes[class as usize].fields;
@@ -483,6 +501,7 @@ impl<'a> BodyLowering<'a> {
                 .iter()
                 .zip(declared)
                 .map(|(field, declared)| (&field.base.symbol, declared.ty, declared.is_final())),
+            properties,
             self.header.value_receiver(),
             value,
         ));
@@ -539,17 +558,19 @@ impl<'a> BodyLowering<'a> {
                 super_qualifier,
             } => {
                 let ty = self.ty(expression, "call")?;
-                if super_qualifier.is_some() {
-                    return unsupported("a `super` call");
-                }
-                let lowered =
-                    match super::range_membership::range_literal_membership(arena, expression) {
+                if let Some(qualifier) = super_qualifier {
+                    (self.super_call(qualifier, access, ty)?, ty)
+                } else {
+                    let lowered = match super::range_membership::range_literal_membership(
+                        arena, expression,
+                    ) {
                         Some(membership) => self.range_literal_membership(membership, ty, false)?,
                         None => None,
                     };
-                match lowered {
-                    Some(lowered) => (lowered, ty),
-                    None => (self.call(access, ty)?, ty),
+                    match lowered {
+                        Some(lowered) => (lowered, ty),
+                        None => (self.call(access, ty)?, ty),
+                    }
                 }
             }
             KlibIrExprKind::Return { target, value } => {
