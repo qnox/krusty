@@ -4,10 +4,10 @@
 
 <p align="center">
   <a href="https://github.com/qnox/krusty/actions/workflows/ci.yml"><img src="https://github.com/qnox/krusty/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-kotlin.json" alt="Latest supported Kotlin version">
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-conformance.json" alt="Kotlin conformance: share of applicable codegen/box cases whose box() returns OK">
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-jvm-byte-equality.json" alt="JVM byte equality: matching leading .class bytes against kotlinc across the same codegen/box cases">
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-native-conformance.json" alt="Native conformance: share of applicable Native codegen/box cases whose box() returns OK">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fkrustythecompiler.dev%2Fbadges%2Fkrusty-kotlin.json" alt="Latest supported Kotlin version">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fkrustythecompiler.dev%2Fbadges%2Fkrusty-conformance.json" alt="Kotlin conformance: share of applicable codegen/box cases whose box() returns OK">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fkrustythecompiler.dev%2Fbadges%2Fkrusty-jvm-byte-equality.json" alt="JVM byte equality: matching leading .class bytes against kotlinc across the same codegen/box cases">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fkrustythecompiler.dev%2Fbadges%2Fkrusty-native-conformance.json" alt="Native conformance: share of applicable Native codegen/box cases whose box() returns OK">
 </p>
 
 <!-- The JVM badges come from one run of the applicable Kotlin `codegen/box` cases per version.
@@ -28,9 +28,9 @@
      `wasm-js-klib`, and `wasm-wasi-klib` fail/not-applicable inventories are committed under
      tests/box_expected_*/<platform>/<version>.txt.
      See docs/TEST_HARNESS.md "Current Conformance".
-     The master build recomputes all three and writes the badge JSON to a Gist
-     (no repo commit) — see the `release` job in .github/workflows/ci.yml. The gist id is wired via
-     the CONFORMANCE_GIST_ID repo variable; updates need the GIST_TOKEN secret (PAT, `gist` scope). -->
+     The site deploy (.github/workflows/pages.yml) packages the badge JSON from the latest successful
+     master CI run's reports with scripts/package-release-badges.sh and serves it at
+     https://krustythecompiler.dev/badges/; the landing page shows the same reports. -->
 
 krusty is built to be a drop-in replacement for `kotlinc` on the JVM. For the Kotlin subset it
 supports, it accepts `kotlinc`'s command-line flags and aims to emit `.class` files byte-for-byte
