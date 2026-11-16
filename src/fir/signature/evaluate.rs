@@ -271,6 +271,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             let Some(SigExpr::ContextualFunction {
                 parameters,
                 result,
+                labeled_receiver,
                 scope,
                 implicit_it,
                 suspend,
@@ -420,6 +421,9 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 .map(ResolvedTy::new)
                 .transpose()
                 .map_err(|_| semantics.missing_signature_diagnostic(contextual_declaration))?;
+            if let (Some(node), Some(receiver)) = (labeled_receiver, contextual_receiver) {
+                memo.insert(node, receiver);
+            }
             let scoped_inputs = expected
                 .params
                 .iter()
@@ -1749,7 +1753,8 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                             suspend,
                         )
                     }
-                    SigExpr::ContextualParameter(declaration) => {
+                    SigExpr::ContextualParameter(declaration)
+                    | SigExpr::ContextualReceiver(declaration) => {
                         Err(semantics.missing_signature_diagnostic(declaration))
                     }
                     SigExpr::ContextualFunction { parameters, .. } => {
