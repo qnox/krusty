@@ -217,13 +217,13 @@ impl Evaluator<'_> {
             }
             Expr::Member { receiver, .. } => match self.selected_role(expression)? {
                 SemanticCallRole::KotlinStringLength => {
-                    let LibConst::Str(text) = self.evaluate(*receiver, None, depth + 1)?.value
-                    else {
-                        return None;
-                    };
+                    let text = self.evaluate(*receiver, None, depth + 1)?;
+                    let length = crate::fir::constant_string_length(
+                        &crate::fir::library_constant_value(&text),
+                    )?;
                     Some(LibraryConst {
                         ty,
-                        value: LibConst::Int(i32::try_from(text.len_utf16()).ok()?),
+                        value: LibConst::Int(i32::try_from(length).ok()?),
                     })
                 }
                 SemanticCallRole::KotlinEnumName => {
@@ -703,26 +703,13 @@ fn constant_f64(constant: &LibraryConst) -> Option<f64> {
     }
 }
 
+/// Append `constant`'s `toString()` text through the operation body folding shares.
 fn push_constant_string(constant: &LibraryConst, output: &mut KtStringBuf) -> Option<()> {
-    match &constant.value {
-        LibConst::Str(value) => output.push_kt(value),
-        LibConst::Int(value) => match constant.ty.non_null() {
-            Ty::Boolean => output.push_str(if *value == 0 { "false" } else { "true" }),
-            Ty::Char => output.push_unit(u16::try_from(*value).ok()?),
-            Ty::UInt => output.push_str(&(*value as u32).to_string()),
-            _ => output.push_str(&value.to_string()),
-        },
-        LibConst::Long(value) => {
-            if constant.ty.non_null() == Ty::ULong {
-                output.push_str(&(*value as u64).to_string());
-            } else {
-                output.push_str(&value.to_string());
-            }
-        }
-        LibConst::Float(value) => crate::kt_string::push_f32(*value, output)?,
-        LibConst::Double(value) => crate::kt_string::push_f64(*value, output)?,
-    }
-    Some(())
+    crate::fir::push_constant_text(
+        &crate::fir::library_constant_value(constant),
+        constant.ty,
+        output,
+    )
 }
 
 #[cfg(test)]
