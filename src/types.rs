@@ -1708,6 +1708,18 @@ impl Ty {
         }
     }
 
+    /// The classifier a class type names under its nullability and flexibility, without following
+    /// a type parameter to its bound.
+    pub fn nominal_classifier(self) -> Option<TypeName> {
+        match self.kind() {
+            TyKind::Obj(name, _) => Some(name),
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => inner.nominal_classifier(),
+            _ => None,
+        }
+    }
+
     /// Internal class name if this is an object type.
     pub fn obj_internal(self) -> Option<TypeName> {
         match self.kind() {
