@@ -112,6 +112,7 @@ fn char_range_body_graph_freezes_its_exact_initializer_conversion_edge() {
             &libraries,
             libraries.declaration_bodies(),
             [selected],
+            &[],
         )
         .expect("the selected range graph has complete checked declarations");
         assert!(

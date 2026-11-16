@@ -112,6 +112,7 @@ pub(super) fn emit_dependencies<B: Backend>(
     }
     let target_represents_classifier =
         |classifier| backend.represents_dependency_classifier(classifier);
+    let dispatched_classes = backend.dispatched_dependency_classes();
     let callees = KlibCalleeFacts::new(selected.iter().copied())
         .with_checked_dependency_facts(source.callables.klib_dependency_facts())
         .with_target_classifiers(&target_represents_classifier);
@@ -567,9 +568,12 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
-        if let Err(identity) =
-            super::builtin_implementations::record_checked(&mut callables, unit.ir(), platform)
-        {
+        if let Err(identity) = super::builtin_implementations::record_checked(
+            &mut callables,
+            unit.ir(),
+            platform,
+            &dispatched_classes,
+        ) {
             diags.error(
                 Span::new(0, 0),
                 format!(

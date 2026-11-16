@@ -15,7 +15,7 @@ use super::*;
 
 /// Whether `classifier` is `kotlin.text.StringBuilder`.
 pub(in crate::codegen) fn is_string_builder(classifier: TypeName) -> bool {
-    classifier == krusty::types::wk::string_builder()
+    crate::string_builders::lays_out(classifier)
 }
 
 /// Whether `ty` is a `StringBuilder`, nullable or not.
@@ -100,6 +100,7 @@ impl Body<'_> {
         {
             return Err("a StringBuilder construction disagreeing with its constructor".into());
         }
+        self.runtime.string_builder_constructed();
         let builders = &self.runtime.string_builders;
         let (new, append_string) = (builders.new, builders.append_string);
         match (fact.params.as_slice(), args) {

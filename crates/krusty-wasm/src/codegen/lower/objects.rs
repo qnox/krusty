@@ -1288,9 +1288,45 @@ impl Body<'_> {
         }
         let nullable = matches!(target.kind(), TyKind::Nullable(_)) && op != IrTypeOp::SafeCast;
         let tested = target.non_null();
+        // A primitive's or an unsigned number's instances are its boxes, one box type per
+        // classifier (see `crate::boxes`).
+        let scalar_box = match crate::boxes::box_prints(tested) {
+            Some(_) => self.boxed_form(tested)?,
+            None => None,
+        };
         let value = self.local(REFERENCE);
         self.value(arg, any())?;
         self.code.local_tee(value);
+        if let Some(form) = scalar_box {
+            self.code
+                .ref_test(nullable, HeapType::Concrete(form.structure));
+        } else {
+            self.reference_type_test(tested, nullable)?;
+        }
+        match op {
+            IrTypeOp::NotInstanceOf => {
+                self.code.op(EQZ32);
+            }
+            IrTypeOp::SafeCast => {
+                let (result, cast) = if tested == Ty::String {
+                    (STRING, Some(STRING_HEAP))
+                } else {
+                    (REFERENCE, None)
+                };
+                self.code.if_(BlockType::Value(result)).local_get(value);
+                if let Some(heap) = cast {
+                    self.code.ref_cast(true, heap);
+                }
+                self.code.else_().ref_null(HeapType::None).end();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Replace the reference on the stack with whether it is an instance of the reference type
+    /// `tested` — or null, when `nullable`.
+    fn reference_type_test(&mut self, tested: Ty, nullable: bool) -> Result<(), Unsupported> {
         match tested.kind() {
             TyKind::STRING => {
                 self.code.ref_test(nullable, STRING_HEAP);
@@ -1331,24 +1367,6 @@ impl Body<'_> {
                     }
                 },
             },
-        }
-        match op {
-            IrTypeOp::NotInstanceOf => {
-                self.code.op(EQZ32);
-            }
-            IrTypeOp::SafeCast => {
-                let (result, cast) = if tested == Ty::String {
-                    (STRING, Some(STRING_HEAP))
-                } else {
-                    (REFERENCE, None)
-                };
-                self.code.if_(BlockType::Value(result)).local_get(value);
-                if let Some(heap) = cast {
-                    self.code.ref_cast(true, heap);
-                }
-                self.code.else_().ref_null(HeapType::None).end();
-            }
-            _ => {}
         }
         Ok(())
     }
