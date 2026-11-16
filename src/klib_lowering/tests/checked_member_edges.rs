@@ -110,9 +110,9 @@ fn a_reached_member_freezes_its_class_initialization() {
             .expect("throwOnFailure body")],
     )
     .expect("throwOnFailure has checked member edges");
-    assert!(facts.reached_constructors.contains(&constructor));
+    assert!(facts.reached_constructors().contains(&constructor));
     let edge = facts
-        .member_edges
+        .member_edges()
         .get(&any_hash_code)
         .expect("kotlin.Any.hashCode is reached from Failure's initialization");
     assert_eq!(
