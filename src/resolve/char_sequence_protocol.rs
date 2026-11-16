@@ -1,32 +1,20 @@
 //! Selects the `CharSequence` members a target's `StringBuilder` reads an appended sequence
-//! through ([`crate::backend::Backend::appends_char_sequences_by_index`]).
+//! through ([`crate::fir::CharSequenceProtocol`]).
 //!
 //! Kotlin/Wasm WASI appends a `CharSequence` to a builder by reading its `length` and each indexed
 //! `Char` (`StringBuilder.append(CharSequence?)` and `appendRange`), so a custom sequence's own
-//! `length` and `get` run, and its `toString` does not. A backend that realizes the builder itself
-//! calls those members whether or not the source names them; a lowering that runs after checking
-//! cannot select a dependency declaration, so the handoff selects both here, as it does the
-//! coroutine runtime.
+//! `length` and `get` run, and its `toString` does not. A target realizing the builder itself calls
+//! those members whether or not the source names them, so resolution selects them once per
+//! compilation, as it selects the coroutine runtime, and the handoff freezes the selection.
 
-use crate::backend::{CharSequenceProtocol, CheckedBackendCallables, DependencyFactError};
+use crate::fir::CharSequenceProtocol;
 use crate::libraries::{FnKind, PropKind};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 
-/// Freeze the `CharSequence` members into `callables`. A compilation whose classpath declares no
-/// single `length` property and no single `get(Int): Char` on `CharSequence` freezes nothing, and
-/// the target declines an append that needs them.
-pub(super) fn freeze(
-    callables: &mut CheckedBackendCallables,
-    source: &dyn SymbolSource,
-) -> Result<(), DependencyFactError> {
-    match select(source) {
-        Some(protocol) => callables.freeze_char_sequence_protocol(protocol, source),
-        None => Ok(()),
-    }
-}
-
-fn select(source: &dyn SymbolSource) -> Option<CharSequenceProtocol> {
+/// The one `length` property and the one `get(Int): Char` function `CharSequence` declares, or
+/// `None` when the classpath declares no single one of either.
+pub(super) fn selected(source: &dyn SymbolSource) -> Option<CharSequenceProtocol> {
     let sequence = Ty::obj_name(char_sequence());
     let lengths = crate::symbol_resolver::declared_member_callables(source, sequence, "length");
     let mut length = lengths.properties().iter().filter(|property| {

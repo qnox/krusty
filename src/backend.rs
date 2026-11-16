@@ -35,8 +35,7 @@ pub use dependency_call_shape::{DeclaredOperandRoles, DependencyCallShape, Depen
 pub use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
-    CharSequenceProtocol, CheckedBackendCallables, DependencyClassifier, DependencyFactError,
-    DependencyGetterSignature,
+    CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
 pub(crate) use dependency_metadata::has_standalone_dependency_code;
 pub use dependency_metadata::KlibDependencyCallable;

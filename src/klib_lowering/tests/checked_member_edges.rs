@@ -109,6 +109,7 @@ fn a_reached_member_freezes_its_class_initialization() {
         [throw_on_failure
             .klib_body_callable()
             .expect("throwOnFailure body")],
+        &[],
     )
     .expect("throwOnFailure has checked member edges");
     assert!(facts.reached_constructors.contains(&constructor));

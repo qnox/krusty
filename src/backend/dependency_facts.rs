@@ -17,7 +17,7 @@ use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
 
 pub use crate::fir::BuiltinImplementation;
-use crate::fir::{ExternalCallableId, ExternalPropertyId};
+use crate::fir::{CharSequenceProtocol, ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
 /// A dependency classifier a target may represent itself
@@ -740,14 +740,6 @@ pub struct CheckedBackendCallables {
     char_sequence_protocol: Option<CharSequenceProtocol>,
 }
 
-/// The `CharSequence` members a target's `StringBuilder` reads an appended sequence through: its
-/// `length` and its `get(Int)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CharSequenceProtocol {
-    pub length: ExternalPropertyId,
-    pub get: ExternalCallableId,
-}
-
 impl CheckedBackendCallables {
     /// Store the checked graph before completing the source callable facts. Only another checked
     /// graph is evidence at this stage: freshly frozen callable implementation slots are empty.
@@ -941,9 +933,10 @@ impl CheckedBackendCallables {
         Ok(())
     }
 
-    /// Freeze the `CharSequence` members a target's `StringBuilder` reads an appended sequence
-    /// through ([`crate::backend::Backend::appends_char_sequences_by_index`]), selected at the
-    /// handoff since no source call need name them.
+    /// Freeze the `CharSequence` members resolution selected for a target whose `StringBuilder`
+    /// reads an appended sequence through them
+    /// ([`crate::backend::Backend::appends_char_sequences_by_index`]); no source call need name
+    /// them.
     pub(crate) fn freeze_char_sequence_protocol(
         &mut self,
         protocol: CharSequenceProtocol,

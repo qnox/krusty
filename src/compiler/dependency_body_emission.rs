@@ -440,8 +440,11 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
-        if backend.appends_char_sequences_by_index() {
-            if let Err(error) = super::char_sequence_protocol::freeze(&mut callables, platform) {
+        if let Some(protocol) = symbols
+            .char_sequence_protocol()
+            .filter(|_| backend.appends_char_sequences_by_index())
+        {
+            if let Err(error) = callables.freeze_char_sequence_protocol(protocol, platform) {
                 diags.error(
                     Span::new(0, 0),
                     format!("internal error: cannot freeze the CharSequence members: {error:?}"),

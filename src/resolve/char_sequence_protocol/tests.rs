@@ -14,7 +14,7 @@ fn each_wasm_stdlib_declares_the_char_sequence_members_an_append_reads() {
             KlibStdlibSemantics::Wasm,
         )])
         .unwrap();
-        let protocol = select(&libraries).expect("`CharSequence` declares `length` and `get`");
+        let protocol = selected(&libraries).expect("`CharSequence` declares `length` and `get`");
         let length = libraries
             .external_property(protocol.length)
             .expect("the selected `length` is a provider property");

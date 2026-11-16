@@ -1,21 +1,22 @@
 //! `StringBuilder.append(CharSequence?)` follows each Kotlin/Wasm target's own stdlib.
 //!
 //! PLATFORM-SPECIFIC: the two Wasm stdlibs append a sequence by different protocols, which a
-//! custom `CharSequence` observes. The pinned Kotlin/Wasm JS `StringBuilder`
-//! (`libraries/stdlib/wasm/js/src/kotlin/text/StringBuilder.kt`) appends `value.toString()`, and
-//! its `StringBuilder(content: CharSequence)` renders `content` the same way. The pinned
-//! Kotlin/Wasm WASI one (`libraries/stdlib/native-wasm/wasi/kotlin/text/StringBuilder.kt`) reads
-//! `value.length` in `append`, again in `appendRange`'s bounds check, and then each `value[index]`.
-//! Its constructor first sizes the builder by `content.length`. One shared program cannot assert
-//! both, so this owning test pins each target's counts of `length`, `get` and `toString` calls,
-//! through a direct `StringBuilder.append`, an `Appendable.append`, `joinToString` and the
-//! constructor.
+//! custom `CharSequence` observes. Kotlin/Wasm JS appends `value.toString()`, and its
+//! `StringBuilder(content: CharSequence)` renders `content` the same way. Kotlin/Wasm WASI reads
+//! `value.length` in `append`, again in `appendRange`'s bounds check, and then each `value[index]`,
+//! and its constructor first sizes the builder by `content.length`. One shared program cannot assert
+//! both, so this owning test runs the same complete program under the exact Kotlin/Wasm reference
+//! compiler for each target and requires the product program to observe what it observes.
 
 use super::{focused_wasm_lane_available, WasmLane};
 use crate::box_lane::{Lane, Outcome};
+use krusty::compilation_target::CompilationTarget;
 use krusty_wasm::WasmTarget;
 
-const PROGRAM: &str = r#"// FILE: wasmCharSequenceAppends.kt
+/// Every append path, observed through a sequence that counts its `length`, `get` and `toString`
+/// calls, beside the controls a builder already answers: a `null`, a `String` and a
+/// `StringBuilder` held as a `CharSequence`, and a builder appended to itself.
+const PROGRAM: &str = r#"
 class Counted(private val text: String) : CharSequence {
     private var lengths = 0
     private var gets = 0
@@ -43,67 +44,83 @@ class Counted(private val text: String) : CharSequence {
 
 fun through(out: Appendable, value: CharSequence?): Appendable = out.append(value)
 
-fun box(): String {
+fun observed(): String {
     val direct = Counted("OK")
     val first = StringBuilder()
     first.append(direct)
-    if (first.toString() != "OK") return "FAIL direct: $first"
-    if (direct.reads() != "APPEND") return "FAIL direct reads " + direct.reads()
 
     val appended = Counted("OK")
     val second = StringBuilder()
     through(second, appended)
-    if (second.toString() != "OK") return "FAIL Appendable: $second"
-    if (appended.reads() != "APPEND") return "FAIL Appendable reads " + appended.reads()
 
     val joined = Counted("OK")
     val text = arrayOf<CharSequence>(joined).joinToString("")
-    if (text != "OK") return "FAIL joined: $text"
-    if (joined.reads() != "APPEND") return "FAIL joined reads " + joined.reads()
 
     val content = Counted("OK")
     val third = StringBuilder(content)
-    if (third.toString() != "OK") return "FAIL constructed: $third"
-    if (content.reads() != "CONSTRUCT") return "FAIL constructed reads " + content.reads()
 
     val nothing: CharSequence? = null
-    val fourth = StringBuilder()
-    through(fourth, nothing)
-    fourth.append(nothing)
-    if (fourth.toString() != "nullnull") return "FAIL null: $fourth"
-    return "OK"
+    val string: CharSequence = "S"
+    val builder: CharSequence = StringBuilder("B")
+    val controls = StringBuilder()
+    controls.append(nothing)
+    through(controls, nothing)
+    controls.append(string)
+    through(controls, string)
+    controls.append(builder)
+    through(controls, builder)
+    through(controls, controls)
+
+    return "direct " + first + " " + direct.reads() +
+        ", Appendable " + second + " " + appended.reads() +
+        ", joined " + text + " " + joined.reads() +
+        ", constructed " + third + " " + content.reads() +
+        ", controls " + controls
 }
 "#;
 
-/// The `length`/`get`/`toString` calls one append of `"OK"` makes, then the constructor's.
-fn expected_reads(target: WasmTarget) -> (&'static str, &'static str) {
-    match target {
-        WasmTarget::Js => ("0/0/1", "0/0/1"),
-        WasmTarget::Wasi => ("2/2/0", "3/2/0"),
-    }
-}
-
 #[test]
-fn a_custom_char_sequence_is_appended_by_each_targets_own_protocol() {
+fn a_custom_char_sequence_is_appended_as_each_reference_target_appends_it() {
     let stem = "wasmCharSequenceAppends";
-    for target in WasmTarget::ALL {
+    for (target, compilation_target) in [
+        (WasmTarget::Js, CompilationTarget::WasmJs),
+        (WasmTarget::Wasi, CompilationTarget::WasmWasi),
+    ] {
         let lane = WasmLane { target };
         assert!(
             focused_wasm_lane_available(&lane, stem),
             "{stem} requires its {} lane",
             target.name()
         );
-        let (append, construct) = expected_reads(target);
-        let source = PROGRAM
-            .replace("\"APPEND\"", &format!("\"{append}\""))
-            .replace("\"CONSTRUCT\"", &format!("\"{construct}\""));
+        let work = std::env::temp_dir().join(format!("{stem}-{}", target.name()));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        let reference_source = work.join(format!("{stem}.kt"));
+        std::fs::write(
+            &reference_source,
+            format!("{PROGRAM}\nfun main() {{\n    println(observed())\n}}\n"),
+        )
+        .unwrap();
+        let reference = crate::reference_wasm_program::run_wasm_reference_program(
+            compilation_target,
+            &work,
+            &[reference_source],
+        )
+        .expect("the exact Kotlin/Wasm reference compiler is provisioned")
+        .unwrap_or_else(|error| panic!("{} reference: {error}", target.name()));
+        let expected = reference.trim_end();
+        let source = format!(
+            "// FILE: {stem}.kt\n{PROGRAM}\nfun box(): String {{\n    val seen = observed()\n    \
+             return if (seen == \"{expected}\") \"OK\" else \"FAIL \" + seen\n}}\n"
+        );
         let (units, _) = krusty::conformance::split_files(&source)
             .expect("the append program names its one file");
         assert_eq!(
-            lane.compile_and_run(&std::env::temp_dir(), stem, &units, &source),
+            lane.compile_and_run(&work, stem, &units, &source),
             Outcome::Pass,
-            "{stem} on {}",
+            "{stem} on {} against the reference's `{expected}`",
             target.name()
         );
+        std::fs::remove_dir_all(work).unwrap();
     }
 }

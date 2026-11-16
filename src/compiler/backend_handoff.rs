@@ -71,14 +71,16 @@ pub(super) fn checked_ir_file<'a>(
         }
     };
     if module.char_sequences_by_index {
-        if let Err(error) =
-            super::char_sequence_protocol::freeze(&mut callables, symbols.semantic_platform())
-        {
-            diags.error(
-                Span::new(0, 0),
-                format!("internal error: cannot freeze the CharSequence members: {error:?}"),
-            );
-            return None;
+        if let Some(protocol) = symbols.char_sequence_protocol() {
+            if let Err(error) =
+                callables.freeze_char_sequence_protocol(protocol, symbols.semantic_platform())
+            {
+                diags.error(
+                    Span::new(0, 0),
+                    format!("internal error: cannot freeze the CharSequence members: {error:?}"),
+                );
+                return None;
+            }
         }
     }
     if let Some(dependency_bodies) = symbols.semantic_platform().klib_dependency_body_facts() {

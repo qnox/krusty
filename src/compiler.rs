@@ -4,7 +4,6 @@ mod artifact_origin;
 mod backend_handoff;
 mod builtin_implementations;
 mod capture_storage;
-mod char_sequence_protocol;
 mod checked_body_observer;
 mod declaration_metadata;
 mod dependency_body_emission;
