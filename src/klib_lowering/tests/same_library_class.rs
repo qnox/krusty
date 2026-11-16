@@ -1067,6 +1067,16 @@ fn a_file_private_class_is_named_and_overrides_the_interfaces_above_its_written_
         (names.qualified.as_str(), names.simple.as_str()),
         ("fixture.Hidden", "Hidden")
     );
+    // Native's and Wasm's runtime reflection read the same declared name.
+    let reflection = crate::backend::class_names::declared_class(ir, class);
+    assert_eq!(
+        (
+            reflection.package.as_str(),
+            reflection.simple.as_deref(),
+            reflection.qualified.as_deref()
+        ),
+        ("fixture", Some("Hidden"), Some("fixture.Hidden"))
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }
 
