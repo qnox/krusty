@@ -274,6 +274,21 @@ pub(crate) fn clone_with_operands(
     target
 }
 
+/// Relocate one operation to a structurally identical expression with remapped direct operands.
+/// Source/value facts are copied to the replacement while operation-owned selection facts follow
+/// the new operation identity and are retired from the old expression slot.
+pub(crate) fn relocate_with_operands(
+    ir: &mut IrFile,
+    source: ExprId,
+    map: impl FnMut(ExprId) -> ExprId,
+) -> ExprId {
+    let mut expression = ir.exprs[source as usize].clone();
+    remap_direct_children(&mut expression, map);
+    let target = ir.add_expr(expression);
+    super::expression_copy::relocate_expression_facts(ir, source, target);
+    target
+}
+
 /// Give every child edge below `root` its own expression nodes while retaining `root` itself.
 ///
 /// Common IR is a DAG: one operand may deliberately be referenced by several parents. A transform
@@ -417,6 +432,22 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
                 *end = map(*end);
             }
             IrCheckedOperation::IllegalProgressionStep { step } => *step = map(*step),
+            IrCheckedOperation::AtomicField {
+                receiver, operands, ..
+            } => {
+                *receiver = map(*receiver);
+                operands.iter_mut().for_each(|value| *value = map(*value));
+            }
+            IrCheckedOperation::AtomicArrayElement {
+                array,
+                index,
+                operands,
+                ..
+            } => {
+                *array = map(*array);
+                *index = map(*index);
+                operands.iter_mut().for_each(|value| *value = map(*value));
+            }
             IrCheckedOperation::RangeContains {
                 value, start, end, ..
             } => {

@@ -5,19 +5,24 @@
 //! deliberately read-only: it records metadata and the exact public declaration identities before
 //! target representation mutates the file, without cloning or re-resolving the program.
 
-use crate::fx_hash::HashMap;
+#[cfg(test)]
+mod constructor_declaration_tests;
+#[cfg(test)]
+mod member_declaration_tests;
+
+use crate::fx_hash::{HashMap, HashSet};
 
 use super::{Artifact, CheckedIrFile, CompilationTarget};
 use crate::diag::DiagSink;
 use crate::ir::FunId;
-pub use crate::libraries::KlibDependencyCallable;
+pub use crate::libraries::{KlibClassIdentity, KlibDependencyCallable};
 
 /// Whether `callable` has a standalone body a target can publish for another source module.
 ///
 /// KLIB metadata also describes declarations which intentionally have no callable target: an
 /// `@InlineOnly` declaration is a template consumed by common lowering, while an external or
-/// abstract declaration has no body in this IR unit. Those declarations remain in the library's
-/// semantic metadata, but recording either one in [`DependencyExportSignatures`] would promise a
+/// abstract declaration has no body in this IR unit. Those declarations retain their declaration
+/// identities, but recording either one as an executable callable export would promise a
 /// physical definition which no backend can emit.
 pub(crate) fn has_standalone_dependency_code(ir: &crate::ir::IrFile, callable: FunId) -> bool {
     ir.functions
@@ -187,6 +192,33 @@ impl SingletonMemberReceiver {
     }
 }
 
+/// Declaration identity and semantic accessor role are independent of its implementation shape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum MemberDeclaration {
+    Function(KlibDependencyCallable),
+    Accessor {
+        identity: KlibDependencyCallable,
+        setter: bool,
+    },
+}
+
+impl MemberDeclaration {
+    fn identity(&self) -> &KlibDependencyCallable {
+        match self {
+            Self::Function(identity) | Self::Accessor { identity, .. } => identity,
+        }
+    }
+    fn slot_identity(&self) -> Vec<u8> {
+        match self {
+            Self::Function(identity) => super::interface_identity::member_identity(identity),
+            Self::Accessor { identity, setter } => {
+                super::interface_identity::property_member_identity(identity, *setter)
+                    .expect("an accessor declaration has its authenticated property signature")
+            }
+        }
+    }
+}
+
 /// Exact module-qualified identities of this file's callable realizations.
 ///
 /// The key is a stable common-IR declaration identity, not a spelling. The value joins the source
@@ -194,10 +226,15 @@ impl SingletonMemberReceiver {
 /// provider later places on `Callee::External`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DependencyExportSignatures {
+    classifiers: HashMap<crate::ir::ClassId, crate::libraries::KlibClassIdentity>,
     callables: HashMap<FunId, KlibDependencyCallable>,
-    /// Every visible function an interface of this file declares, abstract ones included: the
-    /// identity a dependent module's implementation of the member is recorded under.
-    interface_members: HashMap<FunId, KlibDependencyCallable>,
+    /// Declaration identities of visible non-static members, including bodyless abstract ones.
+    member_declarations: HashMap<FunId, MemberDeclaration>,
+    /// The interface subset whose implementations participate in interface dispatch.
+    interface_members: HashSet<FunId>,
+    /// Generated implementations behind exact property-accessor exports. They are private
+    /// trampoline targets; the accessor identity belongs to the exported wrapper, not this body.
+    property_accessor_entries: HashMap<FunId, ExportedPropertyAccessor>,
     interface_properties: HashMap<crate::fir::PropertyId, KlibDependencyCallable>,
     /// Every property of this file another module may name, by its getter's published identity,
     /// whether or not the getter has code of its own: what a reference to the property is equal
@@ -210,6 +247,8 @@ pub struct DependencyExportSignatures {
     /// constructs through. A target realizes each as an ordinary exported callable (see
     /// `super::construction_entries`), since constructing an object needs its layout.
     constructors: Vec<(ExportedConstructor, KlibDependencyCallable)>,
+    /// Exact initializer declarations, including abstract classes with no allocation entry.
+    constructor_declarations: Vec<(ExportedConstructor, KlibDependencyCallable)>,
     /// Concrete default property accessors whose checked operations a target exports as bodies.
     property_accessors: Vec<(ExportedPropertyAccessor, KlibDependencyCallable)>,
     /// The entry a target realized answering each object instance and enum constant of this
@@ -241,6 +280,26 @@ pub(crate) enum ExportedPropertyAccessor {
 }
 
 impl DependencyExportSignatures {
+    /// Exact class declaration exported by this producer, including abstract classes.
+    pub fn classifier(
+        &self,
+        class: crate::ir::ClassId,
+    ) -> Option<&crate::libraries::KlibClassIdentity> {
+        self.classifiers.get(&class)
+    }
+
+    pub(crate) fn record_classifier(
+        &mut self,
+        class: crate::ir::ClassId,
+        identity: crate::libraries::KlibClassIdentity,
+    ) {
+        let previous = self.classifiers.insert(class, identity);
+        assert!(
+            previous.is_none(),
+            "one class exports one declaration identity"
+        );
+    }
+
     pub(crate) fn property_accessors(
         &self,
     ) -> &[(ExportedPropertyAccessor, KlibDependencyCallable)] {
@@ -267,6 +326,11 @@ impl DependencyExportSignatures {
         self.callables.get(&callable)
     }
 
+    /// Whether `callable` is the private implementation behind an exact property-accessor export.
+    pub fn is_property_accessor_entry(&self, callable: FunId) -> bool {
+        self.property_accessor_entries.contains_key(&callable)
+    }
+
     /// Iterate every callable identity this file publishes so a target can install its complete
     /// signature-to-code registry before lowering dependent call sites.
     pub fn callables(&self) -> impl ExactSizeIterator<Item = (FunId, &KlibDependencyCallable)> {
@@ -278,7 +342,25 @@ impl DependencyExportSignatures {
     /// The published identity of a function an interface of this file declares, with or without
     /// a body: what another module's class implementing it names it by.
     pub fn interface_member(&self, function: FunId) -> Option<&KlibDependencyCallable> {
-        self.interface_members.get(&function)
+        self.interface_members
+            .contains(&function)
+            .then(|| self.member_declaration(function))
+            .flatten()
+    }
+
+    /// A member declaration identity, independently of executable target code.
+    pub fn member_declaration(&self, function: FunId) -> Option<&KlibDependencyCallable> {
+        self.member_declarations
+            .get(&function)
+            .map(MemberDeclaration::identity)
+    }
+
+    /// Canonical callable or property-accessor identity of a physical member slot. A support
+    /// function implementing an accessor retains its semantic property role here.
+    pub fn member_slot_identity(&self, function: FunId) -> Option<Vec<u8>> {
+        self.member_declarations
+            .get(&function)
+            .map(MemberDeclaration::slot_identity)
     }
 
     /// The published getter identity of a property an interface of this file declares, with or
@@ -335,7 +417,43 @@ impl DependencyExportSignatures {
         constructor: ExportedConstructor,
         identity: KlibDependencyCallable,
     ) {
+        self.record_constructor_declaration(constructor, identity.clone())
+            .expect("an allocation agrees with its authenticated initializer declaration");
         self.constructors.push((constructor, identity));
+    }
+
+    /// Record a physically defined initializer without promising an allocation entry.
+    pub(crate) fn record_constructor_declaration(
+        &mut self,
+        constructor: ExportedConstructor,
+        identity: KlibDependencyCallable,
+    ) -> Result<(), &'static str> {
+        if let Some((_, previous)) = self
+            .constructor_declarations
+            .iter()
+            .find(|(known, _)| *known == constructor)
+        {
+            if previous != &identity {
+                return Err(
+                    "one initializer ordinal has conflicting constructor declaration identities",
+                );
+            }
+            return Ok(());
+        }
+        if self
+            .constructor_declarations
+            .iter()
+            .any(|(known, previous)| previous == &identity && *known != constructor)
+        {
+            return Err("one constructor declaration identifies conflicting initializer ordinals");
+        }
+        self.constructor_declarations.push((constructor, identity));
+        Ok(())
+    }
+
+    /// Every exact constructor initializer declaration, independently of allocation support.
+    pub fn constructor_declarations(&self) -> &[(ExportedConstructor, KlibDependencyCallable)] {
+        &self.constructor_declarations
     }
 
     /// Every constructor this file publishes, in record order.
@@ -366,15 +484,59 @@ impl DependencyExportSignatures {
         );
     }
 
+    pub(crate) fn record_member_declaration(
+        &mut self,
+        function: FunId,
+        identity: KlibDependencyCallable,
+    ) {
+        self.record_member(function, MemberDeclaration::Function(identity));
+    }
+
+    pub(crate) fn record_accessor_member_declaration(
+        &mut self,
+        function: FunId,
+        identity: KlibDependencyCallable,
+        setter: bool,
+    ) {
+        assert!(
+            matches!(
+                identity.declaration,
+                crate::libraries::KlibDeclarationSignature::Accessor(_)
+            ),
+            "an accessor member requires its exact property signature"
+        );
+        self.record_member(function, MemberDeclaration::Accessor { identity, setter });
+    }
+
+    fn record_member(&mut self, function: FunId, declaration: MemberDeclaration) {
+        let previous = self.member_declarations.insert(function, declaration);
+        assert!(
+            previous.is_none(),
+            "one member publishes one KLIB declaration identity"
+        );
+    }
+
+    pub(crate) fn record_property_accessor_entry(
+        &mut self,
+        callable: FunId,
+        accessor: ExportedPropertyAccessor,
+    ) {
+        let previous = self.property_accessor_entries.insert(callable, accessor);
+        assert!(
+            previous.is_none(),
+            "one callable realizes one property accessor entry"
+        );
+    }
+
     pub(crate) fn record_interface_member(
         &mut self,
         function: FunId,
         identity: KlibDependencyCallable,
     ) {
-        let previous = self.interface_members.insert(function, identity);
+        self.record_member_declaration(function, identity);
         assert!(
-            previous.is_none(),
-            "one interface member cannot publish two KLIB declaration identities"
+            self.interface_members.insert(function),
+            "one interface member is recorded once"
         );
     }
 

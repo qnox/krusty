@@ -366,6 +366,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             dispatch,
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         }
@@ -373,6 +374,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             dispatch,
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         } => {
@@ -383,6 +385,16 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             *result = ty(*result, names);
             if let Some(receiver) = source_receiver {
                 *receiver = ty(*receiver, names);
+            }
+            for substitution in substitutions {
+                substitution.value = ty(substitution.value, names);
+                substitution.reified_runtime = ty(substitution.reified_runtime, names);
+                substitution.additional_bounds = substitution
+                    .additional_bounds
+                    .iter()
+                    .copied()
+                    .map(|bound| ty(bound, names))
+                    .collect();
             }
             return;
         }
@@ -422,6 +434,8 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             return;
         }
         IrCheckedOperation::IllegalProgressionStep { .. }
+        | IrCheckedOperation::AtomicField { .. }
+        | IrCheckedOperation::AtomicArrayElement { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => return,
         IrCheckedOperation::PropertyReference {
             target,
@@ -475,7 +489,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
                 }
                 | super::IrIntrinsic::GeneratedPropertyEquals { ty: classifier }
                 | super::IrIntrinsic::GeneratedPropertyHash { ty: classifier }
-                | super::IrIntrinsic::DataClassArrayToString { ty: classifier }
+                | super::IrIntrinsic::GeneratedPropertyArrayToString { ty: classifier }
                 | super::IrIntrinsic::TypeOf { ty: classifier }
                 | super::IrIntrinsic::Ieee754Equals {
                     operand: classifier,
@@ -501,7 +515,16 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             tys(params, names);
             *ret = ty(*ret, names);
         }
-        Callee::Module { params, ret, .. } | Callee::ModuleDefaultEntry { params, ret, .. } => {
+        Callee::Module { params, ret, .. } => {
+            tys(params, names);
+            *ret = ty(*ret, names);
+        }
+        Callee::ModuleConstructorDefaultEntry {
+            outer, params, ret, ..
+        } => {
+            if let Some(outer) = outer {
+                *outer = ty(*outer, names);
+            }
             tys(params, names);
             *ret = ty(*ret, names);
         }
@@ -520,6 +543,12 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             }
         }
         Callee::ModuleWithDefaults {
+            params,
+            ret,
+            dispatch_receiver_ty,
+            ..
+        }
+        | Callee::ModuleDefaultEntry {
             params,
             ret,
             dispatch_receiver_ty,
@@ -1707,6 +1736,9 @@ fn remap_expression_facts(ir: &mut super::IrFile, expression: ExprId, names: &Id
     if let Some(parameters) = ir.physical_call_parameters.get_mut(&expression) {
         tys(parameters, names);
     }
+    if let Some(source_callee) = ir.suspend_call_declarations.get_mut(&expression) {
+        callee(source_callee, names);
+    }
     if let Some(access) = ir.module_member_accesses.get_mut(&expression) {
         module_member_access(access, names);
     }
@@ -2127,11 +2159,12 @@ mod tests {
         let target = crate::types::type_name("sample/Target");
         let names = HashMap::from_iter([(source, target)]);
         let mut ir = super::super::IrFile::default();
+        let body = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
         let implementation = ir.add_fun(IrFunction {
             name: "invoke".to_string(),
             params: vec![Ty::obj_name(source)],
             ret: Ty::obj_name(source),
-            body: None,
+            body: Some(body),
             is_static: true,
             dispatch_receiver: None,
             param_checks: Vec::new(),
@@ -2251,6 +2284,52 @@ mod tests {
             ir.functions[detached[0].target as usize].params,
             vec![Ty::obj_name(target)]
         );
+    }
+
+    #[test]
+    fn reachable_remap_keeps_a_detached_lambda_inline_only_when_its_body_was_consumed() {
+        let source = crate::types::type_name("sample/Source");
+        let target = crate::types::type_name("sample/Target");
+        let names = HashMap::from_iter([(source, target)]);
+        let mut ir = super::super::IrFile::default();
+        let implementation = ir.add_fun(IrFunction {
+            name: "invoke".to_string(),
+            params: vec![Ty::obj_name(source)],
+            ret: Ty::obj_name(source),
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let call = |ir: &mut super::super::IrFile| {
+            let inline_body = ir.add_expr(IrExpr::Call {
+                callee: Box::new(Callee::Local(implementation)),
+                dispatch_receiver: None,
+                args: Vec::new(),
+            });
+            ir.add_expr(IrExpr::Lambda {
+                impl_fn: implementation,
+                arity: 0,
+                captures: Vec::new(),
+                sam: None,
+                inline_body: Some(inline_body),
+            })
+        };
+        let reachable = call(&mut ir);
+        let _other = call(&mut ir);
+        ir.inline_only_fns.insert(implementation);
+        ir.must_inline_lambdas.insert(implementation);
+
+        let detached = ir.remap_reachable_classifier_identities(
+            &names,
+            [reachable],
+            &HashSet::from_iter([reachable]),
+            &mut HashSet::default(),
+        );
+
+        assert_eq!(detached.len(), 1);
+        assert!(ir.inline_only_fns.contains(&detached[0].target));
+        assert!(ir.must_inline_lambdas.contains(&detached[0].target));
     }
 
     #[test]

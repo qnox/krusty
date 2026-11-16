@@ -92,7 +92,9 @@ pub(super) fn continuation_class_xi(ir: &krusty::ir::IrFile, class: &krusty::ir:
     }
 }
 
-fn in_public_inline_scope(
+/// Whether code at `enclosure` is in the scope of an `inline` function other code can inline: one
+/// that is not private and not a member of a private class.
+pub(super) fn in_public_inline_scope(
     ir: &krusty::ir::IrFile,
     enclosure: Option<krusty::ir::IrEnclosure>,
 ) -> bool {
@@ -108,14 +110,17 @@ fn in_public_inline_scope(
         })
 }
 
-/// `@Metadata.xi` of a `k=3` synthetic class. Kotlin 2.4.20 packs the class's normalized
-/// visibility into bits 8–10; earlier releases wrote the IR flags alone.
+/// `@Metadata.xi` of a `k=3` synthetic class: the IR flags with the class's normalized visibility
+/// in bits 8–10, unless the release writes the flags alone
+/// ([`krusty::kotlin_version::Quirk::SyntheticClassXiOmitsVisibility`]).
 pub(super) fn synthetic_class_xi(visibility: i32) -> i32 {
     const JVM_IR_AND_STABLE_ABI: i32 = 48;
-    if krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20) {
-        JVM_IR_AND_STABLE_ABI | (visibility << 8)
-    } else {
+    if krusty::kotlin_version::Quirks::target()
+        .has(krusty::kotlin_version::Quirk::SyntheticClassXiOmitsVisibility)
+    {
         JVM_IR_AND_STABLE_ABI
+    } else {
+        JVM_IR_AND_STABLE_ABI | (visibility << 8)
     }
 }
 
@@ -126,16 +131,26 @@ pub(super) fn synthetic_class_xi(visibility: i32) -> i32 {
 /// A suspend-conversion or suspend-reference carrier's `invoke` is a suspend function kotlinc's
 /// transformer rewrites, so the class is finished through the run that keeps what it found.
 pub(super) fn finish_local_synthetic_class(
-    mut cw: krusty::jvm::classfile::ClassWriter,
+    cw: krusty::jvm::classfile::ClassWriter,
     env: &super::EmitEnv,
 ) -> Vec<u8> {
-    cw.set_kotlin_metadata(
-        3,
-        env.metadata_stamp,
-        synthetic_class_xi(SYNTHETIC_LOCAL),
-        &[],
-        &[],
-    );
+    finish_local_synthetic_class_in_abi(cw, env, false)
+}
+
+/// The same, for a class that is part of a public inline function's ABI when `public_abi` is set
+/// ([`METADATA_PUBLIC_ABI_FLAG`]).
+pub(super) fn finish_local_synthetic_class_in_abi(
+    mut cw: krusty::jvm::classfile::ClassWriter,
+    env: &super::EmitEnv,
+    public_abi: bool,
+) -> Vec<u8> {
+    let xi = synthetic_class_xi(SYNTHETIC_LOCAL);
+    let xi = if public_abi {
+        xi | METADATA_PUBLIC_ABI_FLAG
+    } else {
+        xi
+    };
+    cw.set_kotlin_metadata(3, env.metadata_stamp, xi, &[], &[]);
     env.run.finish_class(cw)
 }
 
@@ -175,7 +190,8 @@ pub(super) fn finish_public_synthetic_class(
 }
 
 /// Whether a synthetic annotation implementation stamps nullability on its constructor, `equals`
-/// and `toString`. Kotlin 2.4.20 stopped; earlier releases did.
+/// and `toString` ([`krusty::kotlin_version::Quirk::AnnotationImplCarriesNullability`]).
 pub(super) fn annotation_impl_carries_nullability() -> bool {
-    !krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20)
+    krusty::kotlin_version::Quirks::target()
+        .has(krusty::kotlin_version::Quirk::AnnotationImplCarriesNullability)
 }

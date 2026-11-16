@@ -58,11 +58,12 @@ impl Checker<'_> {
     }
 
     /// Whether a function type returning `expected` admits a value whose result is not `Unit`
-    /// through unit conversion. Earlier releases know the feature but convert no arbitrary value
-    /// (KT-84393, fixed in 2.4.20).
+    /// through unit conversion. Some releases know the feature but convert no arbitrary value
+    /// ([`crate::kotlin_version::Quirk::UnitConversionRejectsNonUnitResult`]).
     pub(super) fn unit_conversion_admits_result(&self, expected: Ty) -> bool {
         self.file.unit_conversions_on_arbitrary_expressions
-            && crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
+            && !crate::kotlin_version::Quirks::target()
+                .has(crate::kotlin_version::Quirk::UnitConversionRejectsNonUnitResult)
             && expected == Ty::Unit
     }
 

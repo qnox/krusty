@@ -904,7 +904,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             flags.has(crate::fir::DeclarationFlags::ENUM)
                         });
                     let classifier_is_value = classifier_declaration_flags
-                        .map_or(c.is_value && c.value_modifier_span.is_none(), |flags| {
+                        .map_or(c.declares_inline_value_class(file), |flags| {
                             flags.has(crate::fir::DeclarationFlags::VALUE)
                         });
                     let classifier_is_annotation = classifier_declaration_flags.map_or_else(
@@ -1258,9 +1258,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     let copy_annotations = DataCopyAnnotations::of(&table, i as u32, c);
                     let respects_ctor_visibility = file.data_copy_respects_ctor_visibility;
                     copy_annotations.check(classifier_is_data, respects_ctor_visibility, diags);
-                    let value_representation = c.value_modifier_span.map(|value_keyword| {
+                    let value_representation = c.value_class_keyword(file).map(|keyword| {
                         ValueClassDeclaration {
-                            value_keyword,
+                            keyword,
                             parameters: c.primary_constructor_parameters_span,
                             parameter_count: classifier_header.primary_parameters.len(),
                             jvm_inline: has_jvm_inline,

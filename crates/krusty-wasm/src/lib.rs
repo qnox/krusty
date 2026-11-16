@@ -12,16 +12,19 @@
 //! once, when the backend is finalized.
 
 mod array_access;
+mod array_lists;
 mod array_objects;
 mod boxes;
 mod builtin_instances;
 mod builtin_members;
 mod builtin_order;
 mod callable_references;
+mod char_sequence_appends;
 mod class_tokens;
 mod codegen;
 mod encode;
 mod exception_transport;
+mod function_value_names;
 mod function_values;
 mod hashing;
 mod host;

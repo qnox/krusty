@@ -30,6 +30,8 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::FloatingIsNaN { .. }
         | CompilerIntrinsic::FloatingIsInfinite { .. }
         | CompilerIntrinsic::RadixToString { .. }
+        | CompilerIntrinsic::StringRangeEquals
+        | CompilerIntrinsic::ArrayCopy { .. }
         | CompilerIntrinsic::ArrayGet
         | CompilerIntrinsic::ArraySet
         | CompilerIntrinsic::ArraySize
@@ -54,6 +56,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::CoroutineContext
         | CompilerIntrinsic::CoroutineSuspended
         | CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
+        | CompilerIntrinsic::StartCoroutineUninterceptedOrReturn
         | CompilerIntrinsic::EnumValues
         | CompilerIntrinsic::EnumValueOf
         | CompilerIntrinsic::EnumEntries
@@ -79,6 +82,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::UnsignedDivide { .. }
         | CompilerIntrinsic::UnsignedRemainder { .. }
         | CompilerIntrinsic::ResultFailure(_)
+        | CompilerIntrinsic::ResultFailureException
         | CompilerIntrinsic::PrimitiveIteratorNext => return None,
     })
 }

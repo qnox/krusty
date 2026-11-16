@@ -257,9 +257,29 @@ impl BodyLowering<'_, '_, '_> {
                 provider,
                 params,
                 ret,
-            } if dispatch_receiver.is_none() => {
-                self.module_default_entry_call(*provider, *target, params, *ret, args)
-            }
+                dispatch_receiver_ty,
+            } if dispatch_receiver.is_none() => self.module_default_entry_call(
+                *provider,
+                *target,
+                *dispatch_receiver_ty,
+                params,
+                *ret,
+                args,
+            ),
+            // Only the file that declares the class lays its object out, so its entry for the
+            // constructor's defaults constructs it.
+            Callee::ModuleConstructorDefaultEntry {
+                constructor,
+                outer,
+                params,
+                ret,
+            } if dispatch_receiver.is_none() => self.module_construction_default_entry_call(
+                *constructor,
+                *outer,
+                params,
+                *ret,
+                args,
+            ),
             // A static method owned by a class is, to this generator, a function with a symbol —
             // the owner is a JVM placement fact, and there is no flat facade here for it to be
             // placed differently from. A local function declared inside a member is the shape that
@@ -271,7 +291,7 @@ impl BodyLowering<'_, '_, '_> {
                         if let Some(owner) =
                             self.file.ir.functions[*function as usize].dispatch_receiver
                         {
-                            if !self.file.values.is_value_class(owner) {
+                            if self.file.value_receiver(owner).is_none() {
                                 return self.own_class_member(*function, owner, receiver, args);
                             }
                         }
@@ -302,6 +322,8 @@ impl BodyLowering<'_, '_, '_> {
                 name,
                 kind,
                 declaration,
+                params,
+                ret,
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
@@ -312,6 +334,8 @@ impl BodyLowering<'_, '_, '_> {
                     name,
                     kind: *kind,
                     declaration: *declaration,
+                    parameters: Some(params.clone()),
+                    result: Some(*ret),
                 };
                 self.direct_call(target, receiver, args)
             }
@@ -349,6 +373,8 @@ impl BodyLowering<'_, '_, '_> {
                     name,
                     kind: krusty::ir::IrSuperCallKind::Function,
                     declaration: source.map(krusty::fir::ResolvedFunctionOverrideTarget::Module),
+                    parameters: None,
+                    result: None,
                 };
                 self.direct_call(target, receiver, args)
             }
@@ -372,6 +398,19 @@ impl BodyLowering<'_, '_, '_> {
                     == Some(krusty::backend::BackendCompilerIntrinsic::TypeOf)
                 {
                     return self.type_of(*target, substitutions);
+                }
+                if let Some(result) =
+                    self.published_dependency_member_call(dispatch::PublishedDependencyCall {
+                        target: *target,
+                        key: PlanKey::DependencyCallable(*target),
+                        slot_identity: *target,
+                        fact: realization.clone(),
+                        callee: Ok(callee.clone()),
+                        receiver: dispatch_receiver,
+                        args,
+                    })
+                {
+                    return result;
                 }
                 let symbols = self.file.dependency_symbols;
                 let export_of = |realization: &krusty::backend::BackendCallableFact| {
@@ -430,29 +469,12 @@ impl BodyLowering<'_, '_, '_> {
                 // the exact compiler intrinsic the source-form operation uses.
                 // A member's operation travels as its realization; a package function's as its
                 // intrinsic. Either is the same exact provider fact.
-                let intrinsic = realization
-                    .compiler_intrinsic
-                    .or(realization.member_realization.compiler_intrinsic())
-                    .or_else(|| self.unsigned_array_carrier_access(realization));
-                if let Some(realized) = self.compiler_intrinsic_call(
+                if let Some(realized) = self.realized_operation_call(
                     site,
-                    intrinsic,
+                    realization,
                     dispatch_receiver,
                     args,
-                    super::compiler_intrinsics::DeclaredOperands {
-                        operation: super::super::dependency_intrinsics::declaration_operation(
-                            intrinsic,
-                            realization.semantic_role,
-                        ),
-                        receiver: match realization.declaration_owner {
-                            Some(krusty::types::SemanticCallableOwner::Classifier(owner)) => {
-                                Some(Ty::obj_name(owner))
-                            }
-                            _ => None,
-                        },
-                        params: &realization.params,
-                        extension_receiver_parameter: *extension_receiver_parameter,
-                    },
+                    *extension_receiver_parameter,
                     *ret,
                 ) {
                     return realized;
@@ -505,11 +527,24 @@ impl BodyLowering<'_, '_, '_> {
                     declared_ret,
                 )
                 .with_receiver(declared_receiver)
+                .with_context_count(realization.context_count)
                 .with_overridden(&realization.overridden_declarations);
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
                     Some(receiver) => {
+                        if let Some(realized) = self.source_class_member(
+                            *target,
+                            signature,
+                            super::implementor_dispatch::InterfaceMemberCall {
+                                receiver,
+                                args,
+                                ret: *ret,
+                                physical: &realization.physical_params,
+                            },
+                        ) {
+                            return realized;
+                        }
                         // A receiver typed by a RUNTIME-KNOWN type this file puts a class of its
                         // own behind may be one of those objects, and every table below answers
                         // only for the ones the runtime MAKES. No static type tells the two apart
@@ -548,7 +583,15 @@ impl BodyLowering<'_, '_, '_> {
                                     }
                                 }
                                 if let Some(realized) = self.dependency_interface_member(
-                                    internal, *target, signature, receiver, args, *ret,
+                                    internal,
+                                    *target,
+                                    signature,
+                                    super::implementor_dispatch::InterfaceMemberCall {
+                                        receiver,
+                                        args,
+                                        ret: *ret,
+                                        physical: &realization.physical_params,
+                                    },
                                 ) {
                                     return realized;
                                 }
@@ -829,28 +872,6 @@ impl BodyLowering<'_, '_, '_> {
                                 return Ok(None);
                             };
                             return self.convert(produced, Some(answer), *ret);
-                        }
-                        // A companion member the runtime realizes takes its arguments alone:
-                        // the receiver is an object carrying nothing, and it is not evaluated.
-                        if let Some(symbol) =
-                            super::super::super::intrinsics::runtime_companion_member(
-                                owner, &name, params,
-                            )
-                        {
-                            let mut arguments = Vec::with_capacity(args.len());
-                            for argument in args {
-                                arguments.push(self.reference(*argument)?);
-                            }
-                            if self.terminated {
-                                return Ok(None);
-                            }
-                            let signature = vec![any(); arguments.len()];
-                            let produced =
-                                self.runtime_call(symbol, &signature, any(), &arguments)?;
-                            let Some(produced) = produced else {
-                                return Ok(None);
-                            };
-                            return self.convert(produced, Some(any()), *ret);
                         }
                         let Some(symbol) =
                             super::super::super::intrinsics::runtime_member(signature)

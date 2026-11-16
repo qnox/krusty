@@ -3,8 +3,7 @@
 //! [`IrExpr::AbsentArgument`] in each omitted one, and the omission masks after them.
 //!
 //! A call this lowering cannot realize keeps its checked form, so the backend's own decline
-//! names it: a member-extension receiver, a `super` call, an inherited default whose provider is
-//! in another file, and a dependency callable. Constructions are rewritten by
+//! names it: a member-extension receiver, a `super` call, and a dependency callable. Constructions are rewritten by
 //! [`super::constructor_calls`].
 
 use crate::fir::ResolvedFunctionOverrideTarget;
@@ -28,7 +27,11 @@ enum Rewrite {
     },
     /// A call of the entry another file of the module publishes, a
     /// [`Callee::ModuleDefaultEntry`].
-    ModuleEntry { callee: Callee, frame: Frame },
+    ModuleEntry {
+        callee: Callee,
+        receiver: Option<ExprId>,
+        frame: Frame,
+    },
 }
 
 /// Rewrite `site` when it is a call with omitted arguments this lowering realizes.
@@ -40,7 +43,11 @@ pub(super) fn rewrite(ir: &mut IrFile, entries: &mut Entries, site: ExprId) {
             receiver,
             frame,
         }) => to_entry(ir, entries, site, declaration, form, receiver, frame),
-        Some(Rewrite::ModuleEntry { callee, frame }) => to_module_entry(ir, site, callee, frame),
+        Some(Rewrite::ModuleEntry {
+            callee,
+            receiver,
+            frame,
+        }) => to_module_entry(ir, site, callee, receiver, frame),
         None => {}
     }
 }
@@ -77,12 +84,14 @@ fn rewrite_of(ir: &IrFile, site: ExprId) -> Option<Rewrite> {
                 dispatch_receiver_ty: None,
                 ..
             } => Some(Rewrite::ModuleEntry {
+                receiver: None,
                 frame: frame(args, defaults, params.len())?,
                 callee: Callee::ModuleDefaultEntry {
                     target: *target,
                     provider: *provider,
                     params: params.clone(),
                     ret: *ret,
+                    dispatch_receiver_ty: None,
                 },
             }),
             _ => None,
@@ -95,17 +104,41 @@ fn rewrite_of(ir: &IrFile, site: ExprId) -> Option<Rewrite> {
             // An override inherits the defaults of the member it overrides; the provider's entry
             // fills them and dispatches through the slot the override shares.
             let Callee::ModuleWithDefaults {
+                target,
                 default_provider: ResolvedFunctionOverrideTarget::Module(provider),
                 params,
                 defaults,
-                dispatch_receiver_ty: Some(_),
+                dispatch_receiver_ty: Some(receiver_ty),
                 extension_receiver_parameter: None,
                 ..
             } = &**callee
             else {
                 return None;
             };
-            let declaration = *ir.checked_callable_functions.get(provider)?;
+            let Some(&declaration) = ir.checked_callable_functions.get(provider) else {
+                let declaration = ir.referenced_module_callables.get(provider)?;
+                if declaration.owner.map(Ty::obj_name) != Some(*receiver_ty)
+                    || declaration.parameters.len() != params.len()
+                    || !defaults.iter().all(|ordinal| {
+                        declaration
+                            .default_parameters
+                            .contains(&(*ordinal as usize))
+                    })
+                {
+                    return None;
+                }
+                return Some(Rewrite::ModuleEntry {
+                    callee: Callee::ModuleDefaultEntry {
+                        target: *target,
+                        provider: *provider,
+                        params: declaration.parameters.to_vec(),
+                        ret: declaration.result,
+                        dispatch_receiver_ty: Some(*receiver_ty),
+                    },
+                    receiver: Some(*receiver),
+                    frame: frame(args, defaults, params.len())?,
+                });
+            };
             let function = &ir.functions[declaration as usize];
             if function.dispatch_receiver.is_none() || function.params.len() != params.len() {
                 return None;
@@ -204,12 +237,21 @@ fn to_entry(
 }
 
 /// Call the entry another file of the module publishes for `callee`'s provider.
-fn to_module_entry(ir: &mut IrFile, site: ExprId, callee: Callee, frame: Frame) {
+fn to_module_entry(
+    ir: &mut IrFile,
+    site: ExprId,
+    callee: Callee,
+    receiver: Option<ExprId>,
+    frame: Frame,
+) {
     let Callee::ModuleDefaultEntry { params, ret, .. } = &callee else {
         unreachable!("a module default entry call")
     };
     let result = *ret;
-    let args = arguments(ir, &params.clone(), frame);
+    let args = receiver
+        .into_iter()
+        .chain(arguments(ir, &params.clone(), frame))
+        .collect();
     replace(
         ir,
         site,
@@ -251,7 +293,7 @@ pub(super) fn arguments(ir: &mut IrFile, parameters: &[Ty], frame: Frame) -> Vec
 /// keeps the type it yields. A call whose recorded declaration result is the entry's, or that
 /// recorded no type, stays a call; one that yields another type, as an override narrows the
 /// result of the provider whose entry it calls, becomes a coercion of the entry's value.
-fn replace(ir: &mut IrFile, site: ExprId, call: IrExpr, result: Ty) {
+pub(super) fn replace(ir: &mut IrFile, site: ExprId, call: IrExpr, result: Ty) {
     let declared = ir.call_declared_ret.get(&site).copied();
     let site_type = ir.checked_type(site).or(declared);
     match site_type {

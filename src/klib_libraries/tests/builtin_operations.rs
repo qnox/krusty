@@ -11,6 +11,92 @@ use crate::symbol_source::SymbolNamespace;
 use crate::types::{type_name, ArrayFactoryKind, SemanticCallRole, Ty};
 
 #[test]
+fn language_function_invocations_have_opaque_classifier_owned_identities() {
+    use super::super::external_identities::ExternalIdentities;
+    use super::super::inventory::PackageInventory;
+
+    let inventory = PackageInventory::from_packages(Vec::new()).expect("empty KLIB inventory");
+    let identities = ExternalIdentities::default();
+    for owner in [
+        type_name("kotlin/Function1"),
+        type_name("kotlin/coroutines/SuspendFunction1"),
+    ] {
+        let symbols = declared_symbols(
+            &inventory,
+            &identities,
+            SymbolNamespace::Package(owner.parent().expect("function classifier package")),
+            owner.segment_ref(),
+        );
+        let classifier = symbols.classifier.expect("language classifier record");
+        let invocations = classifier
+            .declared_callables
+            .get("invoke")
+            .expect("language invoke declaration")
+            .functions();
+        let [invoke] = invocations else {
+            panic!("{owner} declares one language invoke candidate")
+        };
+        assert_eq!(
+            invoke.callable.semantic_role,
+            Some(SemanticCallRole::KotlinFunctionInvoke)
+        );
+        assert_eq!(
+            invoke.callable.declaration_owner,
+            Some(crate::types::SemanticCallableOwner::Classifier(owner))
+        );
+        let identity = invoke
+            .callable
+            .external_identity
+            .expect("opaque invocation identity");
+        let realization = identities
+            .realization(identity)
+            .expect("published realization");
+        assert_eq!(
+            realization.callable.semantic_role,
+            Some(SemanticCallRole::KotlinFunctionInvoke)
+        );
+        assert_eq!(
+            realization.callable.declaration_owner,
+            Some(crate::types::SemanticCallableOwner::Classifier(owner))
+        );
+        assert_eq!(
+            realization.kind,
+            crate::libraries::ExternalCallableKind::Member
+        );
+        assert!(realization.declaration_signature.is_none());
+        assert!(realization.dependency_callable.is_none());
+        assert_eq!(
+            realization.callable.suspend,
+            owner.matches("kotlin/coroutines/SuspendFunction1")
+        );
+        let repeated = declared_symbols(
+            &inventory,
+            &identities,
+            SymbolNamespace::Package(owner.parent().expect("function classifier package")),
+            owner.segment_ref(),
+        );
+        let repeated = repeated
+            .classifier
+            .expect("repeated language classifier record")
+            .declared_callables["invoke"]
+            .functions()[0]
+            .callable
+            .external_identity;
+        assert_eq!(repeated, Some(identity), "the provider identity is stable");
+        let static_members = declared_symbols(
+            &inventory,
+            &identities,
+            SymbolNamespace::Classifier(owner),
+            "invoke",
+        );
+        assert!(
+            static_members.callables.functions().is_empty(),
+            "an instance member is not published as a classifier-associated callable"
+        );
+    }
+}
+
+#[test]
 fn klib_string_plus_requires_selected_stdlib_authority() {
     use crate::symbol_source::SymbolSource;
     let Some(trusted) = native_stdlib() else {
@@ -427,5 +513,48 @@ fn wasm_klibs_authenticate_the_mixed_closed_range_contains_overloads() {
                 "{target:?} {receiver:?}.contains({parameter:?})"
             );
         }
+    }
+}
+
+#[test]
+fn only_the_selected_wasm_stdlib_realizes_its_coroutine_start_intrinsics() {
+    let target = crate::compilation_target::CompilationTarget::WasmJs;
+    let Some(libraries) = target_stdlib(target) else {
+        return;
+    };
+    let path = crate::toolchain::kotlin_stdlib_klib(target)
+        .expect("target_stdlib already required this archive");
+    let untrusted =
+        super::super::KlibLibraries::open(&[super::super::KlibLibraryInput::dependency(path)])
+            .expect("the identical ordinary dependency declarations are signable");
+    for (provider, trusted) in [(&libraries, true), (&untrusted, false)] {
+        let package = type_name("kotlin/wasm/internal");
+        let realizations: Vec<_> = (0..3)
+            .map(|arity| {
+                let name = format!("startCoroutineUninterceptedOrReturnIntrinsic{arity}");
+                provider
+                    .inventory
+                    .functions(package, &name)
+                    .map(|signed| {
+                        super::super::lookup::published_function(
+                            &provider.identities,
+                            signed,
+                            crate::libraries::CallablePlacement::Package(package),
+                            &crate::libraries::EnclosingBounds::default(),
+                        )
+                        .callable
+                        .compiler_intrinsic
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(
+            realizations,
+            vec![
+                vec![trusted.then_some(CompilerIntrinsic::StartCoroutineUninterceptedOrReturn)];
+                3
+            ],
+            "trusted={trusted}"
+        );
     }
 }

@@ -72,12 +72,14 @@ impl<'s> Linker<'_, 's> {
             local_body: Some(super::super::same_library_class::LocalBody::Initialize(
                 super::super::same_library_class::LocalInitialize {
                     class: class_id,
+                    declaring: prepared.declaring,
                     receiver_symbol: prepared.receiver_symbol,
                     receiver_ty: prepared.receiver_ty,
                     fields: prepared.stored.clone(),
                     steps: prepared.steps,
                 },
             )),
+            static_initialization: None,
         });
         if let Some(constructor) = constructor {
             self.classes.insert(constructor.clone(), class_id);
@@ -155,10 +157,12 @@ impl<'s> Linker<'_, 's> {
                 local_body: Some(super::super::same_library_class::LocalBody::Member(
                     super::super::same_library_class::LocalMemberFields {
                         class: class_id,
+                        declaring: prepared.declaring,
                         receiver: prepared.self_type,
                         fields: prepared.stored.clone(),
                     },
                 )),
+                static_initialization: None,
             });
             publish_overrides(
                 ir,
@@ -331,9 +335,9 @@ fn publish_overrides(
                 implementation_owner: owner,
                 overridden: crate::fir::ResolvedFunctionOverrideTarget::External(external.target()),
                 overridden_owner: edge.owner,
-                overridden_semantic_role: None,
+                overridden_semantic_role: edge.semantic_role,
                 collection_barrier: None,
-                overridden_is_interface: true,
+                overridden_is_interface: edge.is_interface,
                 name: name.clone(),
                 declared_parameters: edge.declared_parameters.clone(),
                 declared_result: edge.declared_result,

@@ -202,6 +202,7 @@ pub(super) fn prepared_inline_header(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
+    validate_selected_function_modifiers(Some(selected), function)?;
     if function.base.symbol.kind != KlibIrSymbolKind::Function {
         return Err(mismatch(
             "the serialized declaration's symbol is not a function".to_owned(),
@@ -558,9 +559,21 @@ pub(super) fn raw_function_header_with_class(
             "a constructor",
         ));
     }
+    validate_selected_function_modifiers(selected, function)?;
+    let type_parameters =
+        declared_type_parameters::bind(selected, arena, function, class_parameters)?;
+    header(selected, purpose, type_parameters, arena, function)
+}
+
+/// Authenticate serialized function flags against the exact selected declaration for both raw
+/// bodies and prepared inline copies. Prepared suspend templates use the latter path too.
+fn validate_selected_function_modifiers(
+    selected: Option<KlibBodyCallable<'_>>,
+    function: &KlibIrFunction,
+) -> Result<(), KlibBodyDeclineReason> {
     if let Some(modifiers) = selected.and_then(KlibBodyCallable::declaration_modifiers) {
-        // Serialized FunctionFlags reuse the function declaration prefix. Accessor metadata has
-        // a different inline/external layout and has already been normalized by its provider.
+        // Serialized FunctionFlags reuse the function declaration prefix; accessor metadata has a
+        // different layout and has already been normalized by its provider.
         use crate::metadata::function_flags;
         let flags = function.base.flags;
         if modifiers.is_inline != (flags & function_flags::IS_INLINE != 0)
@@ -574,9 +587,7 @@ pub(super) fn raw_function_header_with_class(
             ));
         }
     }
-    let type_parameters =
-        declared_type_parameters::bind(selected, arena, function, class_parameters)?;
-    header(selected, purpose, type_parameters, arena, function)
+    Ok(())
 }
 
 fn header(
@@ -1111,6 +1122,28 @@ fn mismatch(detail: String) -> KlibBodyDeclineReason {
 /// Declare the function to `ir`, with the parameter facts checked FIR lowering publishes for a
 /// top-level function. Its body is attached once lowered: a call cycle reaches the declaration
 /// before its body exists.
+/// The frame of a function the compiler adds to run part of a file's initialization: no receiver
+/// or parameters, and a `Unit` result.
+pub(super) fn initialization_header(name: &str) -> FunctionHeader {
+    FunctionHeader {
+        name: name.to_owned(),
+        params: Vec::new(),
+        ret: Ty::Unit,
+        identities: Vec::new(),
+        context_count: 0,
+        extension_receiver: false,
+        dispatch_receiver: None,
+        receiver_slot: None,
+        value_receiver: None,
+        singleton_extension_unread_receiver: None,
+        values: HashMap::default(),
+        defaults: Vec::new(),
+        type_parameters: KlibTypeParameters::default(),
+        erasures: HashMap::default(),
+        erased_result: None,
+    }
+}
+
 pub(super) fn declare_function(ir: &mut IrFile, header: &FunctionHeader) -> FunId {
     let function = ir.add_fun(IrFunction {
         name: header.name.clone(),

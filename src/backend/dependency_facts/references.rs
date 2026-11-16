@@ -41,6 +41,19 @@ pub fn referenced_dependencies(ir: &IrFile) -> ReferencedDependencies {
         referenced.property_override(edge.overridden);
     }
     for default in ir.inherited_defaults.values().flatten() {
+        // Annotation origin is declaration evidence only. It freezes an exact method header;
+        // executable dependency roots continue to come from `default.body` and emitted calls.
+        if let Some(origin) = default.annotation_origin {
+            match origin {
+                crate::fir::InheritedDefaultAnnotationOrigin::Function(target) => {
+                    referenced.function_override(target)
+                }
+                crate::fir::InheritedDefaultAnnotationOrigin::Getter(target)
+                | crate::fir::InheritedDefaultAnnotationOrigin::Setter(target) => {
+                    referenced.property_override(target)
+                }
+            }
+        }
         match default.body {
             crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration)
             | crate::fir::InheritedDefaultBody::DependencyHolder(declaration) => {
@@ -234,6 +247,7 @@ impl ReferencedDependencies {
             | Callee::CrossFile { .. }
             | Callee::Module { .. }
             | Callee::ModuleDefaultEntry { .. }
+            | Callee::ModuleConstructorDefaultEntry { .. }
             | Callee::Static { .. }
             | Callee::Virtual { .. }
             | Callee::Super { .. }
@@ -281,7 +295,9 @@ impl ReferencedDependencies {
             | IrCheckedOperation::BackingFieldRead { .. }
             | IrCheckedOperation::BackingFieldWrite { .. }
             | IrCheckedOperation::ComparableRangeContains { .. }
-            | IrCheckedOperation::IllegalProgressionStep { .. } => {}
+            | IrCheckedOperation::IllegalProgressionStep { .. }
+            | IrCheckedOperation::AtomicField { .. }
+            | IrCheckedOperation::AtomicArrayElement { .. } => {}
         }
     }
 

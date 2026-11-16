@@ -379,7 +379,7 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
-        self.dispatch_by_implementor_with(&implementors, object, &[], ret, |body, object| {
+        self.dispatch_by_implementor_with(&implementors, object, &[], ret, false, |body, object| {
             body.runtime_call(symbol, &[any()], ret, &[object])
         })
     }

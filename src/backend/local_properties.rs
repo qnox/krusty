@@ -120,6 +120,26 @@ pub fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess>, Prop
                     .insert(operation, parameters.clone().into_boxed_slice());
             }
         }
+        // A getter call of a module accessor yields its declaration's result, as any other call of
+        // that accessor does; a generic `T` merely specialized at this read stays the declared one.
+        if let IrExpr::Call { callee, .. } = &replacement {
+            let declared = match &**callee {
+                Callee::Virtual {
+                    params: Some((parameters, ret)),
+                    ..
+                } => Some((parameters.clone(), *ret)),
+                callee => callee.source_function().map(|getter| {
+                    let getter = &ir.functions[getter as usize];
+                    (getter.params.clone(), getter.ret)
+                }),
+            };
+            if let (true, Some((parameters, ret))) = (read, declared) {
+                ir.call_declared_ret.insert(operation, ret);
+                ir.call_declared_params
+                    .entry(operation)
+                    .or_insert_with(|| parameters.into_boxed_slice());
+            }
+        }
         let first_operand = match &replacement {
             IrExpr::Call {
                 dispatch_receiver,

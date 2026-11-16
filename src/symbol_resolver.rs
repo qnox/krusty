@@ -34,7 +34,9 @@ mod extension_specialization;
 mod generic_inference;
 pub(crate) use generic_inference::{reified_runtime_type, ReifiedDeclarations};
 mod builtin_overrides;
-pub(crate) use builtin_overrides::builtin_implementation_facts;
+pub(crate) use builtin_overrides::{
+    builtin_implementation_facts, represented_implementation_facts,
+};
 mod hierarchy_projection;
 mod indexed_convention_selection;
 mod lambda_call_shape;
@@ -53,6 +55,8 @@ pub use resolved_member::ResolvedMember;
 mod resolved_symbol;
 mod sam;
 mod scope_level_callables;
+mod scope_level_values;
+pub(crate) use scope_level_values::ScopedValue;
 mod selected_call_instantiation;
 mod separately_mapped_selection;
 pub(crate) use selected_call_instantiation::{

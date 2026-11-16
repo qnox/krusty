@@ -12,6 +12,15 @@ use crate::metadata::klib_ir::tree::{KlibIrArguments, KlibIrMemberAccess};
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::Ty;
 
+pub(super) struct ConstructorOperands {
+    pub(super) declaration: super::super::constructor_calls::ConstructorDeclaration,
+    pub(super) external_target: Option<crate::fir::ExternalCallableId>,
+    pub(super) local_access: Option<crate::ir::IrConstructorAccess>,
+    pub(super) params: Vec<Ty>,
+    pub(super) args: Vec<ExprId>,
+    pub(super) defaults: Vec<u32>,
+}
+
 fn constructor_arguments(
     access: &KlibIrMemberAccess,
 ) -> Lowered<Vec<Option<crate::metadata::klib_ir::tree::KlibIrExprId>>> {
@@ -42,7 +51,7 @@ impl BodyLowering<'_> {
         if ty != object {
             return Err(mismatch("an object value is typed apart from its object"));
         }
-        self.linker.singleton(classifier)?;
+        self.linker.singleton(self.ir, classifier)?;
         // Recorded as checked FIR lowering records the source reference: `Unit` is its builtin
         // type rather than its class.
         let value = self.ir.add_expr(IrExpr::SingletonValue { classifier });
@@ -69,12 +78,15 @@ impl BodyLowering<'_> {
         Ok(value)
     }
 
-    pub(super) fn constructor_call(
+    /// The constructor a call selects, with its supplied operands lowered in declaration order
+    /// against the parameters the construction of `ty` instantiates, and the ordinals it leaves to
+    /// their defaults. A construction and a delegation to a superclass constructor share it.
+    pub(super) fn constructor_operands(
         &mut self,
         access: &KlibIrMemberAccess,
         constructor_type_arguments: u32,
         ty: Ty,
-    ) -> Lowered<ExprId> {
+    ) -> Lowered<ConstructorOperands> {
         if access.symbol.kind != KlibIrSymbolKind::Constructor {
             return Err(mismatch("a constructor call's symbol is not a constructor"));
         }
@@ -91,7 +103,9 @@ impl BodyLowering<'_> {
             })
             .collect::<Lowered<Vec<_>>>()?;
         let (declaration, external_target, local_access) = match &access.symbol.signature {
-            KlibIrSignature::Public(callee) => {
+            KlibIrSignature::Public(callee)
+                if !self.linker.links_privately(&access.symbol.signature) =>
+            {
                 let linked = self.linker.link_constructor(self.ir, callee)?;
                 (linked.declaration, Some(linked.target), None)
             }
@@ -123,14 +137,41 @@ impl BodyLowering<'_> {
                 }
             }
         }
+        Ok(ConstructorOperands {
+            declaration,
+            external_target,
+            local_access,
+            params,
+            args,
+            defaults,
+        })
+    }
+
+    pub(super) fn constructor_call(
+        &mut self,
+        access: &KlibIrMemberAccess,
+        constructor_type_arguments: u32,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let ConstructorOperands {
+            declaration,
+            external_target,
+            local_access,
+            params,
+            args,
+            defaults,
+        } = self.constructor_operands(access, constructor_type_arguments, ty)?;
         match declaration.semantic_role {
             Some(crate::types::SemanticCallRole::KotlinArrayAllocation) => {
-                if declaration.classifier != crate::types::wk::array()
-                    || !ty.is_reference_array()
-                    || ty.type_args().len() != 1
-                    || params != [Ty::Int]
-                    || !defaults.is_empty()
-                {
+                // The allocated type is the constructed class's application: `Array<T>` with its
+                // one element type, or the primitive array class itself.
+                let allocates = if declaration.classifier == crate::types::wk::array() {
+                    ty.is_reference_array() && ty.type_args().len() == 1
+                } else {
+                    ty == Ty::obj_name(declaration.classifier)
+                        && crate::types::prim_array_element(declaration.classifier).is_some()
+                };
+                if !allocates || params != [Ty::Int] || !defaults.is_empty() {
                     return Err(mismatch(
                         "an array allocation has another constructor shape",
                     ));

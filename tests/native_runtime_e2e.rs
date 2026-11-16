@@ -1032,6 +1032,11 @@ fn surrogate_halves_concatenate_into_their_character() {
 }
 
 #[test]
+fn a_range_comparison_walks_utf16_units_as_region_matches_does() {
+    run_driver_against_kotlin("string_range_equals");
+}
+
+#[test]
 fn a_bound_between_surrogate_halves_cuts_the_pair_and_a_search_finds_either_half() {
     run_driver("string_surrogate_halves");
 }
@@ -1134,24 +1139,6 @@ fn a_class_that_publishes_no_names_fails_naming_its_descriptor() {
 }
 
 #[test]
-fn a_property_read_through_an_unknown_delegate_fails_naming_it() {
-    run_driver_expecting_failure(
-        "rw_property_get_unknown_delegate",
-        "krusty: a ReadWriteProperty read of a pkg.CustomDelegate, which is neither \
-         Delegates.notNull() nor Delegates.observable()\n",
-    );
-}
-
-#[test]
-fn a_property_write_through_an_unknown_delegate_fails_naming_it() {
-    run_driver_expecting_failure(
-        "rw_property_set_unknown_delegate",
-        "krusty: a ReadWriteProperty write of a pkg.CustomDelegate, which is neither \
-         Delegates.notNull() nor Delegates.observable()\n",
-    );
-}
-
-#[test]
 fn each_primitive_boxes_to_its_kind_and_small_values_share_a_box() {
     run_driver("boxing");
 }
@@ -1167,7 +1154,7 @@ fn a_pairs_members_answer_componentwise() {
 }
 
 #[test]
-fn lazy_observable_and_not_null_delegates_keep_kotlins_order() {
+fn a_lazy_runs_its_initializer_once_on_the_first_read() {
     run_driver("delegates");
 }
 
@@ -1271,6 +1258,11 @@ fn a_list_read_out_of_bounds_raises_and_answers_nothing() {
 #[test]
 fn a_list_added_to_itself_doubles() {
     run_driver("list_add_all_self");
+}
+
+#[test]
+fn a_list_remove_all_and_retain_all_follow_the_argument() {
+    run_driver("list_remove_all");
 }
 
 #[test]

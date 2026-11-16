@@ -1,6 +1,6 @@
 //! Join an already-selected property operation to its exact frozen accessor, without lookup.
 
-use super::{BackendCallableFact, CheckedBackendCallables};
+use super::{BackendCallableFact, BackendPropertyFact, CheckedBackendCallables};
 use crate::fir::ExternalCallableId;
 use crate::ir::{Callee, ExprId, IrCheckedOperation, IrPropertyDispatch};
 use crate::types::Ty;
@@ -8,10 +8,13 @@ use crate::types::Ty;
 pub struct DependencyAccessor<'a> {
     pub target: ExternalCallableId,
     pub callable: &'a BackendCallableFact,
+    /// The property the accessor reads or writes.
+    pub property: &'a BackendPropertyFact,
     pub receiver: Option<ExprId>,
     pub arguments: &'a [ExprId],
     parameters: &'a [Ty],
     result: Ty,
+    substitutions: &'a [crate::ir::IrCheckedSubstitution],
     dispatch: IrPropertyDispatch,
     write: bool,
 }
@@ -21,31 +24,48 @@ impl CheckedBackendCallables {
         &'a self,
         operation: &'a IrCheckedOperation,
     ) -> Option<DependencyAccessor<'a>> {
-        let (target, dispatch, receiver, arguments, parameters, result, write) = match operation {
-            IrCheckedOperation::ExternalPropertyRead {
-                target,
-                dispatch,
-                receiver,
-                arguments,
-                parameters,
-                result,
-                ..
-            } => (
-                *target, *dispatch, *receiver, arguments, parameters, *result, false,
-            ),
-            IrCheckedOperation::ExternalPropertyWrite {
-                target,
-                dispatch,
-                receiver,
-                arguments,
-                parameters,
-                result,
-                ..
-            } => (
-                *target, *dispatch, *receiver, arguments, parameters, *result, true,
-            ),
-            _ => return None,
-        };
+        let (target, dispatch, receiver, arguments, parameters, result, substitutions, write) =
+            match operation {
+                IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch,
+                    receiver,
+                    arguments,
+                    parameters,
+                    result,
+                    substitutions,
+                    ..
+                } => (
+                    *target,
+                    *dispatch,
+                    *receiver,
+                    arguments,
+                    parameters,
+                    *result,
+                    substitutions,
+                    false,
+                ),
+                IrCheckedOperation::ExternalPropertyWrite {
+                    target,
+                    dispatch,
+                    receiver,
+                    arguments,
+                    parameters,
+                    result,
+                    substitutions,
+                    ..
+                } => (
+                    *target,
+                    *dispatch,
+                    *receiver,
+                    arguments,
+                    parameters,
+                    *result,
+                    substitutions,
+                    true,
+                ),
+                _ => return None,
+            };
         let property = self.property(target)?;
         let target = if write {
             property.setter?
@@ -55,10 +75,12 @@ impl CheckedBackendCallables {
         Some(DependencyAccessor {
             target,
             callable: self.callable(target)?,
+            property,
             receiver,
             arguments,
             parameters,
             result,
+            substitutions,
             dispatch,
             write,
         })
@@ -66,6 +88,12 @@ impl CheckedBackendCallables {
 }
 
 impl DependencyAccessor<'_> {
+    /// Declaration-owned accessor type arguments selected by checked FIR. Specialized target
+    /// member paths that do not instantiate a generic signature must decline when this is nonempty.
+    pub fn substitutions(&self) -> &[crate::ir::IrCheckedSubstitution] {
+        self.substitutions
+    }
+
     /// Whether the operation writes the property, through its setter.
     pub fn writes(&self) -> bool {
         self.write
@@ -81,13 +109,25 @@ impl DependencyAccessor<'_> {
         if self.dispatch != IrPropertyDispatch::Ordinary {
             return Err("a dependency accessor export called through super");
         }
-        if self
+        let generic_count = self
             .callable
             .generic_sig
             .as_ref()
-            .is_some_and(|s| !s.formals.is_empty())
+            .map_or(0, |signature| signature.formals.len());
+        if generic_count != self.substitutions.len()
+            || self
+                .substitutions
+                .iter()
+                .enumerate()
+                .any(|(ordinal, substitution)| {
+                    substitution.parameter
+                        != (crate::fir::FirTypeParameterRef::External {
+                            callable: self.target,
+                            ordinal: ordinal as u32,
+                        })
+                })
         {
-            return Err("a dependency property without checked generic substitutions");
+            return Err("a dependency property has incomplete checked generic substitutions");
         }
         let extension_receiver_parameter = if self.callable.is_member_extension()
             || (self.callable.is_extension() && self.receiver.is_none())
@@ -104,7 +144,7 @@ impl DependencyAccessor<'_> {
             default_provider: None,
             params: self.parameters.to_vec(),
             ret: self.result,
-            substitutions: Vec::new(),
+            substitutions: self.substitutions.to_vec(),
             defaults: Vec::new(),
             extension_receiver_parameter,
         })

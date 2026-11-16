@@ -213,9 +213,9 @@ pub(super) fn property_annotation_marker_locals(
     )
 }
 
-/// Kotlin 2.4.20 names an anonymous context parameter by its generated label in the IR itself, so
-/// the label is also its local-variable name; earlier releases left it unnamed there, publishing the
-/// label only to reflection and null assertions. A lambda literal's own context-function parameter
+/// kotlinc names an anonymous context parameter by its generated label in the IR itself, so the
+/// label is also its local-variable name, unless the release leaves it unnamed there
+/// ([`krusty::kotlin_version::Quirk::AnonymousContextParameterIsNotLocal`]). A lambda literal's own context-function parameter
 /// stays unnamed in the method's `LocalVariableTable` at every version: the label is only the
 /// null-check message.
 fn anonymous_context_locals(ir: &IrFile, function: u32) -> bool {
@@ -227,7 +227,8 @@ fn anonymous_context_locals(ir: &IrFile, function: u32) -> bool {
 }
 
 fn anonymous_context_parameters_are_locals() -> bool {
-    krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20)
+    !krusty::kotlin_version::Quirks::target()
+        .has(krusty::kotlin_version::Quirk::AnonymousContextParameterIsNotLocal)
 }
 
 /// kotlinc's spelling of the extension receiver of a value class's interface entry. The entry is a
@@ -311,24 +312,12 @@ fn function_local_variable(
                 super::debug_local_names::escaped(lifted)
             ));
         }
-        let source_name = ir
-            .fn_source_names
-            .get(&function)
-            .expect("an extension receiver retains its declaration source name");
-        // By then kotlinc's inline-class lowering has renamed a function with a value class in its
-        // signature to its `-<hash>` mangle, which the receiver's name escapes.
-        if let Some(suffix) = ir
-            .value_class_mangle_suffixes
-            .get(&function)
-            .filter(|_| matches!(spelling, ReceiverSpelling::Written))
-        {
-            let ir_name = format!("{source_name}{suffix}");
-            return Some(format!(
-                "$this${}",
-                super::debug_local_names::escaped(&ir_name)
-            ));
-        }
-        return Some(format!("$this${source_name}"));
+        return Some(match value_class_mangled_name(ir, function, spelling) {
+            // By then kotlinc's inline-class lowering has renamed a function with a value class in
+            // its signature to its `-<hash>` mangle, which the receiver's name escapes.
+            Some(ir_name) => format!("$this${}", super::debug_local_names::escaped(&ir_name)),
+            None => format!("$this${}", extension_source_name(ir, function)),
+        });
     }
     // kotlinc's `LocalDeclarationsLowering` keeps a captured variable's own name when a named
     // local function or an anonymous function captures it (a shared cell included), and
@@ -343,6 +332,55 @@ fn function_local_variable(
         }
     }
     local_variable(identity, "")
+}
+
+fn extension_source_name(ir: &IrFile, function: u32) -> &str {
+    ir.fn_source_names
+        .get(&function)
+        .expect("an extension receiver retains its declaration source name")
+}
+
+/// The `-<hash>` name kotlinc's inline-class lowering gives a function with a value class in its
+/// signature, when the written spelling is asked for.
+fn value_class_mangled_name(
+    ir: &IrFile,
+    function: u32,
+    spelling: ReceiverSpelling,
+) -> Option<String> {
+    ir.value_class_mangle_suffixes
+        .get(&function)
+        .filter(|_| matches!(spelling, ReceiverSpelling::Written))
+        .map(|suffix| format!("{}{suffix}", extension_source_name(ir, function)))
+}
+
+/// Local-variable spellings for the parameters of an inline function's `$default` stub, whose
+/// copied body kotlinc describes with the stub's own parameters. A member's stub is static and
+/// takes the extension receiver as its `$receiver` value; a top-level stub keeps an extension
+/// receiver, named after the stub (`$this$f_u24default`). The dispatch receiver is the caller's.
+pub(super) fn default_stub_locals(
+    ir: &IrFile,
+    function: u32,
+    types: &[krusty::types::Ty],
+    member_stub: bool,
+) -> Option<Vec<Option<String>>> {
+    let identities = ir.function_parameter_identities(function)?;
+    let mut locals = function_locals(ir, function, types)?;
+    for (local, identity) in locals.iter_mut().zip(identities) {
+        if identity.role != IrParameterRole::ExtensionReceiver {
+            continue;
+        }
+        *local = Some(if member_stub {
+            "$receiver".to_string()
+        } else {
+            let function_name = value_class_mangled_name(ir, function, ReceiverSpelling::Written)
+                .unwrap_or_else(|| extension_source_name(ir, function).to_string());
+            format!(
+                "$this${}",
+                super::debug_local_names::escaped(&format!("{function_name}$default"))
+            )
+        });
+    }
+    Some(locals)
 }
 
 /// Name of one Java-reflection `MethodParameters` entry.

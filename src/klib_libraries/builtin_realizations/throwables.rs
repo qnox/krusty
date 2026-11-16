@@ -83,6 +83,43 @@ pub(in super::super) fn realize_throwable_property(
     }
 }
 
+/// The platform `Result.Failure` carrier has no serialized target layout: the Native runtime's
+/// exact failure object owns its exception field. Attach a getter operation only to the complete
+/// builtin declaration, so an unrelated class cannot acquire that runtime representation.
+pub(in super::super) fn realize_result_failure_property(
+    owner: TypeName,
+    compiler_builtin_owner: bool,
+    property: &mut PropertyInfo,
+) {
+    let failure = crate::types::type_name_nested_child(type_name("kotlin/Result"), "Failure");
+    if compiler_builtin_owner
+        && owner == failure
+        && property.owner == owner
+        && property.name == "exception"
+        && property.kind == PropKind::Member
+        && property.receiver.is_none()
+        && property.formals.is_empty()
+        && property.associated_classifier.is_none()
+        && property.context_count == 0
+        && property.setter.is_none()
+        && !property.is_const
+        && property.ty == Ty::obj("kotlin/Throwable")
+        && property.getter.params.is_empty()
+        && property.getter.context_count == 0
+        && property.getter.generic_sig.is_none()
+        && property.getter.source_receiver.is_none()
+        && !property.getter.owner_is_interface
+        && !property.getter.is_abstract
+        && property.getter.ret == property.ty
+        && !property.getter.suspend
+    {
+        property.getter.compiler_intrinsic = Some(CompilerIntrinsic::ResultFailureException);
+        property.getter.member_realization = crate::libraries::MemberRealization::Intrinsic(
+            CompilerIntrinsic::ResultFailureException,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +242,47 @@ mod tests {
     }
 
     #[test]
+    fn result_failure_exception_requires_the_builtin_carrier_and_getter_frame() {
+        let failure = crate::types::type_name_nested_child(type_name("kotlin/Result"), "Failure");
+        let mut property = message_property();
+        property.owner = failure;
+        property.name = "exception".into();
+        property.ty = Ty::obj("kotlin/Throwable");
+        property.getter.ret = property.ty;
+
+        realize_result_failure_property(failure, true, &mut property);
+        assert_eq!(
+            property.getter.compiler_intrinsic,
+            Some(CompilerIntrinsic::ResultFailureException)
+        );
+        assert_eq!(
+            property.getter.member_realization,
+            crate::libraries::MemberRealization::Intrinsic(
+                CompilerIntrinsic::ResultFailureException
+            )
+        );
+
+        for (owner, builtin, mutate) in [
+            (failure, false, 0),
+            (type_name("user/Result.Failure"), true, 0),
+            (failure, true, 1),
+        ] {
+            let mut candidate = property.clone();
+            candidate.getter.compiler_intrinsic = None;
+            candidate.getter.member_realization = crate::libraries::MemberRealization::Dispatch;
+            if mutate == 1 {
+                candidate.ty = Ty::String;
+            }
+            realize_result_failure_property(owner, builtin, &mut candidate);
+            assert_eq!(candidate.getter.compiler_intrinsic, None);
+            assert_eq!(
+                candidate.getter.member_realization,
+                crate::libraries::MemberRealization::Dispatch
+            );
+        }
+    }
+
+    #[test]
     fn throwable_cause_requires_an_authenticated_member_of_its_exact_type() {
         let owner = type_name("kotlin/Throwable");
         let mut cause = message_property();
@@ -283,26 +361,49 @@ mod tests {
 
     #[test]
     fn selected_exception_constructors_keep_their_declaring_class_authority() {
-        let owner = type_name("kotlin/IllegalStateException");
-        let layout = Some(RuntimeExceptionLayout {
-            kind: RuntimeExceptionKind::IllegalState,
-            parent: Some(RuntimeExceptionKind::RuntimeException.classifier()),
-        });
-        for (params, message) in [(Vec::new(), false), (vec![Ty::nullable(Ty::String)], true)] {
-            let mut trusted = constructor(params.clone());
-            trusted.owner = Some(owner);
-            realize_constructor(owner, true, layout, &mut trusted);
-            assert!(matches!(
-                trusted.realization,
-                MemberRealization::Intrinsic(CompilerIntrinsic::ThrowableConstructor {
-                    kind: RuntimeExceptionKind::IllegalState,
-                    message: actual,
-                }) if actual == message
-            ));
-            let mut untrusted = constructor(params);
-            untrusted.owner = Some(owner);
-            realize_constructor(owner, false, layout, &mut untrusted);
-            assert_eq!(untrusted.realization, MemberRealization::Dispatch);
+        for (kind, parent) in [
+            (
+                RuntimeExceptionKind::IllegalState,
+                RuntimeExceptionKind::RuntimeException,
+            ),
+            (
+                RuntimeExceptionKind::IllegalArgument,
+                RuntimeExceptionKind::RuntimeException,
+            ),
+            (
+                RuntimeExceptionKind::UnsupportedOperation,
+                RuntimeExceptionKind::RuntimeException,
+            ),
+            (
+                RuntimeExceptionKind::Arithmetic,
+                RuntimeExceptionKind::RuntimeException,
+            ),
+            (
+                RuntimeExceptionKind::NumberFormat,
+                RuntimeExceptionKind::IllegalArgument,
+            ),
+        ] {
+            let owner = kind.classifier();
+            let layout = Some(RuntimeExceptionLayout {
+                kind,
+                parent: Some(parent.classifier()),
+            });
+            for (params, message) in [(Vec::new(), false), (vec![Ty::nullable(Ty::String)], true)] {
+                let mut trusted = constructor(params.clone());
+                trusted.owner = Some(owner);
+                realize_constructor(owner, true, layout, &mut trusted);
+                assert!(matches!(
+                    trusted.realization,
+                    MemberRealization::Intrinsic(CompilerIntrinsic::ThrowableConstructor {
+                        kind: actual_kind,
+                        message: actual,
+                    }) if actual_kind == kind && actual == message
+                ));
+                let mut untrusted = constructor(params);
+                untrusted.owner = Some(owner);
+                realize_constructor(owner, false, layout, &mut untrusted);
+                assert_eq!(untrusted.realization, MemberRealization::Dispatch);
+            }
         }
     }
 

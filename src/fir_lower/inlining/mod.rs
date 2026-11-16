@@ -999,6 +999,7 @@ impl BodyLowering<'_> {
                 invocation,
                 LambdaParameterBinding::Declared {
                     callee: Some(&callee),
+                    specialization: Some(&bindings),
                 },
             )
             .expect("the complete declared-lambda splice list was preflighted before commit");
@@ -1290,7 +1291,17 @@ impl BodyLowering<'_> {
             }
             _ => return None,
         };
-        let parameter_types = self.ir.functions.get(impl_fn as usize)?.params.clone();
+        let mut parameter_types = self.ir.functions.get(impl_fn as usize)?.params.clone();
+        if let LambdaParameterBinding::Declared {
+            specialization: Some(bindings),
+            ..
+        } = binding
+        {
+            let formals = bindings.keys().cloned().collect::<Vec<_>>();
+            for ty in &mut parameter_types {
+                *ty = crate::types::ty_subst_formals(*ty, &formals, bindings);
+            }
+        }
 
         let receiver_parameter = self
             .ir
@@ -1428,6 +1439,7 @@ impl BodyLowering<'_> {
         // callable it was passed to.
         if let LambdaParameterBinding::Declared {
             callee: Some(callee),
+            ..
         } = binding
         {
             declarations.push(self.inline_marker(
@@ -1848,7 +1860,7 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::GeneratedPropertyEquals { ty: operand }
         | IrIntrinsic::Ieee754Equals { operand }
         | IrIntrinsic::GeneratedPropertyHash { ty: operand }
-        | IrIntrinsic::DataClassArrayToString { ty: operand }
+        | IrIntrinsic::GeneratedPropertyArrayToString { ty: operand }
         | IrIntrinsic::TypeOf { ty: operand } => specialize_ty(operand, bindings),
         IrIntrinsic::Assert { .. }
         | IrIntrinsic::ArrayGet
@@ -1874,12 +1886,26 @@ fn specialize_callee(
         }
         Callee::CrossFile { params, ret, .. }
         | Callee::Module { params, ret, .. }
-        | Callee::ModuleDefaultEntry { params, ret, .. }
         | Callee::Super { params, ret, .. } => {
             specialize_tys(params, bindings);
             specialize_ty(ret, bindings);
         }
+        Callee::ModuleConstructorDefaultEntry {
+            outer, params, ret, ..
+        } => {
+            specialize_tys(params, bindings);
+            specialize_ty(ret, bindings);
+            if let Some(outer) = outer {
+                specialize_ty(outer, bindings);
+            }
+        }
         Callee::ModuleWithDefaults {
+            params,
+            ret,
+            dispatch_receiver_ty,
+            ..
+        }
+        | Callee::ModuleDefaultEntry {
             params,
             ret,
             dispatch_receiver_ty,
@@ -2064,18 +2090,23 @@ fn specialize_checked_operation(
         IrCheckedOperation::ExternalPropertyRead {
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         }
         | IrCheckedOperation::ExternalPropertyWrite {
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         } => {
             specialize_tys(parameters, bindings);
             specialize_ty(result, bindings);
             specialize_optional_ty(source_receiver, bindings);
+            for substitution in substitutions {
+                specialize_checked_substitution(substitution, bindings);
+            }
         }
         IrCheckedOperation::RangeConstruction {
             start_type,
@@ -2090,6 +2121,8 @@ fn specialize_checked_operation(
         IrCheckedOperation::RangeContains { counter, .. }
         | IrCheckedOperation::RangeLoop { counter, .. } => specialize_ty(counter, bindings),
         IrCheckedOperation::IllegalProgressionStep { .. }
+        | IrCheckedOperation::AtomicField { .. }
+        | IrCheckedOperation::AtomicArrayElement { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => {}
         IrCheckedOperation::PropertyReference {
             target,

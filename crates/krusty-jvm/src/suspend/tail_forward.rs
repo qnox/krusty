@@ -121,7 +121,8 @@ pub(super) fn record_return_adaptations(
     returns: &mut super::SuspendedResultReturns,
 ) {
     if declared_return == Ty::Unit
-        && krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20)
+        && !krusty::kotlin_version::Quirks::target()
+            .has(krusty::kotlin_version::Quirk::SuspendUnitTailCallKeepsCalleeResult)
     {
         returns.extend(
             returned

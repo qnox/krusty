@@ -10,12 +10,14 @@ use krusty::backend::BackendCallableFact;
 use krusty::fir::ExternalCallableId;
 use krusty::types::{SemanticCallableOwner, TypeName};
 
-use super::objects::STRING_HEAP;
+use super::library_members::{
+    library_member_identity, library_member_owner, library_member_signature, MemberRole,
+};
 use super::*;
 
 /// Whether `classifier` is `kotlin.text.StringBuilder`.
 pub(in crate::codegen) fn is_string_builder(classifier: TypeName) -> bool {
-    classifier.matches("kotlin/text/StringBuilder")
+    crate::string_builders::lays_out(classifier)
 }
 
 /// Whether `ty` is a `StringBuilder`, nullable or not.
@@ -80,7 +82,7 @@ fn member(fact: &BackendCallableFact) -> Option<Member> {
 }
 
 fn builder_type() -> Ty {
-    Ty::obj("kotlin/text/StringBuilder")
+    Ty::obj_name(krusty::types::wk::string_builder())
 }
 
 impl Body<'_> {
@@ -100,6 +102,7 @@ impl Body<'_> {
         {
             return Err("a StringBuilder construction disagreeing with its constructor".into());
         }
+        self.runtime.string_builder_constructed();
         let builders = &self.runtime.string_builders;
         let (new, append_string) = (builders.new, builders.append_string);
         match (fact.params.as_slice(), args) {
@@ -116,10 +119,17 @@ impl Body<'_> {
                 self.code.call(append_string);
             }
             ([param], [content]) if is_char_sequence(*param) => {
-                self.code.i32_const(0).call(new);
+                // `StringBuilder(content)` appends `content`; WASI first sizes the builder by
+                // `content.length`, a read a custom sequence observes.
+                let append = self.char_sequence_append()?;
+                let sequence = self.local(REFERENCE);
                 self.value(*content, *param)?;
-                self.rendered_char_sequence();
-                self.code.call(append_string);
+                self.code.local_set(sequence);
+                match self.runtime.char_sequence_length(self.module) {
+                    Some(length) => self.code.local_get(sequence).call(length),
+                    None => self.code.i32_const(0),
+                };
+                self.code.call(new).local_get(sequence).call(append);
             }
             _ => return Err("a StringBuilder constructor the runtime does not realize".into()),
         }
@@ -164,16 +174,21 @@ impl Body<'_> {
                 self.code.call(append_char);
             }
             (Member::Append(Appended::CharSequence), [value]) => {
+                let append = self.char_sequence_append()?;
                 self.value(*value, fact.params[0])?;
-                self.rendered_char_sequence();
-                self.code.call(append_string);
+                self.code.call(append);
             }
             (Member::Length, []) => {
                 self.code.call(length);
             }
             (Member::Get, [index]) => {
+                // `StringBuilder.get` throws for an index outside the units in use.
+                let (builder, offset) = (self.local(REFERENCE), self.local(ValType::I32));
+                self.code.local_set(builder);
                 self.value(*index, Ty::Int)?;
-                self.code.call(get);
+                self.code.local_tee(offset).local_get(builder).call(length);
+                self.throw_unless_index_below()?;
+                self.code.local_get(builder).local_get(offset).call(get);
             }
             _ => return Err("a StringBuilder call with malformed operands".into()),
         }
@@ -205,20 +220,66 @@ impl Body<'_> {
             .is_some_and(declared_by_string_builder)
     }
 
-    /// Replace the nullable `CharSequence` on the stack with the string it renders: itself for a
-    /// string, `"null"` for `null`, and otherwise its own `toString`, which a builder's table
-    /// answers with its contents.
-    fn rendered_char_sequence(&mut self) {
-        let value = self.local(REFERENCE);
-        self.code
-            .local_tee(value)
-            .ref_test(false, STRING_HEAP)
-            .if_(BlockType::Value(STRING))
-            .local_get(value)
-            .ref_cast(false, STRING_HEAP)
-            .else_()
-            .local_get(value);
-        self.dispatch_to_string();
-        self.code.end();
+    /// The runtime's `StringBuilder.append(CharSequence?)` (`crate::char_sequence_appends`).
+    fn char_sequence_append(&mut self) -> Result<u32, Unsupported> {
+        self.record_char_sequence_reads()?;
+        self.runtime.append_char_sequence(self.module)
+    }
+
+    /// On a target whose builder copies an appended sequence's units, record the checked
+    /// `CharSequence.length` and `get` it reads them through, with what a string and the builder
+    /// run for each. A file without them records nothing, and an append declines.
+    pub(super) fn record_char_sequence_reads(&mut self) -> Result<(), Unsupported> {
+        let appends = &self.runtime.char_sequence_appends;
+        if !appends.reads_by_index() || appends.has_reads() {
+            return Ok(());
+        }
+        let Some(protocol) = self.callables.char_sequence_protocol() else {
+            return Ok(());
+        };
+        let property = self
+            .callables
+            .property(protocol.length)
+            .ok_or("a `CharSequence.length` without its declaration")?;
+        let (getter, name) = (property.getter, property.name.to_string());
+        let length = self.char_sequence_member(getter, MemberRole::Getter, &name)?;
+        let get = self.char_sequence_member(protocol.get, MemberRole::Function, "get")?;
+        self.runtime
+            .char_sequence_appends
+            .record_reads(crate::char_sequence_appends::SequenceReads { length, get });
+        Ok(())
+    }
+
+    /// The library member `target` is in `role`, with its builtin implementations recorded.
+    fn char_sequence_member(
+        &mut self,
+        target: ExternalCallableId,
+        role: MemberRole,
+        name: &str,
+    ) -> Result<crate::interface_dispatch::MemberRef, Unsupported> {
+        let fact = self
+            .callables
+            .callable(target)
+            .ok_or("a `CharSequence` member without its declaration")?
+            .clone();
+        let identity = library_member_identity(&fact, role)
+            .ok_or("a `CharSequence` member without its identity")?;
+        let owner =
+            library_member_owner(&fact).ok_or("a `CharSequence` member without its classifier")?;
+        let signature = library_member_signature(&fact, role)?;
+        let member = self.runtime.objects.interfaces.library(
+            self.module,
+            owner,
+            &identity,
+            signature.clone(),
+        )?;
+        self.runtime.builtin_member(
+            self.module,
+            member,
+            name,
+            &signature,
+            &fact.builtin_implementations,
+        )?;
+        Ok(member)
     }
 }
