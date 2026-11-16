@@ -32,8 +32,17 @@ mod emitted_roots;
 pub(super) struct DependencySupportState {
     snapshot: Option<crate::libraries::DependencyBodySnapshot>,
     emitted: HashMap<KlibDependencyCallable, PublishedDependency>,
+    /// Exact body declarations owned by the support unit currently being prepared. Recursive
+    /// closure may link to these only after that unit has proved it owns the corresponding body.
+    in_progress: HashMap<KlibDependencyCallable, PublishedDependency>,
+    /// The ordinal of the next support unit. A unit's dependencies close before it is emitted,
+    /// so the emitted count does not number units uniquely.
+    next_support_unit: usize,
     /// One physical realization per exact logical class; equal names cannot alias producers.
     materialized_classes: HashMap<TypeName, KlibDependencyCallable>,
+    /// Exact class owner reservations for units whose layout is being prepared but is not emitted
+    /// yet. These prevent a recursive dependency from materializing the same class twice.
+    materializing_classes: HashMap<TypeName, KlibDependencyCallable>,
 }
 
 #[derive(Clone)]
@@ -110,6 +119,39 @@ pub(super) fn emit_dependencies<B: Backend>(
         );
         return Vec::new();
     }
+    let emitted_external_ids =
+        match emitted_roots::emitted_dependency_targets(&source.ir, |property, setter| {
+            let property = source
+                .callables
+                .property(property)
+                .ok_or("an emitted dependency property has no frozen fact")?;
+            if setter {
+                property
+                    .setter
+                    .map(Some)
+                    .ok_or("an emitted dependency property write has no selected setter".to_owned())
+            } else {
+                Ok(Some(property.getter))
+            }
+        }) {
+            Ok(targets) => targets
+                .into_iter()
+                .map(|(_, target, _)| target)
+                .collect::<HashSet<_>>(),
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return Vec::new();
+            }
+        };
+    let emitted_dependency_callables = emitted_external_ids
+        .into_iter()
+        .filter_map(|target| {
+            source
+                .callables
+                .callable(target)
+                .and_then(|callable| callable.dependency_callable.clone())
+        })
+        .collect::<HashSet<_>>();
     let target_represents_classifier =
         |classifier| backend.represents_dependency_classifier(classifier);
     let callees = KlibCalleeFacts::new(selected.iter().copied())
@@ -117,7 +159,9 @@ pub(super) fn emit_dependencies<B: Backend>(
         .with_target_classifiers(&target_represents_classifier);
     let mut roots: Vec<crate::libraries::KlibBodyCallable<'_>> = Vec::new();
     for callable in selected.iter().copied().filter(|callable| {
-        !support_state.emitted.contains_key(callable.identity())
+        emitted_dependency_callables.contains(callable.identity())
+            && !support_state.emitted.contains_key(callable.identity())
+            && !support_state.in_progress.contains_key(callable.identity())
             && platform.is_platform_stdlib_dependency(callable.identity())
             && DependencyBodyUnit::is_scalar_root_candidate(*callable, bodies)
             && bodies.is_supported_intrinsic_root(callable.identity(), intrinsics)
@@ -182,15 +226,25 @@ pub(super) fn emit_dependencies<B: Backend>(
             );
         }
         !intrinsic_owned
+            && !support_state.emitted.contains_key(root.identity())
+            && !support_state.in_progress.contains_key(root.identity())
     });
     let mut artifacts = Vec::new();
     for (requires_intrinsic_link, mut roots) in [(true, roots), (false, ordinary)] {
         // Intrinsic support may have emitted an ordinary root transitively in the preceding unit.
-        roots.retain(|root| !support_state.emitted.contains_key(root.identity()));
+        roots.retain(|root| {
+            !support_state.emitted.contains_key(root.identity())
+                && !support_state.in_progress.contains_key(root.identity())
+        });
         if roots.is_empty() {
             continue;
         }
-        let Some(mut externals) = rebound_externals(platform, &support_state.emitted, diags) else {
+        let Some(mut externals) = rebound_externals(
+            platform,
+            &support_state.emitted,
+            &support_state.in_progress,
+            diags,
+        ) else {
             return Vec::new();
         };
         // An enum an earlier unit materialized keeps its one set of constants there; this unit
@@ -319,7 +373,11 @@ pub(super) fn emit_dependencies<B: Backend>(
                 );
                 return Vec::new();
             }
-            if let Some(previous) = support_state.materialized_classes.get(classifier) {
+            if let Some(previous) = support_state
+                .materialized_classes
+                .get(classifier)
+                .or_else(|| support_state.materializing_classes.get(classifier))
+            {
                 let message = if previous == identity {
                     "cannot materialize an imported class twice in separate dependency support units"
                 } else {
@@ -522,6 +580,12 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
+        if let Err(error) =
+            super::backend_handoff::record_checked_klib_dependency_facts(&mut callables, platform)
+        {
+            diags.error(Span::new(0, 0), format!("internal error: {error}"));
+            return Vec::new();
+        }
         if let Err(identity) =
             super::builtin_implementations::record_checked(&mut callables, unit.ir(), platform)
         {
@@ -533,13 +597,14 @@ pub(super) fn emit_dependencies<B: Backend>(
             );
             return Vec::new();
         }
-        let ordinal = support_state.emitted.len();
+        let ordinal = support_state.next_support_unit;
+        support_state.next_support_unit += 1;
         let support_module = format!(
             "{}$klib_body${}${ordinal}",
             source.module_name,
             source.source.raw()
         );
-        let support = CheckedIrFile {
+        let mut support = CheckedIrFile {
             ir: unit.into_ir(),
             kind: CheckedIrUnitKind::DependencySupport,
             source: source.source,
@@ -551,42 +616,135 @@ pub(super) fn emit_dependencies<B: Backend>(
             stems: source.stems,
             origins: source.origins,
         };
+
+        // Reserve only identities this concrete unit has already proved it will publish. The
+        // recursive closure may link cycles to these declarations, but never treats inventory-only
+        // runtime identities as if their bodies existed.
+        if published.iter().any(|(identity, _)| {
+            support_state.emitted.contains_key(identity)
+                || support_state.in_progress.contains_key(identity)
+        }) {
+            diags.error(
+                Span::new(0, 0),
+                "internal error: one dependency body has two support-unit owners",
+            );
+            return Vec::new();
+        }
+        for (classifier, identity) in &materialized {
+            if let Some(previous) = support_state
+                .materialized_classes
+                .get(classifier)
+                .or_else(|| support_state.materializing_classes.get(classifier))
+            {
+                let message = if previous == identity {
+                    "cannot materialize an imported class twice in separate dependency support units"
+                } else {
+                    "cannot materialize equal classifier names from different KLIB producers in one target program"
+                };
+                diags.error(Span::new(0, 0), message);
+                return Vec::new();
+            }
+        }
+        support_state.in_progress.extend(published.iter().cloned());
+        support_state
+            .materializing_classes
+            .extend(materialized.iter().cloned());
+
+        if let Some(preparation) = backend.common_ir_preparation() {
+            if let Err(error) = super::backend_handoff::prepare_common_ir(
+                &mut support,
+                platform,
+                preparation,
+                symbols.coroutine_runtime(),
+            ) {
+                release_unit_reservations(support_state, &published, &materialized);
+                backend.report_common_ir_preparation_error(&error, diags);
+                return Vec::new();
+            }
+        }
+
+        // A common lowering may introduce real external calls (for example, continuation
+        // resumption). Close those calls through the same provider-backed walk before lowering
+        // this unit. Recursion emits dependencies first and sees this unit's reserved exports as
+        // exact provisional owners, not as completed class layouts.
+        let nested_outputs = emit_dependencies(
+            &support,
+            symbols,
+            module_facts,
+            backend,
+            state,
+            support_state,
+            diags,
+        );
+        if diags.has_errors() {
+            release_unit_reservations(support_state, &published, &materialized);
+            return Vec::new();
+        }
         let initializer_requests = match crate::backend::initializer_declarations(&support) {
             Ok(requests) => requests,
             Err(reason) => {
+                release_unit_reservations(support_state, &published, &materialized);
                 diags.error(Span::new(0, 0), format!("internal error: {reason}"));
                 return Vec::new();
             }
         };
         let outputs = backend.lower_ir_file(support, state, diags);
         if diags.has_errors() {
+            release_unit_reservations(support_state, &published, &materialized);
             return Vec::new();
         }
-        published.retain(|(identity, capability)| match capability {
-            PublishedDependency::ConstructorInitializer(class) => initializer_requests
-                .iter()
-                .find(|declaration| {
-                    &declaration.constructor == identity && &declaration.class == class
-                })
-                .is_some_and(|declaration| {
-                    backend.emitted_constructor_initializer(state, declaration)
-                }),
-            _ => true,
-        });
-        support_state.emitted.extend(published);
-        support_state.materialized_classes.extend(materialized);
+        for (identity, realization) in published {
+            support_state.in_progress.remove(&identity);
+            // An initializer the backend did not emit is not published.
+            let emitted = match &realization {
+                PublishedDependency::ConstructorInitializer(class) => initializer_requests
+                    .iter()
+                    .find(|declaration| {
+                        declaration.constructor == identity && &declaration.class == class
+                    })
+                    .is_some_and(|declaration| {
+                        backend.emitted_constructor_initializer(state, declaration)
+                    }),
+                _ => true,
+            };
+            if emitted {
+                support_state.emitted.insert(identity, realization);
+            }
+        }
+        for (classifier, identity) in materialized {
+            support_state.materializing_classes.remove(&classifier);
+            support_state
+                .materialized_classes
+                .insert(classifier, identity);
+        }
+        artifacts.extend(nested_outputs);
         artifacts.extend(outputs);
     }
     artifacts
 }
 
+fn release_unit_reservations(
+    support_state: &mut DependencySupportState,
+    published: &[(KlibDependencyCallable, PublishedDependency)],
+    materialized: &[(TypeName, KlibDependencyCallable)],
+) {
+    for (identity, _) in published {
+        support_state.in_progress.remove(identity);
+    }
+    for (classifier, _) in materialized {
+        support_state.materializing_classes.remove(classifier);
+    }
+}
+
 fn rebound_externals(
     platform: &dyn crate::libraries::SemanticPlatform,
     emitted: &HashMap<KlibDependencyCallable, PublishedDependency>,
+    in_progress: &HashMap<KlibDependencyCallable, PublishedDependency>,
     diags: &mut DiagSink,
 ) -> Option<HashMap<KlibDependencyCallable, EmittedDependencyCallable>> {
-    let mut rebound = HashMap::with_capacity_and_hasher(emitted.len(), Default::default());
-    for (identity, published) in emitted {
+    let mut rebound =
+        HashMap::with_capacity_and_hasher(emitted.len() + in_progress.len(), Default::default());
+    for (identity, published) in emitted.iter().chain(in_progress) {
         let Some((external, realization)) = platform.external_callable_by_dependency(identity)
         else {
             diags.error(
@@ -740,15 +898,14 @@ fn prepare_bodyless_externals(
         } else {
             bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
         };
-        // A member of a materialized class is lowered with the class its constructor creates.
-        match emitted_roots::member_class_constructor(
+        // A member of a materialized class is lowered with the class its constructors create.
+        match emitted_roots::member_class_constructors(
             platform,
             bodies,
             capabilities.callees,
             &identity,
         ) {
-            Ok(Some(primary)) => pending.push_back(primary),
-            Ok(None) => {}
+            Ok(constructors) => pending.extend(constructors),
             Err(error) => {
                 diags.error(Span::new(0, 0), format!("internal error: {error}"));
                 return false;
@@ -904,17 +1061,18 @@ fn prepare_bodyless_externals(
             }
             // An abstract member of a class the unit materializes is a slot of its dispatch
             // table, which every call of it dispatches through.
-            match emitted_roots::member_class_constructor(
+            match emitted_roots::member_class_constructors(
                 platform,
                 bodies,
                 capabilities.callees,
                 &callee,
             ) {
-                Ok(Some(_))
-                    if bodies.function(&callee).is_some_and(|(_, function)| {
-                        crate::metadata::semantic::declaration_modality(function.base.flags)
-                            == crate::metadata::semantic::KotlinModality::Abstract
-                    }) =>
+                Ok(constructors)
+                    if !constructors.is_empty()
+                        && bodies.function(&callee).is_some_and(|(_, function)| {
+                            crate::metadata::semantic::declaration_modality(function.base.flags)
+                                == crate::metadata::semantic::KotlinModality::Abstract
+                        }) =>
                 {
                     continue
                 }

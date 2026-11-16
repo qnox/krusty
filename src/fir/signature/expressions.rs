@@ -111,9 +111,15 @@ pub enum SigExpr {
         suspend: bool,
     },
     ContextualParameter(DeclarationId),
+    /// The extension receiver of a labeled contextual function literal, read as `this@label`.
+    /// Like a contextual parameter, its type exists only once the literal's expected function
+    /// type supplies a receiver; the label binds lexically to this literal, never by spelling.
+    ContextualReceiver(DeclarationId),
     ContextualFunction {
         parameters: OperandRange,
         result: SigExprId,
+        /// The node `this@label` binds to when the literal carries a label.
+        labeled_receiver: Option<SigExprId>,
         scope: SignatureScopeId,
         implicit_it: bool,
         suspend: bool,
@@ -349,7 +355,8 @@ impl SignatureGraph {
                     | SigExpr::ContextualType { .. }
                     | SigExpr::Value(_)
                     | SigExpr::CallableReference(_)
-                    | SigExpr::ContextualParameter(_),
+                    | SigExpr::ContextualParameter(_)
+                    | SigExpr::ContextualReceiver(_),
                 )
                 | None => {}
             }
