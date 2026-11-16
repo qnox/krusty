@@ -7,7 +7,7 @@
 
 use super::*;
 
-impl BodyLowering<'_, '_, '_> {
+impl<'a> BodyLowering<'a, '_, '_> {
     /// The provider's bit reinterpretation of `operand`, a `from` scalar, as the equal-width `to`.
     fn reinterpret_bits(
         &mut self,
@@ -100,6 +100,60 @@ impl BodyLowering<'_, '_, '_> {
             return Ok(None);
         }
         self.value_hash(value, ty).map(Some)
+    }
+
+    /// Realize the exact provider operation a dependency callable's realization carries: a
+    /// member's as its realization, a package function's as its intrinsic. A call of the
+    /// declaration and a read of the property it is the getter of reach the same operation.
+    pub(super) fn realized_operation_call(
+        &mut self,
+        site: u32,
+        realization: &krusty::backend::BackendCallableFact,
+        dispatch_receiver: Option<u32>,
+        args: &[u32],
+        extension_receiver_parameter: Option<u32>,
+        ret: Ty,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let intrinsic = realization
+            .compiler_intrinsic
+            .or(realization.member_realization.compiler_intrinsic())
+            .or_else(|| self.unsigned_array_carrier_access(realization));
+        self.compiler_intrinsic_call(
+            site,
+            intrinsic,
+            dispatch_receiver,
+            args,
+            DeclaredOperands {
+                operation: super::super::dependency_intrinsics::declaration_operation(
+                    intrinsic,
+                    realization.semantic_role,
+                ),
+                receiver: match realization.declaration_owner {
+                    Some(krusty::types::SemanticCallableOwner::Classifier(owner)) => {
+                        Some(Ty::obj_name(owner))
+                    }
+                    _ => None,
+                },
+                params: &realization.params,
+                extension_receiver_parameter,
+            },
+            ret,
+        )
+    }
+
+    /// The getter of a dependency property whose realization is an exact provider operation,
+    /// so its read lowers as the call of that getter does.
+    pub(super) fn operation_getter(
+        &self,
+        target: krusty::fir::ExternalPropertyId,
+    ) -> Option<&'a krusty::backend::BackendCallableFact> {
+        let callables = self.file.callables;
+        let getter = callables.callable(callables.property(target)?.getter)?;
+        let intrinsic = getter
+            .compiler_intrinsic
+            .or(getter.member_realization.compiler_intrinsic());
+        super::super::dependency_intrinsics::declaration_operation(intrinsic, getter.semantic_role)
+            .map(|_| getter)
     }
 
     /// Realize an exact provider operation reached through an ordinary member call.
@@ -326,6 +380,35 @@ impl BodyLowering<'_, '_, '_> {
                         return Ok(None);
                     }
                     self.runtime_call(symbol, &params, ret, &arguments)
+                })());
+            }
+            Some(krusty::backend::BackendCompilerIntrinsic::StringRangeEquals) => {
+                let operands = match (receiver, args, extension_receiver_parameter) {
+                    (Some(this), [this_offset, other, other_offset, length], None) => {
+                        [this, *this_offset, *other, *other_offset, *length]
+                    }
+                    (None, &[this, this_offset, other, other_offset, length], Some(0)) => {
+                        [this, this_offset, other, other_offset, length]
+                    }
+                    _ => {
+                        return Some(Err(
+                            "a String range comparison with malformed operands".into()
+                        ))
+                    }
+                };
+                if ret != Ty::Boolean {
+                    return Some(Err(
+                        "a String range comparison with a non-Boolean result".into()
+                    ));
+                }
+                let string = Ty::obj("kotlin/String");
+                let params = [string, Ty::Int, string, Ty::Int, Ty::Int];
+                return Some((|| {
+                    let arguments = self.arguments(&operands, &params)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call("kt_string_range_equals", &params, ret, &arguments)
                 })());
             }
             Some(krusty::backend::BackendCompilerIntrinsic::FloatingIsNaN { operand }) => {

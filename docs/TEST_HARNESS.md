@@ -184,10 +184,12 @@ earlier run. The failure report reads the exact invocation's log, and the timing
 invocation separately because each is a separate process with its own wall time. The e2e log is the
 unfiltered binary name.
 
-CI builds the conformance test binary and CLI once. Every version in `kotlin-versions` expands into
-independent `jvm`, `native`, and `wasm` matrix rows from those artifacts. Those rows never wait for the
-ordinary compiler unit test binary: the `klib-implementation-coverage` job builds it and checks every release's exact Native and Wasm stdlib KLIB implementation coverage with
-it (`just klib-implementation-coverage`). One conformance matrix executes one step
+CI builds the conformance and e2e test binaries and the CLI once. Every version in `kotlin-versions`
+expands into independent `jvm`, `native`, and `wasm` matrix rows from those artifacts, and the `e2e`
+job runs the e2e binary. None of them waits for the ordinary compiler unit test binary: the `ci` job
+builds it with the other own test suites (`scripts/own-tests.sh`), runs it, and then checks every
+release's exact Native and Wasm stdlib KLIB implementation coverage with it
+(`just klib-implementation-coverage`). One conformance matrix executes one step
 inventory and the same backend-neutral case table. The JVM row runs its box corpus and JVM-owned
 regressions. The Native and Wasm rows run their own box corpora followed by
 their focused non-corpus regressions against the same exact target compiler and KLIB setup, so no
@@ -197,9 +199,9 @@ target test consumes JVM artifacts and no target waits for another target's corp
 code per Kotlin version or target. Toolchain and box/serialization corpora are isolated by version.
 JVM rows require pinned serialization-runtime provisioning, so missing prerequisites fail rather
 than turning those tests into passing skips. Compiler-dependent plugin and KSP integrations belong
-to the root e2e target. After coverage, CI reuses that exact coverage-profile executable for an explicit
-`plugin_host_compiler_e2e:: --include-ignored --test-threads=1` pass under the configurable e2e deadline.
-That pass runs after the coverage report; its counters do not change the measured workload.
+to the root e2e target. After the e2e suite, the `e2e` job runs the same executable again for an
+explicit `plugin_host_compiler_e2e:: --include-ignored --test-threads=1` pass under the configurable
+e2e deadline.
 Compiler-independent host tests run in their own `plugin-host` job through
 `cargo test --profile gate -p krusty-plugin-host -- --include-ignored`. Both use the host's pinned
 toolchain and JDK 17 in CI, not JVM matrix opt-in flags. Each row
@@ -288,7 +290,16 @@ inheritance. An owned source leaves a target only by naming its backends with `/
 as a fixture for a JVM-only compiler argument (`-Xuse-inline-scopes-numbers`) does. It is then
 outside that lane, not one of the lane's not-applicable entries: it leaves the lane's scanned
 and applicable counts, and the report line counts it as `outside-lane`. Harness errors, unavailable setup,
-compiler panics and every other target skip are fatal before any expectation write. The ordinary upstream
+compiler panics and every other target skip are fatal before any expectation write.
+
+A regression for a kotlinc bug fixed in a later release cannot use an earlier kotlinc as its
+oracle, because that compiler still miscompiles it. `// KOTLINC_VERSION:` bounds the reference
+releases such a case belongs to, in interval notation with either bound optional: `[2.5.0,)` (or
+just `2.5.0`) from 2.5.0, `[2.4.0,2.5.0)` before it. Bounds compare `major.minor.patch`, so a
+2.5.0 release candidate is inside `[2.5.0,)`. Under any other reference release, discovery leaves
+the case out of every lane's inventory; it is never a not-applicable entry. A malformed or repeated
+directive fails discovery. `// LANGUAGE_VERSION:` cannot do this: it selects a language level that
+an older kotlinc may still accept. The ordinary upstream
 per-case applicability policy is unchanged. Full sweeps require the provisioned upstream corpus;
 the separate vendored smoke test does not replace missing setup.
 
@@ -552,11 +563,12 @@ Do not use `--release` for tests. The release build cycle takes longer than it s
 ## Required Check
 
 The `ci` workflow's `ci-and-conformance` job is the single check for master's ruleset to require.
-It needs the independent `lint` and coverage-owning `ci` jobs, the shared conformance matrix,
-`klib-implementation-coverage`, `build-gradle-plugin`, and the whole `gradle` compatibility matrix. Every
+It needs the independent `lint` job, the `ci` job that runs the own test suites and the KLIB
+implementation coverage, the `e2e` job, the shared conformance matrix, `build-gradle-plugin`, and
+the whole `gradle` compatibility matrix. Every
 supported Kotlin version has distinct JVM, Native and Wasm conformance
 rows. The KLIB decoder, value-class and kotlinc-native oracle tests are ordinary e2e and unit tests
-that the `ci` coverage gate runs against the maximum-version Native distribution, while
+that the `ci` and `e2e` jobs run against the maximum-version Native distribution, while
 `just klib-semantics` remains the focused local recipe. One backend-neutral box inventory includes upstream and owned
 portable regular/multimodule cases in every JVM, Native and Wasm row; directives may not silently
 skip owned cases. Genuinely platform-specific sources live in named target-owned tests with a
@@ -732,7 +744,8 @@ The e2e suite has its own built-in phase profiler: `KRUSTY_PROF=1` makes every h
 `PROF\t<phase>\t<ms>` lines (`krusty` in-process compile, `kotlinc` reference compile incl. queue
 wait, `box` JVM round-trip) to stderr — run the e2e binary with `--nocapture` and aggregate.
 
-`just coverage` prints a wall-clock line for every phase of that job, in whole seconds:
+`just coverage`, which the nightly `coverage` workflow runs, prints a wall-clock line for every
+phase, in whole seconds:
 `coverage: phase start <name>` when the phase begins and `coverage: phase <name> <seconds>s` when it
 finishes. The phases are toolchain provision, instrumentation, one compiler build
 (`build-compiler`) that emits the CLI, the language server, and their test binaries, each non-e2e
@@ -742,10 +755,11 @@ is compiled once and the cfg(test) harness overlaps the binaries. Nightly rustc 
 job per core (`-Z threads`). The run ends with `coverage: phases` repeating every
 finished phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
 the sum of the rows. The conformance box runner prints the same shape as
-`conformance-run: phase box-conformance <seconds>s`. The KLIB coverage job prints
-`klib-implementation-coverage: phase compiler-unit-tests`, and the tool producer, which builds the
-conformance binary, the CLI and the krusty-build tests over one krusty library, prints
-`tool-bins: phase conformance-and-cli` and `tool-bins: phase krusty-build-tests`. Conformance lanes
+`conformance-run: phase box-conformance <seconds>s`. `scripts/own-tests.sh` prints
+`own-tests: phase build` and one `own-tests: phase test-<binary>` per test binary, and the tool
+producer, which builds the conformance and e2e binaries, the CLI and the krusty-build tests over one
+krusty library, prints `tool-bins: phase conformance-e2e-and-cli` and
+`tool-bins: phase krusty-build-tests`. Conformance lanes
 and Gradle lanes run those binaries. A
 Gradle lane does not compile krusty.
 

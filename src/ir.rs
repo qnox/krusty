@@ -678,10 +678,13 @@ pub enum IrExpr {
     /// class's `$WhenMappings` table for `classifier` at `subject`'s runtime ordinal. Value type:
     /// `Int`. `registrations` are the table entries this subject `when` (and every subject `when`
     /// nested in it) claims, in kotlinc's visiting order; see [`EnumSwitchRegistration`].
+    /// `source_order` is the source `when`'s start offset ([`IrFile::start_offset`]), which
+    /// places these claims among the other claims of the class the backend emits it in.
     EnumSwitchOrdinal {
         classifier: TypeName,
         subject: ExprId,
         registrations: Box<[EnumSwitchRegistration]>,
+        source_order: Option<u32>,
     },
     /// The `$WhenMappings` key of one enum entry in the emitting class's table. Value type: `Int`.
     EnumSwitchKey {
@@ -1906,6 +1909,11 @@ pub struct IrFile {
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub default_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each checked constructor another file may build through with arguments left out, by its
+    /// declaration: the constructor of its class that the shared default-argument lowering
+    /// realized as that constructor's entry. See [`crate::backend::construction_entries`].
+    pub constructor_default_entries:
+        crate::fx_hash::HashMap<crate::fir::DeclarationId, IrConstructorTarget>,
     /// Each entry another module constructs a class of this file, or reads its object, through,
     /// by the entry's `FunId`: the class it answers. See [`crate::backend::construction_entries`].
     pub(crate) construction_entries: crate::fx_hash::HashMap<FunId, ClassId>,

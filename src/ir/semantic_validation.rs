@@ -76,7 +76,7 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         IrIntrinsic::TypeOf { ty } => reject("typeOf type argument", *ty),
         IrIntrinsic::GeneratedPropertyEquals { ty }
         | IrIntrinsic::GeneratedPropertyHash { ty }
-        | IrIntrinsic::DataClassArrayToString { ty } => reject("intrinsic property", *ty),
+        | IrIntrinsic::GeneratedPropertyArrayToString { ty } => reject("intrinsic property", *ty),
         IrIntrinsic::Assert { .. }
         | IrIntrinsic::ArrayGet
         | IrIntrinsic::ArraySet
@@ -110,12 +110,27 @@ fn validate_callee(callee: &Callee) -> Result<(), UndeterminedIrType> {
         }
         Callee::CrossFile { params, ret, .. }
         | Callee::Module { params, ret, .. }
-        | Callee::ModuleDefaultEntry { params, ret, .. }
         | Callee::Super { params, ret, .. } => {
             reject_all("callee parameter", params.iter().copied())?;
             reject("callee result", *ret)
         }
+        Callee::ModuleConstructorDefaultEntry {
+            outer, params, ret, ..
+        } => {
+            reject_all("callee parameter", params.iter().copied())?;
+            reject("callee result", *ret)?;
+            if let Some(outer) = outer {
+                reject("callee enclosing instance", *outer)?;
+            }
+            Ok(())
+        }
         Callee::ModuleWithDefaults {
+            params,
+            ret,
+            dispatch_receiver_ty,
+            ..
+        }
+        | Callee::ModuleDefaultEntry {
             params,
             ret,
             dispatch_receiver_ty,
@@ -260,6 +275,7 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
         IrCheckedOperation::RangeContains { counter, .. }
         | IrCheckedOperation::RangeLoop { counter, .. } => reject("range counter", *counter),
         IrCheckedOperation::IllegalProgressionStep { .. }
+        | IrCheckedOperation::AtomicField { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => Ok(()),
         IrCheckedOperation::PropertyReference { substitutions, .. } => {
             for substitution in substitutions {

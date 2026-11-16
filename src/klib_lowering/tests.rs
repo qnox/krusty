@@ -8,6 +8,7 @@ mod body_forms;
 mod callable_references;
 mod callee_headers;
 mod captured_projections;
+mod checked_member_edges;
 mod closure_frames;
 mod closure_producers;
 mod constructor_calls;
@@ -28,6 +29,7 @@ mod range_membership_producers;
 mod returnable_blocks;
 mod safe_calls;
 mod same_library_class;
+mod support;
 mod target_calls;
 mod target_members;
 mod value_class_members;
@@ -59,6 +61,8 @@ use crate::metadata::semantic::{KotlinFunction, KotlinPackage};
 use crate::metadata::semantic::{KotlinFunctionTypeShape, KotlinType};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{type_name, Ty, TyKind, TypeName, Visibility};
+
+use support::checked_template_hierarchy;
 
 /// The fact the backend handoff freezes for the one function of `package` named `name` with this
 /// receiver and these value parameters.
@@ -1641,6 +1645,16 @@ pub(super) fn non_overriding_edges<'a>(
             )
         })
         .collect()
+}
+
+pub(super) fn checked_backend_klib_facts(
+    facts: crate::fir::CheckedKlibDependencyFacts,
+) -> CheckedBackendCallables {
+    let mut checked = CheckedBackendCallables::default();
+    checked
+        .record_klib_dependency_facts(facts)
+        .expect("test KLIB facts are consistent");
+    checked
 }
 
 // --- The Kotlin/Native stdlib -----------------------------------------------------------------

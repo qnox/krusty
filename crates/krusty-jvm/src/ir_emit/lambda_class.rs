@@ -73,6 +73,7 @@ pub(super) fn emit_lambda_class(
         OBJECT
     };
     let signature = match &lambda.sam {
+        Some(_) if lambda.sam_reference => None,
         Some(target) => sam_class_signature(&formatter, target),
         None if lambda.raw_supertype => None,
         None => formatter
@@ -83,7 +84,12 @@ pub(super) fn emit_lambda_class(
     if let Some(signature) = &signature {
         cw.set_signature(signature);
     }
-    cw.set_access(0x0010 | 0x0020 | u16::from(lambda.public_inline)); // FINAL | SUPER | publication
+    cw.set_access(
+        0x0010
+            | 0x0020
+            | u16::from(lambda.public_inline)
+            | if lambda.sam_reference { 0x1000 } else { 0 },
+    ); // FINAL | SUPER | publication | SYNTHETIC reference
     if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
         let method = lambda
             .default_stub_owner
@@ -326,6 +332,7 @@ pub(super) fn emit_lambda_class(
         match lambda
             .sam
             .as_deref()
+            .filter(|_| !lambda.sam_reference)
             .and_then(sam_instance_signature(&class))
         {
             // The instance of a class declaring the interface's type parameters is typed by them.

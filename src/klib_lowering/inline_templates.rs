@@ -60,10 +60,40 @@ pub struct TemplateCallees<'a> {
     pub declarations: &'a KlibDeclarationBodies,
     /// Already normalized reference identities. Template lowering performs no hierarchy lookup.
     pub references: &'a KlibReferenceBindings,
-    /// The calling compilation's symbols: the provider identity of an exact serialized
-    /// declaration, its property and classifier records, and the class hierarchy that decides the
-    /// subtyping a body leaves implicit.
+    /// The calling compilation's normalized declaration records, used to authenticate exact
+    /// serialized references and validate classifier forms.
     pub source: &'a dyn crate::symbol_source::SymbolSource,
+    /// Checker-frozen hierarchy for the selected inline body and its reachable callees. Required
+    /// so template type checks cannot fall back to provider queries.
+    pub(crate) type_hierarchy: &'a crate::fir::CheckedKlibTypeFacts,
+}
+
+impl TemplateCallees<'_> {
+    fn applied_supertype(&self, sub: Ty, owner: crate::types::TypeName) -> Option<Ty> {
+        crate::assignable::applied_supertype(self.type_hierarchy, sub, Ty::obj_name(owner))
+    }
+
+    fn is_subtype(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        sub: Ty,
+        sup: Ty,
+    ) -> bool {
+        super::type_evidence::ordinary_subtype(Some(self.type_hierarchy), parameters, sub, sup)
+    }
+
+    fn same_type(&self, left: Ty, right: Ty) -> bool {
+        super::type_evidence::same_type(Some(self.type_hierarchy), left, right)
+    }
+
+    fn constructor_bound(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        argument: Ty,
+        bound: Ty,
+    ) -> bool {
+        super::type_evidence::satisfies(Some(self.type_hierarchy), parameters, argument, bound)
+    }
 }
 
 /// Lower the prepared-inline body of the dependency function `selected`, from `prepared`, into
@@ -370,6 +400,23 @@ impl TemplateCalls<'_> {
             .map(|binding| binding.declaration)
     }
 
+    /// `fact` of the provider record of the declaration `signature` names in the template's
+    /// module, when the calling compilation's provider realizes it; `callee` is the public
+    /// signature a decline names it by.
+    fn provider_fact<T>(
+        &self,
+        signature: &KlibDeclarationSignature,
+        callee: &KlibPublicIdSignature,
+        fact: impl FnOnce(KlibBodyCallable<'_>) -> Option<T>,
+    ) -> Result<Option<T>, KlibBodyDeclineReason> {
+        let identity = self.origin(signature, callee)?;
+        Ok(self
+            .callees
+            .source
+            .external_callable_by_dependency(&identity)
+            .and_then(|(_, realization)| fact(realization.klib_body_callable()?)))
+    }
+
     fn binding(
         &self,
         signature: &KlibDeclarationSignature,
@@ -522,11 +569,7 @@ impl CallLinker for TemplateCalls<'_> {
     }
 
     fn applied_supertype(&self, sub: Ty, owner: crate::types::TypeName) -> Option<Ty> {
-        crate::assignable::applied_supertype(
-            &crate::symbol_resolver::SourceOracle(self.callees.source),
-            sub,
-            Ty::obj_name(owner),
-        )
+        self.callees.applied_supertype(sub, owner)
     }
 
     fn is_subtype(
@@ -535,20 +578,11 @@ impl CallLinker for TemplateCalls<'_> {
         sub: Ty,
         sup: Ty,
     ) -> bool {
-        super::type_evidence::ordinary_subtype(
-            Some(&crate::symbol_resolver::SourceOracle(self.callees.source)),
-            parameters,
-            sub,
-            sup,
-        )
+        self.callees.is_subtype(parameters, sub, sup)
     }
 
     fn same_type(&self, left: Ty, right: Ty) -> bool {
-        super::type_evidence::same_type(
-            Some(&crate::symbol_resolver::SourceOracle(self.callees.source)),
-            left,
-            right,
-        )
+        self.callees.same_type(left, right)
     }
 
     fn link_constructor(
@@ -686,8 +720,7 @@ impl CallLinker for TemplateCalls<'_> {
     }
 
     fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool {
-        let oracle = crate::symbol_resolver::SourceOracle(self.callees.source);
-        super::type_evidence::satisfies(Some(&oracle), parameters, argument, bound)
+        self.callees.constructor_bound(parameters, argument, bound)
     }
 
     fn link_accessor(
@@ -761,6 +794,43 @@ impl CallLinker for TemplateCalls<'_> {
     ) -> Result<bool, KlibBodyDeclineReason> {
         // No source edge needs a template's callee as target code.
         Ok(false)
+    }
+
+    /// A template counts a `for` loop over a range literal as the loop's caller would: the
+    /// callee building the progression is never called, so its body never becomes target code.
+    fn range_literal(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<crate::fir::FirRangeOperation>, KlibBodyDeclineReason> {
+        self.provider_fact(
+            &KlibDeclarationSignature::Public(callee.clone()),
+            callee,
+            super::for_loops::range_literal_operation,
+        )
+    }
+
+    fn indices_receiver(
+        &self,
+        getter: &KlibAccessorIdSignature,
+    ) -> Result<Option<crate::libraries::IndicesReceiver>, KlibBodyDeclineReason> {
+        self.provider_fact(
+            &KlibDeclarationSignature::Accessor(getter.clone()),
+            getter.property(),
+            super::for_loops::indices_receiver,
+        )
+    }
+
+    fn reverses_progression(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<bool, KlibBodyDeclineReason> {
+        Ok(self
+            .provider_fact(
+                &KlibDeclarationSignature::Public(callee.clone()),
+                callee,
+                |callable| super::for_loops::reverses_progression(callable).then_some(()),
+            )?
+            .is_some())
     }
 
     fn link(

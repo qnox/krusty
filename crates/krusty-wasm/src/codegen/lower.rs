@@ -20,6 +20,7 @@ use krusty::fx_hash::{HashMap, HashSet};
 
 mod absent_arguments;
 pub(super) mod any_members;
+mod array_lists;
 mod arrays;
 mod boxing;
 mod callable_reference_identity;
@@ -37,6 +38,9 @@ mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
 mod string_builders;
+pub(super) use array_lists::{
+    array_list_receiver, declared_by_array_list, is_array_list, realized_array_list_member,
+};
 pub(super) use shared_cells::cell_reference;
 pub(super) use string_builders::{declared_by_string_builder, is_string_builder};
 mod string_conversion;
@@ -648,6 +652,17 @@ fn expression_type(
         }
         IrExpr::LocalPropertyReference(_) if ir.checked_type(id).is_none() => Ty::obj("kotlin/Any"),
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        // Common lowering leaves a module property read at its declaration's type and records the
+        // use's type on a separate coercion, as it does for a call; the read, through the getter
+        // entry of another file or this file's storage, produces the declared type.
+        IrExpr::Checked(checked_op)
+            if ir.checked_type(id).is_none()
+                && let krusty::ir::IrCheckedOperation::PropertyRead { target, .. } =
+                    &**checked_op
+                && let Some(property) = ir.referenced_module_properties.get(target) =>
+        {
+            property.ty
+        }
         // A `when` without an `else` branch, such as a guard a counted loop's lowering adds, is a
         // statement: no branch's value can be its own.
         IrExpr::When { branches }
@@ -1181,11 +1196,16 @@ impl<'a> Body<'a> {
                         .string_constant(self.module, &mut self.code, &[]);
                 }
             }
+            // A static function a class owns (a local function lifted out of a member, its
+            // receiver captured as a parameter) is called as one the file owns: a wasm function
+            // has no container, so the owner says nothing about the call.
             IrExpr::Call {
                 callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
-            } if let Callee::Local(function) = &**call_callee => {
+            } if let Callee::Local(function) | Callee::ClassStatic { function, .. } =
+                &**call_callee =>
+            {
                 let params = self.ir.functions[*function as usize].params.clone();
                 if params.len() != args.len() {
                     return Err("a call whose arguments do not match its parameters".into());
@@ -1218,14 +1238,55 @@ impl<'a> Body<'a> {
                 dispatch_receiver: None,
                 args,
             } if let Callee::ModuleDefaultEntry {
-                provider, params, ..
+                provider,
+                params,
+                dispatch_receiver_ty,
+                ..
             } = &**call_callee =>
             {
                 let function = self
                     .calls
                     .module_default(*provider)
                     .ok_or_else(|| "an unregistered source default entry".to_string())?;
-                let mut frame = params.clone();
+                let mut frame = dispatch_receiver_ty
+                    .iter()
+                    .copied()
+                    .chain(params.iter().copied())
+                    .collect::<Vec<_>>();
+                frame.extend(std::iter::repeat_n(
+                    Ty::Int,
+                    krusty::backend::default_arguments::mask_words(params.len()),
+                ));
+                self.direct_call(function, &frame, &args)?;
+            }
+            // Only the file that declares the class lays its object out, so its entry for the
+            // constructor's defaults constructs it.
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::ModuleConstructorDefaultEntry {
+                constructor,
+                outer,
+                params,
+                ..
+            } = &**call_callee =>
+            {
+                let function = self
+                    .calls
+                    .instance(
+                        &krusty::backend::instance_links::InstanceEntry::ConstructorDefaults {
+                            module: self.module_name.into(),
+                            declaration: *constructor,
+                        },
+                    )
+                    .ok_or_else(|| {
+                        "a cross-file construction leaving arguments to a constructor its file \
+                         does not expose"
+                            .to_string()
+                    })?;
+                let mut frame = outer.iter().copied().collect::<Vec<_>>();
+                frame.extend_from_slice(params);
                 frame.extend(std::iter::repeat_n(
                     Ty::Int,
                     krusty::backend::default_arguments::mask_words(params.len()),
@@ -1354,6 +1415,22 @@ impl<'a> Body<'a> {
                     .is_some_and(string_builders::declared_by_string_builder) =>
             {
                 self.string_builder_call(*target, receiver, &args)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: Some(receiver),
+                args,
+            } if let Callee::External {
+                target, defaults, ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    array_lists::declared_by_array_list(fact)
+                        || (array_lists::array_list_receiver(self.ir, receiver)
+                            && array_lists::realized_array_list_member(fact))
+                }) =>
+            {
+                self.array_list_call(*target, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1695,6 +1772,27 @@ impl<'a> Body<'a> {
                     && self.is_string_builder_property(*target) =>
             {
                 self.string_builder_property(*target, *receiver)?;
+            }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && (self.is_array_list_property(*target)
+                        || (array_lists::array_list_receiver(self.ir, *receiver)
+                            && self
+                                .callables
+                                .property(*target)
+                                .and_then(|property| self.callables.callable(property.getter))
+                                .is_some_and(array_lists::realized_array_list_member))) =>
+            {
+                self.array_list_property(*target, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::PropertyWrite {
@@ -2238,6 +2336,18 @@ fn callee_kind(callee: &Callee) -> String {
         Callee::CrossFile { .. } | Callee::Module { .. } => {
             "a function of another file".to_string()
         }
+        Callee::ModuleWithDefaults {
+            target,
+            default_provider,
+            name,
+            params,
+            ret,
+            defaults,
+            dispatch_receiver_ty,
+            extension_receiver_parameter,
+        } => format!(
+            "the checked same-module call `{name}` (target {target:?}, default provider {default_provider:?}, dispatch receiver {dispatch_receiver_ty:?}, extension receiver parameter {extension_receiver_parameter:?}, parameters {params:?}, result {ret:?}, omitted ordinals {defaults:?})"
+        ),
         _ => "a function through this calling convention".to_string(),
     }
 }
@@ -2258,6 +2368,7 @@ fn checked_operation_name(operation: &krusty::ir::IrCheckedOperation) -> &'stati
         IrCheckedOperation::RangeContains { .. } => "RangeContains",
         IrCheckedOperation::ComparableRangeContains { .. } => "ComparableRangeContains",
         IrCheckedOperation::IllegalProgressionStep { .. } => "IllegalProgressionStep",
+        IrCheckedOperation::AtomicField { .. } => "AtomicField",
         IrCheckedOperation::RangeLoop { .. } => "RangeLoop",
         IrCheckedOperation::PropertyReference { .. } => "PropertyReference",
     }
@@ -2276,6 +2387,31 @@ fn describe_node(node: &IrExpr) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn module_default_decline_renders_the_complete_checked_call() {
+        let target = krusty::fir::CallableId::from_raw(17);
+        let provider = krusty::fir::ResolvedFunctionOverrideTarget::Module(
+            krusty::fir::CallableId::from_raw(23),
+        );
+        let callee = Callee::ModuleWithDefaults {
+            target,
+            default_provider: provider,
+            name: "lookup".into(),
+            params: vec![Ty::String, Ty::Int],
+            ret: Ty::String,
+            defaults: vec![1].into_boxed_slice(),
+            dispatch_receiver_ty: Some(Ty::obj("sample/Owner")),
+            extension_receiver_parameter: None,
+        };
+        let expected = format!(
+            "the checked same-module call `lookup` (target {target:?}, default provider {provider:?}, dispatch receiver {:?}, extension receiver parameter None, parameters {:?}, result {:?}, omitted ordinals [1])",
+            Some(Ty::obj("sample/Owner")),
+            [Ty::String, Ty::Int],
+            Ty::String,
+        );
+        assert_eq!(callee_kind(&callee), expected);
+    }
 
     /// Lower one file with no interface or dependency classifier declarations.
     pub(super) fn lower_alone(

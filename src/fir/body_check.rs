@@ -53,7 +53,6 @@ mod iterators;
 #[cfg(test)]
 mod lambda_tests;
 mod lambdas;
-mod library_constants;
 #[cfg(test)]
 mod local_class_tests;
 mod local_classes;
@@ -453,10 +452,19 @@ fn bind_parameters_and_check_defaults(
     defaults: &[CheckedBodyDefault],
     receiver_shape: CheckedBodyReceiverShape<'_>,
 ) -> Result<(), BodyCheckFailure> {
-    let context_parameter_count = u32::try_from(receiver_shape.context_receivers.len())
-        .map_err(|_| checker.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?;
+    // A default sees only the parameters before it, but its locals are values of the same body:
+    // allocating every parameter's value first keeps them distinct from a later parameter's.
+    let values = parameters
+        .iter()
+        .enumerate()
+        .map(|(ordinal, parameter)| {
+            let anonymous_context = ordinal < receiver_shape.context_receivers.len()
+                && parameter.context_kind != crate::types::ContextParameterKind::Named;
+            (!anonymous_context).then(|| checker.allocate_local())
+        })
+        .collect::<Vec<_>>();
     let mut defaults = defaults.iter().peekable();
-    for (ordinal, parameter) in parameters.iter().enumerate() {
+    for ((ordinal, parameter), value) in parameters.iter().enumerate().zip(values) {
         let ordinal = u32::try_from(ordinal).map_err(|_| {
             checker.failure(
                 Some(parameter.span),
@@ -477,23 +485,19 @@ fn bind_parameters_and_check_defaults(
                 value,
             });
         }
-        if ordinal < context_parameter_count
-            && parameter.context_kind != crate::types::ContextParameterKind::Named
-        {
+        let Some(value) = value else {
             continue;
-        }
-        let value = match parameter.name_binding {
-            CheckedBodyParameterNameBinding::PhysicalOnly => checker.allocate_local(),
-            CheckedBodyParameterNameBinding::ScriptReceiver(ordinal) => {
-                checker.bind_local(&script_receiver_binding(ordinal), parameter.ty)
-            }
-            CheckedBodyParameterNameBinding::Lexical if parameter.name == "_" => {
-                checker.allocate_local()
-            }
-            CheckedBodyParameterNameBinding::Lexical => {
-                checker.bind_local(parameter.name, parameter.ty)
-            }
         };
+        match parameter.name_binding {
+            CheckedBodyParameterNameBinding::PhysicalOnly => {}
+            CheckedBodyParameterNameBinding::ScriptReceiver(ordinal) => {
+                checker.bind_value(value, &script_receiver_binding(ordinal), parameter.ty);
+            }
+            CheckedBodyParameterNameBinding::Lexical if parameter.name == "_" => {}
+            CheckedBodyParameterNameBinding::Lexical => {
+                checker.bind_value(value, parameter.name, parameter.ty);
+            }
+        }
         let origin = checker.origins.source(checker.source, parameter.span);
         let parameter_record = match parameter.name_binding {
             CheckedBodyParameterNameBinding::ScriptReceiver(ordinal) => {
@@ -1028,6 +1032,23 @@ impl BodyFirChecker<'_> {
         lateinit: bool,
     ) -> LocalValueId {
         let local = self.allocate_local();
+        self.bind_allocated(local, name, ty, mutable, lateinit);
+        local
+    }
+
+    /// Bind `name` to an already allocated immutable value.
+    fn bind_value(&mut self, local: LocalValueId, name: &str, ty: ResolvedTy) {
+        self.bind_allocated(local, name, ty, false, false);
+    }
+
+    fn bind_allocated(
+        &mut self,
+        local: LocalValueId,
+        name: &str,
+        ty: ResolvedTy,
+        mutable: bool,
+        lateinit: bool,
+    ) {
         self.body.set_debug_value_name(local, name.to_owned());
         self.scopes
             .last_mut()
@@ -1041,7 +1062,6 @@ impl BodyFirChecker<'_> {
                     lateinit,
                 },
             );
-        local
     }
 
     fn with_lambda_binding<T>(
@@ -1283,7 +1303,7 @@ impl BodyFirChecker<'_> {
         // own: `60 + 1` checks as an `Int` whose value a `Long` const stores.
         let folded_ty = folded.map(|constant| constant.ty);
         let kind = if let Some(constant) = folded {
-            FirExprKind::Constant(library_constants::checked_constant_value(constant))
+            FirExprKind::Constant(super::library_constant_value(constant))
         } else {
             match self.file.expr(expression) {
                 Expr::IntLit(value) => {
@@ -1453,7 +1473,7 @@ impl BodyFirChecker<'_> {
                         // A `const val` referenced by BARE NAME from inside its own classifier. The
                         // checker folds it exactly as it folds a qualified one; there is no property to
                         // read at run time.
-                        FirExprKind::Constant(library_constants::checked_constant_value(constant))
+                        FirExprKind::Constant(super::library_constant_value(constant))
                     } else if let Some(property) = self.source_property_read(expression, None)? {
                         property
                     } else {
@@ -1921,7 +1941,7 @@ impl BodyFirChecker<'_> {
                         // Qualifier/classifier receivers have no entry in this map and remain a plain
                         // constant. Publish the sequencing explicitly in checked FIR so lowering does
                         // not need to rediscover whether the source prefix was a runtime expression.
-                        let constant = library_constants::checked_constant_value(constant);
+                        let constant = super::library_constant_value(constant);
                         if let Some(receiver) = self.info.resolved_constant_receiver(expression) {
                             let receiver_value = self.expression(receiver)?;
                             let receiver_origin = self.expression_origin(receiver)?;

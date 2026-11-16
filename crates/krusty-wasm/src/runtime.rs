@@ -17,6 +17,7 @@
 //! segment with `array.new_data`.
 
 mod exception_classes;
+mod floating_strings;
 mod object_equality;
 mod object_strings;
 mod root_any;
@@ -26,6 +27,7 @@ pub(super) use object_strings::ObjectStrings;
 
 use krusty::fx_hash::HashMap;
 
+use super::array_lists::ArrayLists;
 use super::array_objects::ArrayObjects;
 use super::boxes::Boxes;
 use super::builtin_instances::BuiltinInstances;
@@ -61,6 +63,8 @@ pub(super) struct Runtime {
     pub(super) string_equals: u32,
     /// `String.compareTo(String)`, once a call needs it.
     string_compare: Option<u32>,
+    /// `Double.toString()` and `Float.toString()`, once a conversion needs them.
+    floating_strings: floating_strings::FloatingStrings,
     pub(super) object_equals: u32,
     pub(super) string_concat: u32,
     pub(super) string_of_i32: u32,
@@ -78,6 +82,8 @@ pub(super) struct Runtime {
     pub(super) identity: IdentityObjects,
     /// `kotlin.text.StringBuilder`, which the runtime lays out.
     pub(super) string_builders: StringBuilders,
+    /// `kotlin.collections.ArrayList`, which the runtime lays out.
+    pub(super) array_lists: ArrayLists,
     /// Kotlin's `hashCode()` rules.
     pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
@@ -149,6 +155,15 @@ impl Runtime {
         let string_builders =
             StringBuilders::declare(module, &mut objects, &identity, chars, string);
         let object_equals = module.declare();
+        let array_lists = ArrayLists::declare(
+            module,
+            &mut objects,
+            &identity,
+            references,
+            chars,
+            string,
+            object_equals,
+        );
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
         let string_concat = module.declare();
         let hashing = Hashing::declare(module);
@@ -168,6 +183,7 @@ impl Runtime {
             arrays,
             string_equals: module.declare(),
             string_compare: None,
+            floating_strings: Default::default(),
             object_equals,
             string_concat,
             string_of_i32: module.declare(),
@@ -183,6 +199,7 @@ impl Runtime {
             objects,
             identity,
             string_builders,
+            array_lists,
             hashing,
             class_tokens,
             exceptions,

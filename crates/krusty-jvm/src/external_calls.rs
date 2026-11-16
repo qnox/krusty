@@ -1081,6 +1081,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::FloatingIsNaN { .. }
                 | krusty::libraries::CompilerIntrinsic::FloatingIsInfinite { .. }
                 | krusty::libraries::CompilerIntrinsic::RadixToString { .. }
+                | krusty::libraries::CompilerIntrinsic::StringRangeEquals
                 | krusty::libraries::CompilerIntrinsic::ArrayGet
                 | krusty::libraries::CompilerIntrinsic::ArraySet
                 | krusty::libraries::CompilerIntrinsic::ArrayFactory(_)
