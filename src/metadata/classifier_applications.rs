@@ -149,6 +149,7 @@ mod tests {
         semantic_type_parameter_count: usize,
     ) -> std::sync::Arc<crate::backend::BackendClassifierFact> {
         std::sync::Arc::new(crate::backend::BackendClassifierFact {
+            klib_identity: None,
             runtime_exception: None,
             declaration_name: None,
             access: crate::libraries::ClassifierAccess::Public,

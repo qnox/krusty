@@ -322,6 +322,8 @@ impl BodyLowering<'_, '_, '_> {
                 name,
                 kind,
                 declaration,
+                params,
+                ret,
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
@@ -332,6 +334,8 @@ impl BodyLowering<'_, '_, '_> {
                     name,
                     kind: *kind,
                     declaration: *declaration,
+                    parameters: Some(params.clone()),
+                    result: Some(*ret),
                 };
                 self.direct_call(target, receiver, args)
             }
@@ -369,6 +373,8 @@ impl BodyLowering<'_, '_, '_> {
                     name,
                     kind: krusty::ir::IrSuperCallKind::Function,
                     declaration: source.map(krusty::fir::ResolvedFunctionOverrideTarget::Module),
+                    parameters: None,
+                    result: None,
                 };
                 self.direct_call(target, receiver, args)
             }
@@ -392,6 +398,19 @@ impl BodyLowering<'_, '_, '_> {
                     == Some(krusty::backend::BackendCompilerIntrinsic::TypeOf)
                 {
                     return self.type_of(*target, substitutions);
+                }
+                if let Some(result) =
+                    self.published_dependency_member_call(dispatch::PublishedDependencyCall {
+                        target: *target,
+                        key: PlanKey::DependencyCallable(*target),
+                        slot_identity: *target,
+                        fact: realization.clone(),
+                        callee: Ok(callee.clone()),
+                        receiver: dispatch_receiver,
+                        args,
+                    })
+                {
+                    return result;
                 }
                 let symbols = self.file.dependency_symbols;
                 let export_of = |realization: &krusty::backend::BackendCallableFact| {
