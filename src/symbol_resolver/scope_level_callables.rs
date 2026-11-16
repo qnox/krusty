@@ -120,7 +120,7 @@ impl FunctionScopeRef<'_> {
 
 /// The shared unqualified-name resolution loop. Each caller applies its own classifier or callable
 /// selection rules to the namespace-separated records returned for this one scope rung.
-fn symbols_at_scope_level(
+pub(super) fn symbols_at_scope_level(
     src: &dyn SymbolSource,
     name: &str,
     packages: &[TypeName],
@@ -242,7 +242,7 @@ impl FunctionScopeLevel {
 }
 
 /// The rank of the explicit star imports in [`FunctionImportScope`]'s callable levels.
-const EXPLICIT_STAR_IMPORT_RANK: u32 = 1;
+pub(super) const EXPLICIT_STAR_IMPORT_RANK: u32 = 1;
 
 pub(super) fn tagged_symbol_levels_in_function_scope(
     src: &dyn SymbolSource,

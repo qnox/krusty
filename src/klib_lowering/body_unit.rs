@@ -38,6 +38,8 @@ use crate::types::{Ty, TypeName};
 mod class_construction;
 pub(crate) use class_construction::superclass_constructor_ordinal;
 mod enum_materialization;
+#[cfg(test)]
+mod initializer_capability_tests;
 mod local_class;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
@@ -56,6 +58,7 @@ enum DependencyExternalRealization {
     TargetIntrinsic(crate::libraries::CompilerIntrinsic),
     Constructor,
     AllocatingConstructor,
+    ConstructorInitializer,
     PropertyGetter,
     TargetMember,
     ProviderLeaf,
@@ -94,6 +97,23 @@ impl EmittedDependencyCallable {
             realization: DependencyExternalRealization::Constructor,
             ..Self::new(target, None, None)
         }
+    }
+
+    /// Actual emitted initialization code; this capability does not permit allocation.
+    pub(crate) fn constructor_initializer(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::ConstructorInitializer,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    pub(crate) fn constructor_initializer_target(self) -> Option<ExternalCallableId> {
+        matches!(
+            self.realization,
+            DependencyExternalRealization::ConstructorInitializer
+                | DependencyExternalRealization::AllocatingConstructor
+        )
+        .then_some(self.target)
     }
 
     pub(crate) fn allocating_constructor(target: ExternalCallableId) -> Self {
@@ -197,10 +217,10 @@ pub struct DependencyBodyUnit {
     builtins: IrBuiltinOperators,
 }
 
-/// The allocation a materialized class's constructor exports: the class, and the index of the
-/// secondary constructor that builds it, or `None` for its primary constructor.
+/// A constructor of an actually materialized class: its class and secondary ordinal, or `None`
+/// for its primary constructor. Allocation eligibility is a separate declaration capability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AllocatingConstructor {
+pub(crate) struct MaterializedClassConstructor {
     pub(crate) class: crate::ir::ClassId,
     pub(crate) secondary: Option<usize>,
 }
@@ -291,6 +311,8 @@ struct BodyHeader<'a> {
 #[derive(Clone)]
 struct MemberClass<'a> {
     class: crate::ir::ClassId,
+    /// The serialized declaration of `class`.
+    declaring: &'a KlibIrSymbol,
     fields: Vec<&'a KlibIrField>,
     /// The class's properties with a backing field, each with that field.
     properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
@@ -665,23 +687,29 @@ impl DependencyBodyUnit {
             .map(|(identity, &function)| (identity, function))
     }
 
-    /// Allocation exports are separate from their private instance initialization functions. An
-    /// abstract class has none: only its subclasses' constructors initialize it.
+    /// Actual constructor initializers materialized in this unit, including abstract classes.
+    pub(crate) fn initializing_constructors(
+        &self,
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, MaterializedClassConstructor)> {
+        self.constructors.iter().map(|(identity, constructor)| {
+            (
+                identity,
+                MaterializedClassConstructor {
+                    class: self.classes[identity],
+                    secondary: constructor.secondary,
+                },
+            )
+        })
+    }
+
+    /// Allocation exports are separate from initializer declarations. Abstract classes have none.
     pub(crate) fn allocating_constructors(
         &self,
-    ) -> impl Iterator<Item = (&KlibDependencyCallable, AllocatingConstructor)> {
-        self.constructors
-            .iter()
-            .filter_map(|(identity, constructor)| {
-                let class = self.classes[identity];
-                (!self.ir.classes[class as usize].is_abstract).then_some((
-                    identity,
-                    AllocatingConstructor {
-                        class,
-                        secondary: constructor.secondary,
-                    },
-                ))
-            })
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, MaterializedClassConstructor)> {
+        self.initializing_constructors().filter(|(_, constructor)| {
+            let class = &self.ir.classes[constructor.class as usize];
+            !class.is_abstract && !class.is_sealed
+        })
     }
 
     /// A unit that reads the constants of `enums`, which earlier units materialized, through
@@ -800,6 +828,7 @@ impl DependencyBodyUnit {
                         Some(member) => lowering
                             .reading_through(
                                 member.class,
+                                member.declaring,
                                 &member.fields,
                                 member.properties.clone(),
                                 member.contract.is_value,
@@ -867,19 +896,18 @@ impl CallLinker for Linker<'_, '_> {
         &self,
         callee: &KlibPublicIdSignature,
     ) -> Result<Option<crate::libraries::AtomicOperation>, KlibBodyDeclineReason> {
-        let signature = KlibDeclarationSignature::Public(callee.clone());
-        Ok(
-            match self
-                .sources
-                .bodies
-                .linked_origin(&self.active_module, &signature)
-            {
-                KlibCalleeOrigin::Exact(identity) => {
-                    self.sources.intrinsics.atomic_field(&identity)
-                }
-                KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
-            },
-        )
+        Ok(self
+            .linked_identity(callee)
+            .and_then(|identity| self.sources.intrinsics.atomic_field(&identity)))
+    }
+
+    fn atomic_array_element(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<crate::libraries::AtomicOperation>, KlibBodyDeclineReason> {
+        Ok(self
+            .linked_identity(callee)
+            .and_then(|identity| self.sources.intrinsics.atomic_array_element(&identity)))
     }
 
     fn common_primitive(
@@ -1177,6 +1205,21 @@ impl CallLinker for Linker<'_, '_> {
         {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "a constructor call selected a non-constructor provider declaration".to_owned(),
+            ));
+        }
+        if self
+            .sources
+            .externals
+            .get(&identity)
+            .is_some_and(|external| {
+                matches!(
+                    external.realization,
+                    DependencyExternalRealization::ConstructorInitializer
+                )
+            })
+        {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an initializer-only dependency does not permit class allocation".to_owned(),
             ));
         }
         let declaration = self
@@ -1518,7 +1561,7 @@ impl CallLinker for Linker<'_, '_> {
             });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
-            if emitted.is_constructor() {
+            if emitted.is_constructor() || emitted.constructor_initializer_target().is_some() {
                 return Err(callee_declined(KlibBodyDeclineReason::SignatureMismatch(
                     "a constructor external is called as a function".to_owned(),
                 )));
@@ -1870,23 +1913,29 @@ impl<'s> Linker<'_, 's> {
         if class.is_value {
             return Ok(true);
         }
-        let Some(primary) = &class.primary_constructor else {
-            return Ok(false);
-        };
-        let identity = KlibDependencyCallable {
-            module: class.module.clone(),
-            declaration: KlibDeclarationSignature::Public(primary.clone()),
-        };
-        let Some(KlibCalleeFact::Selected(constructors)) = self.sources.callees.get(&identity)
+        // Every instance a member is called on was created by one of the constructors that
+        // initialize the class, so the unit materializes the class only when each of them does.
+        let Some(constructors) =
+            super::class_initialization::initializing_constructors(class, self.sources.bodies)
         else {
             return Ok(false);
         };
-        Ok(super::class_initialization::plan(
-            constructors[0],
-            self.sources.bodies,
-            self.sources.callees,
-        )?
-        .is_some())
+        for identity in &constructors {
+            let Some(KlibCalleeFact::Selected(selected)) = self.sources.callees.get(identity)
+            else {
+                return Ok(false);
+            };
+            if super::class_initialization::plan(
+                selected[0],
+                self.sources.bodies,
+                self.sources.callees,
+            )?
+            .is_none()
+            {
+                return Ok(false);
+            }
+        }
+        Ok(!constructors.is_empty())
     }
 
     /// A call of a member of a class this unit does not materialize, through the member's
@@ -2409,6 +2458,17 @@ fn parameter_defaults(declaration: &KlibIrFunction) -> Vec<bool> {
 }
 
 impl Linker<'_, '_> {
+    /// The exact declaration a call of `callee` from the active module links to, if one does.
+    fn linked_identity(&self, callee: &KlibPublicIdSignature) -> Option<KlibDependencyCallable> {
+        match self.sources.bodies.linked_origin(
+            &self.active_module,
+            &KlibDeclarationSignature::Public(callee.clone()),
+        ) {
+            KlibCalleeOrigin::Exact(identity) => Some(identity),
+            KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+        }
+    }
+
     /// The primitive `select` reads for the declaration a call of `signature` names, unless the
     /// call is an exact declaration edge.
     fn primitive_at(
