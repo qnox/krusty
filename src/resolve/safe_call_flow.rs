@@ -126,7 +126,11 @@ impl Checker<'_> {
                     if let Some((name, mutated)) = self.closure_mutated_decline(scope, &path, site)
                     {
                         if let Some(proven) = proven_non_null(mutated) {
-                            declined.push((name, proven));
+                            if self.closure_writes_conform(&name, site, proven) {
+                                out.push((path, proven));
+                            } else {
+                                declined.push((name, proven));
+                            }
                         }
                     }
                 }

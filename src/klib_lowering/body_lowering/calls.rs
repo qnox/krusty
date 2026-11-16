@@ -7,7 +7,7 @@ use super::super::array_content_members;
 use super::super::ir_builtins::{
     BuiltinCallDisposition, BuiltinOperator, BuiltinRelation, DataClassArrayMember,
 };
-use super::super::klib_types::function_invocation_arity;
+use super::super::klib_types::{classifier_name, function_invocation_arity, member_owner};
 use super::{
     mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorTarget, LinkedCallee,
     Lowered,
@@ -21,10 +21,19 @@ use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignatu
 use crate::metadata::klib_ir::tree::{
     KlibIrArguments, KlibIrExprId, KlibIrExprKind, KlibIrMemberAccess,
 };
-use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
+use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::{EqualityMode, Ty, TyKind};
 
 use super::super::decline::KlibBodyDeclineReason;
+
+/// How a call of a member reaches its implementation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CallDispatch {
+    /// Through the receiver's dispatch table when a subclass may override the member.
+    Virtual,
+    /// To the declared implementation itself: a `super` call.
+    Direct,
+}
 
 impl BodyLowering<'_> {
     /// A call of a compiler built-in operator or of a dependency function. A built-in operator
@@ -34,19 +43,25 @@ impl BodyLowering<'_> {
         if access.symbol.kind != KlibIrSymbolKind::Function {
             return Err(mismatch("a call target's symbol is not a function"));
         }
-        let callee = match &access.symbol.signature {
-            KlibIrSignature::Public(callee) => callee,
-            KlibIrSignature::FileLocal { .. } => {
-                let linked = match self.object_members.get(&access.symbol.signature) {
+        let signature = &access.symbol.signature;
+        let callee = match signature {
+            KlibIrSignature::Public(callee) if !self.linker.links_privately(signature) => callee,
+            KlibIrSignature::Accessor(accessor) if !self.linker.links_privately(signature) => {
+                return self.accessor_call(accessor, access, ty)
+            }
+            KlibIrSignature::Public(_)
+            | KlibIrSignature::Accessor(_)
+            | KlibIrSignature::FileLocal { .. } => {
+                let linked = match self.object_members.get(signature) {
                     Some(member) => member.linked(),
-                    None => self
-                        .linker
-                        .link_local_function(self.ir, &access.symbol.signature)?,
+                    None => self.linker.link_local_function(self.ir, signature)?,
                 };
                 return self.linked_call(linked, access, ty);
             }
-            KlibIrSignature::Accessor(accessor) => return self.accessor_call(accessor, access, ty),
         };
+        if let Some(operation) = self.linker.atomic_field(callee)? {
+            return self.atomic_field(operation, access, ty);
+        }
         if let Some(arity) = function_invocation_arity(callee) {
             if !access.type_arguments.is_empty() {
                 return Err(mismatch(
@@ -540,6 +555,44 @@ impl BodyLowering<'_> {
         })
     }
 
+    /// `super<Q>.f(…)`: the qualifier's own implementation of `f`, called on the receiver without
+    /// dispatch, as checked FIR lowers a source `super` call. The KLIB names the member through
+    /// the qualifier, so the callee must be a member `Q` declares, and only an implementation this
+    /// unit lowers is reached directly: no override of a subclass may replace it.
+    pub(super) fn super_call(
+        &mut self,
+        qualifier: &KlibIrSymbol,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let (KlibIrSymbolKind::Class, KlibIrSignature::Public(qualifier)) =
+            (qualifier.kind, &qualifier.signature)
+        else {
+            return Err(mismatch("a `super` qualifier is not a public class"));
+        };
+        let (KlibIrSymbolKind::Function, KlibIrSignature::Public(callee)) =
+            (access.symbol.kind, &access.symbol.signature)
+        else {
+            return unsupported("a `super` call of a member without a public signature");
+        };
+        if member_owner(callee)? != classifier_name(qualifier)? {
+            return Err(mismatch(
+                "a `super` call names a member its qualifier does not declare",
+            ));
+        }
+        let linked = self.linker.link(self.ir, callee)?;
+        if !matches!(linked.callee, Callee::Local(_)) {
+            return unsupported("a `super` call of a member this unit does not implement");
+        }
+        if linked.receiver.is_none() {
+            return Err(mismatch("a `super` call names a member without a receiver"));
+        }
+        if !self.linker.declares_implementation(callee)? {
+            return Err(mismatch("a `super` call names an abstract member"));
+        }
+        self.linked_call_with(linked, access, ty, CallDispatch::Direct)
+    }
+
     /// A call of a dependency function, which the unit lowers too.
     fn dependency_call(
         &mut self,
@@ -556,6 +609,18 @@ impl BodyLowering<'_> {
         linked: LinkedCallee,
         access: &KlibIrMemberAccess,
         ty: Ty,
+    ) -> Lowered<ExprId> {
+        self.linked_call_with(linked, access, ty, CallDispatch::Virtual)
+    }
+
+    /// [`Self::linked_call`], with the dispatch the call site names: a `super` call reaches the
+    /// qualifier's implementation itself, never a subclass's override.
+    fn linked_call_with(
+        &mut self,
+        linked: LinkedCallee,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+        dispatch: CallDispatch,
     ) -> Lowered<ExprId> {
         let linked = self.substituted(linked, access)?;
         let operands = self.call_operands(
@@ -599,6 +664,7 @@ impl BodyLowering<'_> {
         // A member dispatch reaches on an instance of a class this unit materializes, which a
         // subclass may override, is called through the class's dispatch table.
         let overridable = match (&callee, dispatch_receiver) {
+            _ if dispatch == CallDispatch::Direct => None,
             (Callee::Local(function), Some(receiver)) => self
                 .ir
                 .overridable_method(*function)

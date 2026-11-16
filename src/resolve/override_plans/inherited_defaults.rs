@@ -11,8 +11,9 @@
 use crate::fx_hash::HashSet;
 
 use crate::fir::{
-    DeclarationFlags, DeclarationId, DeclarationKind, ExternalCallableId, InheritedDefaultBody,
-    InheritedMemberName, ResolvedFunctionOverride, ResolvedInheritedDefault, ResolvedModuleIndex,
+    DeclarationFlags, DeclarationId, DeclarationKind, ExternalCallableId,
+    InheritedDefaultAnnotationOrigin, InheritedDefaultBody, InheritedMemberName,
+    ResolvedFunctionOverride, ResolvedInheritedDefault, ResolvedModuleIndex,
     ResolvedParameterIdentity, ResolvedPropertyOverride,
 };
 use crate::libraries::{FnKind, FunctionInfo, LibraryCallable, PropKind, PropertyInfo};
@@ -145,7 +146,6 @@ pub(super) fn inherited_defaults(
                 accessors.len(),
                 "an applied member keeps every accessor of its declaration"
             );
-            selected.push(slot);
             // The direct superclass already realizes every member of an interface it reaches, and a
             // delegation every member of the interface it delegates.
             if plan
@@ -155,15 +155,31 @@ pub(super) fn inherited_defaults(
                 || delegated.contains(&interface)
                 || implemented
             {
+                selected.push(slot);
                 continue;
             }
+            let annotation_origins = accessors
+                .iter()
+                .map(|accessor| {
+                    annotation_origin(
+                        index,
+                        source,
+                        header.superclass.map(|ty| ty.get()),
+                        &slot,
+                        accessor,
+                    )
+                })
+                .collect::<Vec<_>>();
+            selected.push(slot);
             let dispatch_interface = ancestors
                 .iter()
                 .find(|(_, closure)| closure.contains(&interface))
                 .map(|(direct, _)| *direct)
                 .expect("a closure interface is reached through a direct superinterface");
-            for (accessor, (applied_parameters, applied_result)) in
-                accessors.into_iter().zip(applied_shapes)
+            for ((accessor, (applied_parameters, applied_result)), annotation_origin) in accessors
+                .into_iter()
+                .zip(applied_shapes)
+                .zip(annotation_origins)
             {
                 if accessor.is_abstract || accessor.visibility == Visibility::Private {
                     continue;
@@ -180,6 +196,7 @@ pub(super) fn inherited_defaults(
                     name: accessor.name,
                     function: accessor.function,
                     accessor: accessor.target,
+                    annotation_origin,
                     declaring_interface: interface,
                     dispatch_interface,
                     parameters: accessor.parameters,
@@ -196,6 +213,63 @@ pub(super) fn inherited_defaults(
         }
     }
     defaults
+}
+
+/// Resolve metadata inheritance in the superclass's existing semantic member scope, independently
+/// of the interface implementation selected above. The same override-slot matcher handles applied
+/// generics, context parameters and member extensions; no target member spelling is involved.
+fn annotation_origin(
+    index: &ResolvedModuleIndex,
+    source: &dyn SymbolSource,
+    superclass: Option<Ty>,
+    slot: &Slot,
+    accessor: &SurfaceAccessor,
+) -> Option<InheritedDefaultAnnotationOrigin> {
+    let body_origin = accessor.annotation_origin();
+    let Some(superclass) = superclass else {
+        return body_origin;
+    };
+    let name = match &accessor.name {
+        InheritedMemberName::Function(name)
+        | InheritedMemberName::PropertyGetter(name)
+        | InheritedMemberName::PropertySetter(name) => name,
+    };
+    let (functions, properties) =
+        crate::symbol_resolver::member_declarations_in_hierarchy(source, superclass, name)
+            .into_parts();
+    let setter = matches!(accessor.name, InheritedMemberName::PropertySetter(_));
+    let candidates = match slot {
+        Slot::Function(_) => functions
+            .overloads
+            .into_iter()
+            .filter(member_function)
+            .filter(|function| function.visibility != Visibility::Private)
+            .map(|function| Slot::Function(Box::new(function)))
+            .collect::<Vec<_>>(),
+        Slot::Property(_) => properties
+            .overloads
+            .into_iter()
+            .filter(member_property)
+            .filter(|property| property.visibility != Visibility::Private)
+            .filter(|property| property.producer != crate::libraries::PropertyProducer::Field)
+            .filter(|property| {
+                !setter
+                    || property.setter.is_some()
+                        && property.setter_visibility != Visibility::Private
+            })
+            .map(|property| Slot::Property(Box::new(property)))
+            .collect(),
+    }
+    .into_iter()
+    .filter(|candidate| slot.same_slot(source, candidate))
+    .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return body_origin;
+    }
+    super::nearest_unique_by(candidates, Slot::receiver_rank, |candidate| {
+        candidate.annotation_origin(index, setter)
+    })
+    .and_then(|candidate| candidate.annotation_origin(index, setter))
 }
 
 /// The applied shape with each occurrence of the member's own type parameter carrying its bound
@@ -324,6 +398,31 @@ enum Slot {
 }
 
 impl Slot {
+    fn receiver_rank(&self) -> u32 {
+        match self {
+            Self::Function(function) => function.receiver_rank,
+            Self::Property(property) => property.receiver_rank,
+        }
+    }
+
+    fn annotation_origin(
+        &self,
+        index: &ResolvedModuleIndex,
+        setter: bool,
+    ) -> Option<InheritedDefaultAnnotationOrigin> {
+        match self {
+            Self::Function(function) => super::function_target(index, function)
+                .map(InheritedDefaultAnnotationOrigin::Function),
+            Self::Property(property) => {
+                let target = super::property_accessor_target(index, property, setter)?;
+                Some(if setter {
+                    InheritedDefaultAnnotationOrigin::Setter(target)
+                } else {
+                    InheritedDefaultAnnotationOrigin::Getter(target)
+                })
+            }
+        }
+    }
     /// The parameters and result of each member this slot contributes (a function, or a
     /// property's getter then setter), as the classifier's applied supertype substitutes them.
     fn applied_accessor_shapes(&self) -> Vec<(Box<[Ty]>, Ty)> {
@@ -451,6 +550,20 @@ struct DependencyRealization {
 }
 
 impl SurfaceAccessor {
+    fn annotation_origin(&self) -> Option<InheritedDefaultAnnotationOrigin> {
+        match (&self.name, self.function, self.target) {
+            (InheritedMemberName::Function(_), Some(target), None) => {
+                Some(InheritedDefaultAnnotationOrigin::Function(target))
+            }
+            (InheritedMemberName::PropertyGetter(_), None, Some(target)) => {
+                Some(InheritedDefaultAnnotationOrigin::Getter(target))
+            }
+            (InheritedMemberName::PropertySetter(_), None, Some(target)) => {
+                Some(InheritedDefaultAnnotationOrigin::Setter(target))
+            }
+            _ => None,
+        }
+    }
     fn body(&self, is_kotlin: bool) -> Option<InheritedDefaultBody> {
         let Some(dependency) = &self.dependency else {
             return Some(InheritedDefaultBody::Module);

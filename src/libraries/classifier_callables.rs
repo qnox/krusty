@@ -91,11 +91,15 @@ pub(crate) fn constructor_generic_signature(
     classifier: &LibraryType,
     constructor: &LibraryMember,
 ) -> Option<GenericSig> {
-    if let Some(signature) = &constructor.generic_sig {
-        return Some(signature.clone());
-    }
     if classifier.type_params().is_empty() {
-        return None;
+        return constructor.generic_sig.clone();
+    }
+    if let Some(signature) = constructor
+        .generic_sig
+        .as_ref()
+        .filter(|signature| !signature.formals.is_empty())
+    {
+        return Some(signature.clone());
     }
     Some(GenericSig {
         formals: crate::types::TyParamName::all(classifier.type_params()),

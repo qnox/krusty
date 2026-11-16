@@ -8590,6 +8590,8 @@ pub enum ExprLowering {
     SamConstructorReference {
         signature: Ty,
         sam: Box<crate::symbol_resolver::SamSignature>,
+        /// The interface's own declared name (`KCallable.name`), when its provider recorded it.
+        interface_name: Option<Box<str>>,
     },
     /// A constructor reference selected from the classifier's shared declaration record. The exact
     /// declaration is independent of whether that record came from this module or a dependency;
@@ -9320,6 +9322,7 @@ struct FunctionLambdaShape<'a> {
 /// The candidate family a provider member call commits through, with the receiver its selection
 /// sees: a value's members, or a classifier's object/companion/static members.
 struct ProviderMemberFamily {
+    result_constraint: CallResultConstraint,
     receiver: Ty,
     members: Vec<crate::libraries::FunctionInfo>,
 }
@@ -14479,6 +14482,7 @@ impl<'a> Checker<'a> {
                             scope,
                             call,
                             ProviderMemberFamily {
+                                result_constraint: CallResultConstraint::direct(expected),
                                 receiver: classifier_receiver,
                                 members: candidates.clone(),
                             },
@@ -18953,9 +18957,7 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(selection) = top_level {
                     if matches!(selection, CallableCandidateSelection::MissingContext(_))
-                        && top_level_candidates.len() > 1
-                    {
-                        call_diagnostics::report_inapplicable_callable_candidates(
+                        && call_diagnostics::report_competing_missing_context(
                             InapplicableTopLevelCall {
                                 call,
                                 name: &fname,
@@ -18970,7 +18972,8 @@ impl<'a> Checker<'a> {
                             },
                             top_level_candidates,
                             self,
-                        );
+                        )
+                    {
                         return Ty::Error;
                     }
                     return self.finish_top_level_call(
@@ -19184,6 +19187,7 @@ impl<'a> Checker<'a> {
                 }
                 let mut candidates = inapplicable_associated;
                 candidates.extend(self.resolver().top_level_candidates(&fname));
+                candidates.extend(competing_constructors.iter().cloned());
                 candidates.extend(inapplicable_classifier_invoke.iter().cloned());
                 if let Some(result) = self.finish_deferred_lexical_invoke_failure(
                     scope,
@@ -20339,8 +20343,14 @@ impl<'a> Checker<'a> {
                             {
                                 // This assignment may be sequential for reads in its own lambda,
                                 // but the closure still invalidates a proof owned by the enclosing
-                                // scope once that closure exists.
-                                if self.capturing_closure_reassigned_before(&name, target_span) {
+                                // scope once that closure exists, unless the value it stores is
+                                // already of the proven type.
+                                if self.closure_assignment_breaks_proof(
+                                    &name,
+                                    target_span,
+                                    vt,
+                                    cur.ty,
+                                ) {
                                     scope.decline_cast_at_binding(&name, cur.ty);
                                 }
                                 let flow = narrowing.unwrap_or(declared);
@@ -39979,52 +39989,6 @@ impl<'a> Checker<'a> {
         StablePathRead::new(self).ty(scope, path, site)
     }
 
-    /// The one stability failure kotlinc reports as SMARTCAST_IMPOSSIBLE: the path's root is a
-    /// local `var` a capturing closure mutates. Returns the variable's name and its DECLARED type
-    /// (the proof's starting point) so the declined cast can be recorded next to the narrowings
-    /// and named at the use that needed it.
-    fn closure_mutated_decline(
-        &self,
-        scope: &CheckerScope<'_>,
-        path: &NarrowPath,
-        site: Span,
-    ) -> Option<(String, Ty)> {
-        let (scope::PathRoot::Value(identity), true) = (&path.root, path.segments.is_empty())
-        else {
-            return None;
-        };
-        let (name, local) = self.visible_flow_value(scope, *identity)?;
-        if local.is_var
-            && matches!(local.origin, ReceiverFnValueOrigin::Local)
-            && self.closure_reassigned_before(&name, site)
-        {
-            Some((name, local.write_ty.unwrap_or(local.ty)))
-        } else {
-            None
-        }
-    }
-
-    /// The stability gate for an `is T` proof, shared by the condition and contract shapes: a
-    /// stable path narrows; a path declined only because a capturing closure mutates its root
-    /// records the cast (with its target) so the use that needed it reports kotlinc's
-    /// SMARTCAST_IMPOSSIBLE.
-    fn is_proof_stable_or_decline(
-        &self,
-        scope: &CheckerScope<'_>,
-        path: &NarrowPath,
-        target: Ty,
-        declined: &mut Vec<(String, Ty)>,
-        site: Span,
-    ) -> bool {
-        if self.stable_path_ty(scope, path, site).is_some() {
-            return true;
-        }
-        if let Some((name, _)) = self.closure_mutated_decline(scope, path, site) {
-            declined.push((name, target));
-        }
-        false
-    }
-
     /// The type a successful `value is tested` proves for a value declared `stable_ty`: shared by
     /// the `is` operator and a contract's `returns(…) implies (value is T)` conclusion, so the two
     /// cannot disagree about scalars, nullable tests, or type arguments the test leaves implicit.
@@ -40078,38 +40042,6 @@ impl<'a> Checker<'a> {
                 .filter(|declared| crate::assignable::is_subtype(&context, self, *declared, target))
                 .unwrap_or(target)
         })
-    }
-
-    /// The NULL branch of a null check: the operand is proven null, so a stable nullable path
-    /// narrows to `Nothing?` (kotlinc's exact receiver wording there). A root-only local made
-    /// unstable only by closure writes still narrows when every such write stores null — the
-    /// proven null joined with the writes kotlinc can interleave stays `Nothing?`. A SAFE-CALL
-    /// chain proves nothing here: a null result means SOME link failed, not which one.
-    fn null_branch_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        operand: ExprId,
-        out: &mut Vec<(NarrowPath, Ty)>,
-    ) {
-        if matches!(self.file.expr(operand), Expr::SafeCall { .. }) {
-            return;
-        }
-        let Some(path) = self.expr_access_path(operand) else {
-            return;
-        };
-        let site = self.span(operand);
-        if matches!(self.stable_path_ty(scope, &path, site), Some(ty) if ty.is_nullable()) {
-            out.push((path, Ty::nullable(Ty::Nothing)));
-            return;
-        }
-        if let Some((name, _)) = self
-            .closure_mutated_decline(scope, &path, site)
-            .filter(|(_, ty)| ty.is_nullable())
-        {
-            if self.closure_writes_only_null(&name, site) {
-                out.push((path, Ty::nullable(Ty::Nothing)));
-            }
-        }
     }
 
     /// Compiler-known equality bound selected by the receiver's semantic `equals` declaration.
@@ -47182,16 +47114,7 @@ impl<'a> Checker<'a> {
     /// An explicit primitive unary-method call is admitted only when overload selection recorded
     /// the exact built-in operation; source/member spellings never manufacture this fact.
     fn integer_constant_provenance(&self, expression: ExprId) -> Option<IntegerConstant> {
-        let semantic = checked_integer_constant(
-            CheckedConstantExpression {
-                file: self.file,
-                expression_types: &self.expr_types,
-                resolved_constants: &self.resolved_constants,
-                resolved_calls: &self.resolved_calls,
-                resolved_operator_calls: &self.resolved_operator_calls,
-            },
-            expression,
-        );
+        let semantic = checked_integer_constant(self.checked_constant_context(), expression);
         semantic.or_else(|| {
             let ExprLowering::BuiltinUnaryCall { operation } = self.expr_lowers.get(&expression)?
             else {
@@ -47415,191 +47338,11 @@ impl<'a> Checker<'a> {
                 self.member_level_constructor_candidates(receiver, name),
             );
         }
-        ProviderMemberFamily { receiver, members }
-    }
-
-    /// A lambda argument's expected shape at one parameter position of a semantic-provider
-    /// candidate: the
-    /// VALUE parameter types, plus the receiver type when the parameter is a receiver function
-    /// type (`Recv.() -> R`). The lambda checks against this shape so its implicit `this`/`it`
-    /// bind exactly as kotlinc binds them.
-    fn provider_member_lambda_expectations(
-        &self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        family: ProviderMemberFamily,
-        name: &str,
-        args_and_partial: (&[ExprId], &[Option<Ty>]),
-        type_args: &[Ty],
-    ) -> Option<ProviderLambdaShape> {
-        let (args, partial) = args_and_partial;
-        let ProviderMemberFamily { receiver, members } = family;
-        // This resolver exists only to postpone and shape lambda syntax. Ordinary arguments are
-        // already typed in `partial`; re-entering provider overload selection for them is both
-        // semantically pointless and quadratic on generated call-heavy sources.
-        if !args.iter().any(|&argument| {
-            matches!(
-                self.file.expr(argument),
-                Expr::Lambda { .. } | Expr::CallableRef { .. }
-            )
-        }) {
-            return None;
+        ProviderMemberFamily {
+            result_constraint: CallResultConstraint::None,
+            receiver,
+            members,
         }
-        let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-
-        // A functional argument remains postponed until a candidate supplies its declaration shape.
-        // Reuse the semantic slot mapper and partial-applicability predicate for every source form;
-        // positional calls need the same boundary as named/default/trailing-lambda calls, otherwise
-        // a callable reference is checked expectation-free before its provider member is selected.
-        let slot_mapped = members
-            .into_iter()
-            .filter_map(|candidate| {
-                let parameter_count = candidate.semantic_params().len();
-                let argument_parameters = call_argument_parameter_indices(
-                    args.len(),
-                    parameter_count,
-                    arg_names,
-                    trailing_lambda,
-                    &candidate.call_sig,
-                )?;
-                Some((candidate, argument_parameters))
-            })
-            .collect::<Vec<_>>();
-        let applicable = slot_mapped
-            .iter()
-            .filter(|(candidate, argument_parameters)| {
-                let whole_array =
-                    named_whole_array_varargs(argument_parameters, arg_names, &candidate.call_sig);
-                self.lambda_overload_partially_applicable(
-                    scope,
-                    candidate,
-                    None,
-                    (args, partial),
-                    (argument_parameters, &whole_array),
-                    ExplicitTypeArgumentProbe {
-                        arguments: type_args,
-                        bounds: ExplicitTypeArgumentBounds::Enforced,
-                    },
-                )
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        // When no candidate accepts the call's functional arguments, kotlinc still reports against
-        // the one candidate that maps every argument, and analyzes those arguments against its
-        // parameters: `take(B::g)` names the misfit reference, not the call. That shape is offered
-        // as not accepted; only the caller knows whether another source accepts the call first.
-        let accepted = !applicable.is_empty();
-        let mut mapped = match (accepted, slot_mapped.len()) {
-            (true, _) => applicable,
-            (false, 1) => slot_mapped,
-            (false, _) => return None,
-        };
-        // Member precedence is semantic receiver distance, not provider iteration order. Drop
-        // inherited candidates when a nearer declaration is applicable before deciding whether
-        // the postponed call is genuinely ambiguous.
-        if let Some(nearest) = mapped
-            .iter()
-            .map(|(candidate, _)| candidate.receiver_rank)
-            .min()
-        {
-            mapped.retain(|(candidate, _)| candidate.receiver_rank == nearest);
-        }
-        // Several candidates can still map the call while its lambdas are untyped. Choose among
-        // them with the selector the call finally commits through, its lambdas postponed, so a
-        // lambda is shaped by exactly the overload that resolution selects: kotlinc's postponed
-        // argument selection, including its preference for a candidate that needs no SAM
-        // conversion. A tie declines the expectation rather than leaking provider order.
-        let selected = match mapped.as_slice() {
-            [] => return None,
-            [_] => 0,
-            _ => {
-                let arg_tys = partial
-                    .iter()
-                    .map(|ty| ty.unwrap_or(Ty::Error))
-                    .collect::<Vec<_>>();
-                let selection = self.select_callable_candidate(
-                    scope,
-                    CallArgs {
-                        call,
-                        args,
-                        arg_tys: &arg_tys,
-                    },
-                    type_args,
-                    Some(receiver),
-                    CallResultConstraint::direct(None),
-                    mapped
-                        .iter()
-                        .map(|(candidate, _)| candidate.clone())
-                        .collect(),
-                );
-                let selected = selection
-                    .and_then(CallableCandidateSelection::available)
-                    .and_then(|selected| selected.candidate_index);
-                crate::trace_compiler!(
-                    "provider_lambda",
-                    "call={call:?} name={name} mapped_candidates={} selected={selected:?}",
-                    mapped.len(),
-                );
-                selected?
-            }
-        };
-        let (candidate, argument_parameters) = mapped.get(selected)?;
-        crate::trace_compiler!(
-                "provider_lambda",
-                "call={call:?} name={name} candidate={} params={:?} map={argument_parameters:?} marks={:?}",
-                candidate.callable.name,
-                candidate.semantic_params(),
-                candidate.call_sig.lambda_receiver_params,
-            );
-        let semantic = candidate.semantic_signature();
-        let binds = self.mapped_generic_call_bindings(
-            candidate,
-            None,
-            (args, partial),
-            argument_parameters,
-            &named_whole_array_varargs(argument_parameters, arg_names, &candidate.call_sig),
-            type_args,
-        );
-        let expectations: Vec<_> = argument_parameters
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(source_index, parameter_index)| {
-                if !matches!(
-                    self.file.expr(args[source_index]),
-                    Expr::Lambda { .. } | Expr::CallableRef { .. }
-                ) {
-                    return None;
-                }
-                let param =
-                    semantic.params.get(parameter_index).copied().map(|param| {
-                        crate::symbol_resolver::ty_subst_keep_unbound(param, &binds)
-                    })?;
-                functional_argument_expectation(
-                    self.libraries,
-                    &self.fed_source(),
-                    &candidate.call_sig,
-                    candidate.flags.inline.can_inline(),
-                    parameter_index,
-                    param,
-                    Some(&semantic),
-                )
-            })
-            .collect();
-        crate::trace_compiler!(
-            "provider_lambda",
-            "call={call:?} name={name} expectations={expectations:?}",
-        );
-        // An expectation whose parameter count cannot fit the lambda AS WRITTEN is not an
-        // expectation for this call, whichever caller asked. A destructuring parameter is ONE
-        // written parameter: the parser gives it a single synthetic name and destructures it in the
-        // body.
-        self.member_expectations_fit_written_lambdas(args, &expectations)
-            .then_some(ProviderLambdaShape {
-                expectations,
-                accepted,
-            })
     }
 
     /// The [`CallArgKind`] for an already-checked argument — pure, no checking side effects.
@@ -47944,7 +47687,10 @@ impl<'a> Checker<'a> {
                 self.provider_member_lambda_expectations(
                     scope,
                     call,
-                    self.value_member_family(receiver, name),
+                    ProviderMemberFamily {
+                        result_constraint,
+                        ..self.value_member_family(receiver, name)
+                    },
                     name,
                     (args, partial),
                     explicit_type_args,

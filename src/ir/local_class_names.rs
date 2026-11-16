@@ -422,6 +422,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             return;
         }
         IrCheckedOperation::IllegalProgressionStep { .. }
+        | IrCheckedOperation::AtomicField { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => return,
         IrCheckedOperation::PropertyReference {
             target,
@@ -502,6 +503,15 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             *ret = ty(*ret, names);
         }
         Callee::Module { params, ret, .. } => {
+            tys(params, names);
+            *ret = ty(*ret, names);
+        }
+        Callee::ModuleConstructorDefaultEntry {
+            outer, params, ret, ..
+        } => {
+            if let Some(outer) = outer {
+                *outer = ty(*outer, names);
+            }
             tys(params, names);
             *ret = ty(*ret, names);
         }
