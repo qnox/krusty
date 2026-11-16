@@ -178,6 +178,7 @@ impl<'u, 's> Linker<'u, 's> {
         );
         let member = super::MemberClass {
             class,
+            declaring: &plan.header.class.base.symbol,
             fields: plan.field_declarations.clone(),
             properties: super::super::class_storage::backed_properties(&plan.header.class.members),
             contract: plan.header.contract,
@@ -317,6 +318,7 @@ impl<'u, 's> Linker<'u, 's> {
             )),
             value_member: Some(super::MemberClass {
                 class,
+                declaring: &delegation.header.class.base.symbol,
                 fields,
                 properties: super::super::class_storage::backed_properties(
                     &delegation.header.class.members,
@@ -448,6 +450,7 @@ impl<'u, 's> Linker<'u, 's> {
         if let Some(&class) = self.classes.get(&identity) {
             return Ok(super::MemberClass {
                 class,
+                declaring: &header.class.base.symbol,
                 fields: vec![field],
                 properties: super::super::class_storage::backed_properties(&header.class.members),
                 contract,
@@ -511,6 +514,7 @@ impl<'u, 's> Linker<'u, 's> {
         self.classes.insert(identity, class);
         let member = super::MemberClass {
             class,
+            declaring: &header.class.base.symbol,
             fields: vec![field],
             properties: super::super::class_storage::backed_properties(&header.class.members),
             contract,
@@ -559,43 +563,35 @@ impl<'u, 's> Linker<'u, 's> {
     }
 
     /// The class a member of the final ordinary class `header` declares belongs to: the class
-    /// its primary constructor materializes, which created every instance the member is called on.
+    /// the constructors that initialize it materialize, which created every instance the member
+    /// is called on.
     fn materialize_ordinary_member_class(
         &mut self,
         ir: &mut IrFile,
         header: &super::super::class_headers::ClassMemberHeader<'s, 's>,
     ) -> Result<super::MemberClass<'s>, KlibBodyDeclineReason> {
         let contract = header.contract;
-        let primary = contract.primary_constructor.as_ref().ok_or(
-            KlibBodyDeclineReason::UnsupportedDeclaration(
-                "a class member without a primary constructor",
-            ),
-        )?;
-        let identity = KlibDependencyCallable {
-            module: contract.module.clone(),
-            declaration: KlibDeclarationSignature::Public(primary.clone()),
-        };
-        if contract.kind == crate::libraries::TypeKind::Object {
+        let class = if contract.kind == crate::libraries::TypeKind::Object {
             // An object's instance is the one its own private constructor created.
+            let primary = contract.primary_constructor.as_ref().ok_or(
+                KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "an object member without a primary constructor",
+                ),
+            )?;
+            let identity = KlibDependencyCallable {
+                module: contract.module.clone(),
+                declaration: KlibDeclarationSignature::Public(primary.clone()),
+            };
             self.materialize_object(ir, &identity, contract)?;
-        } else {
-            let constructor =
-                match self.sources.callees.get(&identity) {
-                    Some(KlibCalleeFact::Selected(callables)) => callables[0],
-                    _ => return Err(KlibBodyDeclineReason::SignatureMismatch(
-                        "a class member's primary constructor has no unique provider declaration"
-                            .to_owned(),
-                    )),
-                };
-            self.materialize_class(ir, &identity, constructor)?;
-        }
-        let class =
             *self
                 .classes
                 .get(&identity)
                 .ok_or(KlibBodyDeclineReason::UnsupportedDeclaration(
-                    "a member of a class without ordinary initialization",
-                ))?;
+                    "a member of an object without ordinary initialization",
+                ))?
+        } else {
+            self.materialize_initializing_constructors(ir, contract)?
+        };
         let fields = header
             .class
             .members
@@ -609,10 +605,53 @@ impl<'u, 's> Linker<'u, 's> {
         }
         Ok(super::MemberClass {
             class,
+            declaring: &header.class.base.symbol,
             fields,
             properties: super::super::class_storage::backed_properties(&header.class.members),
             contract,
         })
+    }
+
+    /// The class every public initializing constructor of the ordinary class `contract`
+    /// materializes.
+    fn materialize_initializing_constructors(
+        &mut self,
+        ir: &mut IrFile,
+        contract: &'s crate::libraries::KlibBodyClassContract,
+    ) -> Result<crate::ir::ClassId, KlibBodyDeclineReason> {
+        let constructors = super::super::class_initialization::initializing_constructors(
+            contract,
+            self.sources.bodies,
+        )
+        .filter(|constructors| !constructors.is_empty())
+        .ok_or(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "a class member without public initializing constructors",
+        ))?;
+        let mut class = None;
+        for identity in &constructors {
+            let constructor = match self.sources.callees.get(identity) {
+                Some(KlibCalleeFact::Selected(callables)) => callables[0],
+                _ => {
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "a class member's constructor has no unique provider declaration"
+                            .to_owned(),
+                    ))
+                }
+            };
+            self.materialize_class(ir, identity, constructor)?;
+            let materialized = *self.classes.get(identity).ok_or(
+                KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "a member of a class without ordinary initialization",
+                ),
+            )?;
+            if class.is_some_and(|class| class != materialized) {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a class's constructors materialize different classes".to_owned(),
+                ));
+            }
+            class = Some(materialized);
+        }
+        Ok(class.expect("a class has an initializing constructor"))
     }
 
     /// Whether the program's closure selected the override `function` of a class of `module` and

@@ -689,6 +689,54 @@ impl KlibDeclarationBodies {
         }
     }
 
+    /// The constructors the public class `signature` serialized by `module` or a library its
+    /// manifest depends on declares, in member order. `None` unless exactly one class has the
+    /// signature, or when a constructor's symbol is not public.
+    pub(crate) fn public_class_constructors(
+        &self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> Option<Vec<KlibPublicIdSignature>> {
+        let wanted = KlibIrSignature::Public(signature.clone());
+        let mut found = None;
+        for owner in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&owner) else {
+                continue;
+            };
+            for tree in self.libraries[library].trees() {
+                let mut pending = vec![&tree.declaration];
+                while let Some(member) = pending.pop() {
+                    let Some(class) = class_of(&tree.arena, member) else {
+                        continue;
+                    };
+                    pending.extend(class.members.iter());
+                    if class.base.symbol.signature != wanted {
+                        continue;
+                    }
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some((&tree.arena, class));
+                }
+            }
+        }
+        let (arena, class) = found?;
+        class
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                KlibIrMember::Function(function) => {
+                    Some(arena.function(*function)).filter(|function| function.constructor)
+                }
+                _ => None,
+            })
+            .map(|constructor| match &constructor.base.symbol.signature {
+                KlibIrSignature::Public(signature) => Some(signature.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The class in `module`'s producer graph that directly declares `signature`.
     ///
     /// The match is the function's serialized symbol, including a property accessor. Two classes

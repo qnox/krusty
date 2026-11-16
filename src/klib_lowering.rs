@@ -45,7 +45,9 @@ pub(crate) use body_unit::{
 };
 pub(crate) use callee_facts::CallEdge;
 pub use callee_facts::KlibCalleeFacts;
-pub(crate) use class_initialization::{delegated_superclass_constructor, value_class_overrides};
+pub(crate) use class_initialization::{
+    delegated_superclass_constructor, initializing_constructors, value_class_overrides,
+};
 pub(crate) use closure_forms::emitted_closure_function;
 
 /// The classifier a serialized object symbol names, when its signature names a class.

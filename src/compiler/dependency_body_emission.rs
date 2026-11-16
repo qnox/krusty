@@ -786,15 +786,14 @@ fn prepare_bodyless_externals(
             bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
         };
         let mut edges = edges;
-        // A member of a materialized class is lowered with the class its constructor creates.
-        match emitted_roots::member_class_constructor(
+        // A member of a materialized class is lowered with the class its constructors create.
+        match emitted_roots::member_class_constructors(
             platform,
             bodies,
             capabilities.callees,
             &identity,
         ) {
-            Ok(Some(primary)) => pending.push_back(primary),
-            Ok(None) => {}
+            Ok(constructors) => pending.extend(constructors),
             Err(error) => {
                 diags.error(Span::new(0, 0), format!("internal error: {error}"));
                 return false;
@@ -965,17 +964,18 @@ fn prepare_bodyless_externals(
             }
             // An abstract member of a class the unit materializes is a slot of its dispatch
             // table, which every call of it dispatches through.
-            match emitted_roots::member_class_constructor(
+            match emitted_roots::member_class_constructors(
                 platform,
                 bodies,
                 capabilities.callees,
                 &callee,
             ) {
-                Ok(Some(_))
-                    if bodies.function(&callee).is_some_and(|(_, function)| {
-                        crate::metadata::semantic::declaration_modality(function.base.flags)
-                            == crate::metadata::semantic::KotlinModality::Abstract
-                    }) =>
+                Ok(constructors)
+                    if !constructors.is_empty()
+                        && bodies.function(&callee).is_some_and(|(_, function)| {
+                            crate::metadata::semantic::declaration_modality(function.base.flags)
+                                == crate::metadata::semantic::KotlinModality::Abstract
+                        }) =>
                 {
                     continue
                 }
