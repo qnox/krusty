@@ -12,8 +12,8 @@ use crate::fx_hash::{HashMap, HashSet};
 use std::collections::VecDeque;
 
 use super::body_lowering::{
-    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessorCall,
-    LinkedCallableReference, LinkedCallee, LinkedConstructor, LoweredFunction,
+    constant_value, publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessorCall,
+    LinkedCallableReference, LinkedCallee, LinkedConstructor, LoweredFunction, StaticField,
 };
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -41,6 +41,7 @@ mod enum_materialization;
 #[cfg(test)]
 mod initializer_capability_tests;
 mod local_class;
+mod static_properties;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
 /// leaves and constructor calls have distinct realization contracts.
@@ -215,6 +216,16 @@ pub struct DependencyBodyUnit {
     >,
     /// Member functions of those classes, keyed by the same library and their file-local signature.
     local_functions: HashMap<super::same_library_class::LocalIdentity, LocalFunction>,
+    /// The static each top-level property's backing field is stored in, by that field.
+    statics: HashMap<static_properties::StaticIdentity, u32>,
+    /// The initialization of each library file whose top-level functions this unit emits and whose
+    /// initialization runs code, by its library and serialized file.
+    file_initializations: HashMap<static_properties::FileIdentity, FunId>,
+    /// The functions that already run their file's initialization first, or need none.
+    initialized_functions: HashSet<FunId>,
+    /// Whether the target stores constant top-level initializers before any code of their file
+    /// runs, rather than in its file's initialization order.
+    presets_constant_statics: bool,
     builtins: IrBuiltinOperators,
 }
 
@@ -255,6 +266,10 @@ impl Default for DependencyBodyUnit {
             member_receivers: HashMap::default(),
             local_classes: HashMap::default(),
             local_functions: HashMap::default(),
+            statics: HashMap::default(),
+            file_initializations: HashMap::default(),
+            initialized_functions: HashSet::default(),
+            presets_constant_statics: false,
             builtins: IrBuiltinOperators::new(),
         }
     }
@@ -293,6 +308,8 @@ struct PendingBody<'a> {
     initialization: Option<(crate::ir::ClassId, PendingInitialization<'a>)>,
     value_member: Option<MemberClass<'a>>,
     local_body: Option<super::same_library_class::LocalBody<'a>>,
+    /// The static a top-level property's initialization stores, and its serialized initializer.
+    static_initialization: Option<(StaticField, crate::metadata::klib_ir::tree::KlibIrExprId)>,
 }
 
 /// What a materialized constructor's private initialization function runs.
@@ -458,8 +475,14 @@ impl DependencyBodyUnit {
         declarations: &'a dyn crate::symbol_source::SymbolSource,
     ) -> Result<FunId, KlibBodyDecline> {
         if let Some(function) = self.functions.get(callable.identity()).copied() {
-            // A member installed with its class was authenticated with the class.
-            if self.installs_member(callable.identity()) {
+            // A member installed with its class was authenticated with the class, as was the
+            // box construction of a value class materialized with its class.
+            let value_construction = callable.kind()
+                == crate::libraries::ExternalCallableKind::Constructor
+                && callable
+                    .class_contract()
+                    .is_some_and(|class| class.is_value);
+            if self.installs_member(callable.identity()) || value_construction {
                 return Ok(function);
             }
             // Declared before, perhaps from its header alone as another body's callee: the
@@ -735,6 +758,20 @@ impl DependencyBodyUnit {
         self.realized_classes.contains(&classifier)
     }
 
+    /// This unit for a target that stores constant top-level initializers before any code of
+    /// their file runs (`presets`), or one that runs them in their file's initialization order.
+    pub(crate) fn presetting_constant_statics(mut self, presets: bool) -> Self {
+        self.presets_constant_statics = presets;
+        self
+    }
+
+    /// The library and backing field of each top-level property this unit stores.
+    pub(crate) fn materialized_statics(&self) -> impl Iterator<Item = (&str, &KlibIrSymbol)> + '_ {
+        self.statics
+            .keys()
+            .map(|(module, field)| (module.as_str(), field))
+    }
+
     /// Classes owned by this closed unit, keyed by their authenticated constructor.
     pub(crate) fn materialized_classes(
         &self,
@@ -857,6 +894,10 @@ impl DependencyBodyUnit {
             member_receivers: &mut self.member_receivers,
             local_classes: &mut self.local_classes,
             local_functions: &mut self.local_functions,
+            statics: &mut self.statics,
+            file_initializations: &mut self.file_initializations,
+            initialized_functions: &mut self.initialized_functions,
+            presets_constant_statics: self.presets_constant_statics,
             pending: &mut pending,
             root,
             active_module: identity.module.clone(),
@@ -866,7 +907,18 @@ impl DependencyBodyUnit {
         };
         let root = seed(&mut linker, &mut self.ir)
             .map_err(|reason| KlibBodyDecline::new(identity.declaration.clone(), reason))?;
-        while let Some(body) = linker.pending.pop_front() {
+        loop {
+            let Some(body) = linker.pending.pop_front() else {
+                // Every body is lowered. Each top-level function among them first runs its file's
+                // initialization, which may queue the bodies of that initialization.
+                linker
+                    .initialize_files(&mut self.ir)
+                    .map_err(|reason| KlibBodyDecline::new(identity.declaration.clone(), reason))?;
+                if linker.pending.is_empty() {
+                    break;
+                }
+                continue;
+            };
             linker.active_module.clone_from(&body.identity.module);
             linker.active_identity.clone_from(&body.identity);
             linker.active_value_class.clone_from(&body.value_member);
@@ -882,7 +934,9 @@ impl DependencyBodyUnit {
                 &mut self.ir,
                 &mut linker,
             );
-            let lowered = if let Some(local) = &body.local_body {
+            let lowered = if let Some((field, initializer)) = body.static_initialization {
+                lowering.initialize_static(field, initializer)
+            } else if let Some(local) = &body.local_body {
                 match local {
                     super::same_library_class::LocalBody::Initialize(plan) => {
                         lowering.initialize_local(plan)
@@ -980,6 +1034,10 @@ struct Linker<'u, 's> {
         super::same_library_class::MaterializedLocalClass,
     >,
     local_functions: &'u mut HashMap<super::same_library_class::LocalIdentity, LocalFunction>,
+    statics: &'u mut HashMap<static_properties::StaticIdentity, u32>,
+    file_initializations: &'u mut HashMap<static_properties::FileIdentity, FunId>,
+    initialized_functions: &'u mut HashSet<FunId>,
+    presets_constant_statics: bool,
     pending: &'u mut VecDeque<PendingBody<'s>>,
     /// The declaration this lowering was asked for, which its own recursive calls select; `None`
     /// for an object materialized for its value.
@@ -1395,6 +1453,14 @@ impl<'s> CallLinker for Linker<'_, 's> {
             self.materialize_enum_class(ir, class)?;
         }
         Ok((classifier, name))
+    }
+
+    fn static_field(
+        &mut self,
+        ir: &mut IrFile,
+        field: &KlibIrSymbol,
+    ) -> Result<Option<StaticField>, KlibBodyDeclineReason> {
+        self.static_storage(ir, field)
     }
 
     fn singleton(
@@ -1956,62 +2022,6 @@ impl<'s> Linker<'_, 's> {
             .map(Some)
     }
 
-    /// The accessor of a top-level property, when the unit emits its body: an accessor with a
-    /// body that no retained export realizes is emitted here, as a top-level function the support
-    /// body calls is. Its serialized declaration must hold the selected accessor's slot of the
-    /// property group its signature names.
-    fn top_level_accessor(
-        &mut self,
-        ir: &mut IrFile,
-        identity: &KlibDependencyCallable,
-    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
-        if self.sources.externals.contains_key(identity) {
-            return Ok(None);
-        }
-        let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(identity) else {
-            return Ok(None);
-        };
-        let Some(accessor) = callables[0].accessor() else {
-            return Ok(None);
-        };
-        if callables.iter().any(|callable| {
-            callable.accessor().is_none_or(|other| {
-                other.property != accessor.property || other.role != accessor.role
-            })
-        }) {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "the selected variants name other accessors of the property".to_owned(),
-            ));
-        }
-        let Some((arena, declaration)) = self.sources.bodies.function(identity) else {
-            return Ok(None);
-        };
-        if declaration.dispatch_receiver.is_some()
-            || !matches!(declaration.body, Some(KlibIrBody::Block(_)))
-        {
-            return Ok(None);
-        }
-        let authenticated = self
-            .sources
-            .bodies
-            .top_level_accessor_header(identity, accessor.role)
-            .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
-        if !authenticated.is_some_and(|(_, header)| std::ptr::eq(header, declaration)) {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "the selected accessor is not its top-level property's serialized accessor"
-                    .to_owned(),
-            ));
-        }
-        self.top_level_function(
-            ir,
-            identity,
-            Some(SelectedKlibCallables::Variants(callables)),
-            arena,
-            declaration,
-        )
-        .map(Some)
-    }
-
     /// A call of a private member of the value class whose member is being lowered. No provider
     /// records a private member, and only its class calls it, so it is emitted as the calling
     /// member is, reading the value through the same field.
@@ -2349,6 +2359,39 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         block_statements(function)?;
         let header = body_header(selected, arena, function, self.sources.bodies)?;
+        self.declare_with_header(ir, identity, selected, arena, function, header)
+    }
+
+    /// Declare a declaration no provider records, whose formals `types` already binds.
+    fn declare_with_types(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        selected: Option<KlibBodyCallable<'s>>,
+        arena: &'s KlibIrArena,
+        function: &'s KlibIrFunction,
+        types: super::klib_types::KlibTypeParameters,
+    ) -> Result<FunId, KlibBodyDeclineReason> {
+        block_statements(function)?;
+        let header = super::function_lowering::raw_function_header_with_class(
+            selected,
+            HeaderPurpose::Body(None),
+            arena,
+            function,
+            types,
+        )?;
+        self.declare_with_header(ir, identity, selected, arena, function, header)
+    }
+
+    fn declare_with_header(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        selected: Option<KlibBodyCallable<'s>>,
+        arena: &'s KlibIrArena,
+        function: &'s KlibIrFunction,
+        header: super::function_lowering::FunctionHeader,
+    ) -> Result<FunId, KlibBodyDeclineReason> {
         let value_member = match (header.value_receiver(), selected) {
             // A builtin type's member reads its receiver as the value the target carries.
             (Some(_), Some(selected))
@@ -2426,6 +2469,7 @@ impl<'s> Linker<'_, 's> {
             initialization: None,
             value_member,
             local_body: None,
+            static_initialization: None,
         });
         Ok(declared)
     }
@@ -2651,6 +2695,12 @@ impl UnitCheckpoint {
             .retain(|_, class| (class.class as usize) < unit.ir.classes.len());
         unit.local_functions
             .retain(|_, function| (function.function as usize) < unit.ir.functions.len());
+        unit.statics
+            .retain(|_, index| (*index as usize) < unit.ir.statics.len());
+        unit.file_initializations
+            .retain(|_, function| *function < first);
+        unit.initialized_functions
+            .retain(|function| *function < first);
         unit.ir.function_overrides.retain(|owner, _| {
             unit.ir
                 .classes
@@ -2764,16 +2814,16 @@ impl Linker<'_, '_> {
             .bodies
             .function(&identity)
             .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
-        if !declaration.type_parameters.is_empty() {
-            return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                "a call of a generic declaration",
-            ));
-        }
+        // A generic one binds the formals its own identity mints, as a provider's record binds a
+        // published declaration's.
+        let (types, type_parameters, type_parameter_bounds) =
+            super::function_lowering::file_private_formals(&identity, arena, declaration)
+                .map_err(callee_declined)?;
         self.private_members.insert(identity.clone());
         let function = match self.functions.get(&identity) {
             Some(function) => *function,
             None => self
-                .declare(ir, &identity, None, arena, declaration)
+                .declare_with_types(ir, &identity, None, arena, declaration, types)
                 .map_err(callee_declined)?,
         };
         let parameter_defaults = parameter_defaults(declaration);
@@ -2785,8 +2835,8 @@ impl Linker<'_, '_> {
             ret: declared.ret,
             context_count: ir.declared_parameters(function).context_count,
             singleton_dispatch: None,
-            type_parameters: Vec::new(),
-            type_parameter_bounds: Some(Vec::new()),
+            type_parameters,
+            type_parameter_bounds: Some(type_parameter_bounds),
             class_type_parameters: Vec::new(),
             parameter_defaults,
             edge: super::CallEdge::default(),

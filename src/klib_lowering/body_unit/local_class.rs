@@ -79,6 +79,7 @@ impl<'s> Linker<'_, 's> {
                     steps: prepared.steps,
                 },
             )),
+            static_initialization: None,
         });
         if let Some(constructor) = constructor {
             self.classes.insert(constructor.clone(), class_id);
@@ -160,6 +161,7 @@ impl<'s> Linker<'_, 's> {
                         fields: prepared.stored.clone(),
                     },
                 )),
+                static_initialization: None,
             });
             publish_overrides(
                 ir,

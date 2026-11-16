@@ -199,6 +199,7 @@ impl<'u, 's> Linker<'u, 's> {
             initialization: Some((class, super::PendingInitialization::Class(Box::new(plan)))),
             value_member: Some(member),
             local_body: None,
+            static_initialization: None,
         });
         Ok(())
     }
@@ -326,6 +327,7 @@ impl<'u, 's> Linker<'u, 's> {
                 contract: delegation.header.contract,
             }),
             local_body: None,
+            static_initialization: None,
         });
         Ok(())
     }
@@ -525,6 +527,26 @@ impl<'u, 's> Linker<'u, 's> {
         for function in value_class_overrides(&header) {
             if self.selects_override(&contract.module, function) {
                 self.declare_dispatched(ir, member.clone(), header.arena, function)?;
+            }
+        }
+        // The unit materializing a value class owns its box construction, exported under the
+        // primary constructor's identity: a later unit, or a body common preparation adds to this
+        // one, constructs a box through that export instead of materializing the class again.
+        if let Some(primary) = &contract.primary_constructor {
+            let constructor = KlibDependencyCallable {
+                module: contract.module.clone(),
+                declaration: KlibDeclarationSignature::Public(primary.clone()),
+            };
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                self.functions.entry(constructor)
+            {
+                let entry = ir
+                    .add_construction_entry(class, None)
+                    .map(|entry| entry.function)
+                    .ok_or(KlibBodyDeclineReason::SignatureMismatch(
+                        "a value class box without its checked self type".to_owned(),
+                    ))?;
+                slot.insert(entry);
             }
         }
         Ok(member)

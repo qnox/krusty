@@ -3,7 +3,7 @@
 use crate::ir::IrCoroutineRuntime;
 use crate::libraries::{FnKind, PropKind};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{type_name, SemanticCallableOwner, Ty, TyKind, TyParamName};
+use crate::types::{type_name, SemanticCallableOwner, Ty, TyKind};
 
 #[cfg(test)]
 mod tests;
@@ -23,76 +23,58 @@ pub(super) fn selected(source: &dyn SymbolSource) -> Option<IrCoroutineRuntime> 
         return None;
     };
 
-    let kotlin = source.symbols(SymbolNamespace::Package(type_name("kotlin")), "getOrThrow");
     let result = type_name("kotlin/Result");
-    let mut get_or_throw = kotlin.callables.functions().iter().filter(|function| {
-        let Some(signature) = function.generic_sig.as_ref() else {
-            return false;
-        };
-        let [formal] = signature.formals.as_slice() else {
-            return false;
-        };
+    let throwable = type_name("kotlin/Throwable");
+    let throws = source.symbols(
+        SymbolNamespace::Package(type_name("kotlin")),
+        "throwOnFailure",
+    );
+    let mut throw_on_failure = throws.callables.functions().iter().filter(|function| {
         function.kind == FnKind::Extension
             && function.context_count == 0
             && function.semantic_params().is_empty()
-            && signature.params.is_empty()
             && function
                 .semantic_receiver()
-                .is_some_and(|receiver| is_result_of(receiver, result, *formal))
-            && signature
-                .receiver
-                .is_some_and(|receiver| is_result_of(receiver, result, *formal))
-            && is_formal(signature.ret, *formal)
+                .is_some_and(|receiver| is_result_application(receiver, result))
+            && function.ret.apply(function.callable.ret) == Ty::Unit
     });
-    let (Some(get_or_throw), None) = (get_or_throw.next(), get_or_throw.next()) else {
+    let (Some(throw_on_failure), None) = (throw_on_failure.next(), throw_on_failure.next()) else {
+        return None;
+    };
+    let failures = source.symbols(
+        SymbolNamespace::Package(type_name("kotlin")),
+        "createFailure",
+    );
+    let mut create_failure = failures.callables.functions().iter().filter(|function| {
+        function.kind == FnKind::TopLevel
+            && function.context_count == 0
+            && function.semantic_receiver().is_none()
+            && function.semantic_params().len() == 1
+            && function.semantic_params()[0] == function.semantic_params()[0].non_null()
+            && function.semantic_params()[0].obj_internal() == Some(throwable)
+            && function.ret.apply(function.callable.ret) == Ty::obj_name(crate::types::wk::any())
+    });
+    let (Some(create_failure), None) = (create_failure.next(), create_failure.next()) else {
         return None;
     };
 
     let result_class = source.classifier(result)?;
-    let companion = result_class.companion_object.as_ref()?.1;
-    let companion_class = source.classifier(companion)?;
-    let throwable = type_name("kotlin/Throwable");
-    let failures = companion_class.declared_callables.get("failure")?;
-    let mut result_failure = failures.functions().iter().filter(|function| {
-        let Some(signature) = function.generic_sig.as_ref() else {
-            return false;
-        };
-        let [formal] = signature.formals.as_slice() else {
-            return false;
-        };
-        function.kind == FnKind::Member
-            && function.context_count == 0
-            && function.semantic_receiver().is_none()
-            && function.callable.declaration_owner
-                == Some(SemanticCallableOwner::Classifier(companion))
-            && function.semantic_params().as_ref() == signature.params.as_slice()
-            && signature.params.len() == 1
-            && signature.params[0] == signature.params[0].non_null()
-            && signature.params[0].non_null().obj_internal() == Some(throwable)
-            && is_result_of(signature.ret, result, *formal)
-    });
-    let (Some(result_failure), None) = (result_failure.next(), result_failure.next()) else {
+    let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+    let mut constructors = result_class
+        .constructors
+        .iter()
+        .filter(|constructor| constructor.params.as_slice() == [any]);
+    let (Some(result_constructor), None) = (constructors.next(), constructors.next()) else {
         return None;
     };
-    let successes = companion_class.declared_callables.get("success")?;
-    let mut result_success = successes.functions().iter().filter(|function| {
-        let Some(signature) = function.generic_sig.as_ref() else {
-            return false;
-        };
-        let [formal] = signature.formals.as_slice() else {
-            return false;
-        };
-        function.kind == FnKind::Member
-            && function.context_count == 0
-            && function.semantic_receiver().is_none()
-            && function.callable.declaration_owner
-                == Some(SemanticCallableOwner::Classifier(companion))
-            && function.semantic_params().as_ref() == signature.params.as_slice()
-            && signature.params.len() == 1
-            && is_formal(signature.params[0], *formal)
-            && is_result_of(signature.ret, result, *formal)
+    let values = result_class.declared_callables.get("value")?;
+    let mut result_value = values.properties().iter().filter(|property| {
+        property.kind == PropKind::Member
+            && property.receiver.is_none()
+            && property.owner == result
+            && property.ty == any
     });
-    let (Some(result_success), None) = (result_success.next(), result_success.next()) else {
+    let (Some(result_value), None) = (result_value.next(), result_value.next()) else {
         return None;
     };
 
@@ -126,7 +108,11 @@ pub(super) fn selected(source: &dyn SymbolSource) -> Option<IrCoroutineRuntime> 
 
     Some(IrCoroutineRuntime {
         suspended: suspended.getter.external_property_identity?,
-        get_or_throw: get_or_throw.callable.external_identity?,
+        throw_on_failure: throw_on_failure.callable.external_identity?,
+        throw_on_failure_receiver: throw_on_failure.semantic_receiver()?,
+        create_failure: create_failure.callable.external_identity?,
+        result_constructor: result_constructor.external_identity?,
+        result_value: result_value.getter.external_property_identity?,
         resume_with: resume_with.callable.external_identity?,
         resume_with_declared_parameter: resume_with.semantic_params().first().copied()?,
         resume_with_declared_result: resume_with.ret.apply(resume_with.callable.ret),
@@ -134,22 +120,7 @@ pub(super) fn selected(source: &dyn SymbolSource) -> Option<IrCoroutineRuntime> 
         context_getter: context.getter.external_identity?,
         context_ty: context.ty,
         context_receiver_ty: crate::types::Ty::obj_name(continuation),
-        result_success: result_success.callable.external_identity?,
-        result_companion: companion,
-        result_failure: result_failure.callable.external_identity?,
     })
-}
-
-fn is_formal(ty: Ty, formal: TyParamName) -> bool {
-    matches!(ty.kind(), TyKind::TyParam(name, _) if name == formal)
-}
-
-fn is_result_of(ty: Ty, result: crate::types::TypeName, formal: TyParamName) -> bool {
-    if ty != ty.non_null() {
-        return false;
-    }
-    matches!(ty.kind(), TyKind::Obj(name, arguments)
-        if name == result && arguments.len() == 1 && is_formal(arguments[0], formal))
 }
 
 fn is_result_application(ty: Ty, result: crate::types::TypeName) -> bool {

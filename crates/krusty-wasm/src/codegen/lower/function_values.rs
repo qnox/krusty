@@ -128,7 +128,7 @@ impl Body<'_> {
         };
         let to_string = match function_value_names::named_shape(self.ir.expr(site), instance) {
             Some(shape) => {
-                let codes: Vec<&str> = params[..captures.len()]
+                let codes: Vec<String> = params[..captures.len()]
                     .iter()
                     .enumerate()
                     .map(|(parameter, &ty)| {
@@ -136,7 +136,7 @@ impl Body<'_> {
                             .ir
                             .shared_capture_parameters
                             .contains_key(&(function, parameter as u32));
-                        function_value_names::capture_code(ty, shared)
+                        function_value_names::capture_code(ty, shared, self.classifiers)
                     })
                     .collect();
                 let name = function_value_names::class_name(shape, &codes);
@@ -352,6 +352,23 @@ impl Body<'_> {
             .ref_cast(false, HeapType::Concrete(shape.invoke))
             .call_ref(shape.invoke);
         self.coerce_emitted_value(any, ret)
+    }
+
+    /// `startCoroutineUninterceptedOrReturnIntrinsicN(f, inputs.., completion)`: `f`'s suspend
+    /// entry, which takes its inputs and then its continuation, called with `completion` as that
+    /// continuation. It answers what the entry answers: `COROUTINE_SUSPENDED` or the value.
+    pub(super) fn start_coroutine_unintercepted_or_return(
+        &mut self,
+        args: &[u32],
+        params: &[Ty],
+    ) -> Result<(), Unsupported> {
+        let (Some((&function, operands)), Some((_, operand_params))) =
+            (args.split_first(), params.split_first())
+        else {
+            return Err("a coroutine start without its suspend function".into());
+        };
+        let any = Ty::nullable(Ty::obj_name(krusty::types::wk::any()));
+        self.invoke_function(function, operands, operand_params, any)
     }
 
     /// `value as F` for a function type `F`: the value, which must be a function value invoked

@@ -56,6 +56,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::CoroutineContext
         | CompilerIntrinsic::CoroutineSuspended
         | CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
+        | CompilerIntrinsic::StartCoroutineUninterceptedOrReturn
         | CompilerIntrinsic::EnumValues
         | CompilerIntrinsic::EnumValueOf
         | CompilerIntrinsic::EnumEntries

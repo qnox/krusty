@@ -149,7 +149,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// tested for first and handed to the runtime function realizing the member on it.
     pub(super) fn dependency_interface_stub(
         &mut self,
-        identity: &krusty::libraries::KlibDependencyCallable,
+        identity: Vec<u8>,
         signature: super::super::super::intrinsics::FunctionSignature<'_>,
         receiver: u32,
         args: &[u32],
@@ -212,6 +212,49 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 &arguments,
             )
         })
+    }
+
+    /// A read of a dependency interface's abstract property this file finds no other realization
+    /// for (`Continuation.context` of a continuation another file or module made): its getter's
+    /// stub, which the link joins to the getter each implementing class recorded under the
+    /// property's identity, as a function member's stub is joined.
+    pub(super) fn dependency_interface_getter(
+        &mut self,
+        operation: &IrCheckedOperation,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let access = self.file.callables.dependency_accessor(operation)?;
+        let realization = access.callable;
+        if access.writes()
+            || !access.dispatches()
+            || !access.substitutions().is_empty()
+            || !realization.owner_is_interface
+            || realization.kind != krusty::libraries::ExternalCallableKind::Member
+            || realization.member_realization != krusty::libraries::MemberRealization::Dispatch
+            || realization.compiler_operation().is_some()
+        {
+            return None;
+        }
+        let receiver = access.receiver?;
+        let accessor = realization.dependency_callable.as_ref()?;
+        let identity =
+            krusty::backend::interface_identity::property_member_identity(accessor, false)?;
+        let IrCheckedOperation::ExternalPropertyRead { result, .. } = operation else {
+            return None;
+        };
+        let owner = super::super::super::intrinsics::DeclarationOwner::callable(
+            realization.physical_owner,
+            realization.declaration_owner,
+        );
+        let name = access.property.name.to_string();
+        let declared_ret = realization.declared_ret.unwrap_or(realization.ret);
+        let signature = super::super::super::intrinsics::FunctionSignature::new(
+            owner,
+            &name,
+            &[],
+            declared_ret,
+        )
+        .with_overridden(&realization.overridden_declarations);
+        Some(self.dependency_interface_stub(identity, signature, receiver, &[], &[], *result))
     }
 
     /// Hand `object` to the runtime function of the first of `runtime`'s classes it is an instance
@@ -332,6 +375,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             super::super::super::intrinsics::has_special_bridge(collection, signature.name)
         });
         bridge && !matches!(signature.ret, Ty::Boolean | Ty::Int)
+    }
+
+    /// A dependency member called on a receiver whose static type is a class of this file that
+    /// overrides it, such as the forwarder a `by` delegation generates for an inherited
+    /// `Comparable.compareTo`. The class's slot holds the member for it and every subclass, so the
+    /// call dispatches there, as a call through the class's own declaration would.
+    pub(super) fn source_class_member(
+        &mut self,
+        target: krusty::fir::ExternalCallableId,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
+        call: InterfaceMemberCall<'_>,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let internal = self
+            .checked_type(call.receiver)?
+            .non_null()
+            .obj_internal()?;
+        let class = self
+            .file
+            .ir
+            .class_id_by_name(internal)
+            .filter(|&class| !self.file.ir.classes[class as usize].is_interface)?;
+        let arm = self.external_override_slot(class, target, signature.params)?;
+        Some(self.dependency_interface_dispatch(&[arm], &[], call, false, None))
     }
 
     /// Dispatch one dependency interface member by the exact override edge each implementor

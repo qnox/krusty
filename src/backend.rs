@@ -190,6 +190,14 @@ pub trait Backend {
         false
     }
 
+    /// Whether this target stores a top-level property's constant initializer before any code of
+    /// its file runs, as Kotlin/Native does, so that a file initializer reading a later property
+    /// of its file sees that constant. A target that does not runs every initializer of a file in
+    /// declaration order, constants included, and an earlier read sees the property's default.
+    fn presets_constant_top_level_initializers(&self) -> bool {
+        false
+    }
+
     /// Whether a dependency-support body may call an exact provider declaration which has no
     /// serialized KLIB body. Such a call is admitted only when the target's ordinary dependency
     /// registry can realize the frozen provider handle directly.
@@ -214,6 +222,23 @@ pub trait Backend {
     /// dispatch receiver, as a source call of it is; its KLIB body reads a class layout the target
     /// object does not have and is never lowered.
     fn represents_dependency_classifier(&self, _classifier: DependencyClassifier) -> bool {
+        false
+    }
+
+    /// The dependency classes this target lays out itself (each one it
+    /// [represents](Self::represents_dependency_classifier)) whose values it dispatches a call of a
+    /// supertype's member on, as it does a builtin class's: `CharSequence.length` on a
+    /// `StringBuilder`. Each selected member carries what these classes run for it, frozen from the
+    /// member hierarchy ([`crate::backend::BuiltinImplementation`]).
+    fn dispatched_dependency_classes(&self) -> Vec<DependencyClassifier> {
+        Vec::new()
+    }
+
+    /// Whether this target's `StringBuilder` appends a `CharSequence` by reading its `length` and
+    /// each indexed `Char` (Kotlin/Wasm WASI) rather than by rendering it with `toString`
+    /// (Kotlin/Wasm JS). The handoff then freezes those `CharSequence` members for the target to
+    /// call ([`CheckedBackendCallables::char_sequence_protocol`]).
+    fn appends_char_sequences_by_index(&self) -> bool {
         false
     }
 

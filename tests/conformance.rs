@@ -60,5 +60,7 @@ mod krusty_case_workers;
 mod reference_invocation_support;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;
+#[path = "common/reference_targets/wasm_program.rs"]
+mod reference_wasm_program;
 #[path = "serialization_conformance.rs"]
 mod serialization_conformance;

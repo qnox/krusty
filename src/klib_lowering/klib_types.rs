@@ -40,6 +40,11 @@ impl KlibTypeParameters {
         self.bindings.insert(symbol.clone(), semantic).is_none()
     }
 
+    /// Whether the serialized type parameter `symbol` is bound.
+    pub(super) fn binds(&self, symbol: &KlibIrSymbol) -> bool {
+        self.bindings.contains_key(symbol)
+    }
+
     pub(super) fn record_bounds(&mut self, formal: Ty, bounds: Vec<Ty>) -> bool {
         let TyKind::TyParam(identity, _) = formal.kind() else {
             return false;
@@ -267,7 +272,7 @@ fn type_argument(
 
 /// The classifier a type-use annotation constructs, when its constructor is a public declaration
 /// with a valid identity path.
-fn annotation_classifier(annotation: &KlibIrAnnotation) -> Option<TypeName> {
+pub(super) fn annotation_classifier(annotation: &KlibIrAnnotation) -> Option<TypeName> {
     let symbol = &annotation.access.symbol;
     if symbol.kind != KlibIrSymbolKind::Constructor {
         return None;

@@ -26,6 +26,12 @@ pub(super) struct ModuleEmission<'a> {
     pub origins: &'a crate::fir::OriginStore,
     /// The backend's common-IR preparation policy includes the shared coroutine passes.
     pub common_ir_coroutines: bool,
+    /// The dependency classes whose supertype members the backend dispatches itself
+    /// ([`crate::backend::Backend::dispatched_dependency_classes`]).
+    pub dispatched_classes: &'a [crate::types::TypeName],
+    /// The backend appends a `CharSequence` to a `StringBuilder` through its `length` and `get`
+    /// ([`crate::backend::Backend::appends_char_sequences_by_index`]).
+    pub char_sequences_by_index: bool,
 }
 
 /// Freeze `ir`'s backend view, or report an internal error when a dependency identity the IR holds
@@ -67,16 +73,34 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     };
-    if let Err(error) =
-        record_checked_klib_dependency_facts(&mut callables, symbols.semantic_platform())
-    {
+    if module.char_sequences_by_index {
+        if let Some(protocol) = symbols.char_sequence_protocol() {
+            if let Err(error) =
+                callables.freeze_char_sequence_protocol(protocol, symbols.semantic_platform())
+            {
+                diags.error(
+                    Span::new(0, 0),
+                    format!("internal error: cannot freeze the CharSequence members: {error:?}"),
+                );
+                return None;
+            }
+        }
+    }
+    if let Err(error) = record_checked_klib_dependency_facts(
+        &mut callables,
+        symbols.semantic_platform(),
+        module.dispatched_classes,
+    ) {
         diags.error(Span::new(0, 0), format!("internal error: {error}"));
         return None;
     }
     if let Err(identity) = super::builtin_implementations::record_checked(
         &mut callables,
         &ir,
-        symbols.semantic_platform(),
+        crate::resolve::RepresentedOverrides::new(
+            symbols.semantic_platform(),
+            module.dispatched_classes,
+        ),
     ) {
         diags.error(
             Span::new(0, 0),
@@ -160,6 +184,7 @@ pub(super) fn checked_ir_file<'a>(
 pub(super) fn record_checked_klib_dependency_facts(
     callables: &mut CheckedBackendCallables,
     platform: &dyn crate::libraries::SemanticPlatform,
+    represented: &[crate::types::TypeName],
 ) -> Result<(), String> {
     let Some(dependency_bodies) = platform.klib_dependency_body_facts() else {
         return Ok(());
@@ -168,6 +193,7 @@ pub(super) fn record_checked_klib_dependency_facts(
         platform,
         dependency_bodies.bodies(),
         callables.klib_body_callables(),
+        represented,
     )
     .map_err(|identity| {
         format!("checked KLIB body graph has no exact member facts for {identity:?}")
@@ -188,6 +214,7 @@ pub(super) fn prepare_common_ir(
     provider: &dyn crate::libraries::SemanticPlatform,
     preparation: crate::backend::CommonIrPreparation,
     coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
+    represented: &[crate::types::TypeName],
 ) -> Result<(), crate::backend::CommonIrPreparationError> {
     // Resolution selected the coroutine runtime declarations once; a unit whose preparation
     // lowers a suspend function records that saved selection.
@@ -216,20 +243,42 @@ pub(super) fn prepare_common_ir(
         .map_err(crate::backend::CommonIrPreparationError::Suspend)?;
 
     let plugin_runtime = file.callables.plugin_runtime_bindings();
-    let mut callables = CheckedBackendCallables::freeze(&file.ir, provider).map_err(|error| {
+    let char_sequence_protocol = file.callables.char_sequence_protocol();
+    // The refreeze keeps the declarations of the module's classes, as the handoff froze them:
+    // the slot plan binds a dependency superclass's published layout by those declarations.
+    let mut callables = CheckedBackendCallables::freeze_with_class_declarations(
+        &file.ir,
+        provider,
+        file.classifiers.module().classes(),
+    )
+    .map_err(|error| {
         crate::backend::CommonIrPreparationError::Invariant(format!(
             "cannot freeze prepared dependency declarations: {error:?}"
         ))
     })?;
-    record_checked_klib_dependency_facts(&mut callables, provider)
+    // The handoff froze the recorded CharSequence selection; the refreeze keeps it, before the
+    // checked KLIB graph is recorded, as the handoff orders them.
+    if let Some(protocol) = char_sequence_protocol {
+        callables
+            .freeze_char_sequence_protocol(protocol, provider)
+            .map_err(|error| {
+                crate::backend::CommonIrPreparationError::Invariant(format!(
+                    "cannot refreeze the CharSequence members: {error:?}"
+                ))
+            })?;
+    }
+    record_checked_klib_dependency_facts(&mut callables, provider, represented)
         .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
-    super::builtin_implementations::record_checked(&mut callables, &file.ir, provider).map_err(
-        |identity| {
-            crate::backend::CommonIrPreparationError::Invariant(format!(
-                "prepared IR has no builtin implementation facts for external member {identity:?}"
-            ))
-        },
-    )?;
+    super::builtin_implementations::record_checked(
+        &mut callables,
+        &file.ir,
+        crate::resolve::RepresentedOverrides::new(provider, represented),
+    )
+    .map_err(|identity| {
+        crate::backend::CommonIrPreparationError::Invariant(format!(
+            "prepared IR has no builtin implementation facts for external member {identity:?}"
+        ))
+    })?;
     callables
         .freeze_plugin_runtime_callables(plugin_runtime, |identity| {
             provider.external_callable(identity)

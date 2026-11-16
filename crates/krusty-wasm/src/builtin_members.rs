@@ -32,6 +32,16 @@ type Signature = (Vec<ValType>, Vec<ValType>);
 #[derive(Default)]
 pub(super) struct BuiltinMembers {
     members: Vec<Member>,
+    builders: BuilderMembers,
+}
+
+/// What the runtime's `StringBuilder` (`super::string_builders`) does for the library members a
+/// call goes through. A member it cannot answer declines the program only once a builder is
+/// constructed: before that, no builder value reaches its stub.
+#[derive(Default)]
+struct BuilderMembers {
+    constructed: bool,
+    unanswered: Vec<(MemberRef, String)>,
 }
 
 struct Member {
@@ -65,6 +75,8 @@ enum Representation {
     String,
     /// The box of this type's classifier.
     Box(Ty),
+    /// The runtime's `StringBuilder`.
+    StringBuilder,
 }
 
 impl Representation {
@@ -73,6 +85,7 @@ impl Representation {
         match self {
             Self::String => "a `String`".to_string(),
             Self::Box(boxed) => format!("a boxed `{boxed:?}`"),
+            Self::StringBuilder => "a `StringBuilder`".to_string(),
         }
     }
 }
@@ -91,17 +104,34 @@ enum Operation {
     /// The order of the value a box holds and the value another box of its class holds
     /// (`Int.compareTo(Int)`).
     Compare,
+    /// A builder member the runtime realizes (`StringBuilder.append(Char)`).
+    Builder(BuilderMember),
+}
+
+/// A `StringBuilder` override the runtime realizes, as a direct call of it does
+/// (`super::codegen` realizes those at the builder's receiver).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuilderMember {
+    /// `append(CharSequence?)`, as the target declares it (`crate::char_sequence_appends`).
+    AppendCharSequence,
+    /// `append(Char)`.
+    AppendChar,
+    /// `length`.
+    Length,
+    /// `get(Int)`.
+    Get,
 }
 
 impl Runtime {
-    /// Record the builtin implementations of `member`, a library member carried as `signature`
-    /// (the receiver first), which a call goes through: a string's now, and each box's now or when
-    /// the box is declared. Declines when a builtin class runs something this generator cannot
-    /// write for it.
+    /// Record the builtin implementations of `member`, a library member named `name` carried as
+    /// `signature` (the receiver first), which a call goes through: a string's and the runtime
+    /// builder's now, and each box's now or when the box is declared. Declines when a builtin class
+    /// runs something this generator cannot write for it.
     pub(super) fn builtin_member(
         &mut self,
         module: &mut Module,
         member: MemberRef,
+        name: &str,
         signature: &Signature,
         implementations: &[BuiltinImplementation],
     ) -> Result<(), String> {
@@ -115,16 +145,25 @@ impl Runtime {
         }
         let mut boxes = Vec::new();
         let mut string = None;
+        let mut builder = None;
         for implementation in implementations {
             let receiver = implementation.receiver;
             let representation = if receiver == Ty::String {
                 Representation::String
+            } else if receiver
+                .obj_internal()
+                .is_some_and(super::string_builders::lays_out)
+            {
+                Representation::StringBuilder
             } else {
                 Representation::Box(receiver)
             };
             match representation {
                 Representation::String => {
                     string = Some(operation(representation, implementation, signature)?);
+                }
+                Representation::StringBuilder => {
+                    builder = Some(builder_operation(name, implementation, signature));
                 }
                 Representation::Box(boxed) => {
                     let identity = boxed
@@ -141,6 +180,17 @@ impl Runtime {
                 .interfaces
                 .implement_representation(member, self.string, function)?;
         }
+        match builder {
+            Some(Ok(operation)) => {
+                let function =
+                    self.define_implementation(module, member, Receiver::StringBuilder, operation)?;
+                self.objects
+                    .interfaces
+                    .implement(self.string_builders.class, member, function)?;
+            }
+            Some(Err(reason)) => self.unanswered_builder_member(member, reason),
+            None => {}
+        }
         let index = self.builtin_members.members.len();
         self.builtin_members.members.push(Member {
             member,
@@ -153,6 +203,28 @@ impl Runtime {
             self.implement_box_member(module, index, form)?;
         }
         Ok(())
+    }
+
+    /// Record that the program constructs a runtime `StringBuilder`, so a member it cannot answer
+    /// declines a call through that member.
+    pub(super) fn string_builder_constructed(&mut self) {
+        let builders = &mut self.builtin_members.builders;
+        if builders.constructed {
+            return;
+        }
+        builders.constructed = true;
+        for (member, reason) in std::mem::take(&mut builders.unanswered) {
+            self.objects.interfaces.unimplementable(member, reason);
+        }
+    }
+
+    fn unanswered_builder_member(&mut self, member: MemberRef, reason: String) {
+        let builders = &mut self.builtin_members.builders;
+        if builders.constructed {
+            self.objects.interfaces.unimplementable(member, reason);
+        } else {
+            builders.unanswered.push((member, reason));
+        }
     }
 
     /// Write the implementation of every recorded member by the new box `form`.
@@ -235,6 +307,19 @@ impl Runtime {
                     .local_get(1)
                     .array_get_u(self.chars);
             }
+            (Receiver::StringBuilder, Operation::Builder(BuilderMember::AppendCharSequence)) => {
+                let append = self.append_char_sequence(module)?;
+                code.local_get(1).call(append);
+            }
+            (Receiver::StringBuilder, Operation::Builder(BuilderMember::AppendChar)) => {
+                code.local_get(1).call(self.string_builders.append_char);
+            }
+            (Receiver::StringBuilder, Operation::Builder(BuilderMember::Length)) => {
+                code.call(self.string_builders.length);
+            }
+            (Receiver::StringBuilder, Operation::Builder(BuilderMember::Get)) => {
+                code.local_get(1).call(self.string_builders.get);
+            }
             _ => return Err("a builtin implementation of another representation".to_string()),
         }
         let function = module.declare();
@@ -254,8 +339,51 @@ impl Runtime {
 #[derive(Clone, Copy)]
 enum Receiver {
     String,
+    /// The runtime's `StringBuilder`, which its functions take as a reference.
+    StringBuilder,
     /// The box of a builtin classifier.
     Box(BoxForm),
+}
+
+/// What the runtime builder runs for the member `name` carried as `signature`, from
+/// `StringBuilder`'s override of it. An override keeps the member's name; its declared parameters
+/// and result say which overload it is, as a direct call's selected declaration does.
+fn builder_operation(
+    name: &str,
+    implementation: &BuiltinImplementation,
+    (params, results): &Signature,
+) -> Result<Operation, String> {
+    let Some(declaration) = &implementation.declaration else {
+        return Err(format!(
+            "a library member `{name}` a `StringBuilder` inherits"
+        ));
+    };
+    let reference = [crate::objects::REFERENCE];
+    let member = match (name, &*declaration.params) {
+        ("append", [param])
+            if *param == Ty::nullable(Ty::obj_name(krusty::types::wk::char_sequence())) =>
+        {
+            Some(BuilderMember::AppendCharSequence)
+        }
+        ("append", [Ty::Char]) if params[1..] == [ValType::I32] => Some(BuilderMember::AppendChar),
+        ("length", []) if declaration.ret == Ty::Int && *results == [ValType::I32] => {
+            Some(BuilderMember::Length)
+        }
+        ("get", [Ty::Int]) if declaration.ret == Ty::Char && params[1..] == [ValType::I32] => {
+            Some(BuilderMember::Get)
+        }
+        _ => None,
+    };
+    let appends = matches!(
+        member,
+        Some(BuilderMember::AppendCharSequence | BuilderMember::AppendChar)
+    );
+    match member {
+        Some(member) if !appends || *results == reference => Ok(Operation::Builder(member)),
+        _ => Err(format!(
+            "the `StringBuilder` override of `{name}`, which the runtime does not realize"
+        )),
+    }
 }
 
 /// What `representation` runs for a member carried as `signature`, from its class's override.
