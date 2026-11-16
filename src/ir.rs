@@ -90,6 +90,7 @@ mod lifting_sequences;
 mod local_class_names;
 mod local_delegates;
 mod loop_exits;
+mod site_class_names;
 pub use local_delegates::IrLocalDelegateAccess;
 pub use local_delegates::{IrInlineDeclaration, IrLocalDelegateAccessorPlan, IrLocalDelegatePlan};
 mod declared_parameters;
@@ -206,6 +207,7 @@ pub use references::{
     ReflectedCallable,
 };
 pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
+pub use site_class_names::{IrSiteClassContainer, IrSiteClassName};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
@@ -964,6 +966,9 @@ pub struct IrClass {
     pub is_compiler_generated: bool,
     /// A source anonymous-object declaration.
     pub is_anonymous_object: bool,
+    /// The declaration site of a local classifier lowered from a serialized body, which has no
+    /// source naming provenance.
+    pub site_name: Option<IrSiteClassName>,
     /// The executable scope a local, anonymous or generated class is declared in, recorded as an
     /// exact identity so a backend realizes enclosure metadata without parsing generated names.
     pub enclosure: Option<IrEnclosure>,
@@ -1396,6 +1401,11 @@ pub struct IrSpecializedAnonymousClass {
     /// the copy's methods. `field_count` still counts them on the declaration, so later fields
     /// appended to the declaration stay past that prefix.
     pub omitted_capture_fields: u32,
+    /// For each constructor parameter of the copy, the declaration's parameter it was copied from,
+    /// or `None` for a value the copy keeps in place of an inlined lambda. Constructor code the
+    /// copy takes from the declaration once lowering has realized it (the superclass constructor
+    /// call and the initializer) reads its parameters through this.
+    pub constructor_parameters: Vec<Option<u32>>,
     /// Property reads and writes in the inlined caller whose receiver is this copy's construction.
     /// Accessor functions are not available when the construction is retargeted, so the read is
     /// rebound once the copy's properties exist.
@@ -2887,7 +2897,7 @@ pub use generated_members::{
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
 };
 mod checked_operation;
-pub use checked_operation::IrCheckedOperation;
+pub use checked_operation::{IrCheckedOperation, IrModulePropertyReference};
 mod construction_entries;
 mod exported_entries;
 mod function_parameters;
@@ -2895,7 +2905,6 @@ pub use function_parameters::*;
 mod traversal;
 pub use traversal::*;
 pub mod clone;
-pub use clone::clone_expression_dag;
 #[cfg(test)]
 pub(crate) use clone::make_expression_children_unique;
 pub use clone::make_expression_children_unique_tracked;
@@ -2903,6 +2912,7 @@ pub(crate) use clone::{
     clone_class_method, clone_expression_with_own_lambdas, clone_function_implementation,
     clone_with_operands, relocate_with_operands,
 };
+pub use clone::{clone_expression_dag, clone_expression_dags};
 mod semantic_validation;
 pub use semantic_validation::{
     IncompleteIrFact, InvalidIrContract, NullableSamContractViolation, UndeterminedIrType,

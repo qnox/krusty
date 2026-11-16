@@ -870,6 +870,7 @@ pub(in crate::resolve) fn finalized_compact_declared_spellings(
                 HeaderDeclarationKind::TypeAlias {
                     type_parameters,
                     target,
+                    ..
                 } => {
                     if index.type_alias_header(stub.id).is_none() {
                         return Some(DeclaredSpellings::default());

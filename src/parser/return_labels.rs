@@ -49,10 +49,17 @@ impl crate::parser::Parser<'_> {
     pub(super) fn parse_return_expression(&mut self, start: Span) -> ExprId {
         self.bump();
         let (label, label_span) = self.parse_return_label();
+        // `else` cannot start an expression: in `if (c) value ?: return else alternative` it
+        // closes the `if`, and in a `when` it is the next entry. Taking it as the return value
+        // reports "expected an expression" and drops the branch.
         let value = if self.at_eol_or_semicolon()
             || matches!(
                 self.kind(),
-                TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket | TokenKind::Comma
+                TokenKind::RBrace
+                    | TokenKind::RParen
+                    | TokenKind::RBracket
+                    | TokenKind::Comma
+                    | TokenKind::KwElse
             ) {
             None
         } else {

@@ -1,5 +1,6 @@
 package krusty.tooling;
 
+import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -7,8 +8,26 @@ import java.util.Map;
 
 /** One JSON object per line. The language server owns the schema. */
 final class Protocol {
+    /**
+     * The stream the language server reads. Maven's resolver prints
+     * {@code [WARNING] The POM for ... is invalid} on {@code System.out}. That line is not a
+     * response; reading it as one stops the resolve and leaves every later jar unrequested.
+     * {@link #capture()} keeps this stream for responses and sends those warnings to stderr.
+     */
+    private static PrintStream protocol = System.out;
+    private static boolean captured;
+
     private final String text;
     private int index;
+
+    static void capture() {
+        if (captured) {
+            return;
+        }
+        captured = true;
+        protocol = System.out;
+        System.setOut(System.err);
+    }
 
     private Protocol(String text) {
         this.text = text;
@@ -80,8 +99,8 @@ final class Protocol {
         builder.append(",\"stderr\":");
         quote(builder, stderr);
         builder.append("}\n");
-        System.out.print(builder);
-        System.out.flush();
+        protocol.print(builder);
+        protocol.flush();
     }
 
     private static List<?> list(Map<String, Object> object, String key) {

@@ -664,6 +664,12 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_class(signature)
     }
 
+    /// The package segments of the serialized file `file` of `module`.
+    pub(crate) fn module_file_package(&self, module: &str, file: u32) -> Option<&[String]> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].file_package(file)
+    }
+
     /// The file-local function `module` itself serializes under `signature`.
     pub(crate) fn module_local_function<'a>(
         &'a self,

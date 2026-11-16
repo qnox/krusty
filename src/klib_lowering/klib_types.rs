@@ -378,6 +378,13 @@ pub(super) fn member_owner(
     declaration_name(member.package().segments(), class)
 }
 
+/// Intern a package identity one signature segment at a time.
+pub(super) fn package_name(package: &[String]) -> TypeName {
+    package.iter().fold(TypeName::ROOT, |parent, segment| {
+        type_name_child(parent, segment)
+    })
+}
+
 fn declaration_name(
     package: &[String],
     declaration: &[String],
