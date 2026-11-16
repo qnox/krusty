@@ -1413,3 +1413,6 @@ mod tests {
         assert!(decoded.defaults().is_empty());
     }
 }
+
+/// Shared interpretation of serialized declaration types, before any body admission or emission.
+pub(crate) mod semantic_types;
