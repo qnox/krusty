@@ -196,6 +196,8 @@ fn isa_for(
 /// One struct rather than a growing parameter list, and BORROWED rather than owned, because the
 /// pass that made them owns them for the whole lowering.
 pub struct FileInput<'a> {
+    #[cfg(feature = "test-support")]
+    pub driver_entries: &'a [super::DriverEntry],
     pub ir: &'a IrFile,
     /// Provider-normalized facts for classifiers whose representation this file needs.
     pub classifiers: &'a dyn krusty::backend::BackendClassifierSource,
@@ -254,6 +256,8 @@ pub fn lower_file(
     verify: bool,
 ) -> Result<Lowered, Unsupported> {
     let FileInput {
+        #[cfg(feature = "test-support")]
+        driver_entries,
         ir,
         classifiers,
         callables,
@@ -430,6 +434,14 @@ pub fn lower_file(
             super::super::c_abi::file_records(ir, abi_symbols)
         }
         krusty::backend::CheckedIrUnitKind::DependencySupport => Vec::new(),
+    };
+    #[cfg(feature = "test-support")]
+    let abi = if unit_kind == krusty::backend::CheckedIrUnitKind::Source {
+        let mut abi = abi;
+        abi.extend(lowering.driver_records(driver_entries, abi_symbols)?);
+        abi
+    } else {
+        abi
     };
     lowering.define_c_exports(file_init, &abi)?;
     lowering.define_dependency_exports(file_init, dependency_exports)?;
