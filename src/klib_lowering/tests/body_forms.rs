@@ -886,6 +886,101 @@ fn klib_ordinary_upcast_uses_explicit_class_evidence() {
     );
 }
 
+/// A function invocation passes a value of a subtype of the function type's parameter with no
+/// cast node, as `suspendCoroutine` passes its `SafeContinuation` to its
+/// `(Continuation<T>) -> Unit` block. The value is one of the parameter type by subsumption,
+/// proved by the class model and never assumed without it.
+#[test]
+fn a_subtype_invocation_argument_passes_by_subsumption_with_class_evidence() {
+    struct Classes;
+    impl crate::assignable::TypeOracle for Classes {
+        fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
+            if ty == Ty::String {
+                vec![Ty::obj("kotlin/CharSequence")]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+    let demo = demo(
+        &[("f", &[T::Function1CharSequenceUnit, T::String], T::Unit)],
+        |_, body| {
+            let block = body.param(0);
+            let value = body.param(1);
+            let invoke = super::demo_package::operator(
+                &["kotlin"],
+                Some("Function1"),
+                "invoke",
+                &[T::NullableAny.kotlin()],
+            );
+            let invocation = body.call_signature(invoke.0, vec![block, value], None, T::Unit);
+            Some(vec![KlibIrStatement::Expression(invocation)])
+        },
+    );
+    let mut unsupported = DependencyBodyUnit::default();
+    let decline = demo.lower(&mut unsupported, "f", &[]).unwrap_err();
+    assert_eq!(decline.reason(), &KlibBodyDeclineReason::ImplicitConversion);
+    assert_unit_is_empty(&unsupported);
+
+    let classes = Classes;
+    let facts = KlibCalleeFacts::default().with_type_oracle(&classes);
+    let mut supported = DependencyBodyUnit::default();
+    let function = supported
+        .lower_function(demo.callable("f"), &demo.bodies, &facts)
+        .expect("the explicit semantic model proves the argument's subtype");
+    validated(supported.ir());
+    assert_eq!(
+        lowered_body(&supported, function),
+        super::demo_package::source_body_with_stdlib(
+            "fun f(a: (CharSequence) -> Unit, b: String) {\n a(b)\n}\n",
+            "f",
+            2
+        )
+    );
+}
+
+/// A primitive argument of a function invocation whose parameter is a reference supertype keeps
+/// the representation coercion the source invocation carries.
+#[test]
+fn a_primitive_invocation_argument_keeps_the_source_coercion() {
+    struct Classes;
+    impl crate::assignable::TypeOracle for Classes {
+        fn direct_supertypes(&self, _: Ty) -> Vec<Ty> {
+            Vec::new()
+        }
+    }
+    let demo = demo(
+        &[("f", &[T::Function1AnyUnit, T::Int], T::Unit)],
+        |_, body| {
+            let block = body.param(0);
+            let value = body.param(1);
+            let invoke = super::demo_package::operator(
+                &["kotlin"],
+                Some("Function1"),
+                "invoke",
+                &[T::NullableAny.kotlin()],
+            );
+            let invocation = body.call_signature(invoke.0, vec![block, value], None, T::Unit);
+            Some(vec![KlibIrStatement::Expression(invocation)])
+        },
+    );
+    let classes = Classes;
+    let facts = KlibCalleeFacts::default().with_type_oracle(&classes);
+    let mut unit = DependencyBodyUnit::default();
+    let function = unit
+        .lower_function(demo.callable("f"), &demo.bodies, &facts)
+        .expect("an Int is an Any");
+    validated(unit.ir());
+    assert_eq!(
+        lowered_body(&unit, function),
+        super::demo_package::source_body_with_stdlib(
+            "fun f(a: (Any) -> Unit, b: Int) {\n a(b)\n}\n",
+            "f",
+            2
+        )
+    );
+}
+
 #[test]
 fn klib_primitive_upcast_retains_the_common_representation_coercion() {
     struct Classes;

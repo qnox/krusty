@@ -82,12 +82,13 @@ impl Body<'_> {
             self.code.call(function).end().ref_as_non_null();
             return Ok(());
         }
+        if let Some(function) = self.scalar_string_function(ty) {
+            self.code.call(function);
+            return Ok(());
+        }
         let function = match ty {
             Ty::String | Ty::Null => self.runtime.string_or_null,
             ty if ty == Ty::nullable(Ty::String) => self.runtime.string_or_null,
-            ty if self.scalar_string_function(ty).is_some() => {
-                self.scalar_string_function(ty).expect("checked above")
-            }
             // A builder's table answers its contents, and a `null` one renders as `"null"`.
             ty if super::string_builders::is_string_builder_type(ty) => {
                 self.dispatch_to_string();
@@ -152,12 +153,14 @@ impl Body<'_> {
     }
 
     /// The runtime function printing a `ty` scalar carrier.
-    fn scalar_string_function(&self, ty: Ty) -> Option<u32> {
+    fn scalar_string_function(&mut self, ty: Ty) -> Option<u32> {
         Some(match ty {
             Ty::Int | Ty::Short | Ty::Byte => self.runtime.string_of_i32,
             Ty::Long => self.runtime.string_of_i64,
             Ty::Char => self.runtime.string_of_char,
             Ty::Boolean => self.runtime.string_of_boolean,
+            Ty::Double => self.runtime.string_of_double(self.module),
+            Ty::Float => self.runtime.string_of_float(self.module),
             _ => return None,
         })
     }

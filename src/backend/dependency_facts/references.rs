@@ -247,6 +247,7 @@ impl ReferencedDependencies {
             | Callee::CrossFile { .. }
             | Callee::Module { .. }
             | Callee::ModuleDefaultEntry { .. }
+            | Callee::ModuleConstructorDefaultEntry { .. }
             | Callee::Static { .. }
             | Callee::Virtual { .. }
             | Callee::Super { .. }
@@ -294,7 +295,8 @@ impl ReferencedDependencies {
             | IrCheckedOperation::BackingFieldRead { .. }
             | IrCheckedOperation::BackingFieldWrite { .. }
             | IrCheckedOperation::ComparableRangeContains { .. }
-            | IrCheckedOperation::IllegalProgressionStep { .. } => {}
+            | IrCheckedOperation::IllegalProgressionStep { .. }
+            | IrCheckedOperation::AtomicField { .. } => {}
         }
     }
 

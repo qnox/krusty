@@ -111,6 +111,10 @@ impl CallableRegistry {
             Some(InstanceEntry::Constructor { .. }) => {
                 Err("a constructor without its declaring file's entry".to_owned())
             }
+            Some(InstanceEntry::ConstructorDefaults { .. }) => Err(
+                "a constructor's default-argument entry without its declaring file's entry"
+                    .to_owned(),
+            ),
             None => Ok(()),
         }
     }
@@ -1109,6 +1113,7 @@ mod tests {
             &mut caller,
             &mut krusty::backend::CheckedBackendCallables::default(),
             |_| false,
+            |_| false,
         );
         let calls = registry
             .file_calls(
@@ -1152,6 +1157,7 @@ mod tests {
         krusty::backend::default_arguments::realize(
             &mut declaration,
             &mut krusty::backend::CheckedBackendCallables::default(),
+            |_| false,
             |_| false,
         );
         let entry = declaration.default_entries[&function];
@@ -1237,6 +1243,7 @@ mod tests {
             &mut caller,
             &mut krusty::backend::CheckedBackendCallables::default(),
             |_| false,
+            |_| false,
         );
         let calls = registry
             .file_calls(
@@ -1300,6 +1307,7 @@ mod tests {
         krusty::backend::default_arguments::realize(
             &mut declaration,
             &mut krusty::backend::CheckedBackendCallables::default(),
+            |_| false,
             |_| false,
         );
         let entry = declaration.default_entries[&function];
