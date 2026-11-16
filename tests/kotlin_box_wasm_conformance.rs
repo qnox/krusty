@@ -1201,15 +1201,14 @@ fn wasm_renders_kotlin_any_default_to_string() {
     );
 }
 
-// A floating box has no printer for Kotlin's form, so an erased `toString` that can reach one
-// declines rather than emit the trap of a slot with no body.
+// An erased `toString` reaching a floating box prints the value in Kotlin's form.
 #[test]
-fn wasm_declines_an_erased_to_string_reaching_a_floating_box() {
-    expect_wasm_decline(
+fn wasm_erased_to_string_prints_a_floating_box() {
+    expect_wasm_box(
         "fun show(value: Any?): String = \"$value\"\n\
-         fun box(): String = if (show(1.5) == \"\") \"fail\" else \"OK\"",
+         fun box(): String = if (show(1.5) == \"1.5\" && show(0.25f) == \"0.25\") \"OK\" \
+         else show(1.5) + \" \" + show(0.25f)",
         "wasmErasedToStringOfAFloatingBox",
-        "a `toString` of `kotlin.Any?` reaching a runtime object this target cannot print",
     );
 }
 
@@ -1431,4 +1430,13 @@ fn wasm_generic_elvis_preserves_its_non_null_type_parameter() {
             target.name()
         );
     }
+}
+
+// PLATFORM-SPECIFIC: a library class's dispatch table type is one type of the whole Wasm program,
+// shared by the support unit laying the class out and the module class extending it.
+#[test]
+fn wasm_library_superclass_members_dispatch_to_the_subclass() {
+    let src = include_str!("box_regressions/librarySuperclassMembersOfSubclass.kt");
+    expect_reference_box(src, "librarySuperclassMembersOfSubclass");
+    expect_wasm_box(src, "librarySuperclassMembersOfSubclass");
 }
