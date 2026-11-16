@@ -936,7 +936,6 @@ escapeAnalysis/zeroOutObjectOnAlloc.kt
 evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
 evaluate/intrinsicConst/equals_after.kt
-evaluate/intrinsicConst/kCallableName.kt
 evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/serialization/typeAnnotation.kt
 evaluate/thisPlusString.kt
