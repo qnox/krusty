@@ -561,7 +561,12 @@ mod tests {
                 "{target:?} exit {:?}\n{stdout}{stderr}",
                 output.status.code()
             );
-            assert!(stdout.contains("OK"), "{target:?} box printed {stdout:?}");
+            assert_eq!(
+                stdout,
+                format!("{}OK", krusty::backend::BOX_RESULT_FRAME),
+                "{target:?} complete framed box result"
+            );
+            assert!(stderr.is_empty(), "{target:?} box stderr: {stderr:?}");
             let _ = std::fs::remove_dir_all(&directory);
         }
     }
