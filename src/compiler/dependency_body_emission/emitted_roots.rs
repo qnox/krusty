@@ -10,11 +10,14 @@ use crate::libraries::{
 };
 use std::collections::VecDeque;
 
-/// The declarations a unit's closure freezes, and the call edge facts of its members realized
-/// outside the unit.
+/// The declarations a unit's closure freezes.
 pub(super) struct FrozenClosure {
     pub(super) declarations: Vec<(crate::fir::ExternalCallableId, ExternalCallableRealization)>,
-    pub(super) member_edges: HashMap<KlibDependencyCallable, crate::klib_lowering::CallEdge>,
+    /// Edges that authorize a provider call of a member realized outside the unit. Function edges
+    /// are the ones the checker froze. An accessor has no function-hierarchy edge; the closure's
+    /// empty edge is the authorization the provider call consumes.
+    pub(super) authorized_member_edges:
+        HashMap<KlibDependencyCallable, crate::klib_lowering::CallEdge>,
 }
 
 /// Freeze declaration contracts along the exact producer graph before ordinary body lowering.
@@ -36,7 +39,7 @@ pub(super) fn declarations(
         .collect::<VecDeque<_>>();
     let mut visited = HashSet::default();
     let mut declarations = Vec::new();
-    let mut member_edges = HashMap::default();
+    let mut authorized_member_edges = HashMap::default();
     // Declaration-only evidence already pushed, which the closure never walks.
     let mut declared = HashSet::default();
     // Members of a materialized class that dispatch reaches: their bodies are emitted even where
@@ -190,7 +193,7 @@ pub(super) fn declarations(
         // has no other such leaf: body lowering declines a call of one, as it declines any
         // unmodelled form.
         let outside_edge = if member || is_outside_units(platform, bodies, &facts, selected)? {
-            Some(member_edge(platform, declaration_target, selected)?)
+            Some(member_edge(&facts, selected)?)
         } else {
             None
         };
@@ -200,7 +203,7 @@ pub(super) fn declarations(
         // A call of a member realized outside the unit carries the facts the member hierarchy
         // decorates a source call of it with; the edge is what authorizes the call.
         if let Some(edge) = outside_edge.filter(|_| external_member) {
-            member_edges.insert(identity.clone(), edge);
+            authorized_member_edges.insert(identity.clone(), edge);
         }
         let emits_body = !externals.contains_key(&identity)
             && !member
@@ -251,7 +254,7 @@ pub(super) fn declarations(
     }
     Ok(FrozenClosure {
         declarations,
-        member_edges,
+        authorized_member_edges,
     })
 }
 
@@ -431,12 +434,7 @@ fn is_materialized_class_member(
     if crate::klib_lowering::is_receiver_member(callable, bodies, callees) {
         // Every target realizes one of `kotlin.Any`'s members from the receiver's own
         // representation, a builtin value included, so such a member stays the target's.
-        let (target, _) = platform
-            .external_callable_by_dependency(callable.identity())
-            .ok_or("a builtin-type member has no provider declaration")?;
-        return Ok(!realizes_any_member(&member_edge(
-            platform, target, callable,
-        )?));
+        return Ok(!realizes_any_member(&member_edge(callees, callable)?));
     }
     let Some(class) = callable
         .class_contract()
@@ -554,8 +552,7 @@ pub(super) fn member_class_constructor(
 /// role and exact overridden declarations. A target recognizes a specially implemented member
 /// through those facts.
 fn member_edge(
-    platform: &dyn SemanticPlatform,
-    target: crate::fir::ExternalCallableId,
+    callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
     selected: KlibBodyCallable<'_>,
 ) -> Result<crate::klib_lowering::CallEdge, String> {
     // The hierarchy decorates function calls. A property accessor is read as its property, which
@@ -566,22 +563,15 @@ fn member_edge(
     ) {
         return Ok(crate::klib_lowering::CallEdge::default());
     }
-    let Some(crate::types::SemanticCallableOwner::Classifier(owner)) = selected.declaration_owner()
-    else {
-        return Err(format!(
-            "a KLIB member has no declaring class: {:?}",
-            selected.identity()
-        ));
-    };
-    let edge =
-        crate::resolve::klib_dependency_member_call_edge(platform, owner, selected.name(), target);
-    let Ok(edge) = edge else {
-        return Err(format!(
-            "a KLIB member is not one declaration of its class's hierarchy: {:?}",
-            selected.identity()
-        ));
-    };
-    Ok(edge)
+    callees
+        .member_edge(selected.identity())
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "the checker stored no member edge for KLIB declaration {:?}",
+                selected.identity()
+            )
+        })
 }
 
 /// Whether a call with `edge` invokes one of `kotlin.Any`'s members, which every target realizes
