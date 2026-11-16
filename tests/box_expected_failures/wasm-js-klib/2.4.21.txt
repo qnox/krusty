@@ -336,7 +336,6 @@ casts/functions/reifiedIsFunKSmall.kt
 casts/functions/reifiedSafeAsFunKBig.kt
 casts/functions/reifiedSafeAsFunKSmall.kt
 casts/functions/safeAsFunKBig.kt
-casts/functions/safeAsFunKSmall.kt
 casts/isNullablePrimitive.kt
 casts/kt50577.kt
 casts/kt53677.kt
@@ -1642,7 +1641,6 @@ inlineClasses/functionNameMangling/reflectionForPropertyOfInlineClassTypeGeneric
 inlineClasses/genericInlineClassSynthMembers.kt
 inlineClasses/genericVararg2ndConstructor.kt
 inlineClasses/hiddenConstructor/kt28855.kt
-inlineClasses/initBlockGeneric.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClass.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClassGeneric.kt
 inlineClasses/inlineClassCollection/inlineListOfInlineClass.kt
