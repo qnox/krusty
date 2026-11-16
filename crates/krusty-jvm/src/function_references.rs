@@ -1030,8 +1030,11 @@ pub(super) fn realize(
         // A property reference is the property reference value itself, which the
         // property-reference realization gives kotlinc's carrier.
         if let krusty::ir::IrCallableReferenceTarget::Property(property) = &reference.target {
-            let operation =
-                property.checked_operation(reference.bound_receiver, reference.adaptation.clone());
+            let operation = property.checked_operation(
+                reference.bound_receiver,
+                reference.captures.clone(),
+                reference.adaptation.clone(),
+            );
             ir.exprs[raw] = IrExpr::Checked(Box::new(operation));
             // An inline getter has no accessor method the carrier could call: kotlinc splices it
             // into the carrier's own `get`, which takes the body of the adapter performing it.

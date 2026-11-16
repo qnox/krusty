@@ -164,6 +164,7 @@ fn property_plan(ir: &IrFile, id: ExprId) -> Result<PropertyPlan, Option<String>
         binding: _,
         dispatch_receiver,
         extension_receiver,
+        context_arguments: _,
         mutable,
         substitutions: _,
         adaptation,

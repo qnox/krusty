@@ -454,6 +454,7 @@ mod tests {
             mutable: false,
             ext_facade: None,
             get: None,
+            context_types: Vec::new(),
         });
         ir.add_class(holder);
         let mut realizations = PropertyReferenceRealizations::default();
