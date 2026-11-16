@@ -728,6 +728,11 @@ impl KlibDeclarationBodies {
         found.unwrap_or(LocatedMember::Missing)
     }
 
+    /// The class that directly declares the exact linked member `identity`, function or accessor.
+    pub(crate) fn member_owner(&self, identity: &KlibDependencyCallable) -> LocatedMember<'_> {
+        self.function_owner(&identity.module, &ir_signature(&identity.declaration))
+    }
+
     /// Whether the exact serialized declaration intentionally carries an executable body.
     pub(crate) fn function_has_body(&self, identity: &KlibDependencyCallable) -> Option<bool> {
         self.function(identity)

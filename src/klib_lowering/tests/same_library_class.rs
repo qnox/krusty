@@ -988,6 +988,50 @@ fn applied_interface_signature_substitutes_the_supertype() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+const ACCESSOR_INTERFACE: &str = "\
+package fixture
+interface Sized {
+    val size: Int
+    var count: Int
+}
+private class Hidden(private val value: Int) : Sized {
+    override val size: Int get() = value
+    override var count: Int = 0
+}
+fun make(value: Int): Sized = Hidden(value)
+";
+
+#[test]
+fn property_accessors_override_the_interface_accessors() {
+    let Some((directory, libraries)) = produce_library("accessor-interface", ACCESSOR_INTERFACE)
+    else {
+        return;
+    };
+    let mut unit = DependencyBodyUnit::default();
+    lower_fixture(
+        &mut unit,
+        &libraries,
+        "make",
+        &Default::default(),
+        &libraries,
+    );
+    validated(unit.ir());
+    let mut overridden = unit
+        .ir()
+        .function_overrides
+        .values()
+        .flatten()
+        .map(|edge| {
+            assert!(edge.overridden_is_interface, "{edge:?}");
+            assert!(edge.implementation_function.is_some(), "{edge:?}");
+            edge.name.clone()
+        })
+        .collect::<Vec<_>>();
+    overridden.sort();
+    assert_eq!(overridden, ["<get-count>", "<get-size>", "<set-count>"]);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 struct MarkIdentity {
     id: crate::fir::ExternalCallableId,
     identity: crate::libraries::KlibDependencyCallable,
