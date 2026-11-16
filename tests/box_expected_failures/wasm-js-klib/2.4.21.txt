@@ -1179,7 +1179,6 @@ enum/enumEntriesInCompanion.kt
 enum/enumEntriesMultimoduleNoMappings.kt
 enum/enumEntriesNameClashes.kt
 enum/enumEntryMembers.kt
-enum/enumMultiModule.kt
 enum/enumNestedObjectInit.kt
 enum/enumNestedObjectInitCrossModule.kt
 enum/enumValueOf.kt
@@ -2134,7 +2133,6 @@ multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/defaultArguments/withTypeParameter.kt
-multiplatform/k2/enumStaticMethods.kt
 multiplatform/k2/exhaustiveness/commonSealedClass.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt

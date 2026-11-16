@@ -192,7 +192,11 @@ pub(super) fn prepare_common_ir(
     }
     crate::backend::counted_loops::realize(&mut file.ir, preparation.counted_loops);
     crate::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
-    crate::backend::enums::realize(&mut file.ir, preparation.enums);
+    crate::backend::enums::realize(
+        &mut file.ir,
+        preparation.enums,
+        &mut file.dependency_exports,
+    );
     let classifiers = file.classifiers.module();
     let module_name = file.module_name;
     crate::backend::default_arguments::realize(
