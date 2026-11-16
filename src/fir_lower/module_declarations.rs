@@ -142,7 +142,15 @@ fn publish_callable(
             .ok_or(FirFileLoweringFailure::MissingCallable(
                 callable.declaration,
             ))?;
-    if let Some(receiver) = callable.shape.extension_receiver {
+    // A companion-associated declaration (a block member or a `companion fun C.f()`) is looked up
+    // as an extension on its classifier, but that association is a name-resolution coordinate,
+    // not a parameter: its calls pass no receiver value, exactly as for a same-file declaration.
+    let companion_associated = flags.has(DeclarationFlags::COMPANION);
+    let extension_receiver = callable
+        .shape
+        .extension_receiver
+        .filter(|_| !companion_associated);
+    if let Some(receiver) = extension_receiver {
         let position = callable.shape.context_parameter_count as usize;
         if position > parameters.len() || position > defaulted.len() {
             return Err(FirFileLoweringFailure::MissingCallable(
@@ -166,15 +174,15 @@ fn publish_callable(
             owner_kind,
             visibility: declaration_header.visibility,
             flags,
-            parameter_identities: index
-                .callable_parameter_identities(target, parameters.len())
-                .ok_or(FirFileLoweringFailure::MissingCallable(
-                    callable.declaration,
-                ))?
-                .iter()
-                .map(super::resolved_parameter_identity)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+            parameter_identities: module_parameter_identities(
+                index,
+                target,
+                parameters.len(),
+                companion_associated,
+            )
+            .ok_or(FirFileLoweringFailure::MissingCallable(
+                callable.declaration,
+            ))?,
             parameters: parameters.into_boxed_slice(),
             default_parameters: defaulted
                 .iter()
@@ -215,6 +223,34 @@ fn publish_callable(
         }
         _ => Ok(()),
     }
+}
+
+/// The identities of a module callable's `count` parameters. A companion-associated declaration
+/// has no receiver parameter, so each of its parameters is a published value parameter.
+fn module_parameter_identities(
+    index: &ResolvedModuleIndex,
+    target: CallableId,
+    count: usize,
+    companion_associated: bool,
+) -> Option<Box<[crate::ir::IrParameterIdentity]>> {
+    let identities = if companion_associated {
+        (index.callable_parameter_name_count(target) == count)
+            .then(|| {
+                (0..count as u32)
+                    .map(|ordinal| index.callable_parameter_identity(target, ordinal))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .flatten()?
+            .into_boxed_slice()
+    } else {
+        index.callable_parameter_identities(target, count)?
+    };
+    Some(
+        identities
+            .iter()
+            .map(super::resolved_parameter_identity)
+            .collect(),
+    )
 }
 
 /// The records a module declaration carries for its type parameters: identity and bounds.
