@@ -867,10 +867,12 @@ fn explicit_array_checks_share_metadata_with_the_reference_compiler() {
     let [(stem, written_source)] = sources.as_slice() else {
         panic!("one complete array-store source")
     };
+    // `ModuleStructureExtractorImpl` keeps the leading text and the FILE marker in the first file,
+    // preserving original source lines. The option above is the compilation context's one
+    // decision: it reaches both compilers as arguments, never by re-reading a file.
     assert_eq!(
-        krusty::conformance::WasmCompilerOptions::from_source(written_source),
-        Ok(krusty::conformance::WasmCompilerOptions::default()),
-        "the pre-FILE option belongs to compilation context, not the split program"
+        written_source, source,
+        "the written file retains the leading text, marker, and original line positions"
     );
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
@@ -1428,4 +1430,13 @@ fn wasm_generic_elvis_preserves_its_non_null_type_parameter() {
             target.name()
         );
     }
+}
+
+// PLATFORM-SPECIFIC: a library class's dispatch table type is one type of the whole Wasm program,
+// shared by the support unit laying the class out and the module class extending it.
+#[test]
+fn wasm_library_superclass_members_dispatch_to_the_subclass() {
+    let src = include_str!("box_regressions/librarySuperclassMembersOfSubclass.kt");
+    expect_reference_box(src, "librarySuperclassMembersOfSubclass");
+    expect_wasm_box(src, "librarySuperclassMembersOfSubclass");
 }

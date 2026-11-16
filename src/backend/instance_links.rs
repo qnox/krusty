@@ -32,6 +32,15 @@ pub enum InstanceEntry {
         module: Box<str>,
         declaration: DeclarationId,
     },
+    /// A new instance, built by a construction that leaves arguments of the checked constructor
+    /// declaration to their defaults; the entry takes an inner class's enclosing instance, the
+    /// constructor's whole parameter frame and the omission mask words (see
+    /// `super::default_arguments`). The module qualifies the declaration as for
+    /// [`Self::Constructor`].
+    ConstructorDefaults {
+        module: Box<str>,
+        declaration: DeclarationId,
+    },
 }
 
 impl InstanceEntry {
@@ -39,7 +48,7 @@ impl InstanceEntry {
     pub fn enum_constant(&self) -> Option<&EnumConstant> {
         match self {
             Self::EnumConstant(constant) => Some(constant),
-            Self::Object(_) | Self::Constructor { .. } => None,
+            Self::Object(_) | Self::Constructor { .. } | Self::ConstructorDefaults { .. } => None,
         }
     }
 }
@@ -91,7 +100,9 @@ pub fn link_reads<V: Clone>(
             InstanceEntry::EnumConstant(constant) => {
                 ir.class_id_by_name(constant.classifier).is_some()
             }
-            InstanceEntry::Constructor { .. } => continue,
+            InstanceEntry::Constructor { .. } | InstanceEntry::ConstructorDefaults { .. } => {
+                continue
+            }
         };
         if declared_here || reads.contains_key(&instance) {
             continue;
@@ -105,9 +116,10 @@ pub fn link_reads<V: Clone>(
 }
 
 /// The link of each constructor of another file's class that `ir` builds an instance through,
-/// reserved or found like [`link_reads`] does for the instances it reads. A construction the
-/// checker selected a module constructor for whose class `ir` does not declare, and that `module`
-/// does not certify, has no link, and the target declines it.
+/// reserved or found like [`link_reads`] does for the instances it reads: a construction the
+/// checker selected a module constructor for whose class `ir` does not declare, and a call of a
+/// constructor's default-argument entry. One whose constructor `module` does not certify has no
+/// link, and the target declines it.
 pub fn link_constructor_reads<V: Clone>(
     ir: &IrFile,
     module_name: &str,
@@ -120,18 +132,31 @@ pub fn link_constructor_reads<V: Clone>(
         .into_iter()
         .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
     {
-        let IrExpr::New { internal, .. } = ir.expr(expression) else {
-            continue;
-        };
-        let Some(&constructor) = ir.module_constructions.selected.get(&expression) else {
-            continue;
-        };
-        if ir.class_id_by_name(*internal).is_some() {
-            continue;
-        }
-        let instance = InstanceEntry::Constructor {
-            module: module_name.into(),
-            declaration: constructor,
+        let instance = match ir.expr(expression) {
+            IrExpr::New { internal, .. } => {
+                let Some(&constructor) = ir.module_constructions.selected.get(&expression) else {
+                    continue;
+                };
+                if ir.class_id_by_name(*internal).is_some() {
+                    continue;
+                }
+                InstanceEntry::Constructor {
+                    module: module_name.into(),
+                    declaration: constructor,
+                }
+            }
+            IrExpr::Call { callee, .. } => {
+                let crate::ir::Callee::ModuleConstructorDefaultEntry { constructor, .. } =
+                    &**callee
+                else {
+                    continue;
+                };
+                InstanceEntry::ConstructorDefaults {
+                    module: module_name.into(),
+                    declaration: *constructor,
+                }
+            }
+            _ => continue,
         };
         if reads.contains_key(&instance) {
             continue;

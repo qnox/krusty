@@ -1032,6 +1032,11 @@ fn surrogate_halves_concatenate_into_their_character() {
 }
 
 #[test]
+fn a_range_comparison_walks_utf16_units_as_region_matches_does() {
+    run_driver_against_kotlin("string_range_equals");
+}
+
+#[test]
 fn a_bound_between_surrogate_halves_cuts_the_pair_and_a_search_finds_either_half() {
     run_driver("string_surrogate_halves");
 }
@@ -1271,6 +1276,11 @@ fn a_list_read_out_of_bounds_raises_and_answers_nothing() {
 #[test]
 fn a_list_added_to_itself_doubles() {
     run_driver("list_add_all_self");
+}
+
+#[test]
+fn a_list_remove_all_and_retain_all_follow_the_argument() {
+    run_driver("list_remove_all");
 }
 
 #[test]

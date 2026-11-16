@@ -8,9 +8,13 @@ class Point(val x: Int) {
 val Point.doubled: Int
     get() = x * 2
 
+inline val Point.tripled: Int
+    get() = x * 3
+
 fun exportedX(): (Point) -> Int = Point::x
 fun exportedLabel(): (Point) -> String = Point::label
 fun exportedDoubled(): (Point) -> Int = Point::doubled
+fun exportedTripled(): (Point) -> Int = Point::tripled
 
 // MODULE: main(lib)
 // FILE: user.kt
@@ -30,6 +34,10 @@ fun box(): String {
     val localDoubled: (Point) -> Int = Point::doubled
     if (importedDoubled != localDoubled) return "extension getter"
     if (importedDoubled(point) != 42 || localDoubled(point) != 42) return "extension invoke"
+    val importedTripled = exportedTripled()
+    val localTripled: (Point) -> Int = Point::tripled
+    if (importedTripled != localTripled) return "inline getter"
+    if (importedTripled(point) != 63 || localTripled(point) != 63) return "inline invoke"
     val declaredLater: (Later) -> Int = Later::y
     if (localY() != declaredLater) return "file order"
     if (localY()(later(5)) != 5) return "file order invoke"

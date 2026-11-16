@@ -842,7 +842,6 @@ mod tests {
             inline_origin: false,
             requires_reification: false,
             extension_receiver_label: None,
-            inline_default_owner: None,
             default_stub_owner: None,
             invoke: implementation,
             function_type: Ty::fun(Vec::new(), Ty::Unit),
@@ -858,6 +857,7 @@ mod tests {
             bridge: krusty::ir::IrInvokeBridge::logical(Vec::new(), Ty::Unit),
             lambda_origin: None,
             sam: None,
+            sam_reference: false,
         });
         ir.add_class(closure);
         implementation

@@ -58,6 +58,7 @@ fn two_interface_object_records_each_declaring_owner() {
     let selected = libraries
         .external_callable(function.callable.external_identity.unwrap())
         .unwrap();
+    let hierarchy = checked_template_hierarchy(&libraries, &selected);
     let mut ir = IrFile::default();
     let template = lower_inline_template(
         &mut ir,
@@ -67,6 +68,7 @@ fn two_interface_object_records_each_declaring_owner() {
             declarations: libraries.declaration_bodies(),
             references: libraries.reference_bindings(),
             source: &libraries,
+            type_hierarchy: &hierarchy,
         },
     )
     .expect("a klib declaration")
