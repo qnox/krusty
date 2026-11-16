@@ -5,12 +5,9 @@
 //! argument is one object per declaration; the object's field is the property's name. A later
 //! call to a member of that `KProperty` is a separate expression.
 
-use krusty::fir::FirPropertyReferenceTarget;
 use krusty::fir::LocalDelegatedPropertyId;
 use krusty::fx_hash::HashMap;
-use krusty::ir::{
-    IrCheckedOperation, IrExpr, IrFile, IrLocalDelegateAccess, IrLocalPropertyReference,
-};
+use krusty::ir::{IrExpr, IrFile, IrLocalDelegateAccess, IrLocalPropertyReference, PropertyId};
 
 use super::super::super::encode::{
     BlockType, CompositeType, FieldType, Function, Module, StorageType, SubType, ValType,
@@ -24,7 +21,7 @@ pub(super) struct Prepared {
     property_type: Option<u32>,
     property_objects: HashMap<LocalDelegatedPropertyId, u32>,
     /// One object per delegated member property, the value `getValue` receives.
-    delegated_properties: HashMap<krusty::fir::PropertyId, u32>,
+    delegated_properties: HashMap<PropertyId, u32>,
 }
 
 /// Reserve an accessor function per plan and one global per property object.
@@ -57,17 +54,15 @@ pub(super) fn prepare(ir: &IrFile, module: &mut Module, runtime: &Runtime) -> Pr
         let IrExpr::Checked(operation) = expression else {
             continue;
         };
-        let IrCheckedOperation::PropertyReference {
-            target: FirPropertyReferenceTarget::Module(property),
-            delegated: true,
-            ..
-        } = operation.as_ref()
-        else {
+        let Some(reference) = operation.module_property_reference() else {
             continue;
         };
+        if !reference.delegated {
+            continue;
+        }
         let struct_type = property_struct(module);
         delegated_properties
-            .entry(*property)
+            .entry(reference.property)
             .or_insert_with(|| module.global(ValType::nullable(struct_type)));
     }
     drop(property_struct);
@@ -184,7 +179,7 @@ impl Body<'_> {
 
     pub(super) fn delegated_property_reference(
         &mut self,
-        property: krusty::fir::PropertyId,
+        property: PropertyId,
     ) -> Result<(), Unsupported> {
         let name = self
             .ir

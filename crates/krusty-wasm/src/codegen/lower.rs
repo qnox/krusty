@@ -1907,13 +1907,10 @@ impl<'a> Body<'a> {
                 self.local_property_reference(&reference)?
             }
             IrExpr::Checked(ref operation)
-                if let krusty::ir::IrCheckedOperation::PropertyReference {
-                    target: krusty::fir::FirPropertyReferenceTarget::Module(property),
-                    delegated: true,
-                    ..
-                } = &**operation =>
+                if let Some(reference) = operation.module_property_reference()
+                    && reference.delegated =>
             {
-                self.delegated_property_reference(*property)?
+                self.delegated_property_reference(reference.property)?
             }
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));

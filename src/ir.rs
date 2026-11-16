@@ -2879,7 +2879,7 @@ pub use generated_members::{
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
 };
 mod checked_operation;
-pub use checked_operation::IrCheckedOperation;
+pub use checked_operation::{IrCheckedOperation, IrModulePropertyReference};
 mod exported_entries;
 mod function_parameters;
 pub use function_parameters::*;
