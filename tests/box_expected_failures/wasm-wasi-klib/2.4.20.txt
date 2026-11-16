@@ -286,7 +286,6 @@ callableReference/property/delegated.kt
 callableReference/property/delegatedMutable.kt
 callableReference/property/enumNameOrdinal.kt
 callableReference/property/extensionProperty.kt
-callableReference/property/extensionPropertyReferenceWithTypeParameter.kt
 callableReference/property/extensionPropertyWithExtensionReceiver.kt
 callableReference/property/extensionPropertyWithExtensionType.kt
 callableReference/property/extensionToArray.kt
@@ -2755,7 +2754,6 @@ regressions/kt1800.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
 regressions/kt32949.kt
-regressions/kt33638.kt
 regressions/kt344.kt
 regressions/kt3442.kt
 regressions/kt35914.kt
