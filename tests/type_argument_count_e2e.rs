@@ -110,3 +110,23 @@ fun f() {
         ],
     );
 }
+
+#[test]
+fn a_type_test_or_cast_target_checks_the_arguments_it_writes() {
+    assert_errors_match_kotlinc(
+        "\
+class Box<T>
+fun cast(x: Any) = x as Box<Int, Int>
+fun test(x: Any) = x is Box<Int, Int>
+fun nested(x: Any) = x is List<Box>
+fun safe(x: Any) = x as? Box<String, String>
+fun narrowed(x: Box<String>) = x is Box
+",
+        &[
+            "2:28: one type argument expected for 'class Box<T> : Any'.",
+            "3:28: one type argument expected for 'class Box<T> : Any'.",
+            "4:32: one type argument expected for 'class Box<T> : Any'.",
+            "5:29: one type argument expected for 'class Box<T> : Any'.",
+        ],
+    );
+}

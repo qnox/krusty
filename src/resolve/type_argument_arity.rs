@@ -109,16 +109,23 @@ fn application_span(file: &crate::ast::File, reference: &TypeRef) -> Span {
 /// Transient context owned by arity checking while one type reference is resolved.
 #[derive(Default)]
 pub(super) struct TypeArgumentArityState {
-    /// The type reference whose outermost application may be written bare: an `is`/`as` target,
-    /// or the receiver of a companion extension, which names the classifier's companion scope.
+    /// The type reference whose outermost application may omit its arguments: an `is`/`as`
+    /// target, or the receiver of a companion extension, which names the classifier's companion
+    /// scope. Arguments it does write are checked like any other application's.
     bare_reference: Option<Span>,
+    /// Applications reported with a wrong argument count; their error type is already explained.
+    rejected: crate::fx_hash::HashSet<Span>,
 }
 
 impl Checker<'_> {
     /// Check the arguments written on `reference`, which the checker resolved to an application
-    /// of `classifier`.
-    pub(super) fn check_type_reference_arity(&mut self, reference: &TypeRef, classifier: TypeName) {
-        self.check_classifier_application_arity(reference, classifier);
+    /// of `classifier`. Returns whether they match; a mismatched application is an error type.
+    pub(super) fn check_type_reference_arity(
+        &mut self,
+        reference: &TypeRef,
+        classifier: TypeName,
+    ) -> bool {
+        self.check_classifier_application_arity(reference, classifier)
     }
 
     /// Run `resolve` with the outermost application of `reference` allowed to omit its arguments.
@@ -146,6 +153,12 @@ impl Checker<'_> {
                 .replace(reference.span),
             None => self.type_argument_arity.bare_reference,
         }
+    }
+
+    /// Whether resolving `reference` reported its wrong argument count, which explains its error
+    /// type.
+    pub(super) fn rejected_type_argument_count(&self, reference: &TypeRef) -> bool {
+        self.type_argument_arity.rejected.contains(&reference.span)
     }
 
     pub(super) fn restore_bare_outermost_type(&mut self, previous: Option<Span>) {
@@ -206,19 +219,20 @@ impl Checker<'_> {
     ) -> bool {
         // An import path or a class literal's receiver names a declaration; neither is a type
         // that applies arguments (class literal arguments have their own rule).
-        if reference.is_import()
-            || reference.is_class_literal_lhs()
-            || self.type_argument_arity.bare_reference == Some(reference.span)
-        {
+        if reference.is_import() || reference.is_class_literal_lhs() {
             return true;
         }
         let Some(declaration) = self.fed_source().classifier(classifier) else {
             return true;
         };
         let expected = declaration.own_type_parameter_count;
-        if own_segment_argument_count(reference) == expected {
+        let written = own_segment_argument_count(reference);
+        // A bare outermost type omits its arguments; any it does write are checked.
+        let bare = written == 0 && self.type_argument_arity.bare_reference == Some(reference.span);
+        if bare || written == expected {
             return true;
         }
+        self.type_argument_arity.rejected.insert(reference.span);
         let display =
             candidate_display::classifier_access_display_from_shape(classifier, &declaration);
         report_wrong_type_argument_count(

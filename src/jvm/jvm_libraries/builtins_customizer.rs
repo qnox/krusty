@@ -36,6 +36,16 @@ impl JvmBuiltInsCustomizer {
             base.unwrap_or_else(|| {
                 let mut classifier = LibraryType::declaration_header();
                 classifier.declaration_name = crate::types::array_declaration_name(internal);
+                // Without `.kotlin_builtins` the header still declares `Array<T>`'s one invariant
+                // formal, so its applications keep their arity; primitive arrays declare none.
+                if internal.matches("kotlin/Array") {
+                    classifier.own_type_parameter_count = 1;
+                    classifier.type_parameters = crate::types::TypeParameters::new(
+                        vec!["T".to_string()],
+                        vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
+                        vec![crate::types::TypeVariance::Invariant],
+                    );
+                }
                 classifier
             })
         } else {

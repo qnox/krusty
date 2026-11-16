@@ -136,6 +136,31 @@ fn builtin_declaration_names_preserve_semantic_and_physical_classifier_authority
 }
 
 #[test]
+fn a_customizer_owned_array_declares_its_own_type_parameters() {
+    let customizer = builtins_customizer::JvmBuiltInsCustomizer;
+    let array = customizer
+        .customize(type_name("kotlin/Array"), None)
+        .unwrap();
+    assert_eq!(array.own_type_parameter_count, 1);
+    assert_eq!(array.type_params(), &["T"]);
+    assert_eq!(
+        array.type_param_variances(),
+        &[crate::types::TypeVariance::Invariant]
+    );
+    assert_eq!(
+        array.type_param_bounds(),
+        &[vec![crate::types::Ty::nullable(crate::types::Ty::obj(
+            "kotlin/Any"
+        ))]]
+    );
+    let int_array = customizer
+        .customize(type_name("kotlin/IntArray"), None)
+        .unwrap();
+    assert_eq!(int_array.own_type_parameter_count, 0);
+    assert!(int_array.type_params().is_empty());
+}
+
+#[test]
 fn builtin_declaration_names_cover_customizer_owned_array_and_cloneable_factories() {
     let customizer = builtins_customizer::JvmBuiltInsCustomizer;
     for name in ["Cloneable", "Array", "IntArray", "UIntArray"] {

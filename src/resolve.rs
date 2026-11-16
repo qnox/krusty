@@ -39496,8 +39496,11 @@ impl<'a> Checker<'a> {
                         })
                     } else {
                         typeref_classifier(r, Some(internal)).map(|internal| {
-                            self.check_type_reference_arity(r, internal);
-                            self.obj_with_targs_name(scope, internal, r)
+                            if self.check_type_reference_arity(r, internal) {
+                                self.obj_with_targs_name(scope, internal, r)
+                            } else {
+                                Ty::Error
+                            }
                         })
                     }
                 }
@@ -49185,6 +49188,10 @@ impl<'a> Checker<'a> {
     /// Report the failed classifier binding recorded by [`Self::type_ref_ty`]. Unsupported shapes
     /// have no binding failure and continue to their shape-specific diagnostic.
     fn report_unresolved_type_ref(&mut self, r: &TypeRef) -> bool {
+        // A wrong argument count was already reported and explains the error type.
+        if self.rejected_type_argument_count(r) {
+            return true;
+        }
         if let Some(miss) = self.unresolved_type_segments.get(&(r.span.lo, r.span.hi)) {
             let message = match miss {
                 crate::symbol_resolver::ClassifierMiss::Unresolved(segment) => {
