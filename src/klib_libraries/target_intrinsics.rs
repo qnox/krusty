@@ -22,6 +22,8 @@ use crate::types::{type_name, Ty, TypeName};
 
 use super::declaration_signatures::SignedFunction;
 
+mod atomic_array_elements;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TargetIntrinsicPlatform {
     Native,
@@ -81,6 +83,9 @@ pub struct KlibIntrinsicFacts {
     /// Native's atomic accesses through a property reference to a backing field. The reference is
     /// not a value, so these never become ordinary calls: body lowering realizes the field access.
     atomic_fields: HashMap<KlibDependencyCallable, AtomicOperation>,
+    /// Native's atomic accesses to one element of an array, which body lowering realizes as that
+    /// element access.
+    atomic_array_elements: HashMap<KlibDependencyCallable, AtomicOperation>,
 }
 
 impl KlibIntrinsicFacts {
@@ -132,18 +137,29 @@ impl KlibIntrinsicFacts {
         arena: &KlibIrArena,
         function: &KlibIrFunction,
     ) {
-        if let Some(operation) = authenticate_atomic_field(platform, arena, function) {
-            let KlibIrSignature::Public(signature) = &function.base.symbol.signature else {
-                unreachable!("an authenticated atomic field access has a public signature");
-            };
-            self.atomic_fields.insert(
-                KlibDependencyCallable {
-                    module: module.to_owned(),
-                    declaration: KlibDeclarationSignature::Public(signature.clone()),
-                },
-                operation,
-            );
-            return;
+        for (authenticate, accesses) in [
+            (
+                authenticate_atomic_field as fn(_, _, _) -> _,
+                &mut self.atomic_fields,
+            ),
+            (
+                atomic_array_elements::authenticate,
+                &mut self.atomic_array_elements,
+            ),
+        ] {
+            if let Some(operation) = authenticate(platform, arena, function) {
+                let KlibIrSignature::Public(signature) = &function.base.symbol.signature else {
+                    unreachable!("an authenticated atomic access has a public signature");
+                };
+                accesses.insert(
+                    KlibDependencyCallable {
+                        module: module.to_owned(),
+                        declaration: KlibDeclarationSignature::Public(signature.clone()),
+                    },
+                    operation,
+                );
+                return;
+            }
         }
         let Some(shape) = authenticate_ir(platform, arena, function) else {
             return;
@@ -179,6 +195,24 @@ impl KlibIntrinsicFacts {
         self.atomic_fields
             .iter()
             .map(|(identity, operation)| (identity, *operation))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn atomic_array_element_declarations(
+        &self,
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, AtomicOperation)> {
+        self.atomic_array_elements
+            .iter()
+            .map(|(identity, operation)| (identity, *operation))
+    }
+
+    /// The atomic array element access `identity` declares, when it is an authenticated Native
+    /// one.
+    pub(crate) fn atomic_array_element(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<AtomicOperation> {
+        self.atomic_array_elements.get(identity).copied()
     }
 
     /// The atomic field access `identity` declares, when it is an authenticated Native one.
@@ -687,76 +721,6 @@ pub(super) fn authenticate(
     }
 }
 
-/// Native's `arrayCopy(array, fromIndex, destination, toIndex, count)` in `kotlin.collections`:
-/// one `@GCUnsafeCall` entry per array classifier, both arrays of that classifier.
-const NATIVE_ARRAY_COPY_ENTRIES: [(&str, &str); 9] = [
-    ("Kotlin_Array_copyImpl", "kotlin/Array"),
-    ("Kotlin_BooleanArray_copyImpl", "kotlin/BooleanArray"),
-    ("Kotlin_ByteArray_copyImpl", "kotlin/ByteArray"),
-    ("Kotlin_CharArray_copyImpl", "kotlin/CharArray"),
-    ("Kotlin_ShortArray_copyImpl", "kotlin/ShortArray"),
-    ("Kotlin_IntArray_copyImpl", "kotlin/IntArray"),
-    ("Kotlin_LongArray_copyImpl", "kotlin/LongArray"),
-    ("Kotlin_FloatArray_copyImpl", "kotlin/FloatArray"),
-    ("Kotlin_DoubleArray_copyImpl", "kotlin/DoubleArray"),
-];
-
-fn native_array_copy(
-    placement: crate::libraries::CallablePlacement,
-    declaration: &KotlinFunction,
-    classifier: &str,
-) -> Option<KlibIntrinsicShape> {
-    let [array, from, destination, to, count] = declaration.params.as_slice() else {
-        return None;
-    };
-    let array_ty = native_array_type(array, classifier)?;
-    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/collections"))
-        && declaration.receiver.is_none()
-        && destination == array
-        && [from, to, count]
-            .into_iter()
-            .all(|index| semantic_type(index) == Some(Ty::Int))
-        && exact_type(&declaration.ret, "kotlin/Unit"))
-    .then(|| KlibIntrinsicShape {
-        operation: CompilerIntrinsic::ArrayCopy,
-        kind: ExternalCallableKind::TopLevel,
-        receiver: None,
-        params: vec![array_ty, Ty::Int, array_ty, Ty::Int, Ty::Int],
-        ret: Ty::Unit,
-    })
-}
-
-/// A primitive array classifier exactly, or `Array<Any?>`: the reference array entry copies
-/// references whatever the arrays' element types.
-fn native_array_type(ty: &KotlinType, classifier: &str) -> Option<Ty> {
-    if classifier != "kotlin/Array" {
-        return exact_type(ty, classifier).then(|| Ty::obj(classifier));
-    }
-    let KotlinType::Class {
-        internal,
-        args,
-        nullable: false,
-        shape:
-            KotlinFunctionTypeShape {
-                receiver: false,
-                context_count: 0,
-                suspend: false,
-            },
-    } = ty
-    else {
-        return None;
-    };
-    let [element] = args.as_slice() else {
-        return None;
-    };
-    (internal == classifier && is_nullable_any(element)).then(|| {
-        Ty::obj_args(
-            classifier,
-            &[Ty::nullable(Ty::obj_name(crate::types::wk::any()))],
-        )
-    })
-}
-
 fn is_nullable_any(ty: &KotlinType) -> bool {
     matches!(
         ty,
@@ -876,6 +840,40 @@ fn string_range_equals(
     })
 }
 
+/// `arrayCopy(array, fromIndex: Int, destination, toIndex: Int, count: Int)` in
+/// `kotlin.collections`, where both arrays are `declared`, the array of `element`: a specialized
+/// primitive array, or `Array<Any?>`.
+fn array_copy(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    element: Ty,
+    declared: KotlinType,
+) -> Option<KlibIntrinsicShape> {
+    let array = Ty::array(element);
+    if declared.internal().map(type_name) != array.obj_internal() {
+        return None;
+    }
+    let is_array = |ty: &KotlinType| *ty == declared;
+    let [source, from, destination, to, count] = declaration.params.as_slice() else {
+        return None;
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/collections"))
+        && declaration.receiver.is_none()
+        && is_array(source)
+        && is_array(destination)
+        && [from, to, count]
+            .into_iter()
+            .all(|index| semantic_type(index) == Some(Ty::Int))
+        && exact_type(&declaration.ret, "kotlin/Unit"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::ArrayCopy { array },
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params: vec![array, Ty::Int, array, Ty::Int, Ty::Int],
+        ret: Ty::Unit,
+    })
+}
+
 fn native(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
@@ -912,12 +910,88 @@ fn native(
                 },
                 Ty::Double,
             ),
-            entry
-                if let Some((_, classifier)) = NATIVE_ARRAY_COPY_ENTRIES
-                    .iter()
-                    .find(|(array_copy, _)| *array_copy == entry) =>
-            {
-                return native_array_copy(placement, declaration, classifier)
+            "Kotlin_Array_copyImpl" => {
+                let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+                return array_copy(
+                    placement,
+                    declaration,
+                    any,
+                    KotlinType::Class {
+                        internal: "kotlin/Array".to_owned(),
+                        args: vec![KotlinType::Class {
+                            internal: "kotlin/Any".to_owned(),
+                            args: Vec::new(),
+                            nullable: true,
+                            shape: KotlinFunctionTypeShape::default(),
+                        }],
+                        nullable: false,
+                        shape: KotlinFunctionTypeShape::default(),
+                    },
+                );
+            }
+            "Kotlin_BooleanArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Boolean,
+                    KotlinType::class("kotlin/BooleanArray"),
+                )
+            }
+            "Kotlin_ByteArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Byte,
+                    KotlinType::class("kotlin/ByteArray"),
+                )
+            }
+            "Kotlin_CharArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Char,
+                    KotlinType::class("kotlin/CharArray"),
+                )
+            }
+            "Kotlin_ShortArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Short,
+                    KotlinType::class("kotlin/ShortArray"),
+                )
+            }
+            "Kotlin_IntArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Int,
+                    KotlinType::class("kotlin/IntArray"),
+                )
+            }
+            "Kotlin_LongArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Long,
+                    KotlinType::class("kotlin/LongArray"),
+                )
+            }
+            "Kotlin_FloatArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Float,
+                    KotlinType::class("kotlin/FloatArray"),
+                )
+            }
+            "Kotlin_DoubleArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Double,
+                    KotlinType::class("kotlin/DoubleArray"),
+                )
             }
             "Kotlin_Int_toStringRadix" => return radix_to_string(placement, declaration, Ty::Int),
             "Kotlin_Long_toStringRadix" => {
@@ -1755,126 +1829,6 @@ mod tests {
     }
 
     #[test]
-    fn native_gc_unsafe_array_copy_requires_the_exact_entry_package_and_shape() {
-        let gc_unsafe = |callee: &str| AnnotationApplication {
-            identity: type_name("kotlin/native/internal/GCUnsafeCall"),
-            arguments: vec![(
-                "callee".to_owned(),
-                AnnotationArgument::String(callee.to_owned()),
-            )],
-        };
-        let native = Some(TargetIntrinsicPlatform::Native);
-        let collections =
-            crate::libraries::CallablePlacement::Package(type_name("kotlin/collections"));
-        let ints = [
-            "kotlin/IntArray",
-            "kotlin/Int",
-            "kotlin/IntArray",
-            "kotlin/Int",
-            "kotlin/Int",
-        ];
-        let exact = declaration(
-            "arrayCopy",
-            &ints,
-            "kotlin/Unit",
-            gc_unsafe("Kotlin_IntArray_copyImpl"),
-        );
-        let array = Ty::obj("kotlin/IntArray");
-        assert_eq!(
-            authenticate(native, collections, &exact),
-            Some(KlibIntrinsicShape {
-                operation: CompilerIntrinsic::ArrayCopy,
-                kind: ExternalCallableKind::TopLevel,
-                receiver: None,
-                params: vec![array, Ty::Int, array, Ty::Int, Ty::Int],
-                ret: Ty::Unit,
-            })
-        );
-        assert!(authenticate(Some(TargetIntrinsicPlatform::Wasm), collections, &exact).is_none());
-        let spoof = crate::libraries::CallablePlacement::Package(type_name("spoof"));
-        assert!(authenticate(native, spoof, &exact).is_none());
-        let other_entry = declaration(
-            "arrayCopy",
-            &ints,
-            "kotlin/Unit",
-            gc_unsafe("Kotlin_LongArray_copyImpl"),
-        );
-        assert!(authenticate(native, collections, &other_entry).is_none());
-        let mixed = declaration(
-            "arrayCopy",
-            &[
-                "kotlin/IntArray",
-                "kotlin/Int",
-                "kotlin/LongArray",
-                "kotlin/Int",
-                "kotlin/Int",
-            ],
-            "kotlin/Unit",
-            gc_unsafe("Kotlin_IntArray_copyImpl"),
-        );
-        assert!(authenticate(native, collections, &mixed).is_none());
-        let short = declaration(
-            "arrayCopy",
-            &ints[..4],
-            "kotlin/Unit",
-            gc_unsafe("Kotlin_IntArray_copyImpl"),
-        );
-        assert!(authenticate(native, collections, &short).is_none());
-        let mut bodyful = declaration(
-            "arrayCopy",
-            &ints,
-            "kotlin/Unit",
-            gc_unsafe("Kotlin_IntArray_copyImpl"),
-        );
-        bodyful.is_external = false;
-        assert!(authenticate(native, collections, &bodyful).is_none());
-
-        let any_array = KotlinType::Class {
-            internal: "kotlin/Array".to_owned(),
-            args: vec![KotlinType::Class {
-                internal: "kotlin/Any".to_owned(),
-                args: Vec::new(),
-                nullable: true,
-                shape: KotlinFunctionTypeShape::default(),
-            }],
-            nullable: false,
-            shape: KotlinFunctionTypeShape::default(),
-        };
-        let mut references = declaration(
-            "arrayCopy",
-            &ints,
-            "kotlin/Unit",
-            gc_unsafe("Kotlin_Array_copyImpl"),
-        );
-        references.params[0] = any_array.clone();
-        references.params[2] = any_array;
-        let reference_array = Ty::obj_args(
-            "kotlin/Array",
-            &[Ty::nullable(Ty::obj_name(crate::types::wk::any()))],
-        );
-        assert_eq!(
-            authenticate(native, collections, &references),
-            Some(KlibIntrinsicShape {
-                operation: CompilerIntrinsic::ArrayCopy,
-                kind: ExternalCallableKind::TopLevel,
-                receiver: None,
-                params: vec![reference_array, Ty::Int, reference_array, Ty::Int, Ty::Int],
-                ret: Ty::Unit,
-            })
-        );
-        let mut raw = declaration(
-            "arrayCopy",
-            &ints,
-            "kotlin/Unit",
-            gc_unsafe("Kotlin_Array_copyImpl"),
-        );
-        let raw_array = KotlinType::class("kotlin/Array");
-        raw.params[0] = raw_array.clone();
-        raw.params[2] = raw_array;
-        assert!(authenticate(native, collections, &raw).is_none());
-    }
-
-    #[test]
     fn wasm_array_copy_requires_its_exact_generic_declaration() {
         let wasm = Some(TargetIntrinsicPlatform::Wasm);
         let internal =
@@ -2020,5 +1974,123 @@ mod tests {
         assert!(authenticate(native, text, &wrong_result).is_none());
         let spoofed = range_equals(&params, "kotlin/Boolean", "User_String_unsafeRangeEquals");
         assert!(authenticate(native, text, &spoofed).is_none());
+    }
+
+    #[test]
+    fn native_gc_unsafe_array_copy_requires_the_exact_entry_package_and_arrays() {
+        let gc_unsafe = |callee: &str| AnnotationApplication {
+            identity: type_name("kotlin/native/internal/GCUnsafeCall"),
+            arguments: vec![(
+                "callee".to_owned(),
+                AnnotationArgument::String(callee.to_owned()),
+            )],
+        };
+        let native = Some(TargetIntrinsicPlatform::Native);
+        let collections =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/collections"));
+        let copy = |array: KotlinType, entry: &str| {
+            let mut declaration = declaration(
+                "arrayCopy",
+                &[
+                    "kotlin/Int",
+                    "kotlin/Int",
+                    "kotlin/Int",
+                    "kotlin/Int",
+                    "kotlin/Int",
+                ],
+                "kotlin/Unit",
+                gc_unsafe(entry),
+            );
+            declaration.params[0] = array.clone();
+            declaration.params[2] = array;
+            declaration
+        };
+        let any_array = KotlinType::Class {
+            internal: "kotlin/Array".to_owned(),
+            args: vec![KotlinType::Class {
+                internal: "kotlin/Any".to_owned(),
+                args: Vec::new(),
+                nullable: true,
+                shape: KotlinFunctionTypeShape::default(),
+            }],
+            nullable: false,
+            shape: KotlinFunctionTypeShape::default(),
+        };
+        for (entry, declared, array) in [
+            (
+                "Kotlin_IntArray_copyImpl",
+                KotlinType::class("kotlin/IntArray"),
+                Ty::array(Ty::Int),
+            ),
+            (
+                "Kotlin_BooleanArray_copyImpl",
+                KotlinType::class("kotlin/BooleanArray"),
+                Ty::array(Ty::Boolean),
+            ),
+            (
+                "Kotlin_Array_copyImpl",
+                any_array.clone(),
+                Ty::array(Ty::nullable(Ty::obj("kotlin/Any"))),
+            ),
+        ] {
+            assert_eq!(
+                authenticate(native, collections, &copy(declared.clone(), entry)),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::ArrayCopy { array },
+                    kind: ExternalCallableKind::TopLevel,
+                    receiver: None,
+                    params: vec![array, Ty::Int, array, Ty::Int, Ty::Int],
+                    ret: Ty::Unit,
+                }),
+                "{entry}"
+            );
+            assert!(
+                authenticate(None, collections, &copy(declared.clone(), entry)).is_none(),
+                "{entry}"
+            );
+            assert!(
+                authenticate(
+                    native,
+                    crate::libraries::CallablePlacement::Package(type_name("kotlin")),
+                    &copy(declared.clone(), entry)
+                )
+                .is_none(),
+                "{entry}"
+            );
+            let mut mixed = copy(declared.clone(), entry);
+            mixed.params[2] = KotlinType::class("kotlin/LongArray");
+            assert!(
+                authenticate(native, collections, &mixed).is_none(),
+                "{entry}"
+            );
+            let mut counted_long = copy(declared, entry);
+            counted_long.params[4] = KotlinType::class("kotlin/Long");
+            assert!(
+                authenticate(native, collections, &counted_long).is_none(),
+                "{entry}"
+            );
+        }
+        // An entry names the one array kind it copies.
+        assert!(authenticate(
+            native,
+            collections,
+            &copy(
+                KotlinType::class("kotlin/LongArray"),
+                "Kotlin_IntArray_copyImpl"
+            )
+        )
+        .is_none());
+        assert!(authenticate(
+            native,
+            collections,
+            &copy(
+                KotlinType::class("kotlin/IntArray"),
+                "Kotlin_Array_copyImpl"
+            )
+        )
+        .is_none());
+        assert!(
+            authenticate(native, collections, &copy(any_array, "User_Array_copyImpl")).is_none()
+        );
     }
 }

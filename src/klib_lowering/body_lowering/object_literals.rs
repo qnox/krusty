@@ -52,6 +52,8 @@ impl SuperclassForwards {
 
 /// The fields an object literal's properties with storage add after its captured values.
 struct ObjectStorage<'a> {
+    /// The serialized declaration of the object's class.
+    declaring: &'a KlibIrSymbol,
     first_index: u32,
     fields: Vec<(&'a KlibIrSymbol, Ty, bool)>,
     /// The object's properties with a backing field, each with that field.
@@ -245,6 +247,7 @@ impl<'a> BodyLowering<'a> {
             &supertypes,
             &capture_fields,
             &ObjectStorage {
+                declaring: &class.base.symbol,
                 first_index: capture_count,
                 fields: storage,
                 properties: super::super::class_storage::backed_properties(&class.members),
@@ -734,6 +737,7 @@ impl<'a> BodyLowering<'a> {
         }
         let fields = super::instance_storage::InstanceStorageFrame::object_member(
             class,
+            storage.declaring,
             storage.first_index,
             storage.fields.iter().copied(),
             storage.properties.clone(),

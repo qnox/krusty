@@ -35,7 +35,7 @@ use declared_capabilities::{
     declares_its_own_comparable, implemented_collections, implemented_dependencies,
     overrides_a_throwable_accessor,
 };
-mod atomic_fields;
+mod atomic_accesses;
 mod functions;
 mod implementor_dispatch;
 mod imported_functions;
@@ -2316,6 +2316,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 } = &**checked_op =>
             {
                 self.atomic_field(*operation, *receiver, *class, *index, operands)
+            }
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::AtomicArrayElement {
+                    operation,
+                    array,
+                    index,
+                    operands,
+                } = &**checked_op =>
+            {
+                self.atomic_array_element(*operation, *array, *index, operands)
             }
             IrExpr::Return(_)
             | IrExpr::Variable { .. }

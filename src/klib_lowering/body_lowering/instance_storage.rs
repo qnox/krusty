@@ -28,6 +28,8 @@ struct Field<'a> {
 #[derive(Clone)]
 pub(super) struct InstanceStorageFrame<'a> {
     class: ClassId,
+    /// The serialized declaration of `class`, which declares every one of `fields`.
+    declaring: &'a KlibIrSymbol,
     receiver: Option<Ty>,
     fields: Vec<Field<'a>>,
     /// A member's class properties with a backing field: the property, then that field.
@@ -48,6 +50,7 @@ impl<'a> InstanceStorageFrame<'a> {
     ) -> Self {
         Self {
             class,
+            declaring: &plan.header.class.base.symbol,
             receiver: Some(super::super::class_headers::declared_receiver(
                 plan.header.contract,
             )),
@@ -69,28 +72,32 @@ impl<'a> InstanceStorageFrame<'a> {
 
     pub(super) fn local_initializer(
         class: ClassId,
+        declaring: &'a KlibIrSymbol,
         receiver: Ty,
         fields: &[super::super::same_library_class::LocalStoredField<'a>],
     ) -> Self {
-        Self::local(class, receiver, fields, Access::Initializer)
+        Self::local(class, declaring, receiver, fields, Access::Initializer)
     }
 
     pub(super) fn local_member(
         class: ClassId,
+        declaring: &'a KlibIrSymbol,
         receiver: Ty,
         fields: &[super::super::same_library_class::LocalStoredField<'a>],
     ) -> Self {
-        Self::local(class, receiver, fields, Access::Member)
+        Self::local(class, declaring, receiver, fields, Access::Member)
     }
 
     fn local(
         class: ClassId,
+        declaring: &'a KlibIrSymbol,
         receiver: Ty,
         fields: &[super::super::same_library_class::LocalStoredField<'a>],
         access: Access,
     ) -> Self {
         Self {
             class,
+            declaring,
             receiver: Some(receiver),
             fields: fields
                 .iter()
@@ -107,11 +114,12 @@ impl<'a> InstanceStorageFrame<'a> {
         }
     }
 
-    /// A member body of `class`, reading its receiver's fields, each with its declared type and
-    /// finality, and the `properties` those fields back. A value class member's one field is its
-    /// value, which it never writes.
+    /// A member body of `class`, the class `declaring` declares, reading its receiver's fields,
+    /// each with its declared type and finality, and the `properties` those fields back. A value
+    /// class member's one field is its value, which it never writes.
     pub(super) fn member(
         class: ClassId,
+        declaring: &'a KlibIrSymbol,
         fields: impl IntoIterator<Item = (&'a KlibIrSymbol, Ty, bool)>,
         properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
         receiver: Option<Ty>,
@@ -119,6 +127,7 @@ impl<'a> InstanceStorageFrame<'a> {
     ) -> Self {
         Self {
             class,
+            declaring,
             receiver,
             fields: fields
                 .into_iter()
@@ -143,12 +152,13 @@ impl<'a> InstanceStorageFrame<'a> {
     /// `fields` its properties with storage declare, from `first_index`.
     pub(super) fn object_member(
         class: ClassId,
+        declaring: &'a KlibIrSymbol,
         first_index: u32,
         fields: impl IntoIterator<Item = (&'a KlibIrSymbol, Ty, bool)>,
         properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
         receiver: Ty,
     ) -> Self {
-        let mut frame = Self::member(class, fields, properties, Some(receiver), false);
+        let mut frame = Self::member(class, declaring, fields, properties, Some(receiver), false);
         for field in &mut frame.fields {
             field.index += first_index;
         }
@@ -208,9 +218,13 @@ impl<'a> BodyLowering<'a> {
         Ok(self.typed(store, Ty::Unit))
     }
 
+    /// A field access, whose super qualifier, when it has one, names the class through which it
+    /// reaches the field. Every field the frame stores is its own class's, so a qualifier names
+    /// that class; one naming a superclass reaches storage this frame does not own.
     pub(super) fn initialized_field(
         &mut self,
         symbol: &KlibIrSymbol,
+        super_qualifier: Option<&KlibIrSymbol>,
         receiver: Option<KlibIrExprId>,
         value: Option<KlibIrExprId>,
         ty: Ty,
@@ -222,6 +236,13 @@ impl<'a> BodyLowering<'a> {
                 "a field read"
             });
         };
+        if super_qualifier.is_some_and(|qualifier| qualifier != frame.declaring) {
+            return unsupported(if value.is_some() {
+                "a superclass field write"
+            } else {
+                "a superclass field read"
+            });
+        }
         if value.is_some() && matches!(frame.access, Access::ValueReadOnly) {
             return unsupported("a field write");
         }

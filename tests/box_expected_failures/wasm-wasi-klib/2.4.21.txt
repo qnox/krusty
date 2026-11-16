@@ -2287,7 +2287,6 @@ ranges/expression/simpleRange.kt
 ranges/expression/simpleRangeWithNonConstantEnds.kt
 ranges/expression/simpleSteppedDownTo.kt
 ranges/expression/simpleSteppedRange.kt
-ranges/forByteProgressionWithIntIncrement.kt
 ranges/forInCharSequenceLengthDecreasedInLoopBody.kt
 ranges/forInCharSequenceLengthIncreasedInLoopBody.kt
 ranges/forInCharSequenceWithCustomIterator.kt

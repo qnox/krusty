@@ -113,10 +113,6 @@ pub enum CompilerIntrinsic {
     /// length)`, an `@ExcludedFromCodegen` declaration kotlinc lowers to `array.copy` over the
     /// two storage arrays.
     ArrayStorageCopy,
-    /// Native's `arrayCopy` of one array classifier (`@GCUnsafeCall("Kotlin_IntArray_copyImpl")`):
-    /// copy `count` elements of `array` from `fromIndex` to `destination` at `toIndex`, as if
-    /// through a temporary when the two ranges overlap.
-    ArrayCopy,
     CharCode,
     StringLength,
     /// `String.get(Int): Char`, the index operator on a string.
@@ -245,6 +241,13 @@ pub enum CompilerIntrinsic {
     /// Native's runtime comparison of two `String` ranges' UTF-16 units, whose bounds the stdlib
     /// already checked (`kotlin.text.unsafeRangeEquals`, a private `@GCUnsafeCall` external).
     StringRangeEquals,
+    /// Native's runtime copy of `count` elements of one array into another of its kind, a
+    /// specialized primitive array or `Array<Any?>` (`kotlin.collections.arrayCopy`, a
+    /// `@GCUnsafeCall` external without a body). It checks both ranges itself and copies as if
+    /// through a temporary buffer, so the two ranges may overlap within one array.
+    ArrayCopy {
+        array: crate::types::Ty,
+    },
     /// A fully normalized `Result` helper reached from an expanded library inline body.
     ResultFailure(ResultFailureIntrinsic),
     /// `next()` declared by a Kotlin primitive iterator (`kotlin.collections.IntIterator.next`).
