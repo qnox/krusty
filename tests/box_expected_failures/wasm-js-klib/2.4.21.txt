@@ -335,7 +335,6 @@ casts/functions/reifiedIsFunKBig.kt
 casts/functions/reifiedIsFunKSmall.kt
 casts/functions/reifiedSafeAsFunKBig.kt
 casts/functions/reifiedSafeAsFunKSmall.kt
-casts/functions/safeAsFunKBig.kt
 casts/isNullablePrimitive.kt
 casts/kt50577.kt
 casts/kt53677.kt
