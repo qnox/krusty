@@ -2695,7 +2695,8 @@ fn callee_kind(callee: &Callee) -> &'static str {
         Callee::CrossFile { .. } => "cross-file",
         Callee::Module { .. }
         | Callee::ModuleWithDefaults { .. }
-        | Callee::ModuleDefaultEntry { .. } => "same-module",
+        | Callee::ModuleDefaultEntry { .. }
+        | Callee::ModuleConstructorDefaultEntry { .. } => "same-module",
         Callee::External { .. } => "dependency",
         Callee::Static { .. } => "static",
         Callee::Virtual { .. } => "virtual",

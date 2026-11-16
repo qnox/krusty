@@ -1878,6 +1878,15 @@ fn specialize_callee(
             specialize_tys(params, bindings);
             specialize_ty(ret, bindings);
         }
+        Callee::ModuleConstructorDefaultEntry {
+            outer, params, ret, ..
+        } => {
+            specialize_tys(params, bindings);
+            specialize_ty(ret, bindings);
+            if let Some(outer) = outer {
+                specialize_ty(outer, bindings);
+            }
+        }
         Callee::ModuleWithDefaults {
             params,
             ret,
