@@ -32,6 +32,12 @@ impl KlibBodyDeclarationModifiers {
         !self.is_external && !self.property_is_external && self.modality.is_abstract()
     }
 
+    /// Whether the declaration is abstract: a call of it runs the override the receiver's class
+    /// supplies, never a body of its own.
+    pub fn is_abstract(self) -> bool {
+        self.modality.is_abstract()
+    }
+
     pub(crate) fn function(declaration: &KotlinFunction) -> Self {
         Self {
             is_inline: declaration.is_inline,

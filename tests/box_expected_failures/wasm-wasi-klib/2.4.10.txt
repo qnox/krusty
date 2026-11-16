@@ -2335,7 +2335,6 @@ primitiveTypes/numberToChar/abstractMethodInSuperinterface.kt
 primitiveTypes/reassignDestructured.kt
 primitiveTypes/smartCastOnNullableDoubleIdentityEquals.kt
 primitiveTypes/stringEqualsHashCodeToString.kt
-primitiveTypes/virtualCallToCustomNumber.kt
 privateConstructors/inline.kt
 properties/PrivatePropertyOfComplexGenericFunctionType.kt
 properties/accessorForProtectedPropertyWithPrivateSetter.kt
