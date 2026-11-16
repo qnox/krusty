@@ -532,6 +532,78 @@ fun box(): String {
     );
 }
 
+/// How kotlinc-wasm codes a captured value class, a nullable value and a shared `var` in a function
+/// value's class name: a value class over a primitive or an unsigned number by `V` and its qualified
+/// name, and a value class over a reference or over another value class, a nullable value and a
+/// shared cell as the reference `A`; a type parameter as its bound. The expected names are
+/// kotlinc-wasm's for this program (2.4.21; wasm-js and wasm-wasi agree), taken by running it there.
+#[test]
+fn wasm_function_values_code_captured_value_classes() {
+    expect_wasm_box(
+        r##"package p
+
+value class Id(val v: Int) {
+    fun show(): Int = v
+}
+
+value class Text(val s: String)
+
+value class Wrapped(val id: Id)
+
+class Outer {
+    value class Inner(val v: Long)
+}
+
+fun name(value: Any): String {
+    val text = "$value"
+    var name = ""
+    var digits = -1
+    for (c in text) {
+        if (digits >= 0) {
+            if (c !in '0'..'9') return "bad hash: $text"
+            digits++
+        } else if (c == '@') {
+            digits = 0
+        } else {
+            name += c
+        }
+    }
+    return if (digits > 0) name else "no hash: $text"
+}
+
+fun <T : Int> generic(t: T): String = name({ t })
+
+fun box(): String {
+    val id = Id(1)
+    val text = Text("s")
+    val wrapped = Wrapped(id)
+    val inner = Outer.Inner(2L)
+    val maybe: Int? = 3
+    val maybeId: Id? = id
+    var shared = 4
+    val names = arrayOf(
+        name({ id.v }),
+        name({ text.s }),
+        name({ wrapped.id }),
+        name({ inner.v }),
+        name({ maybe }),
+        name({ maybeId }),
+        name({ shared++ }),
+        name(id::show),
+        generic(5),
+    )
+    var result = ""
+    for (name in names) result += if (result.isEmpty()) name else " $name"
+    val expected = "Function0_bound1_Vp_Id Function0_bound1_A Function0_bound1_A " +
+        "Function0_bound1_Vp_Outer_Inner Function0_bound1_A Function0_bound1_A Function0_bound1_A " +
+        "KFunction0R_bound1_Vp_Id Function0_bound1_I"
+    return if (result == expected) "OK" else result
+}
+"##,
+        "wasmFunctionValueCaptureCodes",
+    );
+}
+
 /// What a constructor that reaches back into its own enum finds, as kotlinc-wasm builds an enum:
 /// each constant is published once constructed, and a constant with a body right after its super
 /// call, so its own body already finds it. The expected log is kotlinc-wasm's for this program
@@ -1493,6 +1565,28 @@ mod value_class_equality;
 #[path = "wasm_dependency_constructor_exports.rs"]
 mod dependency_constructor_exports;
 
+// PLATFORM-SPECIFIC: the whole portable programs also exercise selected stdlib member calls
+// through each Wasm target's real KLIB provider, registry and executable runtime.
+#[test]
+fn wasm_whole_catch_programs_realize_their_library_member_calls() {
+    for (source, stem) in [
+        (
+            include_str!("box_regressions/unusedCatchParameterName.kt"),
+            "wasmUnusedCatchLibraryMembers",
+        ),
+        (
+            include_str!("box_regressions/inlineCatchParameterNames.kt"),
+            "wasmInlineCatchLibraryMembers",
+        ),
+        (
+            include_str!("box_regressions/inlinedLibraryErrorInsideTry.kt"),
+            "wasmInlinedLibraryErrorInsideTry",
+        ),
+    ] {
+        expect_wasm_box(source, stem);
+    }
+}
+
 #[path = "wasm_escaping_closures.rs"]
 mod escaping_closures;
 
@@ -1501,6 +1595,9 @@ mod default_identity_hash;
 
 #[path = "wasm_type_of.rs"]
 mod type_of;
+
+#[path = "wasm_char_sequence_appends.rs"]
+mod char_sequence_appends;
 
 #[test]
 fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
@@ -1544,6 +1641,52 @@ fn wasm_generic_elvis_preserves_its_non_null_type_parameter() {
     }
 }
 
+// PLATFORM-SPECIFIC: kotlinc-wasm stores a library file's constant initializer in that file's
+// initialization order, as the JVM does, so an earlier initializer reading it sees the default.
+// Kotlin/Native stores every constant before any code of the file runs and reads 7 instead.
+#[test]
+fn wasm_a_library_file_stores_its_constants_in_initialization_order() {
+    let source = r#"// MODULE: lib
+// FILE: Library.kt
+package ordered
+
+private val early = peekLater()
+private var later = 7
+
+private fun peekLater(): Int = later
+
+fun earlyRead(): Int = early
+
+fun laterRead(): Int = later
+
+// MODULE: main(lib)
+// FILE: Box.kt
+import ordered.earlyRead
+import ordered.laterRead
+
+fun box(): String {
+    if (earlyRead() != 0) return "an earlier initializer sees the default: ${earlyRead()}"
+    if (laterRead() != 7) return "the constant is stored: ${laterRead()}"
+    return "OK"
+}
+"#;
+    let stem = "wasmLibraryConstantsInInitializationOrder";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete two-module program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name(),
+        );
+    }
+}
+
 // PLATFORM-SPECIFIC: a library class's dispatch table type is one type of the whole Wasm program,
 // shared by the support unit laying the class out and the module class extending it.
 #[test]
@@ -1551,4 +1694,13 @@ fn wasm_library_superclass_members_dispatch_to_the_subclass() {
     let src = include_str!("box_regressions/librarySuperclassMembersOfSubclass.kt");
     expect_reference_box(src, "librarySuperclassMembersOfSubclass");
     expect_wasm_box(src, "librarySuperclassMembersOfSubclass");
+}
+
+// PLATFORM-SPECIFIC: a library class's abstract member dispatches through the Wasm program's
+// library member stub, which the program's subclasses implement.
+#[test]
+fn wasm_library_abstract_members_dispatch_to_their_overrides() {
+    let src = include_str!("box_regressions/libraryAbstractMemberCalls.kt");
+    expect_reference_box(src, "libraryAbstractMemberCalls");
+    expect_wasm_box(src, "libraryAbstractMemberCalls");
 }
