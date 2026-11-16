@@ -94,12 +94,16 @@ fn reference_site(expr: &IrExpr) -> Option<(&krusty::fir::PropertyId, Option<u32
         target,
         dispatch_receiver,
         extension_receiver,
+        context_arguments,
         mutable,
         ..
     } = &**checked_op
     else {
         return None;
     };
+    if !context_arguments.is_empty() {
+        return None;
+    }
     // The object carries at most ONE receiver, and which of the two it is does not matter to it:
     // `x::p` binds a class's, `"ab"::ext` an extension one, and both arrive as the single operand
     // the accessor leads with. BOTH at once is a member extension property, whose accessor wants
@@ -150,11 +154,17 @@ impl<'a> FileLowering<'a> {
             target,
             dispatch_receiver,
             extension_receiver,
+            context_arguments,
             ..
         } = &**checked_op
         else {
             return "a property reference of a shape this generator does not read".to_string();
         };
+        if !context_arguments.is_empty() {
+            return "a reference to a property with context parameters, whose bound values this \
+                    generator does not carry"
+                .to_string();
+        }
         if dispatch_receiver.is_some() && extension_receiver.is_some() {
             return "a reference to a MEMBER EXTENSION property, whose accessor wants two \
                     receivers where this object has room for one"
