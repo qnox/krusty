@@ -1157,58 +1157,83 @@ fn a_block_member_names_its_block_before_the_companion_object() {
     assert_eq!(run(SRC).expect("block first"), "OK");
 }
 
+// PLATFORM-SPECIFIC: JVM member-table and metadata comparisons stay here; their complete
+// portable programs also run through the shared backend/version inventory.
+fn companion_block_source_files(program: &str) -> Vec<(String, String)> {
+    let (files, java) = krusty::conformance::split_files(program).expect("valid companion program");
+    assert!(
+        java.is_empty(),
+        "the companion programs are portable Kotlin"
+    );
+    files
+        .into_iter()
+        .map(|(name, source)| {
+            let body = companion_block_file_body(&name, &source);
+            (name, body)
+        })
+        .collect()
+}
+
+// The canonical splitter retains FILE comments and source-position padding. Keep those wrappers
+// out of the E2E compiler inputs so each original per-file program stays byte for byte unchanged.
+fn companion_block_file_body(name: &str, source: &str) -> String {
+    let source = source
+        .split_once(&format!("// FILE: {name}\n"))
+        .expect("the named canonical file")
+        .1;
+    krusty::conformance::prepare_test_source(source, krusty::conformance::TestTarget::Jvm)
+}
+
 /// A value class's block members are statics of the value class named like its other realized
 /// members: `-impl`, or kotlinc's hash when the signature mentions a value class. Their bodies
 /// erase like any static's, so a block function can return the value class unboxed.
-const VALUE_CLASS_BLOCK: &str = "@JvmInline\n\
-    value class W(val value: Int) {\n\
-    \x20   companion {\n\
-    \x20       val one get() = 1\n\
-    \x20       fun plain(x: Int) = x + 1\n\
-    \x20       fun takes(w: W) = w.value\n\
-    \x20       fun makes(): W = W(3)\n\
-    \x20   }\n\
-    \x20   fun sum() = plain(one) + takes(this) + makes().value\n\
-    }\n";
-
 #[test]
 fn value_class_block_members_take_the_value_class_member_names() {
-    const MAIN: &str = "fun box(): String {\n\
-        \x20   val r = W(1).sum()\n\
-        \x20   return if (r == 2 + 1 + 3 && W.one == 1) \"OK\" else \"r = $r\"\n\
-        }\n";
-    let src = format!("{VALUE_CLASS_BLOCK}{MAIN}");
-    assert_members_and_metadata_match_kotlinc("ValueClassBlock", &src, &["W"]);
-    assert_eq!(run(&src).expect("value class block members"), "OK");
+    let files = companion_block_source_files(include_str!(
+        "box_regressions/valueClassCompanionBlockMembers.kt"
+    ));
+    let [(_, src)] = files.as_slice() else {
+        panic!("the whole same-file companion program")
+    };
+    let src = src.strip_prefix(LANGUAGE).expect("the companion feature");
+    assert_members_and_metadata_match_kotlinc("ValueClassBlock", src, &["W"]);
+    assert_eq!(run(src).expect("value class block members"), "OK");
 }
 
 #[test]
 fn value_class_block_members_from_another_file_use_their_realized_names() {
-    const USING: &str = "fun box(): String {\n\
-        \x20   val r = W.plain(W.takes(W.makes())) + W.one\n\
-        \x20   return if (r == 4 + 1) \"OK\" else \"r = $r\"\n\
-        }\n";
+    let sources = companion_block_source_files(include_str!(
+        "box_regressions/valueClassCompanionBlockAcrossFiles.kt"
+    ));
     common::expect_box_ok_files_with_stdlib(
-        &[
-            ("W.kt", &format!("{LANGUAGE}{VALUE_CLASS_BLOCK}")),
-            ("Main.kt", &format!("{LANGUAGE}{USING}")),
-        ],
+        &sources
+            .iter()
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .collect::<Vec<_>>(),
         "SeparateFileValueClassBlock",
     );
 }
 
 #[test]
 fn library_value_class_block_members_use_their_realized_names() {
-    const MAIN: &str = "fun box(): String {\n\
-        \x20   val r = W.plain(W.takes(W.makes())) + W.one + W(1).sum()\n\
-        \x20   return if (r == 4 + 1 + 6) \"OK\" else \"r = $r\"\n\
-        }\n";
-    let result = common::expect_box_run_against(
-        "value-class-companion-block-library",
-        &format!("{LANGUAGE}{VALUE_CLASS_BLOCK}"),
-        &format!("{LANGUAGE}{MAIN}"),
-    )
-    .expect("reference kotlinc is provisioned");
+    let modules = krusty::conformance::split_modules(include_str!(
+        "box_regressions/multimodule/valueClassCompanionBlockLibrary.kt"
+    ))
+    .expect("the whole library/consumer companion program");
+    let [library, main] = modules.as_slice() else {
+        panic!("one library and its consumer")
+    };
+    let [(library_name, library)] = library.files.as_slice() else {
+        panic!("the original Lib.kt")
+    };
+    let [(main_name, main)] = main.files.as_slice() else {
+        panic!("the original Main.kt")
+    };
+    let library = companion_block_file_body(library_name, library);
+    let main = companion_block_file_body(main_name, main);
+    let result =
+        common::expect_box_run_against("value-class-companion-block-library", &library, &main)
+            .expect("reference kotlinc is provisioned");
     assert_eq!(result, "OK");
 }
 
@@ -1216,19 +1241,14 @@ fn library_value_class_block_members_use_their_realized_names() {
 /// the call names the method its declaration emits.
 #[test]
 fn ordinary_class_block_function_returning_a_value_class_runs_from_another_file() {
-    const DECLARING: &str = "@JvmInline\n\
-        value class W(val value: Int)\n\
-        class C {\n\
-        \x20   companion {\n\
-        \x20       fun makes(): W = W(1)\n\
-        \x20   }\n\
-        }\n";
-    const USING: &str = "fun box(): String = if (C.makes().value == 1) \"OK\" else \"fail\"\n";
+    let sources = companion_block_source_files(include_str!(
+        "box_regressions/ordinaryClassCompanionBlockValueResult.kt"
+    ));
     common::expect_box_ok_files_with_stdlib(
-        &[
-            ("C.kt", &format!("{LANGUAGE}{DECLARING}")),
-            ("Main.kt", &format!("{LANGUAGE}{USING}")),
-        ],
+        &sources
+            .iter()
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .collect::<Vec<_>>(),
         "SeparateFileOrdinaryBlockValueResult",
     );
 }
