@@ -64,10 +64,6 @@ pub(super) fn is_lazy(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/Lazy"])
 }
 
-pub(super) fn is_read_write_property(internal: TypeName) -> bool {
-    is_identity(internal, &["kotlin/properties/ReadWriteProperty"])
-}
-
 pub(super) fn is_read_only_property(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/properties/ReadOnlyProperty"])
 }
@@ -164,8 +160,8 @@ pub(super) fn runtime_member_classes() -> [(TypeName, &'static str); 1] {
 /// companions of the built-in types, the bases a source class's layout extends (`Number` and the
 /// throwables), the shared empty set, text, the arrays, the unsigned integers (carried as the value
 /// they wrap), the builder it constructs, the integral ranges and progressions, and the standard
-/// collection implementations. A dependency body's call of such
-/// a member, or read of such an object, is lowered here as a source one is.
+/// collection implementations. A dependency body's call of such a member, or read of such an
+/// object, is lowered here as a source one is.
 pub(in super::super) fn represents_dependency_classifier(internal: TypeName) -> bool {
     super::super::super::intrinsics::is_any(internal)
         || internal == krusty::types::wk::unit()
@@ -777,6 +773,7 @@ mod tests {
         role: Option<ClassifierRole>,
     ) -> Arc<krusty::backend::BackendClassifierFact> {
         Arc::new(krusty::backend::BackendClassifierFact {
+            klib_identity: None,
             runtime_exception: None,
             declaration_name: None,
             access: krusty::libraries::ClassifierAccess::Public,

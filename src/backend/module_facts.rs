@@ -52,6 +52,11 @@ pub trait BackendClassifierSource {
         }
     }
 
+    /// Whether `ancestor` is `classifier` or one of the supertypes its facts publish, transitively.
+    fn is_subclassifier(&self, classifier: TypeName, ancestor: TypeName) -> bool {
+        is_subclassifier(self, classifier, ancestor)
+    }
+
     /// Every builtin class (`String`, a primitive, an unsigned integer) whose classifier is a
     /// proper subtype of `classifier`, through the supertypes the classifier facts publish: the
     /// builtin values a target carrying them in representations of its own must count as
@@ -94,6 +99,8 @@ fn is_subclassifier(
 /// parser-backed member identities cannot be represented here.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BackendClassifierFact {
+    /// Exact selected-provider classifier identity, independent of constructor selections.
+    pub klib_identity: Option<crate::libraries::KlibClassIdentity>,
     pub runtime_exception: Option<crate::libraries::RuntimeExceptionLayout>,
     pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub access: crate::libraries::ClassifierAccess,
@@ -170,6 +177,7 @@ struct SourceDeclaration {
 impl BackendClassifierFact {
     fn from_library(classifier: TypeName, shape: &LibraryType) -> Self {
         Self {
+            klib_identity: shape.klib_identity.clone(),
             runtime_exception: shape.runtime_exception,
             declaration_name: shape.declaration_name.clone(),
             access: shape.access,
@@ -331,6 +339,14 @@ impl BackendModuleFacts {
                         .has(crate::fir::DeclarationFlags::ANNOTATION_CLASS)
                     && !header.flags.has(crate::fir::DeclarationFlags::ABSTRACT)
             });
+            let declared_supertypes = classifier
+                .declared_supertypes()
+                .filter_map(|ty| {
+                    crate::libraries::function_classifiers::supertype_classifier(ty.get())
+                        .non_null()
+                        .obj_internal()
+                })
+                .collect::<Box<[_]>>();
             source_supertypes.insert(
                 classifier.classifier,
                 (
@@ -338,10 +354,7 @@ impl BackendModuleFacts {
                         .then(|| index.declaration_anchor(declaration))
                         .flatten()
                         .map(|anchor| anchor.source),
-                    classifier
-                        .declared_supertypes()
-                        .filter_map(|ty| ty.get().non_null().obj_internal())
-                        .collect::<Box<[_]>>(),
+                    declared_supertypes.clone(),
                 ),
             );
             if index.is_body_local_declaration(declaration) {
@@ -420,10 +433,7 @@ impl BackendModuleFacts {
                 kind,
                 crate::libraries::TypeKind::Interface | crate::libraries::TypeKind::Annotation
             );
-            let mut direct_supertypes = classifier
-                .declared_supertypes()
-                .filter_map(|ty| ty.get().non_null().obj_internal())
-                .collect::<Vec<_>>();
+            let mut direct_supertypes = declared_supertypes.into_vec();
             if direct_supertypes.is_empty()
                 && classifier.classifier != crate::types::type_name("kotlin/Any")
             {
@@ -493,6 +503,7 @@ impl BackendModuleFacts {
             let companion = source_companion(index, declaration);
             let qualified_name = source_qualified_name(index, declaration);
             let fact = BackendClassifierFact {
+                klib_identity: None,
                 runtime_exception: None,
                 declaration_name: classifier.declaration_name.clone(),
                 access: declaration_header.visibility.into(),
@@ -1322,6 +1333,29 @@ mod tests {
             assert_eq!(class.declaration_name, fact.declaration_name);
         }
         facts
+    }
+
+    #[test]
+    fn frozen_function_supertypes_keep_their_checked_classifier() {
+        let facts = classifier_name_snapshot(
+            "package ownership.functions\n\
+             fun interface Plain { fun invoke(value: Int): Int }\n\
+             fun interface Callable : (Int) -> Int { override fun invoke(value: Int): Int }\n\
+             interface Suspending : suspend (Int) -> Int\n",
+        );
+        for (name, parent) in [
+            ("Plain", "kotlin/Any"),
+            ("Callable", "kotlin/Function1"),
+            ("Suspending", "kotlin/coroutines/SuspendFunction1"),
+        ] {
+            let classifier =
+                crate::types::type_name_child(crate::types::type_name("ownership/functions"), name);
+            assert_eq!(
+                facts.classifier(classifier).unwrap().supertypes.as_ref(),
+                &[crate::types::type_name(parent)],
+                "{name}"
+            );
+        }
     }
 
     #[test]

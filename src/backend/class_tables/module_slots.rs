@@ -13,6 +13,10 @@
 //! members takes their fixed slots, and `invoke` over a function type the fixed function slot.
 //! Interface members are numbered in [`super::module_interfaces`].
 
+mod published_slots;
+
+pub use published_slots::PublishedClassSlots;
+
 use crate::fx_hash::{HashMap, HashSet};
 
 use super::module_classes::{ForwardedMember, ModuleClass, ModuleClasses, ModuleMember};
@@ -77,11 +81,20 @@ pub(crate) enum PlannedSlot {
     Any(AnyMember),
     /// The function slot, which nothing in the hierarchy implements.
     Reserved,
+    /// A physical producer slot whose declaration is not visible in this consumer inventory.
+    Inherited { slot: u32 },
     /// The member's implementation: its own, or the one it inherits.
     Member(PlanKey),
     /// See [`super::Slot::Bridge`].
     Bridge {
         declared: CallableId,
+        target_slot: u32,
+        target: CallableId,
+    },
+    /// See [`super::Slot::DeclaredBridge`].
+    DeclaredBridge {
+        parameters: Box<[Ty]>,
+        result: Ty,
         target_slot: u32,
         target: CallableId,
     },
@@ -147,6 +160,25 @@ impl ModuleSlotPlan {
 
     /// Plan every class of `classes`, superclasses first.
     pub fn build(classes: &ModuleClasses, representation: &dyn Representation) -> Self {
+        Self::build_with_tables(classes, representation, HashMap::default())
+    }
+
+    /// Plan against already-emitted dependency layouts by their exact declaration bindings.
+    pub fn build_with_published_slots(
+        classes: &ModuleClasses,
+        representation: &dyn Representation,
+        declarations: &super::super::CheckedBackendCallables,
+        published: &dyn Fn(TypeName) -> Result<Option<PublishedClassSlots>, Unsupported>,
+    ) -> Self {
+        let tables = published_slots::bind(classes, representation, declarations, published);
+        Self::build_with_tables(classes, representation, tables)
+    }
+
+    fn build_with_tables(
+        classes: &ModuleClasses,
+        representation: &dyn Representation,
+        tables: HashMap<TypeName, Result<PlannedTable, Unsupported>>,
+    ) -> Self {
         let carriers: HashMap<PlanKey, (Box<[Ty]>, Ty)> = classes
             .iter()
             .flat_map(|(_, class)| class.members.iter())
@@ -186,7 +218,7 @@ impl ModuleSlotPlan {
             classes,
             representation,
             carriers,
-            tables: HashMap::default(),
+            tables,
         };
         // Planning is a pure function of each class, so the order classes are visited in only
         // decides which table is computed first.
@@ -263,9 +295,15 @@ impl ModuleSlotPlan {
         };
         match table.entries.get(slot as usize)? {
             PlannedSlot::Any(any) => Some(PlannedSignature::Any(*any)),
-            PlannedSlot::Reserved | PlannedSlot::FunctionBridge { .. } => {
-                Some(PlannedSignature::Untyped)
-            }
+            PlannedSlot::Reserved
+            | PlannedSlot::Inherited { .. }
+            | PlannedSlot::FunctionBridge { .. } => Some(PlannedSignature::Untyped),
+            PlannedSlot::DeclaredBridge {
+                parameters, result, ..
+            } => Some(PlannedSignature::Member {
+                parameters,
+                result: *result,
+            }),
             PlannedSlot::Member(key) => member(key),
             PlannedSlot::Bridge { declared, .. } => member(&PlanKey::Callable(*declared)),
             PlannedSlot::AccessorBridge {
@@ -287,6 +325,20 @@ impl ModuleSlotPlan {
     /// The module-wide numbers of interface members.
     pub fn interfaces(&self) -> &ModuleInterfaces {
         &self.interfaces
+    }
+
+    /// The declaration keys that share one numbered interface slot: its introduced spelling and
+    /// every inherited/redeclared alias. A target persisting physical interface entries uses
+    /// these checked keys to record stable declaration identities instead of module-local numbers.
+    pub fn interface_member_keys(&self, number: u32) -> Option<Vec<PlanKey>> {
+        if number >= self.interfaces.count() {
+            return None;
+        }
+        let member = self.interfaces.member(number);
+        let mut keys = Vec::with_capacity(member.aliases.len() + 1);
+        keys.push(member.key);
+        keys.extend(member.aliases.iter().copied());
+        Some(keys)
     }
 
     /// Every class the plan covers, with its planned table or why it has none.
@@ -495,7 +547,7 @@ impl Planner<'_> {
         let fixed = any_replaces.or((invoke && carries_references).then_some(FUNCTION_SLOT));
         let function_bridge = (fixed.is_none() && invoke).then_some(carriers.0.len());
         let mut class_replaces = None;
-        let mut bridged = Vec::new();
+        let mut bridged: Vec<(_, _, Box<[Ty]>, Ty)> = Vec::new();
         for edge in &edges {
             if edge.overridden_is_interface {
                 continue;
@@ -518,7 +570,7 @@ impl Planner<'_> {
             if self.same(carriers, declared) {
                 class_replaces = Some(slot);
             } else {
-                bridged.push((slot, overridden));
+                bridged.push((slot, overridden, declared.0.into(), declared.1));
             }
         }
         let slot = place(
@@ -530,15 +582,11 @@ impl Planner<'_> {
         if function_bridge.is_none() && bridged.is_empty() {
             return Ok(());
         }
-        // A bridge is a function of the declaring file, converting to and forwarding from module
-        // declarations; a dependency class's own overrides are carried as they are declared.
-        let module_callable = |callable| match callable {
-            ResolvedFunctionOverrideTarget::Module(callable) => Ok(callable),
-            ResolvedFunctionOverrideTarget::External(_) => {
-                Err("an override carried differently from the dependency member it overrides")
-            }
+        // A bridge is a function of the declaring file, converting to and forwarding from the
+        // override it stands for, which is always a declaration of this module.
+        let ResolvedFunctionOverrideTarget::Module(target) = callable else {
+            return Err("a dependency member overridden by no declaration of this module".into());
         };
-        let target = module_callable(callable)?;
         if let Some(arity) = function_bridge {
             entries[FUNCTION_SLOT as usize] = PlannedSlot::FunctionBridge {
                 arity,
@@ -546,11 +594,20 @@ impl Planner<'_> {
                 target,
             };
         }
-        for (base_slot, declared) in bridged {
-            entries[base_slot as usize] = PlannedSlot::Bridge {
-                declared: module_callable(declared)?,
-                target_slot: slot,
-                target,
+        for (base_slot, declared, parameters, result) in bridged {
+            entries[base_slot as usize] = match declared {
+                ResolvedFunctionOverrideTarget::Module(declared) => PlannedSlot::Bridge {
+                    declared,
+                    target_slot: slot,
+                    target,
+                },
+                // A base no file of the module declares wears the carriers the plan recorded.
+                ResolvedFunctionOverrideTarget::External(_) => PlannedSlot::DeclaredBridge {
+                    parameters,
+                    result,
+                    target_slot: slot,
+                    target,
+                },
             };
         }
         Ok(())

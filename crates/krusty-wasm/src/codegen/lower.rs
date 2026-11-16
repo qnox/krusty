@@ -201,7 +201,14 @@ pub(super) fn lower_file(
         runtime
             .callable_references
             .begin_file(module_name, ir, dependency_exports)?;
-    let call_targets = callable_registry.file_calls(ir, callables, module_facts, module)?;
+    let call_targets = callable_registry.file_calls(
+        ir,
+        callables,
+        module_facts,
+        classifiers,
+        laid_out_classes,
+        module,
+    )?;
     let inert_singleton_bindings = krusty::backend::inert_staged_singleton_bindings(
         ir,
         |expression| {
@@ -272,6 +279,7 @@ pub(super) fn lower_file(
         functions: &indices,
         globals: &globals,
         classes: classes.as_ref(),
+        laid_out_classes,
         calls: &call_targets,
         callables,
         inert_singleton_bindings: &inert_singleton_bindings,
@@ -373,9 +381,6 @@ pub(super) fn lower_file(
             module,
             runtime,
         )?;
-        for (name, record) in classes.records(module, ir, &indices, &signatures) {
-            laid_out_classes.insert(name, record);
-        }
     } else if !member_property_definitions.is_empty() {
         return Err("a member property definition without its class layout".to_string());
     }
@@ -406,6 +411,18 @@ pub(super) fn lower_file(
     } else {
         None
     };
+    if let Some(classes) = &classes {
+        for (name, record) in classes.records(
+            module,
+            ir,
+            &indices,
+            &signatures,
+            dependency_exports,
+            callables,
+        )? {
+            laid_out_classes.insert(name, record);
+        }
+    }
     callable_registry.publish(ir, dependency_exports, &indices)?;
     let mut reach = reach.into_inner();
     if let Some(classes) = &classes {
@@ -479,6 +496,7 @@ struct FileContext<'a> {
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
+    laid_out_classes: &'a LaidOutClasses,
     calls: &'a FileCallTargets,
     /// Provider facts frozen for exactly the dependency identities this file calls.
     callables: &'a CheckedBackendCallables,
@@ -737,6 +755,7 @@ struct Body<'a> {
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
+    laid_out_classes: &'a LaidOutClasses,
     /// Exact source/dependency call targets registered before this body is emitted.
     calls: &'a FileCallTargets,
     /// Provider facts frozen for exactly the dependency identities this file calls.
@@ -811,6 +830,7 @@ impl<'a> Body<'a> {
             functions: context.functions,
             globals: context.globals,
             classes: context.classes,
+            laid_out_classes: context.laid_out_classes,
             calls: context.calls,
             callables: context.callables,
             inert_singleton_bindings: context.inert_singleton_bindings,
@@ -946,7 +966,7 @@ impl<'a> Body<'a> {
 
     /// Evaluate `id` and convert its value to the carrier of `target`.
     fn value(&mut self, id: u32, target: Ty) -> Result<(), Unsupported> {
-        let source_ty = self.type_of(id)?;
+        let source_ty = self.completing_type(id)?;
         self.expression(id)?;
         // A statement-shaped operand may return/throw before its enclosing value use resumes.
         // Its Unit annotation must stay Unit; only the common completion proof removes the
@@ -971,6 +991,21 @@ impl<'a> Body<'a> {
             );
         }
         self.coerce_emitted_value(source, target)
+    }
+
+    /// The type `id` completes with. An inline body spliced at its call keeps the `Nothing` (or no
+    /// type) its blocks had around the callee's `return`, though they complete with the body's
+    /// result; such a block completes with its value's type.
+    fn completing_type(&self, id: u32) -> Result<Option<Ty>, Unsupported> {
+        let ty = self.type_of(id)?;
+        match self.ir.expr(id) {
+            IrExpr::Block {
+                value: Some(value), ..
+            } if ty.is_none_or(|ty| ty == Ty::Nothing) && !self.diverges(id) => {
+                self.completing_type(*value)
+            }
+            _ => Ok(ty),
+        }
     }
 
     /// Whether evaluating `id` as a value never completes: it ends in a jump or a `throw`, or in an
@@ -1113,8 +1148,13 @@ impl<'a> Body<'a> {
                 for statement in stmts {
                     self.statement(statement)?;
                 }
+                // The block's value is delivered at the type the block completes with, which an
+                // inline body's erased generic result is narrower than at its call.
                 if let Some(value) = value {
-                    self.expression(value)?;
+                    match self.completing_type(id)? {
+                        Some(ty) => self.value(value, ty)?,
+                        None => self.expression(value)?,
+                    }
                 }
             }
             IrExpr::Return(value) => {
@@ -1410,7 +1450,7 @@ impl<'a> Body<'a> {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
                 type_operand,
-            } if self.class_of_type(type_operand).is_some()
+            } if self.class_structure(type_operand)?.is_some()
                 || self.interface_of_type(type_operand).is_some() =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
@@ -1787,10 +1827,10 @@ impl<'a> Body<'a> {
                 sam,
                 ..
             } => self.function_value(
+                id,
                 impl_fn,
                 &captures,
                 function_values::FunctionEquality::Identity,
-                self.type_of(id)?,
                 sam.as_deref(),
             )?,
             IrExpr::CallableReference(reference) if !reference.declaration_suspend => {

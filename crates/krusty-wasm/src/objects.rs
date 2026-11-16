@@ -40,6 +40,9 @@ pub(super) const ITABLE_FIELD: u32 = 3;
 /// or null for a runtime object no classifier describes.
 pub(super) const TYPE_INFO_FIELD: u32 = ITABLE_FIELD + 1;
 
+/// The fixed erased `FunctionN.invoke` entry, after the common object table prefix.
+pub(super) const FUNCTION_FIELD: u32 = TYPE_INFO_FIELD + 1;
+
 /// The field of `$Enum` holding `kotlin.Enum`'s `name`, after the identity prefix; `ordinal`
 /// follows it.
 pub(super) const ENUM_NAME_FIELD: u32 = super::identity::PREFIX_FIELDS;
@@ -60,6 +63,8 @@ pub(super) struct ObjectRoot {
     pub(super) itable: u32,
     /// `$AnyTable`: `kotlin.Any`'s three slots, the interface table, then the type information.
     pub(super) any_table: u32,
+    /// `$FunctionTable`: `$AnyTable` plus an erased `FunctionN.invoke` entry.
+    pub(super) function_table: u32,
     /// `$Object`: the dispatch table, and nothing else yet.
     pub(super) object: u32,
     /// `$Identified`: `$Object`, then the object's immutable identity hash
@@ -106,6 +111,24 @@ impl ObjectRoot {
             supertype: None,
             open: true,
         });
+        let function_table = module.subtype(SubType {
+            composite: CompositeType::Struct(
+                any_slot_types
+                    .iter()
+                    .map(|ty| immutable(ValType::reference(*ty)))
+                    .chain([
+                        immutable(ValType::nullable(itable)),
+                        immutable(ValType::nullable(type_infos.ty)),
+                        immutable(ValType::Ref {
+                            nullable: true,
+                            heap: HeapType::Func,
+                        }),
+                    ])
+                    .collect(),
+            ),
+            supertype: Some(any_table),
+            open: true,
+        });
         let object = module.subtype(SubType {
             composite: CompositeType::Struct(vec![immutable(ValType::reference(any_table))]),
             supertype: None,
@@ -143,6 +166,7 @@ impl ObjectRoot {
         Self {
             itable,
             any_table,
+            function_table,
             object,
             identified,
             enum_base,

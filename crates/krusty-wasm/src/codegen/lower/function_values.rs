@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::encode::{CompositeType, SubType};
+use crate::function_value_names;
 use crate::function_values::INVOKE_FIELD;
 use crate::objects::immutable;
 
@@ -20,17 +21,18 @@ pub(super) enum FunctionEquality {
 }
 
 impl Body<'_> {
-    /// A new function value whose body is `function`, carrying `captures` as its leading
-    /// arguments, of the checked type `instance`. With `sam`, the value is also an instance of that
+    /// A new function value, created by the expression `site`, whose body is `function`, carrying
+    /// `captures` as its leading arguments. With `sam`, the value is also an instance of that
     /// `fun interface`, whose member it implements.
     pub(super) fn function_value(
         &mut self,
+        site: u32,
         function: FunId,
         captures: &[u32],
         equality: FunctionEquality,
-        instance: Option<Ty>,
         sam: Option<&krusty::ir::IrSamTarget>,
     ) -> Result<(), Unsupported> {
+        let instance = self.type_of(site)?;
         let declaration = self
             .ir
             .functions
@@ -68,6 +70,7 @@ impl Body<'_> {
                 if receiver.is_some_and(|slot| slot >= captures.len()) {
                     return Err("a callable reference with an invalid bound receiver slot".into());
                 }
+                fields.push(immutable(ValType::I32));
                 fields.push(immutable(REFERENCE));
                 (
                     self.runtime.callable_references.object,
@@ -123,7 +126,25 @@ impl Body<'_> {
             FunctionEquality::Identity => self.runtime.identity.hash_code,
             FunctionEquality::Declaration { .. } => self.runtime.callable_references.hash_code,
         };
-        let to_string = self.runtime.objects.trap(self.module, to_string_ty);
+        let to_string = match function_value_names::named_shape(self.ir.expr(site), instance) {
+            Some(shape) => {
+                let codes: Vec<&str> = params[..captures.len()]
+                    .iter()
+                    .enumerate()
+                    .map(|(parameter, &ty)| {
+                        let shared = self
+                            .ir
+                            .shared_capture_parameters
+                            .contains_key(&(function, parameter as u32));
+                        function_value_names::capture_code(ty, shared)
+                    })
+                    .collect();
+                let name = function_value_names::class_name(shape, &codes);
+                self.runtime.function_value_to_string(self.module, &name)
+            }
+            // kotlinc-wasm names this value's class otherwise, or prints it otherwise.
+            None => self.runtime.objects.trap(self.module, to_string_ty),
+        };
         let objects = &mut self.runtime.objects;
         let (class, itable) =
             objects
@@ -171,7 +192,9 @@ impl Body<'_> {
                 self.code.call(self.runtime.identity.allocate);
             }
             FunctionEquality::Declaration { kind, receiver } => {
-                self.code.i32_const(kind);
+                self.code
+                    .call(self.runtime.identity.allocate)
+                    .i32_const(kind);
                 if let Some(slot) = receiver {
                     self.code.local_get(saved[slot]);
                     self.coerce_emitted_value(
@@ -205,13 +228,13 @@ impl Body<'_> {
             .collect();
         let kind = self.callable_reference_kind(reference)?;
         self.function_value(
+            id,
             reference.adapter,
             &captures,
             FunctionEquality::Declaration {
                 kind,
                 receiver: reference.bound_receiver.map(|_| reference.captures.len()),
             },
-            self.type_of(id)?,
             None,
         )
     }
@@ -311,8 +334,12 @@ impl Body<'_> {
         self.code
             .ref_cast(false, HeapType::Concrete(object))
             .struct_get(object, 0)
-            .ref_cast(false, HeapType::Concrete(shape.table))
-            .struct_get(shape.table, INVOKE_FIELD)
+            .ref_cast(
+                false,
+                HeapType::Concrete(self.runtime.objects.function_table),
+            )
+            .struct_get(self.runtime.objects.function_table, INVOKE_FIELD)
+            .ref_cast(false, HeapType::Concrete(shape.invoke))
             .call_ref(shape.invoke);
         self.coerce_emitted_value(any, ret)
     }
@@ -343,7 +370,12 @@ impl Body<'_> {
         self.code
             .ref_cast(false, HeapType::Concrete(object))
             .struct_get(object, 0)
-            .ref_test(false, HeapType::Concrete(shape.table))
+            .ref_cast(
+                false,
+                HeapType::Concrete(self.runtime.objects.function_table),
+            )
+            .struct_get(self.runtime.objects.function_table, INVOKE_FIELD)
+            .ref_test(false, HeapType::Concrete(shape.invoke))
             .if_(BlockType::Empty)
             .else_()
             .unreachable()

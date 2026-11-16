@@ -10,7 +10,7 @@
 //! [`super::interface_tables`]). A stub keeps the caller's arguments and return address as they
 //! are and jumps, so the implementation returns straight to the caller.
 
-use krusty::fx_hash::HashSet;
+use krusty::fx_hash::{HashMap, HashSet};
 
 use object::read::{Object, ObjectSymbol};
 use object::SymbolSection;
@@ -90,6 +90,9 @@ fn may_read_a_table(records: &[(Target, Target)]) -> bool {
 
 #[derive(Debug)]
 struct Stub {
+    /// Every source-module-local alias for this one canonical member.
+    names: Vec<String>,
+    /// The first alias, for deterministic diagnostics.
     name: String,
     /// Each type with an instance that implements the member, and the function it implements it
     /// with.
@@ -139,6 +142,21 @@ impl InterfaceStubs {
         let mut records = super::interface_records::read(files)?;
         let mut names: Vec<String> = called.into_iter().collect();
         names.sort();
+        let mut groups: HashMap<Vec<String>, Vec<String>> = HashMap::default();
+        let mut grouped_names = Vec::new();
+        for name in names {
+            if let Some(aliases) = records.aliases_by_stub.get(&name) {
+                groups.entry(aliases.clone()).or_default().push(name);
+            } else {
+                grouped_names.push(vec![name]);
+            }
+        }
+        grouped_names.extend(groups.into_values());
+        for aliases in &mut grouped_names {
+            aliases.sort();
+            aliases.dedup();
+        }
+        grouped_names.sort_by(|left, right| left[0].cmp(&right[0]));
         // Every stub keeps room for the longer form, so the form can be chosen once addresses are
         // known.
         let room = align_up(
@@ -156,15 +174,19 @@ impl InterfaceStubs {
             .expect("two forms"),
             STUB_ALIGN,
         );
-        let mut stubs = names
+        let mut stubs = grouped_names
             .into_iter()
             .enumerate()
-            .map(|(index, name)| Stub {
-                records: records.remove(&name).unwrap_or_default(),
-                name,
-                index: None,
-                offset: index as u64 * room,
-                kind: None,
+            .map(|(index, names)| {
+                let name = names[0].clone();
+                Stub {
+                    records: records.implementations.remove(&name).unwrap_or_default(),
+                    names,
+                    name,
+                    index: None,
+                    offset: index as u64 * room,
+                    kind: None,
+                }
             })
             .collect::<Vec<_>>();
         let size = stubs.len() as u64 * room;
@@ -223,13 +245,25 @@ impl InterfaceStubs {
                 .iter()
                 .map(|(ty, function)| Ok((address(ty)?, address(function)?)))
                 .collect::<Result<Vec<_>, ProgramLinkError>>()?;
+            let mut type_implementations = HashMap::default();
+            for &(ty, function) in &records {
+                if type_implementations
+                    .insert(ty, function)
+                    .is_some_and(|known| known != function)
+                {
+                    return Err(ProgramLinkError::Unsupported(
+                        "one runtime type implements an interface slot with conflicting functions"
+                            .into(),
+                    ));
+                }
+            }
             let kind = choose(&records);
             stub.kind = Some(kind);
             let symbol = match kind {
                 Kind::Direct(function) => function,
                 Kind::Compare { .. } | Kind::Table => at + stub.offset,
             };
-            bound.push((stub.name.clone(), symbol));
+            bound.extend(stub.names.iter().cloned().map(|name| (name, symbol)));
         }
         Ok(bound)
     }
@@ -797,6 +831,66 @@ mod tests {
         object
     }
 
+    /// A provider's numbered implementation and a dependent implementation both answer the same
+    /// canonical member. The dependent module's call stub is a second alias for that member.
+    fn aliased_typed_program() -> Obj {
+        let mut object = typed_program(
+            &[(0, 0, 0)],
+            &[(0, b"greet"), (0, b"other")],
+            &[(b"greet", 2, 1), (b"greet", 2, 1), (b"other", 1, 2)],
+        );
+        object.undefined("kt_itf_n_0");
+        let name = b"greet";
+        let mut named = Vec::new();
+        named.extend_from_slice(&0u64.to_le_bytes());
+        named.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        named.extend_from_slice(name);
+        named.resize(
+            named.len() + (padded(name.len() as u64) as usize - name.len()),
+            0,
+        );
+        object.section(
+            &identities_section("n"),
+            SectionKind::ReadOnlyData,
+            &named,
+            8,
+        );
+        object
+    }
+
+    #[test]
+    fn canonical_member_aliases_share_one_stub_and_union_implementations() {
+        let object = aliased_typed_program();
+        let bytes = object.bytes();
+        let file = super::super::elf::parse("alias fixture", &bytes, Arch::X86_64).unwrap();
+        let files = [file];
+        let records = super::super::interface_records::read(&files).unwrap();
+        assert_eq!(
+            records.aliases_by_stub["kt_itf_m_0"],
+            vec!["kt_itf_m_0".to_owned(), "kt_itf_n_0".to_owned()]
+        );
+        assert_eq!(
+            records.implementations["kt_itf_m_0"].len(),
+            3,
+            "slot-family, numbered, and identity records join; duplicate pairs count once"
+        );
+        let mut stubs = InterfaceStubs::collect(&files, Arch::X86_64).unwrap();
+        assert_eq!(stubs.stubs.len(), 1, "aliases share one physical stub");
+        assert_eq!(
+            stubs.stubs[0].names,
+            vec!["kt_itf_m_0".to_owned(), "kt_itf_n_0".to_owned()]
+        );
+        assert_eq!(stubs.stubs[0].records.len(), 3);
+        assert_eq!(
+            stubs.decide(0x200, |_| Ok(0x300)).unwrap(),
+            vec![
+                ("kt_itf_m_0".to_owned(), 0x300),
+                ("kt_itf_n_0".to_owned(), 0x300),
+            ],
+            "every called alias binds to the same implementation or stub address"
+        );
+    }
+
     /// A dependent module's type, recorded by the member's identity, is one more implementation
     /// of the member that identity names.
     #[test]
@@ -814,6 +908,23 @@ mod tests {
             &code[..3],
             &[0x4c, 0x8d, 0x1d],
             "two functions now implement the member, so the stub compares"
+        );
+    }
+
+    #[test]
+    fn one_runtime_type_cannot_implement_one_slot_with_two_functions() {
+        assert_link_error(
+            link(
+                Arch::X86_64,
+                &[&typed_program(
+                    &[(0, 0, 0), (0, 0, 1)],
+                    &[(0, b"greet")],
+                    &[],
+                )],
+            ),
+            ProgramLinkError::Unsupported(
+                "one runtime type implements an interface slot with conflicting functions".into(),
+            ),
         );
     }
 

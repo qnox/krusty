@@ -34,8 +34,9 @@ pub(crate) struct ObjectStrings {
     identity_string: u32,
     /// `(name: String, this: Throwable) -> String`: `Throwable.toString`'s default.
     throwable_string: u32,
-    /// The `toString` slot body of each class name, by the default it renders.
-    slots: HashMap<(TypeName, Rendering), u32>,
+    /// The `toString` slot body of each printed class name, by the default it renders. A body
+    /// depends on nothing else, so classes printed alike share one.
+    slots: HashMap<(String, Rendering), u32>,
     /// The target, whose library chooses the name `Throwable.toString` prints.
     target: WasmTarget,
 }
@@ -68,30 +69,28 @@ impl Runtime {
         self.define_throwable_string(module);
     }
 
-    /// The `toString` slot body of `kotlin.Any`'s default for instances of `class`, which extend
+    /// The `toString` slot body of `kotlin.Any`'s default for instances of a class which extends
     /// `$Identified` and which Kotlin names `names`.
-    pub(crate) fn identity_to_string(
-        &mut self,
-        module: &mut Module,
-        class: TypeName,
-        names: &ClassNames,
-    ) -> u32 {
-        self.named_slot(module, class, &names.qualified, Rendering::Identity)
+    pub(crate) fn identity_to_string(&mut self, module: &mut Module, names: &ClassNames) -> u32 {
+        self.named_slot(module, &names.qualified, Rendering::Identity)
     }
 
-    /// The `toString` slot body of `kotlin.Throwable`'s default for instances of the exception
-    /// class `class`, which Kotlin names `names`.
-    pub(crate) fn throwable_to_string(
-        &mut self,
-        module: &mut Module,
-        class: TypeName,
-        names: &ClassNames,
-    ) -> u32 {
+    /// The `toString` slot body of `kotlin.Any`'s default for a function value, an instance of a
+    /// class kotlinc-wasm names for its shape (`crate::function_value_names`), printed by that
+    /// simple name.
+    pub(crate) fn function_value_to_string(&mut self, module: &mut Module, name: &str) -> u32 {
+        self.named_slot(module, name, Rendering::Identity)
+    }
+
+    /// The `toString` slot body of `kotlin.Throwable`'s default for instances of an exception
+    /// class which Kotlin names `names`.
+    pub(crate) fn throwable_to_string(&mut self, module: &mut Module, names: &ClassNames) -> u32 {
         let name = match self.object_strings.target {
             WasmTarget::Js => &names.qualified,
             WasmTarget::Wasi => &names.simple,
         };
-        self.named_slot(module, class, name, Rendering::Throwable)
+        let name = name.clone();
+        self.named_slot(module, &name, Rendering::Throwable)
     }
 
     /// A `toString` slot body answering the constant `text`: the rendering of a class whose every
@@ -114,22 +113,16 @@ impl Runtime {
 
     fn define_array_to_string(&mut self, module: &mut Module, function: u32, class: TypeName) {
         let name = member_class_names(class).qualified;
-        self.define_named_slot(module, function, (class, &name), Rendering::Identity);
+        self.define_named_slot(module, function, &name, Rendering::Identity);
     }
 
-    /// The slot body rendering `kind` for `class`, whose Kotlin name is `name`: one per class.
-    fn named_slot(
-        &mut self,
-        module: &mut Module,
-        class: TypeName,
-        name: &str,
-        kind: Rendering,
-    ) -> u32 {
-        if let Some(function) = self.object_strings.slots.get(&(class, kind)) {
+    /// The slot body rendering `kind` for a class printed as `name`: one per printed name.
+    fn named_slot(&mut self, module: &mut Module, name: &str, kind: Rendering) -> u32 {
+        if let Some(function) = self.object_strings.slots.get(&(name.to_owned(), kind)) {
             return *function;
         }
         let function = module.declare();
-        self.define_named_slot(module, function, (class, name), kind);
+        self.define_named_slot(module, function, name, kind);
         function
     }
 
@@ -137,7 +130,7 @@ impl Runtime {
         &mut self,
         module: &mut Module,
         function: u32,
-        (class, name): (TypeName, &str),
+        name: &str,
         kind: Rendering,
     ) {
         let rendering = match kind {
@@ -150,7 +143,9 @@ impl Runtime {
         let ty = self.objects.any_slot_types[2];
         let locals = Vec::new();
         module.define(function, Function { ty, locals, code });
-        self.object_strings.slots.insert((class, kind), function);
+        self.object_strings
+            .slots
+            .insert((name.to_owned(), kind), function);
     }
 
     /// Define `function`, the `toString` slot of an unsigned array class: its simple name and its

@@ -19,6 +19,7 @@ use crate::resolve::PassTwoSymbols;
 use crate::types::{Ty, TyKind, TypeName};
 use std::collections::VecDeque;
 
+mod class_declarations;
 mod emitted_roots;
 
 /// Exact dependency support declarations already emitted into one target program.
@@ -35,10 +36,11 @@ pub(super) struct DependencySupportState {
     materialized_classes: HashMap<TypeName, KlibDependencyCallable>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum PublishedDependency {
     Body(Option<PublishedSingletonDispatch>),
     AllocatingConstructor,
+    ConstructorInitializer(crate::libraries::KlibClassIdentity),
 }
 
 #[derive(Clone, Copy)]
@@ -48,6 +50,17 @@ struct PublishedSingletonDispatch {
 }
 
 impl DependencySupportState {
+    pub(super) fn record_initializer(
+        &mut self,
+        declaration: &crate::backend::ConstructorInitializerDeclaration,
+    ) {
+        self.emitted
+            .entry(declaration.constructor.clone())
+            .or_insert_with(|| {
+                PublishedDependency::ConstructorInitializer(declaration.class.clone())
+            });
+    }
+
     fn accepts_snapshot(&mut self, snapshot: &crate::libraries::DependencyBodySnapshot) -> bool {
         match &self.snapshot {
             Some(selected) => selected == snapshot,
@@ -126,8 +139,29 @@ pub(super) fn emit_dependencies<B: Backend>(
         bodies,
         intrinsics,
         &callees,
-        &target_realizes_intrinsic,
-        &target_represents_classifier,
+        &emitted_roots::OrdinaryRootCapabilities {
+            realizes_intrinsic: &target_realizes_intrinsic,
+            represents_classifier: &target_represents_classifier,
+            retains_initializer: &|selected| match support_state.emitted.get(selected.identity()) {
+                Some(PublishedDependency::AllocatingConstructor) => Ok(true),
+                Some(PublishedDependency::ConstructorInitializer(identity)) => {
+                    if selected.class_contract().is_some_and(|class| {
+                        class.module == identity.module
+                            && class.signature == identity.signature
+                            && class.module == selected.identity().module
+                            && selected.declaration_owner()
+                                == Some(crate::types::SemanticCallableOwner::Classifier(
+                                    class.classifier,
+                                ))
+                    }) {
+                        Ok(true)
+                    } else {
+                        Err("a retained superclass initializer changed its canonical class contract")
+                    }
+                }
+                _ => Ok(false),
+            },
+        },
     ) {
         Ok(roots) => roots,
         Err(error) => {
@@ -149,19 +183,45 @@ pub(super) fn emit_dependencies<B: Backend>(
         }
         !intrinsic_owned
     });
+    let root_objects = match emitted_roots::ordinary_root_objects(
+        platform,
+        source,
+        bodies,
+        &callees,
+        &target_represents_classifier,
+    ) {
+        Ok(objects) => objects,
+        Err(error) => {
+            diags.error(Span::new(0, 0), format!("internal error: {error}"));
+            return Vec::new();
+        }
+    };
+    let root_objects = root_objects
+        .into_iter()
+        .filter(|object| {
+            !support_state
+                .materialized_classes
+                .contains_key(&object.classifier)
+        })
+        .collect::<Vec<_>>();
     let mut artifacts = Vec::new();
     for (requires_intrinsic_link, mut roots) in [(true, roots), (false, ordinary)] {
         // Intrinsic support may have emitted an ordinary root transitively in the preceding unit.
         roots.retain(|root| !support_state.emitted.contains_key(root.identity()));
-        if roots.is_empty() {
+        let root_objects: &[_] = if requires_intrinsic_link {
+            &[]
+        } else {
+            &root_objects
+        };
+        if roots.is_empty() && root_objects.is_empty() {
             continue;
         }
         let Some(mut externals) = rebound_externals(platform, &support_state.emitted, diags) else {
             return Vec::new();
         };
-        // An enum an earlier unit materialized keeps its one set of constants there; this unit
-        // reads them through that unit's exports.
-        let mut unit = DependencyBodyUnit::reading_realized_enums(
+        // An enum or object an earlier unit materialized keeps its one set of constants, or its
+        // one instance, there; this unit reads them through that unit's exports.
+        let mut unit = DependencyBodyUnit::reading_realized_classes(
             support_state.materialized_classes.keys().copied(),
         );
         let capabilities = DependencyLeafCapabilities {
@@ -176,7 +236,10 @@ pub(super) fn emit_dependencies<B: Backend>(
             platform,
             bodies,
             intrinsics,
-            &roots,
+            emitted_roots::ClosureRoots {
+                callables: &roots,
+                objects: root_objects,
+            },
             &externals,
             &capabilities,
             !requires_intrinsic_link,
@@ -193,6 +256,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         let emitted_roots::FrozenClosure {
             declarations,
             authorized_member_edges,
+            read_objects,
         } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
@@ -204,6 +268,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         )
         .with_checked_dependency_facts(source.callables.klib_dependency_facts())
         .with_authorized_member_edges(authorized_member_edges)
+        .with_read_objects(read_objects)
         .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
@@ -241,8 +306,22 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         }
+        for object in root_objects {
+            let class = callees
+                .read_object(object.classifier)
+                .expect("the closure froze the objects the source reads");
+            if let Err(decline) =
+                unit.lower_object(class, bodies, &callees, intrinsics, &externals, platform)
+            {
+                diags.error(
+                    Span::new(0, 0),
+                    format!("cannot lower a library object the source reads: {decline}"),
+                );
+                return Vec::new();
+            }
+        }
         if unit.callable_functions().next().is_none()
-            && unit.allocating_constructors().next().is_none()
+            && unit.initializing_constructors().next().is_none()
         {
             continue;
         }
@@ -296,6 +375,14 @@ pub(super) fn emit_dependencies<B: Backend>(
             }
         }
         let mut exports = DependencyExportSignatures::default();
+        if let Err(error) = class_declarations::record(&unit, platform, &callees, &mut exports) {
+            diags.error(
+                Span::new(0, 0),
+                format!("internal error: cannot publish materialized class declarations: {error}"),
+            );
+            return Vec::new();
+        }
+
         let closed = unit
             .callable_functions()
             // A reachable bodyless declaration remains an exact provider edge which the target may
@@ -427,7 +514,48 @@ pub(super) fn emit_dependencies<B: Backend>(
             );
             return Vec::new();
         }
-        let mut callables = match CheckedBackendCallables::freeze(unit.ir(), platform) {
+        for (identity, constructor) in unit.initializing_constructors() {
+            let Some(class_identity) = exports.classifier(constructor.class) else {
+                continue;
+            };
+            let class = &unit.ir().classes[constructor.class as usize];
+            if !class.is_abstract && !class.is_sealed {
+                continue;
+            }
+            let Some((_, realization)) = platform.external_callable_by_dependency(identity) else {
+                diags.error(
+                    Span::new(0, 0),
+                    "internal error: an emitted initializer has no exact provider declaration",
+                );
+                return Vec::new();
+            };
+            if realization.dependency_callable.as_ref() != Some(identity)
+                || realization.kind != crate::libraries::ExternalCallableKind::Constructor
+                || realization.declaration_owner
+                    != Some(crate::types::SemanticCallableOwner::Classifier(
+                        class.fq_name,
+                    ))
+                || !realization
+                    .klib_body_class_contract
+                    .as_ref()
+                    .is_some_and(|contract| contract.matches_owner(&identity.module, class.fq_name))
+            {
+                diags.error(
+                    Span::new(0, 0),
+                    "internal error: an emitted initializer changed its constructor owner contract",
+                );
+                return Vec::new();
+            }
+            published.push((
+                identity.clone(),
+                PublishedDependency::ConstructorInitializer(class_identity.clone()),
+            ));
+        }
+        let mut callables = match CheckedBackendCallables::freeze_with_class_declarations(
+            unit.ir(),
+            platform,
+            module_facts.classes(),
+        ) {
             Ok(callables) => callables,
             Err(error) => {
                 diags.error(
@@ -468,10 +596,28 @@ pub(super) fn emit_dependencies<B: Backend>(
             stems: source.stems,
             origins: source.origins,
         };
+        let initializer_requests = match crate::backend::initializer_declarations(&support) {
+            Ok(requests) => requests,
+            Err(reason) => {
+                diags.error(Span::new(0, 0), format!("internal error: {reason}"));
+                return Vec::new();
+            }
+        };
         let outputs = backend.lower_ir_file(support, state, diags);
         if diags.has_errors() {
             return Vec::new();
         }
+        published.retain(|(identity, capability)| match capability {
+            PublishedDependency::ConstructorInitializer(class) => initializer_requests
+                .iter()
+                .find(|declaration| {
+                    &declaration.constructor == identity && &declaration.class == class
+                })
+                .is_some_and(|declaration| {
+                    backend.emitted_constructor_initializer(state, declaration)
+                }),
+            _ => true,
+        });
         support_state.emitted.extend(published);
         support_state.materialized_classes.extend(materialized);
         artifacts.extend(outputs);
@@ -505,6 +651,30 @@ fn rebound_externals(
         let rebound_callable = match published {
             PublishedDependency::AllocatingConstructor if constructor => {
                 EmittedDependencyCallable::allocating_constructor(external)
+            }
+            PublishedDependency::ConstructorInitializer(class_identity) if constructor => {
+                let Some(crate::types::SemanticCallableOwner::Classifier(owner)) =
+                    realization.declaration_owner
+                else {
+                    diags.error(
+                        Span::new(0, 0),
+                        "internal error: an emitted initializer lost its declaring classifier",
+                    );
+                    return None;
+                };
+                if !realization
+                    .klib_body_class_contract
+                    .as_ref()
+                    .is_some_and(|contract| {
+                        contract.matches_owner(&identity.module, owner)
+                            && contract.module == class_identity.module
+                            && contract.signature == class_identity.signature
+                    })
+                {
+                    diags.error(Span::new(0, 0), "internal error: an emitted initializer changed its authenticated class contract");
+                    return None;
+                }
+                EmittedDependencyCallable::constructor_initializer(external)
             }
             PublishedDependency::Body(singleton_dispatch) if !constructor => {
                 EmittedDependencyCallable::new(
@@ -559,6 +729,32 @@ fn prepare_bodyless_externals(
         if !visited.insert(identity.clone()) {
             continue;
         }
+        if externals
+            .get(&identity)
+            .and_then(|external| external.constructor_initializer_target())
+            .is_some()
+        {
+            match capabilities
+                .callees
+                .authenticates_retained_constructor(&identity, bodies)
+            {
+                Ok(true) => continue,
+                Ok(false) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        "an emitted initializer lost its constructor declaration",
+                    );
+                    return false;
+                }
+                Err(reason) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("invalid retained KLIB constructor declaration: {reason:?}"),
+                    );
+                    return false;
+                }
+            }
+        }
         let constructor = match capabilities
             .callees
             .authenticates_constructor(&identity, bodies)
@@ -589,6 +785,7 @@ fn prepare_bodyless_externals(
         } else {
             bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
         };
+        let mut edges = edges;
         // A member of a materialized class is lowered with the class its constructor creates.
         match emitted_roots::member_class_constructor(
             platform,
@@ -597,6 +794,21 @@ fn prepare_bodyless_externals(
             &identity,
         ) {
             Ok(Some(primary)) => pending.push_back(primary),
+            Ok(None) => {}
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return false;
+            }
+        }
+        // A member of a materialized object is lowered with the object its initialization
+        // creates, whose edges no constructor declaration carries.
+        match emitted_roots::member_object_initialization(
+            platform,
+            bodies,
+            capabilities.callees,
+            &identity,
+        ) {
+            Ok(Some(initialization)) => edges.extend(initialization),
             Ok(None) => {}
             Err(error) => {
                 diags.error(Span::new(0, 0), format!("internal error: {error}"));
