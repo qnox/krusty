@@ -103,7 +103,9 @@ impl BodyLowering<'_> {
             })
             .collect::<Lowered<Vec<_>>>()?;
         let (declaration, external_target, local_access) = match &access.symbol.signature {
-            KlibIrSignature::Public(callee) => {
+            KlibIrSignature::Public(callee)
+                if !self.linker.links_privately(&access.symbol.signature) =>
+            {
                 let linked = self.linker.link_constructor(self.ir, callee)?;
                 (linked.declaration, Some(linked.target), None)
             }
