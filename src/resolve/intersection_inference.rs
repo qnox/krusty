@@ -49,6 +49,10 @@ pub(super) struct SelectedGenericCall {
     /// the whole intersection to its common supertype. Only reification reads it; the semantic
     /// argument and its additional bounds stay the checked intersection.
     reified_runtimes: HashMap<usize, Ty>,
+    /// The approximation of each slot inferred as an intersection (see
+    /// [`Checker::approximated_intersection_arguments`]). The substitution stays the intersection;
+    /// a parameter type checked FIR publishes carries the approximation in its place.
+    published_intersections: HashMap<usize, Ty>,
 }
 
 impl SelectedGenericCall {
@@ -327,6 +331,25 @@ impl TypeInfo {
             .and_then(|call| call.reified_runtimes.get(&ordinal).copied())
     }
 
+    /// Each type argument inferred to an intersection, paired with its approximation. A parameter
+    /// type the resolver specialized with the intersection reaches checked FIR as the
+    /// approximation, the type kotlinc's IR gives that parameter.
+    pub(crate) fn published_call_type_argument_approximations(
+        &self,
+        expression: ExprId,
+    ) -> impl Iterator<Item = (Ty, Ty)> + '_ {
+        self.selected_generic_calls
+            .get(&expression)
+            .into_iter()
+            .flat_map(|call| {
+                call.published_intersections
+                    .iter()
+                    .filter_map(|(ordinal, published)| {
+                        Some(((*call.arguments.get(*ordinal)?)?, *published))
+                    })
+            })
+    }
+
     pub(crate) fn resolved_call_type_argument_bounds(
         &self,
         expression: ExprId,
@@ -521,13 +544,64 @@ impl Checker<'_> {
             return;
         }
         self.inferred_expression_intersections.remove(&call);
+        let published_intersections = self.approximated_intersection_arguments(None, &arguments);
         self.selected_generic_calls.insert(
             call,
             SelectedGenericCall {
                 arguments,
+                published_intersections,
                 ..Default::default()
             },
         );
+    }
+
+    /// The type arguments inferred to an intersection, approximated as kotlinc's FIR approximates a
+    /// call's type arguments before IR, by ordinal. An intersection becomes its type parameter's
+    /// declared upper bound, which every component satisfies, or the common supertype of its
+    /// components when the parameter has only the implicit `Any?` bound. `foo(1, 4.5)` for
+    /// `fun <T : Number> foo(vararg values: T)` therefore passes a `Number[]`, the array the
+    /// callee declares. Diagnostics and the call's result keep the inferred intersection.
+    fn approximated_intersection_arguments(
+        &self,
+        signature: Option<&crate::libraries::GenericSig>,
+        arguments: &[Option<Ty>],
+    ) -> HashMap<usize, Ty> {
+        let bindings = signature
+            .map(|signature| {
+                signature
+                    .formals
+                    .iter()
+                    .zip(arguments)
+                    .filter_map(|(formal, argument)| Some((*formal, (*argument)?)))
+                    .collect::<crate::symbol_resolver::GSigBinds>()
+            })
+            .unwrap_or_default();
+        let formals = signature.map_or(&[][..], |signature| signature.formals.as_slice());
+        let implicit_bound = Ty::nullable(Ty::obj("kotlin/Any"));
+        arguments
+            .iter()
+            .enumerate()
+            .filter_map(|(ordinal, argument)| {
+                let argument = (*argument)?;
+                if !matches!(argument.non_null().kind(), TyKind::Intersection(_)) {
+                    return None;
+                }
+                let declared = signature
+                    .and_then(|signature| signature.formal_bounds.get(ordinal))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|bound| **bound != implicit_bound)
+                    .map(|bound| crate::types::ty_subst_formals(*bound, formals, &bindings))
+                    .collect::<Vec<_>>();
+                let approximated = match declared.as_slice() {
+                    [bound] if argument.is_nullable() => Ty::nullable(*bound),
+                    [bound] => *bound,
+                    _ => self.intersection_runtime_type(argument),
+                };
+                Some((ordinal, approximated))
+            })
+            .collect()
     }
 
     /// The common supertype kotlinc reifies `intersection` to, walking every constituent's
@@ -545,8 +619,14 @@ impl Checker<'_> {
         } else {
             checked
         };
+        self.intersection_runtime_type(checked)
+    }
+
+    /// The single classifier type kotlinc approximates an intersection to when nothing narrower
+    /// bounds it: the most specific supertype every component shares.
+    fn intersection_runtime_type(&self, intersection: Ty) -> Ty {
         crate::symbol_resolver::reified_runtime_type(
-            checked,
+            intersection,
             &crate::symbol_resolver::ReifiedDeclarations {
                 direct_supertypes: &|name| {
                     Some(
@@ -599,12 +679,15 @@ impl Checker<'_> {
         let parameter_indices = (0..signature.params.len()).collect::<Vec<_>>();
         let argument_provenance =
             self.selected_reified_argument_provenance(call, signature, &parameter_indices);
+        let published_intersections =
+            self.approximated_intersection_arguments(Some(signature), &arguments);
         self.selected_generic_calls.insert(
             call,
             SelectedGenericCall {
                 arguments,
                 argument_provenance,
                 reified_parameters: Self::reified_parameters(signature, call_sig),
+                published_intersections,
                 ..Default::default()
             },
         );
@@ -626,7 +709,10 @@ impl Checker<'_> {
         let Some(current) = self.selected_generic_calls.get(&call).cloned() else {
             return;
         };
-        let completed = current.with_completed_arguments(selected.signature(), completion_bindings);
+        let mut completed =
+            current.with_completed_arguments(selected.signature(), completion_bindings);
+        completed.published_intersections = self
+            .approximated_intersection_arguments(Some(selected.signature()), &completed.arguments);
         self.selected_generic_calls.insert(call, completed);
     }
 
@@ -1016,6 +1102,8 @@ impl Checker<'_> {
                 Some((*ordinal, self.reified_intersection_runtime(intersection)))
             })
             .collect();
+        let published_intersections =
+            self.approximated_intersection_arguments(Some(signature), &arguments);
         self.selected_generic_calls.insert(
             call,
             SelectedGenericCall {
@@ -1025,6 +1113,7 @@ impl Checker<'_> {
                 reified_parameters,
                 intersections,
                 reified_runtimes,
+                published_intersections,
             },
         );
 
@@ -1149,6 +1238,7 @@ mod tests {
             reified_parameters: vec![(1, crate::types::TyParamName::new("sample:produce:U"))],
             intersections,
             reified_runtimes: HashMap::default(),
+            published_intersections: HashMap::default(),
         };
         let signature = crate::libraries::GenericSig {
             formals: vec![formal, crate::types::TyParamName::new("sample:produce:U")],

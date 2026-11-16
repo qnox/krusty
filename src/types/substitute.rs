@@ -443,6 +443,47 @@ pub(crate) fn ty_map_symbols(ty: Ty, rebuild: &dyn Fn(Ty, Ty) -> Ty) -> Ty {
     }
 }
 
+/// `ty` with each occurrence that `replace` maps rebuilt as its replacement, outermost first. A
+/// replaced occurrence is not searched again.
+pub(crate) fn ty_replace(ty: Ty, replace: &dyn Fn(Ty) -> Option<Ty>) -> Ty {
+    if let Some(replacement) = replace(ty) {
+        return replacement;
+    }
+    let map = |ty: Ty| ty_replace(ty, replace);
+    match ty.kind() {
+        TyKind::Fun(signature) => Ty::fun_with_shape(
+            signature
+                .params
+                .iter()
+                .map(|parameter| map(*parameter))
+                .collect(),
+            map(signature.ret),
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ),
+        TyKind::DefinitelyNotNull(inner) => Ty::from(TyKind::DefinitelyNotNull(map(inner))),
+        TyKind::Nullable(inner) => Ty::nullable(map(inner)),
+        TyKind::PlatformNullable(inner) => Ty::platform_nullable(map(inner)),
+        TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(map(inner)),
+        TyKind::InProjection(inner) => Ty::in_projection(map(inner)),
+        TyKind::OutProjection(inner) => Ty::out_projection(map(inner)),
+        TyKind::StarProjection(inner) => Ty::star_projection(map(inner)),
+        TyKind::RawProjection(inner) => Ty::raw_projection(map(inner)),
+        TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+            name,
+            &arguments
+                .iter()
+                .map(|argument| map(*argument))
+                .collect::<Vec<_>>(),
+        ),
+        TyKind::Intersection(parts) => {
+            Ty::intersection(&parts.iter().map(|part| map(*part)).collect::<Vec<_>>())
+        }
+        _ => ty,
+    }
+}
+
 /// Canonicalize declaration-owned type-parameter identities by their ordinal. This is used for
 /// declaration-shape equality: two independently declared `<T>` parameters have different semantic
 /// identities during inference, but occupy the same slot when comparing callable signatures.

@@ -195,11 +195,22 @@ impl BodyFirChecker<'_> {
         // Callable type arguments are recorded separately, so apply those on top. Starting again
         // from the declaration signature here discarded the receiver substitution and forced
         // lowering to reconstruct it from syntax/receiver types.
+        let approximations = self
+            .info
+            .published_call_type_argument_approximations(expression)
+            .collect::<Vec<_>>();
         Ok(fallback
             .iter()
             .copied()
             .map(|parameter| {
-                crate::symbol_resolver::ty_subst_keep_unbound(parameter, &substitutions)
+                let parameter =
+                    crate::symbol_resolver::ty_subst_keep_unbound(parameter, &substitutions);
+                crate::types::ty_replace(parameter, &|ty| {
+                    approximations
+                        .iter()
+                        .find(|(inferred, _)| *inferred == ty)
+                        .map(|(_, published)| *published)
+                })
             })
             .collect())
     }
