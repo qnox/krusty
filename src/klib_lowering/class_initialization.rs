@@ -237,9 +237,20 @@ fn admit<'a, 'b>(
         || !matches!(&header.arena.expr(*initialize).kind,
             KlibIrExprKind::InstanceInitializerCall(class) if class == &header.class.base.symbol)
     {
-        return Err(mismatch(
-            "an ordinary class does not delegate to its superclass and initialize its own instance",
-        ));
+        let initialized = match &header.arena.expr(*initialize).kind {
+            KlibIrExprKind::InstanceInitializerCall(class) => {
+                format!("instance initializer for {:?}", class.signature)
+            }
+            other => format!("initializer expression {other:?}"),
+        };
+        return Err(mismatch(&format!(
+            "ordinary KLIB class {:?} has invalid superclass initialization: delegation {:?} (kind {:?}, {} type arguments), {initialized}; expected a constructor paired with an initializer for {:?}",
+            contract.signature,
+            access.symbol.signature,
+            access.symbol.kind,
+            access.type_arguments.len(),
+            header.class.base.symbol.signature,
+        )));
     }
     // The superclass's type arguments, as the class's first supertype applies them.
     let type_arguments = access
@@ -287,7 +298,7 @@ fn admit<'a, 'b>(
         (None, Ty::obj_name(crate::types::wk::any()))
     } else {
         // The superclass constructor the delegation names, by its exact declaration.
-        let constructor = match bodies.linked_origin(
+        let constructor_identity = match bodies.linked_origin(
             &contract.module,
             &KlibDeclarationSignature::Public(signature.clone()),
         ) {
@@ -299,7 +310,7 @@ fn admit<'a, 'b>(
             }
         };
         let Some(super::callee_facts::KlibCalleeFact::Selected(selected)) =
-            callees.get(&constructor)
+            callees.get(&constructor_identity)
         else {
             return Ok(None);
         };
@@ -311,16 +322,25 @@ fn admit<'a, 'b>(
         else {
             return Err(mismatch("a superclass constructor has no declaring class"));
         };
-        let params = selected[0].params().to_vec();
+        let constructor = super::constructor_calls::authenticate(selected[0], bodies)?;
+        if constructor.classifier != owner {
+            return Err(mismatch(
+                "a superclass constructor's authenticated class disagrees with its owner",
+            ));
+        }
+        let applied_params =
+            constructor.instantiate(&type_arguments, applied(owner), |argument, bound| {
+                callees.constructor_bound(&header.types, argument, bound)
+            })?;
         if callees.target_represents(owner) {
             // The target lays the superclass out itself and builds it from the delegation's
             // arguments, as it does for a source class extending it.
             (
                 Some(SuperclassCall {
-                    constructor,
+                    constructor: constructor_identity,
                     arguments,
                     owner,
-                    params,
+                    params: applied_params,
                     materialized: false,
                 }),
                 applied(owner),
@@ -334,10 +354,10 @@ fn admit<'a, 'b>(
             }
             (
                 Some(SuperclassCall {
-                    constructor,
+                    constructor: constructor_identity,
                     arguments,
                     owner: superclass.header.contract.classifier,
-                    params,
+                    params: applied_params,
                     materialized: true,
                 }),
                 applied(superclass.header.contract.classifier),
@@ -360,6 +380,7 @@ fn admit<'a, 'b>(
     if !body.is_empty() {
         steps.push(InitializationStep::Block(body));
     }
+    // The class lists its supertypes in source order; the class it constructs leads them.
     let mut supertypes = supertypes;
     supertypes.retain(|supertype| *supertype != declared_superclass);
     supertypes.insert(0, declared_superclass);

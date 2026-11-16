@@ -9,11 +9,7 @@
 //! implementation has the parameters its function value is invoked with.
 //!
 //! A body with no suspension point completes in place: it returns its result, coerced to `Any?`.
-//! A call to such a function passes a continuation the callee never resumes and reads that
-//! returned value, so the caller completes in place too. A body that can actually suspend — an
-//! intrinsic suspension, a continuation read, or a call to a suspend function whose body is absent
-//! or itself suspends — needs the state machine, which is not modeled on these targets yet. The
-//! pass declines that file rather than emit a body that cannot resume.
+//! A body that can suspend is moved to a generated continuation class with its live value frame.
 
 use crate::fx_hash::HashSet;
 use crate::ir::{
@@ -42,24 +38,73 @@ impl ContinuationDecline {
 
 /// Give every suspend function of `ir` its continuation parameter and its `Any?` result.
 pub fn add_continuation_parameters(ir: &mut IrFile) -> Result<(), ContinuationDecline> {
+    let runtime = ir.coroutine_runtime;
+    add_continuation_parameters_with_runtime(ir, runtime)
+}
+
+/// Give every suspend function its continuation parameter and realize bodies that suspend using
+/// the exact runtime identities selected at the backend handoff.
+pub(crate) fn add_continuation_parameters_with_runtime(
+    ir: &mut IrFile,
+    runtime: Option<crate::ir::IrCoroutineRuntime>,
+) -> Result<(), ContinuationDecline> {
+    if ir.coroutine_runtime.is_none() {
+        ir.coroutine_runtime = runtime;
+    }
     let mut suspend_functions = ir.suspend_funs.clone();
     suspend_functions.sort_unstable();
     suspend_functions.dedup();
     let suspend_set: HashSet<u32> = suspend_functions.iter().copied().collect();
     let completing = completing_suspend_functions(ir, &suspend_set);
-    // Any body may reach a real suspension: a suspend function's own, and a non-suspend one that
-    // forwards to a suspend declaration (a `$default` entry). A call whose callee completes in
-    // place does not.
-    if ir
-        .functions
+    let machine_functions: Vec<u32> = suspend_functions
         .iter()
-        .filter_map(|function| function.body)
-        .any(|body| body_needs_state_machine(ir, body, &suspend_set, &completing))
+        .copied()
+        .filter(|&function| {
+            ir.functions[function as usize]
+                .body
+                .is_some_and(|body| body_needs_state_machine(ir, body, &suspend_set, &completing))
+        })
+        .collect();
+    // A non-suspend synthetic entry (most notably a default stub) can also contain a call that
+    // reaches a suspension. It has no continuation parameter to capture, so keep declining that
+    // shape until its producer supplies the call-frame contract.
+    if let Some((_, declaration)) =
+        ir.functions
+            .iter()
+            .enumerate()
+            .find(|(function, declaration)| {
+                !suspend_set.contains(&(*function as u32))
+                    && declaration.body.is_some_and(|body| {
+                        body_needs_state_machine(ir, body, &suspend_set, &completing)
+                    })
+            })
     {
+        crate::trace_compiler!(
+            "suspend",
+            "the non-suspend function `{}` reaches a suspension",
+            declaration.name
+        );
+        return Err(ContinuationDecline::Suspends);
+    }
+    if !machine_functions.is_empty() && runtime.is_none() {
+        crate::trace_compiler!(
+            "suspend",
+            "a body suspends without a selected coroutine runtime"
+        );
         return Err(ContinuationDecline::Suspends);
     }
     for function in suspend_functions {
         add_continuation_parameter(ir, function);
+    }
+    for function in machine_functions {
+        super::state_machine::realize(ir, function, &suspend_set).map_err(|reason| {
+            crate::trace_compiler!(
+                "suspend",
+                "the function `{}` has no state machine: {reason:?}",
+                ir.functions[function as usize].name
+            );
+            ContinuationDecline::Suspends
+        })?;
     }
     pass_continuations(ir, &suspend_set);
     Ok(())

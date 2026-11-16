@@ -118,14 +118,37 @@ pub(super) struct RangeMembershipHeader {
     pub(super) ret: Ty,
 }
 
+/// The exact provider-selected `suspendCoroutineUninterceptedOrReturn<T>` call shape.
+pub(super) struct UninterceptedSuspensionCall {
+    pub(super) parameter: Ty,
+    pub(super) result: Ty,
+    pub(super) formal: crate::types::TyParamName,
+}
+
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
 pub(super) trait CallLinker {
+    /// Whether this exact provider-assigned dependency callable is declared `suspend`. A selected
+    /// suspend call in a KLIB body keeps its source result type in common IR; the common coroutine
+    /// preparation later supplies the target continuation ABI.
+    fn is_suspend_callable(&self, _target: crate::fir::ExternalCallableId) -> bool {
+        false
+    }
+
     /// The same authenticated primitive call shape that dependency planning treats as a leaf.
     /// Template linkers retain their ordinary checked external-call boundary by default.
     fn common_primitive(
         &self,
         _callee: &crate::libraries::KlibDeclarationSignature,
     ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
+        Ok(None)
+    }
+
+    /// The provider-selected compiler suspension intrinsic, if this template linker owns its
+    /// identity and has authenticated its serialized header.
+    fn unintercepted_suspension(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<UninterceptedSuspensionCall>> {
         Ok(None)
     }
 
@@ -264,12 +287,13 @@ pub(super) trait CallLinker {
         unsupported("a call of a file-private declaration")
     }
 
-    /// The dependency property a call of its accessor `callee` reads or writes.
+    /// What a call of the property accessor `callee` reaches: the dependency property it reads or
+    /// writes, or the accessor function the unit emits.
     fn link_accessor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibAccessorIdSignature,
-    ) -> Lowered<LinkedAccessor>;
+    ) -> Lowered<LinkedAccessorCall>;
 
     /// The static storage of the top-level property whose backing field is `field`, which a body
     /// of that property's own library reads or writes. `None` leaves the access to the body's
@@ -361,7 +385,7 @@ pub(super) struct LinkedConstructor {
 /// and the accessor's dispatch receiver, parameters (context parameters, extension receiver, and a
 /// setter's value) and result.
 pub(super) struct LinkedAccessor {
-    pub(super) target: LinkedAccessorTarget,
+    pub(super) property: crate::fir::ExternalPropertyId,
     pub(super) write: bool,
     pub(super) receiver: Option<Ty>,
     pub(super) params: Vec<Ty>,
@@ -369,6 +393,13 @@ pub(super) struct LinkedAccessor {
     pub(super) context_count: usize,
     /// As [`LinkedCallee::class_type_parameters`].
     pub(super) class_type_parameters: Vec<String>,
+    /// The exact provider-selected external accessor called by this property operation, when the
+    /// target is a dependency property.
+    pub(super) callable: Option<crate::fir::ExternalCallableId>,
+    /// This accessor's own formal identities and bounds, distinct from declaring-class formals.
+    pub(super) type_parameters: Vec<crate::types::TyParamName>,
+    pub(super) type_parameter_bounds: Vec<Vec<Ty>>,
+    pub(super) reified_type_parameters: Vec<u32>,
 }
 
 /// The value of a serialized constant typed `ty`, and the type the lowered constant has: `null`
@@ -409,13 +440,12 @@ pub(super) struct StaticField {
 }
 
 /// What an accessor call reaches.
-#[derive(Clone, Copy)]
-pub(super) enum LinkedAccessorTarget {
+pub(super) enum LinkedAccessorCall {
     /// The provider's property, read or written through its accessor.
-    External(crate::fir::ExternalPropertyId),
-    /// The getter this unit emits, for a member of a value class: a member function of its
-    /// class, called on the receiver in place of the property read.
-    Local(FunId),
+    Property(LinkedAccessor),
+    /// The accessor function this unit emits, called as any function of the unit is: a member of
+    /// a class the unit materializes, or a top-level accessor, generic ones among them.
+    Function(LinkedCallee),
 }
 
 /// The function a body is lowered into: its serialized symbol, the only target its `return`s may
@@ -877,22 +907,39 @@ impl<'a> BodyLowering<'a> {
         if actual.is_nullable() && !expected.is_nullable() {
             return false;
         }
-        let Some(name) = actual.non_null().kotlin_class_internal() else {
-            return false;
-        };
-        let Some(class) = self.ir.classes.iter().find(|class| {
-            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
-        }) else {
-            return false;
-        };
         let parameters = self.header.type_parameters();
-        class
-            .supertypes
-            .iter()
-            .any(|supertype| self.linker.is_subtype(parameters, *supertype, expected))
-            || self
-                .linker
-                .is_subtype(parameters, Ty::obj_name(class.superclass), expected)
+        self.local_class_supertypes(actual)
+            .is_some_and(|mut supertypes| {
+                supertypes.any(|supertype| self.linker.is_subtype(parameters, supertype, expected))
+            })
+    }
+
+    /// The direct supertypes recorded for the local or anonymous class lowered in this body that
+    /// the non-null `actual` names; `None` when it names no such class.
+    fn local_class_supertypes(&self, actual: Ty) -> Option<impl Iterator<Item = Ty> + '_> {
+        let name = actual.non_null().kotlin_class_internal()?;
+        let class = self.ir.classes.iter().find(|class| {
+            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
+        })?;
+        Some(
+            class
+                .supertypes
+                .iter()
+                .copied()
+                .chain(std::iter::once(Ty::obj_name(class.superclass))),
+        )
+    }
+
+    /// The generic class `owner` as `sub` applies it through its hierarchy: through the supertypes
+    /// recorded for a local or anonymous class lowered in this body, or the calling compilation's
+    /// class model otherwise.
+    fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
+        match self.local_class_supertypes(sub) {
+            Some(mut supertypes) => {
+                supertypes.find_map(|supertype| self.linker.applied_supertype(supertype, owner))
+            }
+            None => self.linker.applied_supertype(sub, owner),
+        }
     }
 
     /// Whether `supertype` counts as a supertype of `subtype`: one recorded for a local or

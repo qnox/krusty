@@ -1846,6 +1846,7 @@ impl<'a> Body<'a> {
                     parameters,
                     result,
                     source_receiver: Some(_),
+                    ..
                 } = &**checked_op
                     && parameters.is_empty()
                     && let Some(field) = self.throwable_field_property(*target) =>
@@ -2183,7 +2184,16 @@ impl<'a> Body<'a> {
         let null_guard = matches!(op, IrBinOp::Eq | IrBinOp::Ne)
             && (matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null))
                 || matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null)));
-        if (matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) || null_guard)
+        let reference_or_unit =
+            |ty| Ok::<_, Unsupported>(matches!(carrier(ty)?, None | Some(ValType::Ref { .. })));
+        if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe)
+            && reference_or_unit(left)?
+            && reference_or_unit(right)?
+        {
+            // Identity over objects, `Unit`'s instance among them, is the one equality rule.
+            return self.equality(op, EqualityMode::Structural, lhs, rhs);
+        }
+        if null_guard
             && matches!(carrier(left)?, Some(ValType::Ref { .. }))
             && matches!(carrier(right)?, Some(ValType::Ref { .. }))
         {

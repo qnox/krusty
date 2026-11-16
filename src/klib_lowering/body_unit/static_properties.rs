@@ -29,12 +29,20 @@ pub(super) type FileIdentity = (String, u32);
 
 impl Linker<'_, '_> {
     /// The accessor `identity` of a top-level property this unit lowers from its body, linked as
-    /// the unit function it is declared as. `None` when `identity` is no top-level accessor.
+    /// the unit function it is declared as, generic or not: a call of it binds the accessor's own
+    /// type parameters, as a call of any function the unit lowers does. `None` when `identity` is
+    /// no top-level accessor, or a retained export realizes it.
+    ///
+    /// The serialized declaration must be the accessor in its role's slot of the property group
+    /// its signature names; a function of the same signature elsewhere grants no authority.
     pub(super) fn top_level_accessor(
         &mut self,
         ir: &mut IrFile,
         identity: &KlibDependencyCallable,
-    ) -> Result<Option<LinkedAccessor>, KlibBodyDeclineReason> {
+    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
+        if self.sources.externals.contains_key(identity) {
+            return Ok(None);
+        }
         let Some((_, property, write)) = self
             .sources
             .bodies
@@ -43,11 +51,22 @@ impl Linker<'_, '_> {
         else {
             return Ok(None);
         };
+        let role = if write {
+            crate::libraries::KlibAccessorRole::Setter
+        } else {
+            crate::libraries::KlibAccessorRole::Getter
+        };
         let (arena, declaration) = self
             .sources
             .bodies
-            .function(identity)
+            .top_level_accessor_header(identity, role)
+            .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?
             .ok_or(KlibBodyDeclineReason::Unjoined)?;
+        if declaration.dispatch_receiver.is_some()
+            || !matches!(declaration.body, Some(KlibIrBody::Block(_)))
+        {
+            return Ok(None);
+        }
         if excluded_from_codegen(&property.base.annotations)
             || excluded_from_codegen(&declaration.base.annotations)
         {
@@ -63,29 +82,22 @@ impl Linker<'_, '_> {
                 ))
             }
             Some(KlibCalleeFact::Selected(callables)) => {
+                // Every selected variant is this accessor of this property.
+                let property = callables[0].accessor().map(|accessor| accessor.property);
+                if callables.iter().any(|callable| {
+                    callable.accessor().is_none_or(|accessor| {
+                        Some(accessor.property) != property || accessor.role != role
+                    })
+                }) {
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "the selected variants name other accessors of the property".to_owned(),
+                    ));
+                }
                 Some(SelectedKlibCallables::Variants(callables))
             }
         };
-        let selected = selected_callable_for_header(selected, None, arena, declaration)?;
-        let function = match self.functions.get(identity) {
-            Some(&function) => {
-                if let Some(selected) = selected {
-                    function_header(Some(selected), arena, declaration)?;
-                }
-                function
-            }
-            None => self.declare(ir, identity, selected, arena, declaration)?,
-        };
-        let declared = &ir.functions[function as usize];
-        Ok(Some(LinkedAccessor {
-            target: LinkedAccessorTarget::Local(function),
-            write,
-            receiver: None,
-            params: declared.params.clone(),
-            ret: declared.ret,
-            context_count: ir.declared_parameters(function).context_count,
-            class_type_parameters: Vec::new(),
-        }))
+        self.top_level_function(ir, identity, selected, arena, declaration)
+            .map(Some)
     }
 
     /// The static of the top-level property whose backing field is `field`, declared the first

@@ -58,7 +58,6 @@ arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
 arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
 arrays/hashMap.kt
 arrays/inProjectionOfList.kt
-arrays/indices.kt
 arrays/iteratorBooleanArray.kt
 arrays/iteratorByteArray.kt
 arrays/iteratorByteArrayNextByte.kt
