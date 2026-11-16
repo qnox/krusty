@@ -495,6 +495,15 @@ pub(super) fn from_checked_analysis(
             );
             return None;
         }
+        if let Err(identity) =
+            record_published_override_facts(&mut inline_bodies, &index, symbols, raw_source)
+        {
+            crate::trace_compiler!(
+                "fir",
+                "Pass 1 published inline-local override facts conflict for {identity:?}",
+            );
+            return None;
+        }
     }
     let mut unexpected = UnexpectedOrdinaryInlineBody::default();
     let mut sessions = (0..files.len())
@@ -703,6 +712,17 @@ pub(super) fn streaming(
                 );
                 return None;
             }
+            if let Err(identity) =
+                record_published_override_facts(&mut inline_bodies, &index, symbols, raw_source)
+            {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!(
+                        "internal error: inconsistent builtin implementation facts for external member {identity:?}"
+                    ),
+                );
+                return None;
+            }
             for work in inline_work.take_for_source(&index, source) {
                 if let Err(error) = crate::fir::check_and_dispatch_active_body_in_session(
                     crate::fir::BodyCheckUnit {
@@ -785,6 +805,20 @@ pub(super) fn streaming(
         "no legacy parser arena may survive Pass-1 inline/default preparation"
     );
     finish(index, inline_bodies, sources, default_arguments, unexpected)
+}
+
+/// A body-local classifier of an inline body has its override plan only once its checked
+/// signatures are published, so the external declarations its overrides name get their builtin
+/// implementation facts then, beside the ones its checked body selected. A caller that splices
+/// the body, and the object with it, carries them from the inline store.
+fn record_published_override_facts(
+    inline_bodies: &mut crate::fir::InlineBodyStore,
+    index: &crate::fir::ResolvedModuleIndex,
+    symbols: &FrontendSymbols,
+    raw_source: usize,
+) -> Result<(), crate::fir::ExternalCallableId> {
+    let facts = crate::resolve::published_override_facts(index, symbols, raw_source as u32)?;
+    inline_bodies.record_builtin_implementations(&facts)
 }
 
 fn finish(

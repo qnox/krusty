@@ -131,7 +131,7 @@ impl Body<'_> {
                 self.runtime.function_value_to_string(self.module, &name)
             }
             Some(function_value_names::FunctionValueName::Shape(shape)) => {
-                let codes: Vec<&str> = params[..captures.len()]
+                let codes: Vec<String> = params[..captures.len()]
                     .iter()
                     .enumerate()
                     .map(|(parameter, &ty)| {
@@ -139,7 +139,7 @@ impl Body<'_> {
                             .ir
                             .shared_capture_parameters
                             .contains_key(&(function, parameter as u32));
-                        function_value_names::capture_code(ty, shared)
+                        function_value_names::capture_code(ty, shared, self.classifiers)
                     })
                     .collect();
                 let name = function_value_names::class_name(shape, &codes);

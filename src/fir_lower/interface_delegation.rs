@@ -744,6 +744,9 @@ fn delegated_call(
             if let Some(declared) = call.declared_result {
                 ir.call_declared_ret.insert(expression, declared.get());
             }
+            // The forwarder's call yields the selected member's result on the delegate, which
+            // nothing else in the forwarder names.
+            ir.set_logical_type(expression, call.result.get());
         }
     }
     if call.suspend {

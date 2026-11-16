@@ -248,3 +248,85 @@ fn two_tail_only_blocks_cannot_declare_the_same_return_target() {
         "the KLIB body of `demo.f` (its serialized declaration disagrees with the selected one: a returnable block repeats an enclosing target's identity)"
     );
 }
+
+/// A frame whose last statement calls a function declared to return `Nothing`, as kotlinc inlines
+/// a lambda ending in `fail(…)`: that call never completes, so the frame's result is never read
+/// before a value is stored in it.
+fn frame_ending_in(callee_result: T) -> Demo {
+    demo(
+        &[
+            ("stop", &[T::Throwable], T::Nothing),
+            ("value", &[T::Throwable], T::NullableAny),
+            ("f", &[T::Throwable], T::NullableAny),
+        ],
+        move |name, body| match name {
+            "stop" => {
+                let thrown = body.param(0);
+                let throw = body.throw(thrown);
+                Some(vec![KlibIrStatement::Expression(throw)])
+            }
+            "value" => {
+                let thrown = body.param(0);
+                Some(vec![body.ret(thrown)])
+            }
+            _ => {
+                let target = local_symbol(KlibIrSymbolKind::ReturnableBlock, 500);
+                let thrown = body.param(0);
+                let callee = if callee_result == T::Nothing {
+                    "stop"
+                } else {
+                    "value"
+                };
+                let call = body.call(callee, vec![thrown], callee_result);
+                let frame = body.expr(
+                    T::NullableAny,
+                    KlibIrExprKind::ReturnableBlock {
+                        symbol: target,
+                        statements: vec![KlibIrStatement::Expression(call)],
+                        origin: None,
+                    },
+                );
+                Some(vec![body.ret(frame)])
+            }
+        },
+    )
+}
+
+#[test]
+fn a_value_frame_ending_in_a_nothing_call_never_completes_without_a_value() {
+    let demo = frame_ending_in(T::Nothing);
+    let mut unit = DependencyBodyUnit::default();
+    demo.lower(&mut unit, "f", &["stop"])
+        .expect("the frame's last call never completes");
+    let ir = unit.ir();
+    validated(ir);
+    let [IrExpr::While { body, label, .. }] = ir
+        .exprs
+        .iter()
+        .filter(|expression| matches!(expression, IrExpr::While { .. }))
+        .collect::<Vec<_>>()
+        .as_slice()
+    else {
+        panic!("expected one frame");
+    };
+    let IrExpr::Block { stmts, value: None } = ir.expr(*body) else {
+        panic!("expected the frame's statement block");
+    };
+    let [call, exit] = stmts.as_slice() else {
+        panic!("expected the call and the frame's exit, got {stmts:?}");
+    };
+    assert_eq!(ir.logical_type(*call), Some(crate::types::Ty::Nothing));
+    assert!(matches!(ir.expr(*exit), IrExpr::Break { label: exit } if exit == label));
+    assert!(!ir
+        .exprs
+        .iter()
+        .any(|expression| matches!(expression, IrExpr::SetValue { .. })));
+}
+
+#[test]
+fn a_value_frame_ending_in_a_call_that_returns_still_may_complete_without_a_value() {
+    assert_eq!(
+        frame_ending_in(T::NullableAny).declined("f", &["value"]),
+        "the KLIB body of `demo.f` (it uses a value-returning block that may complete without a value)"
+    );
+}

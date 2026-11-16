@@ -11,11 +11,15 @@ pub enum RuntimeExceptionKind {
     NullPointer,
     IllegalState,
     IllegalArgument,
+    UnsupportedOperation,
+    Arithmetic,
+    NumberFormat,
     ClassCast,
+    NoSuchElement,
 }
 
 impl RuntimeExceptionKind {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 12] = [
         Self::Throwable,
         Self::Exception,
         Self::RuntimeException,
@@ -23,7 +27,11 @@ impl RuntimeExceptionKind {
         Self::NullPointer,
         Self::IllegalState,
         Self::IllegalArgument,
+        Self::UnsupportedOperation,
+        Self::Arithmetic,
+        Self::NumberFormat,
         Self::ClassCast,
+        Self::NoSuchElement,
     ];
 
     /// The role whose language-runtime declaration is `classifier`, if any.
@@ -44,7 +52,11 @@ impl RuntimeExceptionKind {
             Self::NullPointer => "kotlin/NullPointerException",
             Self::IllegalState => "kotlin/IllegalStateException",
             Self::IllegalArgument => "kotlin/IllegalArgumentException",
+            Self::UnsupportedOperation => "kotlin/UnsupportedOperationException",
+            Self::Arithmetic => "kotlin/ArithmeticException",
+            Self::NumberFormat => "kotlin/NumberFormatException",
             Self::ClassCast => "kotlin/ClassCastException",
+            Self::NoSuchElement => "kotlin/NoSuchElementException",
         })
     }
 }
@@ -73,13 +85,17 @@ mod tests {
             RuntimeExceptionKind::NullPointer => 4,
             RuntimeExceptionKind::IllegalState => 5,
             RuntimeExceptionKind::IllegalArgument => 6,
-            RuntimeExceptionKind::ClassCast => 7,
+            RuntimeExceptionKind::UnsupportedOperation => 7,
+            RuntimeExceptionKind::Arithmetic => 8,
+            RuntimeExceptionKind::NumberFormat => 9,
+            RuntimeExceptionKind::ClassCast => 10,
+            RuntimeExceptionKind::NoSuchElement => 11,
         };
         let positions: Vec<usize> = RuntimeExceptionKind::ALL
             .into_iter()
             .map(position)
             .collect();
-        assert_eq!(positions, (0..8).collect::<Vec<_>>());
+        assert_eq!(positions, (0..12).collect::<Vec<_>>());
         for kind in RuntimeExceptionKind::ALL {
             assert_eq!(RuntimeExceptionKind::of(kind.classifier()), Some(kind));
         }

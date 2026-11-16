@@ -10,6 +10,8 @@ pub struct FirCatch {
     pub origin: OriginId,
     pub parameter: LocalValueId,
     pub parameter_ty: ResolvedTy,
+    /// `catch (_: E)`: the parameter declares no name.
+    pub unused: bool,
     pub body: FirExprId,
     /// The `catch` keyword's source line, a line-only output fact; 0 when unknown.
     pub debug_line: u32,
