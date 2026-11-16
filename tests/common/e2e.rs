@@ -201,7 +201,7 @@ pub fn write_native_runtime_headers(directory: &std::path::Path) -> std::io::Res
 }
 
 /// `native_analysis` of a build applying every compiler plugin krusty ships, with their
-/// `libraries` (the plugins' runtimes) on the classpath after the stdlib and `kotlin-test`.
+/// `libraries` (the plugins' Native runtime KLIBs) after the selected Native stdlib.
 pub fn native_analysis_with_plugins(
     sources: &[(&str, &str)],
     libraries: &[std::path::PathBuf],
