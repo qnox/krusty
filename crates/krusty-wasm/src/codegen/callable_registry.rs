@@ -14,8 +14,8 @@ use krusty::backend::{
     DependencyMemberReceiver, KlibDependencyCallable, SingletonExtensionUnreadReceiver,
     SingletonMemberReceiver,
 };
-use krusty::fir::{CallableId, ExternalCallableId};
-use krusty::ir::{Callee, ExprId, IrExpr, IrFile};
+use krusty::fir::{CallableId, ExternalCallableId, ResolvedFunctionOverrideTarget};
+use krusty::ir::{Callee, ExprId, IrExpr, IrFile, IrSuperCallKind};
 
 use super::super::encode::Module;
 use super::lower::Unsupported;
@@ -228,6 +228,8 @@ impl CallableRegistry {
         ir: &IrFile,
         callables: &CheckedBackendCallables,
         module_facts: &krusty::backend::BackendModuleFacts,
+        classifiers: &dyn krusty::backend::BackendClassifierSource,
+        classes: &super::laid_out_classes::LaidOutClasses,
         wasm: &mut Module,
     ) -> Result<FileCallTargets, Unsupported> {
         let mut targets = FileCallTargets {
@@ -297,6 +299,33 @@ impl CallableRegistry {
                     let Some(access) = callables.dependency_accessor(operation) else {
                         continue;
                     };
+                    if access.receiver.is_some()
+                        && access.dispatches()
+                        && !access.callable.is_member_extension()
+                        && !super::lower::library_members::target_owns_call(
+                            ir,
+                            callables,
+                            expression,
+                            access.callable,
+                        )
+                    {
+                        let role = if access.writes() {
+                            super::lower::library_members::MemberRole::Setter
+                        } else {
+                            super::lower::library_members::MemberRole::Getter
+                        };
+                        if let Some(member) = super::lower::library_members::published_class::select(
+                            access.callable,
+                            role,
+                            || access.callee().map_err(str::to_owned),
+                            classifiers,
+                            classes,
+                            wasm,
+                        ) {
+                            member?;
+                            continue;
+                        }
+                    }
                     if !access
                         .callable
                         .dependency_callable
@@ -328,6 +357,28 @@ impl CallableRegistry {
                     targets
                         .module_defaults
                         .insert(*provider, self.module_default_index(*provider, wasm));
+                }
+                // `super.f()` of a dependency class's method runs that declaration's own body,
+                // through the entry its module exports under the selected identity.
+                Callee::Super {
+                    declaration: Some(ResolvedFunctionOverrideTarget::External(target)),
+                    kind: IrSuperCallKind::Function,
+                    ..
+                } => {
+                    let Some(identity) = callables
+                        .callable(*target)
+                        .and_then(|callable| callable.dependency_callable.as_ref())
+                    else {
+                        continue;
+                    };
+                    let Some(&index) = self.dependencies.get(identity) else {
+                        continue;
+                    };
+                    let signature = self.signatures.get(identity).ok_or_else(|| {
+                        "an emitted dependency member without its declared signature".to_owned()
+                    })?;
+                    targets.external.insert(*target, index);
+                    targets.signatures.insert(*target, signature.clone());
                 }
                 Callee::External {
                     target,
@@ -362,24 +413,33 @@ impl CallableRegistry {
                         // `typeOf` keeps its checked call, and emission makes the `KType` it names.
                         continue;
                     }
-                    if super::lower::declared_by_string_builder(callable) {
-                        // The runtime lays `StringBuilder` out and realizes its members.
-                        continue;
-                    }
-                    if super::lower::declared_by_array_list(callable)
-                        || dispatch_receiver.is_some_and(|receiver| {
-                            super::lower::array_list_receiver(ir, receiver)
-                                && super::lower::realized_array_list_member(callable)
-                        })
-                    {
-                        // The runtime lays `ArrayList` out and realizes its members, including
-                        // the ones it inherits from the abstract collection classes.
+                    if super::lower::library_members::target_owns_call(
+                        ir, callables, expression, callable,
+                    ) {
+                        // The same positive runtime ownership check precedes class dispatch
+                        // during both dependency prewalking and body emission.
                         continue;
                     }
                     if super::lower::any_members::call_member(ir, callables, expression).is_some() {
                         // `kotlin.Any`'s members, and the declarations overriding them, are
                         // realized through the receiver's own representation.
                         continue;
+                    }
+                    if dispatch_receiver.is_some()
+                        && extension_receiver_parameter.is_none()
+                        && defaults.is_empty()
+                    {
+                        if let Some(member) = super::lower::library_members::published_class::select(
+                            callable,
+                            super::lower::library_members::MemberRole::Function,
+                            || Ok(callee.clone()),
+                            classifiers,
+                            classes,
+                            wasm,
+                        ) {
+                            member?;
+                            continue;
+                        }
                     }
                     // A published exact export owns even a specialized generic call. Its actual
                     // operand roles are authenticated from checked substitutions during emission,
@@ -699,6 +759,16 @@ impl FileCallTargets {
 
 #[cfg(test)]
 mod tests {
+    struct NoClassifiers;
+    impl krusty::backend::BackendClassifierSource for NoClassifiers {
+        fn classifier(
+            &self,
+            _: krusty::types::TypeName,
+        ) -> Option<std::sync::Arc<krusty::backend::BackendClassifierFact>> {
+            None
+        }
+    }
+
     fn no_facts() -> krusty::backend::BackendModuleFacts {
         krusty::backend::BackendModuleFacts::from_classifiers([], [])
             .expect("an empty module has valid facts")
@@ -1016,6 +1086,8 @@ mod tests {
                 &ir,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("a dead inline template cannot affect emitted calls");
@@ -1053,6 +1125,8 @@ mod tests {
                 &ir,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("a supported constructor initializer has registered calls");
@@ -1200,6 +1274,8 @@ mod tests {
                 &caller,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("the inherited provider reserves its exact entry");
@@ -1330,6 +1406,8 @@ mod tests {
                 &caller,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("the remote member-default provider reserves its exact entry");

@@ -122,6 +122,10 @@ pub(super) fn planned_class_table(
         vtable.push(match *entry {
             PlannedSlot::Any(member) => Slot::AnyMember(member),
             PlannedSlot::Reserved => Slot::Abstract,
+            PlannedSlot::Inherited { slot } if elsewhere(slot as usize) => Slot::Inherited { slot },
+            PlannedSlot::Inherited { .. } => {
+                return Err("an opaque producer slot without its laid-out superclass".into())
+            }
             PlannedSlot::Member(PlanKey::Callable(callable)) => match lowered(callable) {
                 Some(fid) => method(fid),
                 None if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
@@ -182,6 +186,20 @@ pub(super) fn planned_class_table(
                 _ => Slot::Bridge {
                     declared: function(declared)?,
                     target_slot: Some(target_slot),
+                    target: function(target)?,
+                },
+            },
+            PlannedSlot::DeclaredBridge {
+                ref parameters,
+                result,
+                target_slot,
+                target,
+            } => match lowered(target) {
+                None if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
+                _ => Slot::DeclaredBridge {
+                    parameters: parameters.clone(),
+                    result,
+                    target_slot,
                     target: function(target)?,
                 },
             },

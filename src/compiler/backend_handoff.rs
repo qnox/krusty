@@ -59,7 +59,11 @@ pub(super) fn checked_ir_file<'a>(
     if module.common_ir_coroutines && !ir.suspend_funs.is_empty() {
         ir.coroutine_runtime = symbols.coroutine_runtime();
     }
-    let mut callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
+    let mut callables = match CheckedBackendCallables::freeze_with_class_declarations(
+        &ir,
+        symbols.semantic_platform(),
+        module_facts.classes(),
+    ) {
         Ok(callables) => callables,
         Err(error) => {
             diags.error(
@@ -240,7 +244,14 @@ pub(super) fn prepare_common_ir(
 
     let plugin_runtime = file.callables.plugin_runtime_bindings();
     let char_sequence_protocol = file.callables.char_sequence_protocol();
-    let mut callables = CheckedBackendCallables::freeze(&file.ir, provider).map_err(|error| {
+    // The refreeze keeps the declarations of the module's classes, as the handoff froze them:
+    // the slot plan binds a dependency superclass's published layout by those declarations.
+    let mut callables = CheckedBackendCallables::freeze_with_class_declarations(
+        &file.ir,
+        provider,
+        file.classifiers.module().classes(),
+    )
+    .map_err(|error| {
         crate::backend::CommonIrPreparationError::Invariant(format!(
             "cannot freeze prepared dependency declarations: {error:?}"
         ))

@@ -3,11 +3,14 @@
 use crate::ir::{ExprId, FunId, IrFile};
 
 /// What a file held before a lowering began. Lowering appends functions and expressions and
-/// records facts keyed by them; restoring removes exactly those.
+/// records facts keyed by them, and may append members to a class it materialized before;
+/// restoring removes exactly those.
 pub(super) struct LoweringCheckpoint {
     expressions: usize,
     functions: usize,
     classes: usize,
+    /// Each existing class's method and secondary-constructor counts.
+    class_members: Vec<(usize, usize)>,
     statics: usize,
     class_self_types: crate::fx_hash::HashSet<crate::types::TypeName>,
 }
@@ -18,6 +21,11 @@ impl LoweringCheckpoint {
             expressions: ir.exprs.len(),
             functions: ir.functions.len(),
             classes: ir.classes.len(),
+            class_members: ir
+                .classes
+                .iter()
+                .map(|class| (class.methods.len(), class.secondary_ctors.len()))
+                .collect(),
             statics: ir.statics.len(),
             class_self_types: ir.declared_class_self_type_owners(),
         }
@@ -54,6 +62,10 @@ impl LoweringCheckpoint {
             .collect::<Vec<_>>();
         ir.functions.truncate(self.functions);
         ir.classes.truncate(self.classes);
+        for (class, (methods, secondaries)) in ir.classes.iter_mut().zip(self.class_members) {
+            class.methods.truncate(methods);
+            class.secondary_ctors.truncate(secondaries);
+        }
         for class in removed {
             ir.function_overrides.remove(&class);
             ir.property_overrides.remove(&class);
