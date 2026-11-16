@@ -361,6 +361,7 @@ fn supertype_application(
     found.ok_or_else(|| mismatch("an override's declaring type is not a supertype of the object"))
 }
 
+#[derive(Clone)]
 struct AdmittedInterface {
     name: TypeName,
     signature: KlibIrSignature,
@@ -374,6 +375,17 @@ struct AuthenticatedSupertypes {
     interfaces: Vec<AdmittedInterface>,
     superclass: Option<TypeName>,
     library_superclass: Option<AdmittedInterface>,
+    inherited: InheritedSupertypes,
+}
+
+/// The supertypes a class reaches only through its library supertypes, each applied as the class
+/// applies it. The linker follows an override edge naming a member a direct supertype inherits
+/// without overriding it to that member's declaration in one of these: `EnumEntriesList.get`
+/// overrides `EnumEntries.get`, which `EnumEntries` inherits from `List`.
+#[derive(Default)]
+struct InheritedSupertypes {
+    interfaces: Vec<AdmittedInterface>,
+    classes: Vec<AdmittedInterface>,
 }
 
 struct InterfaceSignature {
@@ -808,6 +820,7 @@ fn prepare_class<'a>(
         interfaces,
         superclass,
         library_superclass,
+        inherited,
     } = authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
     let self_type = Ty::obj_args_name(class_name, &formals);
     let result = semantic_type_in(arena, &types, function.return_type, &resolve)?;
@@ -833,6 +846,7 @@ fn prepare_class<'a>(
         module: source.module,
         interfaces: &interfaces,
         library_superclass: library_superclass.as_ref(),
+        inherited: &inherited,
     };
     let StoredMembers {
         mut fields,
@@ -1110,7 +1124,7 @@ fn authenticate_supertypes(
                 ))
             }
             LocatedClass::Several => return Err(mismatch("two libraries serialize one supertype")),
-            LocatedClass::One(found) => {
+            LocatedClass::One(_, found) => {
                 // A library class is the superclass, which the unit materializes from its own
                 // initialization when the class's constructor delegates to it.
                 if class_kind(found.base.flags) == TypeKind::Class {
@@ -1143,12 +1157,110 @@ fn authenticate_supertypes(
             }
         }
     }
+    let inherited = inherited_supertypes(
+        bodies,
+        module,
+        interfaces.iter().chain(library_superclass.as_ref()),
+        resolve,
+    )?;
     Ok(AuthenticatedSupertypes {
         supertypes,
         interfaces,
         superclass,
         library_superclass,
+        inherited,
     })
+}
+
+/// The supertypes the library supertypes in `direct` reach in turn, other than `Any` and those in
+/// `direct`, each applied through the application of the supertype that names it.
+fn inherited_supertypes<'a>(
+    bodies: &KlibDeclarationBodies,
+    module: &str,
+    direct: impl Iterator<Item = &'a AdmittedInterface>,
+    resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
+) -> Result<InheritedSupertypes, KlibBodyDeclineReason> {
+    let mut reached: Vec<AdmittedInterface> = direct.cloned().collect();
+    let direct_count = reached.len();
+    let mut inherited = InheritedSupertypes::default();
+    let mut next = 0;
+    while let Some(current) = reached.get(next).cloned() {
+        next += 1;
+        let KlibIrSignature::Public(signature) = &current.signature else {
+            return Err(unsupported("a non-public supertype"));
+        };
+        let (arena, class) = match bodies.public_class(module, signature) {
+            LocatedClass::One(arena, class) => (arena, class),
+            LocatedClass::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "a supertype this library does not authenticate",
+                ))
+            }
+            LocatedClass::Several => return Err(mismatch("two libraries serialize one supertype")),
+        };
+        if next > direct_count {
+            match class_kind(class.base.flags) {
+                TypeKind::Interface => inherited.interfaces.push(current.clone()),
+                TypeKind::Class => inherited.classes.push(current.clone()),
+                _ => {
+                    return Err(unsupported(
+                        "a supertype other than a class or an interface",
+                    ))
+                }
+            }
+        }
+        let mut formals = Vec::new();
+        let types = bind_interface_parameters(class, |parameter| {
+            let formal = Ty::ty_param(
+                crate::types::metadata_type_parameter(&parameter.name),
+                Ty::nullable(Ty::obj("kotlin/Any")),
+            );
+            formals.push(formal);
+            Ok(formal)
+        })?;
+        let declared = class
+            .supertypes
+            .iter()
+            .map(|&supertype| semantic_type_in(arena, &types, supertype, resolve))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (applied, _) = substitute_applied_signature(
+            &declared,
+            Ty::obj_name(crate::types::wk::any()),
+            &formals,
+            &current.arguments,
+        )?;
+        for (&supertype, ty) in class.supertypes.iter().zip(applied) {
+            if ty == Ty::obj_name(crate::types::wk::any()) {
+                continue;
+            }
+            let KlibIrType::Simple { classifier, .. } = arena.ty(supertype) else {
+                return Err(unsupported(
+                    "a supertype other than a class or an interface",
+                ));
+            };
+            let TyKind::Obj(name, _) = ty.kind() else {
+                return Err(mismatch("a supertype is not a class"));
+            };
+            let supertype = AdmittedInterface {
+                name,
+                signature: classifier.signature.clone(),
+                arguments: ty.type_args().to_vec(),
+            };
+            match reached
+                .iter()
+                .find(|known| known.signature == supertype.signature)
+            {
+                Some(known) if known.arguments == supertype.arguments => {}
+                Some(_) => {
+                    return Err(mismatch(
+                        "a class inherits one supertype with two applications",
+                    ))
+                }
+                None => reached.push(supertype),
+            }
+        }
+    }
+    Ok(inherited)
 }
 
 struct StoredMembers<'a> {
@@ -1167,6 +1279,7 @@ struct MemberScope<'a> {
     module: &'a str,
     interfaces: &'a [AdmittedInterface],
     library_superclass: Option<&'a AdmittedInterface>,
+    inherited: &'a InheritedSupertypes,
 }
 
 fn members_and_storage<'a>(
@@ -1337,6 +1450,7 @@ fn member_overrides(
             let Some(interface) = scope
                 .interfaces
                 .iter()
+                .chain(&scope.inherited.interfaces)
                 .find(|interface| interface.signature == owner.base.symbol.signature)
             else {
                 return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
@@ -1348,10 +1462,12 @@ fn member_overrides(
             (metadata_owner, &[][..])
         } else if let Some(superclass) = scope
             .library_superclass
-            .filter(|superclass| superclass.signature == owner.base.symbol.signature)
+            .into_iter()
+            .chain(&scope.inherited.classes)
+            .find(|superclass| superclass.signature == owner.base.symbol.signature)
         {
-            // A member the library superclass declares, a fake override included, applied as
-            // the class applies its superclass.
+            // A member a library superclass declares, a fake override included, applied as the
+            // class applies that superclass.
             (superclass.name, superclass.arguments.as_slice())
         } else {
             return Err(unsupported("an override of a class member"));
