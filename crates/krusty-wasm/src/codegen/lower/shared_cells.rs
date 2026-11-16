@@ -44,7 +44,7 @@ pub(in crate::codegen) fn parameter_carrier(
         .ok_or("a shared capture parameter outside its function")?;
     match ir.shared_capture_parameters.get(&(function, parameter)) {
         Some(&elem) => Ok(Some(ValType::nullable(cell_type(module, elem)?))),
-        None => carrier(*declared),
+        None => parameter_carrier_of(*declared),
     }
 }
 

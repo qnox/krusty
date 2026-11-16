@@ -400,7 +400,6 @@ closures/closureInsideClosure/propertyAndFunctionNameClash.kt
 closures/closureOnTopLevel1.kt
 closures/closureOnTopLevel2.kt
 closures/closuresAsSingleton.kt
-closures/crossinlineLocalDeclaration.kt
 closures/kt11634_4.kt
 closures/localFunctionInInitBlock.kt
 collectionLiterals/stdlibCollections.kt
@@ -3188,8 +3187,6 @@ smartCasts/smartcastFromGenericToString.kt
 specialBuiltins/bridgeNotEmptyMap.kt
 specialBuiltins/bridges.kt
 specialBuiltins/emptyList.kt
-specialBuiltins/emptyMap.kt
-specialBuiltins/emptyStringMap.kt
 specialBuiltins/enumAsOrdinaled.kt
 specialBuiltins/exceptionCause.kt
 specialBuiltins/notEmptyListAny.kt

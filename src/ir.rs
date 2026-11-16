@@ -1393,6 +1393,11 @@ pub struct IrSpecializedAnonymousClass {
     /// the copy's methods. `field_count` still counts them on the declaration, so later fields
     /// appended to the declaration stay past that prefix.
     pub omitted_capture_fields: u32,
+    /// For each constructor parameter of the copy, the declaration's parameter it was copied from,
+    /// or `None` for a value the copy keeps in place of an inlined lambda. Constructor code the
+    /// copy takes from the declaration once lowering has realized it (the superclass constructor
+    /// call and the initializer) reads its parameters through this.
+    pub constructor_parameters: Vec<Option<u32>>,
     /// Property reads and writes in the inlined caller whose receiver is this copy's construction.
     /// Accessor functions are not available when the construction is retargeted, so the read is
     /// rebound once the copy's properties exist.
@@ -2886,7 +2891,6 @@ pub use function_parameters::*;
 mod traversal;
 pub use traversal::*;
 pub mod clone;
-pub use clone::clone_expression_dag;
 #[cfg(test)]
 pub(crate) use clone::make_expression_children_unique;
 pub use clone::make_expression_children_unique_tracked;
@@ -2894,6 +2898,7 @@ pub(crate) use clone::{
     clone_class_method, clone_expression_with_own_lambdas, clone_function_implementation,
     clone_with_operands,
 };
+pub use clone::{clone_expression_dag, clone_expression_dags};
 mod semantic_validation;
 pub use semantic_validation::{
     IncompleteIrFact, InvalidIrContract, NullableSamContractViolation, UndeterminedIrType,
