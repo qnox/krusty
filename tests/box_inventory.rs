@@ -131,7 +131,9 @@ fn join(
 }
 
 /// The cases a `target` lane runs: the codegen/box cases that target's pinned generators select,
-/// and every owned regression (whose own directives decide its applicability).
+/// and every owned regression (whose own directives decide its applicability). An owned regression
+/// whose `// KOTLINC_VERSION:` range excludes the reference release is outside every lane, as an
+/// upstream case its generators do not select is: that kotlinc cannot be its oracle.
 pub fn discover(corpus: &Path, target: TestTarget) -> Result<Vec<PathBuf>, String> {
     if !corpus.is_dir() {
         return Err(format!("box corpus is unavailable: {}", corpus.display()));
@@ -148,11 +150,27 @@ pub fn discover(corpus: &Path, target: TestTarget) -> Result<Vec<PathBuf>, Strin
         .into_iter()
         .filter(|file| selected.contains(file))
         .collect();
-    let owned = krusty::conformance::kotlin_files(&regressions);
+    let owned = within_kotlinc_releases(krusty::conformance::kotlin_files(&regressions))?;
     if upstream.is_empty() || owned.is_empty() {
         return Err("box inventory requires both upstream sources and owned regressions".into());
     }
     join(corpus, upstream, owned)
+}
+
+/// The owned regressions whose kotlinc release range admits the reference release.
+fn within_kotlinc_releases(owned: Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
+    let release = krusty::kotlin_version::target();
+    let mut within = Vec::with_capacity(owned.len());
+    for file in owned {
+        let source = std::fs::read_to_string(&file)
+            .map_err(|error| format!("reading {}: {error}", file.display()))?;
+        if krusty::conformance::kotlinc_release_applicable(&source, release)
+            .map_err(|error| format!("{}: {error}", file.display()))?
+        {
+            within.push(file);
+        }
+    }
+    Ok(within)
 }
 
 pub fn require_setup(unavailable: Option<&str>, provisioned: bool) -> Result<(), String> {
@@ -272,4 +290,31 @@ fn upstream_generator_parser_regressions() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+}
+
+#[test]
+fn owned_regressions_outside_their_kotlinc_releases_leave_the_inventory() {
+    let dir = std::env::temp_dir().join(format!("krusty_kotlinc_releases_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch directory");
+    // Bounds name `major.minor.patch`, whatever pre-release the reference release carries.
+    let target = krusty::kotlin_version::target();
+    let release = format!("{}.{}.{}", target.major, target.minor, target.patch);
+    let next = format!("{}.{}.0", target.major, target.minor + 1);
+    let write = |name: &str, header: String| {
+        let file = dir.join(name);
+        std::fs::write(&file, format!("{header}fun box() = \"OK\"\n")).expect("fixture");
+        file
+    };
+    let ungated = write("ungated.kt", String::new());
+    let current = write("current.kt", format!("// KOTLINC_VERSION: [{release},)\n"));
+    let later = write("later.kt", format!("// KOTLINC_VERSION: {next}\n"));
+    let earlier = write("earlier.kt", format!("// KOTLINC_VERSION: (,{release})\n"));
+    let within = within_kotlinc_releases(vec![ungated.clone(), current.clone(), later, earlier]);
+    let malformed = within_kotlinc_releases(vec![write(
+        "malformed.kt",
+        "// KOTLINC_VERSION: [2.5\n".to_string(),
+    )]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(within, Ok(vec![ungated, current]));
+    assert!(malformed.is_err());
 }
