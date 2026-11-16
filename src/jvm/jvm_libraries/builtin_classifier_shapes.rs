@@ -17,6 +17,7 @@ pub(super) fn mapped_builtin_signature(internal: TypeName) -> Option<LibraryType
         })
         .collect();
     Some(LibraryType {
+        klib_identity: None,
         runtime_exception: None,
         declaration_name: Some(crate::types::ClassifierDeclarationName::TopLevel {
             package: crate::types::wk::kotlin_package(),
@@ -177,6 +178,7 @@ pub(super) fn builtin_library_type(
         .collect::<Vec<_>>();
     let callable_signature = callable_signatures.first().copied();
     LibraryType {
+        klib_identity: None,
         runtime_exception: None,
         declaration_name: None,
         is_kotlin: true,

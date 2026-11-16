@@ -53,7 +53,11 @@ pub(super) fn checked_ir_file<'a>(
     if module.common_ir_coroutines && !ir.suspend_funs.is_empty() {
         ir.coroutine_runtime = symbols.coroutine_runtime();
     }
-    let mut callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
+    let mut callables = match CheckedBackendCallables::freeze_with_class_declarations(
+        &ir,
+        symbols.semantic_platform(),
+        module_facts.classes(),
+    ) {
         Ok(callables) => callables,
         Err(error) => {
             diags.error(

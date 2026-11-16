@@ -229,7 +229,6 @@ extern const KType kt_type_boolean_companion;
 extern const KType kt_type_float_companion;
 extern const KType kt_type_double_companion;
 extern const KType kt_type_string_companion;
-extern const KType kt_type_result_companion;
 extern const KType kt_type_ubyte_companion;
 extern const KType kt_type_ushort_companion;
 extern const KType kt_type_uint_companion;
@@ -244,7 +243,6 @@ KRef kt_boolean_companion(void);
 KRef kt_float_companion(void);
 KRef kt_double_companion(void);
 KRef kt_string_companion(void);
-KRef kt_result_companion(void);
 KRef kt_ubyte_companion(void);
 KRef kt_ushort_companion(void);
 KRef kt_uint_companion(void);
@@ -676,27 +674,6 @@ kt_boolean kt_floating_range_contains(KRef range, kt_double value);
 kt_boolean kt_floating_range_is_empty(KRef range);
 kt_double kt_floating_range_start(KRef range);
 kt_double kt_floating_range_end(KRef range);
-
-/* ---- Delegates.notNull -------------------------------------------------------------------------
-
-   `var x: T by Delegates.notNull()`: one reference, and reading it before it is written is an
-   error. The NAME the error reports is handed over by the caller, read from the `KProperty`
-   operand the delegate convention passes. */
-extern const KType kt_type_not_null_var;
-
-KRef kt_not_null_var(void);
-/* `Delegates.observable(initial) { property, old, new -> … }`: the value and a callback run after
-   each write. The `KProperty` is passed along, never read, which is what lets this carry it without
-   any reflection. */
-extern const KType kt_type_observable;
-KRef kt_observable(KRef initial, KRef on_change);
-/* The two entry points a `ReadWriteProperty` receiver reaches; the DESCRIPTOR says which delegate
-   it is, no static type separating them. `get` takes the property's NAME, the only thing it can
-   need (the text of a `notNull` read-before-write error); `set` takes the PROPERTY, which an
-   observable passes to its callback. Any object other than those two delegates ends the program
-   with a message naming its descriptor. */
-KRef kt_rw_property_get(KRef self, KRef name);
-void kt_rw_property_set(KRef self, KRef property, KRef value);
 
 /* ---- comparable ranges ------------------------------------------------------------------------
 

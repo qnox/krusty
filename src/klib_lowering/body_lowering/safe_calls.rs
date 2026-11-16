@@ -7,6 +7,48 @@ use crate::metadata::klib_ir::tree::{KlibIrExprId, KlibIrExprKind, KlibIrStateme
 use crate::metadata::klib_ir::{KlibIrConstant, KlibIrSymbolKind};
 use crate::types::Ty;
 
+/// A read whose non-null proof is in scope where it is lowered.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) enum NullProvenRead {
+    /// A safe-call temporary, inside the selector its `null` test guards.
+    Value(crate::metadata::klib_ir::KlibIrSymbol),
+    /// A field read on a value, in the `else` of a compiler-generated `when` testing the same read
+    /// against `null`. A generated data or value class member reads the field it tested without
+    /// the cast a source smart cast serializes.
+    Field {
+        field: crate::metadata::klib_ir::KlibIrSymbol,
+        receiver: crate::metadata::klib_ir::KlibIrSymbol,
+    },
+}
+
+impl NullProvenRead {
+    /// The proof a `read` names, when it is a field read on a value.
+    fn field_read(
+        arena: &crate::metadata::klib_ir::tree::KlibIrArena,
+        read: KlibIrExprId,
+    ) -> Option<Self> {
+        let KlibIrExprKind::GetField {
+            symbol,
+            super_qualifier: None,
+            receiver: Some(receiver),
+            ..
+        } = &arena.expr(read).kind
+        else {
+            return None;
+        };
+        let KlibIrExprKind::GetValue {
+            symbol: receiver, ..
+        } = &arena.expr(*receiver).kind
+        else {
+            return None;
+        };
+        Some(Self::Field {
+            field: symbol.clone(),
+            receiver: receiver.clone(),
+        })
+    }
+}
+
 impl BodyLowering<'_> {
     /// `{ val tmp = receiver; when { tmp == null -> null; else -> selector } }`, whose selector
     /// reads `tmp` through its implicit non-null cast.
@@ -90,9 +132,10 @@ impl BodyLowering<'_> {
             rhs: null,
         });
         let null_result = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-        self.null_proven.insert(symbol.clone());
+        let proof = NullProvenRead::Value(symbol.clone());
+        self.null_proven.insert(proof.clone());
         let selector = self.expression(present.result);
-        self.null_proven.remove(&symbol);
+        self.null_proven.remove(&proof);
         let selector = self.coercion(selector?, ty);
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), null_result), (None, selector)],
@@ -120,7 +163,11 @@ impl BodyLowering<'_> {
         let KlibIrExprKind::GetValue { symbol, .. } = &read.kind else {
             return Ok(None);
         };
-        if !self.null_proven.contains(symbol) || target.is_nullable() {
+        if !self
+            .null_proven
+            .contains(&NullProvenRead::Value(symbol.clone()))
+            || target.is_nullable()
+        {
             return Ok(None);
         }
         let Some(local) = self.locals.get(symbol) else {
@@ -142,5 +189,43 @@ impl BodyLowering<'_> {
             arg: read,
             type_operand: target.canonical_semantic(),
         })))
+    }
+
+    /// The `null` proof the first of a compiler-generated `when`'s two branches gives its `else`:
+    /// `when { read == null -> …; else -> … }` over a field read on a value.
+    pub(super) fn generated_null_test(&self, condition: KlibIrExprId) -> Option<NullProvenRead> {
+        let (read, null) = self.elvis_null_test(condition).ok()?;
+        if !matches!(
+            self.arena.expr(null).kind,
+            KlibIrExprKind::Const(KlibIrConstant::Null)
+        ) {
+            return None;
+        }
+        NullProvenRead::field_read(self.arena, read)
+    }
+
+    /// `read`, already lowered as `lowered` of the nullable `actual`, as a value of the non-null
+    /// `expected`, when a generated `when` proved this exact field read non-null: the conversion
+    /// checked FIR lowering places on a smart cast.
+    pub(super) fn null_proven_field(
+        &mut self,
+        read: KlibIrExprId,
+        lowered: ExprId,
+        actual: Ty,
+        expected: Ty,
+    ) -> Option<ExprId> {
+        if expected.is_nullable() || Ty::nullable(expected) != actual {
+            return None;
+        }
+        let proof = NullProvenRead::field_read(self.arena, read)?;
+        if !self.null_proven.contains(&proof) {
+            return None;
+        }
+        let cast = self.ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: lowered,
+            type_operand: expected.canonical_semantic(),
+        });
+        Some(self.typed(cast, expected))
     }
 }

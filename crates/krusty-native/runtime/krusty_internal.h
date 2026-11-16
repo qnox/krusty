@@ -190,20 +190,14 @@ kt_boolean kt_walk_is(KRef iterator);
 kt_boolean kt_walk_has_next(KRef iterator);
 kt_long kt_walk_next_long(KRef iterator);
 
-/* `function(first, second, third)` through the slot every function value declares. Defined in
-   `krusty_collections.c`. */
-KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third);
-
 /* The value facilities `krusty_classes.c` defines for the rest of the runtime: a built-in value's
-   `equals` and `hashCode`, an object's own `toString` through its vtable, the bits `equals` and
-   `hashCode` read from a floating-point value (every NaN collapsed to one), and the raise a
-   `notNull` delegate read before it was written makes. */
+   `equals` and `hashCode`, an object's own `toString` through its vtable, and the bits `equals` and
+   `hashCode` read from a floating-point value (every NaN collapsed to one). */
 kt_boolean kt_builtin_equals(KRef self, KRef other);
 kt_int kt_builtin_hash_code(KRef self);
 KRef kt_object_to_string(KRef value);
 uint64_t kt_double_bits(kt_double value);
 uint32_t kt_float_bits(kt_float value);
-void kt_raise_uninitialized_property(KRef name);
 
 /* The size of a map, a set or one of a map's views, or -1 for anything else: what a walk sizing
    its result asks. Defined in `krusty_maps.c`. */

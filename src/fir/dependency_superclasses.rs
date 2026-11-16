@@ -13,7 +13,8 @@ use super::{
 };
 use crate::types::TypeName;
 
-/// One dependency class a module class extends, directly or through another dependency class.
+/// One dependency class a module class or a dependency inline template's local class extends,
+/// directly or through another dependency class.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedDependencySuperclass {
     pub classifier: TypeName,
@@ -24,6 +25,10 @@ pub struct ResolvedDependencySuperclass {
     /// The override edges of those members, whose implementations are this class's.
     pub function_overrides: Box<[ResolvedFunctionOverride]>,
     pub property_overrides: Box<[ResolvedPropertyOverride]>,
+    /// A local class of a dependency inline template, an object literal among them, names it as
+    /// its superclass. Wherever a call expands that template, the class is extended in a file
+    /// other than the one materializing it, though no named class of the module extends it.
+    pub extended_by_inline_template: bool,
 }
 
 /// A dispatched member of a dependency class, by its provider identity.

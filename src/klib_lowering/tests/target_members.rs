@@ -224,7 +224,7 @@ fn klib_object_value_of_a_library_laid_out_object_declines() {
             .unwrap_err();
         assert_eq!(
             declined.to_string(),
-            "the KLIB body of `demo.a` (it reads object `kotlin/Unit` the target does not represent)"
+            "the KLIB body of `demo.a` (it uses an object value)"
         );
         assert_unit_is_empty(&unit);
     }
