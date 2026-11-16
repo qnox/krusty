@@ -26,9 +26,7 @@ use crate::ir::{
     IrCtorParameterProvenance, IrField,
 };
 use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies, LocatedClass, LocatedMember};
-use crate::libraries::{
-    KlibBodyClassParameters, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
-};
+use crate::libraries::{KlibBodyClassParameters, KlibDependencyCallable, TypeKind};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction,
@@ -924,10 +922,11 @@ fn member_overrides(
                 "an override of a declaration other than a function",
             ));
         }
-        let KlibIrSignature::Public(signature) = &symbol.signature else {
+        // A property accessor overrides the interface's accessor by its accessor signature, as a
+        // function overrides by its public one; `function_owner` locates either.
+        let Some(declaration) = crate::klib_libraries::member_signature(&symbol.signature) else {
             return Err(unsupported("an override of a non-public declaration"));
         };
-        let declaration = KlibDeclarationSignature::Public(signature.clone());
         let identity = match scope.bodies.linked_origin(scope.module, &declaration) {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => {
@@ -973,6 +972,26 @@ fn member_overrides(
                 "an override of a supertype this library does not authenticate",
             ));
         };
+        // Locating the member by its signature does not prove membership. The declaring class's
+        // raw header must hold it directly: a function as a member, an accessor in its own
+        // property group and in the slot of its shape.
+        let KlibIrSignature::Public(owner_signature) = &owner.base.symbol.signature else {
+            return Err(mismatch(
+                "an overridden member's class has no public signature",
+            ));
+        };
+        match scope
+            .bodies
+            .class_member_header(&identity, owner_signature, None)
+        {
+            Ok(Some(member)) if std::ptr::eq(member.function, declared) => {}
+            Ok(_) => {
+                return Err(mismatch(
+                    "an overridden member is not a direct member of its class's header",
+                ))
+            }
+            Err(reason) => return Err(mismatch(reason)),
+        }
         if !declared.type_parameters.is_empty() || declared.constructor {
             return Err(unsupported(
                 "an override of a generic or constructor declaration",
