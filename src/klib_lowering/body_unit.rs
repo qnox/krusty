@@ -1262,33 +1262,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn site_container(&self) -> Option<crate::ir::IrSiteClassContainer> {
-        use crate::ir::IrSiteClassContainer;
-        use crate::libraries::KlibDeclarationSignature;
-
-        let declared = match &self.active_identity.declaration {
-            KlibDeclarationSignature::Public(signature) => signature,
-            KlibDeclarationSignature::Accessor(accessor) => accessor.property(),
-            // A file-local identity is a top-level function of its file.
-            KlibDeclarationSignature::FileLocal { file, .. } => {
-                let package = self
-                    .sources
-                    .bodies
-                    .module_file_package(&self.active_module, *file)?;
-                return Some(IrSiteClassContainer::Package(
-                    super::klib_types::package_name(package),
-                ));
-            }
-        };
-        // A public identity's declaration path is its enclosing classifiers, then its own name.
-        if declared.declaration().segments().len() > 1 {
-            super::klib_types::member_owner(declared)
-                .ok()
-                .map(IrSiteClassContainer::Classifier)
-        } else {
-            Some(IrSiteClassContainer::Package(
-                super::klib_types::package_name(declared.package().segments()),
-            ))
-        }
+        super::site_containers::site_container(self.sources.bodies, &self.active_identity)
     }
 
     fn links_privately(&self, callee: &KlibIrSignature) -> bool {

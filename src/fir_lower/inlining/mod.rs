@@ -17,6 +17,7 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty, TyKind};
 
 use super::BodyLowering;
 
+mod caller_sites;
 mod converted_inline_lambda;
 mod escaping_anonymous;
 mod escaping_lambda;
@@ -974,6 +975,7 @@ impl BodyLowering<'_> {
                 caller: self.expansion_enclosure,
                 caller_is_default: self.in_default_argument,
                 caller_source_name: &caller_source_name,
+                caller_site: self.caller_site(caller_declaration),
                 inline_callee: frame.callee,
                 inline_callee_source_name: &callee,
                 crossinline_operands: &crossinline_operands,
