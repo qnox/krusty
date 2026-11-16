@@ -11,6 +11,7 @@ pub(super) struct LoweringCheckpoint {
     classes: usize,
     /// Each existing class's method and secondary-constructor counts.
     class_members: Vec<(usize, usize)>,
+    statics: usize,
     class_self_types: crate::fx_hash::HashSet<crate::types::TypeName>,
 }
 
@@ -25,6 +26,7 @@ impl LoweringCheckpoint {
                 .iter()
                 .map(|class| (class.methods.len(), class.secondary_ctors.len()))
                 .collect(),
+            statics: ir.statics.len(),
             class_self_types: ir.declared_class_self_type_owners(),
         }
     }
@@ -33,6 +35,7 @@ impl LoweringCheckpoint {
     pub(super) fn restore(self, ir: &mut IrFile) -> FunId {
         let first = ExprId::try_from(self.expressions).expect("an expression id fits u32");
         ir.exprs.truncate(self.expressions);
+        ir.statics.truncate(self.statics);
         ir.truncate_types(first);
         ir.checked_return_depths
             .retain(|expression, _| *expression < first);

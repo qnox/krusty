@@ -331,6 +331,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         bridge && !matches!(signature.ret, Ty::Boolean | Ty::Int)
     }
 
+    /// A dependency member called on a receiver whose static type is a class of this file that
+    /// overrides it, such as the forwarder a `by` delegation generates for an inherited
+    /// `Comparable.compareTo`. The class's slot holds the member for it and every subclass, so the
+    /// call dispatches there, as a call through the class's own declaration would.
+    pub(super) fn source_class_member(
+        &mut self,
+        target: krusty::fir::ExternalCallableId,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
+        call: InterfaceMemberCall<'_>,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let internal = self
+            .checked_type(call.receiver)?
+            .non_null()
+            .obj_internal()?;
+        let class = self
+            .file
+            .ir
+            .class_id_by_name(internal)
+            .filter(|&class| !self.file.ir.classes[class as usize].is_interface)?;
+        let arm = self.external_override_slot(class, target, signature.params)?;
+        Some(self.dependency_interface_dispatch(&[arm], &[], call, false, None))
+    }
+
     /// Dispatch one dependency interface member by the exact override edge each implementor
     /// published. An implementor without that edge leaves the call to the paths that already
     /// know the member; this does not recover an implementation by its name. A member the runtime

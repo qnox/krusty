@@ -964,11 +964,14 @@ fn applied_interface_signature_substitutes_the_supertype() {
         .flatten()
         .find(|edge| edge.overridden_owner == crate::types::wk::any() && edge.name == "toString")
         .expect("Hidden publishes its Any.toString override");
-    let any_symbols = libraries.symbols(
-        crate::symbol_source::SymbolNamespace::Classifier(crate::types::wk::any()),
-        "toString",
-    );
-    let [any_declaration] = any_symbols.callables.functions() else {
+    let any = libraries
+        .classifier(crate::types::wk::any())
+        .expect("kotlin.Any");
+    let any_members = any
+        .declared_callables
+        .get("toString")
+        .expect("kotlin.Any.toString");
+    let [any_declaration] = any_members.functions() else {
         panic!("one kotlin.Any.toString declaration")
     };
     let any_to_string_id = any_declaration

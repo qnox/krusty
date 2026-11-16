@@ -42,6 +42,7 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         }
         classifier_roots.extend(bodies.type_classifiers_in_body(&identity));
         pending.extend(bodies.direct_callees(&identity));
+        pending.extend(bodies.overridden_callables(&identity));
         pending.extend(
             bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
         );
@@ -67,6 +68,24 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         };
         if realization.dependency_callable.as_ref() != Some(&identity) {
             return Err(external);
+        }
+        // Every reached member is dispatched by the lowered body, including one with no body of
+        // its own (`Iterator.next`, `Any.equals`). Its builtin implementations are a fact of the
+        // declaration, under the same property-or-function name the source handoff uses.
+        if realization.kind == crate::libraries::ExternalCallableKind::Member {
+            let implementations =
+                super::builtin_implementation::for_external_member(source, external)?;
+            match builtin_implementations.entry(external) {
+                std::collections::hash_map::Entry::Occupied(existing)
+                    if existing.get() != &implementations =>
+                {
+                    return Err(external);
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {}
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(implementations);
+                }
+            }
         }
         let Some(selected) = realization.klib_body_callable() else {
             continue;
@@ -127,27 +146,6 @@ pub(crate) fn for_checked_klib_bodies<'a>(
                 != Some(crate::types::SemanticCallableOwner::Classifier(owner))
         {
             return Err(external);
-        }
-        // The same property-or-function name the source handoff uses. An accessor spelling is a
-        // different declaration and would record a different fact.
-        let implementations = super::builtin_implementation::for_checked_external_members(
-            source,
-            [external],
-            &super::builtin_implementation::Facts::default(),
-            represented,
-        )?
-        .remove(&external)
-        .unwrap_or_default();
-        match builtin_implementations.entry(external) {
-            std::collections::hash_map::Entry::Occupied(existing)
-                if existing.get() != &implementations =>
-            {
-                return Err(external);
-            }
-            std::collections::hash_map::Entry::Occupied(_) => {}
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(implementations);
-            }
         }
         if !matches!(
             &identity.declaration,

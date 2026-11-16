@@ -78,12 +78,7 @@ pub(super) fn checked_ir_file<'a>(
         diags.error(Span::new(0, 0), format!("internal error: {error}"));
         return None;
     }
-    if let Err(identity) = super::builtin_implementations::record_checked(
-        &mut callables,
-        &ir,
-        symbols.semantic_platform(),
-        module.dispatched_classes,
-    ) {
+    if let Err(identity) = super::builtin_implementations::record_checked(&mut callables, &ir) {
         diags.error(
             Span::new(0, 0),
             format!(
@@ -225,24 +220,27 @@ pub(super) fn prepare_common_ir(
         .map_err(crate::backend::CommonIrPreparationError::Suspend)?;
 
     let plugin_runtime = file.callables.plugin_runtime_bindings();
-    let mut callables = CheckedBackendCallables::freeze(&file.ir, provider).map_err(|error| {
+    // The refreeze keeps the declarations of the module's classes, as the handoff froze them:
+    // the slot plan binds a dependency superclass's published layout by those declarations.
+    let mut callables = CheckedBackendCallables::freeze_with_class_declarations(
+        &file.ir,
+        provider,
+        file.classifiers.module().classes(),
+    )
+    .map_err(|error| {
         crate::backend::CommonIrPreparationError::Invariant(format!(
             "cannot freeze prepared dependency declarations: {error:?}"
         ))
     })?;
     record_checked_klib_dependency_facts(&mut callables, provider, dispatched_classes)
         .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
-    super::builtin_implementations::record_checked(
-        &mut callables,
-        &file.ir,
-        provider,
-        dispatched_classes,
-    )
-    .map_err(|identity| {
-        crate::backend::CommonIrPreparationError::Invariant(format!(
-            "prepared IR has no builtin implementation facts for external member {identity:?}"
-        ))
-    })?;
+    super::builtin_implementations::record_checked(&mut callables, &file.ir).map_err(
+        |identity| {
+            crate::backend::CommonIrPreparationError::Invariant(format!(
+                "prepared IR has no builtin implementation facts for external member {identity:?}"
+            ))
+        },
+    )?;
     callables
         .freeze_plugin_runtime_callables(plugin_runtime, |identity| {
             provider.external_callable(identity)

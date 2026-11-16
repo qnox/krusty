@@ -130,7 +130,7 @@ impl BodyLowering<'_> {
             access,
             ty,
             CalleeShape {
-                receiver: Some(primitive.receiver),
+                receiver: primitive.receiver,
                 params: &primitive.params,
                 ret: primitive.ret,
                 context_count: 0,
@@ -138,14 +138,21 @@ impl BodyLowering<'_> {
                 parameter_defaults: &[],
             },
         )?;
-        let receiver = operands
-            .receiver
-            .expect("a validated primitive has dispatch");
+        // An array factory is the array its one vararg argument packs, as checked FIR lowers a
+        // source call of it to an array literal. Every other primitive is a member operation.
+        let (Some(receiver), Some(receiver_type)) = (operands.receiver, primitive.receiver) else {
+            return match (primitive.operation, operands.args.as_slice()) {
+                (CommonPrimitive::ArrayLiteral, &[array]) => Ok(self.typed(array, operands.ret)),
+                _ => Err(mismatch(
+                    "a member primitive is called without its dispatch receiver",
+                )),
+            };
+        };
         Ok(match primitive.operation {
             CommonPrimitive::Unary(operation) => {
                 // Match checked FIR's selected promotion before unary realization. In particular,
                 // negate is an IEEE unary operation, never subtraction from positive zero.
-                let operand = if primitive.receiver == primitive.ret {
+                let operand = if receiver_type == primitive.ret {
                     receiver
                 } else {
                     self.coercion(receiver, primitive.ret)
@@ -178,11 +185,33 @@ impl BodyLowering<'_> {
                 )))
             }
             // A numeric conversion, as checked FIR lowers the source conversion.
+            CommonPrimitive::ArrayLiteral => {
+                return Err(mismatch(
+                    "an array factory is called with a dispatch receiver",
+                ))
+            }
             CommonPrimitive::Conversion => self.ir.add_expr(IrExpr::TypeOp {
                 op: crate::ir::IrTypeOp::ImplicitCoercion,
                 arg: receiver,
                 type_operand: primitive.ret,
             }),
+            // The character at the index, as checked FIR lowers a source `String.get` call.
+            CommonPrimitive::StringGet => {
+                let &[index] = operands.args.as_slice() else {
+                    return Err(mismatch(
+                        "a string read is called with another shape than its declaration's",
+                    ));
+                };
+                let read = self.ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Intrinsic {
+                        operation: IrIntrinsic::StringGet,
+                        ret: Ty::Char,
+                    }),
+                    dispatch_receiver: Some(receiver),
+                    args: vec![index],
+                });
+                self.typed(read, Ty::Char)
+            }
             // `compareTo` of a builtin scalar, as checked FIR lowers a call of it: the comparison
             // at the provider's common carrier, the operands promoted to a numeric carrier first.
             CommonPrimitive::Compare { operand } => {
@@ -200,7 +229,7 @@ impl BodyLowering<'_> {
                         lowering.coercion(value, operand)
                     }
                 };
-                let receiver = promote(self, receiver, primitive.receiver);
+                let receiver = promote(self, receiver, receiver_type);
                 let other = promote(self, other, other_type);
                 let relational_operator = matches!(
                     access.origin.as_deref(),
@@ -232,7 +261,7 @@ impl BodyLowering<'_> {
                     IrCheckedOperation::RangeConstruction {
                         operation,
                         start: receiver,
-                        start_type: primitive.receiver,
+                        start_type: receiver_type,
                         end,
                         end_type,
                         result: primitive.ret,
