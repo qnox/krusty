@@ -513,6 +513,16 @@ struct FileContext<'a> {
     delegates: &'a local_delegates::Prepared,
 }
 
+/// The wasm value a parameter of type `ty` is received as; `None` for a `Unit` parameter. A
+/// `Nothing` parameter receives no value at run time, but takes the reference of the erased
+/// member it overrides, as `List<Nothing>.contains(Nothing)` overrides `contains(E)`.
+pub(super) fn parameter_value_carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
+    if ty == Ty::Nothing {
+        return Ok(Some(REFERENCE));
+    }
+    carrier(ty)
+}
+
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
 /// `Nothing`).
 pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
@@ -1489,7 +1499,7 @@ impl<'a> Body<'a> {
                             && array_lists::realized_array_list_member(fact))
                 }) =>
             {
-                self.array_list_call(*target, receiver, &args)?;
+                self.array_list_call(id, *target, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1863,7 +1873,7 @@ impl<'a> Body<'a> {
                                 .and_then(|property| self.callables.callable(property.getter))
                                 .is_some_and(array_lists::realized_array_list_member))) =>
             {
-                self.array_list_property(*target, *receiver)?;
+                self.array_list_property(id, *target, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::PropertyWrite {
@@ -1883,7 +1893,7 @@ impl<'a> Body<'a> {
                 dispatch_receiver: Some(receiver),
                 args,
             } if let Callee::Local(function) = &**call_callee => {
-                self.direct_member_call(*function, receiver, &args)?
+                self.local_member_call(*function, receiver, &args)?
             }
             IrExpr::Call {
                 callee: ref call_callee,

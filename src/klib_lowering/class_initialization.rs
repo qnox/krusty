@@ -757,7 +757,7 @@ pub(crate) fn value_class_overrides(
                     })?;
                 overridden.extend(
                     bodies
-                        .overridden_declarations(module, &signature)
+                        .overridden_closure(module, &signature)
                         .map_err(mismatch)?,
                 );
             }
@@ -836,7 +836,7 @@ fn overridden_declarations(
             .ok_or_else(|| mismatch("an override names a declaration that is not a member"))?;
         declarations.extend(
             bodies
-                .overridden_declarations(&plan.header.contract.module, &signature)
+                .overridden_closure(&plan.header.contract.module, &signature)
                 .map_err(mismatch)?,
         );
     }

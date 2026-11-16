@@ -126,8 +126,11 @@ impl Body<'_> {
             FunctionEquality::Identity => self.runtime.identity.hash_code,
             FunctionEquality::Declaration { .. } => self.runtime.callable_references.hash_code,
         };
-        let to_string = match function_value_names::named_shape(self.ir.expr(site), instance) {
-            Some(shape) => {
+        let to_string = match function_value_names::function_value_name(self.ir, site, instance) {
+            Some(function_value_names::FunctionValueName::SamWrapper(name)) => {
+                self.runtime.function_value_to_string(self.module, &name)
+            }
+            Some(function_value_names::FunctionValueName::Shape(shape)) => {
                 let codes: Vec<String> = params[..captures.len()]
                     .iter()
                     .enumerate()

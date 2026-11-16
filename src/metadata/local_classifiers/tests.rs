@@ -19,10 +19,10 @@ fn member(ir: &mut IrFile, owner: TypeName, name: &str) -> TypeName {
         ir.local_class_name_provenance.insert(
             class_id,
             IrLocalClassNameProvenance {
-                source: IrModuleSource {
+                source: crate::ir::IrLocalClassNameRoot::Source(IrModuleSource {
                     source: crate::fir::SourceFileId::from_raw(0),
                     package: type_name("sample"),
-                },
+                }),
                 lexical_owner: Some(IrLocalClassOwner::Class(owner_id)),
                 segments: vec![name.to_owned()].into_boxed_slice(),
                 ordinal: None,

@@ -161,9 +161,14 @@ impl Backend for WasmBackend {
     }
 
     /// The runtime's `StringBuilder` answers the `Appendable` and `CharSequence` members it
-    /// overrides (`crate::builtin_members`).
+    /// overrides, and its `ArrayList` the collection members (`crate::builtin_members`).
     fn dispatched_dependency_classes(&self) -> Vec<krusty::backend::DependencyClassifier> {
-        vec![crate::string_builders::class()]
+        vec![
+            crate::string_builders::class(),
+            krusty::types::Ty::obj("kotlin/collections/ArrayList")
+                .obj_internal()
+                .expect("a classifier type"),
+        ]
     }
 
     /// The WASI stdlib's `StringBuilder.append(CharSequence?)` copies the sequence's `length`

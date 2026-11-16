@@ -66,6 +66,7 @@ impl LoweringCheckpoint {
         for class in removed {
             ir.function_overrides.remove(&class);
             ir.property_overrides.remove(&class);
+            ir.classifier_hierarchies.remove(&class);
         }
         ir.restore_declared_class_self_type_owners(&self.class_self_types);
         ir.class_method_owners

@@ -23,7 +23,7 @@ use krusty::types::{Ty, TyKind};
 
 use super::super::super::super::boxes::is_boxed_scalar;
 use super::super::super::super::encode::ValType;
-use super::super::super::super::function_value_names::named_shape;
+use super::super::super::super::function_value_names::function_value_name;
 use super::super::super::any_member_reach::Receiver;
 use super::{carrier, Body, Unsupported};
 
@@ -198,6 +198,6 @@ pub(in super::super) fn holds_unprinted_values(ir: &IrFile) -> bool {
         .any(|expression| {
             let node = ir.expr(expression);
             matches!(node, IrExpr::Lambda { .. } | IrExpr::CallableReference(_))
-                && named_shape(node, ir.checked_type(expression)).is_none()
+                && function_value_name(ir, expression, ir.checked_type(expression)).is_none()
         })
 }

@@ -173,6 +173,16 @@ pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
 /// Applied semantic hierarchy in breadth-first order. Providers expose only direct declarations;
 /// core owns the transitive walk and generic substitution for every declaration origin.
 pub(crate) fn applied_hierarchy(source: &dyn SymbolSource, root: Ty) -> Vec<(TypeName, Ty, usize)> {
+    applied_hierarchy_through(root, |_, applied| direct_supertypes(source, applied))
+}
+
+/// The breadth-first applied hierarchy above `root`, `root` itself first at depth 0, where
+/// `parents` answers an applied classifier's direct supertypes. Each classifier appears once, at
+/// its first application; one declaring no supertype has `kotlin.Any`'s.
+pub(crate) fn applied_hierarchy_through(
+    root: Ty,
+    mut parents: impl FnMut(TypeName, Ty) -> Vec<Ty>,
+) -> Vec<(TypeName, Ty, usize)> {
     let Some(internal) = root.kotlin_class_internal() else {
         return Vec::new();
     };
@@ -184,7 +194,7 @@ pub(crate) fn applied_hierarchy(source: &dyn SymbolSource, root: Ty) -> Vec<(Typ
             continue;
         }
         hierarchy.push((owner, applied, depth));
-        let parents = with_implicit_any(owner, direct_supertypes(source, applied));
+        let parents = with_implicit_any(owner, parents(owner, applied));
         pending.extend(
             parents
                 .into_iter()
