@@ -44,6 +44,7 @@ fn int_range_initialization_freezes_any_tostring() {
         &libraries,
         libraries.declaration_bodies(),
         [selected],
+        &[],
     )
     .expect("IntRange initialization has checked member edges");
     let edge = facts
@@ -108,6 +109,7 @@ fn a_reached_member_freezes_its_class_initialization() {
         [throw_on_failure
             .klib_body_callable()
             .expect("throwOnFailure body")],
+        &[],
     )
     .expect("throwOnFailure has checked member edges");
     assert!(facts.reached_constructors().contains(&constructor));

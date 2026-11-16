@@ -75,14 +75,17 @@ pub enum HeaderDeclarationKind {
     TypeAlias {
         type_parameters: HeaderTypeParameterRange,
         target: HeaderTypeId,
+        /// The whole declaration, annotations and modifiers included: what a diagnostic about the
+        /// alias as a declaration points at.
+        declaration: Span,
     },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeaderDeclaration {
     pub declaration: DeclarationId,
-    /// Exact written declaration name for diagnostics after the source AST is released.
-    /// Constructors have no ordinary declaration name.
+    /// Exact written declaration name for diagnostics after the source AST is released. A
+    /// constructor has no name: this is its signature, or its class's name when it has none.
     pub name_span: Option<Span>,
     /// Declaration annotations as compact classifier-reference types. Resolution consumes this
     /// temporary range during Pass 1 and publishes stable classifier identities.

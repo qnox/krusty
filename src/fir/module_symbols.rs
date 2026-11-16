@@ -525,10 +525,16 @@ impl<'a> StreamedModuleSymbols<'a> {
             constructor.call_sig = call_sig.clone();
             constructor.context_count = callable.shape.context_parameter_count as usize;
             constructor.reified = reified;
-            constructor.visibility = self
+            let declared = self
                 .index
                 .declaration_header(declaration)
                 .map_or(declaration_header.visibility, |header| header.visibility);
+            // A sealed class's constructors are protected unless declared private.
+            constructor.visibility = match declared {
+                crate::types::Visibility::Private => crate::types::Visibility::Private,
+                _ if flags.has(DeclarationFlags::SEALED) => crate::types::Visibility::Protected,
+                declared => declared,
+            };
             constructor.annotations = self.index.declaration_annotations(declaration).to_vec();
             constructor.stable_declaration = Some(declaration);
             // The primary constructor is the classifier's first constructor sibling; secondary
