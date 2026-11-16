@@ -2111,14 +2111,15 @@ fn append_lifted_captures(
         );
     }
     if let Some(order) = ir.class_capture_order.get_mut(&class) {
-        // The recorded order is a permutation of the prefix that existed before these fields. A
-        // shorter order is a partial record; extending it with a later field index would name an
-        // identity past the permutation.
-        if order.len() == field_base as usize {
+        // The recorded order is a permutation of the constructor prefix that existed before these
+        // captures, in constructor-prefix identities, not field indices: a prefix value kept in no
+        // field still has an identity. A shorter order is a partial record; extending it would
+        // name an identity past the permutation.
+        if order.len() == insert_at {
             let mut extended = order.to_vec();
             for offset in 0..captures.len() {
                 extended
-                    .push(field_base + u32::try_from(offset).map_err(|_| malformed(class_name))?);
+                    .push(u32::try_from(insert_at + offset).map_err(|_| malformed(class_name))?);
             }
             *order = extended.into_boxed_slice();
         }
@@ -2485,11 +2486,12 @@ fn remove_capture(
     // Closure identities are keyed by constructor parameter, which is not the field index when
     // an earlier prefix value is kept in no field.
     shift_capture_map(&mut ir.class_capture_identities, class, parameter_index);
+    // The recorded order names constructor-prefix identities, like the closure identities above.
     if let Some(order) = ir.class_capture_order.get_mut(&class) {
         *order = order
             .iter()
-            .filter(|&&capture| capture != field)
-            .map(|&capture| capture - u32::from(capture > field))
+            .filter(|&&capture| capture != parameter_index)
+            .map(|&capture| capture - u32::from(capture > parameter_index))
             .collect();
     }
     let IrExpr::New {
