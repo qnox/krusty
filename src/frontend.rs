@@ -18,7 +18,7 @@ mod header_validation;
 mod inline_preparation;
 mod library_classifiers;
 mod local_class_names;
-pub(crate) use local_class_names::{SettledGeneratedClassNames, settle_generated_class_names};
+pub(crate) use local_class_names::{settle_generated_class_names, SettledGeneratedClassNames};
 mod local_function_names;
 mod modifier_containing_declarations;
 mod no_expect_for_actual;
@@ -26,6 +26,8 @@ mod published_declarations;
 mod published_overrides;
 pub use published_overrides::OverriddenMember;
 mod retained_syntax;
+#[cfg(test)]
+pub(crate) use crate::resolve::collect_signatures;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
 pub(crate) use crate::resolve::DeclaredPropertySig as FrontendDeclaredPropertySig;
@@ -33,8 +35,6 @@ pub use crate::resolve::ExtPropSig as FrontendExtPropSig;
 pub(crate) use crate::resolve::Signature;
 pub use crate::resolve::SymbolTable as FrontendSymbols;
 pub use crate::resolve::TypeInfo as FrontendTypeInfo;
-#[cfg(test)]
-pub(crate) use crate::resolve::collect_signatures;
 pub use crate::resolve::{
     AnonymousObjectCapture, AnonymousObjectCaptureSource, CompoundAssignmentTarget,
     SourceConstructorMatcher,
