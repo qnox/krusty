@@ -136,53 +136,30 @@ fn builtin_declaration_names_preserve_semantic_and_physical_classifier_authority
 }
 
 #[test]
-fn a_customizer_owned_array_declares_its_own_type_parameters() {
+fn only_cloneable_is_a_customizer_owned_factory() {
     let customizer = builtins_customizer::JvmBuiltInsCustomizer;
-    let array = customizer
-        .customize(type_name("kotlin/Array"), None)
-        .unwrap();
-    assert_eq!(array.own_type_parameter_count, 1);
-    assert_eq!(array.type_params(), &["T"]);
     assert_eq!(
-        array.type_param_variances(),
-        &[crate::types::TypeVariance::Invariant]
+        customizer
+            .customize(type_name("kotlin/Cloneable"), None)
+            .unwrap()
+            .declaration_name,
+        Some(ClassifierDeclarationName::TopLevel {
+            package: type_name("kotlin"),
+            name: "Cloneable".into(),
+        })
     );
-    assert_eq!(
-        array.type_param_bounds(),
-        &[vec![crate::types::Ty::nullable(crate::types::Ty::obj(
-            "kotlin/Any"
-        ))]]
-    );
-    let int_array = customizer
-        .customize(type_name("kotlin/IntArray"), None)
-        .unwrap();
-    assert_eq!(int_array.own_type_parameter_count, 0);
-    assert!(int_array.type_params().is_empty());
-}
-
-#[test]
-fn builtin_declaration_names_cover_customizer_owned_array_and_cloneable_factories() {
-    let customizer = builtins_customizer::JvmBuiltInsCustomizer;
-    for name in ["Cloneable", "Array", "IntArray", "UIntArray"] {
-        let identity = crate::types::type_name_child(type_name("kotlin"), name);
-        assert_eq!(
-            customizer
-                .customize(identity, None)
-                .unwrap()
-                .declaration_name,
-            Some(ClassifierDeclarationName::TopLevel {
-                package: type_name("kotlin"),
-                name: name.into(),
-            })
+    // Arrays are declared by `.kotlin_builtins`; without it they are not resolvable.
+    for name in [
+        "kotlin/Array",
+        "kotlin/IntArray",
+        "kotlin/UIntArray",
+        "other/IntArray",
+    ] {
+        assert!(
+            customizer.customize(type_name(name), None).is_none(),
+            "{name}"
         );
     }
-    assert!(customizer
-        .customize(type_name("other/IntArray"), None)
-        .is_none());
-    assert_eq!(
-        crate::types::array_declaration_name(type_name("kotlin/Int$Array")),
-        None
-    );
     let mut existing = LibraryType::declaration_header();
     existing.declaration_name = Some(ClassifierDeclarationName::TopLevel {
         package: type_name("array_seed"),
