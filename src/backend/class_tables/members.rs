@@ -85,6 +85,13 @@ pub fn local_property_target(
         return Some(target);
     }
 
+    // A call-site copy of an anonymous object regenerates its declaration's class: property
+    // coordinate `i` of the copy realizes the same property declaration as coordinate `i` of the
+    // class it was copied from, whose layout is the one common lowering recorded.
+    if let Some(copy) = ir.specialized_anonymous_classes.get(&owner) {
+        return local_property_target(ir, copy.source, property);
+    }
+
     // Interface delegation generates an accessor body and an `IrProperty`, but no new source
     // property declaration: its exact declaration identity is the interface target carried by
     // the override edge. Bind the generated property back through those accessor identities. A
