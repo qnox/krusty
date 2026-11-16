@@ -550,6 +550,18 @@ impl BodyLowering<'_, '_, '_> {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
                     Some(receiver) => {
+                        if let Some(realized) = self.source_class_member(
+                            *target,
+                            signature,
+                            super::implementor_dispatch::InterfaceMemberCall {
+                                receiver,
+                                args,
+                                ret: *ret,
+                                physical: &realization.physical_params,
+                            },
+                        ) {
+                            return realized;
+                        }
                         // A receiver typed by a RUNTIME-KNOWN type this file puts a class of its
                         // own behind may be one of those objects, and every table below answers
                         // only for the ones the runtime MAKES. No static type tells the two apart

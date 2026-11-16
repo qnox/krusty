@@ -167,6 +167,42 @@ pub struct LoopMemberProperty {
     pub ty: Ty,
 }
 
+use super::selected_external_members::{SelectedExternal, SelectsExternalMembers};
+
+impl SelectsExternalMembers for LoopMemberProperty {
+    fn selected_external_members(&self, record: &mut dyn FnMut(SelectedExternal)) {
+        record(SelectedExternal::Property(self.property));
+    }
+}
+
+impl SelectsExternalMembers for ProgressionPlan {
+    fn selected_external_members(&self, record: &mut dyn FnMut(SelectedExternal)) {
+        for property in [&self.first, &self.last, &self.step] {
+            property.selected_external_members(record);
+        }
+    }
+}
+
+impl SelectsExternalMembers for IndicesSize {
+    fn selected_external_members(&self, record: &mut dyn FnMut(SelectedExternal)) {
+        self.size.selected_external_members(record);
+    }
+}
+
+impl SelectsExternalMembers for IndexedValueProperties {
+    fn selected_external_members(&self, record: &mut dyn FnMut(SelectedExternal)) {
+        record(SelectedExternal::Property(self.index));
+        record(SelectedExternal::Property(self.value));
+    }
+}
+
+impl SelectsExternalMembers for CharSequenceIndexing {
+    fn selected_external_members(&self, record: &mut dyn FnMut(SelectedExternal)) {
+        self.length.selected_external_members(record);
+        self.get.selected_external_members(record);
+    }
+}
+
 impl Checker<'_> {
     pub(super) fn stmt_for(
         &mut self,
@@ -487,7 +523,10 @@ impl Checker<'_> {
             super::ExprLowering::ExtensionPropertyGet { access },
         );
         match size {
-            Some(size) => self.iteration_plans.indices.insert(expression, size),
+            Some(size) => {
+                self.selected_external_members.record(&size);
+                self.iteration_plans.indices.insert(expression, size)
+            }
             None => self.iteration_plans.indices.remove(&expression),
         };
     }
@@ -586,7 +625,9 @@ impl Checker<'_> {
             property(wk::INDEXED_VALUE_INDEX),
             property(wk::INDEXED_VALUE_VALUE),
         ) {
-            self.iteration_plans.indexed_value = Some(IndexedValueProperties { index, value });
+            let properties = IndexedValueProperties { index, value };
+            self.selected_external_members.record(&properties);
+            self.iteration_plans.indexed_value = Some(properties);
         }
     }
 
@@ -617,10 +658,12 @@ impl Checker<'_> {
             "resolve",
             "CharSequence indexed through {length:?} and {get:?}"
         );
-        self.iteration_plans.char_sequence = Some(CharSequenceIndexing {
+        let indexing = CharSequenceIndexing {
             length,
             get: Box::new(get),
-        });
+        };
+        self.selected_external_members.record(&indexing);
+        self.iteration_plans.char_sequence = Some(indexing);
     }
 
     /// The member `operator fun get(index: Int): Char` of `kotlin.CharSequence`, selected among the
@@ -719,16 +762,15 @@ impl Checker<'_> {
         } else {
             None
         };
-        self.iteration_plans.members.insert(
-            ty,
-            ProgressionPlan {
-                class,
-                first,
-                last,
-                step,
-                compare,
-            },
-        );
+        let plan = ProgressionPlan {
+            class,
+            first,
+            last,
+            step,
+            compare,
+        };
+        self.selected_external_members.record(&plan);
+        self.iteration_plans.members.insert(ty, plan);
     }
 
     /// The `kotlin.internal.getProgressionLastElement` overload a counted loop calls with
