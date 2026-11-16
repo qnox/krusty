@@ -301,6 +301,65 @@ fun box(): String {
     common::assert_errors_match_kotlinc(&[("Main.kt", SRC)], &[]);
 }
 
+/// `val (x = a)` without the short-form feature is the experimental diagnostic on `=`. The entry
+/// stays positional (`component1`), so a missing property name is not resolved, and the file's
+/// signatures are kept.
+#[test]
+fn ungated_short_form_rename_in_a_declaration_is_experimental() {
+    const SRC: &str = r#"class C {
+    operator fun component1(): Int = 1
+}
+
+fun box(): String {
+    val (x = missing) = C()
+    return x.toString()
+}
+"#;
+    let mut diagnostics = krusty::diag::DiagSink::new();
+    let (_file, symbols, info) = krusty::frontend::analyze_source_standalone(SRC, &mut diagnostics);
+    assert!(symbols.is_some());
+    assert!(info.is_some());
+    common::assert_errors_match_kotlinc(&[("Main.kt", SRC)], &[]);
+}
+
+/// A loop rename without the short-form feature is the same experimental diagnostic, and the
+/// iteration stays a positional destructure.
+#[test]
+fn ungated_short_form_rename_in_a_loop_is_experimental() {
+    const SRC: &str = r#"class C {
+    operator fun component1(): Int = 1
+}
+
+class One {
+    operator fun iterator(): One = this
+    operator fun hasNext(): Boolean = false
+    operator fun next(): C = C()
+}
+
+fun box(): String {
+    var n = 0
+    for ((x = missing) in One()) n += x
+    return if (n == 0) "OK" else "fail"
+}
+"#;
+    common::assert_errors_match_kotlinc(&[("Main.kt", SRC)], &[]);
+}
+
+/// A lambda-parameter rename without the short-form feature is the same experimental diagnostic.
+#[test]
+fn ungated_short_form_rename_in_a_lambda_parameter_is_experimental() {
+    const SRC: &str = r#"class C {
+    operator fun component1(): Int = 1
+}
+
+fun box(): String {
+    val read: (C) -> Int = { (x = missing) -> x }
+    return read(C()).toString()
+}
+"#;
+    common::assert_errors_match_kotlinc(&[("Main.kt", SRC)], &[]);
+}
+
 /// A lambda-parameter bracket pattern without the feature is one language-version error. The
 /// parameter stays bound, so the ledger is that gate and nothing else.
 #[test]
