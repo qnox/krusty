@@ -650,6 +650,7 @@ pub(super) fn build(
             slots: layouts[id].vtable.len() as u32,
             interfaces: numbered.interface_tables.implemented[id].clone(),
             interface_entries: numbered.interface_tables.members[id].clone(),
+            members: numbered.members[id].clone(),
         })
         .collect();
     let direct_methods = numbered

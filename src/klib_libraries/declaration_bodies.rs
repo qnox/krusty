@@ -965,6 +965,11 @@ impl KlibDeclarationBodies {
         found.unwrap_or(LocatedMember::Missing)
     }
 
+    /// The class that directly declares the exact linked member `identity`, function or accessor.
+    pub(crate) fn member_owner(&self, identity: &KlibDependencyCallable) -> LocatedMember<'_> {
+        self.function_owner(&identity.module, &ir_signature(&identity.declaration))
+    }
+
     /// Whether the exact serialized declaration intentionally carries an executable body.
     pub(crate) fn function_has_body(&self, identity: &KlibDependencyCallable) -> Option<bool> {
         self.function(identity)
@@ -1120,6 +1125,41 @@ impl KlibDeclarationBodies {
                     KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
                 },
             )
+            .collect()
+    }
+
+    /// The public objects whose values the emitted body of `identity` reads, through the
+    /// closures `forms` lowers with it and the members of the file-local classes it constructs.
+    pub(crate) fn emitted_body_objects(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<KlibPublicIdSignature> {
+        let Some((trees, arena, function)) = self.function_with_trees(identity) else {
+            return Vec::new();
+        };
+        let mut objects = arena.emitted_object_symbols(function, forms);
+        let mut symbols = arena.emitted_callable_symbols(function, forms);
+        let mut classes = crate::fx_hash::HashSet::default();
+        let mut next = 0;
+        while let Some(symbol) = symbols.get(next).copied() {
+            next += 1;
+            if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
+                if classes.insert(&class.base.symbol) {
+                    let roots = class_arena.class_member_roots(class);
+                    objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
+                    symbols.extend(class_arena.emitted_callable_symbols_from(roots, forms));
+                }
+            }
+        }
+        let mut seen = crate::fx_hash::HashSet::default();
+        objects
+            .into_iter()
+            .filter_map(|symbol| match &symbol.signature {
+                KlibIrSignature::Public(signature) => Some(signature.clone()),
+                _ => None,
+            })
+            .filter(|signature| seen.insert(signature.clone()))
             .collect()
     }
 

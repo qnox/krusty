@@ -450,14 +450,6 @@ void kt_throw_index_overflow(void) {
     KT_THROW(kt_type_arithmetic_exception, KT_MESSAGE("Index overflow has happened."));
 }
 
-/* `Property x should be initialized before get.` — Kotlin's own text for a `notNull` delegate read
-   before it was written. */
-void kt_raise_uninitialized_property(KRef name) {
-    KRef message = kt_string_plus(KT_MESSAGE("Property "), kt_to_string(name));
-    message = kt_string_plus(message, KT_MESSAGE(" should be initialized before get."));
-    KT_THROW(kt_type_illegal_state_exception, message);
-}
-
 /* Kotlin's `assert(value)` and `assert(value) { message }`, on the failing side. The generator
    branches on the condition and reaches this only when it is false, which is what keeps the message
    from being computed on the passing path — Kotlin's `lazyMessage` is lazy exactly there.

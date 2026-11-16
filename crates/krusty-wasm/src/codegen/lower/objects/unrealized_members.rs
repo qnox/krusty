@@ -81,7 +81,11 @@ impl Body<'_> {
             return self.ktype_reaches_unrealized(member);
         }
         self.record_call(member, ty, Receiver::Erased);
-        if member == AnyMember::ToString && holds_unprinted_values(self.ir) {
+        let class_elsewhere = self.classifier_declared_elsewhere(value);
+        if member == AnyMember::ToString
+            && class_elsewhere.is_none()
+            && holds_unprinted_values(self.ir)
+        {
             return Ok(true);
         }
         // A runtime exception this file builds or catches is not a class of the file.
@@ -92,7 +96,13 @@ impl Body<'_> {
         let Some(classes) = self.classes else {
             return Ok(false);
         };
-        Ok((0..self.ir.classes.len()).any(|class| !classes.realizes(class as ClassId, member)))
+        Ok((0..self.ir.classes.len()).any(|class| {
+            !classes.realizes(class as ClassId, member)
+                && class_elsewhere.is_none_or(|ancestor| {
+                    self.classifiers
+                        .is_subclassifier(self.ir.classes[class].fq_name, ancestor)
+                })
+        }))
     }
 
     /// Whether a call through `member`'s slot on an instance of `class`, or of a class extending
@@ -112,6 +122,26 @@ impl Body<'_> {
             }
             related && !classes.realizes(id, member)
         }))
+    }
+
+    /// The classifier of `value` when it is declared elsewhere and no value whose `toString` has
+    /// no body can be an instance of it, other than a class of this file implementing it. A
+    /// function value is an instance of `Any`, of `kotlin.Function`'s hierarchy and of the
+    /// `fun interface` it is converted to, so an interface counts only in a file converting none.
+    fn classifier_declared_elsewhere(&self, value: Ty) -> Option<krusty::types::TypeName> {
+        let internal = value.obj_internal()?;
+        if internal == krusty::types::wk::any() {
+            return None;
+        }
+        let fact = self.classifiers.classifier(internal)?;
+        let holds_function_values = matches!(
+            fact.kind,
+            krusty::libraries::TypeKind::Interface | krusty::libraries::TypeKind::Annotation
+        ) && (self
+            .classifiers
+            .is_subclassifier(krusty::types::wk::function_root(), internal)
+            || converts_function_values(self.ir));
+        (!holds_function_values).then_some(internal)
     }
 
     /// Whether this file constructs a runtime exception or binds one in a catch. Those objects
@@ -147,6 +177,15 @@ fn runtime_exception_lacks_body(member: AnyMember) -> bool {
     match member {
         AnyMember::Equals | AnyMember::HashCode | AnyMember::ToString => false,
     }
+}
+
+/// Whether `ir` converts a function value to a `fun interface`.
+fn converts_function_values(ir: &IrFile) -> bool {
+    ir.classes.iter().any(|class| class.sam_wrapper.is_some())
+        || ir
+            .exprs
+            .iter()
+            .any(|node| matches!(node, IrExpr::Lambda { sam: Some(_), .. }))
 }
 
 /// Whether a reference of `ir` can hold a runtime object whose `toString` has no body: a function

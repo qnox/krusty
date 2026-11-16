@@ -151,7 +151,10 @@ impl Backend for WasmBackend {
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
+        // `Unit`'s value is the runtime's own, as a source reference of it is. Every enum
+        // constant is laid out with the runtime's `kotlin.Enum` base, so its members are too.
         classifier == krusty::types::wk::string()
+            || classifier == krusty::types::wk::kotlin_enum()
             || classifier == krusty::types::wk::unit()
             || lower::is_string_builder(classifier)
             || lower::is_array_list(classifier)
