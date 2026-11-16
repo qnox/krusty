@@ -23,7 +23,7 @@ use krusty::backend::class_tables::module_slots::PlanKey;
 use krusty::backend::class_tables::planned_itable::InterfaceEntry;
 use krusty::backend::class_tables::{function_key, Slot, SlotKey};
 use krusty::backend::interface_identity::{member_identity, property_member_identity};
-use krusty::backend::{CheckedBackendCallables, DependencyExportSignatures};
+use krusty::backend::{BackendCallableFact, CheckedBackendCallables, DependencyExportSignatures};
 use krusty::fir::{
     InheritedDefaultBody, InheritedMemberName, ResolvedFunctionOverrideTarget,
     ResolvedPropertyOverrideTarget,
@@ -33,7 +33,7 @@ use krusty::types::Ty;
 
 use super::super::boxes::BoxForm;
 use super::super::encode::{BlockType, Code, Function, Module, ValType};
-use super::super::interface_dispatch::{ClassRef, MemberRef};
+use super::super::interface_dispatch::{ClassRef, InterfaceDispatch, MemberRef};
 use super::super::objects::REFERENCE;
 use super::super::runtime::Runtime;
 use super::callable_registry::CallableRegistry;
@@ -102,10 +102,37 @@ struct Carried {
 
 /// A member of a dependency's interface a class implements.
 #[derive(Clone, Copy)]
-struct DependencyMember {
-    member: MemberRef,
+pub(super) struct DependencyMember {
+    pub(super) member: MemberRef,
     /// Whether it is a library classifier's member rather than a source module's.
-    library: bool,
+    pub(super) library: bool,
+}
+
+/// The member the dependency declaration `fact` is in `role`: a member of a source module's
+/// interface, by the identity its module published, or else a library classifier's member,
+/// which a call through it may name too. `None` for a declaration no member stands for.
+pub(super) fn dependency_member(
+    interfaces: &mut InterfaceDispatch,
+    module: &mut Module,
+    fact: &BackendCallableFact,
+    role: MemberRole,
+) -> Option<DependencyMember> {
+    let identity = library_member_identity(fact, role)?;
+    if let Some(member) = interfaces.identified(&identity) {
+        return Some(DependencyMember {
+            member,
+            library: false,
+        });
+    }
+    let signature = library_member_signature(fact, role).ok()?;
+    let owner = library_member_owner(fact)?;
+    let member = interfaces
+        .library(module, owner, &identity, signature)
+        .ok()?;
+    Some(DependencyMember {
+        member,
+        library: true,
+    })
 }
 
 /// Publish the identities of the file's interface members and record what its classes implement.
@@ -901,32 +928,19 @@ impl FileRecorder<'_, '_, '_> {
         })
     }
 
-    /// The member the dependency declaration `target` is in `role`: a member of a source module's
-    /// interface, by the identity its module published, or else a library classifier's member,
-    /// which a call through it may name too. `None` for a declaration no member stands for.
+    /// The member the dependency declaration `target` is in `role` (`dependency_member`).
     fn dependency_member(
         &mut self,
         target: krusty::fir::ExternalCallableId,
         role: MemberRole,
     ) -> Option<DependencyMember> {
         let fact = self.recording.callables.callable(target)?;
-        let identity = library_member_identity(fact, role)?;
-        let interfaces = &mut self.program.runtime.objects.interfaces;
-        if let Some(member) = interfaces.identified(&identity) {
-            return Some(DependencyMember {
-                member,
-                library: false,
-            });
-        }
-        let signature = library_member_signature(fact, role).ok()?;
-        let owner = library_member_owner(fact)?;
-        let member = interfaces
-            .library(self.program.module, owner, &identity, signature)
-            .ok()?;
-        Some(DependencyMember {
-            member,
-            library: true,
-        })
+        dependency_member(
+            &mut self.program.runtime.objects.interfaces,
+            self.program.module,
+            fact,
+            role,
+        )
     }
 
     /// Settle the outcome of recording what the class implements `member` with. A library
