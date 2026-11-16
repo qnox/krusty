@@ -190,7 +190,9 @@ impl Backend for WasmBackend {
         &self,
         signature: krusty::backend::DependencyGetterSignature<'_>,
     ) -> bool {
+        // An enum constant answers `kotlin.Enum`'s `name` and `ordinal` from its `$Enum` fields.
         lower::realizes_storage_getter(signature)
+            || krusty::backend::enums::getter_base_member(signature).is_some()
     }
 
     fn emitted_constructor_initializer(
