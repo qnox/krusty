@@ -672,6 +672,7 @@ interface View<T> {
 }
 private class Hidden(private val value: String) : View<CharSequence> {
     override fun get(): String = value
+    override fun toString(): String = \"value=$value\"
 }
 fun make(value: String): View<CharSequence> = Hidden(value)
 ";
@@ -956,6 +957,34 @@ fn applied_interface_signature_substitutes_the_supertype() {
     assert_ne!(edge.declared_result, edge.applied_result);
     assert!(edge.applied_parameters.is_empty());
     assert!(edge.declared_parameters.is_empty());
+    let any_to_string = unit
+        .ir()
+        .function_overrides
+        .values()
+        .flatten()
+        .find(|edge| edge.overridden_owner == crate::types::wk::any() && edge.name == "toString")
+        .expect("Hidden publishes its Any.toString override");
+    let any_symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Classifier(crate::types::wk::any()),
+        "toString",
+    );
+    let [any_declaration] = any_symbols.callables.functions() else {
+        panic!("one kotlin.Any.toString declaration")
+    };
+    let any_to_string_id = any_declaration
+        .callable
+        .external_identity
+        .expect("kotlin.Any.toString has a provider identity");
+    assert_eq!(
+        any_to_string.overridden,
+        crate::fir::ResolvedFunctionOverrideTarget::External(any_to_string_id)
+    );
+    assert!(!any_to_string.overridden_is_interface);
+    assert!(any_to_string.implementation_function.is_some());
+    assert_eq!(
+        any_to_string.overridden_semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinAnyToString)
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }
 
@@ -1448,4 +1477,124 @@ fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_
         .bodies
         .constructor_initializer_callables(&foreign, crate::klib_lowering::EMITTED_CALL_FORMS)
         .is_empty());
+}
+
+const DECLINED_SECONDARY: &str = "\
+package fixture
+fun step(value: Int): Int = value + 1
+class Counter(start: Int) {
+    var seen: Int = start
+    constructor(start: Int, label: String) : this(start) {
+        val next: (Int) -> Int = ::step
+        seen = next(seen)
+    }
+}
+";
+
+/// Every class, member and identity a unit holds, compared across a declined lowering.
+fn unit_inventory(unit: &DependencyBodyUnit) -> impl PartialEq + std::fmt::Debug {
+    let ir = unit.ir();
+    let classes = ir
+        .classes
+        .iter()
+        .map(|class| {
+            (
+                class.fq_name.render(),
+                class.methods.clone(),
+                class.secondary_ctors.len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut identities = unit
+        .materialized_classes()
+        .map(|(class, identity)| (class.render(), format!("{identity:?}")))
+        .collect::<Vec<_>>();
+    identities.sort();
+    let mut constructors = unit
+        .allocating_constructors()
+        .map(|(identity, constructor)| (format!("{identity:?}"), constructor))
+        .collect::<Vec<_>>();
+    constructors.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut functions = unit
+        .callable_functions()
+        .map(|(identity, function)| (format!("{identity:?}"), function))
+        .collect::<Vec<_>>();
+    functions.sort();
+    (
+        classes,
+        identities,
+        constructors,
+        functions,
+        ir.functions.len(),
+        ir.exprs.len(),
+    )
+}
+
+/// Lower the constructor of `fixture.Counter` taking `parameters` as a selected root, as an
+/// emitted construction does.
+fn lower_counter_constructor(
+    unit: &mut DependencyBodyUnit,
+    libraries: &crate::klib_libraries::KlibLibraries,
+    parameters: &[Ty],
+) -> Result<crate::ir::FunId, super::super::KlibBodyDecline> {
+    let package =
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture"));
+    let counter = libraries.symbols(package, "Counter");
+    let constructors = counter
+        .classifier
+        .as_ref()
+        .expect("fixture.Counter")
+        .constructors
+        .iter()
+        .map(|constructor| {
+            libraries
+                .external_callable(constructor.external_identity.unwrap())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let callables = constructors
+        .iter()
+        .map(|realization| realization.klib_body_callable().unwrap())
+        .collect::<Vec<_>>();
+    let [root] = constructors
+        .iter()
+        .zip(&callables)
+        .filter(|(realization, _)| realization.callable.params == parameters)
+        .map(|(_, callable)| *callable)
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one Counter constructor taking {parameters:?}")
+    };
+    unit.lower_root_with_declarations(
+        root,
+        libraries.declaration_bodies(),
+        &super::super::KlibCalleeFacts::new(callables.iter().copied()),
+        libraries.intrinsic_facts(),
+        &Default::default(),
+        libraries,
+    )
+}
+
+#[test]
+fn a_declined_secondary_constructor_leaves_its_materialized_class_as_it_was() {
+    let Some((directory, libraries)) = produce_library("declined-secondary", DECLINED_SECONDARY)
+    else {
+        return;
+    };
+    let mut unit = DependencyBodyUnit::default();
+    let primary = lower_counter_constructor(&mut unit, &libraries, &[Ty::Int])
+        .unwrap_or_else(|decline| panic!("primary: {decline}"));
+    let before = unit_inventory(&unit);
+    let declined = lower_counter_constructor(&mut unit, &libraries, &[Ty::Int, Ty::String]);
+    assert!(
+        declined.is_err(),
+        "the secondary constructor's function reference declines: {declined:?}"
+    );
+    assert_eq!(unit_inventory(&unit), before);
+    validated(unit.ir());
+    let again = lower_counter_constructor(&mut unit, &libraries, &[Ty::Int])
+        .unwrap_or_else(|decline| panic!("again: {decline}"));
+    assert_eq!(again, primary);
+    assert_eq!(unit_inventory(&unit), before);
+    let _ = std::fs::remove_dir_all(&directory);
 }

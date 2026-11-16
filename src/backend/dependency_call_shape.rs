@@ -230,7 +230,9 @@ impl DependencyCallShape<'_> {
             (true, false, None, false) => Ok(DependencyExportCall::TopLevel),
             (false, false, None, true) => match (member_receiver, receiver_is_exact_singleton) {
                 (None, true) => Ok(DependencyExportCall::SingletonMember),
-                (Some(_), false) => Ok(DependencyExportCall::Member),
+                // An export that takes its receiver is called with it, whether or not the
+                // receiver is also the exact singleton of its declaring class.
+                (Some(_), _) => Ok(DependencyExportCall::Member),
                 _ => Err("an emitted dependency callable whose checked receiver shape changed"),
             },
             (false, false, Some(receiver_position), true) => {

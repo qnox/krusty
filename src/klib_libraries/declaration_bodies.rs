@@ -200,32 +200,7 @@ impl KlibDeclarationBodies {
         signature: &KlibPublicIdSignature,
         role: Option<crate::libraries::KlibAccessorRole>,
     ) -> Result<Option<KlibClassMember<'_>>, &'static str> {
-        let Some(&library) = self.modules.get(&identity.module) else {
-            return Ok(None);
-        };
-        let mut found = None;
-        for tree in self.libraries[library].trees() {
-            let mut pending = vec![&tree.declaration];
-            while let Some(member) = pending.pop() {
-                let class = match member {
-                    KlibIrMember::Class(id) => tree.arena.class(*id),
-                    KlibIrMember::EnumEntry(entry) => {
-                        let Some(id) = entry.class else { continue };
-                        tree.arena.class(id)
-                    }
-                    _ => continue,
-                };
-                pending.extend(class.members.iter());
-                if class.base.symbol.signature != KlibIrSignature::Public(signature.clone()) {
-                    continue;
-                }
-                if found.is_some() {
-                    return Err("duplicate serialized class headers");
-                }
-                found = Some((&tree.arena, class));
-            }
-        }
-        let Some((arena, class)) = found else {
+        let Some((arena, class)) = self.class_header(&identity.module, signature)? else {
             return Ok(None);
         };
         let target = ir_signature(&identity.declaration);
@@ -269,6 +244,40 @@ impl KlibDeclarationBodies {
             class,
             function: arena.function(*function),
         }))
+    }
+
+    /// The exact serialized class header, independently of any callable it declares.
+    pub(crate) fn class_header(
+        &self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> Result<Option<(&KlibIrArena, &KlibIrClass)>, &'static str> {
+        let Some(&library) = self.modules.get(module) else {
+            return Ok(None);
+        };
+        let mut found = None;
+        for tree in self.libraries[library].trees() {
+            let mut pending = vec![&tree.declaration];
+            while let Some(member) = pending.pop() {
+                let class = match member {
+                    KlibIrMember::Class(id) => tree.arena.class(*id),
+                    KlibIrMember::EnumEntry(entry) => {
+                        let Some(id) = entry.class else { continue };
+                        tree.arena.class(id)
+                    }
+                    _ => continue,
+                };
+                pending.extend(class.members.iter());
+                if class.base.symbol.signature != KlibIrSignature::Public(signature.clone()) {
+                    continue;
+                }
+                if found.is_some() {
+                    return Err("duplicate serialized class headers");
+                }
+                found = Some((&tree.arena, class));
+            }
+        }
+        Ok(found)
     }
 
     /// The class that declares the enum entry `entry` read by a body of `body_module`, resolved
@@ -767,6 +776,11 @@ impl KlibDeclarationBodies {
         found.unwrap_or(LocatedMember::Missing)
     }
 
+    /// The class that directly declares the exact linked member `identity`, function or accessor.
+    pub(crate) fn member_owner(&self, identity: &KlibDependencyCallable) -> LocatedMember<'_> {
+        self.function_owner(&identity.module, &ir_signature(&identity.declaration))
+    }
+
     /// Whether the exact serialized declaration intentionally carries an executable body.
     pub(crate) fn function_has_body(&self, identity: &KlibDependencyCallable) -> Option<bool> {
         self.function(identity)
@@ -815,6 +829,43 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
+    /// The public classes the file-local classes of these bodies directly name as supertypes, each
+    /// once and in a stable order. Over the prepared-inline copies, these are the dependency
+    /// classes an object literal or local class extends wherever a call expands its template.
+    pub(crate) fn local_class_supertypes(&self) -> Vec<TypeName> {
+        let mut supertypes = self
+            .libraries
+            .iter()
+            .flat_map(|library| library.local_classes())
+            .flat_map(|(arena, class)| {
+                class
+                    .supertypes
+                    .iter()
+                    .filter_map(|&supertype| match arena.ty(supertype) {
+                        KlibIrType::Simple { classifier, .. }
+                            if classifier.kind == KlibIrSymbolKind::Class =>
+                        {
+                            match &classifier.signature {
+                                KlibIrSignature::Public(signature) => Some(signature),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        // Stable across processes: ordered by the serialized identity, not by interning order.
+        supertypes.sort_by(|left, right| {
+            (left.package().segments(), left.declaration().segments())
+                .cmp(&(right.package().segments(), right.declaration().segments()))
+        });
+        supertypes.dedup();
+        supertypes
+            .into_iter()
+            .filter_map(|signature| class_identity(&KlibIrSignature::Public(signature.clone())))
+            .collect()
+    }
+
     /// Exact module-qualified edges of the bodies common lowering structurally emits, including
     /// reached closure implementations. The supplied operation policy does not grant intrinsic
     /// authority; original direct inventories remain the authority for that separate decision.
@@ -852,6 +903,41 @@ impl KlibDeclarationBodies {
                     KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
                 },
             )
+            .collect()
+    }
+
+    /// The public objects whose values the emitted body of `identity` reads, through the
+    /// closures `forms` lowers with it and the members of the file-local classes it constructs.
+    pub(crate) fn emitted_body_objects(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<KlibPublicIdSignature> {
+        let Some((trees, arena, function)) = self.function_with_trees(identity) else {
+            return Vec::new();
+        };
+        let mut objects = arena.emitted_object_symbols(function, forms);
+        let mut symbols = arena.emitted_callable_symbols(function, forms);
+        let mut classes = crate::fx_hash::HashSet::default();
+        let mut next = 0;
+        while let Some(symbol) = symbols.get(next).copied() {
+            next += 1;
+            if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
+                if classes.insert(&class.base.symbol) {
+                    let roots = class_arena.class_member_roots(class);
+                    objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
+                    symbols.extend(class_arena.emitted_callable_symbols_from(roots, forms));
+                }
+            }
+        }
+        let mut seen = crate::fx_hash::HashSet::default();
+        objects
+            .into_iter()
+            .filter_map(|symbol| match &symbol.signature {
+                KlibIrSignature::Public(signature) => Some(signature.clone()),
+                _ => None,
+            })
+            .filter(|signature| seen.insert(signature.clone()))
             .collect()
     }
 

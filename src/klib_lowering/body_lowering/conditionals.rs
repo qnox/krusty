@@ -27,7 +27,8 @@ impl BodyLowering<'_> {
             Some("IF") => self.if_chain(branches, ty),
             // A compiler-generated `when`, such as a data class member's, carries no source
             // origin; its branches are evaluated in order as a subjectless `when`'s are.
-            Some("WHEN") | None => self.subjectless_when(branches, ty),
+            Some("WHEN") => self.subjectless_when(branches, ty, false),
+            None => self.subjectless_when(branches, ty, true),
             Some("ANDAND") => self.short_circuit(branches, ty, IrShortCircuitKind::And),
             Some("OROR") => self.short_circuit(branches, ty, IrShortCircuitKind::Or),
             Some(_) => unsupported("a `when` of another origin than `if`, `when`, `&&` or `||`"),
@@ -104,7 +105,15 @@ impl BodyLowering<'_> {
     /// A subjectless `when`. With an `else` it is one flat `when` recorded as exhaustive at its
     /// type; without one it is a `Unit` statement checked FIR lowering records nothing for. Its
     /// branch results are lowered as written: the checker converts none of them.
-    fn subjectless_when(&mut self, branches: &[KlibIrBranch], ty: Ty) -> Lowered<ExprId> {
+    ///
+    /// A `generated` one's `else`, after a single branch testing a field read against `null`,
+    /// reads that field as proven non-null.
+    fn subjectless_when(
+        &mut self,
+        branches: &[KlibIrBranch],
+        ty: Ty,
+        generated: bool,
+    ) -> Lowered<ExprId> {
         let (conditions, otherwise) = self.split_else(branches)?;
         if otherwise.is_none() && ty != Ty::Unit {
             return Err(mismatch("a `when` without an `else` is not typed `Unit`"));
@@ -115,7 +124,19 @@ impl BodyLowering<'_> {
             lowered.push((Some(condition), self.when_result(branch.result, ty)?));
         }
         if let Some(otherwise) = otherwise {
-            lowered.push((None, self.when_result(otherwise, ty)?));
+            let proof = match conditions {
+                [only] if generated => self.generated_null_test(only.condition),
+                _ => None,
+            }
+            .filter(|proof| !self.null_proven.contains(proof));
+            if let Some(proof) = &proof {
+                self.null_proven.insert(proof.clone());
+            }
+            let result = self.when_result(otherwise, ty);
+            if let Some(proof) = &proof {
+                self.null_proven.remove(proof);
+            }
+            lowered.push((None, result?));
         }
         let when = self.ir.add_expr(IrExpr::When { branches: lowered });
         if otherwise.is_some() {
