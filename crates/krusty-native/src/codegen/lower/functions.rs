@@ -708,6 +708,12 @@ impl<'a> FileLowering<'a> {
                 interfaces.push(descriptor);
             }
         }
+        let local_interfaces = self.model.interfaces[interface as usize].clone();
+        for descriptor in self.dependency_interface_memberships(interface, &local_interfaces)? {
+            if !interfaces.contains(&descriptor) {
+                interfaces.push(descriptor);
+            }
+        }
         let kotlin_name = target.classifier.render().replace(['/', '$'], ".");
         Ok(SamTables {
             vtable,
