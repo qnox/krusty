@@ -589,13 +589,19 @@ pub(super) fn ordinary_roots<'a>(
         {
             continue;
         }
-        // A source call of a member of an open or abstract class dispatches on an instance of any
-        // subclass, including one the target lays out itself (an array's `IntIterator`). Only a
-        // final class's instances are all built by the constructor the unit materializes.
+        // A source call of an overridable member of an open or abstract class dispatches on an
+        // instance of any subclass. A final member has the one body, but its instance may still be
+        // one the target lays out itself (an array's `IntIterator`), which only a class the target
+        // represents has; every instance of any other class is built by a constructor of the
+        // program.
         if !callable.is_top_level()
             && selected.class_contract().is_some_and(|class| {
                 !class.is_value
                     && class.modality != crate::metadata::semantic::KotlinModality::Final
+                    && (target_represents_classifier(class.classifier)
+                        || callable
+                            .klib_body_declaration_modifiers
+                            .is_none_or(|modifiers| modifiers.is_overridable()))
             })
         {
             continue;

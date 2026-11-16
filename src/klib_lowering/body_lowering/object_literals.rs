@@ -29,7 +29,7 @@ pub(super) struct CaptureField {
 }
 
 /// An object literal's delegation to a superclass constructor: the operands evaluated where the
-/// object is constructed, the constructor's parameters and the constructor itself.
+/// object is constructed, the constructor's declared parameters and the constructor itself.
 struct SuperclassForwards {
     operands: Vec<(ExprId, Ty)>,
     params: Vec<Ty>,
@@ -404,7 +404,10 @@ impl<'a> BodyLowering<'a> {
             .zip(operands.params.iter().copied());
         Ok(SuperclassForwards {
             operands: pairs.collect(),
-            params: operands.params,
+            // The superclass constructor's own declared frame, as a source class records it: a
+            // backend couples it to the constructor's physical frame, while each operand above is
+            // carried at its type in this object's instantiation.
+            params: operands.declaration.declared_parameters().to_vec(),
             target: IrConstructorTarget {
                 ordinal,
                 access: crate::ir::IrConstructorAccess::Unrestricted,
