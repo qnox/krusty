@@ -1875,6 +1875,10 @@ pub struct File {
     /// span. Diagnostics consume this parser-owned source fact instead of guessing an offset from
     /// the referenced type, which may be separated from the keyword by trivia.
     pub type_projection_spans: crate::fx_hash::HashMap<Span, Span>,
+    /// Exact `<…>` span of the type-argument list written on a classifier reference's own (last)
+    /// segment, keyed by that reference's type span. Diagnostics about the written arguments report
+    /// at the list itself, which the reference's span does not cover.
+    pub type_argument_list_spans: crate::fx_hash::HashMap<Span, Span>,
     /// Every `typealias Name<T…> = Target`: the alias name, its declared type-parameter names, and
     /// the complete source target shape. Resolution binds this once for semantic use and metadata.
     pub type_alias_fun: Vec<(String, Vec<String>, TypeRef)>,

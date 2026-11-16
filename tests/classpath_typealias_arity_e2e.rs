@@ -260,11 +260,8 @@ fn invalid_alias_arity_is_a_frontend_error() {
     let stdlib = common::stdlib_jar();
     let libout = kotlinc_lib().expect("kotlinc dependency");
     let diagnostics = common::front_end_diagnostics(MAIN, &[libout, stdlib], Some(jdk.as_path()));
-    assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.contains("wrong number of type arguments for type alias 'Box'")
-                && diagnostic.contains("expected 2, found 1")
-        }),
-        "expected an alias-arity diagnostic, got {diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        vec!["2 type arguments expected for 'typealias Box<S, A> = PBox<S, S, A, A>'.".to_string()],
     );
 }

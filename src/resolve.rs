@@ -392,6 +392,7 @@ mod type_parameter_owners;
 use type_parameter_owners::ty_param_names_into;
 mod cyclic_upper_bounds;
 mod resolved_bound_view;
+mod type_argument_arity;
 mod uninferred_call_results;
 mod upper_bound_violations;
 mod value_class_parameters;
@@ -30255,6 +30256,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         ret_ty: Ty::Unit,
         type_parameter_owners: HashMap::default(),
         uninferred_type_parameters: HashMap::default(),
+        type_argument_arity: Default::default(),
         upper_bound_violations: Default::default(),
         expected: None,
         callable_reference_literal_constraints: HashMap::default(),
@@ -32725,6 +32727,7 @@ struct Checker<'a> {
     /// Selected call formals that remain unresolved, plus whether their provider declaration is a
     /// platform type parameter. This is diagnostic state scoped with [`Self::type_parameter_owners`].
     uninferred_type_parameters: HashMap<&'static str, bool>,
+    type_argument_arity: type_argument_arity::TypeArgumentArityState,
     upper_bound_violations: upper_bound_violations::UpperBoundViolationState,
     /// Expected type for the next expression. Consumed by [`Self::expr`]; result-position
     /// propagation must re-arm it through [`Self::expr_expected`].
@@ -39495,6 +39498,7 @@ impl<'a> Checker<'a> {
                             let applied = self.alias_application_ty_with_spelling(
                                 scope,
                                 alias_projection::SelectedAliasApplication {
+                                    identity: alias.identity,
                                     formals: alias.formals,
                                     expansion: alias.expansion,
                                     expansion_spelling: alias.expansion_spelling,
@@ -39508,8 +39512,13 @@ impl<'a> Checker<'a> {
                             applied.ty
                         })
                     } else {
-                        typeref_classifier(r, Some(internal))
-                            .map(|internal| self.obj_with_targs_name(scope, internal, r))
+                        typeref_classifier(r, Some(internal)).map(|internal| {
+                            if self.check_type_reference_arity(r, internal) {
+                                self.obj_with_targs_name(scope, internal, r)
+                            } else {
+                                Ty::Error
+                            }
+                        })
                     }
                 }
                 InheritedNestedClassifier::Ambiguous => {
@@ -39793,7 +39802,9 @@ impl<'a> Checker<'a> {
         })
         .flatten();
         let Some((formals, expansion)) = bare_alias else {
-            return self.type_ref_ty(scope, reference);
+            return self.with_bare_outermost_type(reference, |checker| {
+                checker.type_ref_ty(scope, reference)
+            });
         };
 
         // Source alias parameters cannot declare bounds, so their star-projected readable upper
@@ -49194,6 +49205,10 @@ impl<'a> Checker<'a> {
     /// Report the failed classifier binding recorded by [`Self::type_ref_ty`]. Unsupported shapes
     /// have no binding failure and continue to their shape-specific diagnostic.
     fn report_unresolved_type_ref(&mut self, r: &TypeRef) -> bool {
+        // A wrong argument count was already reported and explains the error type.
+        if self.rejected_type_argument_count(r) {
+            return true;
+        }
         if let Some(miss) = self.unresolved_type_segments.get(&(r.span.lo, r.span.hi)) {
             let message = match miss {
                 crate::symbol_resolver::ClassifierMiss::Unresolved(segment) => {
