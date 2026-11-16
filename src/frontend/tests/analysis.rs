@@ -2050,3 +2050,41 @@ fn invalid_dependency_metadata_is_one_terminal_frontend_diagnostic() {
 
     std::fs::remove_dir_all(root).expect("remove classpath directories");
 }
+
+#[test]
+fn preinferred_local_enum_keeps_its_semantic_owner() {
+    // A local enum whose parents are not published in Pass 1 keeps a classifier identity and
+    // no classifier header. Checking that file must record the entry constructor from the
+    // identity instead of aborting.
+    let inputs = [SourceInput::kotlin(
+        "fun demo() {\n\
+             \u{20} enum class Choice : Missing { YES, NO }\n\
+             \u{20} val selected = Choice.YES\n\
+         }",
+    )];
+    let mut diagnostics = DiagSink::new();
+    analyze_source_set_prefix_with_features_trimmed(
+        &inputs,
+        1,
+        1,
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert_eq!(diagnostics.diags.len(), 2, "{:?}", diagnostics.diags);
+    assert!(diagnostics
+        .diags
+        .iter()
+        .all(|diagnostic| { diagnostic.file == 0 && diagnostic.severity == Severity::Error }));
+    assert_eq!(
+        diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "unresolved reference 'Missing'.",
+            "unresolved reference 'Choice'.",
+        ]
+    );
+}

@@ -44383,9 +44383,17 @@ impl<'a> Checker<'a> {
                 self.resolved_enum_entry_constructors.insert(
                     (entry.span.lo, entry.span.hi),
                     ResolvedConstructor::Source {
+                        // A deferred local enum publishes its classifier identity before its
+                        // header. The header remains authoritative when it exists; the identity
+                        // is the owner Pass 2 already bound for that same declaration.
                         owner: streamed_enum_owner
-                            .and_then(|owner| self.resolved_index?.classifier_header(owner))
-                            .map(|header| header.classifier)
+                            .and_then(|owner| {
+                                let index = self.resolved_index?;
+                                index
+                                    .classifier_header(owner)
+                                    .map(|header| header.classifier)
+                                    .or_else(|| index.classifier_identity(owner))
+                            })
                             .or_else(|| enum_signature.as_ref().map(ClassSig::internal_name))
                             .expect("checked enum must have a semantic owner"),
                         stable_declaration,
