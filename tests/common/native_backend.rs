@@ -201,32 +201,11 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty_native::NativeTarget
     native_sources_outcome(&[(stem, src)], target, None)
 }
 
-/// The analysis a Native compilation of `sources` (`(stem, text)`) starts from: the semantic
-/// platform and language settings every Native test compiles with, and the file stems in order.
-/// `None` when this build has no selected Native stdlib to analyze against.
-pub fn native_analysis(
-    sources: &[(&str, &str)],
-    diags: &mut krusty::diag::DiagSink,
-) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
-    analyze_natively(sources, &[], false, diags)
-}
-
-pub(crate) fn analyze_natively(
-    sources: &[(&str, &str)],
-    libraries: &[std::path::PathBuf],
-    plugins: bool,
-    diags: &mut krusty::diag::DiagSink,
-) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
-    let inputs = native_library_inputs(libraries)?;
-    let libraries = KlibLibraries::open(&inputs).expect("open selected Native analysis KLIBs");
-    Some(analyze_with_native_libraries(
-        sources, libraries, plugins, diags,
-    ))
-}
-
 /// Native's stdlib includes its `kotlin.test` declarations and bodies. Extra dependencies are
 /// selected KLIBs too; JVM jars and the JDK cannot authenticate Native declaration identities.
-fn native_library_inputs(libraries: &[std::path::PathBuf]) -> Option<Vec<KlibLibraryInput>> {
+pub(crate) fn native_library_inputs(
+    libraries: &[std::path::PathBuf],
+) -> Option<Vec<KlibLibraryInput>> {
     let stdlib = krusty::toolchain::kotlin_stdlib_klib(
         krusty::compilation_target::CompilationTarget::Native,
     );
@@ -246,7 +225,7 @@ fn native_library_inputs(libraries: &[std::path::PathBuf]) -> Option<Vec<KlibLib
     )
 }
 
-fn analyze_with_native_libraries(
+pub(crate) fn analyze_with_native_libraries(
     sources: &[(&str, &str)],
     libraries: KlibLibraries,
     plugins: bool,
@@ -286,28 +265,26 @@ pub fn native_image(
     sources: &[(&str, &str)],
     target: krusty_native::NativeTarget,
 ) -> Result<Vec<u8>, NativeBox> {
-    let compilation = compile_native_sources(sources, target)?;
-    let object_refs: Vec<&[u8]> = compilation.objects.iter().map(Vec::as_slice).collect();
-    krusty_native::link_program_with_libraries(&object_refs, &compilation.imports, target)
+    let (objects, imports) = compile_native_sources(sources, target)?.into_parts();
+    let object_refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
+    krusty_native::link_program_with_libraries(&object_refs, &imports, target)
         .map_err(|error| NativeBox::Failed(format!("link: {error}")))
 }
 
-/// Compile `sources` with the native code generator into one object per file, or say why there
-/// are none.
-pub fn native_objects(
-    sources: &[(&str, &str)],
-    target: krusty_native::NativeTarget,
-) -> Result<Vec<Vec<u8>>, NativeBox> {
-    compile_native_sources(sources, target).map(|compilation| compilation.objects)
-}
-
-struct NativeCompilation {
+pub(crate) struct NativeCompilation {
     objects: Vec<Vec<u8>>,
     imports: Vec<ImportLibrary>,
 }
 
+impl NativeCompilation {
+    /// Consume the objects and imports emitted from one selected Native KLIB snapshot together.
+    pub(crate) fn into_parts(self) -> (Vec<Vec<u8>>, Vec<ImportLibrary>) {
+        (self.objects, self.imports)
+    }
+}
+
 /// Keep link facts beside emitted objects from the same selected KLIB snapshot.
-fn compile_native_sources(
+pub(crate) fn compile_native_sources(
     sources: &[(&str, &str)],
     target: krusty_native::NativeTarget,
 ) -> Result<NativeCompilation, NativeBox> {

@@ -200,6 +200,40 @@ pub fn write_native_runtime_headers(directory: &std::path::Path) -> std::io::Res
     std::fs::write(directory.join("krusty_rt.h"), NATIVE_RUNTIME_HEADER)
 }
 
+/// The analysis a Native compilation of `sources` (`(stem, text)`) starts from: the semantic
+/// platform and language settings every Native test compiles with, and the file stems in order.
+/// `None` when this build has no selected Native stdlib to analyze against.
+pub fn native_analysis(
+    sources: &[(&str, &str)],
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
+    analyze_natively(sources, &[], false, diags)
+}
+
+fn analyze_natively(
+    sources: &[(&str, &str)],
+    libraries: &[std::path::PathBuf],
+    plugins: bool,
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
+    let inputs = common::native_backend::native_library_inputs(libraries)?;
+    let libraries = krusty::klib_libraries::KlibLibraries::open(&inputs)
+        .expect("open selected Native analysis KLIBs");
+    Some(common::native_backend::analyze_with_native_libraries(
+        sources, libraries, plugins, diags,
+    ))
+}
+
+/// Compile `sources` with the native code generator into one object per file, or say why there
+/// are none.
+pub fn native_objects(
+    sources: &[(&str, &str)],
+    target: krusty_native::NativeTarget,
+) -> Result<Vec<Vec<u8>>, common::native_backend::NativeBox> {
+    common::native_backend::compile_native_sources(sources, target)
+        .map(|compilation| compilation.into_parts().0)
+}
+
 /// `native_analysis` of a build applying every compiler plugin krusty ships, with their
 /// `libraries` (the plugins' Native runtime KLIBs) after the selected Native stdlib.
 pub fn native_analysis_with_plugins(
@@ -207,7 +241,7 @@ pub fn native_analysis_with_plugins(
     libraries: &[std::path::PathBuf],
     diags: &mut krusty::diag::DiagSink,
 ) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
-    common::native_backend::analyze_natively(sources, libraries, true, diags)
+    analyze_natively(sources, libraries, true, diags)
 }
 
 /// A positive front-end coverage test upgraded to true e2e: the source must be checker-clean, the
