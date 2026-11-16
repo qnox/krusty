@@ -101,9 +101,8 @@ fn an_inlined_object_extends_a_class_laid_out_from_the_library() {
         target,
     )
     .unwrap();
-    let output =
-        common::native_backend::run_native_image(&image, "InlineObjectSubclass", &[], &[])
-            .unwrap_or_else(|failure| panic!("Native consumer: {}", failure.as_failure()));
+    let output = common::native_backend::run_native_image(&image, "InlineObjectSubclass", &[], &[])
+        .unwrap_or_else(|failure| panic!("Native consumer: {}", failure.as_failure()));
     assert!(
         output.status.success(),
         "Native consumer: {}",
