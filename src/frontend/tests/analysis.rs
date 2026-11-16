@@ -1002,7 +1002,7 @@ fn cross_file_private_top_level_callable_reference_reports_visibility() {
 }
 
 #[test]
-fn unavailable_context_does_not_hide_inapplicable_candidate_family() {
+fn unavailable_context_of_the_only_mapped_candidate_is_reported() {
     let source = "class Scope\n\
                       context(scope: Scope) fun choose(value: Int): Int = value\n\
                       context(scope: Scope) fun choose(other: Int): String = \"\"\n\
@@ -1018,15 +1018,19 @@ fn unavailable_context_does_not_hide_inapplicable_candidate_family() {
         &mut diagnostics,
     );
 
-    assert!(
-        diagnostics.diags.iter().any(|diagnostic| {
-            diagnostic.msg
-                == "none of the following candidates is applicable:\n\n\
-                        context(scope: Scope) fun choose(other: Int): String\n\
-                        context(scope: Scope) fun choose(value: Int): Int"
-        }),
-        "{:?}",
-        diagnostics.diags
+    // kotlinc 2.4.21: the named argument maps onto `choose(value)` alone, so that candidate's
+    // missing context argument is the call's diagnostic, not a list of both candidates.
+    assert_eq!(
+        diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "conflicting overloads:\ncontext(scope: Scope) fun choose(other: Int): String",
+            "conflicting overloads:\ncontext(scope: Scope) fun choose(value: Int): Int",
+            "no context argument for 'scope: Scope' found.",
+        ]
     );
 }
 
