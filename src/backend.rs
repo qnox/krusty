@@ -225,6 +225,23 @@ pub trait Backend {
         false
     }
 
+    /// The dependency classes this target lays out itself (each one it
+    /// [represents](Self::represents_dependency_classifier)) whose values it dispatches a call of a
+    /// supertype's member on, as it does a builtin class's: `CharSequence.length` on a
+    /// `StringBuilder`. Each selected member carries what these classes run for it, frozen from the
+    /// member hierarchy ([`crate::backend::BuiltinImplementation`]).
+    fn dispatched_dependency_classes(&self) -> Vec<DependencyClassifier> {
+        Vec::new()
+    }
+
+    /// Whether this target's `StringBuilder` appends a `CharSequence` by reading its `length` and
+    /// each indexed `Char` (Kotlin/Wasm WASI) rather than by rendering it with `toString`
+    /// (Kotlin/Wasm JS). The handoff then freezes those `CharSequence` members for the target to
+    /// call ([`CheckedBackendCallables::char_sequence_protocol`]).
+    fn appends_char_sequences_by_index(&self) -> bool {
+        false
+    }
+
     /// How common lowering realizes calls to same-module inline functions for this backend. A
     /// backend that compiles each inline function's body and inlines it at the call keeps the calls
     /// it can inline that way; every other backend has them expanded in IR.

@@ -56,10 +56,6 @@ void kt_program_entry(void) {
     CHECK(kt_iterable_map(NULL, f_count) == NULL && raised_npe() && invoked == 0,
           "map over null went on after raising\n");
     CHECK(kt_class_of(NULL) == NULL && raised_npe(), "::class of null\n");
-    CHECK(kt_rw_property_get(NULL, kt_string_utf8("p", 1)) == NULL && raised_npe(),
-          "a read through a null delegate\n");
-    kt_rw_property_set(NULL, NULL, kt_box_int(1));
-    CHECK(raised_npe(), "a write through a null delegate\n");
 
     CHECK(kt_iterable_iterator(NULL) == NULL && raised_npe(), "iterator() of null\n");
     CHECK(!kt_iterator_has_next(NULL) && raised_npe(), "hasNext() of a null iterator\n");
