@@ -240,3 +240,90 @@ fn decoded_collection_barrier_role_is_declaration_exact() {
         None
     );
 }
+
+#[test]
+fn atomic_exchange_uses_the_stdlib_jvm8_static_realizations() {
+    let (Some(stdlib), Some(jdk)) = (
+        crate::toolchain::stdlib_jar(),
+        crate::toolchain::jdk_modules(),
+    ) else {
+        return;
+    };
+    let libraries = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        vec![stdlib, jdk],
+    )));
+    for (owner, name, physical, descriptor) in [
+        ("AtomicInt", "compareAndExchange", "AtomicInteger", "II)I"),
+        ("AtomicLong", "compareAndExchange", "AtomicLong", "JJ)J"),
+        (
+            "AtomicBoolean",
+            "compareAndExchange",
+            "AtomicBoolean",
+            "ZZ)Z",
+        ),
+        (
+            "AtomicReference",
+            "compareAndExchange",
+            "AtomicReference",
+            "Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        ),
+        (
+            "AtomicIntArray",
+            "compareAndExchangeAt",
+            "AtomicIntegerArray",
+            "III)I",
+        ),
+        (
+            "AtomicLongArray",
+            "compareAndExchangeAt",
+            "AtomicLongArray",
+            "IJJ)J",
+        ),
+        (
+            "AtomicArray",
+            "compareAndExchangeAt",
+            "AtomicReferenceArray",
+            "ILjava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        ),
+    ] {
+        let classifier = libraries
+            .classifier_record(type_name(&format!("kotlin/concurrent/atomics/{owner}")))
+            .expect("atomic declaration");
+        let members = classifier
+            .members
+            .iter()
+            .filter(|m| m.name == name)
+            .collect::<Vec<_>>();
+        let [member] = members.as_slice() else {
+            panic!("one declared {owner}.{name}")
+        };
+        assert_eq!(
+            member.owner,
+            Some(type_name("kotlin/concurrent/internal/AtomicIntrinsicsKt"))
+        );
+        assert_eq!(member.physical_name.as_deref(), Some("compareAndExchange"));
+        assert_eq!(
+            member.descriptor,
+            format!("(Ljava/util/concurrent/atomic/{physical};{descriptor}")
+        );
+        assert_eq!(
+            member.realization,
+            crate::libraries::MemberRealization::Direct {
+                pass_receiver: true
+            }
+        );
+        assert_eq!(
+            member.params.len(),
+            if name.ends_with("At") { 3 } else { 2 }
+        );
+        assert_eq!(
+            member
+                .generic_sig
+                .as_ref()
+                .expect("semantic signature")
+                .params
+                .len(),
+            member.params.len()
+        );
+    }
+}
