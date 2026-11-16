@@ -635,8 +635,7 @@ impl<'a> BodyLowering<'a> {
                 statements,
                 origin: Some(origin),
             } if origin == "OBJECT_LITERAL" => return self.object_literal(statements),
-            KlibIrExprKind::Block { origin, .. } => {
-                eprintln!("ZZBLOCK {origin:?}");
+            KlibIrExprKind::Block { .. } => {
                 return unsupported("a block of a compiler-introduced form");
             }
             KlibIrExprKind::Composite { .. } => return unsupported("a composite block"),
