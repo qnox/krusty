@@ -95,7 +95,7 @@ pub fn source_class_names(ir: &IrFile, class: ClassId) -> Option<ClassNames> {
         Some(IrLocalClassOwner::Class(owner)) => source_class_names(ir, owner)?.qualified,
         Some(IrLocalClassOwner::External(owner)) => member_class_names(owner).qualified,
         // Boundary conversion: the package path is spelled with `/` in the name tree.
-        None => provenance.source.package.render().replace('/', "."),
+        None => provenance.source.package().render().replace('/', "."),
     };
     if !qualified.is_empty() {
         qualified.push('.');

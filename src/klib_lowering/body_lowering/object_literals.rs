@@ -220,6 +220,11 @@ impl<'a> BodyLowering<'a> {
             });
         }
         let class_id = self.ir.add_class(declared);
+        if let Some(provenance) = self.anonymous_object_provenance() {
+            self.ir
+                .local_class_name_provenance
+                .insert(class_id, provenance);
+        }
         let owner = self.ir.classes[class_id as usize].fq_name_id();
         let mut capture_fields = HashMap::default();
         for (index, capture) in captures.iter().enumerate() {
@@ -286,6 +291,59 @@ impl<'a> BodyLowering<'a> {
             default_prefix_count: prefix_count,
         });
         Ok(self.typed(constructed, Ty::obj_name(owner)))
+    }
+
+    /// How Kotlin names an object literal the body of a published function declares: in the
+    /// function's class, or its package for a top-level one, below the function, numbered after
+    /// the ones it already declared. A body of any other declaration names none here.
+    fn anonymous_object_provenance(&self) -> Option<crate::ir::IrLocalClassNameProvenance> {
+        let crate::metadata::klib_ir::KlibIrSignature::Public(signature) =
+            &self.function.symbol.signature
+        else {
+            return None;
+        };
+        let (function, owner) = signature.declaration().segments().split_last()?;
+        let package = signature
+            .package()
+            .segments()
+            .iter()
+            .fold(TypeName::ROOT, |parent, segment| {
+                crate::types::type_name_child(parent, segment)
+            });
+        let lexical_owner = match owner.split_first() {
+            None => None,
+            Some((first, nested)) => {
+                let owner = nested.iter().fold(
+                    crate::types::type_name_child(package, first),
+                    |parent, segment| crate::types::type_name_nested_child(parent, segment),
+                );
+                Some(match self.ir.class_id_by_name(owner) {
+                    Some(class) => crate::ir::IrLocalClassOwner::Class(class),
+                    None => crate::ir::IrLocalClassOwner::External(owner),
+                })
+            }
+        };
+        let source = crate::ir::IrLocalClassNameRoot::Dependency { package };
+        let segments: Box<[String]> = Box::new([function.clone()]);
+        let ordinal = self
+            .ir
+            .local_class_name_provenance
+            .values()
+            .filter(|known| {
+                known.source == source
+                    && known.lexical_owner == lexical_owner
+                    && known.segments == segments
+            })
+            .filter_map(|known| known.ordinal)
+            .max()
+            .map_or(1, |ordinal| ordinal.saturating_add(1));
+        Some(crate::ir::IrLocalClassNameProvenance {
+            source,
+            lexical_owner,
+            segments,
+            ordinal: Some(ordinal),
+            parents: Box::new([]),
+        })
     }
 
     /// Checks the members an object literal may declare, and returns the constructor's delegation
