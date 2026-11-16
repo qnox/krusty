@@ -1103,6 +1103,69 @@ mod tests {
     }
 
     #[test]
+    fn a_defined_callable_is_rebound_only_by_a_local_class_clone() {
+        fn realizing_file(callable: CallableId, local_owner: bool) -> IrFile {
+            let mut ir = IrFile::default();
+            let owner = type_name("demo/make$1");
+            let class = ir.add_class(krusty::ir::IrClass::synthetic(owner));
+            if local_owner {
+                ir.local_class_name_provenance.insert(
+                    class,
+                    krusty::ir::IrLocalClassNameProvenance {
+                        source: krusty::ir::IrModuleSource {
+                            source: krusty::fir::SourceFileId::from_raw(1),
+                            package: type_name("demo"),
+                        },
+                        lexical_owner: None,
+                        segments: Box::new([]),
+                        ordinal: Some(1),
+                        parents: Box::new([]),
+                    },
+                );
+            }
+            let mut run = function("run", None);
+            run.is_static = false;
+            run.dispatch_receiver = Some(owner);
+            let run = ir.add_fun(run);
+            ir.checked_callable_functions.insert(callable, run);
+            ir
+        }
+        fn defined_by_an_earlier_file(callable: CallableId) -> (CallableRegistry, Module, u32) {
+            let mut registry = CallableRegistry::default();
+            let mut wasm = Module::default();
+            registry.enter_source_module("app");
+            let earlier = registry.module_index(callable, &mut wasm);
+            let ty = wasm.func_type(Vec::new(), Vec::new());
+            wasm.define(
+                earlier,
+                Function {
+                    ty,
+                    locals: Vec::new(),
+                    code: Code::default(),
+                },
+            );
+            (registry, wasm, earlier)
+        }
+
+        let callable = CallableId::from_raw(0);
+        let (mut registry, mut wasm, _) = defined_by_an_earlier_file(callable);
+        assert_eq!(
+            registry.declare_file(&realizing_file(callable, false), &mut wasm, &[]),
+            Err("a callable realized by two functions".to_string())
+        );
+
+        let (mut registry, mut wasm, earlier) = defined_by_an_earlier_file(callable);
+        let realized = registry
+            .declare_file(&realizing_file(callable, true), &mut wasm, &[])
+            .expect("a file's clone of a local class realizes its own members");
+        let [Some(clone)] = realized[..] else {
+            panic!("the clone's member is realized once: {realized:?}");
+        };
+        assert_ne!(clone, earlier);
+        assert_eq!(registry.module_index(callable, &mut wasm), clone);
+    }
+
+    #[test]
     fn inherited_default_entry_is_keyed_by_provider_and_calls_the_actual_function() {
         let target = CallableId::from_raw(1);
         let provider = CallableId::from_raw(2);
