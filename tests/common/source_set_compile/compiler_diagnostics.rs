@@ -14,7 +14,8 @@ pub(crate) fn report_rejection<'a>(
     }
 }
 
-fn render_rejection<'a>(
+/// The complete report [`report_rejection`] prints, for a caller that prints it later.
+pub(crate) fn render_rejection<'a>(
     module: &str,
     sources: impl IntoIterator<Item = (SourceKind, &'a str, &'a str)>,
     diagnostics: &DiagSink,

@@ -14,6 +14,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 mod arrays;
+mod atomic_array_elements;
 mod blocks;
 mod callable_references;
 mod calls;
@@ -195,6 +196,15 @@ pub(super) trait CallLinker {
     /// The atomic field access `callee` is, when its exact declaration is the target stdlib's
     /// authenticated intrinsic over a property reference. Template linkers keep an ordinary call.
     fn atomic_field(
+        &self,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<Option<crate::libraries::AtomicOperation>> {
+        Ok(None)
+    }
+
+    /// The atomic array element access `callee` is, when its exact declaration is the target
+    /// stdlib's authenticated intrinsic over an array. Template linkers keep an ordinary call.
+    fn atomic_array_element(
         &self,
         _callee: &KlibPublicIdSignature,
     ) -> Lowered<Option<crate::libraries::AtomicOperation>> {
@@ -484,12 +494,14 @@ impl<'a> BodyLowering<'a> {
         }
     }
 
-    /// This body as a member of the materialized class `class`, which reads its receiver's
+    /// This body as a member of the materialized class `class`, which `declaring` declares and
+    /// which reads its receiver's
     /// `fields`, the backing fields of `properties`. A value class member reads its one value
     /// and writes nothing.
     pub(super) fn reading_through(
         mut self,
         class: crate::ir::ClassId,
+        declaring: &'a KlibIrSymbol,
         fields: &[&'a crate::metadata::klib_ir::tree::KlibIrField],
         properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
         value: bool,
@@ -497,6 +509,7 @@ impl<'a> BodyLowering<'a> {
         let declared = &self.ir.classes[class as usize].fields;
         self.instance_storage = Some(instance_storage::InstanceStorageFrame::member(
             class,
+            declaring,
             fields
                 .iter()
                 .zip(declared)
@@ -730,11 +743,14 @@ impl<'a> BodyLowering<'a> {
                 super_qualifier,
                 ..
             } => {
-                if super_qualifier.is_some() {
-                    return unsupported("a superclass field read");
-                }
                 let ty = self.ty(expression, "field read")?;
-                return self.initialized_field(symbol, *receiver, None, ty);
+                return self.initialized_field(
+                    symbol,
+                    super_qualifier.as_ref(),
+                    *receiver,
+                    None,
+                    ty,
+                );
             }
             KlibIrExprKind::SetField {
                 symbol,
@@ -743,11 +759,14 @@ impl<'a> BodyLowering<'a> {
                 super_qualifier,
                 ..
             } => {
-                if super_qualifier.is_some() {
-                    return unsupported("a superclass field write");
-                }
                 let ty = self.ty(expression, "field write")?;
-                return self.initialized_field(symbol, *receiver, Some(*value), ty);
+                return self.initialized_field(
+                    symbol,
+                    super_qualifier.as_ref(),
+                    *receiver,
+                    Some(*value),
+                    ty,
+                );
             }
             KlibIrExprKind::GetObject(symbol) => {
                 let ty = self.ty(expression, "object value")?;
