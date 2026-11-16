@@ -514,6 +514,63 @@ mod tests {
         compile_program(target, Entry::Box, &[source])
     }
 
+    /// A class delegated property whose getter is reached from a file that also captures an
+    /// anonymous object. The property reference passed to `getValue` keeps the plan's checked
+    /// type, so wasm can lower the accessor instead of declining the expression.
+    #[test]
+    fn delegate_capture_discovery_box_compiles() {
+        use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+        let source = include_str!("../../../tests/box_regressions/delegateCaptureDiscovery.kt");
+        for target in WasmTarget::ALL {
+            let path = krusty::toolchain::kotlin_stdlib_klib(
+                krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
+            )
+            .expect("the exact target stdlib must be provisioned");
+            let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+                path,
+                KlibStdlibSemantics::Wasm,
+            )])
+            .unwrap();
+            let (artifacts, diagnostics) =
+                compile_program_with_provider(target, Entry::Box, &[source], Box::new(libraries));
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            let directory = std::env::temp_dir().join(format!(
+                "delegate-capture-{}-{}",
+                target.name(),
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&directory).unwrap();
+            for (name, bytes) in &artifacts {
+                std::fs::write(directory.join(name), bytes).unwrap();
+            }
+            let loader = artifacts
+                .iter()
+                .find(|(name, _)| name.ends_with(".mjs"))
+                .expect("wasm loader")
+                .0
+                .as_str();
+            let output = std::process::Command::new("node")
+                .arg("--no-warnings")
+                .arg(directory.join(loader))
+                .output()
+                .expect("node runs the wasm box");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "{target:?} exit {:?}\n{stdout}{stderr}",
+                output.status.code()
+            );
+            assert_eq!(
+                stdout,
+                format!("{}OK", krusty::backend::BOX_RESULT_FRAME),
+                "{target:?} complete framed box result"
+            );
+            assert!(stderr.is_empty(), "{target:?} box stderr: {stderr:?}");
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
+
     /// A file dispatching `toString` on an erased receiver, and another file creating a value
     /// whose `toString` this target has no body for, decline together, whichever file comes first.
     #[test]
@@ -524,7 +581,8 @@ mod tests {
             "{}a `toString` of `kotlin.Any?` reaching an object another file creates yet",
             super::DECLINE_PREFIX
         )];
-        let other = "fun function(): String = show { 1 }";
+        let other = "fun interface Supplier { fun get(): Int }\n\
+                     fun converted(): String = show(Supplier { 1 })";
         for target in WasmTarget::ALL {
             for sources in [[show, other], [other, show]] {
                 let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
@@ -605,12 +663,14 @@ mod tests {
     }
 
     /// A `var` can be assigned anything after its initializer, so rendering it still declines
-    /// while the file creates a function value.
+    /// while the file creates a function value with no `toString` body, one converted to a
+    /// `fun interface`.
     #[test]
     fn an_erased_to_string_of_a_reassigned_var_declines() {
-        let source = "fun box(): String { val supplier = { 1 }\n\
+        let source = "fun interface Supplier { fun get(): Int }\n\
+                      fun box(): String { val supplier = Supplier { 1 }\n\
                       var message: Any = \"O\"\n\
-                      if (supplier() == 2) message = supplier\n\
+                      if (supplier.get() == 2) message = supplier\n\
                       return \"$message\" + \"K\" }";
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile(target, source);
@@ -623,6 +683,20 @@ mod tests {
                 )]
             );
             assert!(outputs.is_empty());
+        }
+    }
+
+    /// A lambda and a reference to a function print their class names, as kotlinc-wasm's do, so an
+    /// erased `toString` reaching them is lowered.
+    #[test]
+    fn an_erased_to_string_reaches_named_function_values() {
+        let source = "fun show(value: Any?): String = value.toString()\n\
+                      fun box(): String = if (show { 1 } == \"\" || show(::show) == \"\") \
+                      \"fail\" else \"OK\"";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            assert!(!outputs.is_empty(), "{target:?}");
         }
     }
 

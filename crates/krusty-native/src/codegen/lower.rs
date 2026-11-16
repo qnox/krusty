@@ -228,6 +228,8 @@ pub struct FileInput<'a> {
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     pub dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
+    /// Stable dependency-member numbers shared by every file in the source module.
+    pub dependency_interface_numbers: &'a mut HashMap<Vec<u8>, u32>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -266,6 +268,7 @@ pub fn lower_file(
         dependency_signatures,
         dependency_symbols,
         dependency_instances,
+        dependency_interface_numbers,
         value_classes,
         slot_plan,
         module_facts,
@@ -373,6 +376,7 @@ pub fn lower_file(
         dependency_signatures,
         dependency_symbols,
         dependency_interface_calls: Vec::new(),
+        dependency_interface_numbers,
         dependency_instances,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
@@ -460,7 +464,8 @@ pub fn lower_file(
 /// The classes of `ir` another file of the module extends, with their superclasses in this file:
 /// what a later file's subclass names by symbol, so their objects define those symbols for the
 /// link to find. Of a support unit's classes, the dependency classes the module plan numbers are
-/// the ones a source file extends.
+/// the ones a source file extends: through a named class, or through the local class of an inline
+/// template a call expands there.
 fn extended_elsewhere(
     ir: &IrFile,
     unit_kind: krusty::backend::CheckedIrUnitKind,
@@ -481,6 +486,7 @@ fn extended_elsewhere(
         if classes
             .subclasses_of(class.fq_name)
             .any(|subclass| ir.class_id_by_name(subclass).is_none())
+            || (support && classes.is_inline_template_superclass(class.fq_name))
         {
             extended.insert(id as krusty::ir::ClassId);
         }
@@ -627,6 +633,10 @@ struct FileLowering<'a> {
     /// Dependency interface members this file calls, numbered after the module's own interfaces.
     /// The identity bytes are what a dependent implementation records itself under.
     dependency_interface_calls: Vec<(u32, Vec<u8>)>,
+    /// Module-wide numbers for imported interface identities. The local vector above is only
+    /// this file's emitted identity records; the shared map prevents a second file from reusing
+    /// one stub number for another dependency member.
+    dependency_interface_numbers: &'a mut krusty::fx_hash::HashMap<Vec<u8>, u32>,
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
@@ -2006,15 +2016,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 value,
             } => self.ref_set(holder, elem, value),
             // The shared enum lowering realized every enum this file declares; what is left names
-            // an enum another file declares, whose constants live there. A constant is read
-            // through the entry the declaring file exports.
+            // an enum another file declares, whose constants live there. A constant, `values()`
+            // and `valueOf` are each reached through the entry the declaring file exports.
             IrExpr::EnumEntry { classifier, name } => {
                 self.dependency_enum_constant(classifier, &name)
             }
-            IrExpr::EnumValues { classifier }
-            | IrExpr::EnumEntries { classifier }
-            | IrExpr::EnumValueOf { classifier, .. } => Err(declined!(
-                "an enum another file declares (`{}`)",
+            IrExpr::EnumValues { classifier } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::Values,
+                None,
+            ),
+            IrExpr::EnumValueOf {
+                classifier, arg, ..
+            } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::ValueOf,
+                Some(arg),
+            ),
+            IrExpr::EnumEntries { classifier } => Err(declined!(
+                "the `entries` of an enum another file declares (`{}`)",
                 classifier.render()
             )),
             IrExpr::EnumConstant {

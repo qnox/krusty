@@ -307,14 +307,23 @@ struct PendingBody<'a> {
     statements: &'a [KlibIrStatement],
     header: FunctionHeader,
     function: FunId,
-    initialization: Option<(
-        crate::ir::ClassId,
-        super::class_initialization::ClassInitialization<'a, 'a>,
-    )>,
+    initialization: Option<(crate::ir::ClassId, PendingInitialization<'a>)>,
     value_member: Option<MemberClass<'a>>,
     local_body: Option<super::same_library_class::LocalBody<'a>>,
     /// The static a top-level property's initialization stores, and its serialized initializer.
     static_initialization: Option<(StaticField, crate::metadata::klib_ir::tree::KlibIrExprId)>,
+}
+
+/// What a materialized constructor's private initialization function runs.
+enum PendingInitialization<'a> {
+    /// The admitted initialization of the class's own fields and initializers.
+    Class(Box<super::class_initialization::ClassInitialization<'a, 'a>>),
+    /// A secondary constructor's statements after its delegation to the primary constructor,
+    /// whose arguments the class's secondary constructor `secondary` passes.
+    PrimaryDelegation {
+        secondary: usize,
+        arguments: Vec<crate::metadata::klib_ir::tree::KlibIrExprId>,
+    },
 }
 
 /// The declaration of a body this unit emits, and for a value class member, its class.
@@ -327,14 +336,14 @@ struct BodyHeader<'a> {
 /// body reads through its receiver, in declaration order, and the provider's authenticated class
 /// contract. A value class has exactly one field, its value.
 #[derive(Clone)]
-struct MemberClass<'a> {
+pub(super) struct MemberClass<'a> {
     class: crate::ir::ClassId,
     /// The serialized declaration of `class`.
-    declaring: &'a KlibIrSymbol,
-    fields: Vec<&'a KlibIrField>,
+    pub(super) declaring: &'a KlibIrSymbol,
+    pub(super) fields: Vec<&'a KlibIrField>,
     /// The class's properties with a backing field, each with that field.
-    properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
-    contract: &'a crate::libraries::KlibBodyClassContract,
+    pub(super) properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
+    pub(super) contract: &'a crate::libraries::KlibBodyClassContract,
 }
 
 impl DependencyBodyUnit {
@@ -872,7 +881,30 @@ impl DependencyBodyUnit {
                 })
             } else {
                 match (&body.initialization, &body.value_member) {
-                    (Some((class, plan)), _) => lowering.initialize_class(*class, plan),
+                    (Some((class, PendingInitialization::Class(plan))), _) => {
+                        lowering.initialize_class(*class, plan)
+                    }
+                    (
+                        Some((
+                            class,
+                            PendingInitialization::PrimaryDelegation {
+                                secondary,
+                                arguments,
+                            },
+                        )),
+                        Some(member),
+                    ) => lowering.delegate_to_primary(
+                        *class,
+                        *secondary,
+                        member,
+                        arguments,
+                        body.statements,
+                    ),
+                    (Some((_, PendingInitialization::PrimaryDelegation { .. })), None) => {
+                        Err(KlibBodyDeclineReason::SignatureMismatch(
+                            "a primary constructor delegation has no materialized class".to_owned(),
+                        ))
+                    }
                     (None, value_member) => match value_member {
                         Some(member) => lowering
                             .reading_through(
@@ -2484,8 +2516,15 @@ impl UnitCheckpoint {
     fn restore(self, unit: &mut DependencyBodyUnit) {
         let first = self.0.restore(&mut unit.ir);
         unit.functions.retain(|_, function| *function < first);
-        unit.classes
-            .retain(|_, class| (*class as usize) < unit.ir.classes.len());
+        // A constructor this lowering declared published its identity, even when it joined a
+        // class materialized before.
+        let constructors = &unit.constructors;
+        unit.classes.retain(|identity, class| {
+            (*class as usize) < unit.ir.classes.len()
+                && constructors
+                    .get(identity)
+                    .is_none_or(|constructor| constructor.initializer < first)
+        });
         let classes = &unit.classes;
         unit.constructors.retain(|identity, constructor| {
             constructor.initializer < first && classes.contains_key(identity)

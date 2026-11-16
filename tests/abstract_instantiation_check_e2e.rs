@@ -43,9 +43,16 @@ fn instantiate_abstract_class() {
     assert_rejected("abstract class A\nfun f() { val x = A() }");
 }
 
+/// A sealed class's constructor is protected, so kotlinc reports the call outside the class as an
+/// invisible constructor, not as an instantiation of an abstract class.
 #[test]
 fn instantiate_sealed_class() {
-    assert_rejected("sealed class S\nfun f() { val x = S() }");
+    let source = "sealed class S\nfun f() { val x = S() }\n";
+    common::assert_error_blocks_match_kotlinc(&[("test.kt", source)], &[]);
+    assert_eq!(
+        common::reference_error_blocks(&[("test.kt", source)], &[]),
+        ["test.kt:2:19: cannot access 'constructor(): S': it is protected in 'S'."],
+    );
 }
 
 #[test]
