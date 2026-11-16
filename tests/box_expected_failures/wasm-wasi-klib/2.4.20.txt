@@ -375,7 +375,6 @@ classes/overloadUnaryOperator.kt
 closures/anonymousObjectAsLastExpressionInLambda.kt
 closures/captureExtensionReceiver.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
-closures/capturedVarsOptimization/closureBoxedVarOptimizations.kt
 closures/capturedVarsOptimization/kt44347.kt
 closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
@@ -1610,7 +1609,6 @@ inlineClasses/callableReferences/kt37986Generic.kt
 inlineClasses/callableReferences/let/result.kt
 inlineClasses/castInsideWhenExpression.kt
 inlineClasses/castInsideWhenExpressionGeneric.kt
-inlineClasses/checkLambdaWithInlineClassesInFunctionalTypeGeneric.kt
 inlineClasses/constructorCallableReference.kt
 inlineClasses/constructorCallableReferenceGeneric.kt
 inlineClasses/contextParameterPropertyDeserialization.kt
@@ -1653,7 +1651,6 @@ inlineClasses/functionNameMangling/reflectionForPropertyOfInlineClassTypeGeneric
 inlineClasses/genericInlineClassSynthMembers.kt
 inlineClasses/genericVararg2ndConstructor.kt
 inlineClasses/hiddenConstructor/kt28855.kt
-inlineClasses/initBlock.kt
 inlineClasses/initBlockGeneric.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClass.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClassGeneric.kt
@@ -2017,7 +2014,6 @@ multiplatform/k2/hmpp/propertyAliasTwoLibs.kt
 multiplatform/k2/hmpp/typealiasNameClash.kt
 multiplatform/k2/internalOverride2.kt
 multiplatform/k2/kt66970.kt
-multiplatform/k2/migratedOldTests/mpp_default_args.kt
 nameBasedDestructuring/fullFormExtraPropType.kt
 nameBasedDestructuring/fullFormFromSmartCast.kt
 nameBasedDestructuring/fullFormLoopsAndLambdas.kt

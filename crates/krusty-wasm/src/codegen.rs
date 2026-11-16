@@ -546,8 +546,8 @@ mod tests {
             "{}a `toString` of `kotlin.Any?` reaching an object another file creates yet",
             super::DECLINE_PREFIX
         )];
-        let other =
-            "fun interface Supplier { fun get(): Int }\nfun converted(): String = show(Supplier { 1 })";
+        let other = "fun interface Supplier { fun get(): Int }\n\
+                     fun converted(): String = show(Supplier { 1 })";
         for target in WasmTarget::ALL {
             for sources in [[show, other], [other, show]] {
                 let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
