@@ -144,7 +144,6 @@ bridges/test21.kt
 bridges/test22.kt
 bridges/test23.kt
 bridges/test24.kt
-bridges/test25.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/boundReferences.kt
 callableReference/adaptedReferences/inlineDefault.kt
@@ -227,7 +226,6 @@ closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
-collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/clashWithInternalMapMethod.kt
@@ -1268,7 +1266,6 @@ inlineClasses/kt28405.kt
 inlineClasses/kt32793.kt
 inlineClasses/kt44141.kt
 inlineClasses/kt70461.kt
-inlineClasses/multifileClass.kt
 inlineClasses/privateConstructorFunInterfaceMultiModule.kt
 inlineClasses/privateConstructorFunInterfaceMultiModuleGeneric.kt
 inlineClasses/propertyDelegation/kt27070.kt

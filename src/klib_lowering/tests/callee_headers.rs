@@ -1646,9 +1646,8 @@ fn stdlib_calls_reach_header_declared_callees() {
                     6,
                 ),
                 ("it uses a call of a member function)", 88),
-                ("it uses a call through a property accessor signature)", 40),
+                ("it uses a call through a property accessor signature)", 42),
                 ("it uses a constant of another type than its value's)", 6),
-                ("it uses an access of a generic property)", 2),
                 ("its library serializes none)", 100),
                 (
                     "its serialized declaration disagrees with the selected one: an object literal's supertype TypeName(\"kotlinx/cinterop/CValues\") is not a selected classifier)",
@@ -1672,9 +1671,8 @@ fn stdlib_calls_reach_header_declared_callees() {
                     6,
                 ),
                 ("it uses a call of a member function)", 80),
-                ("it uses a call through a property accessor signature)", 40),
+                ("it uses a call through a property accessor signature)", 42),
                 ("it uses a constant of another type than its value's)", 6),
-                ("it uses an access of a generic property)", 2),
                 ("its library serializes none)", 100),
                 (
                     "its serialized declaration disagrees with the selected one: an object literal's supertype TypeName(\"kotlinx/cinterop/CValues\") is not a selected classifier)",

@@ -1839,13 +1839,15 @@ impl<'a> Body<'a> {
                 captures,
                 sam,
                 ..
-            } => self.function_value(
-                impl_fn,
-                &captures,
-                function_values::FunctionEquality::Identity,
-                self.type_of(id)?,
-                sam.as_deref(),
-            )?,
+            } => {
+                self.function_value(
+                    impl_fn,
+                    &captures,
+                    function_values::FunctionEquality::Identity,
+                    self.type_of(id)?,
+                    sam.as_deref(),
+                )?;
+            }
             IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
                 self.callable_reference(id, &reference)?
             }
@@ -2369,6 +2371,7 @@ fn checked_operation_name(operation: &krusty::ir::IrCheckedOperation) -> &'stati
         IrCheckedOperation::ComparableRangeContains { .. } => "ComparableRangeContains",
         IrCheckedOperation::IllegalProgressionStep { .. } => "IllegalProgressionStep",
         IrCheckedOperation::AtomicField { .. } => "AtomicField",
+        IrCheckedOperation::AtomicArrayElement { .. } => "AtomicArrayElement",
         IrCheckedOperation::RangeLoop { .. } => "RangeLoop",
         IrCheckedOperation::PropertyReference { .. } => "PropertyReference",
     }

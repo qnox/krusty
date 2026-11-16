@@ -76,10 +76,22 @@ fn default_null_checks_lower_branch_local_returns_in_prepared_inline_blocks() {
 
 #[test]
 fn selected_suspend_inline_template_keeps_its_unintercepted_suspension_block() {
-    let Some(root) = distribution_root() else {
+    // The Wasm stdlib's `suspendCoroutine` suspends through `suspendCoroutineUninterceptedOrReturn`.
+    let Some(stdlib) =
+        crate::toolchain::kotlin_stdlib_klib(crate::compilation_target::CompilationTarget::WasmJs)
+    else {
+        assert!(
+            std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
+            "the exact Wasm stdlib is required"
+        );
         return;
     };
-    let libraries = stdlib(&root);
+    let libraries =
+        KlibLibraries::open(&[crate::klib_libraries::KlibLibraryInput::platform_stdlib(
+            stdlib,
+            crate::klib_libraries::KlibStdlibSemantics::Wasm,
+        )])
+        .expect("open the Wasm stdlib");
     let symbols = libraries.symbols(
         SymbolNamespace::Package(type_name("kotlin/coroutines")),
         "suspendCoroutine",
