@@ -114,6 +114,16 @@ fn validate_callee(callee: &Callee) -> Result<(), UndeterminedIrType> {
             reject_all("callee parameter", params.iter().copied())?;
             reject("callee result", *ret)
         }
+        Callee::ModuleConstructorDefaultEntry {
+            outer, params, ret, ..
+        } => {
+            reject_all("callee parameter", params.iter().copied())?;
+            reject("callee result", *ret)?;
+            if let Some(outer) = outer {
+                reject("callee enclosing instance", *outer)?;
+            }
+            Ok(())
+        }
         Callee::ModuleWithDefaults {
             params,
             ret,

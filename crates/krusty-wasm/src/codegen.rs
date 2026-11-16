@@ -223,6 +223,14 @@ impl Backend for WasmBackend {
             &mut file.ir,
             &mut file.callables,
             |function| file.dependency_exports.callable(function).is_some(),
+            |constructor| {
+                file.classifiers.module().declares_instance(
+                    &krusty::backend::instance_links::InstanceEntry::Constructor {
+                        module: file.module_name.into(),
+                        declaration: constructor,
+                    },
+                )
+            },
         );
         // After default arguments, so a `$default` entry's call of the declaration is the one
         // that gains the continuation, and before dispatch entries, which copy the signature.
@@ -285,8 +293,9 @@ impl Backend for WasmBackend {
                 &started.classes,
             );
             state.slot_plan = Some((file.module_name.to_owned(), plan));
-            // The table types are built from the plan, so they are that module's too.
-            started.tables = module_tables::ModuleTables::with_published(
+            // The table types are built from the plan, so they are that module's too, except a
+            // dependency class's, which is the whole program's.
+            started.tables.enter_plan(
                 file.classifiers.module().classes(),
                 &file.classifiers,
                 &started.classes,

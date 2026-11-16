@@ -542,11 +542,12 @@ impl<'u, 's> Linker<'u, 's> {
         if let Some(&entry) = self.functions.get(selected.identity()) {
             return Ok(entry);
         }
-        let entry = ir.add_construction_entry(member.class, None).ok_or(
-            KlibBodyDeclineReason::SignatureMismatch(
+        let entry = ir
+            .add_construction_entry(member.class, None)
+            .map(|entry| entry.function)
+            .ok_or(KlibBodyDeclineReason::SignatureMismatch(
                 "a value class box without its checked self type".to_owned(),
-            ),
-        )?;
+            ))?;
         self.functions.insert(selected.identity().clone(), entry);
         Ok(entry)
     }
