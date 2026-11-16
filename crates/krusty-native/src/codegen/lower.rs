@@ -464,7 +464,8 @@ pub fn lower_file(
 /// The classes of `ir` another file of the module extends, with their superclasses in this file:
 /// what a later file's subclass names by symbol, so their objects define those symbols for the
 /// link to find. Of a support unit's classes, the dependency classes the module plan numbers are
-/// the ones a source file extends.
+/// the ones a source file extends: through a named class, or through the local class of an inline
+/// template a call expands there.
 fn extended_elsewhere(
     ir: &IrFile,
     unit_kind: krusty::backend::CheckedIrUnitKind,
@@ -485,6 +486,7 @@ fn extended_elsewhere(
         if classes
             .subclasses_of(class.fq_name)
             .any(|subclass| ir.class_id_by_name(subclass).is_none())
+            || (support && classes.is_inline_template_superclass(class.fq_name))
         {
             extended.insert(id as krusty::ir::ClassId);
         }

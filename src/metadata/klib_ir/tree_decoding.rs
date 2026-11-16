@@ -139,6 +139,16 @@ impl KlibIrModuleTrees {
         Some((arena, arena.class(class)))
     }
 
+    /// Every file-local class this library serializes, with the arena that owns it.
+    pub(crate) fn local_classes(
+        &self,
+    ) -> impl Iterator<Item = (&KlibIrArena, &super::tree::KlibIrClass)> {
+        self.local_classes.values().map(|&(tree, class)| {
+            let arena = &self.trees[tree].arena;
+            (arena, arena.class(class))
+        })
+    }
+
     pub fn function_count(&self) -> usize {
         self.functions.len()
     }
