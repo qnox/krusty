@@ -42,7 +42,6 @@ arrays/forInReversed/reversedReversedOriginalUpdatedInLoopBody.kt
 arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
 arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
 arrays/indices.kt
-arrays/indicesChar.kt
 arrays/kt42932.kt
 arrays/multiArrayConstructors.kt
 arrays/primitiveArrays.kt
