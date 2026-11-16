@@ -19,6 +19,7 @@ mod builtin_instances;
 mod builtin_members;
 mod builtin_order;
 mod callable_references;
+mod char_sequence_appends;
 mod class_tokens;
 mod codegen;
 mod encode;

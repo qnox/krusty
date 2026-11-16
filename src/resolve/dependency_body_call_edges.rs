@@ -73,8 +73,10 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         // its own (`Iterator.next`, `Any.equals`). Its builtin implementations are a fact of the
         // declaration, under the same property-or-function name the source handoff uses.
         if realization.kind == crate::libraries::ExternalCallableKind::Member {
-            let implementations =
-                super::builtin_implementation::for_external_member(source, external)?;
+            let implementations = super::RepresentedOverrides::new(source, represented).complete(
+                external,
+                &super::builtin_implementation::for_external_member(source, external)?,
+            )?;
             match builtin_implementations.entry(external) {
                 std::collections::hash_map::Entry::Occupied(existing)
                     if existing.get() != &implementations =>

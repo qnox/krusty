@@ -645,6 +645,18 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
+        if let Some(protocol) = symbols
+            .char_sequence_protocol()
+            .filter(|_| backend.appends_char_sequences_by_index())
+        {
+            if let Err(error) = callables.freeze_char_sequence_protocol(protocol, platform) {
+                diags.error(
+                    Span::new(0, 0),
+                    format!("internal error: cannot freeze the CharSequence members: {error:?}"),
+                );
+                return Vec::new();
+            }
+        }
         if let Err(error) = super::backend_handoff::record_checked_klib_dependency_facts(
             &mut callables,
             platform,
@@ -653,9 +665,11 @@ pub(super) fn emit_dependencies<B: Backend>(
             diags.error(Span::new(0, 0), format!("internal error: {error}"));
             return Vec::new();
         }
-        if let Err(identity) =
-            super::builtin_implementations::record_checked(&mut callables, unit.ir())
-        {
+        if let Err(identity) = super::builtin_implementations::record_checked(
+            &mut callables,
+            unit.ir(),
+            crate::resolve::RepresentedOverrides::new(platform, &dispatched_classes),
+        ) {
             diags.error(
                 Span::new(0, 0),
                 format!(

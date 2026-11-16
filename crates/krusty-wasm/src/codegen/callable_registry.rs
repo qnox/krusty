@@ -1186,10 +1186,12 @@ mod tests {
                 ir.local_class_name_provenance.insert(
                     class,
                     krusty::ir::IrLocalClassNameProvenance {
-                        source: krusty::ir::IrModuleSource {
-                            source: krusty::fir::SourceFileId::from_raw(1),
-                            package: type_name("demo"),
-                        },
+                        source: krusty::ir::IrLocalClassNameRoot::Source(
+                            krusty::ir::IrModuleSource {
+                                source: krusty::fir::SourceFileId::from_raw(1),
+                                package: type_name("demo"),
+                            },
+                        ),
                         lexical_owner: None,
                         segments: Box::new([]),
                         ordinal: Some(1),
