@@ -2371,6 +2371,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.statement(id)?;
                 Ok(None)
             }
+            IrExpr::Checked(ref checked_op)
+                if let Some(read) = self.dependency_interface_getter(checked_op) =>
+            {
+                read
+            }
             other => Err(self.describe_declined(&other).into()),
         }
     }

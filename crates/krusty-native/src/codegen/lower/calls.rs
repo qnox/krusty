@@ -879,7 +879,14 @@ impl BodyLowering<'_, '_, '_> {
                             if realization.owner_is_interface {
                                 if let Some(identity) = realization.dependency_callable.as_ref() {
                                     return self.dependency_interface_stub(
-                                        identity, signature, receiver, args, params, *ret,
+                                        krusty::backend::interface_identity::member_identity(
+                                            identity,
+                                        ),
+                                        signature,
+                                        receiver,
+                                        args,
+                                        params,
+                                        *ret,
                                     );
                                 }
                             }

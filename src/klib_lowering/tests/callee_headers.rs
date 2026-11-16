@@ -1631,7 +1631,8 @@ fn stdlib_calls_reach_header_declared_callees() {
     // inside it. A file-private top-level function or property now links, so one more body
     // reaches past it and declines at a member call. A generic property's access links through
     // its exact accessor, so `toKString` reaches `toKStringFromUtf16` and declines at its type
-    // parameters.
+    // parameters. A generic file-private function now links with the formals its identity
+    // mints, so three more bodies reach past one and decline at a member call.
     let expected = if crate::kotlin_version::target()
         >= crate::kotlin_version::KotlinVersion::V2_4_20
     {
@@ -1650,7 +1651,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                      indices)",
                     6,
                 ),
-                ("it uses a call of a member function)", 89),
+                ("it uses a call of a member function)", 92),
                 ("it uses a call through a property accessor signature)", 41),
                 ("it uses a constant of another type than its value's)", 6),
                 ("its library serializes none)", 100),
@@ -1675,7 +1676,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                      indices)",
                     6,
                 ),
-                ("it uses a call of a member function)", 81),
+                ("it uses a call of a member function)", 84),
                 ("it uses a call through a property accessor signature)", 41),
                 ("it uses a constant of another type than its value's)", 6),
                 ("its library serializes none)", 100),

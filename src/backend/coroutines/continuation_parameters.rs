@@ -56,13 +56,17 @@ pub(crate) fn add_continuation_parameters_with_runtime(
     suspend_functions.dedup();
     let suspend_set: HashSet<u32> = suspend_functions.iter().copied().collect();
     let completing = completing_suspend_functions(ir, &suspend_set);
+    // An inline-only function's body is cloned into its callers and never runs as a function of its
+    // own, so it has no frame to resume: a KLIB inline template such as `suspendCoroutine` suspends
+    // only in the caller it is inlined into.
     let machine_functions: Vec<u32> = suspend_functions
         .iter()
         .copied()
         .filter(|&function| {
-            ir.functions[function as usize]
-                .body
-                .is_some_and(|body| body_needs_state_machine(ir, body, &suspend_set, &completing))
+            !is_inline_only(ir, function)
+                && ir.functions[function as usize].body.is_some_and(|body| {
+                    body_needs_state_machine(ir, body, &suspend_set, &completing)
+                })
         })
         .collect();
     // A non-suspend synthetic entry (most notably a default stub) can also contain a call that
@@ -74,6 +78,7 @@ pub(crate) fn add_continuation_parameters_with_runtime(
             .enumerate()
             .find(|(function, declaration)| {
                 !suspend_set.contains(&(*function as u32))
+                    && !is_inline_only(ir, *function as u32)
                     && declaration.body.is_some_and(|body| {
                         body_needs_state_machine(ir, body, &suspend_set, &completing)
                     })
@@ -108,6 +113,11 @@ pub(crate) fn add_continuation_parameters_with_runtime(
     }
     pass_continuations(ir, &suspend_set);
     Ok(())
+}
+
+/// Whether `function` is only a template its call sites are inlined from, never emitted.
+fn is_inline_only(ir: &IrFile, function: u32) -> bool {
+    ir.inline_only_fns.contains(&function) || ir.foreign_inline_templates.contains(&function)
 }
 
 /// Suspend functions whose bodies return their value and never resume a continuation.
