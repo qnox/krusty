@@ -162,10 +162,9 @@ impl Backend for AtomicFieldProbe {
                 let class = array
                     .obj_internal()
                     .expect("an atomic array element access names an array class");
-                self.elements.borrow_mut().push((
-                    class.render().replace('/', "."),
-                    format!("{operation:?}"),
-                ));
+                self.elements
+                    .borrow_mut()
+                    .push((class.render().replace('/', "."), format!("{operation:?}")));
                 continue;
             }
             let IrCheckedOperation::AtomicField {
@@ -341,7 +340,10 @@ fn native_atomic_array_members_lower_to_one_atomic_operation_on_an_element() {
     let Some(probe) = lowered(ARRAY_CONSUMER) else {
         return;
     };
-    assert_eq!(probe.seen.into_inner(), Vec::<(String, String, String)>::new());
+    assert_eq!(
+        probe.seen.into_inner(),
+        Vec::<(String, String, String)>::new()
+    );
     // `toString` loads each element as `loadAt` does; `AtomicArray<T>` has no addition.
     let mut expected = Vec::new();
     for (array, operations) in [
@@ -349,9 +351,10 @@ fn native_atomic_array_members_lower_to_one_atomic_operation_on_an_element() {
         ("kotlin.LongArray", &["Load", "Load", "FetchAndAdd"][..]),
         ("kotlin.Array", &["Load", "Load"][..]),
     ] {
-        for operation in operations
-            .iter()
-            .chain(&["CompareAndExchange", "CompareAndSet", "Exchange", "Store"])
+        for operation in
+            operations
+                .iter()
+                .chain(&["CompareAndExchange", "CompareAndSet", "Exchange", "Store"])
         {
             expected.push((array.to_owned(), (*operation).to_owned()));
         }
