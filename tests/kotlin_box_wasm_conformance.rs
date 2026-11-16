@@ -468,6 +468,142 @@ fn wasm_property_reference_function_values_are_equal_across_files() {
     }
 }
 
+/// The class names kotlinc-wasm gives function values, which `toString` prints before `@` and the
+/// identity hash: the function type's family and arity, `R` for a reference, and the captured
+/// values' count and codes. The expected names are kotlinc-wasm's for this program (2.4.21;
+/// wasm-js and wasm-wasi agree), taken by running it there. The JVM and Native name these classes
+/// otherwise, so this is target-owned; `functionValueStrings.kt` is the portable regression.
+#[test]
+fn wasm_function_values_print_their_class_names() {
+    expect_wasm_box(
+        r##"class C(val n: Int) {
+    fun m(x: Int): Int = x + n
+}
+
+fun Int.twice(): Int = this * 2
+
+fun name(value: Any): String {
+    val text = "$value"
+    var name = ""
+    var digits = -1
+    for (c in text) {
+        if (digits >= 0) {
+            if (c !in '0'..'9') return "bad hash: $text"
+            digits++
+        } else if (c == '@') {
+            digits = 0
+        } else {
+            name += c
+        }
+    }
+    return if (digits > 0) name else "no hash: $text"
+}
+
+fun box(): String {
+    val i = 1
+    val l = 2L
+    val str = "s"
+    var counter = 0
+    val names = arrayOf(
+        name({ 0 }),
+        name({ x: Int, y: Int -> x + y + i }),
+        name({ "$i$l$str" }),
+        name({ counter++ }),
+        name(fun Int.(): Int = this),
+        name(suspend { i }),
+        name(suspend { x: Int -> x + i }),
+        name(C(1)::m),
+        name(run { val plus: (Int) -> Int = i::plus; plus }),
+        name(C::m),
+        name(::C),
+        name(Int::toString),
+        name(Int::twice),
+        name(::name),
+    )
+    var result = ""
+    for (name in names) result += if (result.isEmpty()) name else " $name"
+    val expected = "Function0 Function2_bound1_I Function0_bound3_IJA Function0_bound1_A Function1 " +
+        "SuspendFunction0_bound1_I SuspendFunction1_bound1_I KFunction1R_bound1_A KFunction1R_bound1_I " +
+        "KFunction2R KFunction1R KFunction1R KFunction1R KFunction1R"
+    return if (result == expected) "OK" else result
+}
+"##,
+        "wasmFunctionValueNames",
+    );
+}
+
+/// How kotlinc-wasm codes a captured value class, a nullable value and a shared `var` in a function
+/// value's class name: a value class over a primitive or an unsigned number by `V` and its qualified
+/// name, and a value class over a reference or over another value class, a nullable value and a
+/// shared cell as the reference `A`; a type parameter as its bound. The expected names are
+/// kotlinc-wasm's for this program (2.4.21; wasm-js and wasm-wasi agree), taken by running it there.
+#[test]
+fn wasm_function_values_code_captured_value_classes() {
+    expect_wasm_box(
+        r##"package p
+
+value class Id(val v: Int) {
+    fun show(): Int = v
+}
+
+value class Text(val s: String)
+
+value class Wrapped(val id: Id)
+
+class Outer {
+    value class Inner(val v: Long)
+}
+
+fun name(value: Any): String {
+    val text = "$value"
+    var name = ""
+    var digits = -1
+    for (c in text) {
+        if (digits >= 0) {
+            if (c !in '0'..'9') return "bad hash: $text"
+            digits++
+        } else if (c == '@') {
+            digits = 0
+        } else {
+            name += c
+        }
+    }
+    return if (digits > 0) name else "no hash: $text"
+}
+
+fun <T : Int> generic(t: T): String = name({ t })
+
+fun box(): String {
+    val id = Id(1)
+    val text = Text("s")
+    val wrapped = Wrapped(id)
+    val inner = Outer.Inner(2L)
+    val maybe: Int? = 3
+    val maybeId: Id? = id
+    var shared = 4
+    val names = arrayOf(
+        name({ id.v }),
+        name({ text.s }),
+        name({ wrapped.id }),
+        name({ inner.v }),
+        name({ maybe }),
+        name({ maybeId }),
+        name({ shared++ }),
+        name(id::show),
+        generic(5),
+    )
+    var result = ""
+    for (name in names) result += if (result.isEmpty()) name else " $name"
+    val expected = "Function0_bound1_Vp_Id Function0_bound1_A Function0_bound1_A " +
+        "Function0_bound1_Vp_Outer_Inner Function0_bound1_A Function0_bound1_A Function0_bound1_A " +
+        "KFunction0R_bound1_Vp_Id Function0_bound1_I"
+    return if (result == expected) "OK" else result
+}
+"##,
+        "wasmFunctionValueCaptureCodes",
+    );
+}
+
 /// What a constructor that reaches back into its own enum finds, as kotlinc-wasm builds an enum:
 /// each constant is published once constructed, and a constant with a body right after its super
 /// call, so its own body already finds it. The expected log is kotlinc-wasm's for this program
