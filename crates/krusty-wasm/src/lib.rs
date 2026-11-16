@@ -24,6 +24,7 @@ mod class_tokens;
 mod codegen;
 mod encode;
 mod exception_transport;
+mod function_value_names;
 mod function_values;
 mod hashing;
 mod host;

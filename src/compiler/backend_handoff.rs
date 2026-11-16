@@ -59,7 +59,11 @@ pub(super) fn checked_ir_file<'a>(
     if module.common_ir_coroutines && !ir.suspend_funs.is_empty() {
         ir.coroutine_runtime = symbols.coroutine_runtime();
     }
-    let mut callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
+    let mut callables = match CheckedBackendCallables::freeze_with_class_declarations(
+        &ir,
+        symbols.semantic_platform(),
+        module_facts.classes(),
+    ) {
         Ok(callables) => callables,
         Err(error) => {
             diags.error(
@@ -93,8 +97,10 @@ pub(super) fn checked_ir_file<'a>(
     if let Err(identity) = super::builtin_implementations::record_checked(
         &mut callables,
         &ir,
-        symbols.semantic_platform(),
-        module.dispatched_classes,
+        crate::resolve::RepresentedOverrides::new(
+            symbols.semantic_platform(),
+            module.dispatched_classes,
+        ),
     ) {
         diags.error(
             Span::new(0, 0),
@@ -238,14 +244,20 @@ pub(super) fn prepare_common_ir(
 
     let plugin_runtime = file.callables.plugin_runtime_bindings();
     let char_sequence_protocol = file.callables.char_sequence_protocol();
-    let mut callables = CheckedBackendCallables::freeze(&file.ir, provider).map_err(|error| {
+    // The refreeze keeps the declarations of the module's classes, as the handoff froze them:
+    // the slot plan binds a dependency superclass's published layout by those declarations.
+    let mut callables = CheckedBackendCallables::freeze_with_class_declarations(
+        &file.ir,
+        provider,
+        file.classifiers.module().classes(),
+    )
+    .map_err(|error| {
         crate::backend::CommonIrPreparationError::Invariant(format!(
             "cannot freeze prepared dependency declarations: {error:?}"
         ))
     })?;
-    record_checked_klib_dependency_facts(&mut callables, provider, represented)
-        .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
-    // The handoff froze the recorded CharSequence selection; the refreeze keeps it.
+    // The handoff froze the recorded CharSequence selection; the refreeze keeps it, before the
+    // checked KLIB graph is recorded, as the handoff orders them.
     if let Some(protocol) = char_sequence_protocol {
         callables
             .freeze_char_sequence_protocol(protocol, provider)
@@ -255,12 +267,18 @@ pub(super) fn prepare_common_ir(
                 ))
             })?;
     }
-    super::builtin_implementations::record_checked(&mut callables, &file.ir, provider, represented)
-        .map_err(|identity| {
-            crate::backend::CommonIrPreparationError::Invariant(format!(
-                "prepared IR has no builtin implementation facts for external member {identity:?}"
-            ))
-        })?;
+    record_checked_klib_dependency_facts(&mut callables, provider, represented)
+        .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
+    super::builtin_implementations::record_checked(
+        &mut callables,
+        &file.ir,
+        crate::resolve::RepresentedOverrides::new(provider, represented),
+    )
+    .map_err(|identity| {
+        crate::backend::CommonIrPreparationError::Invariant(format!(
+            "prepared IR has no builtin implementation facts for external member {identity:?}"
+        ))
+    })?;
     callables
         .freeze_plugin_runtime_callables(plugin_runtime, |identity| {
             provider.external_callable(identity)

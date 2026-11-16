@@ -143,14 +143,16 @@ impl Backend for WasmBackend {
         true
     }
 
-    /// The runtime lays out text, its builders and its exception classes itself: a library
-    /// body of one of their members reads a layout this target does not have, and a library
-    /// class extending one of the exceptions delegates to the runtime's constructor.
+    /// The runtime lays out text, its builders, its exception classes and `Unit`'s one instance
+    /// itself: a library body of one of their members reads a layout this target does not have,
+    /// a library class extending one of the exceptions delegates to the runtime's constructor,
+    /// and a library body's `Unit` value is the runtime's, as a source reference of it is.
     fn represents_dependency_classifier(
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
         classifier == krusty::types::wk::string()
+            || classifier == krusty::types::wk::unit()
             || lower::is_string_builder(classifier)
             || lower::is_array_list(classifier)
             || lower::runtime_lays_out(classifier)
@@ -173,6 +175,31 @@ impl Backend for WasmBackend {
         operation: krusty::backend::BackendCompilerIntrinsic,
     ) -> bool {
         lower::is_direct_operation(operation)
+    }
+
+    fn emitted_constructor_initializer(
+        &self,
+        state: &mut Self::State,
+        declaration: &krusty::backend::ConstructorInitializerDeclaration,
+    ) -> bool {
+        if state.declined {
+            return false;
+        }
+        let Some(started) = state.started.as_mut() else {
+            return false;
+        };
+        let Ok(Some((owner, _, signature))) = started
+            .classes
+            .published_initializer(&declaration.constructor, &started.module)
+        else {
+            return false;
+        };
+        owner == &declaration.class
+            && laid_out_classes::constructor_frame_matches(
+                &mut started.module,
+                &declaration.parameters,
+                signature,
+            )
     }
 
     fn lower_ir_file(
@@ -230,20 +257,40 @@ impl Backend for WasmBackend {
             // cross-file reservations from the current source module.
             started.callables.enter_source_module(file.module_name);
             started.properties.enter_source_module(file.module_name);
-            started.classes.enter_source_module(file.module_name);
+            started.classes.enter_source_module(
+                file.module_name,
+                &file.ir,
+                &file.callables,
+                &file.classifiers,
+                &mut started.module,
+            );
         } else {
-            started.classes.enter_dependency_support();
+            started.classes.enter_dependency_support(
+                &file.ir,
+                &file.callables,
+                &file.classifiers,
+                &mut started.module,
+            );
         }
         if state
             .slot_plan
             .as_ref()
             .is_none_or(|(module, _)| module != file.module_name)
         {
-            let plan = classes::module_plan(file.classifiers.module().classes(), &file.classifiers);
+            let plan = classes::module_plan(
+                file.classifiers.module().classes(),
+                &file.classifiers,
+                &file.callables,
+                &started.classes,
+            );
             state.slot_plan = Some((file.module_name.to_owned(), plan));
             // The table types are built from the plan, so they are that module's too, except a
             // dependency class's, which is the whole program's.
-            started.tables.enter_plan();
+            started.tables.enter_plan(
+                file.classifiers.module().classes(),
+                &file.classifiers,
+                &started.classes,
+            );
         }
         let plan = &state.slot_plan.as_ref().expect("planned just above").1;
         let lowered = match lower::lower_file(
@@ -489,7 +536,8 @@ mod tests {
             "{}a `toString` of `kotlin.Any?` reaching an object another file creates yet",
             super::DECLINE_PREFIX
         )];
-        let other = "fun function(): String = show { 1 }";
+        let other = "fun interface Supplier { fun get(): Int }\n\
+                     fun converted(): String = show(Supplier { 1 })";
         for target in WasmTarget::ALL {
             for sources in [[show, other], [other, show]] {
                 let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
@@ -570,12 +618,14 @@ mod tests {
     }
 
     /// A `var` can be assigned anything after its initializer, so rendering it still declines
-    /// while the file creates a function value.
+    /// while the file creates a function value with no `toString` body, one converted to a
+    /// `fun interface`.
     #[test]
     fn an_erased_to_string_of_a_reassigned_var_declines() {
-        let source = "fun box(): String { val supplier = { 1 }\n\
+        let source = "fun interface Supplier { fun get(): Int }\n\
+                      fun box(): String { val supplier = Supplier { 1 }\n\
                       var message: Any = \"O\"\n\
-                      if (supplier() == 2) message = supplier\n\
+                      if (supplier.get() == 2) message = supplier\n\
                       return \"$message\" + \"K\" }";
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile(target, source);
@@ -588,6 +638,20 @@ mod tests {
                 )]
             );
             assert!(outputs.is_empty());
+        }
+    }
+
+    /// A lambda and a reference to a function print their class names, as kotlinc-wasm's do, so an
+    /// erased `toString` reaching them is lowered.
+    #[test]
+    fn an_erased_to_string_reaches_named_function_values() {
+        let source = "fun show(value: Any?): String = value.toString()\n\
+                      fun box(): String = if (show { 1 } == \"\" || show(::show) == \"\") \
+                      \"fail\" else \"OK\"";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            assert!(!outputs.is_empty(), "{target:?}");
         }
     }
 
@@ -738,9 +802,9 @@ mod tests {
     }
 
     #[test]
-    fn a_local_class_cloned_from_another_files_inline_template_declines_by_name() {
-        // Backend contract: the clone realizes the template's callables a second time, which no
-        // Wasm function can carry twice.
+    fn a_local_class_cloned_from_another_files_inline_template_compiles_in_each_file() {
+        // Backend contract: the clone realizes the template's callables a second time, and each
+        // file binds them to its own clone's functions.
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile_program(
                 target,
@@ -751,11 +815,8 @@ mod tests {
                      inline fun make(): String = object : I { override fun run() = \"O\" }.run()",
                 ],
             );
-            assert_eq!(outputs, Vec::<Artifact>::new());
-            assert_eq!(
-                diagnostics,
-                ["krusty: the wasm backend does not support a callable realized by two functions yet"]
-            );
+            assert_eq!(diagnostics, Vec::<String>::new());
+            assert_eq!(outputs.len(), 2);
         }
     }
 

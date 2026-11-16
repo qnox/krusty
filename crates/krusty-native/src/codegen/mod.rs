@@ -125,6 +125,9 @@ pub struct CodegenModule {
     /// distinguishes legal same-signature internals in unrelated dependencies.
     dependency_symbols:
         krusty::fx_hash::HashMap<krusty::backend::KlibDependencyCallable, DependencyExport>,
+    /// Stable imported-interface member numbers, shared by every file in each source module.
+    dependency_interface_numbers:
+        krusty::fx_hash::HashMap<String, krusty::fx_hash::HashMap<Vec<u8>, u32>>,
     /// The exported entry answering each object instance and enum constant another file reads,
     /// linked by the instance (see `krusty::backend::instance_links`).
     instances: krusty::backend::module_links::ModuleLinks<
@@ -210,6 +213,10 @@ impl Backend for CraneliftBackend {
     }
 
     fn realizes_bodyless_dependency_support(&self) -> bool {
+        true
+    }
+
+    fn presets_constant_top_level_initializers(&self) -> bool {
         true
     }
 
@@ -325,7 +332,13 @@ impl Backend for CraneliftBackend {
                 classes.carried_types(),
                 &file.classifiers,
             ) {
-                Ok(values) => super::classes::module_plan(classes, &values),
+                Ok(values) => super::classes::module_plan(
+                    classes,
+                    &values,
+                    &file.callables,
+                    &file.classifiers,
+                    &state.laid_out,
+                ),
                 Err(unsupported) => {
                     diags.error(
                         krusty::diag::Span::new(0, 0),
@@ -340,6 +353,18 @@ impl Backend for CraneliftBackend {
         state.laid_out.enter_source_module(
             file.module_name,
             file.kind != krusty::backend::CheckedIrUnitKind::Source,
+        );
+        state.laid_out.bind_published_layouts(
+            file.classifiers
+                .module()
+                .classes()
+                .classifier_names()
+                .chain(file.callables.declaring_classifiers()),
+            &file.classifiers,
+            slot_plan,
+            &file.ir,
+            &file.dependency_exports,
+            &file.callables,
         );
         let mut dependency_exports: krusty::fx_hash::HashMap<_, DependencyExportDefinition> =
             krusty::fx_hash::HashMap::default();
@@ -500,7 +525,13 @@ impl Backend for CraneliftBackend {
                 symbol
             },
         ));
-        let lowered = match lower::lower_file(
+        let mut dependency_interface_numbers = std::mem::take(
+            state
+                .dependency_interface_numbers
+                .entry(file.module_name.to_owned())
+                .or_default(),
+        );
+        let lowered = lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
                 classifiers: &file.classifiers,
@@ -519,13 +550,18 @@ impl Backend for CraneliftBackend {
                 dependency_signatures: &file.dependency_exports,
                 dependency_symbols: &state.dependency_symbols,
                 dependency_instances: &instance_reads,
+                dependency_interface_numbers: &mut dependency_interface_numbers,
                 laid_out: &state.laid_out,
             },
             self.target,
             &object_stem,
             self.entry.for_module(file.module_name),
             self.verify,
-        ) {
+        );
+        state
+            .dependency_interface_numbers
+            .insert(file.module_name.to_owned(), dependency_interface_numbers);
+        let lowered = match lowered {
             Ok(lowered) => lowered,
             Err(declined) => {
                 report_decline(&declined, &file, diags);
@@ -543,6 +579,9 @@ impl Backend for CraneliftBackend {
                 return Vec::new();
             }
             state.entry_file = Some(source_stem);
+        }
+        for (identity, symbol) in lowered.class_descriptors {
+            state.laid_out.publish_descriptor(identity, symbol);
         }
         state.abi.extend(lowered.abi);
         for (class, record) in lowered.laid_out {
