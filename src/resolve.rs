@@ -35,6 +35,7 @@ use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns}
 mod abstract_obligations;
 mod argument_parameter_mapping;
 mod builtin_implementation;
+mod char_sequence_protocol;
 mod coroutine_runtime;
 mod selected_external_members;
 use argument_parameter_mapping::{
@@ -80,7 +81,9 @@ pub(crate) mod operator_override_relations;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
-pub(crate) use builtin_implementation::{published_override_facts, record_override_edges};
+pub(crate) use builtin_implementation::{
+    published_override_facts, record_override_edges, RepresentedOverrides,
+};
 pub(crate) use checked_annotation_publication::publish_checked_declaration_annotations;
 pub(crate) use checked_constant_publication::publish_checked_compile_time_constants;
 pub(crate) use lexical_policies::publish_file_annotations;
@@ -2841,6 +2844,7 @@ pub(crate) struct PassTwoSymbols {
     compilation_id: u64,
     libraries: std::rc::Rc<dyn SemanticPlatform>,
     coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
+    char_sequence_protocol: Option<crate::fir::CharSequenceProtocol>,
     native_plugins: crate::plugins::registry::NativePlugins,
 }
 
@@ -2859,6 +2863,12 @@ impl PassTwoSymbols {
         self.coroutine_runtime
     }
 
+    /// The `CharSequence` members resolution selected for a builder that reads an appended
+    /// sequence through them.
+    pub(crate) fn char_sequence_protocol(&self) -> Option<crate::fir::CharSequenceProtocol> {
+        self.char_sequence_protocol
+    }
+
     pub(crate) fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
         &self.native_plugins
     }
@@ -2867,10 +2877,12 @@ impl PassTwoSymbols {
 impl SymbolTable {
     pub(crate) fn into_pass_two_symbols(self) -> PassTwoSymbols {
         let coroutine_runtime = coroutine_runtime::selected(&*self.libraries);
+        let char_sequence_protocol = char_sequence_protocol::selected(&*self.libraries);
         PassTwoSymbols {
             compilation_id: self.compilation_id,
             libraries: std::rc::Rc::from(self.libraries),
             coroutine_runtime,
+            char_sequence_protocol,
             native_plugins: self.native_plugins,
         }
     }
