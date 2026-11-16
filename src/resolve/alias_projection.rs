@@ -168,6 +168,8 @@ fn generated_star_argument(ty: Ty) -> bool {
 /// Exact alias template selected before substitution.
 #[derive(Clone)]
 pub(super) struct SelectedAliasApplication {
+    /// The alias declaration, when it has a qualified identity (a statement-local alias has none).
+    pub(super) identity: Option<TypeName>,
     pub(super) formals: Vec<String>,
     pub(super) expansion: Ty,
     pub(super) expansion_spelling: crate::spelling::Spelled,
@@ -212,6 +214,7 @@ impl Checker<'_> {
                 self.selected_type_alias_applications.insert(
                     (reference.span.lo, reference.span.hi),
                     SelectedAliasApplication {
+                        identity: Some(identity),
                         formals: binding.formals,
                         expansion: binding.expansion,
                         expansion_spelling: binding.expansion_spelling,
@@ -264,6 +267,7 @@ impl Checker<'_> {
             return Some(self.alias_application_ty_with_spelling(
                 scope,
                 SelectedAliasApplication {
+                    identity: None,
                     formals: alias.formals,
                     expansion: alias.expansion,
                     expansion_spelling: alias.expansion_spelling,
@@ -303,6 +307,7 @@ impl Checker<'_> {
         self.alias_application_ty_with_spelling(
             scope,
             SelectedAliasApplication {
+                identity: Some(identity),
                 formals: binding.formals,
                 expansion: binding.expansion,
                 expansion_spelling: binding.expansion_spelling,
@@ -325,6 +330,7 @@ impl Checker<'_> {
         self.alias_application_ty_with_spelling(
             scope,
             SelectedAliasApplication {
+                identity: None,
                 formals,
                 expansion,
                 expansion_spelling: Default::default(),
@@ -359,14 +365,21 @@ impl Checker<'_> {
             }
         };
         if formals.len() != arguments.len() {
-            self.diags.error(
-                span,
-                format!(
-                    "wrong number of type arguments for type alias '{}': expected {}, found {}.",
-                    display_name,
-                    formals.len(),
-                    arguments.len()
-                ),
+            let declared = selected
+                .identity
+                .map_or(display_name, |identity| identity.nested_segment_ref());
+            let message = super::type_argument_arity::wrong_type_argument_count_message(
+                formals.len(),
+                &super::candidate_display::type_alias_header_display(declared, &formals, expansion),
+            );
+            super::type_argument_arity::report_wrong_type_argument_count(
+                self.diags,
+                self.file
+                    .type_argument_list_spans
+                    .get(&span)
+                    .copied()
+                    .unwrap_or(span),
+                message,
             );
             return AppliedAlias {
                 ty: Ty::Error,

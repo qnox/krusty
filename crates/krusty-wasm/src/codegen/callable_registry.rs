@@ -48,8 +48,8 @@ pub(super) struct CallableRegistry {
     singleton_member_receivers: HashMap<KlibDependencyCallable, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
         HashMap<KlibDependencyCallable, SingletonExtensionUnreadReceiver>,
-    /// The entry answering each object's instance and each enum constant, linked by the
-    /// instance (see `krusty::backend::instance_links`).
+    /// The entry answering each object's instance, each enum constant and each enum's `values()`
+    /// and `valueOf`, linked by the instance (see `krusty::backend::instance_links`).
     instances: ModuleLinks<InstanceEntry, u32>,
 }
 
@@ -103,6 +103,11 @@ impl CallableRegistry {
                 "an enum constant (`{}.{}`) without its declaring file's entry",
                 constant.classifier.render().replace('/', "."),
                 constant.name
+            )),
+            Some(InstanceEntry::EnumMember { classifier, member }) => Err(format!(
+                "the {} of an enum (`{}`) without its declaring file's entry",
+                member.source_name(),
+                classifier.render().replace('/', ".")
             )),
             Some(InstanceEntry::Object(classifier)) => Err(format!(
                 "an object (`{}`) without its declaring file's entry",
@@ -694,7 +699,8 @@ impl FileCallTargets {
         self.module.get(&target).copied()
     }
 
-    /// The entry answering `instance`, an object or enum constant another file realizes.
+    /// The entry answering `instance`, an object, enum constant or enum member another file
+    /// realizes.
     pub(super) fn instance(&self, instance: &InstanceEntry) -> Option<u32> {
         self.instances.get(instance).copied()
     }
