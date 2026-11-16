@@ -3,12 +3,10 @@
 use super::*;
 
 impl Parser<'_> {
-    /// A full-form destructuring statement starts with `(` (name-based) or `[` (positional, only
-    /// under `+NameBasedDestructuring`) immediately followed by a `val`/`var` keyword.
+    /// A full-form destructuring statement starts with `(` or `[` immediately followed by a
+    /// `val`/`var` keyword. The syntax is recognized without `NameBasedDestructuring` so a disabled
+    /// feature is a language-version diagnostic, not a parse error that drops the file's signatures.
     pub(super) fn at_full_form_destructure(&self) -> bool {
-        if !self.name_based_destructuring {
-            return false;
-        }
         let opener = self.at(TokenKind::LParen) || self.at(TokenKind::LBracket);
         opener
             && self
@@ -25,6 +23,15 @@ impl Parser<'_> {
         } else {
             TokenKind::RBracket
         };
+        // kotlinc points a disabled bracket form at the `[`, and a disabled paren form at each
+        // component's `val`/`var`. Record those spans for the frontend to report after it has
+        // decided the file still joins the module.
+        if !self.name_based_destructuring && close == TokenKind::RBracket {
+            self.file
+                .destructuring
+                .ungated_bracket_spans
+                .push(self.tok().span);
+        }
         self.bump();
         let mut entries = Vec::new();
         let mut source_properties = Vec::new();
@@ -32,6 +39,12 @@ impl Parser<'_> {
         loop {
             let is_var = self.at(TokenKind::KwVar);
             if is_var || self.at(TokenKind::KwVal) {
+                if !self.name_based_destructuring && close == TokenKind::RParen {
+                    self.file
+                        .destructuring
+                        .ungated_full_form_spans
+                        .push(self.tok().span);
+                }
                 self.bump();
             } else {
                 self.diags
@@ -206,7 +219,7 @@ impl Parser<'_> {
         implicit: bool,
         entry_type: &mut Option<TypeRef>,
     ) -> Option<DestructureProperty> {
-        if self.name_based_destructuring && self.eat(TokenKind::Eq) {
+        if self.eat(TokenKind::Eq) {
             let source = self.ident_or_error("property name");
             if self.eat(TokenKind::Colon) {
                 *entry_type = Some(self.parse_type());

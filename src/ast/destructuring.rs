@@ -40,6 +40,10 @@ pub struct DestructuringSyntax {
     /// opening bracket span lets the frontend report the language-version diagnostic after module
     /// admission without discarding declarations later in the file.
     pub ungated_bracket_spans: Vec<Span>,
+    /// `val`/`var` keywords of a parenthesized full-form destructure parsed while
+    /// `NameBasedDestructuring` is disabled. kotlinc reports the language-version diagnostic on
+    /// each of them. Reporting that after module admission keeps the file's signatures.
+    pub ungated_full_form_spans: Vec<Span>,
     /// Explicit type annotations on destructured bindings, parallel to the statement's entries.
     pub entry_types: HashMap<u32, Vec<Option<TypeRef>>>,
 }

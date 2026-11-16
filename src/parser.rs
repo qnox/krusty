@@ -5685,6 +5685,16 @@ typealias Box<@Marker T> = List<T>
     }
 
     #[test]
+    fn full_form_destructure_parses_without_the_feature() {
+        // `NameBasedDestructuring` is off. The statement is still a destructure, so the file keeps
+        // its signatures; the language-version diagnostic is reported later, not as a parse error.
+        assert_eq!(
+            tree("fun read(point: Point) { (val x, val y) = point }"),
+            "(fun read (param point Point) (block (destructure (x y) point)))\n"
+        );
+    }
+
+    #[test]
     fn elvis_return_before_if_else_has_no_value() {
         // `else` closes the `if`, so it is not the value of `return`. The elvis rhs is a bare
         // `return`, and the if keeps its else branch.
