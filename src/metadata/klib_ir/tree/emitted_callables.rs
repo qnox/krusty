@@ -32,7 +32,7 @@ impl KlibIrArena {
         self.emitted_walk(
             self.function_expression_roots(function),
             forms,
-            HashSet::from([function.base.symbol.clone()]),
+            HashSet::from_iter([function.base.symbol.clone()]),
         )
         .0
     }
@@ -99,7 +99,7 @@ impl KlibIrArena {
         self.emitted_walk(
             self.function_expression_roots(function),
             forms,
-            HashSet::from([function.base.symbol.clone()]),
+            HashSet::from_iter([function.base.symbol.clone()]),
         )
         .1
     }
@@ -112,7 +112,7 @@ impl KlibIrArena {
         self.emitted_walk(
             self.function_expression_roots(function),
             forms,
-            HashSet::from([function.base.symbol.clone()]),
+            HashSet::from_iter([function.base.symbol.clone()]),
         )
         .2
     }
