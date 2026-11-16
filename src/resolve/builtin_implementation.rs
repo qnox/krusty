@@ -197,13 +197,15 @@ pub(crate) fn for_checked_external_members(
             Some(checked) => checked.to_vec(),
             None => builtin_implementation_facts(source, owner, &name, identity).into_vec(),
         };
-        implementations.extend(represented_implementation_facts(
-            source,
-            represented,
-            owner,
-            &name,
-            identity,
-        ));
+        // A unit lowered from checked KLIB bodies already carries the represented classes'
+        // implementations its graph froze; each implementation is recorded once.
+        for implementation in
+            represented_implementation_facts(source, represented, owner, &name, identity)
+        {
+            if !implementations.contains(&implementation) {
+                implementations.push(implementation);
+            }
+        }
         facts.insert(identity, implementations.into_boxed_slice());
     }
     Ok(facts)
