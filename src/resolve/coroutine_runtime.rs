@@ -109,6 +109,7 @@ pub(super) fn selected(source: &dyn SymbolSource) -> Option<IrCoroutineRuntime> 
     Some(IrCoroutineRuntime {
         suspended: suspended.getter.external_property_identity?,
         throw_on_failure: throw_on_failure.callable.external_identity?,
+        throw_on_failure_receiver: throw_on_failure.semantic_receiver()?,
         create_failure: create_failure.callable.external_identity?,
         result_constructor: result_constructor.external_identity?,
         result_value: result_value.getter.external_property_identity?,

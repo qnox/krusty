@@ -6,6 +6,10 @@ fn runtime() -> crate::ir::IrCoroutineRuntime {
     crate::ir::IrCoroutineRuntime {
         suspended: ExternalPropertyId::from_raw(0),
         throw_on_failure: ExternalCallableId::from_raw(0),
+        throw_on_failure_receiver: Ty::obj_args_name(
+            crate::types::type_name("kotlin/Result"),
+            &[Ty::nullable(Ty::obj_name(crate::types::wk::any()))],
+        ),
         create_failure: ExternalCallableId::from_raw(3),
         result_constructor: ExternalCallableId::from_raw(4),
         result_value: ExternalPropertyId::from_raw(2),

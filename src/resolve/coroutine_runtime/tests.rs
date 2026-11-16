@@ -59,6 +59,10 @@ fn assert_selected_runtime(provider: &KlibLibraries) {
         Some(type_name("kotlin/Result"))
     );
     assert_eq!(throw_on_failure.callable.ret, Ty::Unit);
+    assert_eq!(
+        Some(runtime.throw_on_failure_receiver),
+        throw_on_failure.callable.source_receiver
+    );
 
     let create_failure = provider.external_callable(runtime.create_failure).unwrap();
     let create_failure_identity = assert_provider_identity(provider, runtime.create_failure);

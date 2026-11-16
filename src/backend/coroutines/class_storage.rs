@@ -257,7 +257,7 @@ impl MachineStorage for ContinuationFields {
             callee: Box::new(Callee::External {
                 target: self.runtime.throw_on_failure,
                 default_provider: None,
-                params: vec![result_ty],
+                params: vec![self.runtime.throw_on_failure_receiver],
                 ret: Ty::Unit,
                 substitutions: Vec::new(),
                 defaults: Vec::new(),

@@ -1,9 +1,9 @@
 //! The stdlib declarations a suspend function's lowering calls, selected once by the handoff.
 //!
 //! A target's suspend lowering reads `COROUTINE_SUSPENDED` after every call that may suspend and
-//! rethrows a failed resume with `Result.getOrThrow`, whether or not the source names either. A
+//! rethrows a failed resume as `Result.getOrThrow` does, whether or not the source names either. A
 //! lowering that runs after checking cannot select a dependency declaration, so the handoff does:
-//! it selects both through the compilation's symbol source and records their identities here, as it
+//! it selects them through the compilation's symbol source and records their identities here, as it
 //! does for the runtime declarations a plugin's generated code calls.
 
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
@@ -15,6 +15,8 @@ pub struct IrCoroutineRuntime {
     pub suspended: ExternalPropertyId,
     /// `kotlin.Result<*>.throwOnFailure()`, which rethrows a failed resume (`getOrThrow` inlines it).
     pub throw_on_failure: ExternalCallableId,
+    /// The declared receiver type of [`Self::throw_on_failure`], the type its call passes.
+    pub throw_on_failure_receiver: crate::types::Ty,
     /// `kotlin.createFailure(Throwable)`, the failure a `Result` holds (`Result.failure` inlines it).
     pub create_failure: ExternalCallableId,
     /// `kotlin.Result`'s constructor from the value it holds (`Result.success` inlines it).
