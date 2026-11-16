@@ -142,7 +142,7 @@ impl BodyFirChecker<'_> {
             };
         }
 
-        if let Some(ExprLowering::SamConstructorReference { signature, sam }) =
+        if let Some(ExprLowering::SamConstructorReference { signature, sam, .. }) =
             self.info.expr_lowers.get(&expression).cloned()
         {
             let internal = sam.internal;

@@ -14,6 +14,10 @@ use crate::types::{SemanticCallRole, Ty};
 
 use super::{ExprLowering, ResolvedCall, ResolvedEnumEntry, SyntheticOperatorCall};
 
+mod callable_reference_name;
+
+use callable_reference_name::{selected_reference_name, ReferenceReceiver};
+
 /// Extract a literal's value after checking has fixed its semantic type.
 ///
 /// This deliberately remains narrower than [`checked_constant_expression`]. Ordinary immutable
@@ -135,7 +139,7 @@ struct Evaluator<'a> {
     context: CheckedConstantExpression<'a>,
 }
 
-impl Evaluator<'_> {
+impl<'a> Evaluator<'a> {
     fn expression_ty(&self, expression: ExprId, requested: Option<Ty>) -> Option<Ty> {
         let ty = requested.unwrap_or(*self.context.expression_types.get(expression.0 as usize)?);
         (!ty.mentions_error() && !ty.mentions_pending()).then(|| ty.canonical_semantic())
@@ -233,6 +237,15 @@ impl Evaluator<'_> {
                         value: LibConst::Str(KtString::from(entry.name.as_str())),
                     })
                 }
+                SemanticCallRole::KotlinCallableReferenceName
+                    if self.context.file.intrinsic_const_evaluation =>
+                {
+                    let name = self.reference_name(*receiver, depth)?;
+                    Some(LibraryConst {
+                        ty,
+                        value: LibConst::Str(KtString::from(name)),
+                    })
+                }
                 _ => None,
             },
             Expr::Call { callee, args }
@@ -284,6 +297,27 @@ impl Evaluator<'_> {
             }
             _ => None,
         }
+    }
+
+    /// The name of the declaration a reference literal selected. kotlinc evaluates it only when
+    /// the reference has no value receiver or its explicit receiver is itself a constant; a
+    /// reference bound to an implicit `this` or to any other value is not a constant.
+    fn reference_name(&self, reference: ExprId, depth: u32) -> Option<&'a str> {
+        let Expr::CallableRef { receiver, .. } = self.context.file.expr(reference) else {
+            return None;
+        };
+        let selected =
+            selected_reference_name(self.context.file, self.context.expr_lowers.get(&reference)?)?;
+        match selected.receiver {
+            ReferenceReceiver::None => {}
+            ReferenceReceiver::Value => {
+                if let Some(receiver) = receiver {
+                    self.evaluate(*receiver, None, depth + 1)?;
+                }
+            }
+            ReferenceReceiver::Implicit => return None,
+        }
+        Some(selected.name)
     }
 
     fn evaluate_binary(
