@@ -357,12 +357,10 @@ mod type_spellings;
 #[cfg(test)]
 pub(crate) use signature_collection::collect_signatures_with_cp_headers;
 use signature_collection::{
-    base_class_type_ref, commit_top_level_conflict_groups, compact_classifier_identity,
+    base_class_type_ref, commit_package_overload_conflicts, compact_classifier_identity,
     compact_source_imports, enum_entry_member_signature, has_projected_generic_return_hazard,
-    register_top_level_function_conflict, spelling_scope, supertype_components, supertype_graph,
-    TopLevelFunctionConflictCandidates, TopLevelFunctionConflictDecl,
-    TopLevelFunctionConflictDeclaration, TopLevelFunctionConflictDisplaySource,
-    TopLevelFunctionConflictGroups, TopLevelFunctionConflictKey,
+    spelling_scope, supertype_components, supertype_graph, TopLevelFunctionConflictCandidates,
+    TopLevelFunctionConflictDecl, TopLevelFunctionConflictDeclaration, TopLevelFunctionConflictKey,
     TopLevelFunctionConflictRegistration,
 };
 #[cfg(test)]
