@@ -288,7 +288,16 @@ inheritance. An owned source leaves a target only by naming its backends with `/
 as a fixture for a JVM-only compiler argument (`-Xuse-inline-scopes-numbers`) does. It is then
 outside that lane, not one of the lane's not-applicable entries: it leaves the lane's scanned
 and applicable counts, and the report line counts it as `outside-lane`. Harness errors, unavailable setup,
-compiler panics and every other target skip are fatal before any expectation write. The ordinary upstream
+compiler panics and every other target skip are fatal before any expectation write.
+
+A regression for a kotlinc bug fixed in a later release cannot use an earlier kotlinc as its
+oracle, because that compiler still miscompiles it. `// KOTLINC_VERSION:` bounds the reference
+releases such a case belongs to, in interval notation with either bound optional: `[2.5.0,)` (or
+just `2.5.0`) from 2.5.0, `[2.4.0,2.5.0)` before it. Bounds compare `major.minor.patch`, so a
+2.5.0 release candidate is inside `[2.5.0,)`. Under any other reference release, discovery leaves
+the case out of every lane's inventory; it is never a not-applicable entry. A malformed or repeated
+directive fails discovery. `// LANGUAGE_VERSION:` cannot do this: it selects a language level that
+an older kotlinc may still accept. The ordinary upstream
 per-case applicability policy is unchanged. Full sweeps require the provisioned upstream corpus;
 the separate vendored smoke test does not replace missing setup.
 
