@@ -421,7 +421,6 @@ closures/closureOnTopLevel2.kt
 closures/closuresAsSingleton.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt11634_4.kt
-closures/kt47894_inlineFunWithObjectWithNothing.kt
 closures/localFunctionInInitBlock.kt
 collectionLiterals/companionBlockOf.kt
 collectionLiterals/stdlibCollections.kt
@@ -1324,7 +1323,6 @@ extensionFunctions/extensionFunctionAsSupertype.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
-extensionFunctions/extensionFunctionWithInlineModifier.kt
 extensionFunctions/kt3285.kt
 extensionFunctions/kt475.kt
 extensionFunctions/kt865.kt
@@ -1340,7 +1338,6 @@ extensionProperties/extensionPropertyDelegated.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
 extensionProperties/extensionPropertyWithExtensionAsReceiver.kt
 extensionProperties/genericContextOverride.kt
-fakeOverride/fakeOverrideWithMissingClassInSignature.kt
 fakeOverride/internalFromFriendModule.kt
 fakeOverride/intersectionInLocal.kt
 fakeOverride/privateFakeOverrides0.kt
@@ -1530,7 +1527,6 @@ initializers/static_list.kt
 initializers/static_varargChange.kt
 initializers/throw1.kt
 initializers/throw2.kt
-inline/LocalEntitiesInAnonymousObjectInInlineCallables.kt
 inline/anonymousFunction.kt
 inline/anonymousObjectInlineMethod.kt
 inline/blocksMaterialization.kt
@@ -1629,7 +1625,6 @@ inline/statementAsLastExprInBlock.kt
 inline/statementsAfterReturn.kt
 inline/thisImplicitlyCaptured.kt
 inline/thisLiteralAliasing.kt
-inline/twiceInlinedObject.kt
 inline/typeParameterSymbolIsUnbound.kt
 inline/vararg.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
@@ -2438,7 +2433,6 @@ primitiveTypes/numberToChar/abstractMethodInSuperinterface.kt
 primitiveTypes/reassignDestructured.kt
 primitiveTypes/smartCastOnNullableDoubleIdentityEquals.kt
 primitiveTypes/stringEqualsHashCodeToString.kt
-primitiveTypes/virtualCallToCustomNumber.kt
 privateConstructors/inline.kt
 properties/PrivatePropertyOfComplexGenericFunctionType.kt
 properties/accessorForProtectedPropertyWithPrivateSetter.kt
@@ -3372,7 +3366,6 @@ regressions/resolvedCallForGetOperator.kt
 reified/callChain.kt
 reified/callableReferenceInlinedFun.kt
 reified/callableReferenceInlinedFunFromOtherModule.kt
-reified/capture.kt
 reified/catchParameter/nestedReifiedCatch.kt
 reified/catchParameter/nullableExceptionType.kt
 reified/catchParameter/reificationClash.kt

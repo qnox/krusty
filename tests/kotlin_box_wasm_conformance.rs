@@ -1486,3 +1486,12 @@ fn wasm_library_superclass_members_dispatch_to_the_subclass() {
     expect_reference_box(src, "librarySuperclassMembersOfSubclass");
     expect_wasm_box(src, "librarySuperclassMembersOfSubclass");
 }
+
+// PLATFORM-SPECIFIC: a library class's abstract member dispatches through the Wasm program's
+// library member stub, which the program's subclasses implement.
+#[test]
+fn wasm_library_abstract_members_dispatch_to_their_overrides() {
+    let src = include_str!("box_regressions/libraryAbstractMemberCalls.kt");
+    expect_reference_box(src, "libraryAbstractMemberCalls");
+    expect_wasm_box(src, "libraryAbstractMemberCalls");
+}

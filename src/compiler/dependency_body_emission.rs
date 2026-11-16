@@ -522,7 +522,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             return Vec::new();
         }
         if let Err(identity) =
-            super::builtin_implementations::record_checked(&mut callables, unit.ir(), platform)
+            super::builtin_implementations::record_checked(&mut callables, unit.ir())
         {
             diags.error(
                 Span::new(0, 0),

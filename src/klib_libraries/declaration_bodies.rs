@@ -1004,6 +1004,28 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
+    /// The serialized declarations the member function `identity` overrides. A materialized
+    /// class carries each as an override edge its dispatch goes through, so the declarations are
+    /// reached with the member even though its body never names them.
+    pub(crate) fn overridden_callables(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Vec<KlibDependencyCallable> {
+        let Some((_, function)) = self.function(identity) else {
+            return Vec::new();
+        };
+        function
+            .overridden
+            .iter()
+            .filter_map(|symbol| member_signature(&symbol.signature))
+            .filter_map(|declaration| {
+                self.overridden_declarations(&identity.module, &declaration)
+                    .ok()
+            })
+            .flatten()
+            .collect()
+    }
+
     /// Exact module-qualified edges of the bodies common lowering structurally emits, including
     /// reached closure implementations. The supplied operation policy does not grant intrinsic
     /// authority; original direct inventories remain the authority for that separate decision.
