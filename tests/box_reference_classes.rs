@@ -168,12 +168,14 @@ impl ReferenceClasses {
 /// the production harness injects for `// WITH_COROUTINES` cases; `cp_jars` and `jdk` are the exact
 /// directive-selected classpath and JDK krusty used.
 ///
-/// Results — success and a deterministic, source-anchored compile rejection — are cached on disk
+/// Successful compilations and deterministic, source-anchored rejections are cached on disk
 /// keyed by every input (source, stem, helpers, classpath/JDK arguments, each unit's code-generation
 /// modes, the exact compiler identity, and the producing JDK's identity), so a re-run pays only for
 /// cases whose inputs changed and never replays one exact version's or one JDK's bytes for another.
 /// A transient failure (driver crash, work-dir clobber) and a snapshot/dev/beta compiler are not
 /// cached.
+/// This artifact-facing API requires at least one class; verdict-only callers use
+/// [`reference_verdict`], which also accepts successful compilations that emit none.
 pub fn reference_compile(
     src: &str,
     stem: &str,
@@ -181,13 +183,17 @@ pub fn reference_compile(
     jdk: BoxJdk<'_>,
     coroutine_helpers: &str,
 ) -> Result<ReferenceClasses, String> {
-    reference_verdict(src, stem, cp_jars, jdk, coroutine_helpers)
-        .map_err(|failure| failure.to_string())
+    let classes = reference_verdict(src, stem, cp_jars, jdk, coroutine_helpers)
+        .map_err(|failure| failure.to_string())?;
+    if classes.is_empty() {
+        return Err("reference compile produced no .class artifacts".to_string());
+    }
+    Ok(classes)
 }
 
-/// [`reference_compile`] with its failure kept typed: a source rejection carries kotlinc's status
-/// and complete diagnostics, and a harness that could not observe the reference is told apart from
-/// a reference that gave no verdict.
+/// Compile with the verdict kept typed. Success may produce an empty class inventory. A source
+/// rejection carries kotlinc's status and complete diagnostics, and a harness that could not
+/// observe the reference is told apart from a reference that gave no verdict.
 pub fn reference_verdict(
     src: &str,
     stem: &str,
@@ -795,11 +801,6 @@ fn compile_all(
         }
         outputs.insert(&unit.module, output);
     }
-    if classes.is_empty() {
-        return Err(ReferenceFailure::NoVerdict(
-            "reference compile produced no .class artifacts".to_string(),
-        ));
-    }
     Ok(classes)
 }
 
@@ -1118,6 +1119,34 @@ mod tests {
     use super::*;
 
     const NO_HELPERS: &str = "";
+
+    /// PLATFORM-SPECIFIC: a successful JVM compile need not emit class artifacts. Keep the
+    /// compilation verdict separate from the box and bytecode callers' artifact requirement.
+    #[test]
+    fn a_successful_classless_compile_is_accepted_without_satisfying_artifact_callers() {
+        let source = include_str!("fixtures/reference/noClassArtifacts.kt");
+        let stem = "ClasslessReference";
+        let jdk = BoxJdk::Full { root: None };
+        let units = plan_units(source, stem, NO_HELPERS).expect("the complete two-file program");
+        let jvm_properties = reference_jvm_properties(&units);
+        let scratch = ScratchDir::new().expect("reference compile scratch");
+        let reference = compile_all(&units, &[], jdk, &jvm_properties, scratch.path());
+
+        assert_eq!(reference, Ok(ReferenceClasses::default()));
+        let cache = scratch.path().join("cached-reference");
+        store_cache(&cache, 0, &reference);
+        assert_eq!(load_cache(&cache), Some(reference));
+        assert_eq!(
+            reference_verdict(source, stem, &[], jdk, NO_HELPERS),
+            Ok(ReferenceClasses::default())
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                reference_compile(source, stem, &[], jdk, NO_HELPERS),
+                Err("reference compile produced no .class artifacts".to_string())
+            );
+        }
+    }
 
     #[test]
     fn reading_a_cached_entry_refreshes_its_marker() {

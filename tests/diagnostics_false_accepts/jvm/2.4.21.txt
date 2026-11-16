@@ -826,10 +826,6 @@ compiler/testData/diagnostics/tests/intersectedVisibilitiesAccessorDifferences_S
 compiler/testData/diagnostics/tests/intersectedVisibilitiesAccessorDifferences_Useful1.kt
 compiler/testData/diagnostics/tests/intersectedVisibilitiesForNonAbstractPropertyAccessors.kt
 compiler/testData/diagnostics/tests/j+k/brokenCode/classDuplicates.kt
-compiler/testData/diagnostics/tests/j+k/collectionOverrides/commonCollections.kt
-compiler/testData/diagnostics/tests/j+k/collectionOverrides/contains.kt
-compiler/testData/diagnostics/tests/j+k/collectionOverrides/containsAndOverload.kt
-compiler/testData/diagnostics/tests/j+k/collectionOverrides/containsAndOverloadWithoutExplicitOverride.kt
 compiler/testData/diagnostics/tests/j+k/collectionOverrides/irrelevantImplCharSequenceKotlin.kt
 compiler/testData/diagnostics/tests/j+k/collectionOverrides/irrelevantImplMutableList.kt
 compiler/testData/diagnostics/tests/j+k/defaultMethodsIndirectInheritance_before.kt
@@ -1431,7 +1427,6 @@ compiler/testData/diagnostics/tests/targetedBuiltIns/backwardCompatibility/basic
 compiler/testData/diagnostics/tests/targetedBuiltIns/backwardCompatibility/delegation.kt
 compiler/testData/diagnostics/tests/targetedBuiltIns/backwardCompatibility/derivedInterfacesWithKotlinFun.kt
 compiler/testData/diagnostics/tests/targetedBuiltIns/backwardCompatibility/finalize.kt
-compiler/testData/diagnostics/tests/targetedBuiltIns/concurrentMapRemove.kt
 compiler/testData/diagnostics/tests/testsWithExplicitApi/kt56505.kt
 compiler/testData/diagnostics/tests/testsWithExplicitReturnTypes/kt56505.kt
 compiler/testData/diagnostics/tests/testsWithJava17/jvmRecord/diagnostics.kt
@@ -1573,7 +1568,6 @@ compiler/testData/diagnostics/testsWithStdLib/builtins/arraysAreCloneable.kt
 compiler/testData/diagnostics/testsWithStdLib/callableReferences/fromBasicDiagnosticTests/chooseCallableReferenceDependingOnInferredReceiver.kt
 compiler/testData/diagnostics/testsWithStdLib/callableReferences/ifWithCR.kt
 compiler/testData/diagnostics/testsWithStdLib/callableReferences/javaStatic.kt
-compiler/testData/diagnostics/testsWithStdLib/commonCollections.kt
 compiler/testData/diagnostics/testsWithStdLib/comparingDifferentSubclassesCommonInterface.kt
 compiler/testData/diagnostics/testsWithStdLib/comparingPlatformTypes.kt
 compiler/testData/diagnostics/testsWithStdLib/comparingTripleWithPair.kt
