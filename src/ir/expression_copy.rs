@@ -574,12 +574,85 @@ fn inherit_declaration_argument_boundaries(
     boundaries.insert(target, copied);
 }
 
+/// A call whose supplied operands were replaced in place, in order (`previous[i]` by
+/// `replaced[i]`), keeps each declaration argument boundary on the operand now in its position.
+pub(crate) fn rebind_declaration_argument_boundaries(
+    ir: &mut IrFile,
+    call: ExprId,
+    previous: &[ExprId],
+    replaced: &[ExprId],
+) {
+    debug_assert_eq!(previous.len(), replaced.len());
+    let Some(boundaries) = ir.declaration_argument_boundaries.get_mut(&call) else {
+        return;
+    };
+    for boundary in boundaries.iter_mut() {
+        let position = previous
+            .iter()
+            .position(|argument| *argument == boundary.argument)
+            .expect("recorded declaration argument belongs to the rewritten call");
+        boundary.argument = replaced[position];
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::{Callee, IrConst, IrExpr, IrFile};
-    use super::{copy_expression_facts, relocate_expression_facts};
+    use super::super::{Callee, IrConst, IrDeclarationArgumentBoundary, IrExpr, IrFile};
+    use super::{
+        copy_expression_facts, rebind_declaration_argument_boundaries, relocate_expression_facts,
+    };
     use crate::fir::SourceFileId;
     use crate::types::{type_name, Ty};
+
+    #[test]
+    fn rewritten_call_operands_keep_their_argument_boundaries_through_a_copy() {
+        let mut ir = IrFile::default();
+        let call_with = |ir: &mut IrFile, args: Vec<u32>| {
+            ir.add_expr(IrExpr::Call {
+                callee: Box::new(Callee::Local(0)),
+                dispatch_receiver: None,
+                args,
+            })
+        };
+        let first = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let second = ir.add_expr(IrExpr::Const(IrConst::Int(2)));
+        let call = call_with(&mut ir, vec![first, second]);
+        ir.declaration_argument_boundaries.insert(
+            call,
+            vec![IrDeclarationArgumentBoundary {
+                argument: second,
+                parameter: 1,
+                declaration: Ty::Int,
+                retarget_coercion: false,
+            }]
+            .into_boxed_slice(),
+        );
+        // An operand is bound to a temporary ahead of the call, which then reads the temporary.
+        let temporary = ir.add_expr(IrExpr::GetValue(0));
+        rebind_declaration_argument_boundaries(
+            &mut ir,
+            call,
+            &[first, second],
+            &[first, temporary],
+        );
+        let IrExpr::Call { args, .. } = &mut ir.exprs[call as usize] else {
+            unreachable!()
+        };
+        *args = vec![first, temporary];
+
+        let copied_temporary = ir.add_expr(IrExpr::GetValue(0));
+        let copy = call_with(&mut ir, vec![first, copied_temporary]);
+        copy_expression_facts(&mut ir, call, copy);
+
+        assert_eq!(
+            ir.declaration_argument_boundaries[&call][0].argument,
+            temporary
+        );
+        assert_eq!(
+            ir.declaration_argument_boundaries[&copy][0].argument,
+            copied_temporary
+        );
+    }
 
     #[test]
     fn a_copy_inherits_the_facts_its_owning_modules_record() {

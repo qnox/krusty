@@ -64,7 +64,9 @@ mod emitted_body_roots;
 mod enums;
 mod expect_actualization;
 mod expression_copy;
-pub(crate) use expression_copy::truncate_expression_facts;
+pub(crate) use expression_copy::{
+    rebind_declaration_argument_boundaries, truncate_expression_facts,
+};
 mod expression_provenance;
 pub use emitted_body_roots::{emitted_body_roots, emitted_declaration_roots, EmittedDeclaration};
 pub mod field_flags;
