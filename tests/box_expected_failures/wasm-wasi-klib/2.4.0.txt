@@ -55,8 +55,6 @@ arrays/arraysOfInlineClass/accessArrayOfUnsigned.kt
 arrays/arraysOfInlineClass/arrayOfInlineClassOfArrayOfInlineClass.kt
 arrays/collectionAssignGetMultiIndex.kt
 arrays/collectionGetMultiIndex.kt
-arrays/forEachDoubleArray.kt
-arrays/forEachFloatArray.kt
 arrays/forInReversed/reversedArrayOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedArrayReversedArrayOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedOriginalUpdatedInLoopBody.kt
@@ -87,8 +85,6 @@ arrays/kt7009.kt
 arrays/kt7288.kt
 arrays/kt950.kt
 arrays/multiArrayConstructors.kt
-arrays/multiDecl/kt15560.kt
-arrays/multiDecl/kt15568.kt
 arrays/nonLocalReturnArrayConstructor.kt
 arrays/primitiveArrays.kt
 arrays/stdlib.kt
@@ -420,7 +416,6 @@ closures/captureExtensionReceiver.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
 closures/captureInSuperConstructorCall/outerCapturedInPrimaryConstructorDefaultParameter.kt
 closures/captureInSuperConstructorCall/outerCapturedInSecondaryConstructorDefaultParameter.kt
-closures/capturedVarsOptimization/capturedVarsOfSize2.kt
 closures/capturedVarsOptimization/closureBoxedVarOptimizations.kt
 closures/capturedVarsOptimization/kt44347.kt
 closures/capturedVarsOptimization/withCoroutines.kt
@@ -540,7 +535,6 @@ controlStructures/kt42455.kt
 controlStructures/kt513.kt
 controlStructures/kt628.kt
 controlStructures/kt910.kt
-controlStructures/tryCatchInExpressions/differentTypes.kt
 controlStructures/tryCatchInExpressions/tryCatchAfterWhileTrue.kt
 controlStructures/tryCatchInExpressions/tryFinallyOfTypeUnit.kt
 controlflow/break.kt
@@ -1043,9 +1037,7 @@ cycles/cycle.kt
 cycles/cycle_do.kt
 cycles/cycle_for.kt
 dataClasses/components/kt49812.kt
-dataClasses/copy/kt3033.kt
 dataClasses/doubleParam.kt
-dataClasses/equalityChecksPrimitiveUnboxed.kt
 dataClasses/floatParam.kt
 dataClasses/hashCode/byte.kt
 dataClasses/hashCode/char.kt
@@ -1415,7 +1407,6 @@ functions/localFunctions/definedWithinLambdaInnerUsage2.kt
 ieee754/asComparableToDouble.kt
 ieee754/asComparableToDouble_properIeeeComparisons.kt
 ieee754/comparableTypeCast.kt
-ieee754/dataClass.kt
 ieee754/equalsNaN_properIeeeComparisons.kt
 ieee754/equalsNullableDouble_properIeeeComparisons.kt
 ieee754/equalsNullableFloat_properIeeeComparisons.kt
@@ -1428,10 +1419,7 @@ ieee754/nullableFloatNotEquals.kt
 ieee754/whenNullableSmartCast.kt
 ieee754/when_properIeeeComparisons.kt
 increment/argumentWithSideEffects.kt
-increment/arrayElement.kt
 increment/augmentedAssignmentWithComplexRhs.kt
-increment/classWithGetSet.kt
-increment/genericClassWithGetSet.kt
 increment/mutableListElement.kt
 increment/nullable.kt
 inference/builderInferenceLeakingVariable.kt
@@ -1521,7 +1509,6 @@ inline/defaultArgsLateinitLowering.kt
 inline/defaultArgsMultipleModules.kt
 inline/dontInlineFunctionCall.kt
 inline/expressionBodyWithLambdaCall.kt
-inline/extension.kt
 inline/extensionWithManyArguments.kt
 inline/genericFunctionReference.kt
 inline/getClass.kt
@@ -1591,7 +1578,6 @@ inline/localObjectReturnedFromWhen.kt
 inline/metadataForPublicFunction.kt
 inline/multiDeclaration.kt
 inline/noInlineLambda.kt
-inline/params.kt
 inline/propertyAccessorInline.kt
 inline/redundantCoercionsCleaner.kt
 inline/redundantCoercionsCleanerKT48876.kt
@@ -1599,7 +1585,6 @@ inline/redundantCoercionsCleanerKT49356.kt
 inline/requireNotNull.kt
 inline/rootConstructor.kt
 inline/safeCall.kt
-inline/severalClosures.kt
 inline/sharedVar.kt
 inline/simpleReturnFunctionWithResultUnused.kt
 inline/statementAsLastExprInBlock.kt
@@ -1778,8 +1763,6 @@ inlineClasses/crossinlineWithInlineClassInParameter.kt
 inlineClasses/crossinlineWithInlineClassInParameterGeneric.kt
 inlineClasses/crossinlineWithInlineClassInParameterGeneric2.kt
 inlineClasses/customIterator.kt
-inlineClasses/defaultFunctionsFromAnyForInlineClass.kt
-inlineClasses/defaultFunctionsFromAnyForInlineClassGeneric.kt
 inlineClasses/defaultParameterValues/defaultConstructorParameterValuesOfInlineClassType.kt
 inlineClasses/defaultParameterValues/defaultConstructorParameterValuesOfInlineClassTypeGeneric.kt
 inlineClasses/defaultParameterValues/defaultInterfaceFunParameterValuesOfInlineClassType.kt
@@ -1800,7 +1783,6 @@ inlineClasses/defaultParameterValues/inlineClassSecondaryConstructor.kt
 inlineClasses/defaultParameterValues/inlineClassSecondaryConstructorGeneric.kt
 inlineClasses/defaultParameterValues/kt26554.kt
 inlineClasses/dnnInValue.kt
-inlineClasses/equalityChecksPrimitiveUnboxed.kt
 inlineClasses/equalityForBoxesOfNullableValuesOfInlineClass.kt
 inlineClasses/equalityForBoxesOfNullableValuesOfInlineClassGeneric.kt
 inlineClasses/equalsEvaluationOrderPrimitiveGeneric.kt
@@ -2357,10 +2339,6 @@ objects/useImportedMember.kt
 objects/useImportedMemberFromCompanion.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt
 operatorConventions/assignToDotQualifiedWithSideEffect.kt
-operatorConventions/compareTo/doubleInt.kt
-operatorConventions/compareTo/doubleLong.kt
-operatorConventions/compareTo/intDouble.kt
-operatorConventions/compareTo/longDouble.kt
 operatorConventions/kt14201_2.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
@@ -2395,7 +2373,6 @@ primitiveTypes/booleanHashCode.kt
 primitiveTypes/conversions.kt
 primitiveTypes/equalityWithObject/boxedEqPrimitiveEvaluationOrder.kt
 primitiveTypes/equalityWithObject/whenNullableBoxed.kt
-primitiveTypes/equalsHashCodeToString.kt
 primitiveTypes/kt1093.kt
 primitiveTypes/kt13023.kt
 primitiveTypes/kt16732.kt
@@ -3404,8 +3381,6 @@ sam/samWithAbstractToString2.kt
 sam/samWithAbstractToString3.kt
 sam/topLevelConversions.kt
 sealed/multipleFiles_enabled.kt
-secondaryConstructors/clashingDefaultConstructors.kt
-secondaryConstructors/defaultArgs.kt
 secondaryConstructors/enums.kt
 secondaryConstructors/innerClasses.kt
 secondaryConstructors/innerClassesInheritance.kt
@@ -3421,7 +3396,6 @@ size/objectsOptimization.kt
 smartCasts/kt17725.kt
 smartCasts/kt19100.kt
 smartCasts/kt44814.kt
-smartCasts/kt72391.kt
 smartCasts/negativesmartCastAugmentedAssignment.kt
 smartCasts/smartcastFromGenericToString.kt
 specialBuiltins/bridgeNotEmptyMap.kt
@@ -3585,7 +3559,6 @@ unsignedTypes/unsignedRangeIterator.kt
 unsignedTypes/unsignedTypePrefixIncrementDecrementBoxing.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
 unsignedTypes/whenByUnsigned.kt
-vararg/boxingArgumentsForVararg.kt
 vararg/doNotCopyImmediatelyCreatedArrays.kt
 vararg/evaluationOrder.kt
 vararg/kt10926.kt
