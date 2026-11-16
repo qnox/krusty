@@ -17,8 +17,9 @@
 use std::io;
 use std::path::Path;
 
+use super::intellij_classpath::jar_repositories;
 use super::model::{ProviderKind, RepositoryLibrary};
-use super::tooling::{self, MavenArtifactRequest, MavenBatch, MavenExclusion};
+use super::tooling::{self, MavenArtifactRequest, MavenBatch, MavenExclusion, MavenRepository};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InstallResult {
@@ -30,7 +31,10 @@ pub struct InstallResult {
 /// URL is named here: the embedder session supplies mirrors and credentials. A library
 /// that includes transitives asks `resolveDependencies` for them, and a pinned jar asks
 /// `resolveArtifact` for the recorded version only.
-fn resolution_batch(libraries: &[&RepositoryLibrary]) -> MavenBatch {
+fn resolution_batch(
+    libraries: &[&RepositoryLibrary],
+    repositories: &[MavenRepository],
+) -> MavenBatch {
     let mut artifacts = Vec::new();
     for library in libraries {
         artifacts.push(MavenArtifactRequest {
@@ -61,7 +65,10 @@ fn resolution_batch(libraries: &[&RepositoryLibrary]) -> MavenBatch {
             });
         }
     }
-    MavenBatch { artifacts }
+    MavenBatch {
+        artifacts,
+        repositories: repositories.to_vec(),
+    }
 }
 
 /// A `CLASSES` jar under `~/.m2/repository` whose filename is the Maven layout
@@ -145,8 +152,10 @@ pub fn ensure_repository_libraries(
     root: &Path,
     libraries: &[RepositoryLibrary],
 ) -> InstallResult {
-    let _ = root;
-    resolve_missing_libraries(kind, libraries, maven_resolve_all)
+    let repositories = jar_repositories(root);
+    resolve_missing_libraries(kind, libraries, |pending| {
+        maven_resolve_all(pending, &repositories)
+    })
 }
 
 fn library_missing(library: &RepositoryLibrary) -> bool {
@@ -187,8 +196,11 @@ fn resolve_missing_libraries(
     result
 }
 
-fn maven_resolve_all(libraries: &[&RepositoryLibrary]) -> io::Result<()> {
-    let batch = resolution_batch(libraries);
+fn maven_resolve_all(
+    libraries: &[&RepositoryLibrary],
+    repositories: &[MavenRepository],
+) -> io::Result<()> {
+    let batch = resolution_batch(libraries, repositories);
     if batch.artifacts.is_empty() {
         return Ok(());
     }
@@ -258,7 +270,7 @@ mod tests {
         );
         dexlib.include_transitive = false;
 
-        let batch = resolution_batch(&[&logback, &dexlib]);
+        let batch = resolution_batch(&[&logback, &dexlib], &[]);
         assert_eq!(batch.artifacts.len(), 3, "{:?}", batch.artifacts);
         let root = &batch.artifacts[0];
         assert_eq!(root.artifact, "logback-classic");
@@ -291,7 +303,7 @@ mod tests {
 
         crate::project::tooling::reset_test_hooks();
         crate::project::tooling::set_maven_response(Ok(()));
-        maven_resolve_all(&[&logback, &dexlib]).unwrap();
+        maven_resolve_all(&[&logback, &dexlib], &[]).unwrap();
         let batches = crate::project::tooling::maven_batches();
         assert_eq!(batches.len(), 1, "one RepositorySystem request");
         assert_eq!(batches[0], batch);
@@ -310,7 +322,7 @@ mod tests {
             "com.jetbrains.intellij.idea:idea-community-build-zip:252.11244",
             vec![archive, netty],
         );
-        let batch = resolution_batch(&[&library]);
+        let batch = resolution_batch(&[&library], &[]);
         let pinned = batch
             .artifacts
             .iter()
@@ -392,6 +404,62 @@ mod tests {
             panic!("an installed library must not be resolved again");
         });
         assert_eq!(again, InstallResult::default());
+    }
+
+    #[test]
+    fn jetbrains_repositories_are_sent_with_the_resolve_and_a_marker_is_not_the_jar() {
+        let tree = crate::project::testing::TempTree::new("maven-jetbrains-repos");
+        tree.write(
+            ".idea/jarRepositories.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="RemoteRepositoriesConfiguration">
+    <remote-repository>
+      <option name="id" value="intellij-dependencies" />
+      <option name="name" value="IntelliJ Dependencies" />
+      <option name="url" value="https://cache-redirector.jetbrains.com/packages.jetbrains.team/maven/p/ij/intellij-dependencies" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="central-proxy" />
+      <option name="url" value="https://cache-redirector.jetbrains.com/repo1.maven.org/maven2" />
+    </remote-repository>
+  </component>
+</project>
+"#,
+        );
+        let repository = tree.directory("m2");
+        let jar = repository
+            .join("org/jetbrains/intellij/deps/rwmutex-idea/0.0.10/rwmutex-idea-0.0.10.jar");
+        std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
+        std::fs::write(format!("{}.lastUpdated", jar.display()), "marker").unwrap();
+        let library = library(
+            "rwmutex-idea",
+            "org.jetbrains.intellij.deps:rwmutex-idea:0.0.10",
+            vec![jar.clone()],
+        );
+        let repositories = jar_repositories(tree.root());
+        let batch = resolution_batch(&[&library], &repositories);
+        assert_eq!(
+            batch
+                .repositories
+                .iter()
+                .map(|repository| repository.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["intellij-dependencies", "central-proxy"]
+        );
+        assert!(batch.repositories.iter().any(|repository| {
+            repository.url.contains("intellij-dependencies") && !repository.url.contains("curl")
+        }));
+        assert!(
+            library_missing(&library),
+            "a .lastUpdated marker is not the jar IntelliJ puts on the classpath"
+        );
+
+        crate::project::tooling::reset_test_hooks();
+        crate::project::tooling::set_maven_response(Ok(()));
+        maven_resolve_all(&[&library], &repositories).unwrap();
+        let batches = crate::project::tooling::maven_batches();
+        assert_eq!(batches, vec![batch]);
     }
 
     #[test]

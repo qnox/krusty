@@ -257,9 +257,15 @@ impl BodyLowering<'_, '_, '_> {
                 provider,
                 params,
                 ret,
-            } if dispatch_receiver.is_none() => {
-                self.module_default_entry_call(*provider, *target, params, *ret, args)
-            }
+                dispatch_receiver_ty,
+            } if dispatch_receiver.is_none() => self.module_default_entry_call(
+                *provider,
+                *target,
+                *dispatch_receiver_ty,
+                params,
+                *ret,
+                args,
+            ),
             // A static method owned by a class is, to this generator, a function with a symbol —
             // the owner is a JVM placement fact, and there is no flat facade here for it to be
             // placed differently from. A local function declared inside a member is the shape that
@@ -548,7 +554,15 @@ impl BodyLowering<'_, '_, '_> {
                                     }
                                 }
                                 if let Some(realized) = self.dependency_interface_member(
-                                    internal, *target, signature, receiver, args, *ret,
+                                    internal,
+                                    *target,
+                                    signature,
+                                    super::implementor_dispatch::InterfaceMemberCall {
+                                        receiver,
+                                        args,
+                                        ret: *ret,
+                                        physical: &realization.physical_params,
+                                    },
                                 ) {
                                     return realized;
                                 }

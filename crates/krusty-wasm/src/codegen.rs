@@ -145,6 +145,7 @@ impl Backend for WasmBackend {
     ) -> bool {
         classifier == krusty::types::wk::string()
             || lower::is_string_builder(classifier)
+            || lower::is_array_list(classifier)
             || lower::runtime_lays_out(classifier)
     }
 

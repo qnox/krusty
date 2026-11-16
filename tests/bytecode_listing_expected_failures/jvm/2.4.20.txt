@@ -7,7 +7,6 @@ annotations/annotationAllTarget.kt
 annotations/annotationsOnDelegatedMembers.kt
 annotations/deprecatedJvmOverloads.kt
 annotations/internalPropertyOrTypealias.kt
-annotations/kt43399.kt
 annotations/kt62788.kt
 annotations/kt9320.kt
 annotations/literals.kt
@@ -107,7 +106,6 @@ jvm8/defaults/enable/bridgeInInterfaceWithProperties.kt
 jvm8/defaults/enable/deprecation.kt
 jvm8/defaults/enable/deprecationWithDefault.kt
 jvm8/defaults/enable/generatedBridgeGenericSpecializedInline.kt
-jvm8/defaults/enable/interfaceProperty.kt
 jvm8/defaults/enable/specialization/primitiveAndAny.kt
 jvm8/defaults/enable/specialization/primitiveAndNullable.kt
 jvmOverloadsAndParametersAnnotations.kt

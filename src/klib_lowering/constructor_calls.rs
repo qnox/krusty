@@ -22,6 +22,9 @@ pub(super) struct ConstructorDeclaration {
     class_parameters: KlibBodyClassParameters,
     defaults: ParamFlags,
     pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
+    /// Whether a support unit materializes the class with its members, so that a source class may
+    /// extend it. A class the target represents is not, and is the target's to lay out.
+    pub(super) class_emits_members: bool,
 }
 
 fn mismatch(detail: &str) -> KlibBodyDeclineReason {
@@ -140,6 +143,7 @@ pub(super) fn authenticate(
         class_parameters: header.contract.parameters.clone(),
         defaults,
         semantic_role: selected.semantic_role(),
+        class_emits_members: header.contract.emits_members(),
     })
 }
 
@@ -266,6 +270,7 @@ impl ConstructorDeclaration {
             class_parameters,
             defaults,
             semantic_role: None,
+            class_emits_members: true,
         }
     }
 
@@ -351,6 +356,7 @@ mod tests {
             },
             defaults: ParamFlags::repeat(false, count),
             semantic_role: None,
+            class_emits_members: true,
         }
     }
 
