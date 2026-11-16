@@ -140,18 +140,15 @@ bce/forUntilWithStep.kt
 bce/forWithIndex.kt
 bce/inheritance.kt
 bce/withGetter.kt
-binaryOp/callAny.kt
 binaryOp/divisionByZero.kt
 binaryOp/eqNullableDoubles.kt
 binaryOp/eqNullableDoublesToInt.kt
 binaryOp/eqNullableDoublesToIntWithTP.kt
 binaryOp/eqNullableDoublesWithTP.kt
-binaryOp/intrinsicAny.kt
 binaryOp/kt11163.kt
 binaryOp/kt11163_properIeee754comparisons.kt
 binaryOp/kt23030_properIeee754comparisons.kt
 binaryOp/kt44402.kt
-boxing/boxBoolean.kt
 boxing/boxing1.kt
 boxing/boxing11.kt
 boxing/boxing12.kt
@@ -372,7 +369,6 @@ callableReference/property/simpleMutableTopLevel.kt
 callableReference/property/simpleTopLevel.kt
 callableReference/starProjectionCallableReference.kt
 casts/asForConstants.kt
-casts/asSafeForConstants.kt
 casts/asToNothing.kt
 casts/asUnit.kt
 casts/castGenericNull.kt
@@ -404,7 +400,6 @@ casts/mutableCollections/reifiedSafeAsWithMutable.kt
 casts/mutableCollections/safeAsWithMutable.kt
 casts/mutableCollections/weirdMutableCasts.kt
 casts/nullableSafeCastToTypeParameterWithInterfaceUpperBound.kt
-casts/unitNullableCast.kt
 casts/wasmCastMessages.kt
 checkcastOptimization/kt50215.kt
 classDelegation/multipleModules.kt
@@ -1441,7 +1436,6 @@ funInterface/noConversionForSubtypeGeneric.kt
 funInterface/nonAbstractMethod.kt
 funInterface/nonTrivialProjectionInSuperType.kt
 funInterface/nullableSam.kt
-funInterface/primitiveConversions.kt
 funInterface/subtypeOfFunctionalTypeToFunInterfaceConversion.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
@@ -1498,31 +1492,17 @@ functions/localFunctions/localFunctionInConstructor.kt
 functions/localFunctions/nameClashAcrossDifferentContainers.kt
 ieee754/asComparableToDouble.kt
 ieee754/asComparableToDouble_properIeeeComparisons.kt
-ieee754/comparableToTWithT_properIeeeComparisons.kt
 ieee754/comparableTypeCast.kt
 ieee754/dataClass.kt
-ieee754/equalsDouble_properIeeeComparisons.kt
-ieee754/equalsFloat_properIeeeComparisons.kt
 ieee754/equalsNaN_properIeeeComparisons.kt
 ieee754/equalsNullableDouble_properIeeeComparisons.kt
 ieee754/equalsNullableFloat_properIeeeComparisons.kt
-ieee754/explicitCompareCall.kt
-ieee754/greaterDouble_properIeeeComparisons.kt
-ieee754/greaterFloat_properIeeeComparisons.kt
 ieee754/inline.kt
-ieee754/lessDouble_properIeeeComparisons.kt
-ieee754/lessFloat_properIeeeComparisons.kt
 ieee754/nullableDoubleEquals.kt
 ieee754/nullableDoubleEqualsLV13.kt
 ieee754/nullableDoubleNotEquals.kt
 ieee754/nullableFloatEquals.kt
 ieee754/nullableFloatNotEquals.kt
-ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt
-ieee754/smartCastToDifferentTypesWithNumericPromotion_properIeeeComparisons.kt
-ieee754/smartCastToDifferentTypes_properIeeeComparisons.kt
-ieee754/smartCastToDoubleAndComparableToDouble.kt
-ieee754/smartCastToInt.kt
-ieee754/whenNoSubject_properIeeeComparisons.kt
 ieee754/whenNullableSmartCast.kt
 ieee754/when_properIeeeComparisons.kt
 increment/argumentWithSideEffects.kt
@@ -1727,7 +1707,6 @@ inlineClass/nestedInlineClasses.kt
 inlineClass/secondaryConstructorWithGenerics.kt
 inlineClasses/UIntArraySortExample.kt
 inlineClasses/UIntArraySortExampleGeneric.kt
-inlineClasses/UIntSafeAsInt.kt
 inlineClasses/anonymousObjectAsDefaultParam.kt
 inlineClasses/anonymousObjectAsDefaultParamFull.kt
 inlineClasses/anonymousObjectAsDefaultParamSingleFile.kt
@@ -2117,8 +2096,6 @@ inlineClasses/returnResult/classGenericOverride.kt
 inlineClasses/returnResult/classResultOverride.kt
 inlineClasses/returnResult/interface.kt
 inlineClasses/returnResult/topLevel.kt
-inlineClasses/safeAsOfTypeParameterWithInlineClassBound.kt
-inlineClasses/safeAsOfTypeParameterWithInlineClassBoundGeneric.kt
 inlineClasses/samWrapperDifferentModule.kt
 inlineClasses/samWrapperDifferentModuleGeneric.kt
 inlineClasses/secondaryConstructorVisibilies.kt
@@ -2259,7 +2236,6 @@ innerNested/superConstructorCall/objectOuterDiffersFromInnerOuter.kt
 interfaceCallsNCasts/conservativeItable.kt
 interfaceCallsNCasts/diamond.kt
 interfaceCallsNCasts/finalMethod.kt
-intrinsics/charToInt.kt
 intrinsics/kt10131.kt
 intrinsics/kt10131a.kt
 intrinsics/kt8666.kt
@@ -2279,10 +2255,6 @@ ir/enumClass3.kt
 ir/fileClassInitializers.kt
 ir/kt41765.kt
 ir/lambdaWithLoop.kt
-ir/primitiveNumberComparisons/comparableToDouble.kt
-ir/primitiveNumberComparisons/doubleEqeq.kt
-ir/primitiveNumberComparisons/floatEqeq.kt
-ir/primitiveNumberComparisons/mixedNumberTypes.kt
 ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
 ir/serializationRegressions/anonFakeOverride.kt
@@ -2531,9 +2503,6 @@ platformTypes/primitives/unaryPlus.kt
 primitiveTypes/booleanHashCode.kt
 primitiveTypes/conversions.kt
 primitiveTypes/equalityWithObject/boxedEqPrimitiveEvaluationOrder.kt
-primitiveTypes/equalityWithObject/intEqualsNullableIntWithSmartCasts.kt
-primitiveTypes/equalityWithObject/objectWithAsymmetricEqualsEqPrimitive.kt
-primitiveTypes/equalityWithObject/whenIntAsNullableAny.kt
 primitiveTypes/equalityWithObject/whenNullableBoxed.kt
 primitiveTypes/equalsHashCodeToString.kt
 primitiveTypes/kt1093.kt
@@ -2555,8 +2524,6 @@ primitiveTypes/numberToChar/abstractMethodInSuperinterface.kt
 primitiveTypes/reassignDestructured.kt
 primitiveTypes/smartCastOnNullableDoubleIdentityEquals.kt
 primitiveTypes/stringEqualsHashCodeToString.kt
-primitiveTypes/substituteIntForGeneric.kt
-primitiveTypes/unboxComparable.kt
 primitiveTypes/virtualCallToCustomNumber.kt
 privateConstructors/inline.kt
 properties/PrivatePropertyOfComplexGenericFunctionType.kt
@@ -3509,7 +3476,6 @@ reified/extensionLambda.kt
 reified/extensionMethod.kt
 reified/filterIsInstance.kt
 reified/innerObject.kt
-reified/instanceof.kt
 reified/isBool.kt
 reified/isChar.kt
 reified/isClass.kt
@@ -3573,7 +3539,6 @@ smartCasts/kt19100.kt
 smartCasts/kt44814.kt
 smartCasts/kt72391.kt
 smartCasts/negativesmartCastAugmentedAssignment.kt
-smartCasts/smartCastedGenericWhenSubjectInRangeCheck.kt
 smartCasts/smartcastFromGenericToString.kt
 specialBuiltins/bridgeNotEmptyMap.kt
 specialBuiltins/bridges.kt
@@ -3695,7 +3660,6 @@ typeErasure/outerClassWithTypeParameterWithUpperBoundAndInlineFunctionWithReifie
 typeErasure/twoFunWithReifiedTypeParametersInlineFunWithTwoTypeParameters.kt
 typeErasure/twoFunWithTypeParametersInlineFunWithReifiedTypeParameters.kt
 typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParameters.kt
-typeMapping/kt2831.kt
 typeMapping/kt3863.kt
 typeMapping/kt3976.kt
 typeMapping/nullableNothing.kt
@@ -3704,7 +3668,6 @@ typealias/localTypeAliases.kt
 typealias/nestedTypeAliasesAndStaticScope.kt
 typealias/nestedTypeAliasesAndTypeArguments.kt
 typealias/typeAliasAsBareType.kt
-unaryOp/callWithCommonType.kt
 underscoredTypeArguments/backTicked.kt
 underscoredTypeArguments/simple.kt
 unit/kt3634.kt
@@ -3712,7 +3675,6 @@ unit/kt4212.kt
 unitConversion/unitConversionForSubtype.kt
 unitConversion/unitConversionWithSamSubtype.kt
 unitConversion/unitConversionWithSuspend.kt
-unsignedTypes/boxConstValOfUnsignedType.kt
 unsignedTypes/boxedUnsignedEqualsZero.kt
 unsignedTypes/equalsImplForInlineClassWrappingNullableInlineClass.kt
 unsignedTypes/forEachIndexedInListOfUInts.kt
@@ -3729,7 +3691,6 @@ unsignedTypes/inUnsignedRangeLiteral.kt
 unsignedTypes/inUnsignedUntil.kt
 unsignedTypes/iterateOverListOfBoxedUnsignedValues.kt
 unsignedTypes/kt25784.kt
-unsignedTypes/kt43286.kt
 unsignedTypes/kt47716.kt
 unsignedTypes/kt61418.kt
 unsignedTypes/literalEqualsNullableUnsigned.kt
@@ -3842,7 +3803,6 @@ when/is.kt
 when/kt45081.kt
 when/kt47365.kt
 when/kt5448.kt
-when/oneUnitBranch.kt
 when/stringOptimization/duplicatingItems.kt
 when/stringOptimization/duplicatingItemsSameHashCode.kt
 when/stringOptimization/duplicatingItemsSameHashCode2.kt
@@ -3859,11 +3819,9 @@ when/switchOptimizationStatement.kt
 when/switchOptimizationTypes.kt
 when/switchOptimizationUnordered.kt
 when/switchOptimizationWithGap.kt
-when/typeDisjunction.kt
 when/whenSubjectVariable/denseIntSwitchWithSubjectVariable.kt
 when/whenSubjectVariable/ieee754Equality.kt
 when/whenSubjectVariable/ieee754EqualityWithSmartCast.kt
-when/whenSubjectVariable/isCheckOnSubjectVariable.kt
 when/whenSubjectVariable/kt33641_inlineClass.kt
 when/whenSubjectVariable/sparseIntSwitchWithSubjectVariable.kt
 when/whenSubjectVariable/subjectExpressionIsEvaluatedOnce.kt

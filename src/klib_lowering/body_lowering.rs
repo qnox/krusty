@@ -212,6 +212,12 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// Whether `callee`, a public or accessor signature, is a constructor or member of a class private to the
+    /// library of the body being lowered. Such a call links as a file-local one does.
+    fn links_privately(&self, _callee: &crate::metadata::klib_ir::KlibIrSignature) -> bool {
+        false
+    }
+
     /// The constructor a file-local construction invokes. Template linkers keep the refusal.
     fn link_local_constructor(
         &mut self,
