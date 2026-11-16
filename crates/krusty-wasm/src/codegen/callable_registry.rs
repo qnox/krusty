@@ -166,6 +166,25 @@ impl CallableRegistry {
                     }
                     return Ok(None);
                 }
+                // A member of a local or anonymous class is reachable from no other file, and an
+                // inline function that declares the class clones it into each file it is expanded
+                // into, where the clone realizes the template's callables again. Each file binds
+                // those identities to its own clone, never to an earlier file's.
+                let file_local = ir.functions[function]
+                    .dispatch_receiver
+                    .and_then(|owner| ir.class_id_by_name(owner))
+                    .is_some_and(|class| ir.local_class_name_provenance.contains_key(&class));
+                if file_local {
+                    for target in &targets {
+                        if self
+                            .module
+                            .get(target)
+                            .is_some_and(|&index| wasm.function_is_defined(index))
+                        {
+                            self.module.remove(target);
+                        }
+                    }
+                }
                 let mut reserved = targets
                     .iter()
                     .filter_map(|target| self.module.get(target).copied())
@@ -187,8 +206,6 @@ impl CallableRegistry {
                             .to_string(),
                     );
                 }
-                // An inline template's local class is cloned into each file it is spliced into,
-                // and every clone realizes the template's callables again.
                 if wasm.function_is_defined(index) || !declared.insert(index) {
                     return Err("a callable realized by two functions".to_string());
                 }
