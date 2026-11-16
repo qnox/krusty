@@ -62,12 +62,11 @@ Enforced in two places:
   WITH coverage — one instrumented run that both checks correctness and enforces the baseline, so
   there is no separate plain own-suite run), then `conformance-plain` (the kotlin box corpus WITHOUT
   coverage). Blocks a push that lowers coverage or breaks a test.
-- **CI** (`lint` and `coverage-gate` on independent runners, the same contract as local `just ci`)
-  — the unbypassable backstop. The clean Clippy build no longer delays the instrumented build. The
-  box suite and every other active conformance test run from the same prebuilt binary for every
-  supported Kotlin version. Neither set rebuilds krusty inside a matrix leg. A local
-  `git push --no-verify` skips the hook, but CI re-measures and fails the PR, so coverage cannot be
-  lowered by bypassing the client-side hook.
+- **Nightly** (`.github/workflows/coverage.yml`) — `just coverage-gate` on master every night, and
+  on demand through `workflow_dispatch`. A failed run names the night a metric dropped. The merge
+  gate runs the same own suites uninstrumented in the `gate` profile (`scripts/own-tests.sh` in the
+  `ci` job and the e2e binary in the `e2e` job), so an instrumented build never sits on a pull
+  request's critical path. That nightly run is the only one in CI with `debug_assert!` enabled.
 
 To land an intentional coverage change, run `just coverage-bless` and commit the refreshed
 `coverage-baseline.json` with the change.

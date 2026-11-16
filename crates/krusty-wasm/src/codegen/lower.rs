@@ -21,6 +21,7 @@ use krusty::fx_hash::{HashMap, HashSet};
 mod absent_arguments;
 pub(super) mod any_members;
 mod array_lists;
+mod array_storage;
 mod arrays;
 mod boxing;
 mod callable_reference_identity;
@@ -49,6 +50,7 @@ mod type_of;
 #[cfg(test)]
 use tests::lower_alone;
 
+pub(super) use array_storage::realizes_storage_getter;
 pub(super) use exceptions::runtime_lays_out;
 pub(super) use scalar_instructions::is_scalar_operation;
 pub(super) use shared_cells::parameter_carrier;
@@ -61,6 +63,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
+        || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageCopy
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
         || matches!(
@@ -680,6 +683,17 @@ fn expression_type(
         }
         IrExpr::LocalPropertyReference(_) if ir.checked_type(id).is_none() => Ty::obj("kotlin/Any"),
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        // Common lowering leaves a module property read at its declaration's type and records the
+        // use's type on a separate coercion, as it does for a call; the read, through the getter
+        // entry of another file or this file's storage, produces the declared type.
+        IrExpr::Checked(checked_op)
+            if ir.checked_type(id).is_none()
+                && let krusty::ir::IrCheckedOperation::PropertyRead { target, .. } =
+                    &**checked_op
+                && let Some(property) = ir.referenced_module_properties.get(target) =>
+        {
+            property.ty
+        }
         // A `when` without an `else` branch, such as a guard a counted loop's lowering adds, is a
         // statement: no branch's value can be its own.
         IrExpr::When { branches }
@@ -1235,11 +1249,16 @@ impl<'a> Body<'a> {
                         .string_constant(self.module, &mut self.code, &[]);
                 }
             }
+            // A static function a class owns (a local function lifted out of a member, its
+            // receiver captured as a parameter) is called as one the file owns: a wasm function
+            // has no container, so the owner says nothing about the call.
             IrExpr::Call {
                 callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
-            } if let Callee::Local(function) = &**call_callee => {
+            } if let Callee::Local(function) | Callee::ClassStatic { function, .. } =
+                &**call_callee =>
+            {
                 let params = self.ir.functions[*function as usize].params.clone();
                 if params.len() != args.len() {
                     return Err("a call whose arguments do not match its parameters".into());
@@ -1293,6 +1312,40 @@ impl<'a> Body<'a> {
                 ));
                 self.direct_call(function, &frame, &args)?;
             }
+            // Only the file that declares the class lays its object out, so its entry for the
+            // constructor's defaults constructs it.
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::ModuleConstructorDefaultEntry {
+                constructor,
+                outer,
+                params,
+                ..
+            } = &**call_callee =>
+            {
+                let function = self
+                    .calls
+                    .instance(
+                        &krusty::backend::instance_links::InstanceEntry::ConstructorDefaults {
+                            module: self.module_name.into(),
+                            declaration: *constructor,
+                        },
+                    )
+                    .ok_or_else(|| {
+                        "a cross-file construction leaving arguments to a constructor its file \
+                         does not expose"
+                            .to_string()
+                    })?;
+                let mut frame = outer.iter().copied().collect::<Vec<_>>();
+                frame.extend_from_slice(params);
+                frame.extend(std::iter::repeat_n(
+                    Ty::Int,
+                    krusty::backend::default_arguments::mask_words(params.len()),
+                ));
+                self.direct_call(function, &frame, &args)?;
+            }
             // The target stdlib's own `typeOf` body only says it is a compiler intrinsic.
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1310,6 +1363,22 @@ impl<'a> Body<'a> {
                 }) =>
             {
                 self.type_of_call(*target, substitutions)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::External {
+                target,
+                substitutions,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.is_array_storage_copy(*target) =>
+            {
+                self.array_storage_copy(*target, substitutions, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1676,6 +1745,21 @@ impl<'a> Body<'a> {
                 self.property_read(*target, *dispatch_receiver)?
             }
             IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && let Some(element) = self.array_storage_property(*target) =>
+            {
+                self.array_storage_read(element, *receiver)?;
+            }
+            IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } =
                     &**checked_op
                     && self.is_array_size_property(*target) =>
@@ -1836,13 +1920,15 @@ impl<'a> Body<'a> {
                 captures,
                 sam,
                 ..
-            } => self.function_value(
-                id,
-                impl_fn,
-                &captures,
-                function_values::FunctionEquality::Identity,
-                sam.as_deref(),
-            )?,
+            } => {
+                self.function_value(
+                    id,
+                    impl_fn,
+                    &captures,
+                    function_values::FunctionEquality::Identity,
+                    sam.as_deref(),
+                )?;
+            }
             IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
                 self.callable_reference(id, &reference)?
             }
@@ -2365,6 +2451,8 @@ fn checked_operation_name(operation: &krusty::ir::IrCheckedOperation) -> &'stati
         IrCheckedOperation::RangeContains { .. } => "RangeContains",
         IrCheckedOperation::ComparableRangeContains { .. } => "ComparableRangeContains",
         IrCheckedOperation::IllegalProgressionStep { .. } => "IllegalProgressionStep",
+        IrCheckedOperation::AtomicField { .. } => "AtomicField",
+        IrCheckedOperation::AtomicArrayElement { .. } => "AtomicArrayElement",
         IrCheckedOperation::RangeLoop { .. } => "RangeLoop",
         IrCheckedOperation::PropertyReference { .. } => "PropertyReference",
     }

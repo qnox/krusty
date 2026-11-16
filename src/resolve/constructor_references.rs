@@ -195,6 +195,10 @@ impl Checker<'_> {
                 ExprLowering::SamConstructorReference {
                     signature,
                     sam: Box::new(sam),
+                    interface_name: classifier
+                        .declaration_name
+                        .as_ref()
+                        .map(|declaration| declaration.name().into()),
                 },
             );
             return Some(signature);

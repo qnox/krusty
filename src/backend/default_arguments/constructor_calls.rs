@@ -8,14 +8,16 @@
 //! constructor's `this(…)` or `super(…)`, and an enum constant. Each already names the exact
 //! constructor the checker selected; the rewrite names the entry's place instead.
 //!
+//! A construction of a class another file of the module declares calls the entry that file
+//! publishes for its constructor's defaults, a [`Callee::ModuleConstructorDefaultEntry`].
+//!
 //! A call this lowering cannot realize keeps its checked form and its omitted ordinals, so the
-//! backend's own decline names it: a construction of a class another file declares, and a
-//! delegation to a dependency's constructor.
+//! backend's own decline names it: a delegation to a dependency's constructor.
 
-use crate::ir::{ClassId, ExprId, IrConstructorTarget, IrExpr, IrFile};
+use crate::ir::{Callee, ClassId, ExprId, IrConstructorTarget, IrExpr, IrFile};
 use crate::types::Ty;
 
-use super::call_sites::{arguments, frame, Frame};
+use super::call_sites::{arguments, frame, replace, Frame};
 use super::constructor_entries::{declared, DeclaredConstructor};
 use super::entries::Entries;
 
@@ -40,6 +42,7 @@ pub(super) fn rewrite(ir: &mut IrFile, entries: &mut Entries, site: ExprId) {
     let has_declared_params = declared_params.is_some();
     let (internal, default_prefix_count) = (*internal, *default_prefix_count);
     let Some(class) = ir.class_id_by_name(internal) else {
+        module_construction(ir, site);
         return;
     };
     let Some(&target) = ir.construction_targets.get(&site) else {
@@ -81,6 +84,60 @@ pub(super) fn rewrite(ir: &mut IrFile, entries: &mut Entries, site: ExprId) {
         default_prefix_count,
     };
     ir.construction_targets.insert(site, entry);
+}
+
+/// Rewrite the construction at `site` of a class another file declares, which leaves arguments
+/// out, to call the entry that file publishes for the selected constructor's defaults: the
+/// enclosing instance of an inner class, then the constructor's whole frame and the masks.
+fn module_construction(ir: &mut IrFile, site: ExprId) {
+    let IrExpr::New {
+        internal,
+        args,
+        defaults,
+        default_prefix_count,
+        ..
+    } = ir.expr(site)
+    else {
+        return;
+    };
+    let Some(&constructor) = ir.module_constructions.selected.get(&site) else {
+        return;
+    };
+    let Some(record) = ir.module_constructions.records.get(&constructor) else {
+        return;
+    };
+    let outer = record.outer.map(Ty::obj_name);
+    let prefix = usize::from(outer.is_some());
+    if *default_prefix_count as usize != prefix || args.len() < prefix {
+        return;
+    }
+    let (leading, supplied) = args.split_at(prefix);
+    let params = record.parameters.to_vec();
+    let Some(frame) = frame(supplied, defaults, params.len()) else {
+        return;
+    };
+    let internal = *internal;
+    let mut operands = leading.to_vec();
+    let result = ir
+        .checked_type(site)
+        .unwrap_or_else(|| Ty::obj_name(internal));
+    operands.extend(arguments(ir, &params, frame));
+    ir.module_constructions.selected.remove(&site);
+    replace(
+        ir,
+        site,
+        IrExpr::Call {
+            callee: Box::new(Callee::ModuleConstructorDefaultEntry {
+                constructor,
+                outer,
+                params,
+                ret: result,
+            }),
+            dispatch_receiver: None,
+            args: operands,
+        },
+        result,
+    );
 }
 
 /// Rewrite every delegation and enum constant of this file's classes that leaves arguments out.

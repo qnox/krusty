@@ -55,6 +55,8 @@ pub use resolved_member::ResolvedMember;
 mod resolved_symbol;
 mod sam;
 mod scope_level_callables;
+mod scope_level_values;
+pub(crate) use scope_level_values::ScopedValue;
 mod selected_call_instantiation;
 mod separately_mapped_selection;
 pub(crate) use selected_call_instantiation::{
