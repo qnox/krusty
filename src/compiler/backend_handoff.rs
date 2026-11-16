@@ -82,13 +82,11 @@ pub(super) fn checked_ir_file<'a>(
             }
         }
     }
-    if let Err(error) =
-        record_checked_klib_dependency_facts(
+    if let Err(error) = record_checked_klib_dependency_facts(
         &mut callables,
         symbols.semantic_platform(),
         module.dispatched_classes,
-    )
-    {
+    ) {
         diags.error(Span::new(0, 0), format!("internal error: {error}"));
         return None;
     }
