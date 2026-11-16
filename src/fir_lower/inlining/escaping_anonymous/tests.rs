@@ -182,3 +182,66 @@ fn specialized_transport_removal_does_not_retag_original_prefix_debug_identity()
         .receiver
         .is_some());
 }
+
+#[test]
+fn copied_constructor_code_rewrites_a_shared_operand_once() {
+    // The declaration takes `(a, lambda, b)`; the copy drops the lambda and takes `(a, b)`.
+    let mut ir = crate::ir::IrFile::default();
+    let name = crate::types::type_name("sample/InlineAnonymous");
+    let mut class = crate::ir::IrClass::synthetic(name);
+    class.is_anonymous_object = true;
+    for _ in 0..3 {
+        class.ctor_args.push(crate::ir::IrCtorArg {
+            name: None,
+            context_kind: crate::types::ContextParameterKind::None,
+            ty: Ty::Int,
+            declared_ty: None,
+            is_field: false,
+            field_index: None,
+            has_default: false,
+            is_vararg: false,
+            type_param: None,
+            check: None,
+            anonymous_super_forward: None,
+            capture: None,
+            provenance: crate::ir::IrCtorParameterProvenance::Value,
+            capture_identity: None,
+        });
+    }
+    let source = ir.add_class(class);
+    // Parameter `b` and the first local, each read by both a super argument and the prelude.
+    let parameter = ir.add_expr(IrExpr::GetValue(3));
+    let local = ir.add_expr(IrExpr::GetValue(4));
+    let spec = crate::ir::IrSpecializedAnonymousClass {
+        source,
+        order: 0,
+        caller_declaration: crate::fir::DeclarationId::from_raw(1),
+        caller: None,
+        caller_is_default: false,
+        caller_source_name: "caller".into(),
+        inline_callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
+        inline_callee_source_name: "callee".into(),
+        crossinline_operands: Vec::new(),
+        method_clones: Default::default(),
+        bindings: Default::default(),
+        reified_bindings: Default::default(),
+        field_count: 0,
+        property_count: 0,
+        omitted_capture_fields: 0,
+        constructor_parameters: vec![Some(0), Some(2)],
+        caller_property_uses: Vec::new(),
+        pending_property_roots: Vec::new(),
+    };
+
+    read_copy_parameters(
+        &mut ir,
+        source,
+        &spec,
+        &[parameter, local, parameter, local],
+        name,
+    )
+    .expect("every read is of a parameter the copy keeps");
+
+    assert!(matches!(ir.exprs[parameter as usize], IrExpr::GetValue(2)));
+    assert!(matches!(ir.exprs[local as usize], IrExpr::GetValue(3)));
+}
