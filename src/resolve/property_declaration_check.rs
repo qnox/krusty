@@ -479,13 +479,7 @@ impl Checker<'_> {
             // convention for a builtin operation. The payload is also attached to this root
             // expression so checked FIR emits a literal rather than a runtime `<clinit>` program.
             if p.is_const && !resolved_property_ty.mentions_error() {
-                let context = constant_evaluation::CheckedConstantExpression {
-                    file: self.file,
-                    expression_types: &self.expr_types,
-                    resolved_constants: &self.resolved_constants,
-                    resolved_calls: &self.resolved_calls,
-                    resolved_operator_calls: &self.resolved_operator_calls,
-                };
+                let context = self.checked_constant_context();
                 let folded = checked_constant_expression(context, init, resolved_property_ty);
                 if let Some(folded) = folded {
                     self.resolved_constants.insert(init, folded);

@@ -1027,8 +1027,8 @@ fn phase_timing_coverage_run_prints_every_phase() {
     );
     assert_eq!(
         fs::read_to_string(&github_output).expect("read workflow output"),
-        format!("compiler_e2e_binary={}\n", e2e_bin.display()),
-        "coverage alone publishes its selected binary after its children finish"
+        "",
+        "a test binary never writes the coverage run's workflow output"
     );
     assert!(e2e_bin.is_file(), "published executable remains available");
     assert!(
@@ -1059,7 +1059,7 @@ fn phase_timing_coverage_run_prints_every_phase() {
     );
     assert_eq!(
         fs::read_to_string(&github_output).expect("read fallback workflow output"),
-        format!("compiler_e2e_binary={}\n", e2e_bin.display())
+        ""
     );
     assert_eq!(
         fallback_stderr

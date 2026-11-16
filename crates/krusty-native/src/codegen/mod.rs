@@ -257,6 +257,14 @@ impl Backend for CraneliftBackend {
             &mut file.ir,
             &mut file.callables,
             |function| file.dependency_exports.callable(function).is_some(),
+            |constructor| {
+                file.classifiers.module().declares_instance(
+                    &krusty::backend::instance_links::InstanceEntry::Constructor {
+                        module: file.module_name.into(),
+                        declaration: constructor,
+                    },
+                )
+            },
         );
         // After default arguments, so a `$default` entry's call of the declaration is the one
         // that gains the continuation, and before dispatch entries, which copy the signature.
@@ -620,6 +628,9 @@ impl Backend for CraneliftBackend {
                 }
                 krusty::backend::instance_links::InstanceEntry::Constructor { .. } => {
                     "a constructor".to_owned()
+                }
+                krusty::backend::instance_links::InstanceEntry::ConstructorDefaults { .. } => {
+                    "a constructor's default-argument entry".to_owned()
                 }
                 krusty::backend::instance_links::InstanceEntry::EnumConstant(constant) => {
                     format!(
