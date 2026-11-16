@@ -37,6 +37,8 @@ mod argument_parameter_mapping;
 mod builtin_implementation;
 mod char_sequence_protocol;
 mod coroutine_runtime;
+mod enum_entries_factory;
+pub(crate) mod runtime_selections;
 mod selected_external_members;
 use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,
@@ -2843,8 +2845,7 @@ pub struct SymbolTable {
 pub(crate) struct PassTwoSymbols {
     compilation_id: u64,
     libraries: std::rc::Rc<dyn SemanticPlatform>,
-    coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
-    char_sequence_protocol: Option<crate::fir::CharSequenceProtocol>,
+    runtime: runtime_selections::RuntimeSelections,
     native_plugins: crate::plugins::registry::NativePlugins,
 }
 
@@ -2858,15 +2859,9 @@ impl PassTwoSymbols {
         std::rc::Rc::clone(&self.libraries)
     }
 
-    /// The runtime declarations selected by resolution for suspend lowering.
-    pub(crate) fn coroutine_runtime(&self) -> Option<crate::ir::IrCoroutineRuntime> {
-        self.coroutine_runtime
-    }
-
-    /// The `CharSequence` members resolution selected for a builder that reads an appended
-    /// sequence through them.
-    pub(crate) fn char_sequence_protocol(&self) -> Option<crate::fir::CharSequenceProtocol> {
-        self.char_sequence_protocol
+    /// The dependency declarations resolution selected for the lowerings after checking.
+    pub(crate) fn runtime(&self) -> runtime_selections::RuntimeSelections {
+        self.runtime
     }
 
     pub(crate) fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
@@ -2876,13 +2871,11 @@ impl PassTwoSymbols {
 
 impl SymbolTable {
     pub(crate) fn into_pass_two_symbols(self) -> PassTwoSymbols {
-        let coroutine_runtime = coroutine_runtime::selected(&*self.libraries);
-        let char_sequence_protocol = char_sequence_protocol::selected(&*self.libraries);
+        let runtime = runtime_selections::RuntimeSelections::select(&*self.libraries);
         PassTwoSymbols {
             compilation_id: self.compilation_id,
             libraries: std::rc::Rc::from(self.libraries),
-            coroutine_runtime,
-            char_sequence_protocol,
+            runtime,
             native_plugins: self.native_plugins,
         }
     }
