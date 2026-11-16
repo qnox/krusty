@@ -205,6 +205,57 @@ fn an_anonymous_object_has_no_name_provided() {
     );
 }
 
+/// An anonymous object a serialized body declares has no source provenance. Its declaration site
+/// names it as Kotlin's IR does: the container of the declaring body, then its own name.
+#[test]
+fn a_serialized_body_object_is_named_by_its_declaration_site() {
+    use crate::ir::{IrSiteClassContainer, IrSiteClassName};
+
+    let mut ir = IrFile::default();
+    let mut sited = |physical: &str, container: Option<IrSiteClassContainer>| {
+        let class = ir.add_class(IrClass::synthetic(type_name(physical)));
+        let declared = &mut ir.classes[class as usize];
+        declared.is_source_declared = true;
+        declared.is_local_class = true;
+        declared.is_anonymous_object = true;
+        declared.site_name = container.map(|container| IrSiteClassName {
+            container,
+            name: ANONYMOUS_OBJECT_NAME.into(),
+        });
+        class
+    };
+    let top_level = sited(
+        "$klib-local$kotlin$1$2",
+        Some(IrSiteClassContainer::Package(type_name(
+            "kotlin/coroutines/intrinsics",
+        ))),
+    );
+    let member = sited(
+        "$klib-local$kotlin$1$3",
+        Some(IrSiteClassContainer::Classifier(
+            crate::types::type_name_nested_child(type_name("p/Outer"), "Inner"),
+        )),
+    );
+    let root = sited(
+        "$klib-local$kotlin$1$4",
+        Some(IrSiteClassContainer::Package(TypeName::ROOT)),
+    );
+    let unsited = sited("$klib-local$kotlin$1$5", None);
+
+    let names = source_class_names(&ir, top_level).unwrap();
+    assert_eq!(
+        names.qualified,
+        "kotlin.coroutines.intrinsics.<no name provided>"
+    );
+    assert_eq!(names.simple, ANONYMOUS_OBJECT_NAME);
+    assert_eq!(
+        qualified(&ir, member).as_deref(),
+        Some("p.Outer.Inner.<no name provided>")
+    );
+    assert_eq!(qualified(&ir, root).as_deref(), Some("<no name provided>"));
+    assert!(source_class_names(&ir, unsited).is_none());
+}
+
 #[test]
 fn a_generated_classifier_has_no_source_name() {
     let mut ir = IrFile::default();
