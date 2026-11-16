@@ -77,7 +77,7 @@ impl<'a> FileLowering<'a> {
         &mut self,
         class: ClassId,
         base: &str,
-    ) -> Result<DataId, Unsupported> {
+    ) -> Result<(DataId, Option<String>), Unsupported> {
         // A support unit names the descriptors of the dependency classes a source file extends,
         // which that file's descriptors point at as their superclass's.
         let named = match self.unit_kind {
@@ -87,15 +87,18 @@ impl<'a> FileLowering<'a> {
             krusty::backend::CheckedIrUnitKind::DependencySupport => self.exported.contains(&class),
         };
         if !named {
-            return self.declare_local_data(&format!("kt_type_{base}"), false);
+            let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
+            return Ok((descriptor, None));
         }
         let symbol = super::super::super::symbols::module_descriptor_symbol(
             self.module_name,
             self.ir.classes[class as usize].fq_name_id(),
         );
-        self.module
+        let descriptor = self
+            .module
             .declare_data(&symbol, Linkage::Hidden, false, false)
-            .map_err(|error| declined!("declaring `{symbol}` ({error})"))
+            .map_err(|error| declined!("declaring `{symbol}` ({error})"))?;
+        Ok((descriptor, Some(symbol)))
     }
 
     /// The runtime descriptor for a represented type: a class of this file or of another file of
@@ -121,11 +124,15 @@ impl<'a> FileLowering<'a> {
                 return self.import_data(&symbol).map(Some);
             }
         }
-        if let Some(symbol) = target
+        if let Some(identity) = target
             .obj_internal()
-            .and_then(super::super::super::intrinsics::builtin_companion_descriptor)
+            .and_then(|name| self.classifiers.classifier(name))
+            .and_then(|fact| fact.klib_identity.clone())
         {
-            return self.import_data(symbol).map(Some);
+            if let Some(symbol) = self.laid_out.published_descriptor(&identity)? {
+                let symbol = symbol.to_owned();
+                return self.import_data(&symbol).map(Some);
+            }
         }
         let symbol = match target {
             Ty::String => "kt_type_string",

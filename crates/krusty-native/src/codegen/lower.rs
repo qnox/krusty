@@ -79,7 +79,7 @@ use krusty::ir::{
 use krusty::types::{Ty, TypeName};
 
 use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
-use super::super::laid_out_classes::{LaidOutClass, LaidOutClasses};
+use super::super::laid_out_classes::{LaidOutClass, LaidOutClasses, ObjectFunction};
 use super::super::symbols::Symbols;
 use super::{Entry, BOX_RESULT_FRAME, PROGRAM_ENTRY};
 use crate::NativeTarget;
@@ -154,6 +154,8 @@ pub struct Lowered {
     pub abi: Vec<super::super::c_abi::Record>,
     /// What a later file of the module extending a class of this one reads of it.
     pub laid_out: Vec<(TypeName, LaidOutClass)>,
+    /// Actual externally linkable descriptor definitions, signed by their producer class records.
+    pub class_descriptors: Vec<(krusty::backend::KlibClassIdentity, String)>,
 }
 
 /// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
@@ -226,6 +228,8 @@ pub struct FileInput<'a> {
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     pub dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
+    /// Stable dependency-member numbers shared by every file in the source module.
+    pub dependency_interface_numbers: &'a mut HashMap<Vec<u8>, u32>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -264,13 +268,20 @@ pub fn lower_file(
         dependency_signatures,
         dependency_symbols,
         dependency_instances,
+        dependency_interface_numbers,
         value_classes,
         slot_plan,
         module_facts,
         laid_out,
     } = input;
     let class_model = model::build(ir, value_classes, slot_plan, laid_out)?;
-    let extended = extended_elsewhere(ir, unit_kind, module_facts);
+    let extended = extended_elsewhere(
+        ir,
+        unit_kind,
+        module_facts,
+        classifiers,
+        dependency_signatures,
+    )?;
     let exported = module_abi::exported_classes(&class_model, &extended);
     // Another file calls a default-argument entry by the one symbol its identity names.
     if let Some(declaration) = ir.default_entries.keys().find(|&&declaration| {
@@ -326,8 +337,10 @@ pub fn lower_file(
         laid_out,
         extended,
         exported,
+        class_descriptors: Vec::new(),
         extension_entries: HashMap::default(),
         extension_tables: HashMap::default(),
+        published_dependency_bridges: HashMap::default(),
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
         model: class_model,
@@ -357,12 +370,15 @@ pub fn lower_file(
         unwalkable_collections: krusty::fx_hash::HashSet::default(),
         walkable_classes: krusty::fx_hash::HashMap::default(),
         declares_its_own_comparable: declares_its_own_comparable(ir),
-        implemented_dependencies: implemented_dependencies(ir),
+        implemented_dependencies: implemented_dependencies(ir, |owner| {
+            laid_out.get(owner).is_some()
+        }),
         module_name,
         unit_kind,
         dependency_signatures,
         dependency_symbols,
         dependency_interface_calls: Vec::new(),
+        dependency_interface_numbers,
         dependency_instances,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
@@ -420,6 +436,7 @@ pub fn lower_file(
     lowering.define_interface_identities()?;
 
     let records = lowering.laid_out_records()?;
+    let class_descriptors = std::mem::take(&mut lowering.class_descriptors);
     let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
     let mut product = module.finish();
     for data in comdat_objects {
@@ -442,18 +459,22 @@ pub fn lower_file(
         defines_entry,
         abi,
         laid_out: records,
+        class_descriptors,
     })
 }
 
 /// The classes of `ir` another file of the module extends, with their superclasses in this file:
 /// what a later file's subclass names by symbol, so their objects define those symbols for the
 /// link to find. Of a support unit's classes, the dependency classes the module plan numbers are
-/// the ones a source file extends.
+/// the ones a source file extends: through a named class, or through the local class of an inline
+/// template a call expands there.
 fn extended_elsewhere(
     ir: &IrFile,
     unit_kind: krusty::backend::CheckedIrUnitKind,
     module_facts: &krusty::backend::BackendModuleFacts,
-) -> krusty::fx_hash::HashSet<krusty::ir::ClassId> {
+    classifiers: &dyn krusty::backend::BackendClassifierSource,
+    signatures: &krusty::backend::DependencyExportSignatures,
+) -> Result<krusty::fx_hash::HashSet<krusty::ir::ClassId>, Unsupported> {
     let mut extended = krusty::fx_hash::HashSet::default();
     let classes = module_facts.classes();
     let support = unit_kind != krusty::backend::CheckedIrUnitKind::Source;
@@ -461,17 +482,43 @@ fn extended_elsewhere(
         if class.is_interface || ir.local_class_name_provenance.contains_key(&(id as u32)) {
             continue;
         }
+        // A local class of a later file, which no header names, may extend any class open to
+        // extension, so every such class is laid out for one.
+        if (class.is_open || class.is_abstract)
+            && !class.is_local_class
+            && !class.is_anonymous_object
+        {
+            extended.insert(id as krusty::ir::ClassId);
+        }
         if support && !classes.is_dependency_class(class.fq_name) {
             continue;
         }
         if classes
             .subclasses_of(class.fq_name)
             .any(|subclass| ir.class_id_by_name(subclass).is_none())
+            || (support && classes.is_inline_template_superclass(class.fq_name))
         {
             extended.insert(id as krusty::ir::ClassId);
         }
+        // A public open source classifier can be subclassed by a later KLIB consumer. Its
+        // physical layout and constructor/activation entries therefore need a provider-owned
+        // linkable record even when this source module has no local subclass.
+        let source_identity = match classifiers
+            .classifier(class.fq_name)
+            .filter(|fact| !support && fact.source && fact.is_extensible)
+        {
+            Some(fact) => super::super::laid_out_classes::producer_class_identity(
+                unit_kind,
+                signatures.classifier(id as krusty::ir::ClassId),
+                fact.klib_identity.as_ref(),
+            )?,
+            None => None,
+        };
+        if source_identity.is_some() {
+            extended.insert(id as krusty::ir::ClassId);
+        }
     }
-    extended
+    Ok(extended)
 }
 
 struct FileLowering<'a> {
@@ -491,6 +538,7 @@ struct FileLowering<'a> {
     module_facts: &'a krusty::backend::BackendModuleFacts,
     /// The classes earlier files of the source module laid out.
     laid_out: &'a LaidOutClasses,
+    class_descriptors: Vec<(krusty::backend::KlibClassIdentity, String)>,
     /// The classes of this file another file of the module extends.
     extended: krusty::fx_hash::HashSet<krusty::ir::ClassId>,
     /// The classes of `extended` and their superclasses here, whose table entries another file
@@ -500,6 +548,8 @@ struct FileLowering<'a> {
     extension_entries: HashMap<krusty::ir::ClassId, module_abi::ExtensionEntries>,
     /// What the vtable and interface table of each class in `extended` hold.
     extension_tables: HashMap<krusty::ir::ClassId, (Vec<FuncId>, Vec<FuncId>)>,
+    /// Linkable Native bridge bodies recorded by exact dependency-interface member identity.
+    published_dependency_bridges: HashMap<(krusty::ir::ClassId, Vec<u8>), ObjectFunction>,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
     symbols: Symbols,
@@ -593,6 +643,10 @@ struct FileLowering<'a> {
     /// Dependency interface members this file calls, numbered after the module's own interfaces.
     /// The identity bytes are what a dependent implementation records itself under.
     dependency_interface_calls: Vec<(u32, Vec<u8>)>,
+    /// Module-wide numbers for imported interface identities. The local vector above is only
+    /// this file's emitted identity records; the shared map prevents a second file from reusing
+    /// one stub number for another dependency member.
+    dependency_interface_numbers: &'a mut krusty::fx_hash::HashMap<Vec<u8>, u32>,
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
@@ -709,6 +763,20 @@ impl<'a> FileLowering<'a> {
                         Linkage::Hidden
                     }
                     krusty::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
+                    // A member of a local or anonymous class is reachable from no other file, and
+                    // an inline function that declares the class realizes it again in each file
+                    // it is expanded into, under the same class name. Like the class's
+                    // descriptor, its members stay inside the file.
+                    krusty::backend::CheckedIrUnitKind::Source
+                        if function
+                            .dispatch_receiver
+                            .and_then(|owner| self.ir.class_id_by_name(owner))
+                            .is_some_and(|class| {
+                                self.ir.local_class_name_provenance.contains_key(&class)
+                            }) =>
+                    {
+                        Linkage::Local
+                    }
                     krusty::backend::CheckedIrUnitKind::Source
                         if super::super::c_abi::is_file_level(self.ir, index)
                             || self.symbols.cross_file[index] =>

@@ -322,6 +322,8 @@ impl BodyLowering<'_, '_, '_> {
                 name,
                 kind,
                 declaration,
+                params,
+                ret,
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
@@ -332,6 +334,8 @@ impl BodyLowering<'_, '_, '_> {
                     name,
                     kind: *kind,
                     declaration: *declaration,
+                    parameters: Some(params.clone()),
+                    result: Some(*ret),
                 };
                 self.direct_call(target, receiver, args)
             }
@@ -369,6 +373,8 @@ impl BodyLowering<'_, '_, '_> {
                     name,
                     kind: krusty::ir::IrSuperCallKind::Function,
                     declaration: source.map(krusty::fir::ResolvedFunctionOverrideTarget::Module),
+                    parameters: None,
+                    result: None,
                 };
                 self.direct_call(target, receiver, args)
             }
@@ -392,6 +398,19 @@ impl BodyLowering<'_, '_, '_> {
                     == Some(krusty::backend::BackendCompilerIntrinsic::TypeOf)
                 {
                     return self.type_of(*target, substitutions);
+                }
+                if let Some(result) =
+                    self.published_dependency_member_call(dispatch::PublishedDependencyCall {
+                        target: *target,
+                        key: PlanKey::DependencyCallable(*target),
+                        slot_identity: *target,
+                        fact: realization.clone(),
+                        callee: Ok(callee.clone()),
+                        receiver: dispatch_receiver,
+                        args,
+                    })
+                {
+                    return result;
                 }
                 let symbols = self.file.dependency_symbols;
                 let export_of = |realization: &krusty::backend::BackendCallableFact| {
@@ -508,11 +527,24 @@ impl BodyLowering<'_, '_, '_> {
                     declared_ret,
                 )
                 .with_receiver(declared_receiver)
+                .with_context_count(realization.context_count)
                 .with_overridden(&realization.overridden_declarations);
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
                     Some(receiver) => {
+                        if let Some(realized) = self.source_class_member(
+                            *target,
+                            signature,
+                            super::implementor_dispatch::InterfaceMemberCall {
+                                receiver,
+                                args,
+                                ret: *ret,
+                                physical: &realization.physical_params,
+                            },
+                        ) {
+                            return realized;
+                        }
                         // A receiver typed by a RUNTIME-KNOWN type this file puts a class of its
                         // own behind may be one of those objects, and every table below answers
                         // only for the ones the runtime MAKES. No static type tells the two apart
@@ -840,28 +872,6 @@ impl BodyLowering<'_, '_, '_> {
                                 return Ok(None);
                             };
                             return self.convert(produced, Some(answer), *ret);
-                        }
-                        // A companion member the runtime realizes takes its arguments alone:
-                        // the receiver is an object carrying nothing, and it is not evaluated.
-                        if let Some(symbol) =
-                            super::super::super::intrinsics::runtime_companion_member(
-                                owner, &name, params,
-                            )
-                        {
-                            let mut arguments = Vec::with_capacity(args.len());
-                            for argument in args {
-                                arguments.push(self.reference(*argument)?);
-                            }
-                            if self.terminated {
-                                return Ok(None);
-                            }
-                            let signature = vec![any(); arguments.len()];
-                            let produced =
-                                self.runtime_call(symbol, &signature, any(), &arguments)?;
-                            let Some(produced) = produced else {
-                                return Ok(None);
-                            };
-                            return self.convert(produced, Some(any()), *ret);
                         }
                         let Some(symbol) =
                             super::super::super::intrinsics::runtime_member(signature)

@@ -18,6 +18,19 @@ pub struct KlibBodyDeclarationModifiers {
 }
 
 impl KlibBodyDeclarationModifiers {
+    /// Whether the selected member can dispatch to a subclass implementation.
+    pub fn is_overridable(self) -> bool {
+        matches!(
+            self.modality,
+            KotlinModality::Open | KotlinModality::Abstract
+        )
+    }
+
+    /// Whether the selected semantic declaration requires a continuation frame.
+    pub fn is_suspend(self) -> bool {
+        self.is_suspend
+    }
+
     pub(crate) fn permits_ordinary_body(self) -> bool {
         !self.is_inline
             && !self.is_suspend
@@ -30,6 +43,12 @@ impl KlibBodyDeclarationModifiers {
     /// an override, which the receiver's class supplies.
     pub(crate) fn declares_abstract_implementation(self) -> bool {
         !self.is_external && !self.property_is_external && self.modality.is_abstract()
+    }
+
+    /// Whether the declaration is abstract: a call of it runs the override the receiver's class
+    /// supplies, never a body of its own.
+    pub fn is_abstract(self) -> bool {
+        self.modality.is_abstract()
     }
 
     pub(crate) fn function(declaration: &KotlinFunction) -> Self {
@@ -56,6 +75,25 @@ impl KlibBodyDeclarationModifiers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn virtual_member_dispatch_requires_an_overridable_declaration() {
+        for (modality, expected) in [
+            (KotlinModality::Final, false),
+            (KotlinModality::Open, true),
+            (KotlinModality::Abstract, true),
+            (KotlinModality::Sealed, false),
+        ] {
+            let modifiers = KlibBodyDeclarationModifiers {
+                is_inline: false,
+                is_suspend: false,
+                is_external: false,
+                property_is_external: false,
+                modality,
+            };
+            assert_eq!(modifiers.is_overridable(), expected, "{modality:?}");
+        }
+    }
 
     #[test]
     fn ordinary_body_admission_requires_every_implementation_modifier() {

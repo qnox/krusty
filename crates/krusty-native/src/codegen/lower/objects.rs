@@ -74,6 +74,9 @@ const _: () = {
 pub(super) struct ClassItems {
     /// Its `KType`.
     pub(super) descriptor: DataId,
+    /// The classifier identity this descriptor was declared to publish, if its physical
+    /// declaration is linkable from another file.
+    pub(super) published_descriptor: Option<(krusty::backend::KlibClassIdentity, String)>,
     /// `kt_<class>__init(this, args…)`, absent for a class with no primary constructor: every
     /// `<init>` of one comes from its secondaries.
     pub(super) constructor: Option<FuncId>,
@@ -230,7 +233,11 @@ impl<'a> FileLowering<'a> {
     pub(super) fn declare_classes(&mut self) -> Result<(), Unsupported> {
         for class in 0..self.ir.classes.len() as ClassId {
             let base = self.class_base(class).to_string();
-            let descriptor = self.declare_descriptor(class, &base)?;
+            let (descriptor, linkable_symbol) = self.declare_descriptor(class, &base)?;
+            let published_descriptor =
+                linkable_symbol.zip(self.dependency_signatures.classifier(class).cloned());
+            let published_descriptor =
+                published_descriptor.map(|(symbol, identity)| (identity, symbol));
             let params: Vec<Ty> = std::iter::once(any())
                 .chain(constructor_parameters(self.ir, class))
                 .collect();
@@ -270,6 +277,7 @@ impl<'a> FileLowering<'a> {
             };
             self.classes.push(ClassItems {
                 descriptor,
+                published_descriptor,
                 constructor,
                 singleton,
                 secondaries,
@@ -289,6 +297,7 @@ impl<'a> FileLowering<'a> {
                         | Slot::AnnotationMember { .. }
                         | Slot::ValueBridge { .. }
                         | Slot::Bridge { .. }
+                        | Slot::DeclaredBridge { .. }
                         | Slot::FunctionBridge { .. }
                         | Slot::AccessorBridge { .. }
                 )
@@ -319,6 +328,24 @@ impl<'a> FileLowering<'a> {
                     },
                     &params,
                     ret,
+                )?;
+                self.accessors.insert(slot, id);
+                continue;
+            }
+            if let Slot::DeclaredBridge {
+                parameters,
+                result,
+                target_slot,
+                target,
+            } = &slot
+            {
+                // The BASE's signature, as the plan recorded it for a base no file declares.
+                let mut params = vec![any()];
+                params.extend(parameters.iter().copied());
+                let id = self.declare_local_function(
+                    &format!("kt_declared_bridge_{target}_{target_slot}"),
+                    &params,
+                    *result,
                 )?;
                 self.accessors.insert(slot, id);
                 continue;
@@ -681,6 +708,7 @@ impl<'a> FileLowering<'a> {
                 | Slot::AnnotationMember { .. }
                 | Slot::ValueBridge { .. }
                 | Slot::Bridge { .. }
+                | Slot::DeclaredBridge { .. }
                 | Slot::FunctionBridge { .. }
                 | Slot::AccessorBridge { .. } => self.accessors[slot],
             });
@@ -787,6 +815,8 @@ impl<'a> FileLowering<'a> {
         let (qualified_name, simple_name, class_names) = self.reflection_names(class);
         if instantiable {
             self.record_dependency_implementations(descriptor, &base, class, (&vtable, &itable))?;
+        } else if self.exported.contains(&class) {
+            self.publish_dependency_bridges(class)?;
         }
         self.define_type_descriptor(
             descriptor,
@@ -806,7 +836,9 @@ impl<'a> FileLowering<'a> {
                 simple_name: simple_name.as_deref(),
                 class_names,
             },
-        )
+        )?;
+        let publication = self.classes[class as usize].published_descriptor.clone();
+        self.record_published_descriptor(class, descriptor, publication)
     }
 
     /// The names Kotlin reflection publishes for one declared classifier, from the declaration
@@ -1018,16 +1050,33 @@ impl<'a> FileLowering<'a> {
                     // A superclass an earlier file laid out, through the entry its file exports
                     // for the selected constructor.
                     None if self.model.layout(class).laid_out_superclass == Some(*owner) => {
-                        let (constructor, params) =
-                            self.laid_out_super_constructor(class, target.ordinal)?;
-                        if params.len() != target_params.len() {
-                            return Err(declined!(
-                                "a delegation to a superclass constructor with compiler-supplied \
-                                 parameters (`{}`)",
-                                owner.render()
-                            ));
-                        }
-                        (Some(constructor), target_params.clone())
+                        let source = self
+                            .classifiers
+                            .classifier(*owner)
+                            .is_some_and(|fact| fact.source);
+                        let (constructor, parameters) = if source {
+                            let (constructor, parameters) =
+                                self.laid_out_super_constructor(class, target.ordinal)?;
+                            if parameters.len() != target_params.len() {
+                                return Err(declined!(
+                                    "a same-module superclass constructor with a different selected frame (`{}`)",
+                                    owner.render()
+                                ));
+                            }
+                            (constructor, parameters)
+                        } else {
+                            let selected = self
+                                .ir
+                                .external_secondary_super_constructors
+                                .get(&(declaration.fq_name, ordinal as u32))
+                                .map(|target| target.declaration)
+                                .ok_or_else(|| declined!(
+                                    "a delegation to a dependency superclass without its exact selected constructor (`{}`)",
+                                    owner.render()
+                                ))?;
+                            self.dependency_super_constructor(class, selected, target_params)?
+                        };
+                        (Some(constructor), parameters)
                     }
                     None => {
                         return Err(declined!(
@@ -1227,6 +1276,23 @@ impl<'a> FileLowering<'a> {
         } = slot
         {
             return self.define_bridge(*declared, *target_slot, *target, id);
+        }
+        if let Slot::DeclaredBridge {
+            parameters,
+            result,
+            target_slot,
+            target,
+        } = slot
+        {
+            let forwarded = super::super::super::captures::carried_parameters(self.ir, *target);
+            let forwarded_ret = self.ir.functions[*target as usize].ret;
+            return self.define_converting_bridge(
+                (parameters, *result),
+                (&forwarded, forwarded_ret),
+                super::object_entries::BridgeTarget::Slot(*target_slot),
+                &format!("bridge to `{}`", self.ir.functions[*target as usize].name),
+                id,
+            );
         }
         if let Slot::FunctionBridge {
             arity,
@@ -1551,8 +1617,38 @@ impl<'a> FileLowering<'a> {
             // A superclass an earlier file laid out is constructed through the entry its file
             // exports for the constructor the checker selected.
             None if layout.laid_out_superclass.is_some() => {
-                let (constructor, params) =
-                    self.laid_out_super_constructor(class, declaration.super_ctor.ordinal)?;
+                let source = self
+                    .classifiers
+                    .classifier(declaration.superclass)
+                    .is_some_and(|fact| fact.source);
+                let (constructor, params) = if source {
+                    let (constructor, parameters) =
+                        self.laid_out_super_constructor(class, declaration.super_ctor.ordinal)?;
+                    if parameters.len() != declaration.super_ctor_params.len() {
+                        return Err(declined!(
+                            "a same-module superclass constructor with a different selected frame (`{}`)",
+                            declaration.fq_name()
+                        ));
+                    }
+                    (constructor, parameters)
+                } else {
+                    let selected = self
+                        .ir
+                        .external_super_constructors
+                        .get(&declaration.fq_name_id())
+                        .map(|target| target.declaration)
+                        .ok_or_else(|| {
+                            declined!(
+                                "a dependency superclass without its exact selected constructor (`{}`)",
+                                declaration.fq_name()
+                            )
+                        })?;
+                    self.dependency_super_constructor(
+                        class,
+                        selected,
+                        &declaration.super_ctor_params,
+                    )?
+                };
                 if declaration.super_args.len() != params.len()
                     || self
                         .ir
@@ -2625,10 +2721,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         {
             return self.runtime_call(symbol, &[], any(), &[]);
         }
-        if super::super::super::intrinsics::is_stateless_runtime_object(classifier) {
-            return Ok(Some(self.builder.ins().iconst(types::I64, 0)));
-        }
-        // Another file's object is read through the entry its file exports.
+        // Another module's object is read through the entry its module exports.
         if self.file.ir.class_id_by_name(classifier).is_none() {
             let instance = krusty::backend::instance_links::InstanceEntry::Object(classifier);
             if let Some(symbol) = self.file.dependency_instances.get(&instance) {

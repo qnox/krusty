@@ -1122,6 +1122,28 @@ fn mismatch(detail: String) -> KlibBodyDeclineReason {
 /// Declare the function to `ir`, with the parameter facts checked FIR lowering publishes for a
 /// top-level function. Its body is attached once lowered: a call cycle reaches the declaration
 /// before its body exists.
+/// The frame of a function the compiler adds to run part of a file's initialization: no receiver
+/// or parameters, and a `Unit` result.
+pub(super) fn initialization_header(name: &str) -> FunctionHeader {
+    FunctionHeader {
+        name: name.to_owned(),
+        params: Vec::new(),
+        ret: Ty::Unit,
+        identities: Vec::new(),
+        context_count: 0,
+        extension_receiver: false,
+        dispatch_receiver: None,
+        receiver_slot: None,
+        value_receiver: None,
+        singleton_extension_unread_receiver: None,
+        values: HashMap::default(),
+        defaults: Vec::new(),
+        type_parameters: KlibTypeParameters::default(),
+        erasures: HashMap::default(),
+        erased_result: None,
+    }
+}
+
 pub(super) fn declare_function(ir: &mut IrFile, header: &FunctionHeader) -> FunId {
     let function = ir.add_fun(IrFunction {
         name: header.name.clone(),

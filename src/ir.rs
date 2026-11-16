@@ -64,7 +64,9 @@ mod emitted_body_roots;
 mod enums;
 mod expect_actualization;
 mod expression_copy;
-pub(crate) use expression_copy::truncate_expression_facts;
+pub(crate) use expression_copy::{
+    rebind_declaration_argument_boundaries, truncate_expression_facts,
+};
 mod expression_provenance;
 pub use emitted_body_roots::{emitted_body_roots, emitted_declaration_roots, EmittedDeclaration};
 pub mod field_flags;
@@ -2877,7 +2879,7 @@ mod external_overrides;
 mod generated_members;
 pub use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
-pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
+pub use debug_locals::{IrCatchBinding, IrCatchName, IrLambdaForm, IrLambdaOrigin};
 pub use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
 pub use generated_members::{IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember};
 pub use generated_members::{
@@ -2886,6 +2888,7 @@ pub use generated_members::{
 };
 mod checked_operation;
 pub use checked_operation::IrCheckedOperation;
+mod construction_entries;
 mod exported_entries;
 mod function_parameters;
 pub use function_parameters::*;

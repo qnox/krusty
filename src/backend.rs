@@ -5,6 +5,7 @@
 pub mod class_names;
 pub mod class_tables;
 pub mod construction_entries;
+mod constructor_initializers;
 mod constructor_selection;
 pub mod coroutines;
 pub mod counted_loops;
@@ -13,6 +14,8 @@ mod dependency_accessor;
 mod dependency_call_shape;
 mod dependency_facts;
 mod dependency_metadata;
+pub(crate) use constructor_initializers::initializer_declarations;
+pub use constructor_initializers::ConstructorInitializerDeclaration;
 mod dependency_signature;
 pub mod dispatch_entries;
 mod entry;
@@ -39,13 +42,13 @@ pub use dependency_facts::{
     CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
 pub(crate) use dependency_metadata::has_standalone_dependency_code;
-pub use dependency_metadata::KlibDependencyCallable;
 pub use dependency_metadata::{authenticated_singleton_receiver, inert_staged_singleton_bindings};
 pub use dependency_metadata::{
     DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata, EnumConstant,
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
 pub(crate) use dependency_metadata::{ExportedConstructor, ExportedPropertyAccessor};
+pub use dependency_metadata::{KlibClassIdentity, KlibDependencyCallable};
 pub use dependency_signature::{
     authenticate_dependency_coroutine_call, instantiate_dependency_signature,
     DependencyFunctionSignature,
@@ -187,6 +190,14 @@ pub trait Backend {
         false
     }
 
+    /// Whether this target stores a top-level property's constant initializer before any code of
+    /// its file runs, as Kotlin/Native does, so that a file initializer reading a later property
+    /// of its file sees that constant. A target that does not runs every initializer of a file in
+    /// declaration order, constants included, and an earlier read sees the property's default.
+    fn presets_constant_top_level_initializers(&self) -> bool {
+        false
+    }
+
     /// Whether a dependency-support body may call an exact provider declaration which has no
     /// serialized KLIB body. Such a call is admitted only when the target's ordinary dependency
     /// registry can realize the frozen provider handle directly.
@@ -214,6 +225,23 @@ pub trait Backend {
         false
     }
 
+    /// The dependency classes this target lays out itself (each one it
+    /// [represents](Self::represents_dependency_classifier)) whose values it dispatches a call of a
+    /// supertype's member on, as it does a builtin class's: `CharSequence.length` on a
+    /// `StringBuilder`. Each selected member carries what these classes run for it, frozen from the
+    /// member hierarchy ([`crate::backend::BuiltinImplementation`]).
+    fn dispatched_dependency_classes(&self) -> Vec<DependencyClassifier> {
+        Vec::new()
+    }
+
+    /// Whether this target's `StringBuilder` appends a `CharSequence` by reading its `length` and
+    /// each indexed `Char` (Kotlin/Wasm WASI) rather than by rendering it with `toString`
+    /// (Kotlin/Wasm JS). The handoff then freezes those `CharSequence` members for the target to
+    /// call ([`CheckedBackendCallables::char_sequence_protocol`]).
+    fn appends_char_sequences_by_index(&self) -> bool {
+        false
+    }
+
     /// How common lowering realizes calls to same-module inline functions for this backend. A
     /// backend that compiles each inline function's body and inlines it at the call keeps the calls
     /// it can inline that way; every other backend has them expanded in IR.
@@ -230,6 +258,16 @@ pub trait Backend {
         state: &mut Self::State,
         diags: &mut DiagSink,
     ) -> Vec<Artifact>;
+
+    /// Acknowledge only a defined initializer in the target's canonical physical registry after
+    /// file emission. This never grants allocation, and artifact presence is not evidence.
+    fn emitted_constructor_initializer(
+        &self,
+        _state: &mut Self::State,
+        _declaration: &ConstructorInitializerDeclaration,
+    ) -> bool {
+        false
+    }
 
     /// Report what makes the accumulated module unemittable as a whole (a program with no entry,
     /// say) before anything is finalized. An error here suppresses [`Backend::finalize`].

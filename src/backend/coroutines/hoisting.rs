@@ -1343,6 +1343,7 @@ fn hoist_call_operands_in_order(
                 "suspend",
                 "hoist call operands expression={e} receiver={dispatch_receiver:?}->{nr:?} args={args:?}->{na:?}"
             );
+            crate::ir::rebind_declaration_argument_boundaries(ir, e, &args, &na);
             if let IrExpr::Call {
                 dispatch_receiver: r,
                 args,
@@ -1363,6 +1364,9 @@ fn hoist_call_operands_in_order(
                 return false;
             };
             let nr = no.remove(0).unwrap();
+            let previous: Vec<ExprId> = args.iter().copied().flatten().collect();
+            let replaced: Vec<ExprId> = no.iter().copied().flatten().collect();
+            crate::ir::rebind_declaration_argument_boundaries(ir, e, &previous, &replaced);
             if let IrExpr::MethodCall {
                 receiver: r,
                 args: a,

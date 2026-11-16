@@ -30,6 +30,7 @@ mod loops;
 mod object_literals;
 mod range_membership;
 mod safe_calls;
+use safe_calls::NullProvenRead;
 mod string_templates;
 mod try_catch;
 mod type_operators;
@@ -293,8 +294,20 @@ pub(super) trait CallLinker {
         callee: &KlibAccessorIdSignature,
     ) -> Lowered<LinkedAccessor>;
 
-    /// Proves that `classifier` is a dependency object, whose value a body may read.
-    fn singleton(&self, classifier: TypeName) -> Lowered<()>;
+    /// The static storage of the top-level property whose backing field is `field`, which a body
+    /// of that property's own library reads or writes. `None` leaves the access to the body's
+    /// instance storage frame. Template linkers materialize no storage.
+    fn static_field(
+        &mut self,
+        _ir: &mut IrFile,
+        _field: &KlibIrSymbol,
+    ) -> Lowered<Option<StaticField>> {
+        Ok(None)
+    }
+
+    /// Proves that `classifier` is a dependency object, whose value a body may read, and
+    /// materializes it in `ir` when its instance is the linker's to create.
+    fn singleton(&mut self, ir: &mut IrFile, classifier: TypeName) -> Lowered<()>;
 
     /// Whether the target owns the representation of `classifier`, which a class of this unit
     /// extends without the unit materializing it. A linker that knows no such class says no.
@@ -388,6 +401,43 @@ pub(super) struct LinkedAccessor {
     pub(super) reified_type_parameters: Vec<u32>,
 }
 
+/// The value of a serialized constant typed `ty`, and the type the lowered constant has: `null`
+/// is the null value, typed `Nothing?`; any other constant has its value's own type.
+pub(super) fn constant_value(constant: &KlibIrConstant, ty: Ty) -> Lowered<(IrConst, Ty)> {
+    let (value, constant_ty) = match constant {
+        KlibIrConstant::Null => {
+            if ty != Ty::nullable(Ty::Nothing) {
+                return Err(mismatch("a `null` is not typed `Nothing?`"));
+            }
+            return Ok((IrConst::Null, Ty::Null));
+        }
+        KlibIrConstant::Boolean(value) => (IrConst::Boolean(*value), Ty::Boolean),
+        KlibIrConstant::Char(value) => (IrConst::Char(*value), Ty::Char),
+        KlibIrConstant::Byte(value) => (IrConst::Byte(*value), Ty::Byte),
+        KlibIrConstant::Short(value) => (IrConst::Short(*value), Ty::Short),
+        KlibIrConstant::Int(value) => (IrConst::Int(*value), Ty::Int),
+        KlibIrConstant::Long(value) => (IrConst::Long(*value), Ty::Long),
+        KlibIrConstant::Float(value) => (IrConst::Float(*value), Ty::Float),
+        KlibIrConstant::Double(value) => (IrConst::Double(*value), Ty::Double),
+        KlibIrConstant::String(value) => (IrConst::String(value.as_str().into()), Ty::String),
+    };
+    if constant_ty != ty {
+        // An unsigned constant, for one, is serialized as its signed value typed `UInt`.
+        return unsupported("a constant of another type than its value's");
+    }
+    Ok((value, ty))
+}
+
+/// The static storage a top-level property's backing field is realized as in a unit.
+#[derive(Clone, Copy)]
+pub(super) struct StaticField {
+    /// The property's entry in the unit's `IrFile::statics`.
+    pub(super) index: u32,
+    pub(super) ty: Ty,
+    /// Whether a body may store to it: the field is not final.
+    pub(super) writable: bool,
+}
+
 /// What an accessor call reaches.
 #[derive(Clone, Copy)]
 pub(super) enum LinkedAccessorTarget {
@@ -418,8 +468,9 @@ pub(super) struct BodyLowering<'a> {
     /// Compiler temporaries that name another immutable value, by the initializer each read of
     /// them lowers as.
     compiler_aliases: HashMap<KlibIrSymbol, KlibIrExprId>,
-    /// Safe-call receiver temporaries, inside the selector their `null` test guards.
-    null_proven: HashSet<KlibIrSymbol>,
+    /// Reads proven non-null where they are lowered: safe-call receiver temporaries inside the
+    /// selector their `null` test guards, and fields a compiler-generated `when` tests.
+    null_proven: HashSet<NullProvenRead>,
     /// All enclosing return-target declarations, including tail-only blocks without a frame.
     returnable_targets: Vec<KlibIrSymbol>,
     /// Enclosing serialized returnable blocks, whose exact symbols own their local exits.
@@ -915,6 +966,9 @@ impl<'a> BodyLowering<'a> {
         if let Some(widened) = self.nullable_widening(lowered, actual, expected) {
             return Ok(widened);
         }
+        if let Some(narrowed) = self.null_proven_field(id, lowered, actual, expected) {
+            return Ok(narrowed);
+        }
         self.upcast(lowered, actual, expected)
             .ok_or(KlibBodyDeclineReason::ImplicitConversion)
     }
@@ -948,28 +1002,8 @@ impl<'a> BodyLowering<'a> {
     /// The constant `constant` the KLIB types `ty`, with the type checked FIR lowering records for
     /// it: `null` is serialized as `Nothing?` and typed as the null literal.
     fn constant(&mut self, constant: &KlibIrConstant, ty: Ty) -> Lowered<(ExprId, Ty)> {
-        let (value, constant_ty) = match constant {
-            KlibIrConstant::Null => {
-                if ty != Ty::nullable(Ty::Nothing) {
-                    return Err(mismatch("a `null` is not typed `Nothing?`"));
-                }
-                return Ok((self.ir.add_expr(IrExpr::Const(IrConst::Null)), Ty::Null));
-            }
-            KlibIrConstant::Boolean(value) => (IrConst::Boolean(*value), Ty::Boolean),
-            KlibIrConstant::Char(value) => (IrConst::Char(*value), Ty::Char),
-            KlibIrConstant::Byte(value) => (IrConst::Byte(*value), Ty::Byte),
-            KlibIrConstant::Short(value) => (IrConst::Short(*value), Ty::Short),
-            KlibIrConstant::Int(value) => (IrConst::Int(*value), Ty::Int),
-            KlibIrConstant::Long(value) => (IrConst::Long(*value), Ty::Long),
-            KlibIrConstant::Float(value) => (IrConst::Float(*value), Ty::Float),
-            KlibIrConstant::Double(value) => (IrConst::Double(*value), Ty::Double),
-            KlibIrConstant::String(value) => (IrConst::String(value.as_str().into()), Ty::String),
-        };
-        if constant_ty != ty {
-            // An unsigned constant, for one, is serialized as its signed value typed `UInt`.
-            return unsupported("a constant of another type than its value's");
-        }
-        Ok((self.ir.add_expr(IrExpr::Const(value)), ty))
+        let (value, constant_ty) = constant_value(constant, ty)?;
+        Ok((self.ir.add_expr(IrExpr::Const(value)), constant_ty))
     }
 
     fn read(&mut self, symbol: &KlibIrSymbol) -> Lowered<ExprId> {
