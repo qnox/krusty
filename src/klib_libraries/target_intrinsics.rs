@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::libraries::{
-    CompilerIntrinsic, ExternalCallableKind, KlibDeclarationSignature, KlibDependencyCallable,
-    ScalarClass, ScalarComparison, ScalarInstruction,
+    AtomicOperation, CompilerIntrinsic, ExternalCallableKind, KlibDeclarationSignature,
+    KlibDependencyCallable, ScalarClass, ScalarComparison, ScalarInstruction,
 };
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrExprKind, KlibIrFunction, KlibIrNullability, KlibIrType,
@@ -78,6 +78,9 @@ impl KlibIntrinsicCallable {
 #[derive(Clone, Debug, Default)]
 pub struct KlibIntrinsicFacts {
     callables: HashMap<KlibDependencyCallable, KlibIntrinsicCallable>,
+    /// Native's atomic accesses through a property reference to a backing field. The reference is
+    /// not a value, so these never become ordinary calls: body lowering realizes the field access.
+    atomic_fields: HashMap<KlibDependencyCallable, AtomicOperation>,
 }
 
 impl KlibIntrinsicFacts {
@@ -129,6 +132,19 @@ impl KlibIntrinsicFacts {
         arena: &KlibIrArena,
         function: &KlibIrFunction,
     ) {
+        if let Some(operation) = authenticate_atomic_field(platform, arena, function) {
+            let KlibIrSignature::Public(signature) = &function.base.symbol.signature else {
+                unreachable!("an authenticated atomic field access has a public signature");
+            };
+            self.atomic_fields.insert(
+                KlibDependencyCallable {
+                    module: module.to_owned(),
+                    declaration: KlibDeclarationSignature::Public(signature.clone()),
+                },
+                operation,
+            );
+            return;
+        }
         let Some(shape) = authenticate_ir(platform, arena, function) else {
             return;
         };
@@ -156,6 +172,23 @@ impl KlibIntrinsicFacts {
         self.callables.get(identity)
     }
 
+    #[cfg(test)]
+    pub(crate) fn atomic_field_declarations(
+        &self,
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, AtomicOperation)> {
+        self.atomic_fields
+            .iter()
+            .map(|(identity, operation)| (identity, *operation))
+    }
+
+    /// The atomic field access `identity` declares, when it is an authenticated Native one.
+    pub(crate) fn atomic_field(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<AtomicOperation> {
+        self.atomic_fields.get(identity).copied()
+    }
+
     pub fn len(&self) -> usize {
         self.callables.len()
     }
@@ -163,6 +196,135 @@ impl KlibIntrinsicFacts {
     pub fn is_empty(&self) -> bool {
         self.callables.is_empty()
     }
+}
+
+/// Native's `kotlin.concurrent` atomic field accesses: an external `TypedIntrinsic` extension of
+/// `KMutableProperty0<V>` whose operands are `V` and whose result the operation fixes. `V` is the
+/// declaration's one type parameter, or a scalar for an addition specialized to it.
+fn authenticate_atomic_field(
+    platform: Option<TargetIntrinsicPlatform>,
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> Option<AtomicOperation> {
+    let KlibIrSignature::Public(signature) = &function.base.symbol.signature else {
+        return None;
+    };
+    if platform != Some(TargetIntrinsicPlatform::Native)
+        || signature.package().segments() != ["kotlin", "concurrent"]
+        || signature.declaration().segments().len() != 1
+        || function.base.symbol.kind != KlibIrSymbolKind::Function
+        || function.constructor
+        || function.body.is_some()
+        || function.type_parameters.len() > 1
+        || function.dispatch_receiver.is_some()
+        || !function.context_parameters.is_empty()
+    {
+        return None;
+    }
+    let operation = match ir_string_annotation(
+        arena,
+        &function.base.annotations,
+        &["kotlin", "native", "internal"],
+        &["TypedIntrinsic", "<init>"],
+    )? {
+        "ATOMIC_GET_FIELD" => AtomicOperation::Load,
+        "ATOMIC_SET_FIELD" => AtomicOperation::Store,
+        "GET_AND_SET_FIELD" => AtomicOperation::Exchange,
+        "COMPARE_AND_SET_FIELD" => AtomicOperation::CompareAndSet,
+        "COMPARE_AND_EXCHANGE_FIELD" => AtomicOperation::CompareAndExchange,
+        "GET_AND_ADD_FIELD" => AtomicOperation::FetchAndAdd,
+        _ => return None,
+    };
+    // The receiver is the property reference itself, which the serializer records as definitely
+    // not null.
+    let KlibIrType::Simple {
+        classifier,
+        nullability: KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull,
+        arguments,
+        annotations,
+        abbreviation: None,
+    } = arena.ty(function.extension_receiver.as_ref()?.ty)
+    else {
+        return None;
+    };
+    let KlibIrSignature::Public(reference) = &classifier.signature else {
+        return None;
+    };
+    let [crate::metadata::klib_ir::tree::KlibIrTypeArgument::Type { ty: value, .. }] =
+        arguments.as_slice()
+    else {
+        return None;
+    };
+    let scalar = ir_semantic_type(arena, *value);
+    let value = arena.ty(*value);
+    // A scalar is compared by what it denotes; the serializer spells one either way.
+    let is_value = |id| match scalar {
+        Some(scalar) => ir_semantic_type(arena, id) == Some(scalar),
+        None => arena.ty(id) == value,
+    };
+    // The value is the declaration's one type parameter, or the scalar an addition is specialized
+    // to when it declares none.
+    let admitted = match function.type_parameters.as_slice() {
+        [parameter] => matches!(
+            value,
+            KlibIrType::Simple {
+                classifier,
+                nullability: KlibIrNullability::NotSpecified,
+                arguments,
+                annotations,
+                abbreviation: None,
+            } if classifier == &parameter.base.symbol && arguments.is_empty() && annotations.is_empty()
+        ),
+        _ => operation == AtomicOperation::FetchAndAdd && scalar.is_some(),
+    };
+    if !admitted
+        || classifier.kind != KlibIrSymbolKind::Class
+        || !annotations.is_empty()
+        || reference.member_id().is_some()
+        || reference.package().segments() != ["kotlin", "reflect"]
+        || reference.declaration().segments() != ["KMutableProperty0"]
+        || function.regular_parameters.len() != operation.operands()
+        || function
+            .regular_parameters
+            .iter()
+            .any(|parameter| !is_value(parameter.ty))
+    {
+        return None;
+    }
+    let answers = match operation {
+        AtomicOperation::Store => ir_unit(arena, function.return_type),
+        AtomicOperation::CompareAndSet => {
+            ir_semantic_type(arena, function.return_type) == Some(Ty::Boolean)
+        }
+        AtomicOperation::Load
+        | AtomicOperation::Exchange
+        | AtomicOperation::CompareAndExchange
+        | AtomicOperation::FetchAndAdd => is_value(function.return_type),
+    };
+    answers.then_some(operation)
+}
+
+/// Whether `id` is exactly `kotlin.Unit`.
+fn ir_unit(arena: &KlibIrArena, id: crate::metadata::klib_ir::tree::KlibIrTypeId) -> bool {
+    let KlibIrType::Simple {
+        classifier,
+        nullability: KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull,
+        arguments,
+        annotations,
+        abbreviation: None,
+    } = arena.ty(id)
+    else {
+        return false;
+    };
+    let KlibIrSignature::Public(signature) = &classifier.signature else {
+        return false;
+    };
+    classifier.kind == KlibIrSymbolKind::Class
+        && arguments.is_empty()
+        && annotations.is_empty()
+        && signature.member_id().is_none()
+        && signature.package().segments() == ["kotlin"]
+        && signature.declaration().segments() == ["Unit"]
 }
 
 fn authenticate_ir(
@@ -456,9 +618,11 @@ fn ir_semantic_type(
     arena: &KlibIrArena,
     id: crate::metadata::klib_ir::tree::KlibIrTypeId,
 ) -> Option<Ty> {
+    // A class type is not null whether the serializer leaves its nullability unspecified or
+    // records it as definitely not null.
     let KlibIrType::Simple {
         classifier,
-        nullability: KlibIrNullability::NotSpecified,
+        nullability: KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull,
         arguments,
         annotations,
         abbreviation: None,
@@ -483,6 +647,8 @@ fn ir_semantic_type(
     }
     match signature.declaration().segments()[0].as_str() {
         "Boolean" => Some(Ty::Boolean),
+        "Byte" => Some(Ty::Byte),
+        "Short" => Some(Ty::Short),
         "Int" => Some(Ty::Int),
         "UInt" => Some(Ty::UInt),
         "Long" => Some(Ty::Long),
