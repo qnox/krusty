@@ -223,6 +223,62 @@ impl KlibIrModuleTrees {
                 }
             }
         }
+        self.index_private_classes()
+    }
+
+    /// A class nested in a private class, or private itself, is linkable only by the bodies of
+    /// the library that declares it, as a file-local class is: no consumer names it, and no
+    /// provider publishes it. It is indexed with the file-local declarations, together with its
+    /// constructors and members, under the public signatures it serializes.
+    fn index_private_classes(&mut self) -> Result<(), KlibIrDecodeError> {
+        let mut classes = Vec::new();
+        let mut functions = Vec::new();
+        for (tree_index, tree) in self.trees.iter().enumerate() {
+            let mut pending = vec![(&tree.declaration, false)];
+            while let Some((member, enclosing_private)) = pending.pop() {
+                let KlibIrMember::Class(id) = member else {
+                    continue;
+                };
+                let class = tree.arena.class(*id);
+                let private = enclosing_private
+                    || crate::metadata::semantic::declaration_visibility(class.base.flags)
+                        == crate::types::Visibility::Private;
+                pending.extend(class.members.iter().map(|member| (member, private)));
+                if !private
+                    || class.base.symbol.kind != KlibIrSymbolKind::Class
+                    || !matches!(class.base.symbol.signature, KlibIrSignature::Public(_))
+                {
+                    continue;
+                }
+                classes.push((class.base.symbol.signature.clone(), (tree_index, *id)));
+                for member in &class.members {
+                    let ids = match member {
+                        KlibIrMember::Function(id) => vec![*id],
+                        KlibIrMember::Property(property) => {
+                            property.getter.into_iter().chain(property.setter).collect()
+                        }
+                        _ => Vec::new(),
+                    };
+                    for id in ids {
+                        let signature = &tree.arena.function(id).base.symbol.signature;
+                        // A file-local member is already indexed by its own signature.
+                        if !matches!(signature, KlibIrSignature::FileLocal { .. }) {
+                            functions.push((signature.clone(), (tree_index, id)));
+                        }
+                    }
+                }
+            }
+        }
+        for (signature, entry) in classes {
+            if let Some((previous, _)) = self.local_classes.insert(signature.clone(), entry) {
+                return Err(duplicate(previous, entry.0, &signature));
+            }
+        }
+        for (signature, entry) in functions {
+            if let Some((previous, _)) = self.local_functions.insert(signature.clone(), entry) {
+                return Err(duplicate(previous, entry.0, &signature));
+            }
+        }
         Ok(())
     }
 
@@ -251,6 +307,14 @@ impl KlibIrModuleTrees {
         }
         Ok(())
     }
+}
+
+fn duplicate(previous: usize, tree: usize, signature: &KlibIrSignature) -> KlibIrDecodeError {
+    KlibIrDecodeError::malformed(
+        DECLARATIONS,
+        0,
+        format!("declaration trees {previous} and {tree} both define {signature:?}"),
+    )
 }
 
 /// Decode every top-level declaration tree a KLIB serializes.

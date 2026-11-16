@@ -2067,9 +2067,10 @@ pub(crate) fn lower_value_classes(
                     _ => None,
                 }
             }
-            // Checked same-module property reads may already be realized as a selected virtual call.
-            // Once a computed value-class accessor becomes static `getX-impl(U)`, preserve that
-            // selected declaration while adapting its dispatch receiver to parameter zero.
+            // A selected member of this file's or a sibling file's value class becomes its static
+            // `-impl` (a computed accessor's `getX-impl(U)` too), the dispatch receiver moving to
+            // parameter zero. A dependency's value-class member falls through: its `toString` and
+            // `hashCode` are the arms below, which call the classpath `-impl` over the carrier.
             IrExpr::Call {
                 callee: call_callee,
                 dispatch_receiver: Some(receiver),
@@ -2081,7 +2082,8 @@ pub(crate) fn lower_value_classes(
                 module_target,
                 ..
             } = &**call_callee
-                && (under.contains_key(owner)) =>
+                && under.contains_key(owner)
+                && (cls_by_name.contains_key(owner) || sibling_member_impls.contains_key(&id)) =>
             {
                 match cls_by_name.get(owner) {
                     Some(class) => {

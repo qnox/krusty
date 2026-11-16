@@ -196,6 +196,14 @@ impl Backend for WasmBackend {
             &mut file.ir,
             &mut file.callables,
             |function| file.dependency_exports.callable(function).is_some(),
+            |constructor| {
+                file.classifiers.module().declares_instance(
+                    &krusty::backend::instance_links::InstanceEntry::Constructor {
+                        module: file.module_name.into(),
+                        declaration: constructor,
+                    },
+                )
+            },
         );
         // After default arguments, so a `$default` entry's call of the declaration is the one
         // that gains the continuation, and before dispatch entries, which copy the signature.
@@ -242,8 +250,9 @@ impl Backend for WasmBackend {
         {
             let plan = classes::module_plan(file.classifiers.module().classes(), &file.classifiers);
             state.slot_plan = Some((file.module_name.to_owned(), plan));
-            // The table types are built from the plan, so they are that module's too.
-            started.tables = Default::default();
+            // The table types are built from the plan, so they are that module's too, except a
+            // dependency class's, which is the whole program's.
+            started.tables.enter_plan();
         }
         let plan = &state.slot_plan.as_ref().expect("planned just above").1;
         let lowered = match lower::lower_file(
@@ -466,15 +475,31 @@ mod tests {
             "{}a `toString` of `kotlin.Any?` reaching an object another file creates yet",
             super::DECLINE_PREFIX
         )];
+        let other = "fun function(): String = show { 1 }";
+        for target in WasmTarget::ALL {
+            for sources in [[show, other], [other, show]] {
+                let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
+                assert_eq!(diagnostics, expected, "{sources:?}");
+                assert!(outputs.is_empty());
+            }
+        }
+    }
+
+    /// A floating box prints its value, so another file boxing one leaves an erased `toString`
+    /// compilable.
+    #[test]
+    fn an_erased_to_string_prints_another_files_floating_box() {
+        let show = "fun show(value: Any?): String = value.toString()\n\
+                    fun box(): String = \"OK\"";
         for other in [
             "fun double(): String = show(1.5)",
-            "fun function(): String = show { 1 }",
+            "fun float(): String = show(1.5f)",
         ] {
             for target in WasmTarget::ALL {
                 for sources in [[show, other], [other, show]] {
                     let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
-                    assert_eq!(diagnostics, expected, "{sources:?}");
-                    assert!(outputs.is_empty());
+                    assert_eq!(diagnostics, Vec::<String>::new(), "{sources:?}");
+                    assert!(!outputs.is_empty(), "{sources:?}");
                 }
             }
         }
