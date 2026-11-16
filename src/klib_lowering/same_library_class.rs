@@ -10,6 +10,9 @@
 //! subtyping reads: `Any`, because the constructor's delegation to it was authenticated, or an
 //! interface this library's producer graph serializes. Any other hierarchy is refused before the
 //! class is admitted.
+//!
+//! A class private to its enclosing class is linked the same way. Its signatures are public, but
+//! no provider publishes it and no other library names it.
 
 use super::class_initialization::{record_initializer, InitializationStep};
 use super::class_storage::{member_field, stored_field};
@@ -23,9 +26,7 @@ use crate::ir::{
     IrCtorParameterProvenance, IrField,
 };
 use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies, LocatedClass, LocatedMember};
-use crate::libraries::{
-    KlibBodyClassParameters, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
-};
+use crate::libraries::{KlibBodyClassParameters, KlibDependencyCallable, TypeKind};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction,
@@ -389,11 +390,16 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) members: Vec<PreparedMember<'a>>,
 }
 
-/// The classifier identity of a file-local class in `module`. The file and slot are the identity;
-/// the source spelling is not.
+/// The classifier identity of a class only `module`'s bodies link. A file-local class is named
+/// by its file and slot, not its source spelling. A class private to its enclosing class keeps
+/// the qualified name its public signature serializes, as every type that mentions it does.
 pub(super) fn classifier_name(module: &str, signature: &KlibIrSignature) -> Option<TypeName> {
-    let KlibIrSignature::FileLocal { file, slot } = signature else {
-        return None;
+    let (file, slot) = match signature {
+        KlibIrSignature::FileLocal { file, slot } => (file, slot),
+        KlibIrSignature::Public(public) => {
+            return super::klib_types::classifier_name(public).ok();
+        }
+        KlibIrSignature::Accessor(_) => return None,
     };
     Some(
         TypeName::ROOT
@@ -588,8 +594,10 @@ fn constructor_class(
     }
     let _ = arguments;
     match &classifier.signature {
-        KlibIrSignature::FileLocal { .. } => Ok(classifier.signature.clone()),
-        KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_) => Err(non_public_type()),
+        KlibIrSignature::FileLocal { .. } | KlibIrSignature::Public(_) => {
+            Ok(classifier.signature.clone())
+        }
+        KlibIrSignature::Accessor(_) => Err(non_public_type()),
     }
 }
 
@@ -872,9 +880,9 @@ fn members_and_storage<'a>(
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {}
-            KlibIrMember::Class(_) => {
-                return Err(unsupported("a nested class of a non-public class"))
-            }
+            // A nested class is its own declaration, prepared when a body constructs it or
+            // calls one of its members. It shares no storage or initialization with this class.
+            KlibIrMember::Class(_) => {}
             KlibIrMember::EnumEntry(_) => return Err(unsupported("a non-public enum")),
             KlibIrMember::TypeAlias(_) => {
                 return Err(unsupported("a type alias of a non-public class"))
@@ -924,10 +932,11 @@ fn member_overrides(
                 "an override of a declaration other than a function",
             ));
         }
-        let KlibIrSignature::Public(signature) = &symbol.signature else {
+        // A property accessor overrides the interface's accessor by its accessor signature, as a
+        // function overrides by its public one; `function_owner` locates either.
+        let Some(declaration) = crate::klib_libraries::member_signature(&symbol.signature) else {
             return Err(unsupported("an override of a non-public declaration"));
         };
-        let declaration = KlibDeclarationSignature::Public(signature.clone());
         let identity = match scope.bodies.linked_origin(scope.module, &declaration) {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => {
@@ -947,13 +956,7 @@ fn member_overrides(
                 "an override this library does not authenticate",
             ));
         };
-        let KlibDeclarationSignature::Public(owner_signature) = &identity.declaration else {
-            return Err(unsupported("an override of a non-public declaration"));
-        };
-        let (owner_arena, owner, declared) = match scope.bodies.function_owner(
-            &identity.module,
-            &KlibIrSignature::Public(owner_signature.clone()),
-        ) {
+        let (owner_arena, owner, declared) = match scope.bodies.member_owner(&identity) {
             LocatedMember::One {
                 module: owner_module,
                 arena,
@@ -1010,6 +1013,26 @@ fn member_overrides(
         } else {
             return Err(unsupported("an override of a class member"));
         };
+        // Locating the member by its signature does not prove membership. The declaring class's
+        // raw header must hold it directly: a function as a member, an accessor in its own
+        // property group and in the slot of its shape.
+        let KlibIrSignature::Public(owner_signature) = &owner.base.symbol.signature else {
+            return Err(mismatch(
+                "an overridden member's class has no public signature",
+            ));
+        };
+        match scope
+            .bodies
+            .class_member_header(&identity, owner_signature, None)
+        {
+            Ok(Some(member)) if std::ptr::eq(member.function, declared) => {}
+            Ok(_) => {
+                return Err(mismatch(
+                    "an overridden member is not a direct member of its class's header",
+                ))
+            }
+            Err(reason) => return Err(mismatch(reason)),
+        }
         if !declared.type_parameters.is_empty() || declared.constructor {
             return Err(unsupported(
                 "an override of a generic or constructor declaration",

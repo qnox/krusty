@@ -165,6 +165,8 @@ pub(super) fn runtime_member_classes() -> [(TypeName, &'static str); 1] {
 pub(in super::super) fn represents_dependency_classifier(internal: TypeName) -> bool {
     super::super::super::intrinsics::is_any(internal)
         || internal == krusty::types::wk::unit()
+        // Every enum constant is laid out with the runtime's `kotlin.Enum` base.
+        || internal == krusty::types::wk::kotlin_enum()
         || super::super::super::intrinsics::builtin_companion(internal).is_some()
         || super::super::super::intrinsics::runtime_object(internal).is_some()
         || internal == krusty::types::wk::string()

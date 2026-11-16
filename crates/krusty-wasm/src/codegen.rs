@@ -143,8 +143,10 @@ impl Backend for WasmBackend {
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
-        // `Unit`'s value is the runtime's own, as a source reference of it is.
+        // `Unit`'s value is the runtime's own, as a source reference of it is. Every enum
+        // constant is laid out with the runtime's `kotlin.Enum` base, so its members are too.
         classifier == krusty::types::wk::string()
+            || classifier == krusty::types::wk::kotlin_enum()
             || classifier == krusty::types::wk::unit()
             || lower::is_string_builder(classifier)
             || lower::is_array_list(classifier)
@@ -229,6 +231,14 @@ impl Backend for WasmBackend {
             &mut file.ir,
             &mut file.callables,
             |function| file.dependency_exports.callable(function).is_some(),
+            |constructor| {
+                file.classifiers.module().declares_instance(
+                    &krusty::backend::instance_links::InstanceEntry::Constructor {
+                        module: file.module_name.into(),
+                        declaration: constructor,
+                    },
+                )
+            },
         );
         // After default arguments, so a `$default` entry's call of the declaration is the one
         // that gains the continuation, and before dispatch entries, which copy the signature.
@@ -291,8 +301,9 @@ impl Backend for WasmBackend {
                 &started.classes,
             );
             state.slot_plan = Some((file.module_name.to_owned(), plan));
-            // The table types are built from the plan, so they are that module's too.
-            started.tables = module_tables::ModuleTables::with_published(
+            // The table types are built from the plan, so they are that module's too, except a
+            // dependency class's, which is the whole program's.
+            started.tables.enter_plan(
                 file.classifiers.module().classes(),
                 &file.classifiers,
                 &started.classes,
@@ -519,15 +530,32 @@ mod tests {
             "{}a `toString` of `kotlin.Any?` reaching an object another file creates yet",
             super::DECLINE_PREFIX
         )];
+        let other =
+            "fun interface Supplier { fun get(): Int }\nfun converted(): String = show(Supplier { 1 })";
+        for target in WasmTarget::ALL {
+            for sources in [[show, other], [other, show]] {
+                let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
+                assert_eq!(diagnostics, expected, "{sources:?}");
+                assert!(outputs.is_empty());
+            }
+        }
+    }
+
+    /// A floating box prints its value, so another file boxing one leaves an erased `toString`
+    /// compilable.
+    #[test]
+    fn an_erased_to_string_prints_another_files_floating_box() {
+        let show = "fun show(value: Any?): String = value.toString()\n\
+                    fun box(): String = \"OK\"";
         for other in [
             "fun double(): String = show(1.5)",
-            "fun interface Supplier { fun get(): Int }\nfun converted(): String = show(Supplier { 1 })",
+            "fun float(): String = show(1.5f)",
         ] {
             for target in WasmTarget::ALL {
                 for sources in [[show, other], [other, show]] {
                     let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
-                    assert_eq!(diagnostics, expected, "{sources:?}");
-                    assert!(outputs.is_empty());
+                    assert_eq!(diagnostics, Vec::<String>::new(), "{sources:?}");
+                    assert!(!outputs.is_empty(), "{sources:?}");
                 }
             }
         }

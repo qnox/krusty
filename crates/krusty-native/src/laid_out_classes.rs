@@ -275,6 +275,11 @@ impl LaidOutClasses {
                 slots: layout.slots.count,
                 interfaces,
                 interface_entries,
+                // The module plan binds the published slots to this module's member identities.
+                members: match slot_plan.table(name) {
+                    Some(Ok(planned)) => planned.slots.clone(),
+                    _ => HashMap::default(),
+                },
             };
             // A member of another module's interface the class implements with a member of its
             // own stands at that member's slot, which a subclass's table answers for itself.

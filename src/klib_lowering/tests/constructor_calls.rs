@@ -520,9 +520,11 @@ fn klib_generic_constructor_ordinary_body_retains_class_formals() {
         .klib_body_callable()
         .unwrap();
     let facts = KlibCalleeFacts::new([selected, constructor]);
+    // `Pair` is an admitted generic class: an earlier unit materialized it and exports its
+    // allocation, which this body constructs through.
     let externals = crate::fx_hash::HashMap::from_iter([(
         constructor.identity().clone(),
-        super::super::EmittedDependencyCallable::constructor(constructor_target),
+        super::super::EmittedDependencyCallable::allocating_constructor(constructor_target),
     )]);
     let mut unit = DependencyBodyUnit::default();
     let function = unit

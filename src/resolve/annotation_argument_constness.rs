@@ -181,8 +181,45 @@ impl Checker<'_> {
         if self.expr_types[leaf.0 as usize] == Ty::Error {
             return Some(NonConstantArgument::ResolutionError);
         }
+        if let Some(receiver) = self.enum_name_receiver(leaf) {
+            return self.non_constant_enum_name(receiver);
+        }
         self.non_constant_expression(leaf, constant_use)
             .map(|kind| Self::kind_for_constant_use(kind, constant_use))
+    }
+
+    /// The receiver of an `Enum.name` read.
+    fn enum_name_receiver(&self, expression: ExprId) -> Option<ExprId> {
+        match self.file.expr(expression) {
+            Expr::Member { receiver, .. }
+                if constant_evaluation::selected_member_role(
+                    self.checked_constant_context(),
+                    expression,
+                ) == Some(crate::types::SemanticCallRole::KotlinEnumName) =>
+            {
+                Some(*receiver)
+            }
+            _ => None,
+        }
+    }
+
+    /// Without `+IntrinsicConstEvaluation`, `Enum.name` is an ordinary non-constant read. With it,
+    /// the read is an intrinsic whose kind is its receiver's as an enum value: constant for an
+    /// entry named directly, and otherwise the receiver's own diagnostic, which a template or
+    /// operator around the `String` read keeps.
+    fn non_constant_enum_name(&self, receiver: ExprId) -> Option<NonConstantArgument> {
+        if !self.file.intrinsic_const_evaluation {
+            return Some(NonConstantArgument::NotConst);
+        }
+        if constant_evaluation::intrinsic_const_enum_entry(
+            self.checked_constant_context(),
+            receiver,
+        )
+        .is_some()
+        {
+            return None;
+        }
+        self.non_constant_argument_for(receiver, ConstantUse::DirectAnnotationValue)
     }
 
     /// Enum/KClass diagnostics describe values that stand directly in the annotation slot. Once
