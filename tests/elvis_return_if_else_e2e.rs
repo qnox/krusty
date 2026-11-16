@@ -5,36 +5,7 @@
 
 use super::common;
 
-const SOURCE: &str = "\
-fun present(choice: String): String? = if (choice == \"no\") null else choice\n\
-\n\
-var seen = \"\"\n\
-\n\
-fun edit(installed: String?, choice: String) {\n\
-    val row = if (installed == null) present(choice) ?: return else installed\n\
-    seen = seen + row + \";\"\n\
-}\n\
-\n\
-interface Marker\n\
-\n\
-fun panel(block: () -> Marker): Marker = block()\n\
-\n\
-class Host {\n\
-    fun create(): Marker {\n\
-        return panel {\n\
-            object : Marker {}\n\
-        }\n\
-    }\n\
-}\n\
-\n\
-fun box(): String {\n\
-    edit(\"kept\", \"x\")\n\
-    edit(null, \"yes\")\n\
-    edit(null, \"no\")\n\
-    if (seen != \"kept;yes;\") return seen\n\
-    return \"OK\"\n\
-}\n\
-";
+const SOURCE: &str = include_str!("box_regressions/elvisReturnIfElse.kt");
 
 #[test]
 fn elvis_return_before_if_else_matches_kotlinc() {
