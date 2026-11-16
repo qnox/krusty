@@ -383,6 +383,13 @@ fn class_tables(
                     planned,
                     plan.interfaces(),
                 )?,
+                // The plan's own reason names the contract a planned class failed.
+                Some(Err(reason)) if laid_out.is_some() => {
+                    return Err(format!(
+                        "a class extending one of another file with no module-wide layout (`{}`): {reason}",
+                        class.fq_name()
+                    ))
+                }
                 _ if laid_out.is_some() => {
                     return Err(format!(
                         "a class extending one of another file with no module-wide layout (`{}`)",

@@ -751,6 +751,20 @@ impl<'a> FileLowering<'a> {
                         Linkage::Hidden
                     }
                     krusty::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
+                    // A member of a local or anonymous class is reachable from no other file, and
+                    // an inline function that declares the class realizes it again in each file
+                    // it is expanded into, under the same class name. Like the class's
+                    // descriptor, its members stay inside the file.
+                    krusty::backend::CheckedIrUnitKind::Source
+                        if function
+                            .dispatch_receiver
+                            .and_then(|owner| self.ir.class_id_by_name(owner))
+                            .is_some_and(|class| {
+                                self.ir.local_class_name_provenance.contains_key(&class)
+                            }) =>
+                    {
+                        Linkage::Local
+                    }
                     krusty::backend::CheckedIrUnitKind::Source
                         if super::super::c_abi::is_file_level(self.ir, index)
                             || self.symbols.cross_file[index] =>
