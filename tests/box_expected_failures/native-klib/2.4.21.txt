@@ -183,7 +183,6 @@ callableReference/adaptedReferences/suspendConversion/withParameters.kt
 callableReference/adaptedReferences/suspendUnitConversion.kt
 callableReference/adaptedReferences/unboundReferences.kt
 callableReference/bound/companionObjectReceiverInheritsFromOuter.kt
-callableReference/bound/kt15446.kt
 callableReference/equality/conversionCombinations.kt
 callableReference/equality/suspendFunctionEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
@@ -965,7 +964,6 @@ escapeAnalysis/zeroOutObjectOnAlloc.kt
 evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
 evaluate/intrinsicConst/equals_after.kt
-evaluate/intrinsicConst/kCallableName.kt
 evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/serialization/typeAnnotation.kt
 evaluate/thisPlusString.kt

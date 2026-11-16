@@ -285,9 +285,10 @@ impl<'a> BodyLowering<'a> {
         ty: Ty,
     ) -> Lowered<ExprId> {
         let arguments = super::calls::arguments(access);
-        let (Some(&Some(reference)), operands) = (arguments.first(), &arguments[1..]) else {
+        let [Some(reference), operands @ ..] = arguments.as_slice() else {
             return Err(mismatch("an atomic field access has no property reference"));
         };
+        let reference = *reference;
         let operands = operands.iter().copied().collect::<Option<Vec<_>>>();
         let Some(operands) = operands.filter(|operands| operands.len() == operation.operands())
         else {
