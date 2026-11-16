@@ -1,10 +1,11 @@
 //! Serialized closure forms shared by emitted-body preparation and common lowering.
 
 use crate::ir::IrCapturingCallable;
+use crate::metadata::klib_ir::tree::KlibIrType;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrExpr, KlibIrExprKind, KlibIrFunctionId,
 };
-use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
+use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 
 pub(super) fn source_form(origin: Option<&str>) -> Option<IrCapturingCallable> {
     match origin {
@@ -37,9 +38,13 @@ pub(crate) fn emitted_closure_function(
     ) {
         return None;
     }
-    let arity = super::klib_types::closure_type_arity(arena, expression.ty?)?;
+    // A lambda converted to a functional interface has the interface's class type, and
+    // implements the interface method its reference overrides rather than a function invocation.
+    let arity = super::klib_types::closure_type_arity(arena, expression.ty?);
     let (function, origin) = match &expression.kind {
-        KlibIrExprKind::FunctionExpression { function, origin } => (*function, origin),
+        KlibIrExprKind::FunctionExpression { function, origin } if arity.is_some() => {
+            (*function, origin)
+        }
         KlibIrExprKind::RichFunctionReference {
             invoke,
             overridden,
@@ -49,9 +54,15 @@ pub(crate) fn emitted_closure_function(
             let KlibIrSignature::Public(signature) = &overridden.signature else {
                 return None;
             };
-            if overridden.kind != KlibIrSymbolKind::Function
-                || super::klib_types::function_invocation_arity(signature) != Some(arity)
-            {
+            // A function-typed reference overrides its function class's invocation at the type's
+            // arity. A lambda converted to an interface overrides a member of no function class.
+            let implements = match arity {
+                Some(arity) => {
+                    super::klib_types::function_invocation_arity(signature) == Some(arity)
+                }
+                None => !super::klib_types::is_function_classifier_member(signature),
+            };
+            if overridden.kind != KlibIrSymbolKind::Function || !implements {
                 return None;
             }
             (*invoke, origin)
@@ -64,4 +75,29 @@ pub(crate) fn emitted_closure_function(
         && declaration.base.flags & crate::metadata::function_flags::IS_SUSPEND == 0
         && matches!(declaration.body, Some(KlibIrBody::Block(_))))
     .then_some(function)
+}
+
+/// The functional interface an emitted closure is converted to: a lambda of the interface's class
+/// type, which implements the interface method its reference overrides. Its checked SAM
+/// declaration is frozen with the conversions of function values.
+pub(crate) fn converted_closure<'a>(
+    arena: &'a KlibIrArena,
+    expression: &KlibIrExpr,
+) -> Option<&'a KlibIrSymbol> {
+    if !matches!(
+        expression.kind,
+        KlibIrExprKind::RichFunctionReference { .. }
+    ) || super::callable_references::declaration_reference(arena, expression).is_some()
+    {
+        return None;
+    }
+    let ty = expression.ty?;
+    if super::klib_types::closure_type_arity(arena, ty).is_some() {
+        return None;
+    }
+    emitted_closure_function(arena, expression)?;
+    match arena.ty(ty) {
+        KlibIrType::Simple { classifier, .. } => Some(classifier),
+        _ => None,
+    }
 }

@@ -293,6 +293,17 @@ pub(super) fn reference_invocation_arity(member: &KlibPublicIdSignature) -> Opti
     invocation_arity(member, true)
 }
 
+/// Whether `member` is declared by a builtin function classifier (`FunctionN`, `KFunctionN`,
+/// `SuspendFunctionN` and their reflective forms). Such a reference is a function value, never a
+/// lambda converted to a functional interface.
+pub(super) fn is_function_classifier_member(member: &KlibPublicIdSignature) -> bool {
+    let Some((_, class)) = member.declaration().segments().split_last() else {
+        return false;
+    };
+    declaration_name(member.package().segments(), class)
+        .is_ok_and(|owner| function_classifiers::classifier(owner).is_some())
+}
+
 fn invocation_arity(member: &KlibPublicIdSignature, reflective: bool) -> Option<usize> {
     let (name, class) = member.declaration().segments().split_last()?;
     let owner = declaration_name(member.package().segments(), class).ok()?;

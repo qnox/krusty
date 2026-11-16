@@ -1,9 +1,14 @@
 //! Serialized SAM conversions consume a declaration selected before backend entry.
+//!
+//! A producer serializes a conversion in one of two forms: a `SAM_CONVERSION` of a function value,
+//! or a lambda whose rich reference has the interface's class type (the Native stdlib's form of
+//! `Comparator { a, b -> ... }`). Both select the same checked declaration and attach it the same
+//! way; only how the function value is lowered differs.
 
 use super::{mismatch, unsupported, BodyLowering, Lowered};
-use crate::ir::{ExprId, IrExpr};
-use crate::metadata::klib_ir::tree::{KlibIrExprId, KlibIrType, KlibIrTypeId};
-use crate::metadata::klib_ir::KlibIrSignature;
+use crate::ir::{ExprId, IrExpr, IrSamTarget};
+use crate::metadata::klib_ir::tree::{KlibIrExprId, KlibIrFunctionId, KlibIrType, KlibIrTypeId};
+use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol};
 use crate::types::{Ty, TyKind};
 
 impl BodyLowering<'_> {
@@ -13,25 +18,7 @@ impl BodyLowering<'_> {
         argument: KlibIrExprId,
         ty: Ty,
     ) -> Lowered<ExprId> {
-        let target_type = self.semantic(operand)?;
-        if target_type != ty {
-            return Err(mismatch("a SAM conversion is typed apart from its target"));
-        }
-        let KlibIrType::Simple { classifier, .. } = self.arena.ty(operand) else {
-            return unsupported("a SAM conversion without a nominal target");
-        };
-        let KlibIrSignature::Public(signature) = &classifier.signature else {
-            return unsupported("a SAM conversion to a non-public classifier");
-        };
-        let declaration = self.linker.sam_declaration(signature)?;
-        let mut target = crate::symbol_resolver::apply_sam_declaration(
-            &declaration.classifier,
-            &declaration.target,
-            target_type.non_null(),
-        )
-        .ok_or_else(|| {
-            mismatch("a SAM conversion differs from its checked classifier application")
-        })?;
+        let mut target = self.sam_target(operand, ty)?;
         let source = self.semantic(
             self.arena
                 .expr(argument)
@@ -53,13 +40,7 @@ impl BodyLowering<'_> {
                 "a nullable function implements a non-null SAM target",
             ));
         }
-        let expected = Ty::fun_with_shape(
-            target.parameters.clone(),
-            target.result,
-            target.context_count as usize,
-            target.has_receiver,
-            function.suspend,
-        );
+        let expected = sam_function_type(&target, function.suspend);
         if !self
             .linker
             .is_subtype(self.header.type_parameters(), source.non_null(), expected)
@@ -69,6 +50,60 @@ impl BodyLowering<'_> {
             ));
         }
         let value = self.expression(argument)?;
+        self.converted(value, target, ty)
+    }
+
+    /// A lambda serialized with the functional interface's type `ty` (`ty_id` in the arena): the
+    /// closure of `invoke` at the checked method's shape, converted like a function value.
+    pub(super) fn converted_closure(
+        &mut self,
+        ty_id: KlibIrTypeId,
+        invoke: KlibIrFunctionId,
+        overridden: &KlibIrSymbol,
+        ty: Ty,
+        source_form: Option<&str>,
+    ) -> Lowered<ExprId> {
+        let target = self.sam_target(ty_id, ty)?;
+        let KlibIrSignature::Public(method) = &overridden.signature else {
+            return Err(mismatch("a converted lambda overrides a non-public method"));
+        };
+        if method.declaration().segments().last() != Some(&target.method) {
+            return Err(mismatch(
+                "a converted lambda overrides another method than its checked SAM method",
+            ));
+        }
+        if target.suspend {
+            return unsupported("a suspend closure");
+        }
+        let value = self.closure(invoke, sam_function_type(&target, false), source_form)?;
+        self.converted(value, target, ty)
+    }
+
+    /// The checked SAM declaration of the classifier `operand` names, applied at `ty`.
+    fn sam_target(&mut self, operand: KlibIrTypeId, ty: Ty) -> Lowered<IrSamTarget> {
+        let target_type = self.semantic(operand)?;
+        if target_type != ty {
+            return Err(mismatch("a SAM conversion is typed apart from its target"));
+        }
+        let KlibIrType::Simple { classifier, .. } = self.arena.ty(operand) else {
+            return unsupported("a SAM conversion without a nominal target");
+        };
+        let KlibIrSignature::Public(signature) = &classifier.signature else {
+            return unsupported("a SAM conversion to a non-public classifier");
+        };
+        let declaration = self.linker.sam_declaration(signature)?;
+        crate::symbol_resolver::apply_sam_declaration(
+            &declaration.classifier,
+            &declaration.target,
+            target_type.non_null(),
+        )
+        .ok_or_else(|| mismatch("a SAM conversion differs from its checked classifier application"))
+    }
+
+    /// `value`, a function value of `target`'s method shape, as the functional interface `ty`.
+    /// A converted lambda has the interface's type, not its function type: a use that expects
+    /// the interface (a field initializer, an argument) must not see an implicit conversion.
+    fn converted(&mut self, value: ExprId, mut target: IrSamTarget, ty: Ty) -> Lowered<ExprId> {
         if !target
             .contravariant_parameters
             .iter()
@@ -92,7 +127,7 @@ impl BodyLowering<'_> {
                     unreachable!()
                 };
                 *sam = Some(Box::new(target));
-                return Ok(value);
+                return Ok(self.typed(value, ty));
             }
         }
         let name = format!(
@@ -106,4 +141,15 @@ impl BodyLowering<'_> {
             .ok_or_else(|| mismatch("a SAM method has too many invocation parameters"))?;
         Ok(expression)
     }
+}
+
+/// The function type a SAM method's implementation has.
+fn sam_function_type(target: &IrSamTarget, suspend: bool) -> Ty {
+    Ty::fun_with_shape(
+        target.parameters.clone(),
+        target.result,
+        target.context_count as usize,
+        target.has_receiver,
+        suspend,
+    )
 }
