@@ -1,8 +1,11 @@
 //! Canonical `A & B` types and the denotable declaration they publish.
 //!
-//! Component order is structural identity: classifier identity, type arguments, and function
-//! shape. Diagnostic spelling is not an identity. Nullability stays on the intersection when
-//! every component admits null, so `Left? & Right?` is not the non-null type `Left & Right`.
+//! An intersection keeps its components in the order they were given, as kotlinc's does: a
+//! common supertype lists them in the order the first operand's supertypes were found, and
+//! diagnostics spell them in that order. The type relation compares intersections as sets (see
+//! `assignable`), so `A & B` and `B & A` are equal types with two spellings. Nullability stays on
+//! the intersection when every component admits null, so `Left? & Right?` is not the non-null
+//! type `Left & Right`.
 
 use crate::types::TyKind;
 use std::cmp::Ordering;
@@ -14,7 +17,7 @@ struct Piece {
     nullable: bool,
 }
 
-/// `A & B & …`. A single component is that component. A non-null `Nothing` component, or a
+/// `A & B & …`, its distinct components in their first order. A single component is that component. A non-null `Nothing` component, or a
 /// nullable bottom beside a non-null component, is divergent `Nothing`. Every component
 /// nullable yields `T?`, including `Nothing?` when a nullable bottom is present.
 pub(super) fn canonical(parts: &[Ty]) -> Ty {
@@ -51,7 +54,6 @@ pub(super) fn canonical(parts: &[Ty]) -> Ty {
             cores.push(piece.core);
         }
     }
-    cores.sort_by(|left, right| component_order(*left, *right));
     match cores.as_slice() {
         [] => Ty::Nothing,
         [one] if all_nullable => Ty::nullable(*one),
@@ -112,32 +114,6 @@ fn decompose(ty: Ty, inherited_nullable: bool, out: &mut Vec<Piece>) {
             nullable: inherited_nullable,
         }),
     }
-}
-
-/// Order components by their name path, then by structure. Intern ids follow whichever name was
-/// seen first in the process, so `Right` can sort before `Left` even though the path `Left`
-/// precedes `Right`. Permutations still collapse to one intersection.
-fn component_order(left: Ty, right: Ty) -> Ordering {
-    match (left.kind(), right.kind()) {
-        (TyKind::Obj(left_name, left_args), TyKind::Obj(right_name, right_args)) => {
-            type_path_cmp(left_name, right_name)
-                .then_with(|| slice_cmp(&left_args, &right_args, component_order))
-        }
-        _ => structural_cmp(left, right),
-    }
-}
-
-fn type_path_cmp(left: TypeName, right: TypeName) -> Ordering {
-    fn segments(mut name: TypeName) -> Vec<&'static str> {
-        let mut segments = Vec::new();
-        while name != TypeName::ROOT {
-            segments.push(name.segment_ref());
-            name = name.parent().unwrap_or(TypeName::ROOT);
-        }
-        segments.reverse();
-        segments
-    }
-    segments(left).cmp(&segments(right))
 }
 
 fn structural_cmp(left: Ty, right: Ty) -> Ordering {
@@ -413,12 +389,12 @@ mod tests {
     }
 
     #[test]
-    fn permutations_and_duplicates_are_one_intersection() {
+    fn duplicates_collapse_and_the_first_order_stays() {
         let forward = Ty::intersection(&[Ty::Int, Ty::String, Ty::Int]);
-        let reverse = Ty::intersection(&[Ty::String, Ty::Int]);
-        assert_eq!(forward, reverse);
+        assert_eq!(forward, Ty::intersection(&[Ty::Int, Ty::String]));
+        assert_ne!(forward, Ty::intersection(&[Ty::String, Ty::Int]));
         match forward.kind() {
-            TyKind::Intersection(parts) => assert_eq!(parts.len(), 2),
+            TyKind::Intersection(parts) => assert_eq!(parts.as_slice(), &[Ty::Int, Ty::String]),
             _ => {
                 let other = forward;
                 panic!("expected an intersection, got {other:?}")
@@ -431,13 +407,10 @@ mod tests {
         let list_int = Ty::obj_args("kotlin/collections/List", &[Ty::Int]);
         let list_string = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
         let intersection = Ty::intersection(&[list_string, list_int, list_string]);
-        let swapped = Ty::intersection(&[list_int, list_string]);
-        assert_eq!(intersection, swapped);
+        assert_eq!(intersection, Ty::intersection(&[list_string, list_int]));
         match intersection.kind() {
             TyKind::Intersection(parts) => {
-                assert_eq!(parts.len(), 2);
-                assert!(parts.contains(&list_int));
-                assert!(parts.contains(&list_string));
+                assert_eq!(parts.as_slice(), &[list_string, list_int]);
             }
             _ => {
                 let other = intersection;
@@ -451,9 +424,8 @@ mod tests {
         let forward = Ty::fun(vec![Ty::Int], Ty::String);
         let reverse = Ty::fun(vec![Ty::String], Ty::Int);
         let intersection = Ty::intersection(&[forward, reverse]);
-        assert_eq!(intersection, Ty::intersection(&[reverse, forward]));
         match intersection.kind() {
-            TyKind::Intersection(parts) => assert_eq!(parts.len(), 2),
+            TyKind::Intersection(parts) => assert_eq!(parts.as_slice(), &[forward, reverse]),
             _ => {
                 let other = intersection;
                 panic!("expected both function shapes, got {other:?}")

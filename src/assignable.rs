@@ -647,6 +647,15 @@ fn same_type_argument_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool
                     .all(|(&left, &right)| same_flexible_type_with(oracle, left, right))
                 && same_flexible_type_with(oracle, a.ret, b.ret)
         }
+        // An intersection is the set of its components. The order inference found them in is
+        // only how it is spelled, so `A & B` and `B & A` are one argument.
+        (TyKind::Intersection(a), TyKind::Intersection(b)) => {
+            a.len() == b.len()
+                && a.iter().all(|&left| {
+                    b.iter()
+                        .any(|&right| same_flexible_type_with(oracle, left, right))
+                })
+        }
         _ => left == right,
     }
 }
@@ -862,6 +871,17 @@ mod tests {
         assert!(ok(Ty::Int, Ty::Error));
         assert!(ok(Ty::Nothing, s("app/Dog")));
         assert!(ok(Ty::Nothing, Ty::Int));
+    }
+
+    #[test]
+    fn an_intersection_is_the_set_of_its_components() {
+        let forward = Ty::intersection(&[s("app/Dog"), s("app/Pet")]);
+        let reverse = Ty::intersection(&[s("app/Pet"), s("app/Dog")]);
+        assert_ne!(forward, reverse, "each keeps the order it was built in");
+        assert!(ok(forward, reverse) && ok(reverse, forward));
+        let invariant = |argument| g("kotlin/collections/MutableList", &[argument]);
+        assert!(ok(invariant(forward), invariant(reverse)));
+        assert!(!ok(invariant(forward), invariant(s("app/Dog"))));
     }
 
     #[test]
