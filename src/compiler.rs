@@ -211,6 +211,7 @@ fn emit_analyzed_into<B: Backend>(
         return;
     }
     let (mut index, mut inline_bodies, mut default_arguments, mut source_map) = module.into_parts();
+    let dispatched_classes = backend.dispatched_dependency_classes();
     let backend_module_facts = match crate::backend::BackendModuleFacts::from_resolved_index(&index)
     {
         Ok(facts) if backend.numbers_slots() => facts.with_classes(&index),
@@ -471,6 +472,8 @@ fn emit_analyzed_into<B: Backend>(
                 stems,
                 origins: source_map.origins(),
                 common_ir_coroutines: common_ir_preparation.is_some(),
+                dispatched_classes: &dispatched_classes,
+                char_sequences_by_index: backend.appends_char_sequences_by_index(),
             },
             diags,
         ) else {
@@ -486,6 +489,7 @@ fn emit_analyzed_into<B: Backend>(
                 symbols.semantic_platform(),
                 preparation,
                 symbols.coroutine_runtime(),
+                &dispatched_classes,
             ) {
                 backend.report_common_ir_preparation_error(&error, diags);
                 continue;
@@ -897,7 +901,7 @@ fn check_body_group(
             current = owner;
         }
     }
-    let info = crate::resolve::check_selected_declarations_in_pass_two(
+    let mut info = crate::resolve::check_selected_declarations_in_pass_two(
         crate::resolve::SourceFileUnit {
             file: active_file,
             file_index: raw_source as u32,
@@ -936,6 +940,22 @@ fn check_body_group(
             Span::new(0, 0),
             format!(
                 "internal error: checked local signatures were not publishable: {declarations:?}"
+            ),
+        );
+        return None;
+    }
+    // The body-local override plans published above can name external declarations no checked
+    // selection reached; freeze their builtin implementation facts with the unit's own.
+    if let Err(identity) = crate::resolve::record_override_edges(
+        &mut info.builtin_implementations,
+        index,
+        symbols.semantic_platform(),
+        raw_source as u32,
+    ) {
+        diags.error(
+            Span::new(0, 0),
+            format!(
+                "internal error: selected external member has incomplete builtin implementation facts: {identity:?}"
             ),
         );
         return None;

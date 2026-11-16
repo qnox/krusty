@@ -40,6 +40,9 @@ pub(super) struct DependencySupportState {
     next_support_unit: usize,
     /// One physical realization per exact logical class; equal names cannot alias producers.
     materialized_classes: HashMap<TypeName, KlibDependencyCallable>,
+    /// One static per top-level property backing field, by its library and field symbol. A
+    /// unit reserves its statics with its exports, before its dependencies close.
+    materialized_statics: HashSet<(String, crate::metadata::klib_ir::KlibIrSymbol)>,
     /// Exact class owner reservations for units whose layout is being prepared but is not emitted
     /// yet. These prevent a recursive dependency from materializing the same class twice.
     materializing_classes: HashMap<TypeName, KlibDependencyCallable>,
@@ -154,6 +157,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         .collect::<HashSet<_>>();
     let target_represents_classifier =
         |classifier| backend.represents_dependency_classifier(classifier);
+    let dispatched_classes = backend.dispatched_dependency_classes();
     let callees = KlibCalleeFacts::new(selected.iter().copied())
         .with_checked_dependency_facts(source.callables.klib_dependency_facts())
         .with_target_classifiers(&target_represents_classifier);
@@ -185,6 +189,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         &callees,
         &emitted_roots::OrdinaryRootCapabilities {
             realizes_intrinsic: &target_realizes_intrinsic,
+            realizes_getter: &target_realizes_getter,
             represents_classifier: &target_represents_classifier,
             retains_initializer: &|selected| match support_state.emitted.get(selected.identity()) {
                 Some(PublishedDependency::AllocatingConstructor) => Ok(true),
@@ -248,6 +253,9 @@ pub(super) fn emit_dependencies<B: Backend>(
             !support_state
                 .materialized_classes
                 .contains_key(&object.classifier)
+                && !support_state
+                    .materializing_classes
+                    .contains_key(&object.classifier)
         })
         .collect::<Vec<_>>();
     let mut artifacts = Vec::new();
@@ -273,11 +281,17 @@ pub(super) fn emit_dependencies<B: Backend>(
         ) else {
             return Vec::new();
         };
-        // An enum or object an earlier unit materialized keeps its one set of constants, or its
-        // one instance, there; this unit reads them through that unit's exports.
+        // An enum or object an earlier unit materialized, or one an enclosing unit is
+        // materializing, keeps its one set of constants, or its one instance, there; this unit
+        // reads them through that unit's exports.
         let mut unit = DependencyBodyUnit::reading_realized_classes(
-            support_state.materialized_classes.keys().copied(),
-        );
+            support_state
+                .materialized_classes
+                .keys()
+                .chain(support_state.materializing_classes.keys())
+                .copied(),
+        )
+        .presetting_constant_statics(backend.presets_constant_top_level_initializers());
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
@@ -431,6 +445,20 @@ pub(super) fn emit_dependencies<B: Backend>(
                 diags.error(Span::new(0, 0), message);
                 return Vec::new();
             }
+        }
+        let statics = unit
+            .materialized_statics()
+            .map(|(module, field)| (module.to_owned(), field.clone()))
+            .collect::<Vec<_>>();
+        if statics
+            .iter()
+            .any(|field| support_state.materialized_statics.contains(field))
+        {
+            diags.error(
+                Span::new(0, 0),
+                "cannot store a dependency property twice in separate dependency support units",
+            );
+            return Vec::new();
         }
         let mut exports = DependencyExportSignatures::default();
         if let Err(error) = class_declarations::record(&unit, platform, &callees, &mut exports) {
@@ -625,15 +653,31 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
-        if let Err(error) =
-            super::backend_handoff::record_checked_klib_dependency_facts(&mut callables, platform)
+        if let Some(protocol) = symbols
+            .char_sequence_protocol()
+            .filter(|_| backend.appends_char_sequences_by_index())
         {
+            if let Err(error) = callables.freeze_char_sequence_protocol(protocol, platform) {
+                diags.error(
+                    Span::new(0, 0),
+                    format!("internal error: cannot freeze the CharSequence members: {error:?}"),
+                );
+                return Vec::new();
+            }
+        }
+        if let Err(error) = super::backend_handoff::record_checked_klib_dependency_facts(
+            &mut callables,
+            platform,
+            &dispatched_classes,
+        ) {
             diags.error(Span::new(0, 0), format!("internal error: {error}"));
             return Vec::new();
         }
-        if let Err(identity) =
-            super::builtin_implementations::record_checked(&mut callables, unit.ir(), platform)
-        {
+        if let Err(identity) = super::builtin_implementations::record_checked(
+            &mut callables,
+            unit.ir(),
+            crate::resolve::RepresentedOverrides::new(platform, &dispatched_classes),
+        ) {
             diags.error(
                 Span::new(0, 0),
                 format!(
@@ -694,6 +738,9 @@ pub(super) fn emit_dependencies<B: Backend>(
         support_state
             .materializing_classes
             .extend(materialized.iter().cloned());
+        support_state
+            .materialized_statics
+            .extend(statics.iter().cloned());
 
         if let Some(preparation) = backend.common_ir_preparation() {
             if let Err(error) = super::backend_handoff::prepare_common_ir(
@@ -701,8 +748,9 @@ pub(super) fn emit_dependencies<B: Backend>(
                 platform,
                 preparation,
                 symbols.coroutine_runtime(),
+                &dispatched_classes,
             ) {
-                release_unit_reservations(support_state, &published, &materialized);
+                release_unit_reservations(support_state, &published, &materialized, &statics);
                 backend.report_common_ir_preparation_error(&error, diags);
                 return Vec::new();
             }
@@ -722,20 +770,20 @@ pub(super) fn emit_dependencies<B: Backend>(
             diags,
         );
         if diags.has_errors() {
-            release_unit_reservations(support_state, &published, &materialized);
+            release_unit_reservations(support_state, &published, &materialized, &statics);
             return Vec::new();
         }
         let initializer_requests = match crate::backend::initializer_declarations(&support) {
             Ok(requests) => requests,
             Err(reason) => {
-                release_unit_reservations(support_state, &published, &materialized);
+                release_unit_reservations(support_state, &published, &materialized, &statics);
                 diags.error(Span::new(0, 0), format!("internal error: {reason}"));
                 return Vec::new();
             }
         };
         let outputs = backend.lower_ir_file(support, state, diags);
         if diags.has_errors() {
-            release_unit_reservations(support_state, &published, &materialized);
+            release_unit_reservations(support_state, &published, &materialized, &statics);
             return Vec::new();
         }
         for (identity, realization) in published {
@@ -772,12 +820,16 @@ fn release_unit_reservations(
     support_state: &mut DependencySupportState,
     published: &[(KlibDependencyCallable, PublishedDependency)],
     materialized: &[(TypeName, KlibDependencyCallable)],
+    statics: &[(String, crate::metadata::klib_ir::KlibIrSymbol)],
 ) {
     for (identity, _) in published {
         support_state.in_progress.remove(identity);
     }
     for (classifier, _) in materialized {
         support_state.materializing_classes.remove(classifier);
+    }
+    for field in statics {
+        support_state.materialized_statics.remove(field);
     }
 }
 
