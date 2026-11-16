@@ -40,7 +40,8 @@ use super::callable_registry::CallableRegistry;
 use super::classes::{accessor_function, field_carrier, Accessor, FileClasses};
 use super::laid_out_classes::{DependencyImplementation, ResultAdapter, SignatureAdapters};
 use super::lower::library_members::{
-    library_member_identity, library_member_owner, library_member_signature, MemberRole,
+    is_abstract_class_member, library_member_identity, library_member_owner,
+    library_member_signature, MemberRole,
 };
 use super::lower::{carrier, Unsupported};
 
@@ -699,7 +700,15 @@ impl FileRecorder<'_, '_, '_> {
                 let ResolvedFunctionOverrideTarget::External(target) = edge.overridden else {
                     continue;
                 };
-                if !edge.overridden_is_interface {
+                // A call of a library class's abstract member reaches the overrides as one of a
+                // library interface's does.
+                if !edge.overridden_is_interface
+                    && !self
+                        .recording
+                        .callables
+                        .callable(target)
+                        .is_some_and(is_abstract_class_member)
+                {
                     continue;
                 }
                 if edge.overridden_semantic_role == Some(SemanticCallRole::KotlinFunctionInvoke) {

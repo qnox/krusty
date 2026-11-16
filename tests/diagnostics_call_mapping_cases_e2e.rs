@@ -29,6 +29,11 @@ fn argument_mapping_and_overload_errors_match_kotlinc_exactly() {
         "class C(val a: Int) { constructor(a: String, b: String, c: String) : this(0) }\nfun g(): C = C(1, 2)",
         "fun f(vararg x: Int): Int = x.size\nfun g(): Int = f(\"no\")",
         "fun f(x: Int = \"no\"): Int = x",
+        // A constructor whose arguments map but mismatch outranks a same-named factory that the
+        // arguments cannot be mapped onto, from source and from the stdlib alike.
+        "class Box<T>(val a: Array<T>)\nfun <T> Box(size: Int, init: (Int) -> T): Box<T> = TODO()\nfun g() = Box<String>(3)",
+        "class C(val a: String) { constructor(a: String, b: Int) : this(a) }\nfun C(x: Int, y: Int, z: Int): C = TODO()\nfun g() = C(1)",
+        "@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)\nimport kotlin.concurrent.atomics.AtomicArray\nfun g() = AtomicArray<String>(3)",
     ];
     assert_error_parity(&cases);
 }

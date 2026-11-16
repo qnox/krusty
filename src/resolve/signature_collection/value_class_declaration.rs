@@ -3,16 +3,18 @@
 //!
 //! The JVM makes a single-field `value class` inline only with `@JvmInline`; every other target
 //! reads the keyword alone. A multi-field one is a full value class behind `+FullValueClasses` on
-//! every target. Positions follow the reference compilers: a missing feature or annotation is
-//! reported at the `value` keyword, a wrong parameter count at the primary-constructor parameter
-//! list.
+//! every target. A legacy `inline class` is inline by its modifier, exactly as a `@JvmInline value
+//! class` is by its annotation, and is checked as one. Positions follow the reference compilers: a
+//! missing constructor, feature or annotation is reported at the keyword, a wrong parameter count
+//! at the primary-constructor parameter list.
 
+use crate::ast::ValueClassKeyword;
 use crate::compilation_target::CompilationTarget;
 use crate::diag::{DiagSink, Span};
 
 /// The written shape of one `value class` declaration.
 pub(super) struct ValueClassDeclaration {
-    pub(super) value_keyword: Span,
+    pub(super) keyword: ValueClassKeyword,
     pub(super) parameters: Option<Span>,
     pub(super) parameter_count: usize,
     pub(super) jvm_inline: bool,
@@ -38,24 +40,21 @@ impl ValueClassDeclaration {
         diags: &mut DiagSink,
     ) -> ValueClassRepresentation {
         let annotation_required = target.inline_value_classes_require_jvm_inline();
-        // Only the JVM reads the annotation; elsewhere it is not part of the representation.
-        let jvm_inline = annotation_required && self.jvm_inline;
+        // Only the JVM reads the annotation; elsewhere it is not part of the representation. An
+        // `inline` modifier declares the class inline on every target.
+        let jvm_inline = self.keyword.declares_inline || (annotation_required && self.jvm_inline);
         let Some(parameters) = self.parameters else {
-            if !full_value_classes {
-                diags.error(
-                    self.value_keyword,
-                    "primary constructor is required for value classes.",
-                );
-                return ValueClassRepresentation::Rejected;
-            }
-            if self.final_class {
-                diags.error(
-                    self.value_keyword,
-                    "primary constructor is required for final value classes.",
-                );
-                return ValueClassRepresentation::Rejected;
-            }
-            return ValueClassRepresentation::Full;
+            let missing = if !full_value_classes {
+                "primary constructor is required for value classes."
+            } else if jvm_inline {
+                "primary constructor is required for @JvmInline value classes."
+            } else if self.final_class {
+                "primary constructor is required for final value classes."
+            } else {
+                return ValueClassRepresentation::Full;
+            };
+            diags.error(self.keyword.span, missing);
+            return ValueClassRepresentation::Rejected;
         };
         let wrong_parameter_count = if jvm_inline && full_value_classes {
             "@JvmInline value class must have exactly one primary constructor parameter."
@@ -65,7 +64,7 @@ impl ValueClassDeclaration {
         match self.parameter_count {
             1 if annotation_required && !jvm_inline && !full_value_classes => {
                 diags.error(
-                    self.value_keyword,
+                    self.keyword.span,
                     "value classes without '@JvmInline' annotation are not yet supported.",
                 );
                 ValueClassRepresentation::Rejected
@@ -94,7 +93,7 @@ impl ValueClassDeclaration {
             _ if full_value_classes => ValueClassRepresentation::Full,
             _ => {
                 diags.error(
-                    self.value_keyword,
+                    self.keyword.span,
                     "the feature \"full value classes\" is experimental and should be enabled \
                      explicitly. This can be done by supplying the compiler argument \
                      '-XXLanguage:+FullValueClasses', but note that no stability guarantees are \

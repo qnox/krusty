@@ -55,6 +55,7 @@ pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
+        || intrinsic_operations::member_operation(operation).is_some()
         || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == krusty::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == krusty::backend::BackendCompilerIntrinsic::ThrowableCause
@@ -670,6 +671,17 @@ fn expression_type(
         }
         IrExpr::LocalPropertyReference(_) if ir.checked_type(id).is_none() => Ty::obj("kotlin/Any"),
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        // Common lowering leaves a module property read at its declaration's type and records the
+        // use's type on a separate coercion, as it does for a call; the read, through the getter
+        // entry of another file or this file's storage, produces the declared type.
+        IrExpr::Checked(checked_op)
+            if ir.checked_type(id).is_none()
+                && let krusty::ir::IrCheckedOperation::PropertyRead { target, .. } =
+                    &**checked_op
+                && let Some(property) = ir.referenced_module_properties.get(target) =>
+        {
+            property.ty
+        }
         // A `when` without an `else` branch, such as a guard a counted loop's lowering adds, is a
         // statement: no branch's value can be its own.
         IrExpr::When { branches }
@@ -968,19 +980,17 @@ impl<'a> Body<'a> {
     fn value(&mut self, id: u32, target: Ty) -> Result<(), Unsupported> {
         let source_ty = self.type_of(id)?;
         self.expression(id)?;
-        // A statement-shaped operand may return/throw before its enclosing value use resumes.
-        // Its Unit annotation must stay Unit; only the common completion proof removes the
-        // impossible conversion. Live Unit operands still fail below rather than invent a value.
-        if source_ty == Some(Ty::Unit) && carrier(target)?.is_some() && self.diverges(id) {
+        // An operand may return, throw or enter a loop it never leaves before its enclosing value
+        // use resumes, whatever type it is annotated with: an inlined `Nothing` body keeps its
+        // caller's `Int`, and a statement-shaped one stays `Unit`. Only the common completion
+        // proof removes the impossible conversion; `unreachable` discards whatever the operand
+        // left and restores stack polymorphism. An inlined generic result may retain `Nothing`
+        // yet complete normally, so a live operand still converts or fails below.
+        if self.diverges(id) {
             self.code.unreachable();
             return Ok(());
         }
         let Some(source) = source_ty else {
-            // Restore stack polymorphism after structured control only when completion proves
-            // divergence: an inlined generic result may retain Nothing but complete normally.
-            if self.diverges(id) {
-                self.code.unreachable();
-            }
             return Ok(());
         };
         if source == Ty::Unit && carrier(target)?.is_some() {
@@ -1205,11 +1215,16 @@ impl<'a> Body<'a> {
                         .string_constant(self.module, &mut self.code, &[]);
                 }
             }
+            // A static function a class owns (a local function lifted out of a member, its
+            // receiver captured as a parameter) is called as one the file owns: a wasm function
+            // has no container, so the owner says nothing about the call.
             IrExpr::Call {
                 callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
-            } if let Callee::Local(function) = &**call_callee => {
+            } if let Callee::Local(function) | Callee::ClassStatic { function, .. } =
+                &**call_callee =>
+            {
                 let params = self.ir.functions[*function as usize].params.clone();
                 if params.len() != args.len() {
                     return Err("a call whose arguments do not match its parameters".into());
@@ -1257,6 +1272,40 @@ impl<'a> Body<'a> {
                     .copied()
                     .chain(params.iter().copied())
                     .collect::<Vec<_>>();
+                frame.extend(std::iter::repeat_n(
+                    Ty::Int,
+                    krusty::backend::default_arguments::mask_words(params.len()),
+                ));
+                self.direct_call(function, &frame, &args)?;
+            }
+            // Only the file that declares the class lays its object out, so its entry for the
+            // constructor's defaults constructs it.
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::ModuleConstructorDefaultEntry {
+                constructor,
+                outer,
+                params,
+                ..
+            } = &**call_callee =>
+            {
+                let function = self
+                    .calls
+                    .instance(
+                        &krusty::backend::instance_links::InstanceEntry::ConstructorDefaults {
+                            module: self.module_name.into(),
+                            declaration: *constructor,
+                        },
+                    )
+                    .ok_or_else(|| {
+                        "a cross-file construction leaving arguments to a constructor its file \
+                         does not expose"
+                            .to_string()
+                    })?;
+                let mut frame = outer.iter().copied().collect::<Vec<_>>();
+                frame.extend_from_slice(params);
                 frame.extend(std::iter::repeat_n(
                     Ty::Int,
                     krusty::backend::default_arguments::mask_words(params.len()),
@@ -1363,6 +1412,32 @@ impl<'a> Body<'a> {
                 && let Some(field) = self.throwable_field(*target) =>
             {
                 self.throwable_field_read(field, dispatch_receiver, &args, *ret)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                params,
+                ret,
+                defaults,
+                extension_receiver_parameter,
+                ..
+            } = &**call_callee
+                && let Some(operation) = self
+                    .callables
+                    .callable(*target)
+                    .and_then(|fact| fact.compiler_operation())
+                    .and_then(intrinsic_operations::member_operation) =>
+            {
+                intrinsic_operations::string_get_frame(
+                    params,
+                    *ret,
+                    defaults,
+                    *extension_receiver_parameter,
+                )?;
+                self.intrinsic(operation, dispatch_receiver, &args)?;
             }
             IrExpr::Call {
                 dispatch_receiver: Some(receiver),
@@ -1806,13 +1881,15 @@ impl<'a> Body<'a> {
                 captures,
                 sam,
                 ..
-            } => self.function_value(
-                impl_fn,
-                &captures,
-                function_values::FunctionEquality::Identity,
-                self.type_of(id)?,
-                sam.as_deref(),
-            )?,
+            } => {
+                self.function_value(
+                    impl_fn,
+                    &captures,
+                    function_values::FunctionEquality::Identity,
+                    self.type_of(id)?,
+                    sam.as_deref(),
+                )?;
+            }
             IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
                 self.callable_reference(id, &reference)?
             }
@@ -2345,6 +2422,8 @@ fn checked_operation_name(operation: &krusty::ir::IrCheckedOperation) -> &'stati
         IrCheckedOperation::RangeContains { .. } => "RangeContains",
         IrCheckedOperation::ComparableRangeContains { .. } => "ComparableRangeContains",
         IrCheckedOperation::IllegalProgressionStep { .. } => "IllegalProgressionStep",
+        IrCheckedOperation::AtomicField { .. } => "AtomicField",
+        IrCheckedOperation::AtomicArrayElement { .. } => "AtomicArrayElement",
         IrCheckedOperation::RangeLoop { .. } => "RangeLoop",
         IrCheckedOperation::PropertyReference { .. } => "PropertyReference",
     }

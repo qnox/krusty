@@ -185,6 +185,7 @@ fn an_exported_dependency_declaration_publishes_its_entry_without_a_caller() {
         &mut ir,
         &mut CheckedBackendCallables::default(),
         |function| function == exported_function,
+        |_| false,
     );
 
     let entry = ir.default_entries[&exported_function];
@@ -226,7 +227,12 @@ fn a_published_entry_takes_the_frame_and_one_mask_word_per_32_parameters() {
     ir.checked_callable_functions
         .insert(CallableId::from_raw(4), function);
 
-    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
 
     let entry = ir.default_entries[&function];
     assert_eq!(ir.default_entries.len(), 1);
@@ -292,7 +298,12 @@ fn a_default_reads_an_earlier_parameter_and_its_own_locals_move_past_the_masks()
     });
     let caller = declare(&mut ir, "caller", Vec::new(), Ty::Int, Some(call), None);
 
-    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
 
     let entry = ir.default_entries[&function];
     assert_eq!(
@@ -341,7 +352,12 @@ fn a_call_site_passes_every_parameter_and_constant_mask_words() {
     });
     let caller = declare(&mut ir, "caller", Vec::new(), Ty::Unit, Some(call), None);
 
-    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
 
     let entry = ir.default_entries[&function];
     let mut expected = vec!["0".to_owned(), "absent Int".to_owned()];
@@ -399,7 +415,12 @@ fn a_member_entry_takes_the_receiver_and_dispatches_through_the_method() {
         None,
     );
 
-    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
 
     let entry = ir.default_entries[&function];
     let declaration = &ir.functions[entry as usize];
@@ -453,10 +474,85 @@ fn overriding_members_do_not_publish_the_inherited_default_provider_twice() {
             .get_mut(&function)
             .unwrap()
             .inherited_default_provider = Some(ResolvedFunctionOverrideTarget::Module(provider));
+        let implementation = CallableId::from_raw(21 + ordinal);
         ir.checked_callable_functions
-            .insert(CallableId::from_raw(21 + ordinal), function);
+            .insert(implementation, function);
+        record_override(&mut ir, owner, implementation, provider);
         assert!(published_identities(&ir, function).is_empty());
     }
+}
+
+#[test]
+fn an_actual_member_publishes_its_entry_under_its_expect() {
+    let expected = CallableId::from_raw(30);
+    let actual = CallableId::from_raw(31);
+    let mut ir = IrFile::default();
+    let owner = type_name("demo/Renderer");
+    let read = ir.add_expr(IrExpr::GetValue(1));
+    let function = declare(
+        &mut ir,
+        "render",
+        vec![Ty::Int],
+        Ty::Int,
+        Some(read),
+        Some(owner),
+    );
+    method_of(&mut ir, "demo/Renderer", function);
+    ir.checked_callable_functions.insert(actual, function);
+    let default = int(&mut ir, 1);
+    with_defaults(&mut ir, function, vec![Some(default)]);
+    ir.fn_params
+        .get_mut(&function)
+        .unwrap()
+        .inherited_default_provider = Some(ResolvedFunctionOverrideTarget::Module(expected));
+
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
+
+    assert!(ir.default_entries.contains_key(&function));
+    assert_eq!(
+        published_identities(&ir, function),
+        [expected],
+        "an actual member overrides nothing; its expect's callers select its entry"
+    );
+}
+
+/// Record that `implementation`, a member of `owner`, overrides `overridden`.
+fn record_override(
+    ir: &mut IrFile,
+    owner: TypeName,
+    implementation: CallableId,
+    overridden: CallableId,
+) {
+    ir.function_overrides
+        .entry(owner)
+        .or_default()
+        .push(crate::ir::IrFunctionOverride {
+            implementation: ResolvedFunctionOverrideTarget::Module(implementation),
+            implementation_function: None,
+            implementation_owner: owner,
+            overridden: ResolvedFunctionOverrideTarget::Module(overridden),
+            overridden_owner: type_name("demo/Base"),
+            overridden_semantic_role: None,
+            collection_barrier: None,
+            overridden_is_interface: false,
+            name: "scale".to_owned(),
+            declared_parameters: vec![Ty::Int],
+            declared_result: Ty::Int,
+            applied_parameters: vec![Ty::Int],
+            applied_result: Ty::Int,
+            implementation_parameters: vec![Ty::Int],
+            implementation_parameter_identities: Vec::new(),
+            overridden_parameter_identities: Vec::new(),
+            implementation_result: Ty::Int,
+            suspend: false,
+            has_kotlin_superclass_override: false,
+            depth: 1,
+        });
 }
 
 #[test]
@@ -492,7 +588,12 @@ fn a_value_class_member_entry_calls_the_member_directly() {
         None,
     );
 
-    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
 
     let entry = ir.default_entries[&function];
     assert_eq!(
@@ -557,7 +658,12 @@ fn an_inherited_default_calls_the_entry_of_its_provider_in_this_file() {
         None,
     );
 
-    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
 
     assert_eq!(ir.default_entries.len(), 1);
     let entry = ir.default_entries[&provider];
@@ -619,7 +725,12 @@ fn an_override_narrowing_its_providers_result_coerces_the_entry_value() {
         None,
     );
 
-    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
 
     let entry = ir.default_entries[&provider];
     assert_eq!(ir.functions[entry as usize].ret, formal);
@@ -665,7 +776,12 @@ fn an_actual_entry_is_keyed_by_its_expect_and_calls_the_actual() {
     });
     let caller = declare(&mut ir, "caller", Vec::new(), Ty::String, Some(call), None);
 
-    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
 
     let entry = ir.default_entries[&function];
     assert_eq!(published_identities(&ir, function), [expect]);
@@ -778,7 +894,12 @@ fn inherited_member_defaults_in_another_file_keep_receiver_out_of_masks() {
         );
         let functions = ir.functions.len();
 
-        realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+        realize(
+            &mut ir,
+            &mut CheckedBackendCallables::default(),
+            |_| false,
+            |_| false,
+        );
 
         let IrExpr::Call {
             callee,
@@ -871,7 +992,12 @@ fn cross_file_member_defaults_use_the_provider_frame_before_coercing_the_result(
         None,
     );
 
-    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
 
     let IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::ImplicitCoercion,
@@ -1009,7 +1135,12 @@ fn shapes_this_lowering_cannot_realize_keep_their_checked_form() {
     let before = format!("{:?}", ir.exprs);
     let functions = ir.functions.len();
 
-    realize(&mut ir, &mut CheckedBackendCallables::default(), |_| false);
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
 
     assert_eq!(format!("{:?}", ir.exprs), before);
     assert_eq!(ir.functions.len(), functions);
@@ -1082,7 +1213,7 @@ fn an_entry_keeps_the_checked_facts_frozen_for_its_defaults() {
     let mut facts = CheckedBackendCallables::freeze(&ir, &SingletonMember(target))
         .expect("the selected dependency member has a frozen fact");
 
-    realize(&mut ir, &mut facts, |_| false);
+    realize(&mut ir, &mut facts, |_| false, |_| false);
 
     let entry = ir.default_entries[&function];
     assert_eq!(ir.default_entries.len(), 1);

@@ -48,27 +48,27 @@ pub(super) enum KlibCalleeFact<'facts, 'callable> {
 }
 
 /// Shared name retained for the checked member-call edge consumed by KLIB body lowering.
-pub(crate) type CallEdge = crate::fir::CheckedMemberCallEdge;
+pub(crate) type CallEdge = crate::ir::CheckedMemberCallEdge;
 
 impl<'a> KlibCalleeFacts<'a> {
     /// Copy checker-produced semantic facts for the selected KLIB dependency graph.
     pub(crate) fn with_checked_dependency_facts(
         mut self,
-        checked: &'a crate::fir::CheckedKlibDependencyFacts,
+        checked: &'a crate::ir::CheckedKlibDependencyFacts,
     ) -> Self {
         self.builtin_implementation_facts.extend(
             checked
-                .builtin_implementations
+                .builtin_implementations()
                 .iter()
                 .map(|(&id, facts)| (id, facts.clone())),
         );
         self.member_edges.extend(
             checked
-                .member_edges
+                .member_edges()
                 .iter()
                 .map(|(id, edge)| (id.clone(), edge.clone())),
         );
-        if let Some(hierarchy) = checked.type_hierarchy.as_ref() {
+        if let Some(hierarchy) = checked.type_hierarchy() {
             self.class_type_oracle = Some(hierarchy);
         }
         self

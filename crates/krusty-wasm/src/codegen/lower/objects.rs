@@ -1292,57 +1292,21 @@ impl Body<'_> {
         }
         let nullable = matches!(target.kind(), TyKind::Nullable(_)) && op != IrTypeOp::SafeCast;
         let tested = target.non_null();
+        // A primitive's or an unsigned number's instances are its boxes, one box type per
+        // classifier (see `crate::boxes`).
+        let scalar_box = if crate::boxes::is_boxed_scalar(tested) {
+            self.boxed_form(tested)?
+        } else {
+            None
+        };
         let value = self.local(REFERENCE);
         self.value(arg, any())?;
         self.code.local_tee(value);
-        if let Some(arity) = self.function_arity(tested) {
-            self.function_type_test(arity, nullable, self.is_suspend_function_type(tested));
+        if let Some(form) = scalar_box {
+            self.code
+                .ref_test(nullable, HeapType::Concrete(form.structure));
         } else {
-            match tested.kind() {
-                TyKind::STRING => {
-                    self.code.ref_test(nullable, STRING_HEAP);
-                }
-                TyKind::Obj(name, _) if name == krusty::types::wk::any() => {
-                    self.code.ref_test(nullable, HeapType::Eq);
-                }
-                TyKind::Obj(name, _)
-                    if self
-                        .classifiers
-                        .classifier(name)
-                        .is_some_and(|fact| fact.runtime_exception.is_some()) =>
-                {
-                    let structure =
-                        self.runtime
-                            .exception_class(self.module, self.classifiers, name)?;
-                    self.code.ref_test(nullable, HeapType::Concrete(structure));
-                }
-                // Each array classifier is an object type of its own, so the test is its type's:
-                // `UIntArray` is not an `IntArray`, though one wraps the other's storage.
-                _ if tested.is_array() => {
-                    let (form, _) = self.array_form(tested)?;
-                    self.code
-                        .ref_test(nullable, HeapType::Concrete(form.object));
-                }
-                _ => match (
-                    self.interface_of_type(tested),
-                    self.class_structure(tested)?,
-                ) {
-                    (Some(interface), _) => self.interface_test(interface, nullable),
-                    (None, Some(structure)) => {
-                        self.code.ref_test(nullable, HeapType::Concrete(structure));
-                    }
-                    (None, None) => match self.library_interface_of_type(tested) {
-                        Some(interface) => self.library_interface_test(interface, nullable),
-                        None if self.box_test(tested, nullable)? => {}
-                        None => {
-                            return Err(format!(
-                                "a type test against `{}`",
-                                super::describe(tested)
-                            ));
-                        }
-                    },
-                },
-            }
+            self.reference_type_test(tested, nullable)?;
         }
         match op {
             IrTypeOp::NotInstanceOf => {
@@ -1361,6 +1325,57 @@ impl Body<'_> {
                 self.code.else_().ref_null(HeapType::None).end();
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Replace the reference on the stack with whether it is an instance of the reference type
+    /// `tested` — or null, when `nullable`.
+    fn reference_type_test(&mut self, tested: Ty, nullable: bool) -> Result<(), Unsupported> {
+        if let Some(arity) = self.function_arity(tested) {
+            self.function_type_test(arity, nullable, self.is_suspend_function_type(tested));
+            return Ok(());
+        }
+        match tested.kind() {
+            TyKind::STRING => {
+                self.code.ref_test(nullable, STRING_HEAP);
+            }
+            TyKind::Obj(name, _) if name == krusty::types::wk::any() => {
+                self.code.ref_test(nullable, HeapType::Eq);
+            }
+            TyKind::Obj(name, _)
+                if self
+                    .classifiers
+                    .classifier(name)
+                    .is_some_and(|fact| fact.runtime_exception.is_some()) =>
+            {
+                let structure =
+                    self.runtime
+                        .exception_class(self.module, self.classifiers, name)?;
+                self.code.ref_test(nullable, HeapType::Concrete(structure));
+            }
+            // Each array classifier is an object type of its own, so the test is its type's:
+            // `UIntArray` is not an `IntArray`, though one wraps the other's storage.
+            _ if tested.is_array() => {
+                let (form, _) = self.array_form(tested)?;
+                self.code
+                    .ref_test(nullable, HeapType::Concrete(form.object));
+            }
+            _ => match (
+                self.interface_of_type(tested),
+                self.class_structure(tested)?,
+            ) {
+                (Some(interface), _) => self.interface_test(interface, nullable),
+                (None, Some(structure)) => {
+                    self.code.ref_test(nullable, HeapType::Concrete(structure));
+                }
+                (None, None) => match self.library_interface_of_type(tested) {
+                    Some(interface) => self.library_interface_test(interface, nullable),
+                    None => {
+                        return Err(format!("a type test against `{}`", super::describe(tested)));
+                    }
+                },
+            },
         }
         Ok(())
     }

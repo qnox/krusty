@@ -122,6 +122,7 @@ impl BodyLowering<'_, '_, '_> {
                 | Callee::Module { ret, .. }
                 | Callee::ModuleWithDefaults { ret, .. }
                 | Callee::ModuleDefaultEntry { ret, .. }
+                | Callee::ModuleConstructorDefaultEntry { ret, .. }
                 | Callee::Super { ret, .. }
                 // Another file's function returns what its declaration fixes; both files carry
                 // that type by the same projection, a value class as its value.

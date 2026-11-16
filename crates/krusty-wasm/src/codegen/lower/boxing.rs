@@ -21,31 +21,25 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// Read the `ty` value out of the box the frontend checked the reference on the stack is.
-    pub(super) fn unbox(&mut self, ty: Ty) -> Result<(), Unsupported> {
-        let form = match scalar_carrier(ty)? {
+    /// The box of the scalar `ty`'s values, declared on first use; `None` for a type carried as a
+    /// reference.
+    pub(super) fn boxed_form(
+        &mut self,
+        ty: Ty,
+    ) -> Result<Option<crate::boxes::BoxForm>, Unsupported> {
+        Ok(match scalar_carrier(ty)? {
             Some(value) => self.runtime.box_form(self.module, ty, value)?,
             None => None,
-        }
-        .ok_or_else(|| format!("a reference read as a `{}` value", describe(ty)))?;
-        form.emit_unbox(&mut self.code);
-        Ok(())
+        })
     }
 
-    /// Replace the reference on the stack with whether it is a box of the scalar type `tested`
-    /// (or null, when `nullable`): `x is Char` on an `Any?`. Each scalar classifier has its own box
-    /// type, so the test is that type's. `false`, leaving the stack as it is, when `tested` is not
-    /// a scalar this backend boxes.
-    pub(super) fn box_test(&mut self, tested: Ty, nullable: bool) -> Result<bool, Unsupported> {
-        let Some(value) = scalar_carrier(tested)? else {
-            return Ok(false);
-        };
-        let Some(form) = self.runtime.box_form(self.module, tested, value)? else {
-            return Ok(false);
-        };
-        self.code
-            .ref_test(nullable, HeapType::Concrete(form.structure));
-        Ok(true)
+    /// Read the `ty` value out of the box the frontend checked the reference on the stack is.
+    pub(super) fn unbox(&mut self, ty: Ty) -> Result<(), Unsupported> {
+        let form = self
+            .boxed_form(ty)?
+            .ok_or_else(|| format!("a reference read as a `{}` value", describe(ty)))?;
+        form.emit_unbox(&mut self.code);
+        Ok(())
     }
 
     /// `x as Int` or `x as UInt?` on a reference: Kotlin checks the cast, so another type's box
@@ -60,11 +54,9 @@ impl Body<'_> {
     ) -> Result<(), Unsupported> {
         let nullable = matches!(target.kind(), TyKind::Nullable(_));
         let scalar = target.non_null();
-        let form = match scalar_carrier(scalar)? {
-            Some(value) => self.runtime.box_form(self.module, scalar, value)?,
-            None => None,
-        }
-        .ok_or_else(|| format!("a reference cast to a `{}` value", describe(target)))?;
+        let form = self
+            .boxed_form(scalar)?
+            .ok_or_else(|| format!("a reference cast to a `{}` value", describe(target)))?;
         let failure = self.runtime.exception_class(
             self.module,
             self.classifiers,

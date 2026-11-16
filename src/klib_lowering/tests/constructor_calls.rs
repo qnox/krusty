@@ -519,7 +519,11 @@ fn klib_generic_constructor_ordinary_body_retains_class_formals() {
         .unwrap()
         .klib_body_callable()
         .unwrap();
-    let facts = KlibCalleeFacts::new([selected, constructor]);
+    // `Pair` is final, so a unit would materialize it, but the target lays it out itself, as
+    // Native does: the body constructs the target's class through the constructor's handle.
+    let represents_pair = |classifier| classifier == type_name("kotlin/Pair");
+    let facts =
+        KlibCalleeFacts::new([selected, constructor]).with_target_classifiers(&represents_pair);
     let externals = crate::fx_hash::HashMap::from_iter([(
         constructor.identity().clone(),
         super::super::EmittedDependencyCallable::constructor(constructor_target),
