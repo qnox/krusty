@@ -35,29 +35,30 @@ pub(super) fn report(ir: &IrFile, facts: &SlotSignatureFacts<'_>, diags: &mut Di
         let owner = class.fq_name.render().replace(['/', '$'], ".");
         let owner = owner.rsplit('.').next().unwrap_or(&owner).to_owned();
         for family in families {
+            // A member whose JVM method the backend cannot name has no signature to compare;
+            // the signatures of the others still are.
             let slots = family
                 .slots
                 .iter()
                 .map(|slot| {
                     slot.iter()
                         .map(|function| signature(ir, facts, &family.name, function))
-                        .collect::<Option<Vec<_>>>()
+                        .collect::<Vec<_>>()
                 })
-                .collect::<Option<Vec<_>>>();
-            // A member whose JVM method the backend cannot name has no signature to compare.
-            let Some(slots) = slots else {
-                continue;
+                .collect::<Vec<_>>();
+            let holds = |signatures: &[Option<(String, String)>], signature: &(String, String)| {
+                signatures.iter().flatten().any(|other| other == signature)
             };
             let mut seen = Vec::<(String, String)>::new();
             for (index, signatures) in slots.iter().enumerate() {
-                for signature in signatures {
+                for signature in signatures.iter().flatten() {
                     if seen.contains(signature) {
                         continue;
                     }
                     let sharing = slots
                         .iter()
                         .enumerate()
-                        .filter(|(_, other)| other.contains(signature))
+                        .filter(|(_, other)| holds(other, signature))
                         .map(|(other, _)| other)
                         .collect::<Vec<_>>();
                     if sharing.len() < 2 || sharing[0] != index {
@@ -68,7 +69,8 @@ pub(super) fn report(ir: &IrFile, facts: &SlotSignatureFacts<'_>, diags: &mut Di
                     // declaration clash, which the declaration checks report; this pass reports
                     // only a signature an inherited declaration or a bridge takes.
                     if sharing.iter().all(|&slot| {
-                        family.slots[slot][0].declared_by_classifier && slots[slot][0] == *signature
+                        family.slots[slot][0].declared_by_classifier
+                            && slots[slot][0].as_ref() == Some(signature)
                     }) {
                         continue;
                     }
@@ -78,7 +80,7 @@ pub(super) fn report(ir: &IrFile, facts: &SlotSignatureFacts<'_>, diags: &mut Di
                             let functions = &family.slots[slot];
                             let realized = slots[slot]
                                 .iter()
-                                .position(|other| other == signature)
+                                .position(|other| other.as_ref() == Some(signature))
                                 .expect("a sharing slot holds the signature");
                             // A declared slot takes the signature with its own method or with a
                             // bridge for the overridden declaration; an inherited slot is one fake
@@ -106,7 +108,7 @@ pub(super) fn report(ir: &IrFile, facts: &SlotSignatureFacts<'_>, diags: &mut Di
                         .iter()
                         .filter(|&&slot| {
                             family.slots[slot][0].declared_by_classifier
-                                && slots[slot][0] == *signature
+                                && slots[slot][0].as_ref() == Some(signature)
                         })
                         .map(|&slot| &family.slots[slot][0])
                         .collect::<Vec<_>>();

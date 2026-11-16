@@ -15,14 +15,12 @@ use crate::libraries::{FnKind, FunctionInfo};
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
-/// Whether `function` is a member of a classifier whose language declares no extension
-/// receivers, so that it overrides a Kotlin extension through its first parameter.
-fn declares_receiver_as_parameter(source: &dyn SymbolSource, function: &FunctionInfo) -> bool {
-    function.kind == FnKind::Member
+/// Whether `function` overrides a Kotlin extension through its first parameter, as its provider
+/// published ([`FunctionInfo::receiver_as_first_parameter`]).
+fn declares_receiver_as_parameter(function: &FunctionInfo) -> bool {
+    function.receiver_as_first_parameter
+        && function.kind == FnKind::Member
         && function.context_count == 0
-        && source
-            .classifier(function.callable.owner)
-            .is_some_and(|classifier| !classifier.is_kotlin)
 }
 
 /// Whether the Java member `implementation` overrides the Kotlin extension `inherited` that its
@@ -36,7 +34,7 @@ pub(super) fn function_receiver_parameter_slots_match(
 ) -> bool {
     if inherited.kind != FnKind::Extension
         || inherited.context_count != 0
-        || !declares_receiver_as_parameter(source, implementation)
+        || !declares_receiver_as_parameter(implementation)
         || implementation.callable.owner == inherited.callable.owner
         || !resolution_subtype(
             source,

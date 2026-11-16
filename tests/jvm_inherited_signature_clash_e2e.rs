@@ -5,8 +5,13 @@ use super::common;
 use super::diagnostics_parity_support::complete_errors;
 
 fn assert_kotlinc_diagnostics(file: &str, source: &str) {
+    assert_kotlinc_module_diagnostics(&[(file, source)]);
+}
+
+fn assert_kotlinc_module_diagnostics(files: &[(&str, &str)]) {
+    let source = files;
     let stdlib = common::stdlib_jar();
-    let result = common::compiler_diagnostics(&[(file, source)], std::slice::from_ref(&stdlib));
+    let result = common::compiler_diagnostics(files, std::slice::from_ref(&stdlib));
     assert_ne!(result.reference_code, 0, "kotlinc accepted {source:?}");
     assert_ne!(result.krusty_code, 0, "krusty accepted {source:?}");
     let mut observed = complete_errors(&result.krusty_stderr, false);
@@ -132,4 +137,21 @@ fn an_internal_member_of_another_file_keeps_its_module_name() {
         "{}{}",
         result.krusty_stdout, result.krusty_stderr
     );
+}
+
+/// A sibling file's `internal` overload, whose JVM name carries the module suffix, leaves the
+/// signatures of its public overloads comparable.
+#[test]
+fn an_internal_overload_of_another_file_does_not_hide_a_public_ones_signature() {
+    assert_kotlinc_module_diagnostics(&[
+        (
+            "Base.kt",
+            "open class Base {\n    internal fun take(x: List<String>) {}\n    \
+             fun take(x: Set<String>) {}\n}\n",
+        ),
+        (
+            "Derived.kt",
+            "class Derived : Base() {\n    fun take(x: Set<Int>) {}\n}\n",
+        ),
+    ]);
 }
