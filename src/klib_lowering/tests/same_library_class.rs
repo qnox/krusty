@@ -1214,7 +1214,17 @@ fn lower_fixture(
         .external_callable(function.callable.external_identity.unwrap())
         .unwrap();
     let callable = selected.klib_body_callable().unwrap();
-    let callees = super::super::KlibCalleeFacts::new([callable]);
+    // The checker freezes the selected body graph, the class hierarchy above each class included,
+    // before lowering reads it.
+    let checked = crate::resolve::for_checked_klib_bodies(
+        libraries,
+        libraries.declaration_bodies(),
+        [callable],
+        &[],
+    )
+    .unwrap_or_else(|identity| panic!("{name}: no checked facts for {identity:?}"));
+    let callees =
+        super::super::KlibCalleeFacts::new([callable]).with_checked_dependency_facts(&checked);
     unit.lower_function_with_declarations(
         callable,
         libraries.declaration_bodies(),
