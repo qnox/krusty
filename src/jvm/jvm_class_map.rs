@@ -669,6 +669,9 @@ struct BuiltinIds {
     /// JVM classifier that a Java source declaration denotes → its canonical Kotlin classifier.
     /// Groups that erase without that inverse (`kotlin/Nothing` → `java/lang/Void`) are absent.
     source_to_kotlin: FxHashMap<TypeName, TypeName>,
+    /// JVM classifier of a one-way group → its Kotlin classifier. A Java declaration naming it does
+    /// not denote the Kotlin declaration, but overrides one through it.
+    one_way_to_kotlin: FxHashMap<TypeName, TypeName>,
     /// Groups whose JVM face is a `java/util/*` collection interface, as a bitmask by group index.
     collection_groups: u32,
     /// Groups whose Kotlin metadata declaration replaces, rather than joins, the JVM source scope.
@@ -699,6 +702,7 @@ fn builtin_ids() -> &'static BuiltinIds {
         let mut metadata_declarations = Vec::with_capacity(ERASURE_GROUPS.len());
         let mut jvm_builtin = FxHashMap::default();
         let mut source_to_kotlin = FxHashMap::default();
+        let mut one_way_to_kotlin = FxHashMap::default();
         let mut collection_groups = 0u32;
         let mut authoritative_scope_groups = 0u32;
         let mut java_serializable_groups = 0u32;
@@ -768,6 +772,9 @@ fn builtin_ids() -> &'static BuiltinIds {
             }
             if !*maps_java_source_to_kotlin {
                 one_way_groups |= 1 << group;
+                if let Some(kotlin_name) = kotlin_names.first() {
+                    one_way_to_kotlin.insert(jvm_id, tn(kotlin_name));
+                }
             }
             if let Some(kotlin) = jvm_collection_to_kotlin(jvm_name) {
                 coll_to_kotlin.insert(jvm_id, tn(kotlin));
@@ -819,6 +826,7 @@ fn builtin_ids() -> &'static BuiltinIds {
             metadata_declarations,
             jvm_builtin,
             source_to_kotlin,
+            one_way_to_kotlin,
             collection_groups,
             authoritative_scope_groups,
             java_serializable_groups,
@@ -869,6 +877,13 @@ pub fn mapped_builtin_has_authoritative_kotlin_scope(internal: TypeName) -> bool
 pub(super) fn mapped_builtin_is_one_way(internal: TypeName) -> bool {
     let ids = builtin_ids();
     jvm_erasure_group(internal).is_some_and(|group| ids.one_way_groups & (1 << group) != 0)
+}
+
+/// The Kotlin classifier a Java declaration's input of the one-way mapped JVM class `internal`
+/// overrides through: kotlinc's Java override checker matches a Kotlin `AtomicInt` input with a
+/// Java `AtomicInteger` one, although the Java type never denotes the Kotlin declaration.
+pub(super) fn one_way_java_override_classifier(internal: TypeName) -> Option<TypeName> {
+    builtin_ids().one_way_to_kotlin.get(&internal).copied()
 }
 
 /// Whether the JVM realization in the authoritative Kotlin/JVM builtin map implements
