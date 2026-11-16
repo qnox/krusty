@@ -1291,6 +1291,57 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
     }
 }
 
+/// The Wasm stdlibs sign the data class array member operators over `Any`, not `Any?`. Every
+/// call of one in their bodies, such as `UIntArray.hashCode`'s, is the operator and reaches the
+/// array's content extension.
+#[test]
+fn wasm_stdlib_data_class_array_member_calls_are_the_operator() {
+    for target in [
+        crate::compilation_target::CompilationTarget::WasmJs,
+        crate::compilation_target::CompilationTarget::WasmWasi,
+    ] {
+        let path = crate::toolchain::kotlin_stdlib_klib(target)
+            .expect("the exact target stdlib must be provisioned");
+        let archive = crate::klib::KlibArchive::open(&path).expect("the stdlib opens");
+        let trees = read_declaration_trees(&archive).expect("the stdlib IR decodes");
+        let builtins = super::super::ir_builtins::IrBuiltinOperators::new();
+        let mut calls = 0;
+        for tree in trees.trees() {
+            let arena = &tree.arena;
+            for index in 0..arena.expr_count() {
+                let call = arena.expr(expr_id(arena, index));
+                let KlibIrExprKind::Call { access, .. } = &call.kind else {
+                    continue;
+                };
+                let KlibIrSignature::Public(callee) = &access.symbol.signature else {
+                    continue;
+                };
+                if !callee
+                    .declaration()
+                    .segments()
+                    .last()
+                    .is_some_and(|name| name.starts_with("dataClassArrayMember"))
+                {
+                    continue;
+                }
+                assert!(
+                    matches!(
+                        builtins.operator(callee),
+                        Some(super::super::ir_builtins::BuiltinOperator::DataClassArrayMember(_))
+                    ),
+                    "{target:?}: an unknown data class array member signature {callee:?}"
+                );
+                assert!(
+                    super::super::array_content_members::implied_callee(arena, call).is_some(),
+                    "{target:?}: a data class array member call has no content extension edge"
+                );
+                calls += 1;
+            }
+        }
+        assert!(calls > 0, "{target:?}: no data class array member call");
+    }
+}
+
 fn expr_id(arena: &KlibIrArena, index: usize) -> KlibIrExprId {
     arena.expr_id(index)
 }
