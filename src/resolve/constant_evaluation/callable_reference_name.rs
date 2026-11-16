@@ -46,8 +46,8 @@ pub(in crate::resolve) fn selected_reference_name<'a>(
             };
             (function.name.as_str(), explicit_when(*bound_receiver))
         }
-        ExprLowering::SamConstructorReference { sam, .. } => {
-            (sam.internal.nested_segment_ref(), ReferenceReceiver::None)
+        ExprLowering::SamConstructorReference { interface_name, .. } => {
+            (interface_name.as_deref()?, ReferenceReceiver::None)
         }
         ExprLowering::ConstructorRef { outer, .. } => (
             "<init>",

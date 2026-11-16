@@ -18,6 +18,7 @@ class A(val p: Int) {
 }
 object O { fun f() {} }
 fun interface Action { fun run() }
+fun interface `Dollar$Name` { fun run() }
 val top = 1
 fun Int.ext() {}
 const val PROPERTY = A::p.name
@@ -26,6 +27,7 @@ const val SAME_AS_CLASS = A::A.name
 const val SUSPEND = A::bar.name
 const val CONSTRUCTOR = ::A.name
 const val FUN_INTERFACE = ::Action.name
+const val DOLLAR_FUN_INTERFACE = ::`Dollar$Name`.name
 const val TOP = ::top.name
 const val CONSTANT_RECEIVER = 42::ext.name
 const val SINGLETON = O::f.name
@@ -33,10 +35,11 @@ const val CONCATENATED = A::p.name + "!"
 @Names(A::p.name, ::Action.name, "x"::length.name) class Annotated
 fun box(): String {
     val constants = listOf(
-        PROPERTY, MEMBER, SAME_AS_CLASS, SUSPEND, CONSTRUCTOR, FUN_INTERFACE, TOP,
+        PROPERTY, MEMBER, SAME_AS_CLASS, SUSPEND, CONSTRUCTOR, FUN_INTERFACE,
+        DOLLAR_FUN_INTERFACE, TOP,
         CONSTANT_RECEIVER, SINGLETON, CONCATENATED,
     ).joinToString()
-    if (constants != "p, foo, A, bar, <init>, Action, top, ext, f, p!") return constants
+    if (constants != "p, foo, A, bar, <init>, Action, Dollar\$Name, top, ext, f, p!") return constants
     val annotated = Annotated::class.java.getAnnotation(Names::class.java).values.joinToString()
     return if (annotated == "p, Action, length") "OK" else annotated
 }

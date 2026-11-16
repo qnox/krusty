@@ -8590,6 +8590,8 @@ pub enum ExprLowering {
     SamConstructorReference {
         signature: Ty,
         sam: Box<crate::symbol_resolver::SamSignature>,
+        /// The interface's own declared name (`KCallable.name`), when its provider recorded it.
+        interface_name: Option<Box<str>>,
     },
     /// A constructor reference selected from the classifier's shared declaration record. The exact
     /// declaration is independent of whether that record came from this module or a dependency;
