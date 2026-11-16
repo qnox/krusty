@@ -107,6 +107,8 @@ pub(super) enum LocalBody<'a> {
 pub(super) struct LocalClassSource<'bodies, 'call> {
     pub(super) bodies: &'bodies KlibDeclarationBodies,
     pub(super) declarations: &'bodies dyn crate::symbol_source::SymbolSource,
+    /// The class hierarchy the checker froze for the selected bodies, when it froze one.
+    pub(super) classes: Option<&'bodies dyn crate::assignable::TypeOracle>,
     pub(super) module: &'call str,
     pub(super) validate_root:
         &'call dyn Fn(&KlibPublicIdSignature) -> Result<(), KlibBodyDeclineReason>,
@@ -833,6 +835,7 @@ fn prepare_class<'a>(
         self_type,
         bodies: source.bodies,
         declarations: source.declarations,
+        classes: source.classes,
         module: source.module,
         interfaces: &interfaces,
         library_superclass: library_superclass.as_ref(),
@@ -1185,6 +1188,7 @@ struct MemberScope<'a> {
     self_type: Ty,
     bodies: &'a KlibDeclarationBodies,
     declarations: &'a dyn crate::symbol_source::SymbolSource,
+    classes: Option<&'a dyn crate::assignable::TypeOracle>,
     module: &'a str,
     interfaces: &'a [AdmittedInterface],
     library_superclass: Option<&'a AdmittedInterface>,
@@ -1445,14 +1449,17 @@ fn member_overrides(
 }
 
 /// Every supertype above a class's written interfaces and library superclass, at the
-/// application the walk from them reaches it with.
+/// application the walk from them reaches it with, through the hierarchy the checker froze.
+/// Without that evidence only the written supertypes themselves are known.
 fn applied_supertypes(scope: &MemberScope<'_>) -> Vec<(TypeName, Ty)> {
     let mut supertypes = Vec::<(TypeName, Ty)>::new();
     for written in scope.interfaces.iter().chain(scope.library_superclass) {
         let root = Ty::obj_args_name(written.name, &written.arguments);
         for (classifier, applied, _) in
-            crate::symbol_resolver::applied_hierarchy_through(root, |_, applied| {
-                crate::symbol_resolver::direct_supertypes(scope.declarations, applied)
+            crate::assignable::applied_hierarchy_through(root, |_, applied| {
+                scope
+                    .classes
+                    .map_or_else(Vec::new, |classes| classes.direct_supertypes(applied))
             })
         {
             if !supertypes.iter().any(|(known, _)| *known == classifier) {
