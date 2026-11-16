@@ -344,7 +344,6 @@ casts/asUnit.kt
 casts/castGenericNull.kt
 casts/functions/asFunKBig.kt
 casts/functions/asFunKSmall.kt
-casts/functions/isFunKBig.kt
 casts/functions/reifiedAsFunKBig.kt
 casts/functions/reifiedAsFunKSmall.kt
 casts/functions/reifiedIsFunKBig.kt
