@@ -36,12 +36,9 @@ pub(in crate::codegen) fn array_list_receiver(ir: &krusty::ir::IrFile, receiver:
         .is_some_and(is_array_list)
 }
 
-/// What the runtime list iterator answers for `fact`, a member of `Iterator`, `ListIterator` or
-/// their mutable forms: the step it realizes, or why it realizes none. `None` for a member of
-/// another classifier.
-pub(in crate::codegen) fn iterator_step(
-    fact: &BackendCallableFact,
-) -> Option<Result<IteratorStep, String>> {
+/// The step the runtime list iterator realizes for `fact`, a member of `Iterator`, `ListIterator`
+/// or their mutable forms; `None` for any other member.
+pub(in crate::codegen) fn iterator_step(fact: &BackendCallableFact) -> Option<IteratorStep> {
     let Some(SemanticCallableOwner::Classifier(owner)) = fact.declaration_owner else {
         return None;
     };
@@ -56,17 +53,15 @@ pub(in crate::codegen) fn iterator_step(
     {
         return None;
     }
-    Some(match (fact.name.as_str(), fact.params.len()) {
-        ("hasNext", 0) => Ok(IteratorStep::HasNext),
-        ("next", 0) => Ok(IteratorStep::Next),
-        ("hasPrevious", 0) => Ok(IteratorStep::HasPrevious),
-        ("previous", 0) => Ok(IteratorStep::Previous),
-        ("nextIndex", 0) => Ok(IteratorStep::NextIndex),
-        ("previousIndex", 0) => Ok(IteratorStep::PreviousIndex),
-        (name, _) => Err(format!(
-            "the iterator member `{name}`, which the runtime list iterator does not realize"
-        )),
-    })
+    match (fact.name.as_str(), fact.params.len()) {
+        ("hasNext", 0) => Some(IteratorStep::HasNext),
+        ("next", 0) => Some(IteratorStep::Next),
+        ("hasPrevious", 0) => Some(IteratorStep::HasPrevious),
+        ("previous", 0) => Some(IteratorStep::Previous),
+        ("nextIndex", 0) => Some(IteratorStep::NextIndex),
+        ("previousIndex", 0) => Some(IteratorStep::PreviousIndex),
+        _ => None,
+    }
 }
 
 /// One step of the runtime iterator.
@@ -97,7 +92,6 @@ impl Body<'_> {
         {
             return Err("an ArrayList construction disagreeing with its constructor".into());
         }
-        self.runtime.array_list_constructed();
         let new = self.runtime.array_lists.new;
         let add_all = self.runtime.array_lists.add_all;
         match args {

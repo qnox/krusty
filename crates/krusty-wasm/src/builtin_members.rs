@@ -37,16 +37,14 @@ type Signature = (Vec<ValType>, Vec<ValType>);
 #[derive(Default)]
 pub(super) struct BuiltinMembers {
     members: Vec<Member>,
-    builders: RuntimeClassMembers,
-    lists: RuntimeClassMembers,
+    builders: BuilderMembers,
 }
 
-/// What a class the runtime lays out, its `StringBuilder` (`super::string_builders`) or its
-/// `ArrayList` (`super::array_lists`), does for the library members a call goes through. A member
-/// it cannot answer declines the program only once an instance is constructed: before that, no
-/// instance reaches its stub.
+/// What the runtime's `StringBuilder` (`super::string_builders`) does for the library members a
+/// call goes through. A member it cannot answer declines the program only once a builder is
+/// constructed: before that, no builder value reaches its stub.
 #[derive(Default)]
-struct RuntimeClassMembers {
+struct BuilderMembers {
     constructed: bool,
     unanswered: Vec<(MemberRef, String)>,
 }
@@ -262,7 +260,14 @@ impl Runtime {
                     };
                     self.objects.interfaces.implement(class, member, function)?;
                 }
-                Some(Err(reason)) => self.unanswered_runtime_member(class, member, reason),
+                Some(Err(reason)) => match class {
+                    RuntimeClass::StringBuilder => self.unanswered_builder_member(member, reason),
+                    // A list member the runtime does not realize keeps the empty slot it had
+                    // before the list answered any interface member. Declining it would decline
+                    // every program constructing a list and reaching, say, `MutableList.set`
+                    // through a class of its own.
+                    RuntimeClass::ArrayList => {}
+                },
                 None => {}
             }
         }
@@ -283,50 +288,22 @@ impl Runtime {
     /// Record that the program constructs a runtime `StringBuilder`, so a member it cannot answer
     /// declines a call through that member.
     pub(super) fn string_builder_constructed(&mut self) {
-        self.runtime_class_constructed(RuntimeClass::StringBuilder);
-    }
-
-    /// Record that the program constructs a runtime `ArrayList`, so a member it cannot answer
-    /// declines a call through that member.
-    pub(super) fn array_list_constructed(&mut self) {
-        self.runtime_class_constructed(RuntimeClass::ArrayList);
-    }
-
-    /// Record that the runtime list iterator, which only a runtime `ArrayList` creates, cannot
-    /// answer the iterator member `member`.
-    pub(super) fn list_iterator_member_unanswered(&mut self, member: MemberRef, reason: String) {
-        self.unanswered_runtime_member(RuntimeClass::ArrayList, member, reason);
-    }
-
-    fn runtime_class_members(&mut self, class: RuntimeClass) -> &mut RuntimeClassMembers {
-        match class {
-            RuntimeClass::StringBuilder => &mut self.builtin_members.builders,
-            RuntimeClass::ArrayList => &mut self.builtin_members.lists,
-        }
-    }
-
-    fn runtime_class_constructed(&mut self, class: RuntimeClass) {
-        let members = self.runtime_class_members(class);
-        if members.constructed {
+        let builders = &mut self.builtin_members.builders;
+        if builders.constructed {
             return;
         }
-        members.constructed = true;
-        for (member, reason) in std::mem::take(&mut members.unanswered) {
+        builders.constructed = true;
+        for (member, reason) in std::mem::take(&mut builders.unanswered) {
             self.objects.interfaces.unimplementable(member, reason);
         }
     }
 
-    fn unanswered_runtime_member(
-        &mut self,
-        class: RuntimeClass,
-        member: MemberRef,
-        reason: String,
-    ) {
-        let members = self.runtime_class_members(class);
-        if members.constructed {
+    fn unanswered_builder_member(&mut self, member: MemberRef, reason: String) {
+        let builders = &mut self.builtin_members.builders;
+        if builders.constructed {
             self.objects.interfaces.unimplementable(member, reason);
         } else {
-            members.unanswered.push((member, reason));
+            builders.unanswered.push((member, reason));
         }
     }
 
