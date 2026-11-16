@@ -233,16 +233,13 @@ impl Body<'_> {
                 }),
             );
         }
-        if role == MemberRole::Setter {
-            return None;
-        }
         let published = self.calls.external(target).is_some();
         if !dispatches_through_library_member(self.ir, self.callables, id, fact, published) {
             return None;
         }
         // A function's identity names a function, and an accessor's a property.
         let identity = library_member_identity(fact, role)?;
-        Some(self.library_member_call(id, fact.clone(), identity, property, receiver, args))
+        Some(self.library_member_call(id, fact.clone(), identity, (property, role), receiver, args))
     }
 
     fn published_class_call(
@@ -285,27 +282,34 @@ impl Body<'_> {
         }
     }
 
-    /// A call through the library member `fact` declares, the getter of `property` when there is
-    /// one.
+    /// A call through the library member `fact` declares, in `role`: the getter or setter of
+    /// `property` when there is one.
     fn library_member_call(
         &mut self,
         id: u32,
         fact: BackendCallableFact,
         identity: Vec<u8>,
-        property: Option<&BackendPropertyFact>,
+        (property, role): (Option<&BackendPropertyFact>, MemberRole),
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
-        let role = match property {
-            Some(_) => MemberRole::Getter,
-            None => MemberRole::Function,
-        };
         let params = fact.declared_params.as_deref().unwrap_or(&fact.params);
         let result = fact.declared_ret.unwrap_or(fact.ret);
         if params.len() != args.len() {
             return Err("a call whose arguments do not match its parameters".into());
         }
-        let signature = library_member_signature(&fact, role)?;
+        // A setter's member is named and carried as its property's getter declares it, the way
+        // an implementing class records it (`super::super::interface_members`).
+        let signature = match (property, role) {
+            (Some(property), MemberRole::Setter) => {
+                let getter = self
+                    .callables
+                    .callable(property.getter)
+                    .ok_or("a dependency setter without its property's getter")?;
+                library_member_signature(getter, MemberRole::Setter)?
+            }
+            _ => library_member_signature(&fact, role)?,
+        };
         let owner = library_member_owner(&fact).ok_or("a library member without its classifier")?;
         let member = self.runtime.objects.interfaces.library(
             self.module,
@@ -319,7 +323,7 @@ impl Body<'_> {
             &signature,
             &fact.builtin_implementations,
         )?;
-        if property.is_some_and(is_reference_name) {
+        if role == MemberRole::Getter && property.is_some_and(is_reference_name) {
             self.runtime.reference_name_member(self.module, member)?;
         }
         if let Some(step) = super::array_lists::iterator_step(&fact) {

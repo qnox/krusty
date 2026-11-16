@@ -751,7 +751,6 @@ impl FileRecorder<'_, '_, '_> {
         edge: &krusty::ir::IrFunctionOverride,
         numbered: &HashMap<u32, Placed>,
     ) -> Result<Carried, Unsupported> {
-        let ir = self.recording.ir;
         let implementation = match edge.implementation {
             ResolvedFunctionOverrideTarget::Module(callable) => Some(callable),
             ResolvedFunctionOverrideTarget::External(_) => None,
@@ -767,21 +766,7 @@ impl FileRecorder<'_, '_, '_> {
                 None,
             ),
             None => {
-                let function = edge
-                    .implementation_function
-                    .or_else(|| {
-                        implementation.and_then(|callable| {
-                            ir.checked_callable_functions.get(&callable).copied()
-                        })
-                    })
-                    .ok_or_else(|| {
-                        self.declined("a dependency's interface member with no body here")
-                    })?;
-                let key = function_key(ir, owner, function);
-                let slot =
-                    self.classes.tables.slot(owner, &key).ok_or_else(|| {
-                        self.declined("a dependency's interface member with no slot")
-                    })?;
+                let slot = self.edge_implementation_slot(owner, edge, implementation)?;
                 (self.slot_function(slot)?, Some(slot))
             }
         };
@@ -802,6 +787,46 @@ impl FileRecorder<'_, '_, '_> {
             implemented,
             adapters,
         })
+    }
+
+    /// The slot of `owner`'s own table holding what implements the dependency member `edge`
+    /// overrides: the slot of the function implementing it in this module, or else, for a
+    /// member of a dependency class `owner` extends, the slot that class's producer layout binds
+    /// the member to, which `owner`'s table overrides in place (a delegation forwarder, say).
+    fn edge_implementation_slot(
+        &self,
+        owner: ClassId,
+        edge: &krusty::ir::IrFunctionOverride,
+        implementation: Option<krusty::fir::CallableId>,
+    ) -> Result<u32, Unsupported> {
+        let ir = self.recording.ir;
+        let function = edge.implementation_function.or_else(|| {
+            implementation
+                .and_then(|callable| ir.checked_callable_functions.get(&callable).copied())
+        });
+        if let Some(function) = function {
+            let key = function_key(ir, owner, function);
+            return self
+                .classes
+                .tables
+                .slot(owner, &key)
+                .ok_or_else(|| self.declined("a dependency's interface member with no slot"));
+        }
+        let ResolvedFunctionOverrideTarget::External(inherited) = edge.implementation else {
+            return Err(self.declined("a dependency's interface member with no body here"));
+        };
+        let identity = self
+            .recording
+            .callables
+            .callable(inherited)
+            .and_then(|fact| fact.member_slot_identity())
+            .ok_or_else(|| {
+                self.declined("an inherited dependency member without its declaration identity")
+            })?;
+        self.classes
+            .laid_out_superclass(owner)
+            .and_then(|superclass| superclass.declaration_slots.get(&identity).copied())
+            .ok_or_else(|| self.declined("a dependency's interface member with no body here"))
     }
 
     /// The getter and setter `owner` implements each property of a dependency's interface with.
