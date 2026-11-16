@@ -318,12 +318,12 @@ struct BodyHeader<'a> {
 /// body reads through its receiver, in declaration order, and the provider's authenticated class
 /// contract. A value class has exactly one field, its value.
 #[derive(Clone)]
-struct MemberClass<'a> {
+pub(super) struct MemberClass<'a> {
     class: crate::ir::ClassId,
-    fields: Vec<&'a KlibIrField>,
+    pub(super) fields: Vec<&'a KlibIrField>,
     /// The class's properties with a backing field, each with that field.
-    properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
-    contract: &'a crate::libraries::KlibBodyClassContract,
+    pub(super) properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
+    pub(super) contract: &'a crate::libraries::KlibBodyClassContract,
 }
 
 impl DependencyBodyUnit {
@@ -918,8 +918,7 @@ impl DependencyBodyUnit {
                     ) => lowering.delegate_to_primary(
                         *class,
                         *secondary,
-                        super::class_headers::declared_receiver(member.contract),
-                        &member.fields,
+                        member,
                         arguments,
                         body.statements,
                     ),

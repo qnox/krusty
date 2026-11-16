@@ -318,6 +318,9 @@ impl<'u, 's> Linker<'u, 's> {
             value_member: Some(super::MemberClass {
                 class,
                 fields,
+                properties: super::super::class_storage::backed_properties(
+                    &delegation.header.class.members,
+                ),
                 contract: delegation.header.contract,
             }),
             local_body: None,

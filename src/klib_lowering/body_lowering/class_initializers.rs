@@ -70,18 +70,19 @@ impl<'a> BodyLowering<'a> {
     /// A secondary constructor of the materialized `class` delegating to its primary
     /// constructor: the delegation's arguments become the arguments of the class's secondary
     /// constructor `secondary`, then its own statements run as a member of the class does,
-    /// reading and writing the receiver's `fields`.
+    /// reading and writing the fields and backed properties of the receiver `member`.
     pub(in super::super) fn delegate_to_primary(
         mut self,
         class: ClassId,
         secondary: usize,
-        receiver: Ty,
-        fields: &[&'a crate::metadata::klib_ir::tree::KlibIrField],
+        member: &super::super::body_unit::MemberClass<'a>,
         arguments: &[crate::metadata::klib_ir::tree::KlibIrExprId],
         statements: &'a [KlibIrStatement],
     ) -> Lowered<ExprId> {
         let declared = &self.ir.classes[class as usize];
-        let storage = fields
+        let receiver = super::super::class_headers::declared_receiver(member.contract);
+        let storage = member
+            .fields
             .iter()
             .zip(&declared.fields)
             .map(|(field, declared)| (&field.base.symbol, declared.ty, declared.is_final()))
@@ -99,6 +100,7 @@ impl<'a> BodyLowering<'a> {
         self.instance_storage = Some(super::instance_storage::InstanceStorageFrame::member(
             class,
             storage,
+            member.properties.clone(),
             Some(receiver),
             false,
         ));
