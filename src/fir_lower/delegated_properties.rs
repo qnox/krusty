@@ -82,11 +82,12 @@ pub(super) fn materialize_top_level_delegate(
     // reflected value lives (kotlinc's per-class `$$delegatedProperties`).
     let flags = property.flags;
     let unbound = extension_receiver.is_some();
-    let reference =
-        move |ir: &mut IrFile| delegated_property_reference(ir, property_id, unbound, flags);
     // Not this lowering's to decide: the checked plan publishes the type resolution selected the
     // conventions against, and every operand built from it carries that one answer.
     let property_reference_ty = plan.property_reference_type.get();
+    let reference = move |ir: &mut IrFile| {
+        delegated_property_reference(ir, property_id, unbound, flags, property_reference_ty)
+    };
     let owner = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
     let storage_initializer = if let Some(provide) = &plan.provide_delegate {
         let property_reference = reference(ir);
@@ -276,8 +277,12 @@ pub(super) fn materialize_member_delegate(
     // A script's property has no dispatch receiver: its delegate sees `null` and a reference that
     // does not take the script, as a top-level property's does.
     let script = ir.classes[class_id as usize].is_script;
-    let reference =
-        move |ir: &mut IrFile| delegated_property_reference(ir, property_id, !script, flags);
+    // Not this lowering's to decide: the checked plan publishes the type resolution selected the
+    // conventions against, and every operand built from it carries that one answer.
+    let property_reference_ty = plan.property_reference_type.get();
+    let reference = move |ir: &mut IrFile| {
+        delegated_property_reference(ir, property_id, !script, flags, property_reference_ty)
+    };
     let thisref_argument = move |ir: &mut IrFile| {
         if script {
             (
@@ -288,9 +293,6 @@ pub(super) fn materialize_member_delegate(
             (ir.add_expr(IrExpr::GetValue(0)), Ty::obj_name(owner_type))
         }
     };
-    // Not this lowering's to decide: the checked plan publishes the type resolution selected the
-    // conventions against, and every operand built from it carries that one answer.
-    let property_reference_ty = plan.property_reference_type.get();
     let storage_initializer = if let Some(provide) = &plan.provide_delegate {
         let this_ref = thisref_argument(ir);
         let property_reference = reference(ir);
@@ -532,11 +534,12 @@ pub(super) fn materialize_member_extension_delegate(
     // unbound KProperty2-like value; the dispatch instance is supplied separately to
     // `provideDelegate`, while accessors supply the extension receiver to getValue/setValue.
     let flags = property.flags;
-    let reference =
-        move |ir: &mut IrFile| delegated_property_reference(ir, property_id, true, flags);
     // Not this lowering's to decide: the checked plan publishes the type resolution selected the
     // conventions against, and every operand built from it carries that one answer.
     let property_reference_ty = plan.property_reference_type.get();
+    let reference = move |ir: &mut IrFile| {
+        delegated_property_reference(ir, property_id, true, flags, property_reference_ty)
+    };
     let storage_initializer = if let Some(provide) = &plan.provide_delegate {
         let dispatch = ir.add_expr(IrExpr::GetValue(0));
         let property_reference = reference(ir);
@@ -744,8 +747,9 @@ fn delegated_property_reference(
     property: crate::fir::PropertyId,
     unbound: bool,
     flags: DeclarationFlags,
+    ty: Ty,
 ) -> ExprId {
-    ir.add_expr(IrExpr::Checked(Box::new(
+    let expression = ir.add_expr(IrExpr::Checked(Box::new(
         IrCheckedOperation::PropertyReference {
             target: FirPropertyReferenceTarget::Module(property),
             delegated: true,
@@ -760,7 +764,12 @@ fn delegated_property_reference(
             substitutions: Vec::new(),
             adaptation: None,
         },
-    )))
+    )));
+    // The node is the value passed to `getValue`/`setValue`/`provideDelegate`. A backend reads
+    // that value's checked type from the expression; the argument list beside the call is not a
+    // second copy of it.
+    ir.set_logical_type(expression, ty);
+    expression
 }
 
 fn push_delegate_static(
@@ -1253,6 +1262,9 @@ fn materialize_delegated_result(
     result: Ty,
 ) -> ExprId {
     if declared == result {
+        // The call is the accessor's value. Its checked type is that result; a backend does not
+        // recover it from the callee.
+        ir.set_logical_type(expression, result);
         return expression;
     }
     ir.call_declared_ret.insert(expression, declared);
@@ -1269,6 +1281,39 @@ mod tests {
     use super::*;
     use crate::fir_lower::tests::{lower_single_source, lower_source_from_set};
     use crate::ir::IrTypeOp;
+
+    #[test]
+    fn a_delegated_property_reference_keeps_its_checked_type() {
+        let ir = lower_single_source(
+            include_str!("../../tests/box_regressions/delegateCaptureDiscovery.kt"),
+            "DelegateCaptureDiscovery",
+        );
+        let mut found = false;
+        for (index, expression) in ir.exprs.iter().enumerate() {
+            let IrExpr::Checked(operation) = expression else {
+                continue;
+            };
+            if !matches!(
+                operation.as_ref(),
+                crate::ir::IrCheckedOperation::PropertyReference {
+                    delegated: true,
+                    ..
+                }
+            ) {
+                continue;
+            }
+            found = true;
+            let id = u32::try_from(index).expect("expression id");
+            assert!(
+                ir.checked_type(id).is_some(),
+                "delegated property reference {id} has no checked type"
+            );
+        }
+        assert!(
+            found,
+            "the capture-discovery fixture must lower a delegated property reference"
+        );
+    }
 
     #[test]
     fn local_delegate_storage_name_survives_checked_fir_lowering() {
