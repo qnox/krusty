@@ -1,3 +1,4 @@
+// KOTLINC_VERSION: [2.5.0,)
 // LANGUAGE: +ContextParameters +CallableReferencesToContextual
 
 import kotlin.reflect.KMutableProperty0

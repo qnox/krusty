@@ -43,7 +43,7 @@ fun box(): String {
 /// properties, read-only and mutable, bound and unbound, all compile without diagnostics.
 #[test]
 fn property_references_with_context_parameters_are_accepted_with_the_feature() {
-    let source = include_str!("contextual_references/contextualPropertyReferences.kt");
+    let source = include_str!("box_regressions/contextParameters/contextualPropertyReferences.kt");
     let diagnostics = common::front_end_diagnostics(
         source,
         &[common::stdlib_jar()],
