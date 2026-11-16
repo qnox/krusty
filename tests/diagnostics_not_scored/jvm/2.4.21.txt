@@ -113,10 +113,6 @@ compiler/testData/diagnostics/tests/platformTypes/rawTypes/smartCastToClassWithR
 compiler/testData/diagnostics/tests/platformTypes/starProjectionToFlexibleVariable.kt
 compiler/testData/diagnostics/tests/platformTypes/typeEnhancement/buildFlexibleEnhancement.kt
 compiler/testData/diagnostics/tests/problems/javaClassWithEmptyAnnotationName.kt
-compiler/testData/diagnostics/tests/receiverType.kt
-compiler/testData/diagnostics/tests/redeclarations/PackageRedeclaresLibClass.kt
-compiler/testData/diagnostics/tests/regressions/kt26-1.kt
-compiler/testData/diagnostics/tests/regressions/kt691.kt
 compiler/testData/diagnostics/tests/samConversions/samWithEquals.kt
 compiler/testData/diagnostics/tests/scopes/explicitOverrideOfTwoMembers_java.kt
 compiler/testData/diagnostics/tests/scopes/inheritance/statics/overloadStatic.kt
