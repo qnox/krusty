@@ -859,7 +859,6 @@ coroutines/withReceiver.kt
 cycles/cycle.kt
 cycles/cycle_do.kt
 cycles/cycle_for.kt
-dataClasses/components/kt49812.kt
 dataClasses/kt49715.kt
 dataObjects/equals.kt
 dataObjects/hashCode.kt
@@ -944,7 +943,6 @@ enum/enumValueOf.kt
 enum/interfaceCallNoEntryClass.kt
 enum/interfaceCallWithEntryClass.kt
 enum/k54079.kt
-enum/kt20651_inlineLambda.kt
 enum/kt38540.kt
 enum/lambdaInDefault.kt
 enum/loop.kt
@@ -1209,7 +1207,6 @@ inlineClass/secondaryConstructorWithGenerics.kt
 inlineClasses/anonymousObjectAsDefaultParam.kt
 inlineClasses/anonymousObjectAsDefaultParamFull.kt
 inlineClasses/anonymousObjectAsDefaultParamSingleFile.kt
-inlineClasses/boxReturnValueInLambda/kt27586_1.kt
 inlineClasses/boxReturnValueInLambda/kt27586_2.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideListVsMutableList.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideListVsMutableListGeneric.kt
@@ -1278,8 +1275,6 @@ inlineClasses/kt28405.kt
 inlineClasses/kt32793.kt
 inlineClasses/kt44141.kt
 inlineClasses/kt44867.kt
-inlineClasses/kt45991.kt
-inlineClasses/kt50974_resultMultiModule.kt
 inlineClasses/kt70461.kt
 inlineClasses/multifileClass.kt
 inlineClasses/privateConstructorFunInterfaceMultiModule.kt
@@ -1304,21 +1299,14 @@ inlineClasses/samWrapperDifferentModule.kt
 inlineClasses/samWrapperDifferentModuleGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/nullableResult.kt
 inlineClasses/unboxGenericParameter/funInterface/result.kt
-inlineClasses/unboxGenericParameter/funInterface/resultAny.kt
-inlineClasses/unboxGenericParameter/funInterface/resultAnyGeneric.kt
 inlineClasses/unboxGenericParameter/genericArrayInlineClassCast.kt
 inlineClasses/unboxGenericParameter/lambda/nullableResult.kt
 inlineClasses/unboxGenericParameter/lambda/result.kt
-inlineClasses/unboxGenericParameter/lambda/resultAny.kt
-inlineClasses/unboxGenericParameter/lambda/resultAnyGeneric.kt
 inlineClasses/unboxGenericParameter/objectLiteral/nullableResult.kt
 inlineClasses/unboxGenericParameter/objectLiteral/result.kt
-inlineClasses/unboxGenericParameter/objectLiteral/resultAny.kt
-inlineClasses/unboxGenericParameter/objectLiteral/resultAnyGeneric.kt
 inlineClasses/unboxParameterOfSuspendLambdaBeforeInvoke.kt
 inlineClasses/unboxParameterOfSuspendLambdaBeforeInvokeGeneric.kt
 inlineClasses/unboxResultParameterWhenCapturingToCrossinlineLambda.kt
-inlineClasses/valueClassInstanceOfNumberAndComparableInInlineFunction.kt
 inlineEvaluationOrder/argumentOfCall.kt
 inlineEvaluationOrder/argumentOfCallMultipleInlineCalls.kt
 inlineEvaluationOrder/argumentOfInlineCall.kt
@@ -1515,7 +1503,6 @@ object/initialization1.kt
 object/method_call.kt
 objectExpression/expr1.kt
 objectExpression/expr3.kt
-objectIntrinsics/objects.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/anonymousObjectInPropertyInitializer.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromAnonymousObjectInNestedClass.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlock.kt
@@ -1574,7 +1561,6 @@ ranges/contains/evaluationOrderForUntilReversed.kt
 ranges/contains/generated/arrayIndices.kt
 ranges/contains/generated/charDownTo.kt
 ranges/contains/generated/charSequenceIndices.kt
-ranges/contains/generated/charUntil.kt
 ranges/contains/generated/collectionIndices.kt
 ranges/contains/generated/doubleRangeTo.kt
 ranges/contains/generated/doubleRangeUntil.kt
@@ -1647,7 +1633,6 @@ ranges/expression/inexactSteppedDownTo.kt
 ranges/expression/inexactSteppedRange.kt
 ranges/expression/inexactToMaxValue.kt
 ranges/expression/oneElementDownTo.kt
-ranges/expression/openRange.kt
 ranges/expression/overflowZeroDownToMaxValue.kt
 ranges/expression/overflowZeroToMinValue.kt
 ranges/expression/progressionDownToMinValue.kt

@@ -441,7 +441,6 @@ collections/inheritFromAbstractMutableListInt.kt
 collections/internalRemove.kt
 collections/removeClash.kt
 companion/delegatedPropertyOnCompanion.kt
-companion/genericLambdaOnStringCompanion.kt
 companion/protectedConstValFromSuperCompanion.kt
 companionBlocksAndExtensions/abstractClasses.kt
 companionBlocksAndExtensions/basicBlockAndExtension.kt
@@ -591,7 +590,6 @@ controlflow/for_loops_array_nullable.kt
 controlflow/for_loops_array_side_effects.kt
 controlflow/for_loops_call_order.kt
 controlflow/for_loops_coroutines.kt
-controlflow/for_loops_empty_range.kt
 controlflow/for_loops_errors.kt
 controlflow/for_loops_let_with_nullable.kt
 controlflow/for_loops_nested.kt
@@ -1087,7 +1085,6 @@ coroutines/withReceiver.kt
 cycles/cycle.kt
 cycles/cycle_do.kt
 cycles/cycle_for.kt
-dataClasses/components/kt49812.kt
 dataClasses/copy/kt3033.kt
 dataClasses/doubleParam.kt
 dataClasses/equalityChecksPrimitiveUnboxed.kt
@@ -1192,9 +1189,6 @@ delegatedProperty/lazyDelegateInObject.kt
 delegatedProperty/local.kt
 delegatedProperty/local/inlineGetValue.kt
 delegatedProperty/local/kt12891.kt
-delegatedProperty/local/kt13557.kt
-delegatedProperty/local/kt19690.kt
-delegatedProperty/local/kt23117.kt
 delegatedProperty/local/kt78073.kt
 delegatedProperty/local/localDelegatedPropertyCall.kt
 delegatedProperty/localDelegatedBoundValueWithSideEffect.kt
@@ -1288,7 +1282,6 @@ enum/enumValueOf.kt
 enum/interfaceCallNoEntryClass.kt
 enum/interfaceCallWithEntryClass.kt
 enum/k54079.kt
-enum/kt20651_inlineLambda.kt
 enum/kt38540.kt
 enum/kt44744_innerClass.kt
 enum/kt7257_boundReference2.kt
@@ -1590,7 +1583,6 @@ inline/expressionBodyWithLambdaCall.kt
 inline/extension.kt
 inline/extensionWithManyArguments.kt
 inline/genericFunctionReference.kt
-inline/getClass.kt
 inline/identityEquals.kt
 inline/incrementProperty.kt
 inline/inline0.kt
@@ -1668,7 +1660,6 @@ inline/safeCall.kt
 inline/severalClosures.kt
 inline/sharedVar.kt
 inline/simpleReturnFunctionWithResultUnused.kt
-inline/statementAsLastExprInBlock.kt
 inline/statementsAfterReturn.kt
 inline/thisImplicitlyCaptured.kt
 inline/thisLiteralAliasing.kt
@@ -1699,7 +1690,6 @@ inlineClasses/boxNullableValueOfInlineClassWithPrimitiveUnderlyingTypeGeneric2.k
 inlineClasses/boxResultInlineClassOfConstructorCall.kt
 inlineClasses/boxResultInlineClassOfConstructorCallGeneric.kt
 inlineClasses/boxResultInlineClassOfConstructorCallGeneric2.kt
-inlineClasses/boxReturnValueInLambda/kt27586_1.kt
 inlineClasses/boxReturnValueInLambda/kt27586_2.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideChainErasedToAny.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideChainErasedToAnyGeneric.kt
@@ -1908,7 +1898,6 @@ inlineClasses/inlineClassesInInlineLambdaParameters.kt
 inlineClasses/inlineClassesInInlineLambdaParametersGeneric.kt
 inlineClasses/inlineClassesRefTypesInInlineLambdaParameters.kt
 inlineClasses/inlineClassesRefTypesInInlineLambdaParametersGeneric.kt
-inlineClasses/inlineExtLambdaInInlineClassFun2Generic.kt
 inlineClasses/inlineFunctionInsideInlineClassGeneric.kt
 inlineClasses/interfaceDelegation/kt38337.kt
 inlineClasses/interfaceDelegation/kt38337Generic.kt
@@ -1978,7 +1967,6 @@ inlineClasses/kt37998.kt
 inlineClasses/kt37998Generic.kt
 inlineClasses/kt44141.kt
 inlineClasses/kt44867.kt
-inlineClasses/kt45991.kt
 inlineClasses/kt47762Generic.kt
 inlineClasses/kt47823.kt
 inlineClasses/kt50974_resultMultiModule.kt
@@ -2042,8 +2030,6 @@ inlineClasses/secondaryConstructorWithVararg.kt
 inlineClasses/secondaryConstructorWithVarargGeneric.kt
 inlineClasses/secondaryConstructorsInsideInlineClassWithPrimitiveCarrierTypeGeneric.kt
 inlineClasses/secondaryConstructorsWithBody.kt
-inlineClasses/simpleSecondaryConstructor.kt
-inlineClasses/simpleSecondaryConstructorGeneric.kt
 inlineClasses/smartCastOnThisOfInlineClassType.kt
 inlineClasses/smartCastOnThisOfInlineClassTypeGeneric.kt
 inlineClasses/toStringCallingPrivateFunGeneric.kt
@@ -2054,15 +2040,12 @@ inlineClasses/unboxGenericParameter/funInterface/anyGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/anyN.kt
 inlineClasses/unboxGenericParameter/funInterface/anyNGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/anyNGeneric2.kt
-inlineClasses/unboxGenericParameter/funInterface/ifaceChildGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/ifaceGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/nullableResult.kt
 inlineClasses/unboxGenericParameter/funInterface/primitive.kt
-inlineClasses/unboxGenericParameter/funInterface/primitiveGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/result.kt
 inlineClasses/unboxGenericParameter/funInterface/resultAny.kt
 inlineClasses/unboxGenericParameter/funInterface/resultAnyGeneric.kt
-inlineClasses/unboxGenericParameter/funInterface/stringGeneric.kt
 inlineClasses/unboxGenericParameter/genericArrayInlineClassCast.kt
 inlineClasses/unboxGenericParameter/lambda/nullableResult.kt
 inlineClasses/unboxGenericParameter/lambda/primitive.kt
@@ -2094,7 +2077,6 @@ inlineClasses/unboxValueOfAnyBeforeMethodInvocationGeneric.kt
 inlineClasses/unboxValueOfAnyBeforeMethodInvocationGeneric2.kt
 inlineClasses/valueClassInValueClass.kt
 inlineClasses/valueClassInstanceOfNumberAndComparable.kt
-inlineClasses/valueClassInstanceOfNumberAndComparableInInlineFunction.kt
 inlineEvaluationOrder/argumentOfCall.kt
 inlineEvaluationOrder/argumentOfCallMultipleInlineCalls.kt
 inlineEvaluationOrder/argumentOfInlineCall.kt
@@ -2454,7 +2436,6 @@ properties/genericPropertyMultiModule.kt
 properties/kt10729.kt
 properties/kt1398.kt
 properties/kt2892.kt
-properties/kt4252.kt
 properties/kt4383.kt
 properties/kt78962.kt
 properties/lateinit/accessorException.kt
@@ -2540,7 +2521,6 @@ ranges/contains/inOptimizableDoubleRange.kt
 ranges/contains/inOptimizableFloatRange.kt
 ranges/contains/inOptimizableIntRange.kt
 ranges/contains/inOptimizableLongRange.kt
-ranges/contains/inPrimitiveProgression.kt
 ranges/contains/inRangeLiteralComposition.kt
 ranges/contains/inRangeWithCustomContains.kt
 ranges/contains/inRangeWithImplicitReceiver.kt
@@ -3431,7 +3411,6 @@ secondaryConstructors/enums.kt
 secondaryConstructors/innerClasses.kt
 secondaryConstructors/innerClassesInheritance.kt
 secondaryConstructors/localClasses.kt
-secondaryConstructors/withReturnUnit.kt
 serialization/deserializedMembers.kt
 serialization/serializedCharConstant.kt
 serialization/serializedDefaultArgs.kt
@@ -3568,7 +3547,6 @@ typeErasure/twoFunWithTypeParametersInlineFunWithReifiedTypeParameters.kt
 typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParameters.kt
 typeMapping/kt3863.kt
 typeMapping/kt3976.kt
-typeMapping/nullableNothing.kt
 typealias/abbreviationWithCapturedType.kt
 typealias/localTypeAliases.kt
 typealias/nestedTypeAliasesAndStaticScope.kt
@@ -3577,7 +3555,6 @@ typealias/typeAliasAsBareType.kt
 underscoredTypeArguments/backTicked.kt
 underscoredTypeArguments/simple.kt
 unit/kt3634.kt
-unit/kt4212.kt
 unitConversion/unitConversionForSubtype.kt
 unitConversion/unitConversionWithSamSubtype.kt
 unitConversion/unitConversionWithSuspend.kt
