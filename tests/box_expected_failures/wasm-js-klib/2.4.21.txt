@@ -1066,7 +1066,6 @@ delegatedProperty/delegateByTopLevelFun.kt
 delegatedProperty/delegateByTopLevelProperty.kt
 delegatedProperty/delegateForExtProperty.kt
 delegatedProperty/delegateForExtPropertyInClass.kt
-delegatedProperty/delegateToAnother/custom.kt
 delegatedProperty/delegateToAnother/kt49793_companionObject.kt
 delegatedProperty/delegateToAnother/kt49793_interfaceCompanionObject.kt
 delegatedProperty/delegateToAnother/kt49793_object.kt
