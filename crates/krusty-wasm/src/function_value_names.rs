@@ -12,6 +12,8 @@
 //! A value whose class kotlinc names otherwise is not given a name here: a lambda converted to a
 //! `fun interface`, and a reference to a property, which prints the property instead.
 
+use krusty::backend::class_names::member_class_names;
+use krusty::backend::BackendClassifierSource;
 use krusty::ir::{IrCallableReferenceTarget, IrExpr};
 use krusty::types::{FnSig, Ty, TyKind};
 
@@ -53,14 +55,22 @@ fn function_signature(ty: Ty) -> Option<&'static FnSig> {
     }
 }
 
-/// How kotlinc-wasm encodes one captured value in a class name: by its declared type, a primitive
-/// or an unsigned number by its own code and anything else, a shared `var` cell included, as a
-/// reference.
-pub(super) fn capture_code(ty: Ty, shared: bool) -> &'static str {
+/// How kotlinc-wasm encodes one captured value in a class name, by the type its capture keeps
+/// after erasure ([`erased_capture`]): a primitive or an unsigned number by its own code, a value
+/// class that erases to one by `V` and its qualified name with `_` for `.`, and anything else, a
+/// nullable value and a shared `var` cell included, as the reference `A`.
+pub(super) fn capture_code(
+    ty: Ty,
+    shared: bool,
+    classifiers: &dyn BackendClassifierSource,
+) -> String {
     if shared {
-        return "A";
+        return "A".to_owned();
     }
-    match ty.kind() {
+    let Some(kept) = erased_capture(ty, classifiers) else {
+        return "A".to_owned();
+    };
+    let code = match kept.kind() {
         TyKind::INT => "I",
         TyKind::LONG => "J",
         TyKind::DOUBLE => "D",
@@ -73,12 +83,38 @@ pub(super) fn capture_code(ty: Ty, shared: bool) -> &'static str {
         TyKind::USHORT => "US",
         TyKind::UINT => "UI",
         TyKind::ULONG => "UJ",
+        TyKind::Obj(class, _) => {
+            // Boundary conversion: the class name kotlinc-wasm spells into the generated one.
+            let qualified = member_class_names(class).qualified;
+            return format!("V{}", qualified.replace('.', "_"));
+        }
         _ => "A",
+    };
+    code.to_owned()
+}
+
+/// The type a captured value of type `ty` keeps in kotlinc-wasm's class name, or `None` when it
+/// is erased to a reference. A primitive and an unsigned number keep their type, a type parameter
+/// erases as its first bound does, and a non-null value class keeps its own type only when its
+/// underlying type erases to a primitive or an unsigned number. A nullable value is boxed, so it
+/// is a reference.
+fn erased_capture(ty: Ty, classifiers: &dyn BackendClassifierSource) -> Option<Ty> {
+    if ty.is_builtin_scalar() {
+        return Some(ty);
+    }
+    match ty.kind() {
+        TyKind::TyParam(_, bound) => erased_capture(bound, classifiers),
+        TyKind::Obj(class, _) => {
+            let underlying = classifiers.classifier(class)?.value_underlying?;
+            let erased = erased_capture(underlying, classifiers)?;
+            erased.is_builtin_scalar().then_some(ty)
+        }
+        _ => None,
     }
 }
 
 /// The simple class name of a function value of `shape` capturing values encoded as `captures`.
-pub(super) fn class_name(shape: NamedShape, captures: &[&str]) -> String {
+pub(super) fn class_name(shape: NamedShape, captures: &[String]) -> String {
     let mut name = String::new();
     if shape.reference {
         name.push('K');
@@ -95,7 +131,7 @@ pub(super) fn class_name(shape: NamedShape, captures: &[&str]) -> String {
         name.push_str("_bound");
         name.push_str(&captures.len().to_string());
         name.push('_');
-        name.extend(captures.iter().copied());
+        name.extend(captures.iter().map(String::as_str));
     }
     name
 }
@@ -103,6 +139,39 @@ pub(super) fn class_name(shape: NamedShape, captures: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use krusty::backend::BackendClassifierFact;
+    use krusty::types::{type_name, type_name_nested_child, TypeName};
+    use std::sync::Arc;
+
+    /// The classifier facts of value classes, each by its underlying type.
+    struct ValueClasses(Vec<(TypeName, Ty)>);
+
+    impl BackendClassifierSource for ValueClasses {
+        fn classifier(&self, name: TypeName) -> Option<Arc<BackendClassifierFact>> {
+            let &(_, underlying) = self.0.iter().find(|(class, _)| *class == name)?;
+            Some(Arc::new(BackendClassifierFact {
+                runtime_exception: None,
+                declaration_name: None,
+                access: krusty::libraries::ClassifierAccess::Public,
+                is_kotlin: true,
+                mapped_builtin: false,
+                source: true,
+                outer_instance: None,
+                kind: krusty::libraries::TypeKind::Class,
+                is_abstract: false,
+                is_extensible: false,
+                supertypes: Box::new([]),
+                annotations: Box::new([]),
+                own_type_parameter_count: 0,
+                type_param_variances: Box::new([]),
+                value_underlying: Some(underlying),
+                value_declaration: None,
+                role: None,
+                companion: None,
+                enum_entries_accessor: None,
+            }))
+        }
+    }
 
     fn shape(reference: bool, suspend: bool, arity: usize) -> NamedShape {
         NamedShape {
@@ -112,25 +181,29 @@ mod tests {
         }
     }
 
+    fn codes(codes: &[&str]) -> Vec<String> {
+        codes.iter().map(|code| (*code).to_owned()).collect()
+    }
+
     /// kotlinc-wasm 2.4.21's names for these shapes, measured on wasm-js and wasm-wasi.
     #[test]
     fn names_follow_kotlinc_wasm() {
         assert_eq!(class_name(shape(false, false, 0), &[]), "Function0");
         assert_eq!(
-            class_name(shape(false, false, 2), &["I"]),
+            class_name(shape(false, false, 2), &codes(&["I"])),
             "Function2_bound1_I"
         );
         assert_eq!(
-            class_name(shape(false, false, 0), &["I", "J", "A"]),
+            class_name(shape(false, false, 0), &codes(&["I", "J", "A"])),
             "Function0_bound3_IJA"
         );
         assert_eq!(
-            class_name(shape(false, true, 1), &["I"]),
+            class_name(shape(false, true, 1), &codes(&["I"])),
             "SuspendFunction1_bound1_I"
         );
         assert_eq!(class_name(shape(true, false, 1), &[]), "KFunction1R");
         assert_eq!(
-            class_name(shape(true, false, 0), &["A"]),
+            class_name(shape(true, false, 0), &codes(&["A"])),
             "KFunction0R_bound1_A"
         );
         assert_eq!(class_name(shape(true, true, 0), &[]), "KSuspendFunction0R");
@@ -138,6 +211,7 @@ mod tests {
 
     #[test]
     fn captures_are_coded_by_their_declared_type() {
+        let none = ValueClasses(Vec::new());
         let codes = [
             Ty::Int,
             Ty::Long,
@@ -153,12 +227,41 @@ mod tests {
             Ty::ULong,
             Ty::String,
         ]
-        .map(|ty| capture_code(ty, false));
+        .map(|ty| capture_code(ty, false, &none));
         assert_eq!(
             codes,
             ["I", "J", "D", "F", "Z", "C", "S", "B", "UB", "US", "UI", "UJ", "A"]
         );
-        assert_eq!(capture_code(Ty::Int, true), "A");
-        assert_eq!(capture_code(Ty::nullable(Ty::Int), false), "A");
+        assert_eq!(capture_code(Ty::Int, true, &none), "A");
+        assert_eq!(capture_code(Ty::nullable(Ty::Int), false, &none), "A");
+    }
+
+    /// A value class keeps its identity when its underlying type erases to a primitive or an
+    /// unsigned number, and is a reference otherwise: over a reference, over another value class,
+    /// nullable, or shared. kotlinc-wasm 2.4.21 names `p.Outer.Inner` over `Long` `Vp_Outer_Inner`.
+    #[test]
+    fn value_class_captures_keep_their_qualified_name() {
+        let id = type_name("p/Id");
+        let inner = type_name_nested_child(type_name("p/Outer"), "Inner");
+        let wrapped = type_name("p/Wrapped");
+        let text = type_name("p/Text");
+        let classes = ValueClasses(vec![
+            (id, Ty::Int),
+            (inner, Ty::Long),
+            (wrapped, Ty::obj_name(id)),
+            (text, Ty::String),
+        ]);
+        assert_eq!(capture_code(Ty::obj_name(id), false, &classes), "Vp_Id");
+        assert_eq!(
+            capture_code(Ty::obj_name(inner), false, &classes),
+            "Vp_Outer_Inner"
+        );
+        assert_eq!(capture_code(Ty::obj_name(wrapped), false, &classes), "A");
+        assert_eq!(capture_code(Ty::obj_name(text), false, &classes), "A");
+        assert_eq!(
+            capture_code(Ty::nullable(Ty::obj_name(id)), false, &classes),
+            "A"
+        );
+        assert_eq!(capture_code(Ty::obj_name(id), true, &classes), "A");
     }
 }
