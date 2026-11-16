@@ -739,6 +739,29 @@ impl<'a> FileLowering<'a> {
         if let Some(number) = sam_number {
             itable[number as usize] = thunk;
         }
+        // A functional interface that is itself a function type (`fun interface F : (Int) -> String`)
+        // is also called through the one invoke slot every function value declares, whose entry
+        // takes and returns references. The member above wears the interface's own signature, so
+        // the slot gets an entry of its own over the same lambda body.
+        if let Some(method) =
+            method.filter(|method| self.overrides_function_invoke(interface, *method))
+        {
+            let arity = self.ir.functions[method as usize].params.len();
+            let boxed = self.declare_local_function(
+                &format!("{base}_function_invoke"),
+                &vec![any(); arity + 1],
+                any(),
+            )?;
+            self.define_sam_thunk(
+                boxed,
+                &format!("{base}_function"),
+                impl_fn,
+                captures,
+                &vec![any(); arity],
+                any(),
+            )?;
+            vtable[model::FUNCTION_SLOT as usize] = boxed;
+        }
 
         let mut interfaces: Vec<DataId> = Vec::new();
         for name in self.model.implemented[interface as usize].clone() {
@@ -756,6 +779,28 @@ impl<'a> FileLowering<'a> {
             interfaces,
             kotlin_name,
         })
+    }
+
+    /// Whether `method`, a member of the module interface `interface`, overrides a function
+    /// classifier's `invoke` by the exact checked edge.
+    fn overrides_function_invoke(&self, interface: u32, method: u32) -> bool {
+        let owner = self.ir.classes[interface as usize].fq_name_id();
+        self.ir
+            .function_overrides
+            .get(&owner)
+            .into_iter()
+            .flatten()
+            .any(|edge| {
+                edge.overridden_semantic_role
+                    == Some(krusty::types::SemanticCallRole::KotlinFunctionInvoke)
+                    && (edge.implementation_function == Some(method)
+                        || match &edge.implementation {
+                            krusty::fir::ResolvedFunctionOverrideTarget::Module(callable) => {
+                                self.ir.checked_callable_functions.get(callable) == Some(&method)
+                            }
+                            krusty::fir::ResolvedFunctionOverrideTarget::External(_) => false,
+                        })
+            })
     }
 
     /// Why a lambda's body function was not emitted, for a thunk that needs to call it.

@@ -1291,7 +1291,6 @@ exceptions/kt69534.kt
 exceptions/rethrow.kt
 exceptions/throw0.kt
 exceptions/throw_from_catch.kt
-extensionFunctions/extensionFunctionAsSupertype.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionFakeOverride.kt
 extensionFunctions/extensionFunctionInValueClass.kt
@@ -3372,7 +3371,6 @@ regressions/multimodule/inlineNarrowElementInRange.kt
 regressions/multimodule/inlineNullCheckReturnTargets.kt
 regressions/multimodule/inlineTextTrim.kt
 regressions/multimodule/inlineTodoDefaultMessage.kt
-regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt
 regressions/multimodule/multimoduleDirectCollectionIterator.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
