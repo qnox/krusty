@@ -610,7 +610,6 @@ compiler/testData/diagnostics/tests/headerMode/functionDeclaration.kt
 compiler/testData/diagnostics/tests/headerMode/objectDeclaration.kt
 compiler/testData/diagnostics/tests/illegalCharsInPackageWithDots.kt
 compiler/testData/diagnostics/tests/imports/CheckVisibility_differentModule.kt
-compiler/testData/diagnostics/tests/imports/EnumEntryVsStaticAmbiguity2.kt
 compiler/testData/diagnostics/tests/imports/ImportFromCurrentWithDifferentName.kt
 compiler/testData/diagnostics/tests/imports/ImportFromCurrentWithDifferentNameComplex.kt
 compiler/testData/diagnostics/tests/imports/ImportObjectAndUseAsSupertype.kt
