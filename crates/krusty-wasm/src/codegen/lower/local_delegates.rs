@@ -99,7 +99,10 @@ pub(super) fn define(
             let params = accessor
                 .parameters
                 .iter()
-                .map(|ty| carrier(*ty)?.ok_or_else(|| "a `Unit` parameter".to_string()))
+                .map(|ty| {
+                    super::parameter_carrier_of(*ty)?
+                        .ok_or_else(|| "a `Unit` parameter".to_string())
+                })
                 .collect::<Result<Vec<_>, Unsupported>>()?;
             let results = carrier(accessor.result)?.into_iter().collect::<Vec<_>>();
             let signature = module.func_type(params, results);
