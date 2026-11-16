@@ -2781,8 +2781,6 @@ reified/callChain.kt
 reified/callableReferenceInlinedFun.kt
 reified/callableReferenceInlinedFunFromOtherModule.kt
 reified/catchParameter/nestedReifiedCatch.kt
-reified/catchParameter/nullableExceptionType.kt
-reified/catchParameter/reificationClash.kt
 reified/catchParameter/tryCatchReifiedType.kt
 reified/checkcast.kt
 reified/copyToArray.kt
@@ -3063,7 +3061,6 @@ when/enumOptimization/manyWhensWithinClass.kt
 when/enumOptimization/nullability.kt
 when/enumOptimization/subjectAny.kt
 when/enumOptimization/withoutElse.kt
-when/exhaustiveness/exhaustiveWithNegativeEnum.kt
 when/guard/whenWithGuard.kt
 when/is.kt
 when/kt45081.kt
