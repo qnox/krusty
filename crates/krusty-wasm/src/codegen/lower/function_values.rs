@@ -128,7 +128,7 @@ impl Body<'_> {
         };
         let to_string = match function_value_names::named_shape(self.ir.expr(site), instance) {
             Some(shape) => {
-                let codes: Vec<&str> = params[..captures.len()]
+                let codes: Vec<String> = params[..captures.len()]
                     .iter()
                     .enumerate()
                     .map(|(parameter, &ty)| {
@@ -136,7 +136,7 @@ impl Body<'_> {
                             .ir
                             .shared_capture_parameters
                             .contains_key(&(function, parameter as u32));
-                        function_value_names::capture_code(ty, shared)
+                        function_value_names::capture_code(ty, shared, self.classifiers)
                     })
                     .collect();
                 let name = function_value_names::class_name(shape, &codes);

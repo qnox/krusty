@@ -46,7 +46,9 @@ impl BodyLowering<'_> {
         let CommonPrimitive::RangeConstruction(operation) = construction.operation else {
             return unsupported("a membership in another range than a builtin range construction");
         };
-        let element = construction.receiver;
+        let element = construction
+            .receiver
+            .ok_or_else(|| mismatch("a range construction has no receiver"))?;
         // Mixed bounds and unsigned ranges compare through a widened or provider-selected
         // operation that this form does not record.
         if construction.params != [element] || !matches!(element, Ty::Int | Ty::Long | Ty::Char) {

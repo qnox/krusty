@@ -11,6 +11,7 @@ pub(super) struct LoweringCheckpoint {
     classes: usize,
     /// Each existing class's method and secondary-constructor counts.
     class_members: Vec<(usize, usize)>,
+    statics: usize,
     class_self_types: crate::fx_hash::HashSet<crate::types::TypeName>,
 }
 
@@ -25,6 +26,7 @@ impl LoweringCheckpoint {
                 .iter()
                 .map(|class| (class.methods.len(), class.secondary_ctors.len()))
                 .collect(),
+            statics: ir.statics.len(),
             class_self_types: ir.declared_class_self_type_owners(),
         }
     }
@@ -34,6 +36,7 @@ impl LoweringCheckpoint {
         let first = ExprId::try_from(self.expressions).expect("an expression id fits u32");
         ir.exprs.truncate(self.expressions);
         crate::ir::truncate_expression_facts(ir, first);
+        ir.statics.truncate(self.statics);
         ir.callable_reference_adapter_results
             .retain(|body, result| *body < first && *result < first);
         // The exhaustive classifier above prunes inherited and operation-owned expression facts.
