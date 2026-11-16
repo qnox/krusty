@@ -1178,7 +1178,7 @@ fn companion_block_source_files(program: &str) -> Vec<(String, String)> {
 // out of the E2E compiler inputs so each original per-file program stays byte for byte unchanged.
 fn companion_block_file_body(name: &str, source: &str) -> String {
     let source = source
-        .split_once(&format!("// FILE: {name}\n"))
+        .split_once(&format!("// FILE: {name}.kt\n"))
         .expect("the named canonical file")
         .1;
     krusty::conformance::prepare_test_source(source, krusty::conformance::TestTarget::Jvm)
