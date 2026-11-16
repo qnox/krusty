@@ -527,6 +527,65 @@ pub(super) fn object_dispatched_members(
     }
 }
 
+/// An override of a value class, with the declarations it overrides.
+pub(crate) struct ValueClassOverride {
+    pub(crate) identity: KlibDependencyCallable,
+    pub(crate) overridden: Vec<KlibDependencyCallable>,
+}
+
+/// The overrides with bodies of the value class declaring the member `selected`, each with the
+/// declarations it overrides: dispatch reaches them on a boxed instance of the class, which has no
+/// initialization of its own to carry them.
+pub(super) fn value_class_overrides(
+    selected: KlibBodyCallable<'_>,
+    bodies: &KlibDeclarationBodies,
+) -> Result<Vec<ValueClassOverride>, KlibBodyDeclineReason> {
+    let header = class_headers::authenticate(selected, bodies)?;
+    if !header.contract.is_value {
+        return Ok(Vec::new());
+    }
+    let module = &header.contract.module;
+    let mut overrides = Vec::new();
+    for member in &header.class.members {
+        let functions: Vec<_> = match member {
+            KlibIrMember::Function(function) => vec![*function],
+            KlibIrMember::Property(property) => [property.getter, property.setter]
+                .into_iter()
+                .flatten()
+                .collect(),
+            _ => Vec::new(),
+        };
+        for function in functions.into_iter().map(|id| header.arena.function(id)) {
+            if function.constructor || function.body.is_none() || function.overridden.is_empty() {
+                continue;
+            }
+            let signature =
+                crate::klib_libraries::member_signature(&function.base.symbol.signature)
+                    .ok_or_else(|| mismatch("a value class override is not a member"))?;
+            let KlibCalleeOrigin::Exact(identity) = bodies.linked_origin(module, &signature) else {
+                return Err(mismatch("a value class override has no exact producer"));
+            };
+            let mut overridden = Vec::new();
+            for symbol in &function.overridden {
+                let signature = crate::klib_libraries::member_signature(&symbol.signature)
+                    .ok_or_else(|| {
+                        mismatch("an override names a declaration that is not a member")
+                    })?;
+                overridden.extend(
+                    bodies
+                        .overridden_declarations(module, &signature)
+                        .map_err(mismatch)?,
+                );
+            }
+            overrides.push(ValueClassOverride {
+                identity,
+                overridden,
+            });
+        }
+    }
+    Ok(overrides)
+}
+
 fn dispatched_members(
     plan: &ClassInitialization<'_, '_>,
     bodies: &KlibDeclarationBodies,

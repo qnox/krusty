@@ -1,30 +1,49 @@
 //! Materialization of references to checker-selected compiler array factories.
 
 use crate::fir::{
-    FirAdaptedReferenceArgument, FirCallableReferenceBinding, FirReferenceAdaptation, ResolvedTy,
+    ExternalCallableId, FirAdaptedReferenceArgument, FirCallableReferenceBinding,
+    FirReferenceAdaptation, ResolvedTy,
 };
 use crate::ir::{ExprId, IrExpr, IrFunction};
-use crate::types::{ArrayFactoryKind, Ty, TyKind};
+use crate::types::{ArrayFactoryKind, Ty, TyKind, TypeName};
 
 use super::{BodyLowering, FirLoweringFailure};
 
+/// The compiler array factory a reference names: the provider's declaration identity, the
+/// construction it performs, and the checked types it constructs with.
+pub(super) struct ArrayFactoryReference<'a> {
+    pub(super) declaration: ExternalCallableId,
+    pub(super) operation: ArrayFactoryKind,
+    pub(super) array_type: ResolvedTy,
+    pub(super) element_type: ResolvedTy,
+    pub(super) parameters: &'a [ResolvedTy],
+    pub(super) reflection_owner: Option<TypeName>,
+}
+
 impl BodyLowering<'_> {
-    #[allow(clippy::too_many_arguments)]
+    /// Materialize a reference to a compiler array factory as an ordinary dependency
+    /// [`IrExpr::CallableReference`] to that declaration. Its adapter constructs the array the
+    /// factory would, so no backend calls a method the factory does not have; the target backend
+    /// chooses the carrier and reflects the declaration as for any other dependency reference.
     pub(super) fn checked_array_factory_reference(
         &mut self,
-        operation: ArrayFactoryKind,
-        array_type: ResolvedTy,
-        element_type: ResolvedTy,
-        parameters: &[ResolvedTy],
+        factory: ArrayFactoryReference<'_>,
         binding: FirCallableReferenceBinding,
         adaptation: Option<&FirReferenceAdaptation>,
         reference_ty: Ty,
-        reflective: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let ArrayFactoryReference {
+            declaration,
+            operation,
+            array_type,
+            element_type,
+            parameters,
+            reflection_owner,
+        } = factory;
         let TyKind::Fun(reference) = reference_ty.non_null().kind() else {
             return Err(FirLoweringFailure::UnsupportedIntrinsicCall);
         };
-        if binding != FirCallableReferenceBinding::Static || reflective {
+        if binding != FirCallableReferenceBinding::Static {
             return Err(FirLoweringFailure::UnsupportedIntrinsicCall);
         }
 
@@ -164,22 +183,33 @@ impl BodyLowering<'_> {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        if adaptation.is_some_and(|adaptation| adaptation.suspend_conversion) {
+        if reference.suspend {
             self.ir.suspend_funs.push(function);
         }
         self.ir
             .set_method_visibility(function, crate::types::Visibility::Private);
         self.ir.lambda_own_params_from.insert(function, 0);
-        let arity = u8::try_from(reference.params.len())
-            .map_err(|_| FirLoweringFailure::UnsupportedIntrinsicCall)?;
-        let lambda = self.ir.add_expr(IrExpr::Lambda {
-            impl_fn: function,
-            arity,
-            captures: Vec::new(),
-            sam: None,
-            inline_body: None,
-        });
-        self.ir.note_synthesized_lambda(lambda);
-        Ok(lambda)
+        self.attach_generated_static_to_lexical_class(function);
+        Ok(self.ir.add_expr(IrExpr::CallableReference(Box::new(
+            crate::ir::IrCallableReference {
+                target: crate::ir::IrCallableReferenceTarget::External {
+                    declaration,
+                    receiver: None,
+                },
+                adapter: function,
+                captures: Vec::new(),
+                bound_receiver: None,
+                bound_contexts: 0,
+                function_type: reference_ty,
+                declaration_parameters: parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect(),
+                declaration_result: array_type.get(),
+                declaration_suspend: false,
+                adaptation: adaptation.cloned().map(Box::new),
+                reflection_owner,
+            },
+        ))))
     }
 }

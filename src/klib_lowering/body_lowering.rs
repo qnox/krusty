@@ -29,6 +29,7 @@ mod loops;
 mod object_literals;
 mod range_membership;
 mod safe_calls;
+use safe_calls::NullProvenRead;
 mod string_templates;
 mod try_catch;
 mod type_operators;
@@ -357,8 +358,9 @@ pub(super) struct BodyLowering<'a> {
     /// Compiler temporaries that name another immutable value, by the initializer each read of
     /// them lowers as.
     compiler_aliases: HashMap<KlibIrSymbol, KlibIrExprId>,
-    /// Safe-call receiver temporaries, inside the selector their `null` test guards.
-    null_proven: HashSet<KlibIrSymbol>,
+    /// Reads proven non-null where they are lowered: safe-call receiver temporaries inside the
+    /// selector their `null` test guards, and fields a compiler-generated `when` tests.
+    null_proven: HashSet<NullProvenRead>,
     /// All enclosing return-target declarations, including tail-only blocks without a frame.
     returnable_targets: Vec<KlibIrSymbol>,
     /// Enclosing serialized returnable blocks, whose exact symbols own their local exits.
@@ -822,6 +824,9 @@ impl<'a> BodyLowering<'a> {
         }
         if let Some(widened) = self.nullable_widening(lowered, actual, expected) {
             return Ok(widened);
+        }
+        if let Some(narrowed) = self.null_proven_field(id, lowered, actual, expected) {
+            return Ok(narrowed);
         }
         self.upcast(lowered, actual, expected)
             .ok_or(KlibBodyDeclineReason::ImplicitConversion)
