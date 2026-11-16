@@ -7,6 +7,10 @@
 //! and without `-XXLanguage:+FullValueClasses`, which makes a multi-field or parameterless class
 //! a full value class instead of an error.
 //!
+//! A legacy `inline class` is inline by its modifier on every target, exactly as a `@JvmInline
+//! value class` is by its annotation, so it gets that declaration's shape errors, reported at the
+//! `inline` keyword.
+//!
 //! An annotated declaration is covered on the JVM only: elsewhere `@JvmInline` is an optional
 //! expectation, which needs a KLIB library to resolve.
 
@@ -34,10 +38,19 @@ const UNANNOTATED: [&str; 4] = [
     "value class V(val x: Int, val y: Int)\n",
 ];
 
-const ANNOTATED: [&str; 3] = [
+const ANNOTATED: [&str; 4] = [
+    "@JvmInline\nvalue class V\n",
     "@JvmInline\nvalue class V()\n",
     "@JvmInline\nvalue class V(val x: Int)\n",
     "@JvmInline\nvalue class V(val x: Int, val y: Int)\n",
+];
+
+const INLINE_MODIFIER: [&str; 5] = [
+    "inline class V\n",
+    "inline class V()\n",
+    "inline class V(val x: Int)\n",
+    "inline class V(val x: Int, val y: Int)\n",
+    "public inline class V\n",
 ];
 
 const FULL_VALUE_CLASSES: &str = "// LANGUAGE: +FullValueClasses\n";
@@ -104,6 +117,63 @@ fn an_unannotated_value_class_matches_every_reference_compiler() {
             assert_matches_reference(target, form);
         }
     }
+}
+
+#[test]
+fn a_legacy_inline_class_matches_every_reference_compiler() {
+    for target in EVERY_TARGET {
+        for form in INLINE_MODIFIER {
+            assert_matches_reference(target, form);
+        }
+    }
+}
+
+/// kotlinc 2.4.21's answers on the JVM, pinned so the shapes stay checked when it is not
+/// provisioned.
+#[test]
+fn a_legacy_inline_class_is_checked_as_a_jvm_inline_value_class() {
+    let jvm = CompilationTarget::Jvm;
+    let cases: [(&str, &str); 4] = [
+        (
+            "inline class V\n",
+            "V.kt:1:1: primary constructor is required for value classes.",
+        ),
+        (
+            "public inline class V\n",
+            "V.kt:1:8: primary constructor is required for value classes.",
+        ),
+        (
+            "inline class V()\n",
+            "V.kt:1:15: value class must have exactly one primary constructor parameter.",
+        ),
+        (
+            "inline class V(val x: Int, val y: Int)\n",
+            "V.kt:1:15: value class must have exactly one primary constructor parameter.",
+        ),
+    ];
+    for (source, error) in cases {
+        assert_eq!(
+            krusty_errors(jvm, source),
+            vec![error.to_string()],
+            "{source}"
+        );
+    }
+    let full = |form: &str| format!("{FULL_VALUE_CLASSES}{form}");
+    assert_eq!(
+        krusty_errors(jvm, &full("inline class V\n")),
+        vec!["V.kt:2:1: primary constructor is required for @JvmInline value classes.".to_string()]
+    );
+    assert_eq!(
+        krusty_errors(jvm, &full("inline class V(val x: Int, val y: Int)\n")),
+        vec![
+            "V.kt:2:15: @JvmInline value class must have exactly one primary constructor parameter."
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        krusty_errors(jvm, "inline class V(val x: Int)\n"),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
