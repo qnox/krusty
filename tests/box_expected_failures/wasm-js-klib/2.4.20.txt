@@ -1407,7 +1407,6 @@ funInterface/noConversionForSubtypeGeneric.kt
 funInterface/nonAbstractMethod.kt
 funInterface/nonTrivialProjectionInSuperType.kt
 funInterface/nullableSam.kt
-funInterface/subtypeOfFunctionalTypeToFunInterfaceConversion.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
 function/arithmetic.kt
@@ -2309,8 +2308,6 @@ multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/expectActualInheritance2-2.kt
 multiplatform/k2/hmpp/expectActualInheritance3-3.kt
 multiplatform/k2/hmpp/expectActualInheritanceTwoLibs.kt
-multiplatform/k2/hmpp/expectActualOverload3-3.kt
-multiplatform/k2/hmpp/expectActualOverloadTwoLibs.kt
 multiplatform/k2/hmpp/genericTypealiasSameNameTwoLibs.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
@@ -3566,7 +3563,6 @@ underscoredTypeArguments/simple.kt
 unit/kt3634.kt
 unit/kt4212.kt
 unitConversion/unitConversionForSubtype.kt
-unitConversion/unitConversionWithSamSubtype.kt
 unitConversion/unitConversionWithSuspend.kt
 unsignedTypes/boxedUnsignedEqualsZero.kt
 unsignedTypes/equalsImplForInlineClassWrappingNullableInlineClass.kt
