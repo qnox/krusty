@@ -292,6 +292,8 @@ struct BodyHeader<'a> {
 #[derive(Clone)]
 struct MemberClass<'a> {
     class: crate::ir::ClassId,
+    /// The serialized declaration of `class`.
+    declaring: &'a KlibIrSymbol,
     fields: Vec<&'a KlibIrField>,
     /// The class's properties with a backing field, each with that field.
     properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
@@ -801,6 +803,7 @@ impl DependencyBodyUnit {
                         Some(member) => lowering
                             .reading_through(
                                 member.class,
+                                member.declaring,
                                 &member.fields,
                                 member.properties.clone(),
                                 member.contract.is_value,
@@ -868,19 +871,18 @@ impl CallLinker for Linker<'_, '_> {
         &self,
         callee: &KlibPublicIdSignature,
     ) -> Result<Option<crate::libraries::AtomicOperation>, KlibBodyDeclineReason> {
-        let signature = KlibDeclarationSignature::Public(callee.clone());
-        Ok(
-            match self
-                .sources
-                .bodies
-                .linked_origin(&self.active_module, &signature)
-            {
-                KlibCalleeOrigin::Exact(identity) => {
-                    self.sources.intrinsics.atomic_field(&identity)
-                }
-                KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
-            },
-        )
+        Ok(self
+            .linked_identity(callee)
+            .and_then(|identity| self.sources.intrinsics.atomic_field(&identity)))
+    }
+
+    fn atomic_array_element(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<crate::libraries::AtomicOperation>, KlibBodyDeclineReason> {
+        Ok(self
+            .linked_identity(callee)
+            .and_then(|identity| self.sources.intrinsics.atomic_array_element(&identity)))
     }
 
     fn common_primitive(
@@ -1949,7 +1951,12 @@ impl<'s> Linker<'_, 's> {
         candidate: KlibBodyCallable<'s>,
     ) -> Result<bool, KlibBodyDeclineReason> {
         if is_receiver_member(candidate, self.sources.bodies, self.sources.callees) {
-            return Ok(true);
+            // A member realizing one of `kotlin.Any`'s stays the target's, as the closure froze it.
+            return Ok(!self
+                .sources
+                .callees
+                .member_edge(candidate.identity())
+                .is_some_and(super::CallEdge::realizes_any_member));
         }
         let Some(class) = candidate
             .class_contract()
@@ -1960,23 +1967,29 @@ impl<'s> Linker<'_, 's> {
         if class.is_value {
             return Ok(true);
         }
-        let Some(primary) = &class.primary_constructor else {
-            return Ok(false);
-        };
-        let identity = KlibDependencyCallable {
-            module: class.module.clone(),
-            declaration: KlibDeclarationSignature::Public(primary.clone()),
-        };
-        let Some(KlibCalleeFact::Selected(constructors)) = self.sources.callees.get(&identity)
+        // Every instance a member is called on was created by one of the constructors that
+        // initialize the class, so the unit materializes the class only when each of them does.
+        let Some(constructors) =
+            super::class_initialization::initializing_constructors(class, self.sources.bodies)
         else {
             return Ok(false);
         };
-        Ok(super::class_initialization::plan(
-            constructors[0],
-            self.sources.bodies,
-            self.sources.callees,
-        )?
-        .is_some())
+        for identity in &constructors {
+            let Some(KlibCalleeFact::Selected(selected)) = self.sources.callees.get(identity)
+            else {
+                return Ok(false);
+            };
+            if super::class_initialization::plan(
+                selected[0],
+                self.sources.bodies,
+                self.sources.callees,
+            )?
+            .is_none()
+            {
+                return Ok(false);
+            }
+        }
+        Ok(!constructors.is_empty())
     }
 
     /// A call of a member of a class this unit does not materialize, through the member's
@@ -2499,6 +2512,17 @@ fn parameter_defaults(declaration: &KlibIrFunction) -> Vec<bool> {
 }
 
 impl Linker<'_, '_> {
+    /// The exact declaration a call of `callee` from the active module links to, if one does.
+    fn linked_identity(&self, callee: &KlibPublicIdSignature) -> Option<KlibDependencyCallable> {
+        match self.sources.bodies.linked_origin(
+            &self.active_module,
+            &KlibDeclarationSignature::Public(callee.clone()),
+        ) {
+            KlibCalleeOrigin::Exact(identity) => Some(identity),
+            KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+        }
+    }
+
     /// The primitive `select` reads for the declaration a call of `signature` names, unless the
     /// call is an exact declaration edge.
     fn primitive_at(

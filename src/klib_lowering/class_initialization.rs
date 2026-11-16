@@ -191,11 +191,13 @@ pub(super) fn plan<'a, 'b>(
             "a class instance receiver has another declared type",
         ));
     }
-    let [KlibIrStatement::Expression(delegate), KlibIrStatement::Expression(initialize)] =
+    // The delegation and instance initialization, then the rest of the constructor's own body,
+    // which runs after every member initializer as a secondary constructor's body does.
+    let [KlibIrStatement::Expression(delegate), KlibIrStatement::Expression(initialize), body @ ..] =
         statements.as_slice()
     else {
-        // A constructor body with more than its delegation and instance initialization keeps
-        // its separately authenticated target boundary, as a bodyless one does.
+        // A constructor body without its delegation and instance initialization keeps its
+        // separately authenticated target boundary, as a bodyless one does.
         return Ok(None);
     };
     let KlibIrExprKind::DelegatingConstructorCall(access) = &header.arena.expr(*delegate).kind
@@ -368,6 +370,9 @@ pub(super) fn plan<'a, 'b>(
         super::class_storage::authenticate(&header, declared_superclass, |member, field| {
             record_initializer(member, field, &mut steps)
         })?;
+    if !body.is_empty() {
+        steps.push(InitializationStep::Block(body));
+    }
     // The class lists its supertypes in source order; the class it constructs leads them.
     let mut supertypes = supertypes;
     supertypes.retain(|supertype| *supertype != declared_superclass);
@@ -436,6 +441,29 @@ pub(super) fn constructor_initialization_callees(
             .chain(superclass)
             .collect(),
     ))
+}
+
+/// The constructors that initialize an instance of the ordinary class `class`: its primary
+/// constructor, or each of its constructors when it has no primary one. A secondary constructor of
+/// a class with a primary one delegates to it and initializes nothing itself. `None` when the
+/// class's serialized constructors are not each one public declaration.
+pub(crate) fn initializing_constructors(
+    class: &crate::libraries::KlibBodyClassContract,
+    bodies: &KlibDeclarationBodies,
+) -> Option<Vec<KlibDependencyCallable>> {
+    let constructors = match &class.primary_constructor {
+        Some(primary) => vec![primary.clone()],
+        None => bodies.public_class_constructors(&class.module, &class.signature)?,
+    };
+    Some(
+        constructors
+            .into_iter()
+            .map(|constructor| KlibDependencyCallable {
+                module: class.module.clone(),
+                declaration: KlibDeclarationSignature::Public(constructor),
+            })
+            .collect(),
+    )
 }
 
 /// The superclass constructor the primary constructor `identity` serializes a delegation to,

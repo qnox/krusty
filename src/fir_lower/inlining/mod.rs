@@ -2122,6 +2122,7 @@ fn specialize_checked_operation(
         | IrCheckedOperation::RangeLoop { counter, .. } => specialize_ty(counter, bindings),
         IrCheckedOperation::IllegalProgressionStep { .. }
         | IrCheckedOperation::AtomicField { .. }
+        | IrCheckedOperation::AtomicArrayElement { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => {}
         IrCheckedOperation::PropertyReference {
             target,

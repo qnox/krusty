@@ -11,7 +11,7 @@
 //! entry its module exports.
 
 use krusty::backend::interface_identity::{member_identity, property_member_identity};
-use krusty::backend::{BackendCallableFact, CheckedBackendCallables};
+use krusty::backend::{BackendCallableFact, BackendPropertyFact, CheckedBackendCallables};
 use krusty::libraries::ExternalCallableKind;
 use krusty::libraries::MemberRealization;
 use krusty::types::{SemanticCallableOwner, TypeName};
@@ -88,6 +88,12 @@ pub(in crate::codegen) fn dispatches_through_library_member(
         && any_members::call_member(ir, callables, expression).is_none()
 }
 
+/// Whether `property` is `KCallable.name`, which every callable-reference object implements
+/// (`crate::callable_references`).
+fn is_reference_name(property: &BackendPropertyFact) -> bool {
+    &*property.name == "name" && property.owner.matches("kotlin/reflect/KCallable")
+}
+
 impl Body<'_> {
     /// Emit `id` when it is a call through a library member.
     pub(super) fn library_member_expression(
@@ -95,7 +101,7 @@ impl Body<'_> {
         id: u32,
         node: &IrExpr,
     ) -> Option<Result<(), Unsupported>> {
-        let (target, receiver, args, role, generic_accessor, member_extension) = match node {
+        let (target, receiver, args, property, generic_accessor, member_extension) = match node {
             IrExpr::Call {
                 callee,
                 dispatch_receiver: Some(receiver),
@@ -113,14 +119,7 @@ impl Body<'_> {
                 if !defaults.is_empty() {
                     return None;
                 }
-                (
-                    *target,
-                    *receiver,
-                    args.as_slice(),
-                    MemberRole::Function,
-                    false,
-                    false,
-                )
+                (*target, *receiver, args.as_slice(), None, false, false)
             }
             IrExpr::Checked(operation) => {
                 let access = self.callables.dependency_accessor(operation)?;
@@ -138,12 +137,16 @@ impl Body<'_> {
                     access.target,
                     receiver,
                     access.arguments,
-                    MemberRole::Getter,
+                    Some(access.property),
                     generic_accessor,
                     access.callable.is_member_extension(),
                 )
             }
             _ => return None,
+        };
+        let role = match property {
+            Some(_) => MemberRole::Getter,
+            None => MemberRole::Function,
         };
         let fact = self.callables.callable(target)?;
         if generic_accessor
@@ -171,18 +174,24 @@ impl Body<'_> {
         }
         // A function's identity names a function, and an accessor's a property.
         let identity = library_member_identity(fact, role)?;
-        Some(self.library_member_call(id, fact.clone(), identity, role, receiver, args))
+        Some(self.library_member_call(id, fact.clone(), identity, property, receiver, args))
     }
 
+    /// A call through the library member `fact` declares, the getter of `property` when there is
+    /// one.
     fn library_member_call(
         &mut self,
         id: u32,
         fact: BackendCallableFact,
         identity: Vec<u8>,
-        role: MemberRole,
+        property: Option<&BackendPropertyFact>,
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
+        let role = match property {
+            Some(_) => MemberRole::Getter,
+            None => MemberRole::Function,
+        };
         let params = fact.declared_params.as_deref().unwrap_or(&fact.params);
         let result = fact.declared_ret.unwrap_or(fact.ret);
         if params.len() != args.len() {
@@ -202,6 +211,9 @@ impl Body<'_> {
             &signature,
             &fact.builtin_implementations,
         )?;
+        if property.is_some_and(is_reference_name) {
+            self.runtime.reference_name_member(self.module, member)?;
+        }
         if let Some(step) = super::array_lists::iterator_step(&fact) {
             let function = match step {
                 super::array_lists::IteratorStep::HasNext => self.runtime.array_lists.has_next,

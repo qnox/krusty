@@ -289,6 +289,12 @@ KRef kt_unsigned_array_wrap(const KType *type, KRef storage);
    a spread needs: `f(a, *xs, b)` builds one array whose size only run time knows. */
 kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source);
 
+/* Kotlin/Native's `arrayCopy` of one specialized primitive array or `Array<Any?>`: `count` elements of `source`
+   from `from` into `destination` at `to`. A range outside either array raises its
+   `ArrayIndexOutOfBoundsException`, with no message, before anything is copied. The ranges may
+   overlap within one array. */
+void kt_array_copy_range(KRef source, kt_int from, KRef destination, kt_int to, kt_int count);
+
 /* An index outside `0 until size`: raises Kotlin's `IndexOutOfBoundsException`, with the JVM's
    wording, and returns; the caller returns too. */
 void kt_index_out_of_bounds(kt_int index, kt_int size);

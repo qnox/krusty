@@ -64,6 +64,9 @@ impl BodyLowering<'_> {
         if let Some(operation) = self.linker.atomic_field(callee)? {
             return self.atomic_field(operation, access, ty);
         }
+        if let Some(operation) = self.linker.atomic_array_element(callee)? {
+            return self.atomic_array_element(operation, access, ty);
+        }
         if let Some(arity) = suspend_function_invocation_arity(callee) {
             if !access.type_arguments.is_empty() {
                 return Err(mismatch(
@@ -742,6 +745,9 @@ impl BodyLowering<'_> {
         }
         Ok(match declared_ret {
             Some(declared) if declared != operands.ret => {
+                // As checked FIR lowering does for a source call, the inner call publishes the
+                // declaration's result it evaluates to, and the coercion the use's type.
+                self.ir.call_declared_ret.insert(call, declared);
                 let coerced = self.coercion(call, operands.ret);
                 self.ir.set_logical_type(coerced, operands.ret);
                 coerced
