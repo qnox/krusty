@@ -1,22 +1,23 @@
 //! The applied hierarchies of the classes a lowering materializes. A target answers a type test
 //! and lays out a class's interface tables from the hierarchy, as it does for a source class.
 
+use crate::assignable::TypeOracle;
 use crate::fx_hash::HashMap;
 use crate::ir::{IrAppliedClassifier, IrClass, IrFile};
-use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind};
 
 use super::decline::KlibBodyDeclineReason;
 
 /// Publish the applied hierarchy of each class lowering declared from `first` on. A class of the
 /// file is above its written supertypes, at the application the walk reaches it with; any other
-/// classifier is above the supertypes `declarations` gives it.
+/// classifier is above the supertypes of the hierarchy the checker froze for the selected bodies,
+/// `classes`. Without that evidence, only a class of the file is known above its own.
 ///
 /// A value class records no supertypes on its class, so it publishes no hierarchy.
 pub(super) fn publish(
     ir: &mut IrFile,
     first: usize,
-    declarations: &dyn SymbolSource,
+    classes: Option<&dyn TypeOracle>,
 ) -> Result<(), KlibBodyDeclineReason> {
     for class in first..ir.classes.len() {
         let name = ir.classes[class].fq_name_id();
@@ -34,14 +35,16 @@ pub(super) fn publish(
         };
         let mut malformed = false;
         let hierarchy =
-            crate::symbol_resolver::applied_hierarchy_through(root, |owner, applied| {
+            crate::assignable::applied_hierarchy_through(root, |owner, applied| {
                 match ir.class_id_by_name(owner) {
                     Some(declared) => declared_parents(&ir.classes[declared as usize], applied)
                         .unwrap_or_else(|| {
                             malformed = true;
                             Vec::new()
                         }),
-                    None => crate::symbol_resolver::direct_supertypes(declarations, applied),
+                    None => {
+                        classes.map_or_else(Vec::new, |classes| classes.direct_supertypes(applied))
+                    }
                 }
             });
         if malformed {
