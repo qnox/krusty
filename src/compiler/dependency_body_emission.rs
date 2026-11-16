@@ -154,6 +154,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         .collect::<HashSet<_>>();
     let target_represents_classifier =
         |classifier| backend.represents_dependency_classifier(classifier);
+    let dispatched_classes = backend.dispatched_dependency_classes();
     let callees = KlibCalleeFacts::new(selected.iter().copied())
         .with_checked_dependency_facts(source.callables.klib_dependency_facts())
         .with_target_classifiers(&target_represents_classifier);
@@ -625,15 +626,32 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
-        if let Err(error) =
-            super::backend_handoff::record_checked_klib_dependency_facts(&mut callables, platform)
-        {
+        if let Err(error) = super::backend_handoff::record_checked_klib_dependency_facts(
+            &mut callables,
+            platform,
+            &dispatched_classes,
+        ) {
             diags.error(Span::new(0, 0), format!("internal error: {error}"));
             return Vec::new();
         }
-        if let Err(identity) =
-            super::builtin_implementations::record_checked(&mut callables, unit.ir(), platform)
+        if let Some(protocol) = symbols
+            .char_sequence_protocol()
+            .filter(|_| backend.appends_char_sequences_by_index())
         {
+            if let Err(error) = callables.freeze_char_sequence_protocol(protocol, platform) {
+                diags.error(
+                    Span::new(0, 0),
+                    format!("internal error: cannot freeze the CharSequence members: {error:?}"),
+                );
+                return Vec::new();
+            }
+        }
+        if let Err(identity) = super::builtin_implementations::record_checked(
+            &mut callables,
+            unit.ir(),
+            platform,
+            &dispatched_classes,
+        ) {
             diags.error(
                 Span::new(0, 0),
                 format!(
@@ -701,6 +719,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 platform,
                 preparation,
                 symbols.coroutine_runtime(),
+                &dispatched_classes,
             ) {
                 release_unit_reservations(support_state, &published, &materialized);
                 backend.report_common_ir_preparation_error(&error, diags);

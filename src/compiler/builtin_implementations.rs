@@ -13,7 +13,10 @@ pub(super) fn record_checked(
     callables: &mut CheckedBackendCallables,
     ir: &crate::ir::IrFile,
     source: &dyn crate::symbol_source::SymbolSource,
+    represented: &[crate::types::TypeName],
 ) -> Result<(), crate::fir::ExternalCallableId> {
+    // The checked KLIB graph froze its members' facts with the same `represented` overrides
+    // (`for_checked_klib_bodies`); a member whose two facts disagree is rejected.
     let mut implementations = ir.external_builtin_implementations.clone();
     for (&identity, checked) in callables.klib_builtin_implementations() {
         match implementations.entry(identity) {
@@ -30,6 +33,7 @@ pub(super) fn record_checked(
         source,
         callables.external_member_identities(),
         &implementations,
+        represented,
     )?;
     callables.record_checked_builtin_implementations(&implementations)
 }
