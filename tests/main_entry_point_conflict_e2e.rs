@@ -138,8 +138,8 @@ fn cross_file_main_with_ordinary_parameter_conflicts() {
     assert_diagnostics(
         diags,
         &[
-            "conflicting overloads:\nfun main(x: Int)",
-            "conflicting overloads:\nfun main(x: Int)",
+            "conflicting overloads:\nfun main(x: Int): Unit",
+            "conflicting overloads:\nfun main(x: Int): Unit",
         ],
     );
 }
@@ -176,8 +176,8 @@ fn cross_file_generic_main_functions_conflict() {
     assert_diagnostics(
         diags,
         &[
-            "conflicting overloads:\nfun <T> main()",
-            "conflicting overloads:\nfun <T> main()",
+            "conflicting overloads:\nfun <T> main(): Unit",
+            "conflicting overloads:\nfun <T> main(): Unit",
         ],
     );
 }
@@ -210,8 +210,8 @@ fn same_file_main_duplicates_still_conflict() {
     assert_diagnostics(
         diags,
         &[
-            "conflicting overloads:\nfun main(rawArgs: Array<String>)",
-            "conflicting overloads:\nfun main(rawArgs: Array<String>)",
+            "conflicting overloads:\nfun main(rawArgs: Array<String>): Unit",
+            "conflicting overloads:\nfun main(rawArgs: Array<String>): Unit",
         ],
     );
 }
@@ -251,8 +251,8 @@ fn cross_file_non_main_duplicates_still_conflict() {
     assert_diagnostics(
         diags,
         &[
-            "conflicting overloads:\nfun helper(rawArgs: Array<String>)",
-            "conflicting overloads:\nfun helper(rawArgs: Array<String>)",
+            "conflicting overloads:\nfun helper(rawArgs: Array<String>): Unit",
+            "conflicting overloads:\nfun helper(rawArgs: Array<String>): Unit",
         ],
     );
 }
@@ -279,7 +279,7 @@ fn cross_file_public_and_private_functions_conflict_in_the_private_file() {
         ],
         false,
     );
-    assert_diagnostics(diags, &["conflicting overloads:\nfun helper(x: Int)"]);
+    assert_diagnostics(diags, &["conflicting overloads:\nfun helper(x: Int): Unit"]);
     let reversed = assert_acceptance_matches_kotlinc(
         "mixed-helper-visibility-reversed",
         &[
@@ -288,7 +288,10 @@ fn cross_file_public_and_private_functions_conflict_in_the_private_file() {
         ],
         false,
     );
-    assert_diagnostics(reversed, &["conflicting overloads:\nfun helper(x: Int)"]);
+    assert_diagnostics(
+        reversed,
+        &["conflicting overloads:\nfun helper(x: Int): Unit"],
+    );
 }
 
 #[test]
@@ -313,8 +316,8 @@ fn same_file_private_extension_functions_conflict() {
     assert_diagnostics(
         diags,
         &[
-            "conflicting overloads:\nfun String.helper()",
-            "conflicting overloads:\nfun String.helper()",
+            "conflicting overloads:\nfun String.helper(): Unit",
+            "conflicting overloads:\nfun String.helper(): Unit",
         ],
     );
 }
@@ -332,8 +335,8 @@ fn cross_file_public_extension_functions_conflict() {
     assert_diagnostics(
         diags,
         &[
-            "conflicting overloads:\nfun String.helper()",
-            "conflicting overloads:\nfun String.helper()",
+            "conflicting overloads:\nfun String.helper(): Unit",
+            "conflicting overloads:\nfun String.helper(): Unit",
         ],
     );
 }
@@ -348,7 +351,10 @@ fn cross_file_public_and_private_extension_functions_conflict() {
         ],
         false,
     );
-    assert_diagnostics(diags, &["conflicting overloads:\nfun String.helper()"]);
+    assert_diagnostics(
+        diags,
+        &["conflicting overloads:\nfun String.helper(): Unit"],
+    );
     let reversed = assert_acceptance_matches_kotlinc(
         "mixed-extension-visibility-reversed",
         &[
@@ -357,5 +363,8 @@ fn cross_file_public_and_private_extension_functions_conflict() {
         ],
         false,
     );
-    assert_diagnostics(reversed, &["conflicting overloads:\nfun String.helper()"]);
+    assert_diagnostics(
+        reversed,
+        &["conflicting overloads:\nfun String.helper(): Unit"],
+    );
 }
