@@ -527,6 +527,24 @@ impl<'u, 's> Linker<'u, 's> {
                 self.declare_dispatched(ir, member.clone(), header.arena, function)?;
             }
         }
+        // The unit materializing a value class owns its box construction, exported under the
+        // primary constructor's identity: a later unit, or a body common preparation adds to this
+        // one, constructs a box through that export instead of materializing the class again.
+        if let Some(primary) = &contract.primary_constructor {
+            let constructor = KlibDependencyCallable {
+                module: contract.module.clone(),
+                declaration: KlibDeclarationSignature::Public(primary.clone()),
+            };
+            if !self.functions.contains_key(&constructor) {
+                let entry = ir
+                    .add_construction_entry(class, None)
+                    .map(|entry| entry.function)
+                    .ok_or(KlibBodyDeclineReason::SignatureMismatch(
+                        "a value class box without its checked self type".to_owned(),
+                    ))?;
+                self.functions.insert(constructor, entry);
+            }
+        }
         Ok(member)
     }
 

@@ -460,8 +460,14 @@ impl DependencyBodyUnit {
         declarations: &'a dyn crate::symbol_source::SymbolSource,
     ) -> Result<FunId, KlibBodyDecline> {
         if let Some(function) = self.functions.get(callable.identity()).copied() {
-            // A member installed with its class was authenticated with the class.
-            if self.installs_member(callable.identity()) {
+            // A member installed with its class was authenticated with the class, as was the
+            // box construction of a value class materialized with its class.
+            let value_construction = callable.kind()
+                == crate::libraries::ExternalCallableKind::Constructor
+                && callable
+                    .class_contract()
+                    .is_some_and(|class| class.is_value);
+            if self.installs_member(callable.identity()) || value_construction {
                 return Ok(function);
             }
             // Declared before, perhaps from its header alone as another body's callee: the
