@@ -541,6 +541,35 @@ fn radix_to_string(
     })
 }
 
+/// `String.unsafeRangeEquals(thisOffset: Int, other: String, otherOffset: Int, length: Int):
+/// Boolean` in `kotlin.text`.
+fn string_range_equals(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let string = Ty::obj("kotlin/String");
+    let [this_offset, other, other_offset, length] = declaration.params.as_slice() else {
+        return None;
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/text"))
+        && declaration
+            .receiver
+            .as_ref()
+            .is_some_and(|receiver| exact_type(receiver, "kotlin/String"))
+        && semantic_type(this_offset) == Some(Ty::Int)
+        && exact_type(other, "kotlin/String")
+        && semantic_type(other_offset) == Some(Ty::Int)
+        && semantic_type(length) == Some(Ty::Int)
+        && exact_type(&declaration.ret, "kotlin/Boolean"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::StringRangeEquals,
+        kind: ExternalCallableKind::Extension,
+        receiver: Some(string),
+        params: vec![string, Ty::Int, string, Ty::Int, Ty::Int],
+        ret: Ty::Boolean,
+    })
+}
+
 fn native(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
@@ -580,6 +609,9 @@ fn native(
             "Kotlin_Int_toStringRadix" => return radix_to_string(placement, declaration, Ty::Int),
             "Kotlin_Long_toStringRadix" => {
                 return radix_to_string(placement, declaration, Ty::Long)
+            }
+            "Kotlin_String_unsafeRangeEquals" => {
+                return string_range_equals(placement, declaration)
             }
             _ => return None,
         };
@@ -1407,5 +1439,66 @@ mod tests {
             gc_unsafe("Kotlin_Int_toStringRadix"),
         );
         assert!(authenticate(native, text, &swapped).is_none());
+    }
+
+    #[test]
+    fn native_gc_unsafe_string_range_equality_requires_the_exact_entry_package_and_shape() {
+        let gc_unsafe = |callee: &str| AnnotationApplication {
+            identity: type_name("kotlin/native/internal/GCUnsafeCall"),
+            arguments: vec![(
+                "callee".to_owned(),
+                AnnotationArgument::String(callee.to_owned()),
+            )],
+        };
+        let native = Some(TargetIntrinsicPlatform::Native);
+        let text = crate::libraries::CallablePlacement::Package(type_name("kotlin/text"));
+        let params = ["kotlin/Int", "kotlin/String", "kotlin/Int", "kotlin/Int"];
+        let range_equals = |params: &[&str], ret: &str, callee: &str| {
+            let mut declaration = declaration("unsafeRangeEquals", params, ret, gc_unsafe(callee));
+            declaration.visibility = Visibility::Private;
+            declaration.receiver = Some(KotlinType::class("kotlin/String"));
+            declaration
+        };
+        let exact = range_equals(&params, "kotlin/Boolean", "Kotlin_String_unsafeRangeEquals");
+        let string = Ty::obj("kotlin/String");
+        assert_eq!(
+            authenticate(native, text, &exact),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::StringRangeEquals,
+                kind: ExternalCallableKind::Extension,
+                receiver: Some(string),
+                params: vec![string, Ty::Int, string, Ty::Int, Ty::Int],
+                ret: Ty::Boolean,
+            })
+        );
+        assert!(authenticate(None, text, &exact).is_none());
+        assert!(authenticate(
+            native,
+            crate::libraries::CallablePlacement::Package(type_name("spoof")),
+            &exact
+        )
+        .is_none());
+        let mut bodyful =
+            range_equals(&params, "kotlin/Boolean", "Kotlin_String_unsafeRangeEquals");
+        bodyful.is_external = false;
+        assert!(authenticate(native, text, &bodyful).is_none());
+        let mut top_level =
+            range_equals(&params, "kotlin/Boolean", "Kotlin_String_unsafeRangeEquals");
+        top_level.receiver = None;
+        assert!(authenticate(native, text, &top_level).is_none());
+        let mut builder_receiver =
+            range_equals(&params, "kotlin/Boolean", "Kotlin_String_unsafeRangeEquals");
+        builder_receiver.receiver = Some(KotlinType::class("kotlin/text/StringBuilder"));
+        assert!(authenticate(native, text, &builder_receiver).is_none());
+        let swapped = range_equals(
+            &["kotlin/String", "kotlin/Int", "kotlin/Int", "kotlin/Int"],
+            "kotlin/Boolean",
+            "Kotlin_String_unsafeRangeEquals",
+        );
+        assert!(authenticate(native, text, &swapped).is_none());
+        let wrong_result = range_equals(&params, "kotlin/Int", "Kotlin_String_unsafeRangeEquals");
+        assert!(authenticate(native, text, &wrong_result).is_none());
+        let spoofed = range_equals(&params, "kotlin/Boolean", "User_String_unsafeRangeEquals");
+        assert!(authenticate(native, text, &spoofed).is_none());
     }
 }

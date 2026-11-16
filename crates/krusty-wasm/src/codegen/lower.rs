@@ -652,6 +652,17 @@ fn expression_type(
         }
         IrExpr::LocalPropertyReference(_) if ir.checked_type(id).is_none() => Ty::obj("kotlin/Any"),
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        // Common lowering leaves a module property read at its declaration's type and records the
+        // use's type on a separate coercion, as it does for a call; the read, through the getter
+        // entry of another file or this file's storage, produces the declared type.
+        IrExpr::Checked(checked_op)
+            if ir.checked_type(id).is_none()
+                && let krusty::ir::IrCheckedOperation::PropertyRead { target, .. } =
+                    &**checked_op
+                && let Some(property) = ir.referenced_module_properties.get(target) =>
+        {
+            property.ty
+        }
         // A `when` without an `else` branch, such as a guard a counted loop's lowering adds, is a
         // statement: no branch's value can be its own.
         IrExpr::When { branches }
@@ -1185,11 +1196,16 @@ impl<'a> Body<'a> {
                         .string_constant(self.module, &mut self.code, &[]);
                 }
             }
+            // A static function a class owns (a local function lifted out of a member, its
+            // receiver captured as a parameter) is called as one the file owns: a wasm function
+            // has no container, so the owner says nothing about the call.
             IrExpr::Call {
                 callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
-            } if let Callee::Local(function) = &**call_callee => {
+            } if let Callee::Local(function) | Callee::ClassStatic { function, .. } =
+                &**call_callee =>
+            {
                 let params = self.ir.functions[*function as usize].params.clone();
                 if params.len() != args.len() {
                     return Err("a call whose arguments do not match its parameters".into());
@@ -1237,6 +1253,40 @@ impl<'a> Body<'a> {
                     .copied()
                     .chain(params.iter().copied())
                     .collect::<Vec<_>>();
+                frame.extend(std::iter::repeat_n(
+                    Ty::Int,
+                    krusty::backend::default_arguments::mask_words(params.len()),
+                ));
+                self.direct_call(function, &frame, &args)?;
+            }
+            // Only the file that declares the class lays its object out, so its entry for the
+            // constructor's defaults constructs it.
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::ModuleConstructorDefaultEntry {
+                constructor,
+                outer,
+                params,
+                ..
+            } = &**call_callee =>
+            {
+                let function = self
+                    .calls
+                    .instance(
+                        &krusty::backend::instance_links::InstanceEntry::ConstructorDefaults {
+                            module: self.module_name.into(),
+                            declaration: *constructor,
+                        },
+                    )
+                    .ok_or_else(|| {
+                        "a cross-file construction leaving arguments to a constructor its file \
+                         does not expose"
+                            .to_string()
+                    })?;
+                let mut frame = outer.iter().copied().collect::<Vec<_>>();
+                frame.extend_from_slice(params);
                 frame.extend(std::iter::repeat_n(
                     Ty::Int,
                     krusty::backend::default_arguments::mask_words(params.len()),
