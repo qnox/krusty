@@ -7,7 +7,8 @@
 #
 # In order, stopping at the first failure:
 #   1. attribution and outcome lists of the commits in base..HEAD;
-#   2. rustfmt, then the clippy and legacy baselines;
+#   2. rustfmt as CI checks it (`just fmt-check`, which also covers `tests/*_e2e.rs`), then the
+#      legacy and clippy baselines;
 #   3. the lib tests of krusty and the backend crates;
 #   4. the e2e modules (`tests/*_e2e.rs`) this branch changes;
 #   5. a box slice on JVM, Native, wasm-js and wasm-wasi: an even sample of the corpus, then every
@@ -46,7 +47,7 @@ bash scripts/check-attribution.sh "$fork..HEAD"
 bash scripts/check-outcome-lists.sh "$fork" HEAD
 
 step "rustfmt"
-cargo fmt --all -- --check
+just fmt-check
 step "legacy baseline"
 just legacy-baseline-check
 if [ "${KRUSTY_SMOKE_SKIP_CLIPPY:-}" != 1 ]; then
