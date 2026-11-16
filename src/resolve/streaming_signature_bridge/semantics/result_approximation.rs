@@ -35,7 +35,12 @@ pub(super) fn declaration_result(
             .into_iter()
             .collect::<crate::fx_hash::HashSet<_>>()
     })?;
-    let exposed = anonymous_results::declaration_result(semantics, declaration, result.get())?;
+    let module =
+        crate::module_symbols::ModuleSymbols::for_file(semantics.table, anchor.source.raw());
+    let source =
+        crate::symbol_source::CompositeSource::new(vec![&module, &*semantics.table.libraries]);
+    let published = crate::symbol_resolver::published_declaration_type(&source, result.get());
+    let exposed = anonymous_results::declaration_result(semantics, declaration, published)?;
     let resolve = |ty| {
         crate::fir::ResolvedTy::new(denotable_signature_result(ty, &denotable))
             .map_err(|_| super::ProductionSignatureSemantics::failure())

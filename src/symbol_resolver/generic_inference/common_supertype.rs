@@ -342,6 +342,28 @@ pub(crate) fn reified_runtime_type(ty: Ty, declarations: &ReifiedDeclarations<'_
     }
 }
 
+/// The type an inferred declaration publishes. kotlinc approximates every intersection in it the
+/// way it approximates a reified argument, against the declarations `source` provides:
+/// `val marker get() = choose("text", 1)` publishes `Any`, and `val list = listOf(1, "a")`
+/// publishes `List<Any>`. A local variable keeps its intersection.
+pub(crate) fn published_declaration_type(source: &dyn SymbolSource, ty: Ty) -> Ty {
+    reified_runtime_type(
+        ty,
+        &ReifiedDeclarations {
+            direct_supertypes: &|name| {
+                Some(source.classifier(name)?.supertypes.iter_ids().collect())
+            },
+            variance_at: &|name, index| {
+                source
+                    .classifier(name)?
+                    .type_param_variances()
+                    .get(index)
+                    .copied()
+            },
+        },
+    )
+}
+
 fn reified_approximation(ty: Ty, to_super: bool, declarations: &ReifiedDeclarations<'_>) -> Ty {
     match ty.kind() {
         TyKind::Nullable(inner) => {
