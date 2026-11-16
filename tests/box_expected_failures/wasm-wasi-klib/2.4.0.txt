@@ -278,7 +278,6 @@ callableReference/bound/equals/nullableReceiverInEquals.kt
 callableReference/bound/genericValOnLHS.kt
 callableReference/bound/kCallableNameIntrinsic.kt
 callableReference/bound/kt12738.kt
-callableReference/bound/kt15446.kt
 callableReference/bound/multiCase.kt
 callableReference/bound/nullReceiver.kt
 callableReference/bound/primitiveReceiver.kt
