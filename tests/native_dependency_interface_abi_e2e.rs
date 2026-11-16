@@ -38,7 +38,10 @@ fn a_declared_generic_slot_converts_int_long_and_value_class_arguments_and_resul
     };
     assert_eq!(producer.files.len(), 1);
     assert_eq!(consumer.files.len(), 2);
-    assert_eq!(consumer.deps.as_slice(), std::slice::from_ref(&producer.name));
+    assert_eq!(
+        consumer.deps.as_slice(),
+        std::slice::from_ref(&producer.name)
+    );
     let files = consumer
         .files
         .iter()
