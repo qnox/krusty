@@ -121,6 +121,7 @@ compiler/testData/diagnostics/tests/samConversions/samWithEquals.kt
 compiler/testData/diagnostics/tests/scopes/explicitOverrideOfTwoMembers_java.kt
 compiler/testData/diagnostics/tests/scopes/inheritance/statics/overloadStatic.kt
 compiler/testData/diagnostics/tests/scopes/inheritance/statics/staticVsCompanion.kt
+compiler/testData/diagnostics/tests/scopes/kt1642.kt
 compiler/testData/diagnostics/tests/scopes/publicJavaAndPrivateKotlinVar.kt
 compiler/testData/diagnostics/tests/smartCasts/varnotnull/toFlexibleType.kt
 compiler/testData/diagnostics/tests/syntheticExtensions/javaProperties/FullySupportedSyntheticJavaPropertyReference.kt

@@ -553,7 +553,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus
-          key: box-cli-and-generator-corpus-v3-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
+          key: box-cli-diagnostics-and-generator-corpus-v4-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit
         if: steps.box-corpus.outputs.cache-hit == 'true'

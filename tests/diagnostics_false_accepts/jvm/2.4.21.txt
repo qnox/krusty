@@ -946,6 +946,7 @@ compiler/testData/diagnostics/tests/jvm/exposedPrivate/privateCompanion.kt
 compiler/testData/diagnostics/tests/jvm/exposedPrivate/privateNestedClass.kt
 compiler/testData/diagnostics/tests/jvm/exposedPrivate/simpleError.kt
 compiler/testData/diagnostics/tests/jvm/internal/internalSetter.kt
+compiler/testData/diagnostics/tests/jvm/jvmDefault/nonDefaultInheritanceSuperCall.kt
 compiler/testData/diagnostics/tests/jvm/kt59590.kt
 compiler/testData/diagnostics/tests/jvm/multifileClasses/jvmSynthetic.kt
 compiler/testData/diagnostics/tests/jvm/multipleBigArityFunsImplemented.kt
@@ -1341,11 +1342,9 @@ compiler/testData/diagnostics/tests/scopes/invisibleInternalSetterAccessFromDeri
 compiler/testData/diagnostics/tests/scopes/invisibleInternalSetterAccessFromDeriviedClass_direct.kt
 compiler/testData/diagnostics/tests/scopes/invisibleInternalSetterAccessFromDeriviedClass_inherited.kt
 compiler/testData/diagnostics/tests/scopes/kt1248.kt
-compiler/testData/diagnostics/tests/scopes/kt1642.kt
 compiler/testData/diagnostics/tests/scopes/kt323.kt
 compiler/testData/diagnostics/tests/scopes/protectedVisibility/nonSuperCallConstructor.kt
 compiler/testData/diagnostics/tests/scopes/protectedVisibility/nonSuperCallConstructorJavaDifferentPackage.kt
-compiler/testData/diagnostics/tests/scopes/specialFunctionInJava_2.kt
 compiler/testData/diagnostics/tests/scopes/visibility3.kt
 compiler/testData/diagnostics/tests/sealed/DerivedTopLevel.kt
 compiler/testData/diagnostics/tests/sealed/Local.kt
