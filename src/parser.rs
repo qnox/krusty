@@ -5695,6 +5695,16 @@ typealias Box<@Marker T> = List<T>
     }
 
     #[test]
+    fn short_form_rename_parses_without_the_feature() {
+        // The `=` is not a parse error and the entry stays positional. The experimental diagnostic
+        // is reported later, so `tree` (which rejects parse errors) still accepts the statement.
+        assert_eq!(
+            tree("fun read(point: Point) { val (x = a) = point }"),
+            "(fun read (param point Point) (block (destructure (x) point)))\n"
+        );
+    }
+
+    #[test]
     fn elvis_return_before_if_else_has_no_value() {
         // `else` closes the `if`, so it is not the value of `return`. The elvis rhs is a bare
         // `return`, and the if keeps its else branch.

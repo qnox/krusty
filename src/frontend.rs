@@ -1354,6 +1354,15 @@ where
                 "the feature \"name based destructuring\" is only available since language version 2.5",
             );
         }
+        for span in file.destructuring.ungated_short_form_spans.iter().copied() {
+            diags.error(
+                span,
+                "the feature \"enable name based destructuring short form\" is experimental and \
+                 should be enabled explicitly. This can be done by supplying the compiler \
+                 argument '-Xname-based-destructuring=complete', but note that no stability \
+                 guarantees are provided.",
+            );
+        }
         let extracted = pass1_builder.add_source(
             index,
             source,

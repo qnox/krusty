@@ -54,8 +54,13 @@ impl Parser<'_> {
             let name = self.ident_or_error("variable name");
             let name_span = self.declaration_name_span;
             let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
-            let source_property =
-                self.destructure_property(&name, close == TokenKind::RParen, &mut entry_type);
+            let source_property = self.destructure_property(
+                &name,
+                close == TokenKind::RParen,
+                close == TokenKind::RParen,
+                true,
+                &mut entry_type,
+            );
             entries.push(DestructureEntry {
                 name,
                 name_span,
@@ -111,7 +116,13 @@ impl Parser<'_> {
                 let name_span = self.declaration_name_span;
                 let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
                 let implicit = self.short_form_destructuring && close == TokenKind::RParen;
-                let source_property = self.destructure_property(&name, implicit, &mut entry_type);
+                let source_property = self.destructure_property(
+                    &name,
+                    implicit,
+                    close == TokenKind::RParen,
+                    false,
+                    &mut entry_type,
+                );
                 entries.push(DestructureEntry {
                     name,
                     name_span,
@@ -213,18 +224,44 @@ impl Parser<'_> {
 
     /// `= property` is an explicit rename. A parenthesized name-based entry without `=` names the
     /// property by the entry itself. The two stay distinct even when both strings are `_`.
+    ///
+    /// A parenthesized rename is parsed even when its feature is off, so the file keeps its
+    /// signatures. A full-form entry still names the property; the language-version diagnostic is
+    /// recorded on its `val`/`var`. A keyword-less entry stays positional unless the short form is
+    /// enabled, and the `=` span carries the experimental diagnostic. A bracket entry does not
+    /// accept `=` while name-based destructuring is disabled: kotlinc reports a syntax error there.
     pub(super) fn destructure_property(
         &mut self,
         entry_name: &str,
         implicit: bool,
+        paren: bool,
+        full_form: bool,
         entry_type: &mut Option<TypeRef>,
     ) -> Option<DestructureProperty> {
-        if self.eat(TokenKind::Eq) {
+        let consume = self.at(TokenKind::Eq) && (paren || self.name_based_destructuring);
+        if consume {
+            let operator = self.tok().span;
+            self.bump();
             let source = self.ident_or_error("property name");
             if self.eat(TokenKind::Colon) {
                 *entry_type = Some(self.parse_type());
             }
-            Some(DestructureProperty::Renamed(source))
+            let binds = if !paren {
+                self.name_based_destructuring
+            } else if full_form {
+                true
+            } else {
+                self.short_form_destructuring
+            };
+            if binds {
+                Some(DestructureProperty::Renamed(source))
+            } else {
+                self.file
+                    .destructuring
+                    .ungated_short_form_spans
+                    .push(operator);
+                None
+            }
         } else if implicit {
             Some(DestructureProperty::Implicit(entry_name.to_string()))
         } else {
