@@ -741,6 +741,15 @@ pub struct CheckedBackendCallables {
 }
 
 impl CheckedBackendCallables {
+    /// The runtime declarations native plugins selected, to reapply their ABI annotations after a
+    /// common lowering rewrites IR and the checked dependency view is rebuilt.
+    pub(crate) fn plugin_runtime_bindings(&self) -> Vec<(ExternalCallableId, Box<[Ty]>)> {
+        self.plugin_runtime
+            .iter()
+            .map(|(&identity, appended)| (identity, appended.clone()))
+            .collect()
+    }
+
     /// Store the checked graph before completing the source callable facts. Only another checked
     /// graph is evidence at this stage: freshly frozen callable implementation slots are empty.
     /// Source-vs-graph consistency is checked when actual selected implementations are recorded.

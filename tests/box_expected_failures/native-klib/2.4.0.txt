@@ -228,7 +228,6 @@ closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
 closures/crossinlineLocalDeclaration.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
-collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/clashWithInternalMapMethod.kt
@@ -338,7 +337,6 @@ controlflow/for_loops_array_nullable.kt
 controlflow/for_loops_array_side_effects.kt
 controlflow/for_loops_call_order.kt
 controlflow/for_loops_coroutines.kt
-controlflow/for_loops_empty_range.kt
 controlflow/for_loops_errors.kt
 controlflow/for_loops_let_with_nullable.kt
 controlflow/for_loops_nested.kt
