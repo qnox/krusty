@@ -3,6 +3,7 @@
 //! Resolution collects these records before backend entry. Consumers read the same semantic
 //! snapshot; it contains no provider reference or lookup operation.
 
+use super::checked_member_call_edge::CheckedMemberCallEdge;
 use crate::assignable::TypeOracle;
 use crate::fx_hash::HashMap;
 use crate::libraries::LibraryType;
@@ -12,27 +13,89 @@ use std::sync::Arc;
 /// Declaration facts of one selected dependency graph, separate from executable body roots.
 #[derive(Debug, Default)]
 pub(crate) struct CheckedKlibDependencyFacts {
-    pub(crate) builtin_implementations:
-        HashMap<super::ExternalCallableId, Box<[super::BuiltinImplementation]>>,
-    pub(crate) member_edges:
-        HashMap<crate::libraries::KlibDependencyCallable, super::CheckedMemberCallEdge>,
-    pub(crate) type_hierarchy: Option<CheckedKlibTypeFacts>,
+    builtin_implementations:
+        HashMap<crate::fir::ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>>,
+    member_edges: HashMap<crate::libraries::KlibDependencyCallable, CheckedMemberCallEdge>,
+    type_hierarchy: Option<CheckedKlibTypeFacts>,
     /// Owning tests observe exact constructor reachability without reimplementing the graph walk.
     #[cfg(test)]
-    pub(crate) reached_constructors:
-        crate::fx_hash::HashSet<crate::libraries::KlibDependencyCallable>,
+    reached_constructors: crate::fx_hash::HashSet<crate::libraries::KlibDependencyCallable>,
+}
+
+impl CheckedKlibDependencyFacts {
+    pub(crate) fn new(
+        builtin_implementations: HashMap<
+            crate::fir::ExternalCallableId,
+            Box<[crate::fir::BuiltinImplementation]>,
+        >,
+        member_edges: HashMap<crate::libraries::KlibDependencyCallable, CheckedMemberCallEdge>,
+        type_hierarchy: Option<CheckedKlibTypeFacts>,
+    ) -> Self {
+        Self {
+            builtin_implementations,
+            member_edges,
+            type_hierarchy,
+            #[cfg(test)]
+            reached_constructors: crate::fx_hash::HashSet::default(),
+        }
+    }
+
+    pub(crate) fn builtin_implementations(
+        &self,
+    ) -> &HashMap<crate::fir::ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>> {
+        &self.builtin_implementations
+    }
+
+    pub(crate) fn member_edges(
+        &self,
+    ) -> &HashMap<crate::libraries::KlibDependencyCallable, CheckedMemberCallEdge> {
+        &self.member_edges
+    }
+
+    pub(crate) fn type_hierarchy(&self) -> Option<&CheckedKlibTypeFacts> {
+        self.type_hierarchy.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_reached_constructor(
+        &mut self,
+        identity: crate::libraries::KlibDependencyCallable,
+    ) {
+        self.reached_constructors.insert(identity);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reached_constructors(
+        &self,
+    ) -> &crate::fx_hash::HashSet<crate::libraries::KlibDependencyCallable> {
+        &self.reached_constructors
+    }
 }
 
 /// Provider-normalized class facts reachable from the serialized types a checker selected.
 #[derive(Clone, Default)]
 pub(crate) struct CheckedKlibTypeFacts {
-    pub(crate) classifiers: HashMap<TypeName, Arc<LibraryType>>,
-    pub(crate) actualized_expects: HashMap<TypeName, TypeName>,
-    pub(crate) flexible_upper_bounds: HashMap<TypeName, TypeName>,
-    pub(crate) type_variable_bounds: HashMap<String, Box<[Ty]>>,
+    classifiers: HashMap<TypeName, Arc<LibraryType>>,
+    actualized_expects: HashMap<TypeName, TypeName>,
+    flexible_upper_bounds: HashMap<TypeName, TypeName>,
+    type_variable_bounds: HashMap<String, Box<[Ty]>>,
 }
 
 impl CheckedKlibTypeFacts {
+    pub(crate) fn from_records(
+        classifiers: HashMap<TypeName, Arc<LibraryType>>,
+        actualized_expects: HashMap<TypeName, TypeName>,
+        flexible_upper_bounds: HashMap<TypeName, TypeName>,
+        type_variable_bounds: HashMap<String, Box<[Ty]>>,
+    ) -> Self {
+        Self {
+            classifiers,
+            actualized_expects,
+            flexible_upper_bounds,
+            type_variable_bounds,
+        }
+    }
+
     fn classifier(&self, identity: TypeName) -> Option<&Arc<LibraryType>> {
         let identity = self
             .actualized_expects

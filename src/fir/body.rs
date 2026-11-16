@@ -771,6 +771,9 @@ pub enum FirCallableReferenceTarget {
         /// The declaration itself is `suspend`; a suspend-converted reference to an ordinary
         /// function is not.
         suspend: bool,
+        /// The referenced declaration's inline kind, as a direct call of it records: the
+        /// generated adapter's call is that declaration's call.
+        inline: InlineKind,
     },
     Classifier {
         classifier: crate::types::TypeName,

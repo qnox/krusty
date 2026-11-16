@@ -79,8 +79,8 @@ jobs:
           asking: route
           outputs: build-tool-bins.matrix=${{ steps.versions.outputs.matrix }}
 
-  # Lint and coverage are independent merge gates. Give each its own runner so the clean Clippy
-  # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
+  # Lint and the own test suites are independent merge gates. Give each its own runner so the clean
+  # Clippy build does not sit on the test critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
   # TEMP (2026-11-07): GHA hosted queue is backed up — temporarily run the heavy ubuntu-latest
   # jobs on self-hosted rust-4c-8gb too. Revert once the hosted backlog clears; then dual-label +
@@ -163,8 +163,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: gh run cancel "$GITHUB_RUN_ID"
 
-  # krusty-plugin-host is outside the default members and the coverage packages, so its own
-  # compiler-independent tests run here. Compiler-dependent plugin integrations run in `ci`.
+  # krusty-plugin-host is outside the default members and the own-suite packages, so its own
+  # compiler-independent tests run here. Compiler-dependent plugin integrations run in `e2e`.
   plugin-host:
     # GitHub-hosted: these tests ran out of memory on the 8 GB self-hosted runners, and GitHub's
     # Linux runners (16 GB) had free slots.
@@ -208,10 +208,7 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     env:
-      # Coverage mappings are compiler-version dependent. Keep the committed baseline and the
-      # instrumenting compiler on the same immutable nightly.
-      KRUSTY_COVERAGE_TOOLCHAIN: nightly-2026-09-05
-      # The instrumented build compiles krusty's lib and test targets side by side, and every
+      # The build compiles krusty's library and its cfg(test) unit harness side by side, and every
       # extra job token also lets rustc run more LLVM threads. Four jobs fit in 16 GB, which is
       # what GitHub's four-core runners use; eight do not.
       CARGO_BUILD_JOBS: "4"
@@ -227,17 +224,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.100.0
-      - name: install coverage tooling
-        run: rustup toolchain install "$KRUSTY_COVERAGE_TOOLCHAIN" --profile minimal --component llvm-tools-preview
-      # Prebuilt binary: `cargo install cargo-llvm-cov` compiled it from source on every run
-      # (~75s of the ci job).
-      - id: llvm-cov-on-path
-        name: look for an installed cargo-llvm-cov
-        run: if command -v cargo-llvm-cov > /dev/null; then echo "found=true" >> "$GITHUB_OUTPUT"; fi
-      - if: steps.llvm-cov-on-path.outputs.found != 'true'
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # Queue branches restore master's entries but never save their own: per-branch copies
@@ -246,7 +232,7 @@ jobs:
       - *just-on-path
       - *install-just
       # krusty-toolchain's oracle builds the Build Tools API implementation with its Gradle
-      # wrapper, which does not run on JDK 25; the coverage gate points it at JDK 21. The last
+      # wrapper, which does not run on JDK 25; the test step points it at JDK 21. The last
       # version listed stays JAVA_HOME.
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
@@ -279,24 +265,13 @@ jobs:
         with:
           path: target/cache/box-corpus
           # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
-          # corpus, the bytecode corpora, and the test-generator sources that select each target's
+          # corpus, the diagnostics test data, the bytecode corpora, and the test-generator sources that select each target's
           # cases. A key hit is never re-saved, so the key changes whenever those inputs do.
-          key: box-cli-and-generator-corpus-v3-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
+          key: box-cli-diagnostics-and-generator-corpus-v4-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit
         if: steps.box-corpus.outputs.cache-hit == 'true'
         run: echo KRUSTY_BOX_CORPUS_OFFLINE=1 >> "$GITHUB_ENV"
-      - name: select recorded-byte cache version
-        id: recorded-version
-        run: echo "version=$(just max-version)" >> "$GITHUB_OUTPUT"
-      - name: restore recorded kotlinc bytes
-        id: recorded-bytes
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/cache/class-dumps
-          key: recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-${{ steps.base.outputs.sha }}
-          restore-keys: |
-            recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-
       # krusty-toolchain's references (JetBrains' `kotlin` and the JDK glob matcher) are cached the
       # same way: restored from the base, run only for a missing entry, saved by master.
       # `tests/support/oracle.rs` keys each entry by the reference's identity and its inputs.
@@ -315,7 +290,7 @@ jobs:
           path: ~/.cache/JetBrains/Kotlin/cli
           key: kotlin-toolchain-cli-${{ runner.os }}-${{ hashFiles('scripts/kotlin-toolchain/kotlin') }}
       # krusty-toolchain's tests run the krusty-build-tools wrapper in a fresh Gradle user home (see
-      # the coverage gate below). Only the wrapper's distribution is kept: a restored Kotlin-DSL
+      # the own test suites below). Only the wrapper's distribution is kept: a restored Kotlin-DSL
       # workspace can lack metadata.bin.
       - name: restore Kotlin Build Tools Gradle distribution
         id: build-tools-gradle-dists
@@ -323,25 +298,6 @@ jobs:
         with:
           path: ${{ runner.temp }}/krusty-build-tools-gradle-user-home/wrapper/dists
           key: build-tools-gradle-dists-${{ runner.os }}-${{ hashFiles('tools/krusty-build-tools/gradle/wrapper/gradle-wrapper.properties') }}
-      - name: select recorded-byte cache mode
-        id: recorded-mode
-        env:
-          CACHE_HIT: ${{ steps.recorded-bytes.outputs.cache-hit }}
-          MASTER_PUSH: ${{ github.ref == 'refs/heads/master' }}
-        run: |
-          set -euo pipefail
-          # A restored entry is replayed. A test absent from this job's archive compiles
-          # with kotlinc instead of failing. Master publishes the archive, including that
-          # new recording, under this commit. A queue branch does not write it.
-          record=0
-          compile_missing=1
-          write=0
-          if [ "$MASTER_PUSH" = true ] && [ "$CACHE_HIT" != true ]; then
-            write=1
-          fi
-          echo "record=$record" >> "$GITHUB_OUTPUT"
-          echo "write=$write" >> "$GITHUB_OUTPUT"
-          echo "compile_missing=$compile_missing" >> "$GITHUB_OUTPUT"
       # The native runtime's thread drivers run on every supported architecture: built for each
       # with clang and lld, and run under QEMU's user-mode emulators (tests/native_runtime_e2e.rs).
       # The packages are cached by the runner's release, so a run installs them without the Ubuntu
@@ -393,7 +349,7 @@ jobs:
           path: ~/cross-packages
           key: ${{ steps.cross-packages.outputs.key }}
       # The KLIB semantics, value-class and kotlinc-native oracle tests are ordinary e2e and unit
-      # tests: the coverage gate runs them against the maximum-version Native distribution.
+      # tests: the e2e job and this one run them against the maximum-version Native distribution.
       # The same entry the Native conformance row of this version restores.
       - name: restore Kotlin/Native ${{ steps.max-version.outputs.version }}
         id: kotlin-native
@@ -416,35 +372,39 @@ jobs:
       - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
         with:
           maven-version: '3.9.11'
-      - name: coverage gate
-        id: coverage
+      # Coverage measures these same suites, instrumented, every night (.github/workflows/coverage.yml).
+      - name: own test suites
+        id: own-tests
         env:
-          # The e2e suite is one process. An instrumented run is about seventeen minutes; thirty
-          # minutes leaves room for a slow runner and still fails a hung binary.
-          KRUSTY_COVERAGE_E2E_TIMEOUT_SECONDS: 1800
           # A change to what krusty-toolchain's oracle entries hold re-runs every Kotlin Toolchain
           # case live (a queue branch restores, but never saves, the oracle cache), which takes
           # compile_cases past the ordinary 120 seconds.
-          KRUSTY_COVERAGE_TEST_TIMEOUT_SECONDS: 600
+          KRUSTY_TEST_TIMEOUT_SECONDS: 600
           KRUSTY_BUILD_TOOLS_JAVA_HOME: ${{ env.JAVA_HOME_21_X64 }}
           # rust-cache prunes target before archiving it. A Gradle Kotlin-DSL workspace restored
           # from there can therefore lack metadata.bin, which Gradle 8 cannot regenerate.
           KRUSTY_BUILD_TOOLS_GRADLE_USER_HOME: ${{ runner.temp }}/krusty-build-tools-gradle-user-home
-          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
-          # This job's archive only. The conformance job publishes a separate one.
-          KRUSTY_RECORD_CLASS_DUMPS: ${{ steps.recorded-mode.outputs.record }}
-          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
-          KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
           KRUSTY_TOOLCHAIN_RUN_MISSING: 1
           KRUSTY_REQUIRE_KLIB: "1"
           KRUSTY_REQUIRE_KOTLIN_NATIVE: "1"
-        run: just coverage-gate
-      - name: save recorded kotlinc bytes
-        if: steps.recorded-mode.outputs.write == '1'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/cache/class-dumps
-          key: recorded-kotlinc-bytes-${{ steps.recorded-version.outputs.version }}-${{ github.sha }}
+        run: scripts/own-tests.sh
+      # Holds every release's exact Native and Wasm stdlib to its implementation backlog with the
+      # compiler unit binary the step above built and ran.
+      - name: enforce exact KLIB implementation coverage for every release
+        env:
+          COMPILER_UNIT_TESTS: ${{ steps.own-tests.outputs.compiler_unit_tests }}
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+          KRUSTY_TEST_TIMEOUT_SECONDS: "600"
+        run: |
+          set -euo pipefail
+          test -x "$COMPILER_UNIT_TESTS"
+          for version in $(just supported-kotlin | tr , ' '); do
+            echo "::group::KLIB implementation coverage $version"
+            timeout 600s just klib-implementation-coverage "$COMPILER_UNIT_TESTS" "$version"
+            # Each release's Native distribution is only read here; drop it before the next.
+            rm -rf "$PWD/target/cache/kotlin-native/$version"
+            echo "::endgroup::"
+          done
       - name: save Kotlin Toolchain oracle output
         if: github.ref == 'refs/heads/master' && steps.toolchain-oracle.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -483,87 +443,6 @@ jobs:
         with:
           path: ~/.cache/JetBrains/Kotlin/cli
           key: ${{ steps.kotlin-toolchain-cli.outputs.cache-primary-key }}
-      # Reuse coverage's exact compiler e2e executable for its ignored plugin/KSP controls.
-      # This pass runs after the coverage report and does not change its measured workload.
-      - *plugin-host-runtime-cache
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
-        with:
-          distribution: zulu
-          java-version: '17'
-      - name: compiler plugin integration tests
-        env:
-          E2E_BINARY: ${{ steps.coverage.outputs.compiler_e2e_binary }}
-          RUST_MIN_STACK: "134217728"
-          LLVM_PROFILE_FILE: ${{ runner.temp }}/plugin-host-compiler-%p-%m.profraw
-        run: |
-          set -euo pipefail
-          source scripts/test-gate-defaults.sh
-          source scripts/test-deadline.sh
-          test -n "$E2E_BINARY" && test -x "$E2E_BINARY"
-          ignored_tests="$("$E2E_BINARY" plugin_host_compiler_e2e:: --ignored --list --format=terse)"
-          printf '%s\n' "$ignored_tests"
-          grep -q ': test$' <<< "$ignored_tests"
-          echo "plugin host compiler tests: $E2E_BINARY plugin_host_compiler_e2e:: --include-ignored --test-threads=1 (timeout=${KRUSTY_E2E_TIMEOUT_SECONDS}s)"
-          run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$E2E_BINARY" plugin_host_compiler_e2e:: --include-ignored --test-threads=1
-      - *save-plugin-host-runtime
-
-  # The KLIB implementation-coverage ratchet needs the compiler unit binary, whose build takes about
-  # three times as long as the conformance binary. Its own job keeps that build off the conformance
-  # rows' critical path; no row waits for it, and it checks every release's exact Native and Wasm
-  # stdlib in one pass. The full cfg(test) unit harness exceeded the 8 GB self-hosted runners
-  # before, so it stays on hosted capacity.
-      - name: upload failed program evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: e2e-failures
-          path: test-failures/
-          if-no-files-found: ignore
-
-  klib-implementation-coverage:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: 1.100.0
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          # Queue branches restore master's entries but never save their own: per-branch copies
-          # overflowed the repository cache and evicted the master entries every branch restores.
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
-        with:
-          distribution: zulu
-          java-version: '17'
-      - *just-on-path
-      - *install-just
-      - name: build the compiler unit binary
-        run: |
-          set -euo pipefail
-          source scripts/phase-timing.sh
-          phase_log_prefix=klib-implementation-coverage
-          PHASE_TIMING_LOG="$(mktemp)"
-          trap 'phase_report || true' EXIT
-          phase_begin compiler-unit-tests
-          bin=$(just compiler-unit-tests)
-          phase_end compiler-unit-tests
-          cp "$bin" compiler-unit-tests
-      - name: enforce exact KLIB implementation coverage for every release
-        env:
-          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
-          KRUSTY_TEST_TIMEOUT_SECONDS: "600"
-        run: |
-          set -euo pipefail
-          for version in $(just supported-kotlin | tr , ' '); do
-            echo "::group::KLIB implementation coverage $version"
-            timeout 600s just klib-implementation-coverage "$PWD/compiler-unit-tests" "$version"
-            # Each release's Native distribution is only read here; drop it before the next.
-            rm -rf "$PWD/target/cache/kotlin-native/$version"
-            echo "::endgroup::"
-          done
-
-
 
   build-tool-bins:
     runs-on: [self-hosted, rust-4c-8gb]
@@ -595,20 +474,22 @@ jobs:
         run: |
           echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
           echo "max=$(just max-version)" >> "$GITHUB_OUTPUT"
-      # One job builds every prebuilt Rust binary the later jobs run: the conformance binary, the
-      # krusty CLI and the krusty-build test binary all link one krusty library. In separate jobs
-      # the conformance build compiled krusty a second time, with its test dependencies' features.
-      - name: build conformance, compiler and Gradle test binaries
+      # One job builds every prebuilt Rust binary the later jobs run: the conformance and e2e
+      # binaries, the krusty CLI and the krusty-build test binary all link one krusty library. In
+      # separate jobs the conformance build compiled krusty a second time, with its test
+      # dependencies' features.
+      - name: build conformance, e2e, compiler and Gradle test binaries
         run: |
           set -euo pipefail
           source scripts/phase-timing.sh
           phase_log_prefix=tool-bins
           PHASE_TIMING_LOG="$(mktemp)"
           trap 'phase_report || true' EXIT
-          phase_begin conformance-and-cli
-          bin=$(just conformance-bin-and-cli)
-          phase_end conformance-and-cli
+          phase_begin conformance-e2e-and-cli
+          bin=$(just tool-test-bin conformance)
+          phase_end conformance-e2e-and-cli
           cp "$bin" conformance-bin
+          cp "$(just tool-test-bin e2e)" e2e-bin
           cp target/gate/krusty krusty
           phase_begin krusty-build-tests
           bin=$(just krusty-build-tests)
@@ -621,11 +502,154 @@ jobs:
           if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          name: e2e-bin
+          path: e2e-bin
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
           name: tool-bins
           path: |
             krusty
             krusty-build-tests
           if-no-files-found: error
+
+  # The product e2e suite, uninstrumented, from build-tool-bins' binary. The binary reads its fixtures
+  # through the checkout path it was built in, which every runner of this pool shares, so it runs on
+  # the pool that built it. Coverage runs it instrumented every night (.github/workflows/coverage.yml).
+  e2e:
+    needs: build-tool-bins
+    runs-on: [self-hosted, rust-4c-8gb]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - *mq-base
+      # The Native runtime cache tests build a standalone fixture with Cargo.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0
+      - *just-on-path
+      - *install-just
+      # The last version listed stays JAVA_HOME, as in the ci job.
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: zulu
+          java-version: |
+            21
+            25
+      # The Wasm e2e programs run under Node.js, which runs WasmGC without flags from version 22.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: select the maximum Kotlin version
+        id: max-version
+        run: echo "version=$(just max-version)" >> "$GITHUB_OUTPUT"
+      - name: restore kotlinc ${{ steps.max-version.outputs.version }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/kotlinc/${{ steps.max-version.outputs.version }}
+          key: kotlinc-${{ steps.max-version.outputs.version }}
+      # The ci job saves this entry; see its restore step.
+      - name: restore box corpus
+        id: box-corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/box-corpus
+          key: box-cli-diagnostics-and-generator-corpus-v4-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
+      # A hit must already hold every corpus input: provisioning then refuses to fetch.
+      - name: forbid corpus fetches after a cache hit
+        if: steps.box-corpus.outputs.cache-hit == 'true'
+        run: echo KRUSTY_BOX_CORPUS_OFFLINE=1 >> "$GITHUB_ENV"
+      - name: restore recorded kotlinc bytes
+        id: recorded-bytes
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/class-dumps
+          key: recorded-kotlinc-bytes-${{ steps.max-version.outputs.version }}-${{ steps.base.outputs.sha }}
+          restore-keys: |
+            recorded-kotlinc-bytes-${{ steps.max-version.outputs.version }}-
+      - name: select recorded-byte cache mode
+        id: recorded-mode
+        env:
+          CACHE_HIT: ${{ steps.recorded-bytes.outputs.cache-hit }}
+          MASTER_PUSH: ${{ github.ref == 'refs/heads/master' }}
+        run: |
+          set -euo pipefail
+          # A restored entry is replayed. A test absent from this job's archive compiles
+          # with kotlinc instead of failing. Master publishes the archive, including that
+          # new recording, under this commit. A queue branch does not write it.
+          write=0
+          if [ "$MASTER_PUSH" = true ] && [ "$CACHE_HIT" != true ]; then
+            write=1
+          fi
+          echo "write=$write" >> "$GITHUB_OUTPUT"
+      # The KLIB semantics, value-class and kotlinc-native oracle tests run against the
+      # maximum-version Native distribution. The ci job saves this entry.
+      - name: restore Kotlin/Native ${{ steps.max-version.outputs.version }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/kotlin-native/${{ steps.max-version.outputs.version }}
+          key: kotlin-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.max-version.outputs.version }}
+      - name: provision kotlinc, the box corpus and Native
+        run: |
+          set -euo pipefail
+          version="${{ steps.max-version.outputs.version }}"
+          just kotlinc "$version" >/dev/null
+          just box-corpus "$version" >/dev/null
+          echo "KRUSTY_KOTLIN_NATIVE=$(just kotlin-native "$version")" >> "$GITHUB_ENV"
+      - name: download e2e binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: e2e-bin
+      - name: download compiler binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tool-bins
+      - name: e2e
+        env:
+          RUST_MIN_STACK: "134217728"
+          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
+          KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
+          KRUSTY_REQUIRE_KLIB: "1"
+          KRUSTY_REQUIRE_KOTLIN_NATIVE: "1"
+        run: |
+          set -euo pipefail
+          source scripts/test-gate-defaults.sh
+          source scripts/test-deadline.sh
+          chmod +x e2e-bin krusty
+          export KRUSTY_BIN="$PWD/krusty"
+          run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" ./e2e-bin --test-threads="$(nproc)"
+      - name: save recorded kotlinc bytes
+        if: steps.recorded-mode.outputs.write == '1'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/class-dumps
+          key: recorded-kotlinc-bytes-${{ steps.max-version.outputs.version }}-${{ github.sha }}
+      # The same binary's ignored plugin and KSP controls.
+      - *plugin-host-runtime-cache
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: zulu
+          java-version: '17'
+      - name: compiler plugin integration tests
+        env:
+          RUST_MIN_STACK: "134217728"
+        run: |
+          set -euo pipefail
+          source scripts/test-gate-defaults.sh
+          source scripts/test-deadline.sh
+          export KRUSTY_BIN="$PWD/krusty"
+          ignored_tests="$(./e2e-bin plugin_host_compiler_e2e:: --ignored --list --format=terse)"
+          printf '%s\n' "$ignored_tests"
+          grep -q ': test$' <<< "$ignored_tests"
+          run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" ./e2e-bin plugin_host_compiler_e2e:: --include-ignored --test-threads=1
+      - *save-plugin-host-runtime
+      - name: upload failed program evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-failures
+          path: test-failures/
+          if-no-files-found: ignore
 
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
@@ -648,6 +672,10 @@ jobs:
       BOX_REFERENCES: box-reference-classes-${{ matrix.target != 'jvm' && format('{0}-', matrix.target) || '' }}${{ matrix.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # One label serves machines of different speeds. The last step reports which machine this
+      # row had and how much of its CPU time went to other guests or waited on CPU, disk or memory.
+      - name: start runner profile
+        run: scripts/runner-profile.sh start "$RUNNER_TEMP/runner-profile"
       - *mq-base
       - *just-on-path
       - *install-just
@@ -745,9 +773,9 @@ jobs:
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
           # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
-          # corpus, the bytecode corpora, and the test-generator sources that select each target's
+          # corpus, the diagnostics test data, the bytecode corpora, and the test-generator sources that select each target's
           # cases. A key hit is never re-saved, so the key changes whenever those inputs do.
-          key: box-cli-and-generator-corpus-v3-${{ matrix.version }}-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
+          key: box-cli-diagnostics-and-generator-corpus-v4-${{ matrix.version }}-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit (${{ matrix.version }})
         if: steps.box-corpus.outputs.cache-hit == 'true'
@@ -937,6 +965,7 @@ jobs:
           path: '*-byte-equality.txt'
           if-no-files-found: error
       - name: run non-box conformance ${{ matrix.version }}
+        id: non_box
         if: matrix.target == 'jvm'
         env:
           # Required serialization/reference CLI toolchains can be cold. Keep the local
@@ -953,6 +982,19 @@ jobs:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: "1"
         run: just conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
+      # kotlinc's diagnostics test data, scored by false accepts against
+      # tests/diagnostics_false_accepts. Its kotlinc results are box reference compiles, restored
+      # with the box references and saved with them after the JVM steps that fill that cache.
+      # This job runs only on merge-queue branches and dispatched master runs, like the other lanes.
+      # It runs after non-box conformance, and also when that step failed, so neither lane's
+      # failure hides the other's result.
+      - name: run diagnostics conformance ${{ matrix.version }}
+        if: >-
+          (success() || steps.non_box.outcome == 'failure')
+          && matrix.target == 'jvm' && matrix.version == needs.build-tool-bins.outputs.max
+        env:
+          KRUSTY_DIAGNOSTICS_TIMEOUT_SECONDS: "10800"
+        run: just diagnostics-conformance "$PWD/conformance-bin" "${{ matrix.version }}"
       # Entries no run read for a week (removed or edited cases, an old salt) go before saving, so
       # the cache follows the suite instead of growing with every input it ever compiled. Entries
       # a cut-short run never reached stay until they have gone a week unread.
@@ -1037,6 +1079,9 @@ jobs:
           name: conformance-failures-${{ matrix.version }}-${{ matrix.target }}
           path: test-failures/
           if-no-files-found: ignore
+      - name: runner profile
+        if: always()
+        run: scripts/runner-profile.sh report "$RUNNER_TEMP/runner-profile"
 
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
@@ -1046,7 +1091,7 @@ jobs:
   # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, lint, plugin-host, conformance, klib-implementation-coverage, build-gradle-plugin, gradle, maven, build-tools, bazel]
+    needs: [ci, lint, plugin-host, e2e, conformance, build-gradle-plugin, gradle, maven, build-tools, bazel]
     if: always()
     runs-on: [self-hosted, helper-1c-1gb]
     steps:
@@ -1055,8 +1100,8 @@ jobs:
           CI_RESULT: ${{ needs.ci.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           PLUGIN_HOST_RESULT: ${{ needs.plugin-host.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
           CONFORMANCE_RESULT: ${{ needs.conformance.result }}
-          KLIB_COVERAGE_RESULT: ${{ needs.klib-implementation-coverage.result }}
           GRADLE_PLUGIN_RESULT: ${{ needs.build-gradle-plugin.result }}
           GRADLE_RESULT: ${{ needs.gradle.result }}
           MAVEN_RESULT: ${{ needs.maven.result }}
@@ -1066,8 +1111,8 @@ jobs:
           echo "ci: $CI_RESULT"
           echo "lint: $LINT_RESULT"
           echo "plugin-host: $PLUGIN_HOST_RESULT"
+          echo "e2e: $E2E_RESULT"
           echo "conformance: $CONFORMANCE_RESULT"
-          echo "klib-implementation-coverage: $KLIB_COVERAGE_RESULT"
           echo "build-gradle-plugin: $GRADLE_PLUGIN_RESULT"
           echo "gradle: $GRADLE_RESULT"
           echo "maven: $MAVEN_RESULT"
@@ -1076,14 +1121,14 @@ jobs:
           if [ "$CI_RESULT" != success ] \
             || [ "$LINT_RESULT" != success ] \
             || [ "$PLUGIN_HOST_RESULT" != success ] \
+            || [ "$E2E_RESULT" != success ] \
             || [ "$CONFORMANCE_RESULT" != success ] \
-            || [ "$KLIB_COVERAGE_RESULT" != success ] \
             || [ "$GRADLE_PLUGIN_RESULT" != success ] \
             || [ "$GRADLE_RESULT" != success ] \
             || [ "$MAVEN_RESULT" != success ] \
             || [ "$BUILD_TOOLS_RESULT" != success ] \
             || [ "$BAZEL_RESULT" != success ]; then
-            echo "lint, plugin host tests, coverage, conformance (including KLIB semantics), KLIB implementation coverage, every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed" >&2
+            echo "lint, plugin host tests, the own test suites (including KLIB implementation coverage), e2e, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed" >&2
             exit 1
           fi
 
@@ -1574,7 +1619,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, lint, plugin-host, conformance, klib-implementation-coverage, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
+    needs: [ci, lint, plugin-host, e2e, conformance, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
     # Publication runs Gradle to build and sign Maven Central and Plugin Portal artifacts.
     runs-on: [self-hosted, rust-4c-8gb]

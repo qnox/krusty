@@ -54,6 +54,14 @@ impl KlibBodyClassContract {
             || (!self.is_value && Ty::obj_name(self.classifier).is_array())
     }
 
+    /// Whether a support unit lays out a box of this value class, whose boxed instances dispatch
+    /// to its overrides. A value class the type model classifies as a builtin scalar or array (an
+    /// unsigned number or array) has none: its boxes are the target's.
+    pub(crate) fn has_unit_box(&self) -> bool {
+        let modeled = Ty::obj_name(self.classifier).canonical_semantic();
+        self.is_value && !modeled.is_builtin_scalar() && !modeled.is_array()
+    }
+
     /// Whether a support unit emits this class's members as functions of their receiver value,
     /// materializing no class: a final builtin type of the common type model that is not a value
     /// class, whose values the target carries itself, `Array<T>` included. Such a member
@@ -67,9 +75,9 @@ impl KlibBodyClassContract {
 
     /// Whether a support unit materializes this class and emits its members as functions of the
     /// class it materializes: a value class, or a class or object that is not sealed, inner or
-    /// expected; a generic one carries its formals, which its members' bodies read. A builtin
-    /// type of the common type model is neither, and neither is `kotlin.Any`, the root of every
-    /// class, which each target lays out itself.
+    /// expected; a generic one carries its formals, which its members' bodies read. A builtin type
+    /// of the common type model is neither, and neither is `kotlin.Any`, the root of every class,
+    /// which each target lays out itself.
     pub(crate) fn emits_members(&self) -> bool {
         if self.is_builtin_type() || self.classifier == crate::types::wk::any() {
             return false;

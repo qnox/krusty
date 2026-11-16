@@ -8,6 +8,13 @@
 use super::{ClassId, ExprId, FunId, IrExpr, IrFile, IrFunction};
 use crate::types::Ty;
 
+/// A class's construction entry and the construction its body answers.
+#[derive(Clone, Copy)]
+pub(crate) struct ConstructionEntry {
+    pub(crate) function: FunId,
+    pub(crate) construction: ExprId,
+}
+
 impl IrFile {
     /// Build the entry constructing `class` through its primary constructor, or through its
     /// secondary constructor of that index, and record it as the class's construction entry.
@@ -16,7 +23,7 @@ impl IrFile {
         &mut self,
         class: ClassId,
         secondary: Option<usize>,
-    ) -> Option<FunId> {
+    ) -> Option<ConstructionEntry> {
         let declaration = &self.classes[class as usize];
         let internal = declaration.fq_name;
         let result = self.declared_class_self_type(internal)?;
@@ -61,7 +68,10 @@ impl IrFile {
         self.set_logical_type(construction, result);
         let entry = self.add_generated_entry("<init>$new", parameters, result, construction);
         self.construction_entries.insert(entry, class);
-        Some(entry)
+        Some(ConstructionEntry {
+            function: entry,
+            construction,
+        })
     }
 
     /// A compiler-generated static function of the file returning `value`.

@@ -126,6 +126,7 @@ impl<'s> Linker<'_, 's> {
             local_body: Some(super::super::same_library_class::LocalBody::Initialize(
                 super::super::same_library_class::LocalInitialize {
                     class: class_id,
+                    declaring: prepared.declaring,
                     receiver_symbol: prepared.receiver_symbol,
                     receiver_ty: prepared.receiver_ty,
                     fields: prepared.stored.clone(),
@@ -210,6 +211,7 @@ impl<'s> Linker<'_, 's> {
                 local_body: Some(super::super::same_library_class::LocalBody::Member(
                     super::super::same_library_class::LocalMemberFields {
                         class: class_id,
+                        declaring: prepared.declaring,
                         receiver: prepared.self_type,
                         fields: prepared.stored.clone(),
                         outer: prepared.outer,

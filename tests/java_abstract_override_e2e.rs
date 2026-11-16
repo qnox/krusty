@@ -358,3 +358,51 @@ fn java_diagnostics(java: &[(&str, &str)], main: &str) -> Vec<String> {
     }
     diagnostics
 }
+
+/// A JDK collection interface reached through an abstract class in another file. kotlinc sees the
+/// Java `Queue`'s `Collection` supertype only as `MutableCollection`, so the Java interface's own
+/// members (`contains(Object)`, `toArray()`) are no obligations of the Kotlin implementor.
+#[test]
+fn an_implementor_of_a_jdk_queue_through_another_files_abstract_class_matches_kotlinc() {
+    let base = "package p
+abstract class SimpleQueue<E> : java.util.Queue<E>
+";
+    let main = r#"package p
+class ListQueue<E> : SimpleQueue<E>() {
+    private val items = ArrayList<E>()
+    override val size: Int get() = items.size
+    override fun isEmpty(): Boolean = items.isEmpty()
+    override fun contains(element: E): Boolean = items.contains(element)
+    override fun containsAll(elements: Collection<E>): Boolean = items.containsAll(elements)
+    override fun iterator(): MutableIterator<E> = items.iterator()
+    override fun add(element: E): Boolean = items.add(element)
+    override fun addAll(elements: Collection<E>): Boolean = items.addAll(elements)
+    override fun remove(element: E): Boolean = items.remove(element)
+    override fun removeAll(elements: Collection<E>): Boolean = items.removeAll(elements)
+    override fun retainAll(elements: Collection<E>): Boolean = items.retainAll(elements)
+    override fun clear() = items.clear()
+    override fun offer(element: E): Boolean = items.add(element)
+    override fun poll(): E? = if (items.isEmpty()) null else items.removeAt(0)
+    override fun peek(): E? = items.firstOrNull()
+    override fun element(): E = items.first()
+    override fun remove(): E = items.removeAt(0)
+}
+fun box(): String {
+    val queue = ListQueue<Int>()
+    queue.offer(1)
+    queue.offer(2)
+    queue.offer(3)
+    if (!queue.removeIf { it == 2 }) return "removeIf"
+    if (queue.stream().count() != 2L) return "stream"
+    return if (queue.poll() == 1 && queue.poll() == 3) "OK" else "poll"
+}
+"#;
+    let sources = [("Base.kt", base), ("Main.kt", main)];
+    assert_eq!(common::kotlinc_box_files_result(&sources, "p.MainKt"), "OK");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::compile_and_run_box_files(&sources, &[stdlib], Some(jdk.as_path())).as_deref(),
+        Some("OK")
+    );
+}

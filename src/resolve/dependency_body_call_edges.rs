@@ -3,7 +3,8 @@
 #[path = "klib_type_facts.rs"]
 mod klib_type_facts;
 
-use crate::fir::{CheckedKlibDependencyFacts, CheckedMemberCallEdge, ExternalCallableId};
+use crate::fir::ExternalCallableId;
+use crate::ir::{CheckedKlibDependencyFacts, CheckedMemberCallEdge};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 
@@ -18,7 +19,10 @@ pub(crate) fn for_checked_klib_bodies<'a>(
     roots: impl IntoIterator<Item = crate::libraries::KlibBodyCallable<'a>>,
     represented: &[TypeName],
 ) -> Result<CheckedKlibDependencyFacts, ExternalCallableId> {
-    let mut facts = CheckedKlibDependencyFacts::default();
+    let mut builtin_implementations = crate::fx_hash::HashMap::default();
+    let mut member_edges = crate::fx_hash::HashMap::default();
+    #[cfg(test)]
+    let mut reached_constructors = crate::fx_hash::HashSet::default();
     let roots = roots.into_iter().collect::<Vec<_>>();
     let mut classifier_roots = Vec::new();
     let mut semantic_types = Vec::new();
@@ -70,6 +74,16 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         semantic_types.extend(selected.params().iter().copied());
         semantic_types.push(selected.ret());
         semantic_types.extend(selected.type_parameters().iter().copied());
+        // Emission lowers a member of an ordinary class with the class the constructors that
+        // initialize it materialize, and closes their initialization with the member: the
+        // members dispatch reaches on the class included.
+        if let Some(class) = selected.class_contract().filter(|class| {
+            !class.is_value && selected.kind() == crate::libraries::ExternalCallableKind::Member
+        }) {
+            pending.extend(
+                crate::klib_lowering::initializing_constructors(class, bodies).unwrap_or_default(),
+            );
+        }
         // Emission closes a constructor through the same initialization plan: superclass
         // arguments, field and block initializers, dispatched members, and a materialized
         // superclass constructor. Initializer-root symbols omit the members dispatch reaches,
@@ -80,9 +94,25 @@ pub(crate) fn for_checked_klib_bodies<'a>(
                 source, bodies, &identity, selected,
             ));
         }
+        // A boxed value class's instances dispatch to its overrides, which emission walks with
+        // a construction or a member of the class.
+        if matches!(
+            realization.kind,
+            crate::libraries::ExternalCallableKind::Constructor
+                | crate::libraries::ExternalCallableKind::Member
+        ) && selected
+            .class_contract()
+            .is_some_and(crate::libraries::KlibBodyClassContract::has_unit_box)
+        {
+            // A class whose overrides do not authenticate is declined by emission with its
+            // own reason; there are no override edges to freeze for it.
+            if let Ok(overrides) = crate::klib_lowering::value_class_overrides(selected, bodies) {
+                pending.extend(overrides.into_iter().map(|value| value.identity));
+            }
+        }
         #[cfg(test)]
         if realization.kind == crate::libraries::ExternalCallableKind::Constructor {
-            facts.reached_constructors.insert(identity.clone());
+            reached_constructors.insert(identity.clone());
         }
         if realization.kind != crate::libraries::ExternalCallableKind::Member {
             continue;
@@ -108,7 +138,7 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         )?
         .remove(&external)
         .unwrap_or_default();
-        match facts.builtin_implementations.entry(external) {
+        match builtin_implementations.entry(external) {
             std::collections::hash_map::Entry::Occupied(existing)
                 if existing.get() != &implementations =>
             {
@@ -124,15 +154,22 @@ pub(crate) fn for_checked_klib_bodies<'a>(
             crate::libraries::KlibDeclarationSignature::Accessor(_)
         ) {
             let edge = klib_dependency_member_call_edge(source, owner, selected.name(), external)?;
-            facts.member_edges.insert(identity, edge);
+            member_edges.insert(identity, edge);
         }
     }
-    facts.type_hierarchy = Some(klib_type_facts::freeze(
-        source,
-        classifier_roots,
-        std::iter::empty(),
-        semantic_types,
-    ));
+    let type_hierarchy =
+        klib_type_facts::freeze(source, classifier_roots, std::iter::empty(), semantic_types);
+    let facts = CheckedKlibDependencyFacts::new(
+        builtin_implementations,
+        member_edges,
+        Some(type_hierarchy),
+    );
+    #[cfg(test)]
+    let mut facts = facts;
+    #[cfg(test)]
+    for constructor in reached_constructors {
+        facts.record_reached_constructor(constructor);
+    }
     Ok(facts)
 }
 

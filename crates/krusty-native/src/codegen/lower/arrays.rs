@@ -82,7 +82,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// The array an access names, checked non-null.
-    fn array_of(&mut self, receiver: u32) -> Result<(Value, Shape), Unsupported> {
+    pub(super) fn array_of(&mut self, receiver: u32) -> Result<(Value, Shape), Unsupported> {
         let ty = self
             .checked_type(receiver)
             .ok_or_else(|| "an array access on an undetermined type".to_string())?;
@@ -103,7 +103,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// The address of one element, after proving the index is inside the array.
-    fn element_address(
+    pub(super) fn element_address(
         &mut self,
         array: Value,
         index: Value,

@@ -180,13 +180,19 @@ impl IrBuiltinOperators {
             }
         }
         let any = nullable("kotlin/Any");
+        // A library KLIB signs these operators over `Any?`, as kotlinc's built-ins declare them.
+        // The Wasm stdlib KLIBs are compiled with the built-ins of the stdlib's own sources, which
+        // declare the operand as `Any`; both are the operator, under its two exact signatures.
+        let non_null_any = KotlinType::class("kotlin/Any");
         for member in DataClassArrayMember::ALL {
-            declare(
-                builtins,
-                member.operator_name(),
-                vec![&any],
-                BuiltinOperator::DataClassArrayMember(member),
-            );
+            for operand in [&any, &non_null_any] {
+                declare(
+                    builtins,
+                    member.operator_name(),
+                    vec![operand],
+                    BuiltinOperator::DataClassArrayMember(member),
+                );
+            }
         }
         declare(builtins, "EQEQ", vec![&any, &any], BuiltinOperator::Equals);
         declare(
@@ -536,8 +542,20 @@ mod tests {
                 ),
                 (
                     "kotlin.internal.ir".to_owned(),
+                    "dataClassArrayMemberHashCode".to_owned(),
+                    7_122_638_843_589_570_653,
+                    BuiltinOperator::DataClassArrayMember(DataClassArrayMember::HashCode)
+                ),
+                (
+                    "kotlin.internal.ir".to_owned(),
                     "dataClassArrayMemberToString".to_owned(),
                     6_964_999_878_285_616_846,
+                    BuiltinOperator::DataClassArrayMember(DataClassArrayMember::ToString)
+                ),
+                (
+                    "kotlin.internal.ir".to_owned(),
+                    "dataClassArrayMemberToString".to_owned(),
+                    11_342_481_618_934_126_410,
                     BuiltinOperator::DataClassArrayMember(DataClassArrayMember::ToString)
                 ),
                 (

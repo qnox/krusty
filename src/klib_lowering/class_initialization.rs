@@ -218,11 +218,13 @@ fn admit<'a, 'b>(
             "a class instance receiver has another declared type",
         ));
     }
-    let [KlibIrStatement::Expression(delegate), KlibIrStatement::Expression(initialize)] =
+    // The delegation and instance initialization, then the rest of the constructor's own body,
+    // which runs after every member initializer as a secondary constructor's body does.
+    let [KlibIrStatement::Expression(delegate), KlibIrStatement::Expression(initialize), body @ ..] =
         statements.as_slice()
     else {
-        // A constructor body with more than its delegation and instance initialization keeps
-        // its separately authenticated target boundary, as a bodyless one does.
+        // A constructor body without its delegation and instance initialization keeps its
+        // separately authenticated target boundary, as a bodyless one does.
         return Ok(None);
     };
     let KlibIrExprKind::DelegatingConstructorCall(access) = &header.arena.expr(*delegate).kind
@@ -279,7 +281,7 @@ fn admit<'a, 'b>(
     let (superclass, declared_superclass) = if root {
         if !arguments.is_empty() || !type_arguments.is_empty() {
             return Err(mismatch(
-                "a delegation to `Any`'s constructor passes arguments",
+                "a delegation to `Any`'s constructor passes arguments or type arguments",
             ));
         }
         (None, Ty::obj_name(crate::types::wk::any()))
@@ -355,6 +357,9 @@ fn admit<'a, 'b>(
         super::class_storage::authenticate(&header, declared_superclass, |member, field| {
             record_initializer(member, field, &mut steps)
         })?;
+    if !body.is_empty() {
+        steps.push(InitializationStep::Block(body));
+    }
     let mut supertypes = supertypes;
     supertypes.retain(|supertype| *supertype != declared_superclass);
     supertypes.insert(0, declared_superclass);
@@ -483,10 +488,10 @@ pub(super) fn constructor_initialization_callees(
     bodies: &KlibDeclarationBodies,
     callees: &super::KlibCalleeFacts<'_>,
 ) -> Result<Option<Vec<KlibDependencyCallable>>, KlibBodyDeclineReason> {
-    let Some(plan) = plan(selected, bodies, callees)? else {
-        return primary_delegation_callees(selected, bodies, callees);
-    };
-    Ok(Some(initialization_callees(&plan, bodies)))
+    match plan(selected, bodies, callees)? {
+        Some(plan) => Ok(Some(initialization_callees(&plan, bodies))),
+        None => primary_delegation_callees(selected, bodies, callees),
+    }
 }
 
 /// The library objects the same admitted initialization reads as values.
@@ -626,6 +631,29 @@ fn primary_delegation_callees(
     ))
 }
 
+/// The constructors that initialize an instance of the ordinary class `class`: its primary
+/// constructor, or each of its constructors when it has no primary one. A secondary constructor of
+/// a class with a primary one delegates to it and initializes nothing itself. `None` when the
+/// class's serialized constructors are not each one public declaration.
+pub(crate) fn initializing_constructors(
+    class: &crate::libraries::KlibBodyClassContract,
+    bodies: &KlibDeclarationBodies,
+) -> Option<Vec<KlibDependencyCallable>> {
+    let constructors = match &class.primary_constructor {
+        Some(primary) => vec![primary.clone()],
+        None => bodies.public_class_constructors(&class.module, &class.signature)?,
+    };
+    Some(
+        constructors
+            .into_iter()
+            .map(|constructor| KlibDependencyCallable {
+                module: class.module.clone(),
+                declaration: KlibDeclarationSignature::Public(constructor),
+            })
+            .collect(),
+    )
+}
+
 /// The superclass constructor the primary constructor `identity` serializes a delegation to,
 /// read from its body alone. Admitting the class's initialization needs that constructor's own
 /// declaration, so a closure records it before asking.
@@ -692,7 +720,7 @@ pub(crate) struct ValueClassOverride {
 /// The overrides with bodies of the value class declaring the member `selected`, each with the
 /// declarations it overrides: dispatch reaches them on a boxed instance of the class, which has no
 /// initialization of its own to carry them.
-pub(super) fn value_class_overrides(
+pub(crate) fn value_class_overrides(
     selected: KlibBodyCallable<'_>,
     bodies: &KlibDeclarationBodies,
 ) -> Result<Vec<ValueClassOverride>, KlibBodyDeclineReason> {

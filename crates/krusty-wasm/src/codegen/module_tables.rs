@@ -8,6 +8,12 @@
 //! `krusty::backend::class_tables::module_slots`), and the declaring file lays its table out as
 //! this type. A class the plan does not cover, a body-local one among them, is typed by its file
 //! alone, and no other file dispatches through it.
+//!
+//! A dependency class a support unit materializes is one class of the whole program, so its table
+//! type is too: every module's plan, and the support unit laying it out, take the one type the
+//! first of them built ([`ModuleTables::dependency`]). Otherwise a module class extending it
+//! would extend a second, unrelated type, and a call in a support body casting to the first would
+//! trap.
 
 use krusty::fx_hash::HashMap;
 
@@ -25,23 +31,30 @@ pub(super) struct ModuleTable {
     pub(super) slot_types: Vec<Option<u32>>,
 }
 
-/// The table types built so far from the current module's plan, by class. A new plan starts an
-/// empty one.
+/// The table types built so far from the current module's plan, by class, and the dependency
+/// classes' of the whole program. A new plan starts with only the dependency classes'.
 #[derive(Default)]
 pub(super) struct ModuleTables {
     tables: HashMap<TypeName, Result<ModuleTable, Unsupported>>,
     published: HashMap<TypeName, Result<ModuleTable, Unsupported>>,
+    dependencies: HashMap<TypeName, ModuleTable>,
 }
 
 impl ModuleTables {
-    /// Bind current-provider names to layouts selected by exact frozen class identities. This
-    /// inventory is recreated with each module plan; provider-local names never outlive it.
-    pub(super) fn with_published(
+    /// Begin a new plan, forgetting the previous plan's tables but not the dependency classes'.
+    ///
+    /// The plan's dependency classes bind current-provider names to layouts selected by exact
+    /// frozen class identities; provider-local names never outlive the plan. A dependency class
+    /// no producer has laid out yet takes the program's one table type
+    /// ([`Self::dependency`]).
+    pub(super) fn enter_plan(
+        &mut self,
         classes: &krusty::backend::class_tables::module_classes::ModuleClasses,
         classifiers: &dyn krusty::backend::BackendClassifierSource,
         layouts: &super::laid_out_classes::LaidOutClasses,
-    ) -> Self {
-        let mut published = HashMap::default();
+    ) {
+        self.tables.clear();
+        self.published.clear();
         for (name, _) in classes.iter() {
             if !classes.is_dependency_class(name) {
                 continue;
@@ -50,7 +63,7 @@ impl ModuleTables {
                 .classifier(name)
                 .and_then(|fact| fact.klib_identity.clone())
             else {
-                published.insert(
+                self.published.insert(
                     name,
                     Err("a dependency class without its selected declaration identity".into()),
                 );
@@ -58,7 +71,7 @@ impl ModuleTables {
             };
             match layouts.published_layout(&identity) {
                 Ok(Some(layout)) => {
-                    published.insert(
+                    self.published.insert(
                         name,
                         Ok(ModuleTable {
                             table_type: layout.table_type,
@@ -67,20 +80,41 @@ impl ModuleTables {
                     );
                 }
                 Err(reason) => {
-                    published.insert(name, Err(reason));
+                    self.published.insert(name, Err(reason));
                 }
-                Ok(None) => {
-                    published.insert(
-                        name,
-                        Err("a dependency class without its producer table type".into()),
-                    );
-                }
+                Ok(None) => {}
             }
         }
-        Self {
-            tables: HashMap::default(),
-            published,
+    }
+
+    /// The table type of the dependency class `class`, carried with `slot_types`: the one an
+    /// earlier module or support unit built for it, or else `build`'s, which every later one then
+    /// takes.
+    pub(super) fn dependency(
+        &mut self,
+        class: TypeName,
+        slot_types: &[Option<u32>],
+        build: impl FnOnce() -> u32,
+    ) -> Result<u32, Unsupported> {
+        if let Some(known) = self.dependencies.get(&class) {
+            if known.slot_types != slot_types {
+                return Err(format!(
+                    "a dependency class whose table two modules lay out differently (`{}`)",
+                    // Boundary conversion for a diagnostic.
+                    class.render().replace('/', ".")
+                ));
+            }
+            return Ok(known.table_type);
         }
+        let table_type = build();
+        self.dependencies.insert(
+            class,
+            ModuleTable {
+                table_type,
+                slot_types: slot_types.to_vec(),
+            },
+        );
+        Ok(table_type)
     }
 
     /// The table of `class`, building it (and its superclasses') the first time a file asks;
@@ -104,7 +138,7 @@ impl ModuleTables {
                         self.validate_published(plan, planned, table, module, objects)
                     }
                     Some(Err(reason)) => Err(reason),
-                    None => self.build(plan, planned, module, objects),
+                    None => self.build(plan, class, planned, module, objects),
                 }
             }
             Err(reason) => Err(reason.to_owned()),
@@ -153,6 +187,7 @@ impl ModuleTables {
     fn build(
         &mut self,
         plan: &ModuleSlotPlan,
+        class: TypeName,
         planned: &krusty::backend::class_tables::module_slots::PlannedTable,
         module: &mut Module,
         objects: &ObjectRoot,
@@ -197,19 +232,26 @@ impl ModuleTables {
                 (_, own) => own,
             });
         }
-        let table_type = module.subtype(SubType {
-            composite: super::classes::table_struct(
-                &slot_types,
-                objects.itable,
-                objects.type_infos.ty,
-            ),
-            supertype: Some(
-                parent
-                    .as_ref()
-                    .map_or(objects.function_table, |parent| parent.table_type),
-            ),
-            open: true,
-        });
+        let mut declare = || {
+            module.subtype(SubType {
+                composite: super::classes::table_struct(
+                    &slot_types,
+                    objects.itable,
+                    objects.type_infos.ty,
+                ),
+                supertype: Some(
+                    parent
+                        .as_ref()
+                        .map_or(objects.function_table, |parent| parent.table_type),
+                ),
+                open: true,
+            })
+        };
+        let table_type = if planned.is_dependency() {
+            self.dependency(class, &slot_types, declare)?
+        } else {
+            declare()
+        };
         Ok(ModuleTable {
             table_type,
             slot_types,

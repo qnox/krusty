@@ -16,6 +16,25 @@ pub(super) fn member_field(member: &KlibIrMember) -> Option<&KlibIrField> {
     }
 }
 
+/// Each property `members` declares with a backing field: the property, then that field.
+pub(super) fn backed_properties(
+    members: &[KlibIrMember],
+) -> Vec<(
+    &crate::metadata::klib_ir::KlibIrSymbol,
+    &crate::metadata::klib_ir::KlibIrSymbol,
+)> {
+    members
+        .iter()
+        .filter_map(|member| match member {
+            KlibIrMember::Property(property) => property
+                .backing_field
+                .as_ref()
+                .map(|field| (&property.base.symbol, &field.base.symbol)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Incremental authentication lets constructors preserve field/initializer diagnostic order.
 pub(super) fn declared_field<'a>(
     header: &ClassMemberHeader<'_, 'a>,

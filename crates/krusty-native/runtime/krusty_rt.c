@@ -861,6 +861,30 @@ kt_boolean kt_string_contains(KRef self, KRef other) {
     return 0;
 }
 
+/* Whether `length` UTF-16 units of `self` from `self_offset` equal those of `other` from
+   `other_offset`: Kotlin/Native's `Kotlin_String_unsafeRangeEquals`, which `regionMatches` calls
+   once it has checked both ranges against their strings' lengths. It walks units rather than
+   bytes, because an offset may fall between the halves of a surrogate pair. */
+kt_boolean kt_string_range_equals(KRef self, kt_int self_offset, KRef other, kt_int other_offset,
+                                  kt_int length) {
+    KUnits left = kt_units_of(self);
+    KUnits right = kt_units_of(other);
+    kt_char x = 0;
+    kt_char y = 0;
+    for (kt_int unit = 0; unit < self_offset; unit++) {
+        (void)kt_units_next(&left, &x);
+    }
+    for (kt_int unit = 0; unit < other_offset; unit++) {
+        (void)kt_units_next(&right, &y);
+    }
+    for (kt_int unit = 0; unit < length; unit++) {
+        if (!kt_units_next(&left, &x) || !kt_units_next(&right, &y) || x != y) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* `s.removeSuffix(suffix)`, for a `String` or a `StringBuilder` receiver and suffix. It is
    `endsWith` and then `substring` by unit, which is how Kotlin defines it, and that is what cuts a
    pair in two when the suffix is its low half: `"😀".removeSuffix("\uDE00")` is `"\uD83D"`.
@@ -2970,6 +2994,43 @@ static KRef kt_range_to_string(KRef self) {
    whose size nothing static can compute, and copying is what the callee's own array must contain.
    A copy, rather than passing `xs` itself, is also what keeps the callee from writing through to
    the caller's array. */
+void kt_array_copy_range(KRef source, kt_int from, KRef destination, kt_int to, kt_int count) {
+    if (destination == NULL || source == NULL) {
+        kt_null_receiver();
+        return;
+    }
+    if (source->header.type != destination->header.type
+        || destination->header.type->element_size == 0) {
+        KT_FAIL("krusty: an array copy between arrays of different kinds\n");
+    }
+    /* Both ends are compared at 64 bits, so a start near `Int.MAX_VALUE` cannot wrap past the
+       length. */
+    if (from < 0 || to < 0 || count < 0
+        || (kt_long)from + count > ((const KArray *)source)->length
+        || (kt_long)to + count > ((const KArray *)destination)->length) {
+        kt_throw(kt_throwable_new(&kt_type_array_index_out_of_bounds_exception, NULL));
+        return;
+    }
+    uint32_t stride = destination->header.type->element_size;
+    unsigned char *into = (unsigned char *)(KArray *)destination + sizeof(KArray)
+                          + (size_t)to * stride;
+    const unsigned char *out = (const unsigned char *)(const KArray *)source + sizeof(KArray)
+                               + (size_t)from * stride;
+    size_t length = (size_t)count * stride;
+    /* Within one array the ranges may overlap: a copy forward reads each byte before it is
+       overwritten exactly when the destination does not start inside the source's range. The
+       comparison is on the addresses as integers, as the two arrays are as often two objects. */
+    if ((uintptr_t)into - (uintptr_t)out >= length) {
+        for (size_t i = 0; i < length; i++) {
+            into[i] = out[i];
+        }
+    } else {
+        for (size_t i = length; i > 0; i--) {
+            into[i - 1] = out[i - 1];
+        }
+    }
+}
+
 kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source) {
     if (destination == NULL || source == NULL) {
         kt_null_receiver();

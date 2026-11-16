@@ -33,6 +33,10 @@ pub struct IrNodePosition {
     /// The factory's array instructions are marked at [`Self::source_line`], the first element's
     /// line. `None` for every other node, including a vararg argument of a call.
     pub factory_line: Option<u32>,
+    /// Where the expression's source text starts in its file, kotlinc's `startOffset`: compared
+    /// only with another expression of the same file, for a decision kotlinc makes by visiting a
+    /// file's declarations in source order.
+    pub start_offset: Option<u32>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -93,6 +97,7 @@ impl InheritedFacts for IrNodePositions {
             end_line,
             statement_line,
             factory_line,
+            start_offset,
         } = self.get(source);
         let copy = self.settle(target);
         for (copied, line) in [
@@ -109,6 +114,9 @@ impl InheritedFacts for IrNodePositions {
         }
         if factory_line.is_some() {
             copy.factory_line = factory_line;
+        }
+        if start_offset.is_some() {
+            copy.start_offset = start_offset;
         }
     }
 }
@@ -224,6 +232,15 @@ impl IrFile {
         self.positions.settle(expression).source_line = Some(line);
     }
 
+    /// Where `expression`'s source text starts in its file.
+    pub fn start_offset(&self, expression: ExprId) -> Option<u32> {
+        self.positions.get(expression).start_offset
+    }
+
+    pub fn set_start_offset(&mut self, expression: ExprId, offset: u32) {
+        self.positions.settle(expression).start_offset = Some(offset);
+    }
+
     pub fn set_end_line(&mut self, expression: ExprId, line: u32) {
         self.positions.settle(expression).end_line = Some(line);
     }
@@ -318,6 +335,7 @@ mod tests {
             end_line: Some(line + 1),
             statement_line: None,
             factory_line: None,
+            start_offset: None,
         }
     }
 
@@ -344,6 +362,7 @@ mod tests {
                 end_line: None,
                 statement_line: None,
                 factory_line: None,
+                start_offset: None,
             }
         );
         assert_eq!(ir.position(positionless as u32), IrNodePosition::default());

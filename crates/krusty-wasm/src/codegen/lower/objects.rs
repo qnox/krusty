@@ -1314,9 +1314,10 @@ impl Body<'_> {
         let tested = target.non_null();
         // A primitive's or an unsigned number's instances are its boxes, one box type per
         // classifier (see `crate::boxes`).
-        let scalar_box = match crate::boxes::box_prints(tested) {
-            Some(_) => self.boxed_form(tested)?,
-            None => None,
+        let scalar_box = if crate::boxes::is_boxed_scalar(tested) {
+            self.boxed_form(tested)?
+        } else {
+            None
         };
         let value = self.local(REFERENCE);
         self.value(arg, any())?;
