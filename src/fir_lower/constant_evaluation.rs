@@ -360,11 +360,8 @@ impl ConstantEvaluation {
             }
             SemanticCallRole::KotlinStringLength => {
                 let receiver = self.converted(body, receiver.value, receiver.conversion)?;
-                let FirConstant::String(text) = receiver.value else {
-                    return None;
-                };
                 Some(EvaluatedConstant {
-                    value: FirConstant::Int(i64::try_from(text.len_utf16()).ok()?),
+                    value: FirConstant::Int(crate::fir::constant_string_length(&receiver.value)?),
                     ty: Ty::Int,
                 })
             }
@@ -823,15 +820,7 @@ fn declared_operation(
 
 /// An unsigned constant's value, read at its checked type's width.
 fn unsigned(constant: &EvaluatedConstant) -> Option<u64> {
-    Some(
-        match (&constant.value, constant.ty.non_null().canonical_semantic()) {
-            (FirConstant::UInt(value), Ty::UByte) => u64::from(*value as u8),
-            (FirConstant::UInt(value), Ty::UShort) => u64::from(*value as u16),
-            (FirConstant::UInt(value), Ty::UInt) => u64::from(*value as u32),
-            (FirConstant::ULong(value), Ty::ULong) => *value as u64,
-            _ => return None,
-        },
-    )
+    crate::fir::unsigned_constant(&constant.value, constant.ty)
 }
 
 /// `equals` on a builtin value: the boxed value's `equals`. Values of different types are unequal
@@ -897,19 +886,7 @@ impl KotlinTotalOrder for f64 {
 
 /// Append a constant's `toString()` text.
 fn push_text(constant: &EvaluatedConstant, text: &mut KtStringBuf) -> Option<()> {
-    match &constant.value {
-        FirConstant::String(value) => text.push_kt(value),
-        FirConstant::Null => text.push_str("null"),
-        FirConstant::Boolean(value) => text.push_str(if *value { "true" } else { "false" }),
-        FirConstant::Char(value) => text.push_unit(*value),
-        FirConstant::Int(value) | FirConstant::Long(value) => text.push_str(&value.to_string()),
-        FirConstant::UInt(_) | FirConstant::ULong(_) => {
-            text.push_str(&unsigned(constant)?.to_string())
-        }
-        FirConstant::Float(value) => crate::kt_string::push_f32(*value, text)?,
-        FirConstant::Double(value) => crate::kt_string::push_f64(*value, text)?,
-    }
-    Some(())
+    crate::fir::push_constant_text(&constant.value, constant.ty, text)
 }
 
 #[cfg(test)]

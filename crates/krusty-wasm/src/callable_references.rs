@@ -1,8 +1,10 @@
 //! Callable-reference objects compare their checked declaration, adaptation, and bound receiver.
 
 mod declarations;
+mod names;
 
 pub(super) use declarations::Declaration;
+use names::ReferenceNames;
 
 use krusty::backend::DependencyExportSignatures;
 use krusty::fx_hash::HashMap;
@@ -42,6 +44,7 @@ pub(super) struct CallableReferences {
     pub(super) hash_code: u32,
     declarations: declarations::Declarations,
     kinds: HashMap<Kind, i32>,
+    names: ReferenceNames,
 }
 
 impl CallableReferences {
@@ -114,6 +117,7 @@ impl CallableReferences {
             hash_code,
             declarations: Default::default(),
             kinds: HashMap::default(),
+            names: ReferenceNames::default(),
         }
     }
 

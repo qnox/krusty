@@ -2,8 +2,9 @@
 //!
 //! Wasm atomicfu stores the value in an ordinary field and updates it with a plain
 //! read-modify-write, which is what its runtime does (`AtomicInt.incrementAndGet` is `++value`).
-//! Native stores the same value and updates it with a single atomic instruction. The compilation
-//! target selects which of those representations runs.
+//! Native stores the same value and updates it with a single atomic instruction, the checked
+//! atomic field access the target realizes. The compilation target selects which of those
+//! representations runs.
 //!
 //! Every operation captures its receiver and its arguments, in call order, before it reads or
 //! writes the field. `compareAndSet(0, nextValue())` therefore calls `nextValue` when the
@@ -13,7 +14,8 @@
 use super::source_facts::{
     AtomicOp, AtomicValue, DirectAtomic, DirectOperation, FieldRepresentation,
 };
-use crate::ir::{IrBinOp, IrConst, IrExpr, IrFile};
+use crate::ir::{IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile};
+use crate::libraries::AtomicOperation;
 use crate::types::Ty;
 
 pub(super) fn rewrite(
@@ -120,9 +122,12 @@ impl Lowering<'_> {
                 self.ir.set_logical_type(decision, Ty::Boolean);
                 decision
             }
-            FieldRepresentation::NativeAtomic => {
-                self.atomic("compareAndSet", instance, &[expected, update], Ty::Boolean)
-            }
+            FieldRepresentation::NativeAtomic => self.atomic(
+                AtomicOperation::CompareAndSet,
+                instance,
+                vec![expected, update],
+                Ty::Boolean,
+            ),
         }
     }
 
@@ -136,33 +141,28 @@ impl Lowering<'_> {
                 previous
             }
             FieldRepresentation::NativeAtomic => {
-                self.atomic("exchange", instance, &[update], self.operation.value.ty())
+                let value_ty = self.operation.value.ty();
+                self.atomic(AtomicOperation::Exchange, instance, vec![update], value_ty)
             }
         }
     }
 
     fn adjust(&mut self, instance: u32, delta: u32, returns_new: bool) -> u32 {
-        self.update(instance, delta, "getAndAdd", IrBinOp::Add, returns_new)
+        self.update(instance, delta, IrBinOp::Add, returns_new)
     }
 
+    /// An increment adds one. A decrement subtracts one from a plain field and adds minus one
+    /// atomically, as the atomic instruction only adds.
     fn step(&mut self, instance: u32, returns_new: bool, increment: bool) -> u32 {
-        let one = self.one();
-        let (kind, op) = if increment {
-            ("getAndAdd", IrBinOp::Add)
-        } else {
-            ("getAndSub", IrBinOp::Sub)
+        let (delta, op) = match (increment, self.representation) {
+            (true, _) => (self.unit(1), IrBinOp::Add),
+            (false, FieldRepresentation::WasmValue) => (self.unit(1), IrBinOp::Sub),
+            (false, FieldRepresentation::NativeAtomic) => (self.unit(-1), IrBinOp::Add),
         };
-        self.update(instance, one, kind, op, returns_new)
+        self.update(instance, delta, op, returns_new)
     }
 
-    fn update(
-        &mut self,
-        instance: u32,
-        delta: u32,
-        kind: &'static str,
-        op: IrBinOp,
-        returns_new: bool,
-    ) -> u32 {
+    fn update(&mut self, instance: u32, delta: u32, op: IrBinOp, returns_new: bool) -> u32 {
         let value_ty = self.operation.value.ty();
         match self.representation {
             FieldRepresentation::WasmValue => {
@@ -178,7 +178,12 @@ impl Lowering<'_> {
                 }
             }
             FieldRepresentation::NativeAtomic => {
-                let previous = self.atomic(kind, instance, &[delta], value_ty);
+                let previous = self.atomic(
+                    AtomicOperation::FetchAndAdd,
+                    instance,
+                    vec![delta],
+                    value_ty,
+                );
                 if returns_new {
                     self.ir.add_arithmetic(op, previous, delta, value_ty)
                 } else {
@@ -222,31 +227,31 @@ impl Lowering<'_> {
         })
     }
 
-    fn atomic(&mut self, kind: &'static str, instance: u32, arguments: &[u32], result: Ty) -> u32 {
-        let field = self.operation.field;
-        let index = self.ir.add_expr(IrExpr::Const(IrConst::Int(
-            i32::try_from(field).expect("an atomic field index fits in an Int"),
-        )));
-        let mut exprs = vec![instance, index];
-        exprs.extend(arguments.iter().copied());
-        let class_name = self.ir.classes[self.operation.class as usize].fq_name;
-        let value_ty = self.operation.value.ty();
-        let operation = self.ir.add_expr(IrExpr::PluginPlaceholder {
-            plugin: "atomicfu",
-            kind,
-            exprs,
-            data: vec![class_name],
-            types: vec![value_ty],
-        });
-        self.ir.set_logical_type(operation, result);
-        operation
+    fn atomic(
+        &mut self,
+        operation: AtomicOperation,
+        instance: u32,
+        operands: Vec<u32>,
+        result: Ty,
+    ) -> u32 {
+        let access = self
+            .ir
+            .add_expr(IrExpr::Checked(Box::new(IrCheckedOperation::AtomicField {
+                operation,
+                receiver: instance,
+                class: self.operation.class,
+                index: self.operation.field,
+                operands,
+            })));
+        self.ir.set_logical_type(access, result);
+        access
     }
 
-    fn one(&mut self) -> u32 {
+    fn unit(&mut self, sign: i8) -> u32 {
         let value = self.operation.value;
         self.ir.add_expr(match value {
-            AtomicValue::Int => IrExpr::Const(IrConst::Int(1)),
-            AtomicValue::Long => IrExpr::Const(IrConst::Long(1)),
+            AtomicValue::Int => IrExpr::Const(IrConst::Int(i32::from(sign))),
+            AtomicValue::Long => IrExpr::Const(IrConst::Long(i64::from(sign))),
         })
     }
 

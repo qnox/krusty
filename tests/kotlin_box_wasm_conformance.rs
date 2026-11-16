@@ -867,10 +867,12 @@ fn explicit_array_checks_share_metadata_with_the_reference_compiler() {
     let [(stem, written_source)] = sources.as_slice() else {
         panic!("one complete array-store source")
     };
+    // `ModuleStructureExtractorImpl` keeps the leading text and the FILE marker in the first file,
+    // preserving original source lines. The option above is the compilation context's one
+    // decision: it reaches both compilers as arguments, never by re-reading a file.
     assert_eq!(
-        krusty::conformance::WasmCompilerOptions::from_source(written_source),
-        Ok(krusty::conformance::WasmCompilerOptions::default()),
-        "the pre-FILE option belongs to compilation context, not the split program"
+        written_source, source,
+        "the written file retains the leading text, marker, and original line positions"
     );
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
@@ -1199,15 +1201,14 @@ fn wasm_renders_kotlin_any_default_to_string() {
     );
 }
 
-// A floating box has no printer for Kotlin's form, so an erased `toString` that can reach one
-// declines rather than emit the trap of a slot with no body.
+// An erased `toString` reaching a floating box prints the value in Kotlin's form.
 #[test]
-fn wasm_declines_an_erased_to_string_reaching_a_floating_box() {
-    expect_wasm_decline(
+fn wasm_erased_to_string_prints_a_floating_box() {
+    expect_wasm_box(
         "fun show(value: Any?): String = \"$value\"\n\
-         fun box(): String = if (show(1.5) == \"\") \"fail\" else \"OK\"",
+         fun box(): String = if (show(1.5) == \"1.5\" && show(0.25f) == \"0.25\") \"OK\" \
+         else show(1.5) + \" \" + show(0.25f)",
         "wasmErasedToStringOfAFloatingBox",
-        "a `toString` of `kotlin.Any?` reaching a runtime object this target cannot print",
     );
 }
 
@@ -1475,4 +1476,13 @@ fun box(): String {
             target.name(),
         );
     }
+}
+
+// PLATFORM-SPECIFIC: a library class's dispatch table type is one type of the whole Wasm program,
+// shared by the support unit laying the class out and the module class extending it.
+#[test]
+fn wasm_library_superclass_members_dispatch_to_the_subclass() {
+    let src = include_str!("box_regressions/librarySuperclassMembersOfSubclass.kt");
+    expect_reference_box(src, "librarySuperclassMembersOfSubclass");
+    expect_wasm_box(src, "librarySuperclassMembersOfSubclass");
 }

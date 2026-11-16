@@ -1003,6 +1003,7 @@ impl super::Emitter<'_> {
                 }
                 Callee::Module { .. }
                 | Callee::ModuleDefaultEntry { .. }
+                | Callee::ModuleConstructorDefaultEntry { .. }
                 | Callee::ModuleWithDefaults { .. }
                 | Callee::LocalWithDefaults { .. }
                 | Callee::ClassStaticWithDefaults { .. }
@@ -1576,8 +1577,8 @@ impl super::Emitter<'_> {
             IrExpr::EnumSwitchOrdinal {
                 classifier,
                 subject,
-                registrations,
-            } => self.emit_enum_switch_ordinal(*classifier, *subject, registrations, code),
+                ..
+            } => self.emit_enum_switch_ordinal(*classifier, *subject, code),
             IrExpr::EnumSwitchKey { classifier, name } => {
                 let key = self.enum_switch_key(*classifier, name);
                 code.push_int(key, self.cw);

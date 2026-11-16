@@ -87,6 +87,9 @@ fn an_interface_reached_through_the_superclass_publishes_no_inherited_default() 
             name: InheritedMemberName::Function("direct".into()),
             function,
             accessor: None,
+            annotation_origin: Some(InheritedDefaultAnnotationOrigin::Function(
+                function.expect("function target")
+            )),
             declaring_interface: direct,
             dispatch_interface: direct,
             parameters: Box::new([]),
@@ -123,6 +126,9 @@ fn the_nearest_declaration_of_a_slot_wins_and_names_its_direct_superinterface() 
             name: InheritedMemberName::Function("g".into()),
             function,
             accessor: None,
+            annotation_origin: Some(InheritedDefaultAnnotationOrigin::Function(
+                function.expect("function target")
+            )),
             declaring_interface: left,
             dispatch_interface: left,
             parameters: Box::new([]),
@@ -214,6 +220,81 @@ fn inherited_property_accessors_publish_their_exact_checked_targets() {
             &InheritedMemberName::PropertySetter("answer".into()),
         ]
     );
+}
+
+#[test]
+fn inherited_default_body_and_annotations_keep_separate_exact_declarations() {
+    let [base, nearer, derived, private_only] = published_inherited_defaults(
+        r#"package sample
+interface A {
+    fun f(): String = "A"
+    var p: String
+        get() = "A"
+        set(value) {}
+}
+open class PrivateDecoy {
+    private fun f(): String = "private"
+    private var p: String = "private"
+}
+open class B : PrivateDecoy(), A
+interface C : A {
+    override fun f(): String = "C"
+    override var p: String
+        get() = "C"
+        set(value) {}
+}
+class AOnly : A
+class COnly : C
+class D : B(), C
+class PrivateOnly : PrivateDecoy(), C
+"#,
+        "InheritedAnnotationOrigin",
+        &["AOnly", "COnly", "D", "PrivateOnly"],
+    )
+    .try_into()
+    .expect("four classifiers");
+    assert_eq!(derived.len(), 3, "function, getter and setter");
+    for default in &derived {
+        let ancestor = base
+            .iter()
+            .find(|candidate| candidate.name == default.name)
+            .expect("exact ancestor slot");
+        let body = nearer
+            .iter()
+            .find(|candidate| candidate.name == default.name)
+            .expect("exact nearer body slot");
+        assert_eq!(
+            (default.function, default.accessor),
+            (body.function, body.accessor)
+        );
+        assert_eq!(
+            default.declaring_interface,
+            crate::types::type_name("sample/C")
+        );
+        assert_eq!(default.annotation_origin, ancestor.annotation_origin);
+        assert_ne!(default.annotation_origin, body.annotation_origin);
+        assert!(matches!(
+            default.annotation_origin,
+            Some(InheritedDefaultAnnotationOrigin::Function(
+                ResolvedFunctionOverrideTarget::Module(_)
+            )) | Some(InheritedDefaultAnnotationOrigin::Getter(
+                ResolvedPropertyOverrideTarget::Module(_)
+            )) | Some(InheritedDefaultAnnotationOrigin::Setter(
+                ResolvedPropertyOverrideTarget::Module(_)
+            ))
+        ));
+    }
+    assert_eq!(private_only.len(), 3);
+    for default in &private_only {
+        let body = nearer
+            .iter()
+            .find(|candidate| candidate.name == default.name)
+            .expect("exact body slot");
+        assert_eq!(
+            default.annotation_origin, body.annotation_origin,
+            "private superclass decoys do not supply inherited metadata"
+        );
+    }
 }
 
 #[test]
@@ -1032,6 +1113,70 @@ fn a_dependency_extension_publishes_its_kotlin_name() {
             ("until", "until-eb3DHEI"),
         ],
         "the extension name contract changed"
+    );
+}
+
+#[test]
+fn language_function_classifier_retains_external_invoke_override_edge() {
+    let provider = crate::klib_libraries::KlibLibraries::from_packages(Vec::new())
+        .expect("the language-owned function classifiers need no serialized KLIB");
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[
+            // The language-owned `Function1` names `kotlin.Function` as its supertype, which a
+            // real classpath's builtins declare and an empty provider does not.
+            SourceInput::kotlin("package kotlin\n\ninterface Function<out R>\n")
+                .with_file_stem("FunctionRoot"),
+            SourceInput::kotlin(
+                "class Target : (Int) -> String {\n\
+                     override fun invoke(value: Int): String = \"OK\"\n\
+                 }\n",
+            )
+            .with_file_stem("LanguageFunctionInvokeOverride"),
+        ],
+        crate::frontend::PlatformProvider::jvm(Box::new(provider)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    let implementation = (0..index.declaration_count())
+        .map(|raw| DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            index
+                .classifier_header(*declaration)
+                .is_some_and(|header| header.classifier.segment_ref() == "Target")
+        })
+        .expect("Target classifier");
+    let edge = index
+        .function_overrides(implementation)
+        .iter()
+        .find(|edge| edge.name.as_ref() == "invoke")
+        .expect("Target.invoke must retain the language interface edge");
+    assert!(matches!(
+        edge.overridden,
+        ResolvedFunctionOverrideTarget::External(_)
+    ));
+    assert!(edge.overridden_is_interface);
+    assert_eq!(
+        edge.overridden_semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
+    );
+    assert_eq!(
+        edge.overridden_owner,
+        crate::types::type_name("kotlin/Function1")
+    );
+    assert_eq!(
+        edge.applied_parameters
+            .iter()
+            .map(|ty| ty.get())
+            .collect::<Vec<_>>(),
+        [crate::types::Ty::Int]
     );
 }
 

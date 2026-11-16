@@ -29,3 +29,8 @@ krusty-test-support = { path = "../krusty-test-support" }
 libc = { version = "0.2", features = ["extra_traits"] }
 object = { version = "0.41.0", default-features = false, features = ["archive", "unaligned"] }
 once_cell = "1"
+
+# `cargo llvm-cov` sets `coverage_nightly` on its nightly instrumented builds; the digest's SIMD
+# kernel opts out of instrumentation under it (see `digest/lanes.rs`).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage_nightly)"] }

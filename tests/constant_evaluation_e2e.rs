@@ -414,3 +414,26 @@ fn a_nan_constant_keeps_the_bits_of_its_arithmetic_when_the_feature_is_disabled(
     assert_ne!(bits[0], bits[1], "float NaN constants: {answer}");
     assert_ne!(bits[2], bits[3], "double NaN constants: {answer}");
 }
+
+/// A builtin's `toString` and `String.length` are intrinsic-const in an annotation argument too,
+/// with no language feature: the argument is the evaluated text.
+#[test]
+fn builtin_to_string_and_length_are_annotation_constants() {
+    const SRC: &str = r#"
+@Retention(AnnotationRetention.RUNTIME)
+annotation class Texts(vararg val values: String)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class Size(val value: Int)
+@Texts("abc".length.toString(), 1.toString(), 1.5.toString(), true.toString(), 'c'.toString(),
+    (1 + 2L).toString(), "s".toString(), 2.5f.toString())
+@Size("abcd".length)
+class Annotated
+fun box(): String {
+    val texts = Annotated::class.java.getAnnotation(Texts::class.java).values.joinToString()
+    if (texts != "3, 1, 1.5, true, c, 3, s, 2.5") return texts
+    val size = Annotated::class.java.getAnnotation(Size::class.java).value
+    return if (size == 4) "OK" else "size $size"
+}
+"#;
+    common::expect_box_same_as_kotlinc(SRC, "BuiltinToStringAnnotationConstant");
+}

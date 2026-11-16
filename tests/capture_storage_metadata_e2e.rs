@@ -97,6 +97,14 @@ fn a_super_argument_capture_uses_its_parameter_without_an_extra_field() {
 }
 
 #[test]
+fn an_inline_super_argument_capture_has_no_storage_field() {
+    assert_capture_metadata(
+        "InlineSuperArgumentCaptureMetadata",
+        include_str!("box_regressions/captureStorageInlineSuperArgumentMetadata.kt"),
+    );
+}
+
+#[test]
 fn member_parameters_do_not_capture_shadowed_enclosing_values() {
     assert_capture_metadata(
         "ShadowedCaptureMetadata",
