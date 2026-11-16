@@ -94,8 +94,26 @@ mod tests {
         };
         let top_level = KlibClassIdentity {
             module: first.module.clone(),
-            signature: KlibPublicIdSignature::classifier(type_name("sample/Owner.Contract")),
+            // A top-level Contract in package sample.Owner has the same dotted display as
+            // nested sample.Owner.Contract, but different package/declaration boundaries.
+            signature: KlibPublicIdSignature::classifier(type_name("sample/Owner/Contract")),
         };
+        assert_eq!(
+            nested.signature.declaration().segments(),
+            &["Owner".to_owned(), "Contract".to_owned()]
+        );
+        assert_eq!(
+            top_level.signature.declaration().segments(),
+            &["Contract".to_owned()]
+        );
+        assert_eq!(
+            nested.signature.package().segments(),
+            &["sample".to_owned()]
+        );
+        assert_eq!(
+            top_level.signature.package().segments(),
+            &["sample".to_owned(), "Owner".to_owned()]
+        );
         assert_ne!(
             classifier_identity(&nested),
             classifier_identity(&top_level)
