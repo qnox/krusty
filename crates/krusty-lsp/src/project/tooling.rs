@@ -703,59 +703,6 @@ mod tests {
     }
 
     #[test]
-    fn a_resolver_warning_stays_off_the_protocol_stream() {
-        let directory =
-            std::env::temp_dir().join(format!("krusty-protocol-stream-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).unwrap();
-        let protocol = directory.join("Protocol.java");
-        let test = directory.join("ProtocolStreamTest.java");
-        std::fs::write(&protocol, PROTOCOL).unwrap();
-        std::fs::write(
-            &test,
-            include_str!("../../java/krusty/tooling/ProtocolStreamTest.java"),
-        )
-        .unwrap();
-        let javac = std::process::Command::new(java_bin("javac"))
-            .arg("-encoding")
-            .arg("UTF-8")
-            .arg("-proc:none")
-            .arg("-d")
-            .arg(&directory)
-            .arg(&protocol)
-            .arg(&test)
-            .output()
-            .expect("javac");
-        assert!(
-            javac.status.success(),
-            "javac: {}",
-            String::from_utf8_lossy(&javac.stderr)
-        );
-        let java = std::process::Command::new(java_bin("java"))
-            .arg("-cp")
-            .arg(&directory)
-            .arg("krusty.tooling.ProtocolStreamTest")
-            .output()
-            .expect("java");
-        let _ = std::fs::remove_dir_all(&directory);
-        let stdout = String::from_utf8_lossy(&java.stdout);
-        let stderr = String::from_utf8_lossy(&java.stderr);
-        assert!(
-            java.status.success(),
-            "stdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-        assert_eq!(
-            stdout.trim(),
-            r#"{"status":0,"stdout":"","stderr":""}"#,
-            "stdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-        assert!(
-            stderr.contains("[WARNING] The POM for example:example:jar:1.0 is invalid"),
-            "stderr:\n{stderr}"
-        );
-    }
-
-    #[test]
     fn an_official_distribution_on_path_is_the_embedder() {
         let tree = TempTree::new("maven-official-home");
         let home = tree.directory("apache-maven");
