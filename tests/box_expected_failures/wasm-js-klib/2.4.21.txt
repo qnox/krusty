@@ -1659,7 +1659,6 @@ inlineClasses/propertyDelegation/kt27070Generic.kt
 inlineClasses/referToPropertyInCompanionObjectOfInlineClass.kt
 inlineClasses/referToPropertyInCompanionObjectOfInlineClassGeneric.kt
 inlineClasses/removeInInlineCollectionOfInlineClassAsInt.kt
-inlineClasses/result/directCall1.kt
 inlineClasses/result/directCall2.kt
 inlineClasses/result/doubleOverride.kt
 inlineClasses/result/extensionOverride.kt
@@ -1685,7 +1684,6 @@ inlineClasses/smartCastOnThisOfInlineClassTypeGeneric.kt
 inlineClasses/toStringCallingPrivateFunGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/nullableResult.kt
 inlineClasses/unboxGenericParameter/funInterface/primitive.kt
-inlineClasses/unboxGenericParameter/funInterface/result.kt
 inlineClasses/unboxGenericParameter/funInterface/resultAny.kt
 inlineClasses/unboxGenericParameter/funInterface/resultAnyGeneric.kt
 inlineClasses/unboxGenericParameter/genericArrayInlineClassCast.kt
@@ -1864,7 +1862,6 @@ lower/localDelegatedProperty.kt
 mangling/internalOverrideSuperCall.kt
 mangling/multipleConstructors.kt
 mangling/publicOverrideSuperCall.kt
-mixedNamedPosition/varargsEvaluationOrder.kt
 multiDecl/component.kt
 multiDecl/kt9828_hashMap.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
