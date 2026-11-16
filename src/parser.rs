@@ -5654,6 +5654,18 @@ typealias Box<@Marker T> = List<T>
     }
 
     #[test]
+    fn elvis_return_before_if_else_has_no_value() {
+        // `else` closes the `if`, so it is not the value of `return`. The elvis rhs is a bare
+        // `return`, and the if keeps its else branch.
+        assert_eq!(
+            tree(
+                "fun select(installed: String?, choice: String?): String? = if (installed == null) choice ?: return else installed"
+            ),
+            "(fun select (param installed String) (param choice String) :String (if (== installed null) (?: choice (return)) installed))\n"
+        );
+    }
+
+    #[test]
     fn precedence_comparison_and_logic() {
         // a < b && c == d  =>  (&& (< a b) (== c d))
         assert_eq!(

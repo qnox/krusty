@@ -507,8 +507,10 @@ mod tests {
 
         let checker = source_path("src/compiler/builtin_implementations.rs");
         let text = fs::read_to_string(&checker).expect("read checked builtin fact finalizer");
-        assert!(text.contains("for_checked_external_members"));
-        assert!(text.contains("external_member_identities"));
+        assert!(!text.contains("symbol_source"));
+        assert!(!text.contains("for_checked_external_members"));
+        assert!(!text.contains("external_callable("));
+        assert!(text.contains("record_checked_builtin_implementations"));
     }
 
     #[test]

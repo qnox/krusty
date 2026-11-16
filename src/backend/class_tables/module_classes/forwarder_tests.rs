@@ -47,7 +47,7 @@ fn plan(members: Vec<ModuleMember>, forwarders: Vec<ModuleForwarder>) -> ModuleS
     ModuleSlotPlan::build(
         &ModuleClasses {
             classes,
-            interfaces: Vec::new(),
+            ..ModuleClasses::default()
         },
         &IntsAndReferences,
     )
