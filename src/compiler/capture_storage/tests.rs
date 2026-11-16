@@ -495,6 +495,7 @@ fn specialized_copy_and_source_snapshots_keep_their_storage() {
             field_count: 1,
             property_count: 0,
             omitted_capture_fields: 0,
+            constructor_parameters: vec![Some(0)],
             caller_property_uses: Vec::new(),
             pending_property_roots: Vec::new(),
         };

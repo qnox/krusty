@@ -44,6 +44,44 @@ impl BodyLowering<'_, '_, '_> {
         Ok(Some(self.builder.inst_results(call)[0]))
     }
 
+    /// `values()` or `valueOf` of an enum another file declares, called through the entry that
+    /// file exports: they read the constants its storage holds. `name` is `valueOf`'s argument.
+    pub(super) fn dependency_enum_member(
+        &mut self,
+        classifier: krusty::types::TypeName,
+        member: krusty::backend::enums::StaticMember,
+        name: Option<u32>,
+    ) -> Result<Option<Value>, Unsupported> {
+        let entry =
+            krusty::backend::instance_links::InstanceEntry::EnumMember { classifier, member };
+        let Some(symbol) = self.file.dependency_instances.get(&entry) else {
+            return Err(declined!(
+                "the {} of an enum another file declares (`{}`)",
+                member.source_name(),
+                classifier.render()
+            ));
+        };
+        let mut args = Vec::new();
+        let mut params = Vec::new();
+        if let Some(name) = name {
+            args.push(self.reference(name)?);
+            if self.terminated {
+                return Ok(None);
+            }
+            params.push(Ty::String);
+        }
+        let result = match member {
+            krusty::backend::enums::StaticMember::Values => {
+                Ty::obj_args("kotlin/Array", &[Ty::obj_name(classifier)])
+            }
+            krusty::backend::enums::StaticMember::ValueOf => Ty::obj_name(classifier),
+        };
+        let id = self.file.import(symbol, &params, result)?;
+        let func_ref = self.func_ref(id);
+        let call = self.emit_call(func_ref, &args)?;
+        Ok(Some(self.builder.inst_results(call)[0]))
+    }
+
     /// One enum constant: its construction, with `kotlin.Enum`'s storage filled right after the
     /// allocation, or on the published allocation it constructs in place, so a constructor reading
     /// `name` or `ordinal` finds them.

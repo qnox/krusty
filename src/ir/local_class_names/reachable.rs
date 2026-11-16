@@ -329,14 +329,15 @@ fn detach_lambda_impl(ir: &mut IrFile, source: FunId) -> FunId {
     shape.body = shape
         .body
         .map(|body| super::super::clone_expression_dag(ir, body).0);
+    let consumed = shape.body.is_none();
     let target = super::super::clone::clone_class_method(ir, source, shape, &HashMap::default());
     // `inline_only` and `must_inline` describe how the source lambda's existing sites were
     // consumed. This detached implementation belongs to a newly copied site and must remain
     // available until that site's own representation pass either consumes or realizes it. Keeping
     // the source state can emit a continuation for the copy while dropping the method it re-enters.
-    // A source whose body an inline call already consumed has nothing to realize: its copy stays
-    // inline-only, as the source is, instead of becoming a method without a body.
-    if ir.functions[target as usize].body.is_some() {
+    // A source whose body a splice already consumed has no body to copy: the copy is that same
+    // consumed implementation, with no method of its own to realize.
+    if !consumed {
         ir.inline_only_fns.remove(&target);
         ir.must_inline_lambdas.remove(&target);
     }

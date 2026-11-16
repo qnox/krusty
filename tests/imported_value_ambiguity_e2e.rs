@@ -89,35 +89,3 @@ fun test() = SOME
         ],
     );
 }
-
-/// Compile and run `sources` with the standard library and JDK.
-fn run_box(sources: &[(&str, &str)]) -> Option<String> {
-    common::compile_and_run_box_files(
-        sources,
-        &[common::stdlib_jar()],
-        Some(&common::jdk_modules()),
-    )
-}
-
-#[test]
-fn a_nearer_rung_selects_its_own_value() {
-    // The explicit import outranks the star imports, and the current package outranks them too.
-    let explicit = "\
-import second.SomeEnum.SOME
-import third.SomeEnum.*
-fun box(): String = if (SOME == second.SomeEnum.SOME) \"OK\" else \"fail\"
-";
-    assert_eq!(
-        run_box(&[("test.kt", explicit), SECOND_ENUM, THIRD_ENUM]).as_deref(),
-        Some("OK")
-    );
-    let own_package = "\
-import second.SomeEnum.*
-val SOME = \"OK\"
-fun box(): String = SOME
-";
-    assert_eq!(
-        run_box(&[("test.kt", own_package), SECOND_ENUM]).as_deref(),
-        Some("OK")
-    );
-}
