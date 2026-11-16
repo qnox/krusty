@@ -194,6 +194,14 @@ impl Backend for WasmBackend {
             &mut file.ir,
             &mut file.callables,
             |function| file.dependency_exports.callable(function).is_some(),
+            |constructor| {
+                file.classifiers.module().declares_instance(
+                    &krusty::backend::instance_links::InstanceEntry::Constructor {
+                        module: file.module_name.into(),
+                        declaration: constructor,
+                    },
+                )
+            },
         );
         // After default arguments, so a `$default` entry's call of the declaration is the one
         // that gains the continuation, and before dispatch entries, which copy the signature.

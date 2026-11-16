@@ -83,6 +83,33 @@ impl Entries {
         }
     }
 
+    /// Build the entry of every checked constructor with defaults that another file may build an
+    /// instance through, `constructible` says which, and record it by the constructor's
+    /// declaration. Such a constructor is never private, and its class is neither sealed nor an
+    /// enum, so whoever may call it may call its entry.
+    pub(super) fn publish_constructors(
+        &mut self,
+        ir: &mut IrFile,
+        constructible: impl Fn(crate::fir::DeclarationId) -> bool,
+    ) {
+        let mut published = ir
+            .checked_constructor_bodies
+            .iter()
+            .filter(|(&declaration, _)| constructible(declaration))
+            .map(|(&declaration, body)| (declaration, body.class, body.ordinal))
+            .collect::<Vec<_>>();
+        published.sort_unstable_by_key(|&(declaration, _, _)| declaration.raw());
+        for (declaration, class, ordinal) in published {
+            let target = IrConstructorTarget {
+                ordinal,
+                access: crate::ir::IrConstructorAccess::Unrestricted,
+            };
+            if let Some(entry) = self.constructor_entry(ir, class, target) {
+                ir.constructor_default_entries.insert(declaration, entry);
+            }
+        }
+    }
+
     /// The entry of `declaration`, built on first use. `form` is how a declaration without a
     /// dispatch receiver is called; a member is reached through its receiver instead.
     pub(super) fn entry(

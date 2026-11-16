@@ -39,14 +39,17 @@ use crate::ir::{FunId, IrFile};
 /// leaves arguments out to call one. `callables` are the facts frozen for `ir` before this
 /// lowering; each expression an entry copies from a default gets the facts of its original.
 /// `exported` says which declarations a later module calls by their dependency export; each of
-/// those publishes its entry too.
+/// those publishes its entry too. `constructible` says which checked constructors another file
+/// may build an instance through; each of those with defaults publishes its entry.
 pub fn realize(
     ir: &mut IrFile,
     callables: &mut CheckedBackendCallables,
     exported: impl Fn(FunId) -> bool,
+    constructible: impl Fn(crate::fir::DeclarationId) -> bool,
 ) {
     let mut entries = entries::Entries::default();
     entries.publish(ir, exported);
+    entries.publish_constructors(ir, constructible);
     constructor_calls::rewrite_delegations(ir, &mut entries);
     entries.take_new_bodies();
     // Every emitted body, the entries' own included: a default may itself call with omissions.
