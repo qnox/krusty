@@ -388,7 +388,6 @@ closures/crossinlineLocalDeclaration.kt
 closures/kt11634_4.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
 closures/localFunctionInInitBlock.kt
-collectionLiterals/primitiveArrays.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/addCollectionStubWithCovariantOverride.kt
