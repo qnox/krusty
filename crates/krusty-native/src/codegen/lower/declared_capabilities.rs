@@ -11,7 +11,10 @@ use super::classifier_shapes;
 /// Dependency types this file puts a class of its own behind, by resolved identity.
 ///
 /// A class another unit `laid_out` is not one: it is an ordinary class of the program, whose
-/// members a call reaches through its own table whichever subclass the receiver is.
+/// members a call reaches through its own table whichever subclass the receiver is. That holds
+/// only while every instance of the class is the program's: the runtime also makes instances of
+/// an integral range's iterator (an array's or a range's walk), and a call keyed on such a
+/// receiver must still tell the file's own subclasses from those.
 pub(super) fn implemented_dependencies(
     ir: &IrFile,
     laid_out: impl Fn(krusty::types::TypeName) -> bool,
@@ -33,7 +36,8 @@ pub(super) fn implemented_dependencies(
             owners.insert(edge.overridden_owner);
         }
     }
-    owners.retain(|&owner| !laid_out(owner));
+    owners
+        .retain(|&owner| !laid_out(owner) || classifier_shapes::is_integral_range_iterator(owner));
     owners
 }
 
