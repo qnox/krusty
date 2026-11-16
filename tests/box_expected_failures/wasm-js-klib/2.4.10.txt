@@ -276,7 +276,6 @@ callableReference/bound/companionObjectReceiverInheritsFromOuter.kt
 callableReference/bound/emptyLHS.kt
 callableReference/bound/equals/nullableReceiverInEquals.kt
 callableReference/bound/genericValOnLHS.kt
-callableReference/bound/kCallableNameIntrinsic.kt
 callableReference/bound/kt12738.kt
 callableReference/bound/multiCase.kt
 callableReference/bound/nullReceiver.kt
@@ -296,7 +295,6 @@ callableReference/equality/suspendFunctionEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorIsKFunction.kt
 callableReference/function/booleanNotIntrinsic.kt
-callableReference/function/classMemberFromCompanionObject.kt
 callableReference/function/coercionToUnit.kt
 callableReference/function/enumValueOfMethod.kt
 callableReference/function/extensionFunctionAsASuperTypePassToSAMInterface.kt
@@ -308,7 +306,6 @@ callableReference/function/genericWithDependentType.kt
 callableReference/function/kt21787.kt
 callableReference/function/kt32462.kt
 callableReference/function/local/enumExtendsTrait.kt
-callableReference/function/local/localFunctionName.kt
 callableReference/function/overloadedFunVsVal.kt
 callableReference/function/referenceToCompanionMember.kt
 callableReference/function/sortListOfStrings.kt
@@ -1258,7 +1255,6 @@ evaluate/inJavaPackage.kt
 evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
 evaluate/intrinsicConst/kCallableNameWithSideEffect.kt
-evaluate/intrinsicConst/kt58717.kt
 evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/kt9443.kt
 evaluate/objectConstValInAnnotationArgument.kt
