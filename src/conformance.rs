@@ -8,6 +8,7 @@ mod box_jdk;
 mod codegen_modes;
 mod compiler_arguments;
 mod coroutine_support;
+mod kotlinc_release_range;
 mod native_box_configuration;
 mod reference_jvm;
 mod wasm_options;
@@ -22,6 +23,7 @@ pub use compiler_arguments::{
     unit_kotlinc_arguments, UnitCompilerConfiguration,
 };
 pub use coroutine_support::{coroutine_sources, inject_coroutine_support};
+pub use kotlinc_release_range::kotlinc_release_applicable;
 pub use native_box_configuration::{
     native_box_configuration_applicable, native_def_contents_supported,
 };
