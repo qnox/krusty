@@ -1217,7 +1217,6 @@ enum/enumEntriesInCompanion.kt
 enum/enumEntriesMultimoduleNoMappings.kt
 enum/enumEntriesNameClashes.kt
 enum/enumEntryMembers.kt
-enum/enumMultiModule.kt
 enum/enumValueOf.kt
 enum/initEnumAfterObjectAccessJsAndWasm.kt
 enum/interfaceCallNoEntryClass.kt
@@ -2232,7 +2231,6 @@ multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/defaultArguments/withTypeParameter.kt
-multiplatform/k2/enumStaticMethods.kt
 multiplatform/k2/exhaustiveness/commonSealedClass.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/abstractExpectedActual2-2.kt

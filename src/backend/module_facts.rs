@@ -650,8 +650,8 @@ impl BackendModuleFacts {
         self.classifiers.get(&classifier).cloned()
     }
 
-    /// Whether a file of this module declares `instance`: an object, a constant of an enum, or a
-    /// constructor another file may build through.
+    /// Whether a file of this module declares `instance`: an object, a constant of an enum or one
+    /// of its `values()` and `valueOf`, or a constructor another file may build through.
     pub fn declares_instance(&self, instance: &super::instance_links::InstanceEntry) -> bool {
         match instance {
             super::instance_links::InstanceEntry::Object(classifier) => self
@@ -662,6 +662,9 @@ impl BackendModuleFacts {
                 .source_enum_constants
                 .get(&constant.classifier)
                 .is_some_and(|constants| constants.contains(&constant.name)),
+            super::instance_links::InstanceEntry::EnumMember { classifier, .. } => {
+                self.source_enum_constants.contains_key(classifier)
+            }
             super::instance_links::InstanceEntry::Constructor { declaration, .. }
             | super::instance_links::InstanceEntry::ConstructorDefaults { declaration, .. } => {
                 self.source_constructors.contains(declaration)
