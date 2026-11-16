@@ -759,6 +759,7 @@ fn delegated_property_reference(
             mutable: flags.has(DeclarationFlags::MUTABLE),
             substitutions: Vec::new(),
             adaptation: None,
+            function_type: None,
         },
     )))
 }

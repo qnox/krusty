@@ -195,7 +195,7 @@ pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
     FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable,
     IrConstructorReferenceDeclaration, IrPropertyFunctionReference, IrReferencedProperty, PropRef,
-    PropertyReferenceObjects, ReflectedCallable,
+    ReflectedCallable,
 };
 pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
@@ -1429,9 +1429,6 @@ pub struct IrFile {
     /// Finalized source-language decision for recursive non-reified `typeOf` bounds. The JVM
     /// realizes this checked per-file fact; it does not select the policy itself.
     pub recursive_type_of: bool,
-    /// How the target realizes a property reference used as a `KProperty` value. Selected once,
-    /// before any body is lowered.
-    pub property_reference_objects: PropertyReferenceObjects,
     /// Checked file-level annotation applications. These are declaration metadata, not syntax;
     /// backend plugins consume their folded values without retaining or reopening the source AST.
     pub file_annotations: DeclarationAnnotations,

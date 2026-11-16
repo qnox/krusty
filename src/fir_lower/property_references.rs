@@ -26,15 +26,11 @@ pub(super) struct CheckedPropertyReference<'a> {
 impl BodyLowering<'_> {
     /// A property reference used as a function value is a callable reference whose adapter reads
     /// the property, so an inline call splices that read as it splices a function reference.
-    ///
-    /// A `reflective` reference is also the `KProperty` value itself, which a target whose
-    /// reference objects are function values realizes as this one.
     pub(super) fn materialize_property_function_reference(
         &mut self,
         checked: &CheckedPropertyReference<'_>,
         dispatch_capture: Option<ExprId>,
         extension_capture: Option<ExprId>,
-        reflective: bool,
     ) -> Result<Option<ExprId>, FirLoweringFailure> {
         let CheckedPropertyReference {
             target,
@@ -241,7 +237,9 @@ impl BodyLowering<'_> {
             }),
             _ => read,
         };
-        let body = self.callable_reference_adapter_body(read, property_type.get(), reference.ret);
+        let body =
+            self.ir
+                .callable_reference_adapter_body(read, property_type.get(), reference.ret);
         let mut parameters = capture_types;
         parameters.extend(reference.params.iter().copied());
         let function = self.ir.add_fun(IrFunction {
@@ -275,7 +273,7 @@ impl BodyLowering<'_> {
                         binding,
                         bound_extension_receiver: extension_capture.is_some(),
                         mutable,
-                        reflective,
+                        reflective: false,
                         substitutions: super::checked::lower_substitutions(substitutions),
                     },
                 )),

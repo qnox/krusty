@@ -536,7 +536,9 @@ impl BodyLowering<'_> {
         let Some(call) = call.transpose()? else {
             return Ok(None);
         };
-        let body = self.callable_reference_adapter_body(call, signature_result, reference.ret);
+        let body = self
+            .ir
+            .callable_reference_adapter_body(call, signature_result, reference.ret);
         let mut parameters = capture_types;
         parameters.extend(reference.params.iter().copied());
         let adapter_name = format!(
@@ -641,17 +643,11 @@ impl BodyLowering<'_> {
         }
         let dispatch_receiver = self.receiver(dispatch_receiver)?;
         let extension_receiver = self.receiver(extension_receiver)?;
-        // A target whose reference objects are function values reads every reference through
-        // one, a reflective `KProperty` value included.
-        if !reflective
-            || self.ir.property_reference_objects
-                == crate::ir::PropertyReferenceObjects::FunctionValues
-        {
+        if !reflective {
             if let Some(function) = self.materialize_property_function_reference(
                 &reference,
                 dispatch_receiver,
                 extension_receiver,
-                reflective,
             )? {
                 return Ok(function);
             }
@@ -666,6 +662,7 @@ impl BodyLowering<'_> {
                 mutable: reference.mutable,
                 substitutions: lower_substitutions(reference.substitutions),
                 adaptation: reference.adaptation.cloned().map(Box::new),
+                function_type: Some(reference.reference_ty),
             },
         ))))
     }

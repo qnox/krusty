@@ -167,6 +167,7 @@ fn property_plan(ir: &IrFile, id: ExprId) -> Result<PropertyPlan, Option<String>
         mutable,
         substitutions: _,
         adaptation,
+        function_type: _,
     } = &**checked_op
     else {
         return Err(None);

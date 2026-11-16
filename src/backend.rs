@@ -23,6 +23,7 @@ pub mod local_properties;
 mod module_facts;
 pub mod module_links;
 pub mod property_entries;
+pub mod property_reference_values;
 pub mod range_constructions;
 pub mod reference_names;
 mod source_class_members;
@@ -30,7 +31,6 @@ pub use source_class_members::SourceMemberAnnotations;
 pub mod value_classes;
 
 pub use crate::fir::{BuiltinImplementation, BuiltinOverrideDeclaration};
-pub use crate::ir::PropertyReferenceObjects;
 pub use constructor_selection::selected_constructor;
 pub use dependency_call_shape::{DeclaredOperandRoles, DependencyCallShape, DependencyExportCall};
 #[cfg(any(test, feature = "test-support"))]
@@ -179,13 +179,6 @@ pub trait Backend {
     /// it can inline that way; every other backend has them expanded in IR.
     fn same_module_inlining(&self) -> crate::ir::SameModuleInlining {
         crate::ir::SameModuleInlining::ExpandInIr
-    }
-
-    /// How common lowering realizes a property reference used as a `KProperty` value for this
-    /// backend. A backend whose reference objects are all function values has it materialized as
-    /// one; every other backend realizes the checked reference itself.
-    fn property_reference_objects(&self) -> PropertyReferenceObjects {
-        PropertyReferenceObjects::Checked
     }
 
     /// Consume one checked common-IR file produced by the streaming FIR path. No parsed source or
