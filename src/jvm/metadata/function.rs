@@ -331,6 +331,17 @@ impl MetaFn {
         self.extras.as_ref().and_then(|extras| extras.hidden_since)
     }
 
+    /// Record the `hiddenSince` version a realization method states for a function whose
+    /// metadata carries no annotations.
+    pub(super) fn set_hidden_since(&mut self, hidden_since: Option<LanguageVersion>) {
+        let Some(hidden_since) = hidden_since else {
+            return;
+        };
+        self.extras
+            .get_or_insert_with(|| Box::new(FunctionExtras::default()))
+            .hidden_since = Some(hidden_since);
+    }
+
     pub(in crate::jvm) fn deprecation(&self) -> Option<&crate::types::DeclaredDeprecation> {
         self.extras
             .as_ref()
