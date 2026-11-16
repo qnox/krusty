@@ -340,7 +340,6 @@ casts/functions/reifiedIsFunKSmall.kt
 casts/functions/reifiedSafeAsFunKBig.kt
 casts/functions/reifiedSafeAsFunKSmall.kt
 casts/functions/safeAsFunKBig.kt
-casts/functions/safeAsFunKSmall.kt
 casts/isNullablePrimitive.kt
 casts/kt50577.kt
 casts/kt53677.kt
@@ -1697,7 +1696,6 @@ inlineClasses/kt26103.kt
 inlineClasses/kt26103_covariantUnderlyingType.kt
 inlineClasses/kt27096.kt
 inlineClasses/kt27096Generic.kt
-inlineClasses/kt27096_functional.kt
 inlineClasses/kt27096_functionalGeneric.kt
 inlineClasses/kt27113.kt
 inlineClasses/kt27140Generic.kt
