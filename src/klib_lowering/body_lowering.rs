@@ -262,6 +262,13 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The declaration that names the local classifiers of the body being lowered: the package
+    /// of a top-level function, or the classifier a member belongs to. `None` when the linker
+    /// lowers no declared body or that body belongs to a classifier with no member name.
+    fn site_container(&self) -> Option<crate::ir::IrSiteClassContainer> {
+        None
+    }
+
     /// Whether `callee`, a public or accessor signature, is a constructor or member of a class private to the
     /// library of the body being lowered. Such a call links as a file-local one does.
     fn links_privately(&self, _callee: &crate::metadata::klib_ir::KlibIrSignature) -> bool {

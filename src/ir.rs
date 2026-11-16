@@ -90,6 +90,7 @@ mod lifting_sequences;
 mod local_class_names;
 mod local_delegates;
 mod loop_exits;
+mod site_class_names;
 pub use local_delegates::IrLocalDelegateAccess;
 pub use local_delegates::{IrInlineDeclaration, IrLocalDelegateAccessorPlan, IrLocalDelegatePlan};
 mod declared_parameters;
@@ -206,6 +207,7 @@ pub use references::{
     ReflectedCallable,
 };
 pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
+pub use site_class_names::{IrSiteClassContainer, IrSiteClassName};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
@@ -964,6 +966,9 @@ pub struct IrClass {
     pub is_compiler_generated: bool,
     /// A source anonymous-object declaration.
     pub is_anonymous_object: bool,
+    /// The declaration site of a local classifier lowered from a serialized body, which has no
+    /// source naming provenance.
+    pub site_name: Option<IrSiteClassName>,
     /// The executable scope a local, anonymous or generated class is declared in, recorded as an
     /// exact identity so a backend realizes enclosure metadata without parsing generated names.
     pub enclosure: Option<IrEnclosure>,
