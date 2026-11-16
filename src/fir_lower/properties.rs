@@ -999,6 +999,7 @@ pub(super) fn record_companion_block_property(
             getter_diagnostic_span: property.getter_diagnostic_span,
             setter_diagnostic_span: property.setter_diagnostic_span,
             field_annotations,
+            annotations: property.annotations.clone(),
             ty: property.ty,
             is_var: property.flags.has(DeclarationFlags::MUTABLE),
             is_const: property.flags.has(DeclarationFlags::CONST),

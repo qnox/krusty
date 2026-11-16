@@ -304,15 +304,14 @@ fn emit_interface_storage_class(
             e.cw.set_method_lines("<clinit>", "()V", &lines);
         }
     }
+    let signature_formatter = super::JvmSignatureFormatter::new(ir, env);
     for &index in &storage {
-        let s = &ir.statics[index as usize];
-        let final_flag = if s.is_var { 0 } else { 0x0010 };
-        cw.add_field_late(
-            0x0008 | final_flag,
-            ir.static_field_jvm_name(index),
-            &ir_type_desc(&s.ty),
-            None,
-            super::declared_static_annotation(s),
+        super::static_fields::declare_interface_block_static(
+            ir,
+            class,
+            &signature_formatter,
+            &mut cw,
+            index,
         );
     }
     let xi = synthetic_class_xi(super::metadata_policy::SYNTHETIC_PRIVATE);

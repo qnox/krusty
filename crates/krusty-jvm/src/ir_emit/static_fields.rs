@@ -668,12 +668,8 @@ fn declare_static(
     static_index: u32,
     s: &krusty::ir::IrStatic,
 ) {
-    let desc = ir_type_desc(&s.ty);
     // A `private const val`/`private val` on an object/companion keeps its declared visibility
     // (kotlinc: PRIVATE static final; const reads are inlined so no cross-class getstatic needs it).
-    // A `var` is reassignable, so it must NOT carry ACC_FINAL — a `putstatic` on a final field
-    // outside `<clinit>` is an IllegalAccessError.
-    let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
     // A HOISTED companion property's field is PRIVATE regardless of the property's declared
     // visibility (kotlinc: every access goes through the accessors/bridges, never the field) —
     // EXCEPT under `@JvmField`, where the field IS the property's whole JVM surface and takes the
@@ -682,16 +678,51 @@ fn declare_static(
     let hoisted = ir.is_jvm_companion_hoisted_static(static_index);
     let jvm_field = ir.is_jvm_field_static(static_index);
     let block_storage = companion_blocks::storage_is_private(ir, static_index);
-    let lateinit_visibility = hoisted_lateinit_field_visibility(ir, static_index);
-    let acc = if let Some(visibility) = lateinit_visibility {
-        0x0008 | static_visibility_access(visibility) | final_flag
+    let visibility = if let Some(visibility) = hoisted_lateinit_field_visibility(ir, static_index) {
+        static_visibility_access(visibility)
     } else if jvm_field {
-        0x0008 | static_visibility_access(s.visibility) | final_flag
+        static_visibility_access(s.visibility)
     } else if s.visibility.is_private() || hoisted || block_storage {
-        0x000A | final_flag // PRIVATE | STATIC [| FINAL]
+        krusty::jvm::classfile::ACC_PRIVATE
     } else {
-        0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
-    } | annotated_field_modifiers(ir.static_declaration_annotations(static_index));
+        krusty::jvm::classfile::ACC_PUBLIC
+    };
+    declare_static_field(ir, c, signature_formatter, cw, static_index, visibility);
+}
+
+/// Declare the storage of one of interface `interface`'s `companion { … }` block properties on
+/// its synthetic private-fields class. The field is package-private, so the interface's accessors
+/// reach it, and otherwise carries every fact the property's own field would: its modifiers,
+/// generic signature, nullability and FIELD-targeted annotations.
+pub(super) fn declare_interface_block_static(
+    ir: &IrFile,
+    interface: &IrClass,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    cw: &mut ClassWriter,
+    static_index: u32,
+) {
+    declare_static_field(ir, interface, signature_formatter, cw, static_index, 0);
+}
+
+/// Declare static `static_index`, owned by `c`, as a field with the JVM `visibility` access bits.
+fn declare_static_field(
+    ir: &IrFile,
+    c: &IrClass,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    cw: &mut ClassWriter,
+    static_index: u32,
+    visibility: u16,
+) {
+    let s = &ir.statics[static_index as usize];
+    let desc = ir_type_desc(&s.ty);
+    let hoisted = ir.is_jvm_companion_hoisted_static(static_index);
+    // A `var` is reassignable, so it must NOT carry ACC_FINAL — a `putstatic` on a final field
+    // outside `<clinit>` is an IllegalAccessError.
+    let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
+    let acc = krusty::jvm::classfile::ACC_STATIC
+        | visibility
+        | final_flag
+        | annotated_field_modifiers(ir.static_declaration_annotations(static_index));
     // `ConstantValue` is only meaningful on a FINAL field (JVMS 4.7.2 ignores it otherwise), and a
     // `var` is initialized by the `<clinit>` store anyway. A HOISTED companion property never
     // folds either — kotlinc initializes it in `<clinit>` (only `const val` gets the attribute).
