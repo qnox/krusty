@@ -970,8 +970,51 @@ impl Checker<'_> {
                 propagated.insert(formal.to_string(), fact);
                 break;
             }
+            if propagated.contains_key(formal.as_str()) {
+                continue;
+            }
+            let Some(fact) = slots
+                .argument_bindings
+                .iter()
+                .filter_map(|binding| {
+                    let parameter = *parameter_indices.get(binding.parameter)?;
+                    let TyKind::Fun(function) = signature.params.get(parameter)?.kind() else {
+                        return None;
+                    };
+                    (function.ret.non_null().ty_param_name() == Some(formal.as_str()))
+                        .then(|| self.lambda_result_intersection(binding.argument))
+                        .flatten()
+                })
+                .find(|fact| fact.parts.len() > 1 && fact.selected_result == selected_argument)
+            else {
+                continue;
+            };
+            let all_arguments_prove_parts = direct_arguments.iter().all(|other| {
+                let actual = self.expr_types[other.argument.0 as usize];
+                fact.parts
+                    .iter()
+                    .all(|&part| self.receiver_is_assignable(actual, part))
+            });
+            if !all_arguments_prove_parts {
+                continue;
+            }
+            selected_bindings.insert(*formal, fact.parts[0]);
+            intersection_bindings.insert(formal.to_string(), fact.parts.clone());
+            propagated.insert(formal.to_string(), fact);
         }
         propagated
+    }
+
+    /// The intersection a lambda argument's value expression carries, when the lambda's result is
+    /// exactly that expression's denotable type: the result type variable then holds the
+    /// intersection, not just the view an ordinary expression type keeps.
+    fn lambda_result_intersection(&self, argument: ExprId) -> Option<InferredIntersection> {
+        let Expr::Lambda { body, .. } = self.file.expr(argument) else {
+            return None;
+        };
+        let tail = super::conditional_branch::branch_value_expression(self.file, *body);
+        let fact = self.inferred_expression_intersection_fact(tail)?;
+        (self.lambda_body_results.get(&argument) == Some(&fact.selected_result)).then_some(fact)
     }
 
     /// Commit the type arguments and intersection provenance of an already-selected generic call.
