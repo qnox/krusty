@@ -15,12 +15,12 @@
 //! AST vs IR (see the doc): declaration/supertype generation belongs before type checking so
 //! generated symbols resolve. Body and expression rewriting belongs at the IR level.
 
-pub mod allopen;
 pub mod assignment;
 pub mod atomicfu;
 pub mod class_metadata;
 pub mod cli;
 pub mod compose;
+mod convention;
 pub mod deps;
 pub mod noarg;
 pub mod parcelize;

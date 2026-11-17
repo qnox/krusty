@@ -27,7 +27,7 @@ impl SamWithReceiverPlugin {
             annotations: options
                 .iter()
                 .filter(|option| option.key == "annotation")
-                .flat_map(|option| crate::plugins::allopen::classifier_identities(&option.value))
+                .flat_map(|option| krusty_plugin_api::classifier_identities(&option.value))
                 .collect(),
         }
     }
