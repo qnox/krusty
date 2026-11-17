@@ -211,53 +211,62 @@ with open(log, 'w') as f:
             z.writestr(f'{name}/A.class', b'same')
         json.dump(dict(targetLabel=label, mnemonic='KrustyCompile' if krusty else 'JvmCompile',
                        walltime='1s', listedOutputs=[out]), f)
+# A reference build that wrote its execution log and jars, then failed on another target.
+if not krusty and os.environ.get('FAKE_BAZEL_REFERENCE_EXIT'):
+    sys.exit(int(os.environ['FAKE_BAZEL_REFERENCE_EXIT']))
 '''
 
 
 class Runner(unittest.TestCase):
+    def run_project(self, work, **env):
+        """Runs `run.sh` on a one-commit project with two targets, a fake `bazel.cmd` and a pinned
+        further checkout; returns the result and the krusty binary and call log it used."""
+        repo = Path(work, 'upstream')
+        repo.mkdir()
+        Path(repo, 'bazel.cmd').write_text(
+            f'exec {shlex.quote(sys.executable)} "$(dirname "$0")/fake_bazel.py" "$@"\n')
+        Path(repo, 'fake_bazel.py').write_text(FAKE_BAZEL)
+        Path(repo, 'MODULE.bazel').write_text('module(name = "p")\n')
+        git = ['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@t']
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        subprocess.run(git + ['add', '.'], check=True)
+        subprocess.run(git + ['commit', '-qm', 'init'], check=True)
+        commit = subprocess.run(git + ['rev-parse', 'HEAD'], check=True, capture_output=True,
+                                text=True).stdout.strip()
+        plugin = Path(work, 'plugin')
+        plugin.mkdir()
+        Path(plugin, 'plugin.iml').write_text('<module/>\n')
+        pgit = ['git', '-C', str(plugin), '-c', 'user.name=t', '-c', 'user.email=t@t']
+        subprocess.run(['git', 'init', '-q', str(plugin)], check=True)
+        subprocess.run(pgit + ['add', '.'], check=True)
+        subprocess.run(pgit + ['commit', '-qm', 'init'], check=True)
+        plugin_commit = subprocess.run(pgit + ['rev-parse', 'HEAD'], check=True, capture_output=True,
+                                       text=True).stdout.strip()
+        projects = Path(work, 'projects.tsv')
+        projects.write_text(f'p\tfile://{repo}\t{commit}\t.\t21\t-\t-\tcompile,lsp\n')
+        integration = Path(work, 'integration')
+        integration.mkdir()
+        Path(integration, '0001-marker.patch').write_text(
+            'diff --git a/KRUSTY b/KRUSTY\nnew file mode 100644\n--- /dev/null\n+++ b/KRUSTY\n@@ -0,0 +1 @@\n+patched\n')
+        bazel = Path(work, 'bazel', 'p')
+        bazel.mkdir(parents=True)
+        Path(bazel, 'targets').write_text('# comment\n//a:a\n\n//b:b  # trailing comment\n')
+        Path(bazel, 'integration').write_text(f'{integration}\n')
+        Path(bazel, 'checkouts').write_text(f'# a repository the build reads\nandroid\tfile://{plugin}\t{plugin_commit}\n')
+        krusty = Path(work, 'krusty')
+        krusty.write_text('#!/bin/sh\n')
+        calls = Path(work, 'calls')
+        # A KRUSTY_BINARY the caller exports must not reach the reference build: the integration's
+        # repository rule reads the whole client environment.
+        env = dict(os.environ, CORPUS_PROJECTS=str(projects), CORPUS_BAZEL=str(Path(work, 'bazel')),
+                   FAKE_BAZEL_CALLS=str(calls), KRUSTY_BINARY=str(krusty), **env)
+        result = subprocess.run(['bash', str(HERE / 'run.sh'), 'p', f'{work}/corpus', str(krusty),
+                                 '/nonexistent/repository', '0'], env=env, capture_output=True, text=True)
+        return result, krusty, calls
+
     def test_run_sh_builds_a_bazel_project_with_and_without_krusty(self):
         with tempfile.TemporaryDirectory() as work:
-            repo = Path(work, 'upstream')
-            repo.mkdir()
-            Path(repo, 'bazel.cmd').write_text(
-                f'exec {shlex.quote(sys.executable)} "$(dirname "$0")/fake_bazel.py" "$@"\n')
-            Path(repo, 'fake_bazel.py').write_text(FAKE_BAZEL)
-            Path(repo, 'MODULE.bazel').write_text('module(name = "p")\n')
-            git = ['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@t']
-            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-            subprocess.run(git + ['add', '.'], check=True)
-            subprocess.run(git + ['commit', '-qm', 'init'], check=True)
-            commit = subprocess.run(git + ['rev-parse', 'HEAD'], check=True, capture_output=True,
-                                    text=True).stdout.strip()
-            plugin = Path(work, 'plugin')
-            plugin.mkdir()
-            Path(plugin, 'plugin.iml').write_text('<module/>\n')
-            pgit = ['git', '-C', str(plugin), '-c', 'user.name=t', '-c', 'user.email=t@t']
-            subprocess.run(['git', 'init', '-q', str(plugin)], check=True)
-            subprocess.run(pgit + ['add', '.'], check=True)
-            subprocess.run(pgit + ['commit', '-qm', 'init'], check=True)
-            plugin_commit = subprocess.run(pgit + ['rev-parse', 'HEAD'], check=True, capture_output=True,
-                                           text=True).stdout.strip()
-            projects = Path(work, 'projects.tsv')
-            projects.write_text(f'p\tfile://{repo}\t{commit}\t.\t21\t-\t-\tcompile,lsp\n')
-            integration = Path(work, 'integration')
-            integration.mkdir()
-            Path(integration, '0001-marker.patch').write_text(
-                'diff --git a/KRUSTY b/KRUSTY\nnew file mode 100644\n--- /dev/null\n+++ b/KRUSTY\n@@ -0,0 +1 @@\n+patched\n')
-            bazel = Path(work, 'bazel', 'p')
-            bazel.mkdir(parents=True)
-            Path(bazel, 'targets').write_text('# comment\n//a:a\n\n//b:b  # trailing comment\n')
-            Path(bazel, 'integration').write_text(f'{integration}\n')
-            Path(bazel, 'checkouts').write_text(f'# a repository the build reads\nandroid\tfile://{plugin}\t{plugin_commit}\n')
-            krusty = Path(work, 'krusty')
-            krusty.write_text('#!/bin/sh\n')
-            calls = Path(work, 'calls')
-            # A KRUSTY_BINARY the caller exports must not reach the reference build: the integration's
-            # repository rule reads the whole client environment.
-            env = dict(os.environ, CORPUS_PROJECTS=str(projects), CORPUS_BAZEL=str(Path(work, 'bazel')),
-                       FAKE_BAZEL_CALLS=str(calls), KRUSTY_BINARY=str(krusty))
-            result = subprocess.run(['bash', str(HERE / 'run.sh'), 'p', f'{work}/corpus', str(krusty),
-                                     '/nonexistent/repository', '0'], env=env, capture_output=True, text=True)
+            result, krusty, calls = self.run_project(work)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(Path(work, 'corpus/src/p/KRUSTY').read_text(), 'patched\n')
             self.assertEqual(Path(work, 'corpus/src/p/android/plugin.iml').read_text(), '<module/>\n')
@@ -281,6 +290,16 @@ class Runner(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in Path(work, 'corpus/logs').iterdir()), [
                 'STATUS', 'p.kotlinc.compilations.tsv', 'p.kotlinc.log', 'p.kotlinc.metrics.json',
                 'p.krusty.compilations.tsv', 'p.krusty.log', 'p.krusty.metrics.json', 'p.warmup.log'])
+
+    def test_a_failed_reference_build_is_compared_and_then_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as work:
+            result, _, _ = self.run_project(work, FAKE_BAZEL_REFERENCE_EXIT='3')
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual(result.stderr, 'p: the reference kotlinc build failed (exit 3); see p.kotlinc.log\n')
+            data = json.loads(Path(work, 'corpus/out/p/compare.json').read_text())
+        # The partial reference build is compared like any other; krusty's results stay measured.
+        self.assertEqual((data['reference_exit'], data['compilations'], data['built'], data['identical']),
+                         (3, 2, 2, 2))
 
     def test_a_target_set_without_targets_stops_before_checkout(self):
         with tempfile.TemporaryDirectory() as work:

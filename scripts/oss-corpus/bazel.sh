@@ -21,7 +21,8 @@
 # which `bazel_compare.py snapshot` lists the compile actions (`<name>.<mode>.compilations.tsv`) and
 # copies their jars out of the execution root (`bazel info execution_root`, which the project's own
 # convenience symlinks need not name `bazel-out`) to out/<name>/<mode>. `bazel_compare.py compare` writes out/<name>/compare.json in
-# the shape `compare.py` writes for a Gradle project; there is no verify or test build.
+# the shape `compare.py` writes for a Gradle project; there is no verify or test build. A failed
+# reference build fails the run once that comparison is written.
 set -euo pipefail
 
 name=$1
@@ -123,3 +124,9 @@ build krusty --repo_env=KRUSTY_BINARY="$krusty"
 krusty_exit=$status
 bazel shutdown >/dev/null 2>&1 || true
 python3 "$here/bazel_compare.py" compare "$work" "$name" "$reference" "$krusty_exit"
+# As for a Gradle project, a failed reference build is still compared as far as it got, then fails
+# the run: every project is meant to build with kotlinc. krusty's own misses never fail it.
+if [ "$reference" -ne 0 ]; then
+  echo "$name: the reference kotlinc build failed (exit $reference); see $name.kotlinc.log" >&2
+  exit 1
+fi

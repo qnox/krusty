@@ -156,7 +156,8 @@ and a stopped server, without a disk cache and with downloads disabled, under `m
 execution log lists every compile action, from which `bazel_compare.py` copies the jars out of the
 execution root and writes `compare.json` in the Gradle shape: one compilation per compile action,
 named by its target's label (with ` [for tool]` for a target also built for the execution platform,
-as Bazel's progress messages say), its class entries compared byte for byte. There is no verify build, test build or sampled profile.
+as Bazel's progress messages say), its class entries compared byte for byte. As for a Gradle
+project, a failed reference build is compared as far as it got and then fails the run. There is no verify build, test build or sampled profile.
 
 Run one project locally with:
 
