@@ -64,10 +64,9 @@ impl BodyLowering<'_> {
         source_form: Option<&str>,
     ) -> Lowered<ExprId> {
         let target = self.sam_target(ty_id, ty)?;
-        let KlibIrSignature::Public(method) = &overridden.signature else {
-            return Err(mismatch("a converted lambda overrides a non-public method"));
-        };
-        if method.declaration().segments().last() != Some(&target.method) {
+        // The reference names the declaration it overrides: by exact identity, the checked
+        // method or one of the dispatch frames it implements, never a same-named member.
+        if !self.overrides_checked_method(ty_id, overridden)? {
             return Err(mismatch(
                 "a converted lambda overrides another method than its checked SAM method",
             ));
@@ -92,12 +91,32 @@ impl BodyLowering<'_> {
             return unsupported("a SAM conversion to a non-public classifier");
         };
         let declaration = self.linker.sam_declaration(signature)?;
-        crate::symbol_resolver::apply_sam_declaration(
-            &declaration.classifier,
-            &declaration.target,
-            target_type.non_null(),
-        )
-        .ok_or_else(|| mismatch("a SAM conversion differs from its checked classifier application"))
+        declaration.applied(target_type.non_null()).ok_or_else(|| {
+            mismatch("a SAM conversion differs from its checked classifier application")
+        })
+    }
+
+    /// Whether `overridden` is one of the declarations the checked SAM declaration of the
+    /// classifier `operand` names allows a converted lambda to override.
+    fn overrides_checked_method(
+        &self,
+        operand: KlibIrTypeId,
+        overridden: &KlibIrSymbol,
+    ) -> Lowered<bool> {
+        let KlibIrType::Simple { classifier, .. } = self.arena.ty(operand) else {
+            return unsupported("a SAM conversion without a nominal target");
+        };
+        let KlibIrSignature::Public(signature) = &classifier.signature else {
+            return unsupported("a SAM conversion to a non-public classifier");
+        };
+        let KlibIrSignature::Public(method) = &overridden.signature else {
+            return Ok(false);
+        };
+        let declaration = self.linker.sam_declaration(signature)?;
+        Ok(declaration.overridable.iter().any(|callable| {
+            callable.declaration
+                == crate::libraries::KlibDeclarationSignature::Public(method.clone())
+        }))
     }
 
     /// `value`, a function value of `target`'s method shape, as the functional interface `ty`.

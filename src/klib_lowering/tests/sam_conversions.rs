@@ -8,6 +8,7 @@ const LIBRARY: &str = include_str!("../../../tests/fixtures/klib_selected_sam/Li
 /// The same conversions with bodies that call nothing, so the test needs no declaration facts
 /// beyond the SAM selection.
 const NATIVE_LIBRARY: &str = include_str!("../../../tests/fixtures/klib_native_sam/Library.kt");
+const NATIVE_OTHER: &str = include_str!("../../../tests/fixtures/klib_native_sam/Other.kt");
 
 /// The externals production registers for the checked closure's target-realized members, such
 /// as `String.plus` called inside a converted lambda: each frozen member edge links its exact
@@ -245,11 +246,14 @@ fn native_converted_lambdas_freeze_and_lower_the_same_checked_declaration() {
     };
     let source = work.join("Library.kt");
     std::fs::write(&source, NATIVE_LIBRARY).unwrap();
+    let other_source = work.join("Other.kt");
+    std::fs::write(&other_source, NATIVE_OTHER).unwrap();
     let library = work.join("sam");
     let output = std::process::Command::new(root.join("bin/kotlinc-native"))
         .args(["-p", "library", "-nopack", "-o"])
         .arg(&library)
         .arg(&source)
+        .arg(&other_source)
         .output()
         .expect("run exact Native KLIB producer");
     assert!(
@@ -332,5 +336,87 @@ fn native_converted_lambdas_freeze_and_lower_the_same_checked_declaration() {
             assert_eq!(raw.ir().logical_type(id as ExprId), Some(interface));
         }
     }
+
+    // `Other.apply` has the name and shape of `Action.apply`. The override a converted lambda
+    // names is authenticated against the frozen declaration's exact method identities, so the
+    // unrelated owner's method never stands for the selected one.
+    let other_classifier = libraries
+        .classifier(type_name("fixture/Other"))
+        .expect("unrelated interface");
+    let other_identity = other_classifier
+        .klib_identity
+        .as_ref()
+        .expect("exact unrelated interface identity");
+    let other_method = other_classifier.declared_callables["apply"].functions()[0]
+        .callable
+        .external_identity
+        .unwrap();
+    let dependency = |id| {
+        libraries
+            .external_callable(id)
+            .unwrap()
+            .dependency_callable
+            .expect("exact serialized method identity")
+    };
+    let (action_apply, other_apply) = (dependency(method), dependency(other_method));
+    assert_ne!(action_apply, other_apply);
+    assert_eq!(
+        frozen.overridable.as_ref(),
+        std::slice::from_ref(&action_apply)
+    );
+    let symbols = libraries.symbols(SymbolNamespace::Package(type_name("fixture")), "other");
+    let [function] = symbols.callables.functions() else {
+        panic!("one unrelated producer function")
+    };
+    let other_selected = libraries
+        .external_callable(function.callable.external_identity.unwrap())
+        .unwrap();
+    let other_callable = other_selected.klib_body_callable().unwrap();
+    let other_checked = crate::resolve::for_checked_klib_bodies(
+        &libraries,
+        libraries.declaration_bodies(),
+        [other_callable],
+        &[],
+    )
+    .unwrap();
+    let other_frozen = other_checked
+        .sam_declarations()
+        .get(&(
+            other_callable.identity().module.clone(),
+            other_identity.signature.clone(),
+        ))
+        .expect("the unrelated lambda freezes its own interface's declaration");
+    assert_eq!(other_frozen.overridable.as_ref(), [other_apply]);
+    let other_callees =
+        KlibCalleeFacts::new([other_callable]).with_checked_dependency_facts(&other_checked);
+    let mut other_raw = DependencyBodyUnit::default();
+    other_raw
+        .lower_function_with_intrinsics(
+            other_callable,
+            libraries.declaration_bodies(),
+            &other_callees,
+            libraries.intrinsic_facts(),
+        )
+        .unwrap_or_else(|decline| panic!("unrelated converted lambda: {decline}"));
+    assert_sam_frames(other_raw.ir(), other_method, 1);
+    // Facts frozen for `Action` alone give the unrelated lambda no declaration to borrow.
+    let action_only =
+        KlibCalleeFacts::new([other_callable]).with_checked_dependency_facts(&checked);
+    let mut relabeled = DependencyBodyUnit::default();
+    let refusal = relabeled
+        .lower_function_with_intrinsics(
+            other_callable,
+            libraries.declaration_bodies(),
+            &action_only,
+            libraries.intrinsic_facts(),
+        )
+        .expect_err("another interface's frozen declaration never selects this lambda's method");
+    assert_eq!(
+        refusal.reason(),
+        &KlibBodyDeclineReason::UnsupportedOperation(
+            "a SAM conversion without a checked declaration"
+        )
+    );
+    super::demo_package::assert_unit_is_empty(&relabeled);
     std::fs::remove_dir_all(work).unwrap();
 }
