@@ -9,3 +9,5 @@ private val initializerOnly = Action<String> { it + ":initialized" }
 fun make(): Action<String> = Action<String> { it + ":direct" }
 
 inline fun inlineMake(): Action<String> = Action<String> { it + ":inline" }
+
+fun functionValue(value: (String) -> String): Action<String> = Action(value)

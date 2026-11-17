@@ -67,6 +67,61 @@ fn assert_sam_frames(ir: &IrFile, method: crate::fir::ExternalCallableId, count:
     validated(ir);
 }
 
+fn assert_sam_result_types(ir: &IrFile, expected: Ty) {
+    for (expression, node) in ir.exprs.iter().enumerate() {
+        if matches!(node, IrExpr::Lambda { sam: Some(_), .. }) {
+            assert_eq!(ir.checked_type(expression as ExprId), Some(expected));
+        }
+    }
+}
+
+fn assert_function_value_sam_frame(ir: &IrFile, method: crate::fir::ExternalCallableId) {
+    let targets = ir
+        .exprs
+        .iter()
+        .filter_map(|node| match node {
+            IrExpr::Lambda {
+                impl_fn,
+                captures,
+                sam: Some(target),
+                ..
+            } => Some((*impl_fn, captures, target)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // The private initializer remains a literal conversion; the selected factory wraps its
+    // function parameter once, with that function's own type retained in its capture.
+    assert_eq!(targets.len(), 2);
+    let wrapped = targets
+        .into_iter()
+        .filter(|(_, _, target)| target.wraps_function_value)
+        .collect::<Vec<_>>();
+    let [(implementation, captures, target)] = wrapped.as_slice() else {
+        panic!("one function-value SAM wrapper")
+    };
+    let function_type = Ty::fun(vec![Ty::String], Ty::String);
+    assert_eq!(captures.len(), 1);
+    assert!(matches!(ir.expr(captures[0]), IrExpr::GetValue(0)));
+    assert_eq!(ir.checked_type(captures[0]), Some(function_type));
+    assert_eq!(
+        ir.functions[*implementation as usize].params,
+        vec![function_type, Ty::String]
+    );
+    assert_eq!(ir.functions[*implementation as usize].ret, Ty::String);
+    assert_eq!(
+        target.method_target,
+        crate::ir::IrSamMethod::External(method)
+    );
+    assert_eq!(target.parameters, vec![Ty::String]);
+    assert_eq!(target.result, Ty::String);
+    assert!(!target.nullable);
+    assert_eq!(
+        ir.lambda_sam_signature[implementation],
+        (target.declared_parameters.clone(), target.declared_result)
+    );
+    validated(ir);
+}
+
 #[test]
 fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frames() {
     let target = crate::compilation_target::CompilationTarget::WasmWasi;
@@ -131,7 +186,11 @@ fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frame
         .callable
         .external_identity
         .unwrap();
-    for (name, inline) in [("make", false), ("inlineMake", true)] {
+    for (name, inline, wraps_function_value) in [
+        ("make", false, false),
+        ("inlineMake", true, false),
+        ("functionValue", false, true),
+    ] {
         let symbols = libraries.symbols(SymbolNamespace::Package(type_name("fixture")), name);
         let [function] = symbols.callables.functions() else {
             panic!("one producer function")
@@ -186,8 +245,13 @@ fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frame
             &externals,
         )
         .unwrap_or_else(|decline| panic!("raw selected SAM {name}: {decline}"));
-        // One direct conversion and the otherwise unreferenced private file initializer.
-        assert_sam_frames(raw.ir(), method, 2);
+        assert_sam_result_types(raw.ir(), callable.ret());
+        if wraps_function_value {
+            assert_function_value_sam_frame(raw.ir(), method);
+        } else {
+            // One direct conversion and the otherwise unreferenced private file initializer.
+            assert_sam_frames(raw.ir(), method, 2);
+        }
         if inline {
             let mut prepared = IrFile::default();
             lower_inline_template(
@@ -203,6 +267,7 @@ fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frame
             )
             .unwrap()
             .unwrap_or_else(|decline| panic!("prepared selected SAM: {decline}"));
+            assert_sam_result_types(&prepared, callable.ret());
             assert_sam_frames(&prepared, method, 1);
         }
     }
