@@ -35,6 +35,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::ArrayGet
         | CompilerIntrinsic::ArraySet
         | CompilerIntrinsic::ArraySize
+        | CompilerIntrinsic::ArrayStorageCopy
         | CompilerIntrinsic::CharCode
         | CompilerIntrinsic::StringLength
         | CompilerIntrinsic::StringGet
@@ -56,6 +57,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::CoroutineContext
         | CompilerIntrinsic::CoroutineSuspended
         | CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
+        | CompilerIntrinsic::StartCoroutineUninterceptedOrReturn
         | CompilerIntrinsic::EnumValues
         | CompilerIntrinsic::EnumValueOf
         | CompilerIntrinsic::EnumEntries
@@ -81,7 +83,10 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::UnsignedDivide { .. }
         | CompilerIntrinsic::UnsignedRemainder { .. }
         | CompilerIntrinsic::ResultFailure(_)
-        | CompilerIntrinsic::PrimitiveIteratorNext => return None,
+        | CompilerIntrinsic::ResultFailureException
+        | CompilerIntrinsic::PrimitiveIteratorNext
+        | CompilerIntrinsic::CurrentContinuation
+        | CompilerIntrinsic::ReturnIfSuspended => return None,
     })
 }
 

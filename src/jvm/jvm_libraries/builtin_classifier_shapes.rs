@@ -134,18 +134,7 @@ impl JvmLibraries {
         classifier.constants = crate::fx_hash::HashMap::default();
         // The builtin's own modality, as a class file would state it: `kotlin.Throwable` stays
         // open when no JDK supplies `java/lang/Throwable`.
-        let is_interface = class_access & crate::jvm::classfile::ACC_INTERFACE != 0;
-        classifier.inheritance = crate::libraries::ClassifierInheritance {
-            is_abstract: class_access & crate::jvm::classfile::ACC_ABSTRACT != 0,
-            is_extensible: class_access & crate::jvm::classfile::ACC_FINAL == 0 && !is_interface,
-            has_no_arg_constructor: classifier.constructors.iter().any(|constructor| {
-                constructor.params.is_empty()
-                    && matches!(
-                        constructor.visibility,
-                        crate::types::Visibility::Public | crate::types::Visibility::Protected
-                    )
-            }),
-        };
+        classifier.inheritance = classifier_inheritance(class_access, &classifier.constructors);
         Some(classifier)
     }
 }
@@ -226,5 +215,25 @@ pub(super) fn builtin_library_type(
         mapped_builtin: false,
         annotation_element_defaults: Vec::new(),
         deprecation: None,
+    }
+}
+
+/// A classifier's inheritance capabilities from its class-file access flags and its published
+/// constructors. A mapped builtin passes its Kotlin declaration's flags, never its JVM class's.
+pub(super) fn classifier_inheritance(
+    class_access: u16,
+    constructors: &[crate::libraries::LibraryMember],
+) -> crate::libraries::ClassifierInheritance {
+    let is_interface = class_access & crate::jvm::classfile::ACC_INTERFACE != 0;
+    crate::libraries::ClassifierInheritance {
+        is_abstract: class_access & crate::jvm::classfile::ACC_ABSTRACT != 0 || is_interface,
+        is_extensible: class_access & crate::jvm::classfile::ACC_FINAL == 0 && !is_interface,
+        has_no_arg_constructor: constructors.iter().any(|constructor| {
+            constructor.params.is_empty()
+                && matches!(
+                    constructor.visibility,
+                    crate::types::Visibility::Public | crate::types::Visibility::Protected
+                )
+        }),
     }
 }

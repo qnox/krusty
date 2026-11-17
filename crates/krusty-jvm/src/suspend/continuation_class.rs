@@ -302,6 +302,7 @@ pub(super) fn build_continuation_class(
         is_source_declared: false,
         is_compiler_generated: false,
         is_anonymous_object: false,
+        site_name: None,
         enclosure: None,
         is_inner_class: false,
         is_local_class: false,
