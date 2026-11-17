@@ -18,7 +18,7 @@
 pub const SERIALIZATION_PLUGIN_ID: &str = "org.jetbrains.kotlinx.serialization";
 pub const KSP_PLUGIN_ID: &str = "com.google.devtools.ksp.symbol-processing";
 pub const ALLOPEN_PLUGIN_ID: &str = krusty_plugin_allopen::PLUGIN_ID;
-pub const NOARG_PLUGIN_ID: &str = "org.jetbrains.kotlin.noarg";
+pub const NOARG_PLUGIN_ID: &str = krusty_plugin_noarg::PLUGIN_ID;
 pub const SAM_WITH_RECEIVER_PLUGIN_ID: &str = "org.jetbrains.kotlin.samWithReceiver";
 pub const ASSIGNMENT_PLUGIN_ID: &str = "org.jetbrains.kotlin.assignment";
 pub const COMPOSE_PLUGIN_ID: &str = "androidx.compose.compiler.plugins.kotlin";

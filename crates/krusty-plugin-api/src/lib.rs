@@ -12,7 +12,7 @@ mod annotation_names;
 mod convention;
 mod option;
 
-pub use annotation_names::classifier_identities;
+pub use annotation_names::{annotations_from_options, classifier_identities, Presets};
 pub use convention::{Convention, ConventionPlugin};
 pub use krusty_names::TypeName;
 pub use option::PluginOption;

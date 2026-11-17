@@ -37,7 +37,6 @@ use crate::plugins::cli::{
 };
 use crate::plugins::compose::{ComposeOptions, ComposePlugin};
 use crate::plugins::convention::ConventionInstance;
-use crate::plugins::noarg::NoArgPlugin;
 use crate::plugins::parcelize::ParcelizePlugin;
 use crate::plugins::sam_with_receiver::SamWithReceiverPlugin;
 use crate::plugins::serialization::{SerializationAbi, SerializationPlugin};
@@ -415,7 +414,10 @@ fn build_noarg(
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(NoArgPlugin::from_options(options))
+    Box::new(ConventionInstance::new(
+        &krusty_plugin_noarg::PLUGIN,
+        options,
+    ))
 }
 
 /// Build the native sam-with-receiver plugin from the compilation's options for it.

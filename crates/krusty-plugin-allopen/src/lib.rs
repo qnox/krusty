@@ -10,7 +10,7 @@
 //! kotlinc's `AllOpenPluginNames.SUPPORTED_PRESETS`.
 
 use krusty_plugin_api::{
-    classifier_identities, Convention, ConventionPlugin, PluginOption, TypeName,
+    annotations_from_options, Convention, ConventionPlugin, PluginOption, Presets, TypeName,
 };
 
 /// kotlinc's plugin id for all-open.
@@ -26,7 +26,7 @@ pub static PLUGIN: ConventionPlugin = ConventionPlugin {
 
 /// kotlinc's `AllOpenPluginNames.SUPPORTED_PRESETS`, as qualified names. The `jpa` preset is the
 /// no-arg plugin's and is recognized by all-open's preset table too.
-const PRESETS: &[(&str, &[&str])] = &[
+const PRESETS: Presets = &[
     (
         "spring",
         &[
@@ -67,28 +67,8 @@ const PRESETS: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// The annotations the compilation's all-open options configure, in either syntax: every
-/// `annotation=<fqname>`, then the annotations of every `preset=<name>`. Like kotlinc, an unknown
-/// preset name contributes nothing.
 fn annotations(options: &[PluginOption]) -> Vec<TypeName> {
-    let mut qualified = Vec::new();
-    let mut presets = Vec::new();
-    for option in options {
-        match option.key.as_str() {
-            "annotation" => qualified.push(option.value.as_str()),
-            "preset" => presets.push(option.value.as_str()),
-            _ => {}
-        }
-    }
-    for preset in presets {
-        if let Some((_, names)) = PRESETS.iter().find(|(name, _)| *name == preset) {
-            qualified.extend(names.iter().copied());
-        }
-    }
-    qualified
-        .into_iter()
-        .flat_map(classifier_identities)
-        .collect()
+    annotations_from_options(options, PRESETS)
 }
 
 #[cfg(test)]
