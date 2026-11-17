@@ -20,6 +20,7 @@ use super::id_signature::{
 
 #[cfg(test)]
 mod arena_fixtures;
+mod class_index;
 mod field_storage;
 mod symbols;
 pub mod tree;
@@ -1413,3 +1414,6 @@ mod tests {
         assert!(decoded.defaults().is_empty());
     }
 }
+
+/// Shared interpretation of serialized declaration types, before any body admission or emission.
+pub(crate) mod semantic_types;
