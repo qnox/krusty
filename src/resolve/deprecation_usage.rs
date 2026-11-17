@@ -437,7 +437,7 @@ impl Checker<'_> {
     ) {
         emit_deprecated_use(
             self.diags,
-            &self.file.deprecation_migrations,
+            &self.file.language.deprecation_migrations,
             &self.active_lexical_policies,
             span,
             used,

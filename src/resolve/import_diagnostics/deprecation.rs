@@ -34,7 +34,7 @@ pub(crate) fn check_import_deprecations(
             };
             emit_deprecated_use(
                 diags,
-                &file.deprecation_migrations,
+                &file.language.deprecation_migrations,
                 &policies,
                 import.span,
                 classifier_deprecated_use_by_identity(
@@ -48,7 +48,7 @@ pub(crate) fn check_import_deprecations(
             for &classifier in enclosing.iter().rev() {
                 emit_deprecated_use(
                     diags,
-                    &file.deprecation_migrations,
+                    &file.language.deprecation_migrations,
                     &policies,
                     import.span,
                     classifier_deprecated_use_by_identity(

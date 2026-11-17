@@ -295,7 +295,7 @@ impl Checker<'_> {
                     has_type_arguments: bound.type_arguments,
                     outer_class_type_arguments: usize::from(previous.has_type_arguments),
                     has_explicit_parent: nested
-                        || (self.file.forbid_package_qualifier_forms
+                        || (self.file.language.forbid_package_qualifier_forms
                             && matches!(bound.binding, QualifierBinding::Classifier(_))),
                 }
             };

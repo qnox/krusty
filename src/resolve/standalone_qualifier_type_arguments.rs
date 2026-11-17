@@ -37,8 +37,9 @@ impl Checker<'_> {
         if accepted {
             self.report_deprecation_error(
                 arguments.span,
-                self.file.forbid_useless_type_arguments,
+                self.file.language.forbid_useless_type_arguments,
                 self.file
+                    .language
                     .explicit_type_arguments_in_property_access_warning
                     .as_deref(),
                 DeprecationNames {

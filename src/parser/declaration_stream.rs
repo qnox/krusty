@@ -145,7 +145,10 @@ mod tests {
             &mut diagnostics,
             &features,
             |file, _| {
-                policies.push((file.enum_entries_enabled, file.prioritized_enum_entries));
+                policies.push((
+                    file.language.enum_entries_enabled,
+                    file.language.prioritized_enum_entries,
+                ));
             },
         );
 
