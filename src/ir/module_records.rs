@@ -69,6 +69,26 @@ pub struct IrModuleCallable {
     pub overridden_declarations: Box<[IrOverriddenFunction]>,
 }
 
+impl IrModuleCallable {
+    /// The parameters of the method realizing this declaration. A companion-associated
+    /// declaration's receiver names the classifier whose static scope it joins and is not one of
+    /// them; it is identified by the parameter identity parallel to it. `None` when the identities
+    /// do not line up with the parameters.
+    pub fn realized_parameters(&self) -> Option<Vec<Ty>> {
+        if !self.flags.has(crate::fir::DeclarationFlags::COMPANION) {
+            return Some(self.parameters.to_vec());
+        }
+        (self.parameters.len() == self.parameter_identities.len()).then(|| {
+            self.parameters
+                .iter()
+                .zip(&self.parameter_identities)
+                .filter(|(_, identity)| identity.role != super::IrParameterRole::ExtensionReceiver)
+                .map(|(parameter, _)| *parameter)
+                .collect()
+        })
+    }
+}
+
 /// One declaration a module callable overrides, as its override edge records it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrOverriddenFunction {

@@ -42,7 +42,6 @@ contextParameters/callableReferences/contextual/valueClassContextArg.kt
 contextParameters/contextualCallableReferenceReturnType.kt
 contextParameters/evaluationOrder.kt
 inference/selfBoundedVariableFromFunctionTypeBeforeElvisThrow.kt
-inlineClasses/contextParameterPropertyDeserialization.kt
 inlineClasses/inlineValueClassSyntax.kt
 multiplatform/k2/complexInheritanceWithDelegation.kt
 strictEquals/dataClass.kt

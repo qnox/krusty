@@ -724,10 +724,11 @@ pub(crate) fn lower_value_classes(
     // every read in the implementation gains an `unbox-impl` after the loop (kotlinc reaches the same
     // state via its lambda-class `invoke` bridge; here the unbox is fused into the impl at each use).
     let mut boxed_own_reads: Vec<(u32, u32, TypeName, Ty)> = Vec::new();
-    // User-written value-class members are realized as static `*-impl` functions over the carrier.
-    // Keep their declaration identities so return adaptation follows that realized ABI instead of the
-    // boxed-instance convention used by synthesized wrapper members.
+    // User-written value-class members, `companion { … }` block members included in `carrier_members`,
+    // are realized as static `*-impl` functions over the carrier. Keep their identities so return
+    // adaptation follows that ABI instead of the boxed convention of synthesized wrapper members.
     let mut lowered_value_members = HashSet::default();
+    let mut carrier_members = HashSet::default();
     // Functions whose physical name the mangling below changed, by stable identity.
     let mut renamed_functions = HashSet::default();
     // kotlinc names a property accessor's extension receiver after the property, not after the
@@ -762,8 +763,9 @@ pub(crate) fn lower_value_classes(
         // calls are rewritten below through their exact selected declaration identity.
         if !synthesized {
             // A top-level (facade/file-class) function has no dispatch receiver — its value-class RETURN
-            // is not mangled; a member's is.
-            let is_file_class = f.dispatch_receiver.is_none();
+            // is not mangled; a member's is, a `companion { … }` block member's included.
+            let companion_block = ir.companion_blocks.is_function(fid as u32);
+            let is_file_class = f.dispatch_receiver.is_none() && !companion_block;
             // Keep the declared signature for `@Metadata`, which names the Kotlin function and its
             // declared types — the mangling and erasure below are a JVM realization it records
             // separately. Only worth keeping when a value class is actually involved.
@@ -784,11 +786,13 @@ pub(crate) fn lower_value_classes(
             // carrier. The source name and source value parameters stay in `vc_declared_sigs` for
             // metadata.
             let lower_value_member = vc_member && !f.is_static;
+            let impl_named = lower_value_member || vc_member && companion_block;
+            carrier_members.extend(impl_named.then_some(fid as u32));
             let is_suspend = suspend_fids.contains(&(fid as u32));
             let mangled = if realized_members.accessors.contains_key(&(fid as u32)) {
                 // Already named from its declared accessor signature, before it gained the carrier.
                 source_name.clone()
-            } else if lower_value_member {
+            } else if impl_named {
                 vc_member_impl_name(
                     &source_name,
                     &orig_params[fid],
@@ -939,7 +943,7 @@ pub(crate) fn lower_value_classes(
     for function in lowered_value_members.iter().copied() {
         super::method_parameters::prepend_value_class_receiver(ir, function, "arg0");
     }
-    let static_members = realized_members.static_members(&lowered_value_members);
+    let static_members = realized_members.static_members(&carrier_members);
     // `(class, method-index)` → the value class a member's RETURN keeps BOXED. A user value-class member
     // runs on / returns the boxed object (the erasure loop above left its VC return un-erased), so its
     // `MethodCall` result is a boxed `X` — a following unboxed-slot use (`val b: X = x.inc()`) must unbox.
@@ -1170,22 +1174,11 @@ pub(crate) fn lower_value_classes(
             let record_physical = if let Some(callable) =
                 module_target.and_then(|target| ir.referenced_module_callables.get(&target))
             {
-                let (mangled, value_class_bounds) = member_names::module_call_jvm_name(
-                    member_names::ModuleCallSignature {
-                        name,
-                        parameters: &callable.parameters,
-                        type_parameters: &callable.type_parameters,
-                        result: &callable.result,
-                        suspend: callable.flags.has(krusty::fir::DeclarationFlags::SUSPEND),
-                    },
-                    member_names::ModuleCallOwner {
-                        value_class_member: callable
-                            .owner
-                            .is_some_and(|owner| module_value_classes.contains_key(&owner)),
-                        file: callable.owner.is_none(),
-                        module_default_call,
-                        semantic_default,
-                    },
+                let (mangled, value_class_bounds) = member_names::module_callable_call_name(
+                    name,
+                    callable,
+                    |owner| module_value_classes.contains_key(&owner),
+                    (module_default_call, semantic_default),
                     &callable_under,
                 );
                 *name = mangled;
@@ -1198,7 +1191,13 @@ pub(crate) fn lower_value_classes(
                     .contains_key(&(index as ExprId))
             } else {
                 if !private_accessor_calls::keeps_name(&ir.private_property_accessor_calls, index) {
-                    *name = vc_mangle(name, params, ret, &callable_under, true, false);
+                    *name = member_names::module_accessor_call_name(
+                        (name, params, ret),
+                        (&ir.module_member_accesses, &ir.referenced_module_properties),
+                        index as ExprId,
+                        |class| module_value_classes.contains_key(&class),
+                        &callable_under,
+                    );
                 }
                 false
             };

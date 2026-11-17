@@ -59,23 +59,9 @@ fn reflection_descriptor_ty(ty: Ty) -> Ty {
 fn module_declaration_reflection(
     declaration: &krusty::ir::IrModuleCallable,
 ) -> Result<(Vec<Ty>, Ty), FunctionReferenceRealizationTarget> {
-    let companion = declaration
-        .flags
-        .has(krusty::fir::DeclarationFlags::COMPANION);
-    let parameters = if companion {
-        if declaration.parameters.len() != declaration.parameter_identities.len() {
-            return Err(FunctionReferenceRealizationTarget::Invalid);
-        }
-        declaration
-            .parameters
-            .iter()
-            .zip(declaration.parameter_identities.iter())
-            .filter(|(_, identity)| identity.role != krusty::ir::IrParameterRole::ExtensionReceiver)
-            .map(|(parameter, _)| *parameter)
-            .collect()
-    } else {
-        declaration.parameters.to_vec()
-    };
+    let parameters = declaration
+        .realized_parameters()
+        .ok_or(FunctionReferenceRealizationTarget::Invalid)?;
     let parameters = super::generic_erasure::erased_callable_parameters(
         &parameters,
         &declaration.type_parameters,

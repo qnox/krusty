@@ -146,3 +146,13 @@ pub enum IrStaticPlacement {
     Package,
     CompanionBlock { declaring_class: TypeName },
 }
+
+impl IrStaticPlacement {
+    /// The class a `companion { … }` block member belongs to; `None` for a package declaration.
+    pub fn declaring_class(self) -> Option<TypeName> {
+        match self {
+            Self::Package => None,
+            Self::CompanionBlock { declaring_class } => Some(declaring_class),
+        }
+    }
+}

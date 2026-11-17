@@ -196,6 +196,39 @@ pub(super) struct ModuleCallOwner {
     pub(super) semantic_default: bool,
 }
 
+/// [`module_call_jvm_name`] of a call to the module `callable`. A `companion { … }` block member
+/// is a member of its declaring class, and its companion-associated receiver is no parameter.
+/// `is_value_class` says whether a module classifier is a value class; `default_call` is the
+/// call's `(module_default_call, semantic_default)`.
+pub(super) fn module_callable_call_name(
+    name: &str,
+    callable: &krusty::ir::IrModuleCallable,
+    is_value_class: impl Fn(TypeName) -> bool,
+    (module_default_call, semantic_default): (bool, bool),
+    under: &Under,
+) -> (String, Vec<(usize, Ty)>) {
+    let declaring = callable.owner.or(callable.placement.declaring_class());
+    let parameters = callable
+        .realized_parameters()
+        .expect("a module callable's parameter identities parallel its parameters");
+    module_call_jvm_name(
+        ModuleCallSignature {
+            name,
+            parameters: &parameters,
+            type_parameters: &callable.type_parameters,
+            result: &callable.result,
+            suspend: callable.flags.has(krusty::fir::DeclarationFlags::SUSPEND),
+        },
+        ModuleCallOwner {
+            value_class_member: declaring.is_some_and(is_value_class),
+            file: declaring.is_none(),
+            module_default_call,
+            semantic_default,
+        },
+        under,
+    )
+}
+
 pub(super) fn module_call_jvm_name(
     signature: ModuleCallSignature<'_>,
     owner: ModuleCallOwner,
@@ -319,6 +352,34 @@ pub(crate) fn member_signature_is_mangled<'a>(
 /// (`val z: T` with `T : Z?`) mangles its accessors exactly as the bound itself would.
 pub(super) fn accessor_type_is_value_class(t: &Ty, under: &Under) -> bool {
     mangling_info(t, under).is_value
+}
+
+/// JVM name of the module property accessor call `expression` makes, from its recorded access: a
+/// top-level accessor's, or, for a `companion { … }` block property, a member's of its declaring
+/// class, which a value class (`is_value_class`) names as a static implementation.
+pub(super) fn module_accessor_call_name(
+    (name, params, ret): (&str, &[Ty], &Ty),
+    (accesses, properties): (
+        &krusty::fx_hash::HashMap<krusty::ir::ExprId, krusty::ir::IrModuleMemberAccess>,
+        &krusty::fx_hash::HashMap<krusty::fir::PropertyId, krusty::ir::IrModuleProperty>,
+    ),
+    expression: krusty::ir::ExprId,
+    is_value_class: impl Fn(TypeName) -> bool,
+    under: &Under,
+) -> String {
+    let declaring = match accesses.get(&expression) {
+        Some(krusty::ir::IrModuleMemberAccess::Property { target, .. }) => properties
+            .get(target)
+            .and_then(|property| property.placement.declaring_class()),
+        _ => None,
+    };
+    match declaring {
+        Some(class) if is_value_class(class) => {
+            vc_member_impl_name(name, params, ret, under, false)
+        }
+        Some(_) => vc_mangle(name, params, ret, under, false, false),
+        None => vc_mangle(name, params, ret, under, true, false),
+    }
 }
 
 #[cfg(test)]
