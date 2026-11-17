@@ -151,11 +151,26 @@ impl Backend for WasmBackend {
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
+        // `Unit`'s value is the runtime's own, as a source reference of it is. Every enum
+        // constant is laid out with the runtime's `kotlin.Enum` base, so its members are too.
         classifier == krusty::types::wk::string()
+            || classifier == krusty::types::wk::kotlin_enum()
             || classifier == krusty::types::wk::unit()
             || lower::is_string_builder(classifier)
             || lower::is_array_list(classifier)
             || lower::runtime_lays_out(classifier)
+    }
+
+    /// The runtime's `StringBuilder` answers the `Appendable` and `CharSequence` members it
+    /// overrides (`crate::builtin_members`).
+    fn dispatched_dependency_classes(&self) -> Vec<krusty::backend::DependencyClassifier> {
+        vec![crate::string_builders::class()]
+    }
+
+    /// The WASI stdlib's `StringBuilder.append(CharSequence?)` copies the sequence's `length`
+    /// indexed `Char`s; the JS one appends its `toString` (`crate::string_builders`).
+    fn appends_char_sequences_by_index(&self) -> bool {
+        self.target == WasmTarget::Wasi
     }
 
     fn realizes_dependency_intrinsic(
@@ -163,6 +178,14 @@ impl Backend for WasmBackend {
         operation: krusty::backend::BackendCompilerIntrinsic,
     ) -> bool {
         lower::is_direct_operation(operation)
+    }
+
+    /// An array classifier's `storage` property is this target's own array storage.
+    fn realizes_dependency_getter(
+        &self,
+        signature: krusty::backend::DependencyGetterSignature<'_>,
+    ) -> bool {
+        lower::realizes_storage_getter(signature)
     }
 
     fn emitted_constructor_initializer(

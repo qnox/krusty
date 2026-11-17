@@ -49,7 +49,10 @@ pub use dependency_metadata::{
 };
 pub(crate) use dependency_metadata::{ExportedConstructor, ExportedPropertyAccessor};
 pub use dependency_metadata::{KlibClassIdentity, KlibDependencyCallable};
-pub use dependency_signature::{instantiate_dependency_signature, DependencyFunctionSignature};
+pub use dependency_signature::{
+    authenticate_dependency_coroutine_call, instantiate_dependency_signature,
+    DependencyFunctionSignature,
+};
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.
 pub use crate::ir::MainEntryParameters;
@@ -219,6 +222,23 @@ pub trait Backend {
     /// dispatch receiver, as a source call of it is; its KLIB body reads a class layout the target
     /// object does not have and is never lowered.
     fn represents_dependency_classifier(&self, _classifier: DependencyClassifier) -> bool {
+        false
+    }
+
+    /// The dependency classes this target lays out itself (each one it
+    /// [represents](Self::represents_dependency_classifier)) whose values it dispatches a call of a
+    /// supertype's member on, as it does a builtin class's: `CharSequence.length` on a
+    /// `StringBuilder`. Each selected member carries what these classes run for it, frozen from the
+    /// member hierarchy ([`crate::backend::BuiltinImplementation`]).
+    fn dispatched_dependency_classes(&self) -> Vec<DependencyClassifier> {
+        Vec::new()
+    }
+
+    /// Whether this target's `StringBuilder` appends a `CharSequence` by reading its `length` and
+    /// each indexed `Char` (Kotlin/Wasm WASI) rather than by rendering it with `toString`
+    /// (Kotlin/Wasm JS). The handoff then freezes those `CharSequence` members for the target to
+    /// call ([`CheckedBackendCallables::char_sequence_protocol`]).
+    fn appends_char_sequences_by_index(&self) -> bool {
         false
     }
 

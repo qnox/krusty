@@ -357,6 +357,31 @@ extern const KType kt_type_function20;
 extern const KType kt_type_function21;
 extern const KType kt_type_function22;
 
+/* Semantic source-arity markers for Kotlin suspend function types. */
+extern const KType kt_type_suspend_function0;
+extern const KType kt_type_suspend_function1;
+extern const KType kt_type_suspend_function2;
+extern const KType kt_type_suspend_function3;
+extern const KType kt_type_suspend_function4;
+extern const KType kt_type_suspend_function5;
+extern const KType kt_type_suspend_function6;
+extern const KType kt_type_suspend_function7;
+extern const KType kt_type_suspend_function8;
+extern const KType kt_type_suspend_function9;
+extern const KType kt_type_suspend_function10;
+extern const KType kt_type_suspend_function11;
+extern const KType kt_type_suspend_function12;
+extern const KType kt_type_suspend_function13;
+extern const KType kt_type_suspend_function14;
+extern const KType kt_type_suspend_function15;
+extern const KType kt_type_suspend_function16;
+extern const KType kt_type_suspend_function17;
+extern const KType kt_type_suspend_function18;
+extern const KType kt_type_suspend_function19;
+extern const KType kt_type_suspend_function20;
+extern const KType kt_type_suspend_function21;
+extern const KType kt_type_suspend_function22;
+
 /* Kotlin's reflection hierarchy, as far as a PROPERTY REFERENCE wears it. Each reference object
    has a type of its own — one per property — so an `is` against `KProperty0` cannot ask about that
    type and asks about these instead. The whole chain is named on each descriptor, because
@@ -674,27 +699,6 @@ kt_boolean kt_floating_range_contains(KRef range, kt_double value);
 kt_boolean kt_floating_range_is_empty(KRef range);
 kt_double kt_floating_range_start(KRef range);
 kt_double kt_floating_range_end(KRef range);
-
-/* ---- Delegates.notNull -------------------------------------------------------------------------
-
-   `var x: T by Delegates.notNull()`: one reference, and reading it before it is written is an
-   error. The NAME the error reports is handed over by the caller, read from the `KProperty`
-   operand the delegate convention passes. */
-extern const KType kt_type_not_null_var;
-
-KRef kt_not_null_var(void);
-/* `Delegates.observable(initial) { property, old, new -> … }`: the value and a callback run after
-   each write. The `KProperty` is passed along, never read, which is what lets this carry it without
-   any reflection. */
-extern const KType kt_type_observable;
-KRef kt_observable(KRef initial, KRef on_change);
-/* The two entry points a `ReadWriteProperty` receiver reaches; the DESCRIPTOR says which delegate
-   it is, no static type separating them. `get` takes the property's NAME, the only thing it can
-   need (the text of a `notNull` read-before-write error); `set` takes the PROPERTY, which an
-   observable passes to its callback. Any object other than those two delegates ends the program
-   with a message naming its descriptor. */
-KRef kt_rw_property_get(KRef self, KRef name);
-void kt_rw_property_set(KRef self, KRef property, KRef value);
 
 /* ---- comparable ranges ------------------------------------------------------------------------
 
@@ -1063,6 +1067,7 @@ KRef kt_throwable_new_defaulted(const KType *type);
 /* `kotlin.Result`'s failed state, and kotlin-test's `checkResultIsFailure` over one. */
 extern const KType kt_type_result_failure;
 KRef kt_result_failure_new(KRef exception);
+KRef kt_result_failure_exception(KRef failure);
 KRef kt_check_result_is_failure(KRef expected, KRef message, KRef result);
 /* A `Result` held where its class is not known statically, and the value back out of one. */
 extern const KType kt_type_result;
@@ -1349,6 +1354,23 @@ KRef kt_read_line_or_throw(void);
 
 typedef struct KThread KThread;
 
+/* Explicit embedding lifetime. A foreign host calls begin once at OS-thread routine entry, and
+   end with its returned token after the routine's final callback, immediately before thread exit.
+   Both run outside Kotlin, without holding the mutator lock. Begin is not nestable and rejects
+   an existing registration; the token is valid only until its one matching end on the same thread.
+   They do not detect OS exit and must not bracket individual callbacks. Main and kt_thread_start
+   threads are already managed and must not be registered or ended by the host.
+   Unregistered hosts retain the existing temporary callback behavior, without persistent slots. */
+KThread *kt_thread_lifetime_begin(void);
+void kt_thread_lifetime_end(KThread *thread);
+
+/* A declaration's reference slot in the current managed/registered OS-thread lifetime. The caller
+   holds the mutator lock. The nonnull token must identify the same exact declaration in every
+   module; the runtime never interprets it. The stable zero-initialized slot is a GC root until
+   the declared thread end, including gaps between callbacks. Allocation/initialization of its
+   value belongs to the caller. An unregistered temporary callback cannot use this operation. */
+KRef *kt_thread_object_slot(const void *canonical_declaration_token);
+
 /* Release the lock for a call into foreign code, recording the caller's callee-saved registers and
    stack pointer so its frames stay roots while it is away. Pass the answer to `kt_native_leave`
    when the foreign call returns. */
@@ -1360,6 +1382,8 @@ typedef struct KThreadEntry {
     KThread *thread;
     /* Whether this entry attached the thread, and so detaches it on the way out. */
     bool attached;
+    /* An explicitly registered thread was outside every callback, with no Kotlin stack. */
+    bool outer_dormant;
     /* A thread that was already attached, in a `kt_native_enter`: its released state, put back on
        the way out. */
     uintptr_t outer_registers[KT_SAVED_REGISTERS];
@@ -1369,7 +1393,8 @@ typedef struct KThreadEntry {
 
 /* Enter Kotlin from foreign code, taking the lock. `stack_bottom` is the address of a local in the
    caller's frame, above every Kotlin frame the callback will run; it matters only for a thread the
-   runtime has not seen, which is attached for the callback's duration. */
+   runtime has not seen, which is attached for the callback's duration, or a registered
+   thread reentering after its previous callback returned. */
 void kt_callback_enter(KThreadEntry *entry, void *stack_bottom);
 
 /* Leave Kotlin for the foreign code that called in, releasing the lock. An exception the callback

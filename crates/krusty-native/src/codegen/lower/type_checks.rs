@@ -79,12 +79,15 @@ impl<'a> FileLowering<'a> {
         base: &str,
     ) -> Result<(DataId, Option<String>), Unsupported> {
         // A support unit names the descriptors of the dependency classes a source file extends,
-        // which that file's descriptors point at as their superclass's.
+        // which that file's descriptors point at as their superclass's, and of the objects whose
+        // single instance it hands to other files, which may ask that instance its class.
         let named = match self.unit_kind {
             krusty::backend::CheckedIrUnitKind::Source => {
                 !self.ir.local_class_name_provenance.contains_key(&class)
             }
-            krusty::backend::CheckedIrUnitKind::DependencySupport => self.exported.contains(&class),
+            krusty::backend::CheckedIrUnitKind::DependencySupport => {
+                self.exported.contains(&class) || self.exports_singleton(class)
+            }
         };
         if !named {
             let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
@@ -99,6 +102,17 @@ impl<'a> FileLowering<'a> {
             .declare_data(&symbol, Linkage::Hidden, false, false)
             .map_err(|error| declined!("declaring `{symbol}` ({error})"))?;
         Ok((descriptor, Some(symbol)))
+    }
+
+    /// Whether this unit exports the entry answering `class`'s single instance.
+    fn exports_singleton(&self, class: ClassId) -> bool {
+        let object = krusty::backend::instance_links::InstanceEntry::Object(
+            self.ir.classes[class as usize].fq_name_id(),
+        );
+        self.dependency_signatures
+            .instance_entries()
+            .iter()
+            .any(|(instance, _)| *instance == object)
     }
 
     /// The runtime descriptor for a represented type: a class of this file or of another file of
@@ -133,6 +147,13 @@ impl<'a> FileLowering<'a> {
                 let symbol = symbol.to_owned();
                 return self.import_data(&symbol).map(Some);
             }
+        }
+        // The companion object of a built-in type is the runtime's, with a descriptor of its own.
+        if let Some(symbol) = target
+            .obj_internal()
+            .and_then(super::super::super::intrinsics::builtin_companion_descriptor)
+        {
+            return self.import_data(symbol).map(Some);
         }
         let symbol = match target {
             Ty::String => "kt_type_string",
@@ -388,6 +409,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
     }
 
+    /// A safe cast uses the same semantic function membership as `is`. A non-safe `as` remains a
+    /// physical cast, which is why it continues through `checked_cast_target` below.
+    fn safe_cast_target(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
+        let role_ty = match ty.non_null().kind() {
+            TyKind::TyParam(_, bound) => bound,
+            _ => ty,
+        };
+        match self.file.ir.type_check_role(role_ty.non_null()) {
+            Some(TypeCheckRole::FunctionOfArity(_))
+            | Some(TypeCheckRole::SuspendFunctionOfArity(_)) => self.instance_check_descriptor(ty),
+            _ => self.checked_cast_target(ty),
+        }
+    }
+
     /// The `is` checks Kotlin settles by the type alone — `Nothing`, which has no instances, and
     /// `Any`, which every non-`null` value is one of — and `None` when the question really is
     /// about the object.
@@ -630,7 +665,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.checked_object(checked, type_operand)
             }
             IrTypeOp::SafeCast => {
-                let Some(descriptor) = self.checked_cast_target(type_operand)? else {
+                let Some(descriptor) = self.safe_cast_target(type_operand)? else {
                     return Err(declined!("an `as?` to `{}`", type_name_of(type_operand)));
                 };
                 let Some(object) = self.receiver(arg)? else {

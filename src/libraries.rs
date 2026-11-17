@@ -1410,6 +1410,18 @@ pub struct FunctionInfo {
     /// Provider-owned override-slot identity for declarations whose platform compatibility differs
     /// from their source-language signature. This is distinct from the physical emit handle.
     pub(crate) provider_override_slot: Option<ProviderOverrideSlot>,
+    /// How this declaration's declaring language matches its inputs against an inherited
+    /// declaration's, when that differs from how calls see them. Parallel to
+    /// [`Self::semantic_params`]: a `Some` slot matches an inherited input of exactly that
+    /// classifier, whatever its arguments, as kotlinc's Java override checker matches a raw Java
+    /// `AtomicReference` with a Kotlin `AtomicReference<Int>` by their JVM erasure while callers
+    /// still pass a Java `AtomicReference`; a `None` slot compares as usual. The relation is
+    /// one-directional, so an inherited declaration is always compared by its own inputs.
+    pub(crate) override_inputs: Option<Box<[Option<TypeName>]>>,
+    /// The declaring language has no extension receivers (Java), so its provider publishes that
+    /// this member overrides an inherited Kotlin extension by taking the receiver as its first
+    /// parameter, as kotlinc's Java override checker matches them.
+    pub(crate) receiver_as_first_parameter: bool,
     /// Provider-normalized receiver-less declaration in a classifier's static namespace. The
     /// checker uses this only as source call shape; target realization remains on the callable.
     pub classifier_static: bool,
@@ -1694,6 +1706,8 @@ impl FunctionInfo {
             kind,
             source_inputs: None,
             provider_override_slot: None,
+            override_inputs: None,
+            receiver_as_first_parameter: false,
             classifier_static: false,
             associated_classifier: None,
             associated_access_owner: None,

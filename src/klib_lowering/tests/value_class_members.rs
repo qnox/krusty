@@ -65,20 +65,44 @@ fn a_value_class_member_is_a_member_of_its_class_reading_the_value_through_its_f
         "scope {scope {return@Some(0) Lt(call v0!: kotlin/time/Duration.<get-rawValue>(): Long, \
          ImplicitCoercion<Long>(Int(0): Int): Long): Boolean: Nothing}: Nothing}"
     );
+    // The unit laying out the class exports its box construction, so a later or nested unit
+    // constructing a `Duration` calls it instead of materializing the class again.
+    let [(&box_entry, &boxed)] = ir.construction_entries.iter().collect::<Vec<_>>()[..] else {
+        panic!("the unit declares the class's one box construction");
+    };
+    assert_eq!(boxed, 0);
+    let entry = &ir.functions[box_entry as usize];
+    assert_eq!(
+        (
+            entry.params.as_slice(),
+            entry.ret,
+            entry.is_static,
+            entry.dispatch_receiver
+        ),
+        (
+            &[Ty::Long][..],
+            ir.declared_class_self_type(type_name("kotlin/time/Duration"))
+                .expect("the laid-out class's self type"),
+            true,
+            None
+        )
+    );
     // The private getter no provider records is emitted as its class's other members are.
     let [getter] = (0..ir.functions.len() as FunId)
-        .filter(|&id| id != function)
+        .filter(|&id| id != function && id != box_entry)
         .collect::<Vec<_>>()[..]
     else {
-        panic!("the unit emits the member and the getter it calls alone");
+        panic!("the unit emits the member, the getter it calls and the box construction alone");
     };
-    // Only the member is a function callers outside the unit can name.
-    assert_eq!(
-        unit.callable_functions()
-            .map(|(_, function)| function)
-            .collect::<Vec<_>>(),
-        [function]
-    );
+    // The member and the box construction are the functions callers outside the unit can name.
+    let mut callable = unit
+        .callable_functions()
+        .map(|(_, function)| function)
+        .collect::<Vec<_>>();
+    callable.sort_unstable();
+    let mut expected = vec![function, box_entry];
+    expected.sort_unstable();
+    assert_eq!(callable, expected);
     let declared = &ir.functions[getter as usize];
     assert_eq!(
         (

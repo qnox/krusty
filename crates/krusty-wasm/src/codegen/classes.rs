@@ -295,6 +295,9 @@ pub(super) struct FileClasses {
     /// How each class implements each member of a dependency's interface, as interface recording
     /// found it.
     pub(super) dependency_implementations: Vec<Vec<(MemberRef, DependencyImplementation)>>,
+    /// Checked callable arities, independent of whether their method adapters were emitted.
+    pub(super) function_arities: Vec<Vec<usize>>,
+    pub(super) suspend_function_arities: Vec<Vec<usize>>,
     /// Why a class with no instances of its own cannot be extended by a later file: what its
     /// table or interface entries needed that this form does not provide.
     pub(super) refusals: Vec<Option<Unsupported>>,
@@ -584,10 +587,13 @@ impl FileClasses {
                         interfaces: self.tables.interface_tables.implemented[id as usize].clone(),
                         interface_entries: self.tables.interface_tables.members[id as usize]
                             .clone(),
+                        members: self.tables.members[id as usize].clone(),
                     },
                     interface_bodies: self.interface_bodies[id as usize].clone(),
                     dependency_implementations: self.dependency_implementations[id as usize]
                         .clone(),
+                    function_arities: self.function_arities[id as usize].clone(),
+                    suspend_function_arities: self.suspend_function_arities[id as usize].clone(),
                     refusal: self.refusals[id as usize].clone(),
                 },
             ));
@@ -703,6 +709,42 @@ pub(super) fn module_plan(
     )
 }
 
+/// The table of `record`, a class an earlier file laid out, as a class of `ir` extending it reads
+/// it. A dependency member is numbered by its declaration, which `ir` names by callable identities
+/// of its own module: each one an override edge of `ir` names finds its slot through the member's
+/// declaration identity, not through the identity another module's file gave it.
+fn inherited_table(
+    record: &LaidOutClass,
+    ir: &IrFile,
+    callables: &krusty::backend::CheckedBackendCallables,
+) -> LaidOutSuperclass {
+    use krusty::backend::class_tables::module_slots::PlanKey;
+    let mut table = record.table.clone();
+    table
+        .members
+        .retain(|member, _| !matches!(member, PlanKey::DependencyCallable(_)));
+    let overridden =
+        ir.function_overrides
+            .values()
+            .flatten()
+            .filter_map(|edge| match edge.overridden {
+                krusty::fir::ResolvedFunctionOverrideTarget::External(target) => Some(target),
+                krusty::fir::ResolvedFunctionOverrideTarget::Module(_) => None,
+            });
+    for target in overridden {
+        let Some(declaration) = callables.declaration_identity(target) else {
+            continue;
+        };
+        let identity = krusty::backend::interface_identity::member_identity(declaration);
+        if let Some(&slot) = record.declaration_slots.get(&identity) {
+            table
+                .members
+                .insert(PlanKey::DependencyCallable(target), slot);
+        }
+    }
+    table
+}
+
 /// Reject, by name, a class this form does not lay out.
 fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     let class = &ir.classes[id as usize];
@@ -723,16 +765,106 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     // Stored by-value captures use the same checked pre-super field transport.
     } else if !constructor_prefix::supported(ir, id) {
         "a class capturing its surroundings"
-    } else if class
-        .supertypes
-        .iter()
-        .any(|supertype| supertype.non_null().is_fun())
-    {
-        "a class implementing a function type"
     } else {
         return Ok(());
     };
     Err(format!("{construct} (`{name}`)"))
+}
+
+/// A function invocation override is accepted only when its frozen owner role, source arity,
+/// suspend bit, and semantic role all agree. Both arrow and nominal supertypes use this predicate.
+fn has_checked_function_invoke(
+    ir: &IrFile,
+    classifiers: &dyn BackendClassifierSource,
+    id: ClassId,
+    expected_owner: Option<TypeName>,
+    arity: usize,
+    suspend: bool,
+) -> bool {
+    let class = &ir.classes[id as usize];
+    let Ok(arity) = u8::try_from(arity) else {
+        return false;
+    };
+    let expected_role = if suspend {
+        krusty::types::ClassifierRole::SuspendFunctionOfArity(arity)
+    } else {
+        krusty::types::ClassifierRole::FunctionOfArity(arity)
+    };
+    ir.function_overrides
+        .get(&class.fq_name_id())
+        .into_iter()
+        .flatten()
+        .any(|edge| {
+            expected_owner.is_none_or(|owner| edge.overridden_owner == owner)
+                && classifiers
+                    .classifier(edge.overridden_owner)
+                    .is_some_and(|fact| fact.role == Some(expected_role))
+                && edge.overridden_is_interface
+                && matches!(
+                    edge.overridden,
+                    krusty::fir::ResolvedFunctionOverrideTarget::External(_)
+                )
+                && edge.overridden_semantic_role
+                    == Some(krusty::types::SemanticCallRole::KotlinFunctionInvoke)
+                && edge.declared_parameters.len() == usize::from(arity)
+                && edge.suspend == suspend
+        })
+}
+
+/// Require a checked invocation edge for every function-type supertype, whichever spelling the
+/// source used. The checked edge authenticates the implementation; the frozen classifier role
+/// authenticates the function family and its source arity.
+fn check_function_invocation_support(
+    ir: &IrFile,
+    classifiers: &dyn BackendClassifierSource,
+    id: ClassId,
+) -> Result<(), Unsupported> {
+    let class = &ir.classes[id as usize];
+    // An interface has no instances to invoke: a class implementing it is the one that must
+    // carry the checked invocation, and it is checked as that class's own supertype.
+    if class.is_interface {
+        return Ok(());
+    }
+    for supertype in &class.supertypes {
+        if let krusty::types::TyKind::Fun(signature) = supertype.non_null().kind() {
+            if !has_checked_function_invoke(
+                ir,
+                classifiers,
+                id,
+                None,
+                signature.params.len(),
+                signature.suspend,
+            ) {
+                return Err(format!(
+                    "a class implementing a function type without its checked invocation (`{}`)",
+                    class.fq_name()
+                ));
+            }
+            continue;
+        }
+        let Some(owner) = supertype.non_null().obj_internal() else {
+            continue;
+        };
+        let Some(fact) = classifiers.classifier(owner) else {
+            continue;
+        };
+        let (arity, suspend) = match fact.role {
+            Some(krusty::types::ClassifierRole::FunctionOfArity(arity)) => {
+                (usize::from(arity), false)
+            }
+            Some(krusty::types::ClassifierRole::SuspendFunctionOfArity(arity)) => {
+                (usize::from(arity), true)
+            }
+            _ => continue,
+        };
+        if !has_checked_function_invoke(ir, classifiers, id, Some(owner), arity, suspend) {
+            return Err(format!(
+                "a function classifier supertype without its checked invocation (`{}`)",
+                class.fq_name()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Reject a class overriding a runtime exception's property. Its message and cause are fields the
@@ -773,6 +905,8 @@ pub(super) struct BeyondFile<'a> {
     pub(super) plan: &'a ModuleSlotPlan,
     /// The classes earlier files of the module laid out.
     pub(super) laid_out: &'a LaidOutClasses,
+    /// The dependency declarations this file's callable identities stand for.
+    pub(super) callables: &'a krusty::backend::CheckedBackendCallables,
 }
 
 pub(super) fn declare(
@@ -788,16 +922,22 @@ pub(super) fn declare(
         classifiers,
         plan,
         laid_out,
+        callables,
     } = beyond;
     for class in 0..ir.classes.len() {
         check_supported(ir, class as ClassId)?;
+        check_function_invocation_support(ir, classifiers, class as ClassId)?;
         check_exception_storage(ir, classifiers, class as ClassId)?;
     }
     let tables = class_tables::build_numbered(
         &WasmRepresentation { classifiers },
         ir,
         plan,
-        &|superclass| laid_out.get(superclass).map(|record| record.table.clone()),
+        &|superclass| {
+            laid_out
+                .get(superclass)
+                .map(|record| inherited_table(record, ir, callables))
+        },
     )?;
     let superclasses: HashMap<TypeName, LaidOutClass> = tables
         .tables
@@ -1058,6 +1198,8 @@ pub(super) fn declare(
         ancestors: ancestry,
         interface_bodies: vec![HashMap::default(); classes],
         dependency_implementations: vec![Vec::new(); classes],
+        function_arities: vec![Vec::new(); classes],
+        suspend_function_arities: vec![Vec::new(); classes],
         refusals,
     })
 }

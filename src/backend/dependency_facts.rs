@@ -21,7 +21,7 @@ use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
 
 pub use crate::fir::BuiltinImplementation;
-use crate::fir::{ExternalCallableId, ExternalPropertyId};
+use crate::fir::{CharSequenceProtocol, ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
 /// A dependency classifier a target may represent itself
@@ -577,6 +577,7 @@ mod tests {
                 vec![Ty::String, Ty::Float]
             },
             result: Ty::Long,
+            substitutions: Vec::new(),
             source_receiver: None,
         }
     }
@@ -623,6 +624,7 @@ mod tests {
             arguments: vec![20, 30],
             parameters: vec![Ty::String, Ty::Int],
             result: Ty::Unit,
+            substitutions: Vec::new(),
             source_receiver: None,
         };
         let access = facts.dependency_accessor(&operation).unwrap();
@@ -636,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_accessors_do_not_invent_setters_or_generic_substitutions() {
+    fn dependency_accessors_require_exact_generic_substitutions() {
         let mut facts = accessor_facts();
         let mut operation = property_read(Some(10));
         if let crate::ir::IrCheckedOperation::ExternalPropertyRead { dispatch, .. } = &mut operation
@@ -666,15 +668,102 @@ mod tests {
             ret: Ty::Long,
             return_policy: Default::default(),
         }));
-        let operation = property_read(Some(10));
-        assert_eq!(
+        let mut operation = property_read(Some(10));
+        let crate::ir::IrCheckedOperation::ExternalPropertyRead { substitutions, .. } =
+            &mut operation
+        else {
+            unreachable!()
+        };
+        *substitutions = vec![crate::ir::IrCheckedSubstitution {
+            parameter: crate::fir::FirTypeParameterRef::External {
+                callable: ExternalCallableId::from_raw(1),
+                ordinal: 0,
+            },
+            reified: false,
+            value: Ty::Int,
+            reified_runtime: Ty::Int,
+            additional_bounds: Vec::new(),
+        }];
+        assert!(matches!(
             facts
                 .dependency_accessor(&operation)
                 .unwrap()
                 .callee()
-                .unwrap_err(),
-            "a dependency property without checked generic substitutions"
-        );
+                .unwrap(),
+            crate::ir::Callee::External { substitutions, .. } if substitutions.len() == 1
+        ));
+        let crate::ir::IrCheckedOperation::ExternalPropertyRead { substitutions, .. } =
+            &mut operation
+        else {
+            unreachable!()
+        };
+        substitutions[0].parameter = crate::fir::FirTypeParameterRef::External {
+            callable: ExternalCallableId::from_raw(2),
+            ordinal: 0,
+        };
+        assert!(facts
+            .dependency_accessor(&operation)
+            .unwrap()
+            .callee()
+            .is_err());
+
+        // A write is authenticated against the selected setter, not the property's getter. The
+        // two accessors can each own ordinal zero, but those are different declaration formals.
+        facts
+            .callables
+            .get_mut(&ExternalCallableId::from_raw(2))
+            .unwrap()
+            .generic_sig = Some(Box::new(GenericSig {
+            formals: vec![crate::types::TyParamName::new("setter-T")],
+            formal_bounds: vec![Vec::new()],
+            receiver: None,
+            params: vec![Ty::Int],
+            ret: Ty::Unit,
+            return_policy: Default::default(),
+        }));
+        let mut operation = crate::ir::IrCheckedOperation::ExternalPropertyWrite {
+            target: ExternalPropertyId::from_raw(0),
+            dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+            receiver: Some(10),
+            arguments: vec![20, 30],
+            parameters: vec![Ty::String, Ty::Int],
+            result: Ty::Unit,
+            substitutions: vec![crate::ir::IrCheckedSubstitution {
+                parameter: crate::fir::FirTypeParameterRef::External {
+                    callable: ExternalCallableId::from_raw(2),
+                    ordinal: 0,
+                },
+                reified: false,
+                value: Ty::String,
+                reified_runtime: Ty::String,
+                additional_bounds: Vec::new(),
+            }],
+            source_receiver: None,
+        };
+        assert!(matches!(
+            facts
+                .dependency_accessor(&operation)
+                .unwrap()
+                .callee()
+                .unwrap(),
+            crate::ir::Callee::External { target, substitutions, .. }
+                if target == ExternalCallableId::from_raw(2) && substitutions.len() == 1
+        ));
+        let crate::ir::IrCheckedOperation::ExternalPropertyWrite { substitutions, .. } =
+            &mut operation
+        else {
+            unreachable!()
+        };
+        substitutions[0].parameter = crate::fir::FirTypeParameterRef::External {
+            callable: ExternalCallableId::from_raw(1),
+            ordinal: 0,
+        };
+        assert!(facts
+            .dependency_accessor(&operation)
+            .unwrap()
+            .callee()
+            .is_err());
+
         facts
             .properties
             .get_mut(&ExternalPropertyId::from_raw(0))
@@ -687,6 +776,7 @@ mod tests {
             arguments: vec![20, 30],
             parameters: vec![Ty::String, Ty::Int],
             result: Ty::Unit,
+            substitutions: Vec::new(),
             source_receiver: None,
         };
         assert!(facts.dependency_accessor(&operation).is_none());
@@ -791,6 +881,21 @@ struct SingletonEdge {
     class_contract: Option<crate::libraries::KlibBodyClassContract>,
 }
 
+/// The physical method header of a dependency member, as its provider realized it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DependencyMemberHeader {
+    pub physical_owner: TypeName,
+    pub name: String,
+    pub physical_name: Option<String>,
+    pub descriptor: String,
+}
+
+impl DependencyMemberHeader {
+    pub fn physical_name(&self) -> &str {
+        self.physical_name.as_deref().unwrap_or(&self.name)
+    }
+}
+
 /// The frozen dependency facts of one checked file. It holds a fact for every dependency callable
 /// and property identity the file's IR references, including the accessors of each property.
 #[derive(Debug, Default)]
@@ -798,6 +903,9 @@ pub struct CheckedBackendCallables {
     callables: HashMap<ExternalCallableId, BackendCallableFact>,
     /// Header-only declaration identities never participate in executable dependency closure.
     member_declarations: HashMap<ExternalCallableId, KlibDependencyCallable>,
+    /// The method headers of dependency members a target compares by signature only (a member
+    /// slot's declarations): never called, so never an executable dependency or a dispatch.
+    member_headers: HashMap<ExternalCallableId, DependencyMemberHeader>,
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
     /// The checker-owned immutable snapshot of this file's reached KLIB declarations.
     klib_dependency_facts: crate::ir::CheckedKlibDependencyFacts,
@@ -806,6 +914,7 @@ pub struct CheckedBackendCallables {
     /// The runtime declarations native plugins selected at the handoff for their generated code,
     /// with the parameters a plugin's transform appended to each.
     plugin_runtime: HashMap<ExternalCallableId, Box<[Ty]>>,
+    char_sequence_protocol: Option<CharSequenceProtocol>,
 }
 
 impl CheckedBackendCallables {
@@ -963,7 +1072,60 @@ impl CheckedBackendCallables {
                 .map(|declaration| declaration.dependency_callable)
                 .ok_or(DependencyFactError::UnknownCallable(identity))
         })?;
+        facts.freeze_member_headers(ir, provider)?;
         Ok(facts)
+    }
+
+    /// Freeze the header of every dependency member of the file's member slots that the file does
+    /// not otherwise reference. A slot member is declaration evidence only: a target compares its
+    /// method header and never calls it.
+    fn freeze_member_headers(
+        &mut self,
+        ir: &crate::ir::IrFile,
+        provider: &dyn SymbolSource,
+    ) -> Result<(), DependencyFactError> {
+        let identities = ir
+            .function_slot_families
+            .values()
+            .flatten()
+            .flat_map(|family| family.slots.iter().flatten())
+            .filter_map(|function| match function.target {
+                crate::fir::ResolvedFunctionOverrideTarget::External(identity) => Some(identity),
+                crate::fir::ResolvedFunctionOverrideTarget::Module(_) => None,
+            });
+        for identity in identities {
+            if self.callables.contains_key(&identity) || self.member_headers.contains_key(&identity)
+            {
+                continue;
+            }
+            let callable = provider
+                .external_callable(identity)
+                .ok_or(DependencyFactError::UnknownCallable(identity))?
+                .callable;
+            self.member_headers.insert(
+                identity,
+                DependencyMemberHeader {
+                    physical_owner: callable.owner,
+                    name: callable.name,
+                    physical_name: callable.physical_name,
+                    descriptor: callable.descriptor,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// The physical header of a dependency member the file references or compares.
+    pub fn member_header(&self, identity: ExternalCallableId) -> Option<DependencyMemberHeader> {
+        match self.callables.get(&identity) {
+            Some(callable) => Some(DependencyMemberHeader {
+                physical_owner: callable.physical_owner,
+                name: callable.name.clone(),
+                physical_name: callable.physical_name.clone(),
+                descriptor: callable.descriptor.clone(),
+            }),
+            None => self.member_headers.get(&identity).cloned(),
+        }
     }
 
     fn freeze_declaration_identities(
@@ -1005,48 +1167,10 @@ impl CheckedBackendCallables {
     ) -> Result<Self, DependencyFactError> {
         let referenced = references::referenced_dependencies(ir);
         let mut facts = Self::default();
-        let mut callable = |identity| provider.external_callable(identity);
         for property in referenced.properties {
-            let realization = provider
-                .external_property(property)
-                .ok_or(DependencyFactError::UnknownProperty(property))?;
-            let compile_time_constant = realization
-                .compile_time_constant
-                .as_ref()
-                .map(|constant| {
-                    crate::ir::IrConst::from_library_constant(constant)
-                        .ok_or(DependencyFactError::InvalidPropertyConstant(property))
-                })
-                .transpose()?;
-            let owner = facts
-                .freeze_callable(realization.getter, &mut callable)?
-                .physical_owner;
-            let getter = provider
-                .external_callable(realization.getter)
-                .ok_or(DependencyFactError::UnknownCallable(realization.getter))?
-                .callable;
-            let result = getter
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.ret)
-                .or(getter.declared_ret)
-                .unwrap_or(getter.ret);
-            if let Some(setter) = realization.setter {
-                facts.freeze_callable(setter, &mut callable)?;
-            }
-            facts.properties.insert(
-                property,
-                BackendPropertyFact {
-                    name: realization.name.into_boxed_str(),
-                    getter: realization.getter,
-                    setter: realization.setter,
-                    owner,
-                    result,
-                    declares_value_class_storage: realization.declares_value_class_storage,
-                    compile_time_constant,
-                },
-            );
+            facts.freeze_property(property, provider)?;
         }
+        let callable = |identity| provider.external_callable(identity);
         facts.freeze_callables(referenced.callables, callable)?;
         let mut singleton_dispatches = ir
             .external_singleton_dispatches
@@ -1080,6 +1204,77 @@ impl CheckedBackendCallables {
             }
         }
         Ok(facts)
+    }
+
+    /// Freeze the dependency property `property` with its accessors.
+    fn freeze_property(
+        &mut self,
+        property: ExternalPropertyId,
+        provider: &dyn SymbolSource,
+    ) -> Result<(), DependencyFactError> {
+        let mut callable = |identity| provider.external_callable(identity);
+        let realization = provider
+            .external_property(property)
+            .ok_or(DependencyFactError::UnknownProperty(property))?;
+        let compile_time_constant = realization
+            .compile_time_constant
+            .as_ref()
+            .map(|constant| {
+                crate::ir::IrConst::from_library_constant(constant)
+                    .ok_or(DependencyFactError::InvalidPropertyConstant(property))
+            })
+            .transpose()?;
+        let owner = self
+            .freeze_callable(realization.getter, &mut callable)?
+            .physical_owner;
+        let getter = provider
+            .external_callable(realization.getter)
+            .ok_or(DependencyFactError::UnknownCallable(realization.getter))?
+            .callable;
+        let result = getter
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.ret)
+            .or(getter.declared_ret)
+            .unwrap_or(getter.ret);
+        if let Some(setter) = realization.setter {
+            self.freeze_callable(setter, &mut callable)?;
+        }
+        self.properties.insert(
+            property,
+            BackendPropertyFact {
+                name: realization.name.into_boxed_str(),
+                getter: realization.getter,
+                setter: realization.setter,
+                owner,
+                result,
+                declares_value_class_storage: realization.declares_value_class_storage,
+                compile_time_constant,
+            },
+        );
+        Ok(())
+    }
+
+    /// Freeze the `CharSequence` members resolution selected for a target whose `StringBuilder`
+    /// reads an appended sequence through them
+    /// ([`crate::backend::Backend::appends_char_sequences_by_index`]); no source call need name
+    /// them.
+    pub(crate) fn freeze_char_sequence_protocol(
+        &mut self,
+        protocol: CharSequenceProtocol,
+        provider: &dyn SymbolSource,
+    ) -> Result<(), DependencyFactError> {
+        self.freeze_property(protocol.length, provider)?;
+        let mut callable = |identity| provider.external_callable(identity);
+        self.freeze_callable(protocol.get, &mut callable)?;
+        self.char_sequence_protocol = Some(protocol);
+        Ok(())
+    }
+
+    /// The `CharSequence` members the handoff froze for a target that appends a sequence through
+    /// them; `None` for every other target.
+    pub fn char_sequence_protocol(&self) -> Option<CharSequenceProtocol> {
+        self.char_sequence_protocol
     }
 
     /// Copy checker-produced builtin implementation facts for every selected external member.

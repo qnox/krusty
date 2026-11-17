@@ -130,6 +130,16 @@ pub(in crate::codegen) fn dispatches_through_library_member(
         && any_members::call_member(ir, callables, expression).is_none()
 }
 
+/// The library member a call goes through: its KLIB identity, how the call reaches it, and the
+/// Kotlin name of the declaration its overrides share.
+struct LibraryMember {
+    identity: Vec<u8>,
+    role: MemberRole,
+    name: String,
+    /// Whether the member is `KCallable.name`, which every callable-reference object answers.
+    reference_name: bool,
+}
+
 /// Whether `property` is `KCallable.name`, which every callable-reference object implements
 /// (`crate::callable_references`).
 fn is_reference_name(property: &BackendPropertyFact) -> bool {
@@ -155,54 +165,86 @@ impl Body<'_> {
         id: u32,
         node: &IrExpr,
     ) -> Option<Result<(), Unsupported>> {
-        let (target, receiver, args, (property, role)) = match node {
-            IrExpr::Call {
-                callee,
-                dispatch_receiver: Some(receiver),
-                args,
-            } => {
-                let Callee::External {
-                    target,
-                    defaults,
-                    extension_receiver_parameter: None,
-                    ..
-                } = &**callee
-                else {
-                    return None;
-                };
-                if !defaults.is_empty() {
-                    return None;
-                }
-                (
-                    *target,
-                    *receiver,
-                    args.as_slice(),
-                    (None, MemberRole::Function),
-                )
-            }
-            IrExpr::Checked(operation) => {
-                let access = self.callables.dependency_accessor(operation)?;
-                let receiver = access.receiver?;
-                if !access.dispatches() || access.callable.is_member_extension() {
-                    return None;
-                }
-                (
-                    access.target,
-                    receiver,
-                    access.arguments,
+        // A function's overrides are named by the function, an accessor's by its property.
+        let (target, receiver, args, (property, role), generic_accessor, member_extension) =
+            match node {
+                IrExpr::Call {
+                    callee,
+                    dispatch_receiver: Some(receiver),
+                    args,
+                } => {
+                    let Callee::External {
+                        target,
+                        defaults,
+                        extension_receiver_parameter: None,
+                        ..
+                    } = &**callee
+                    else {
+                        return None;
+                    };
+                    if !defaults.is_empty() {
+                        return None;
+                    }
                     (
-                        Some(access.property),
-                        if access.writes() {
-                            MemberRole::Setter
-                        } else {
-                            MemberRole::Getter
-                        },
-                    ),
-                )
-            }
-            _ => return None,
-        };
+                        *target,
+                        *receiver,
+                        args.as_slice(),
+                        (None, MemberRole::Function),
+                        false,
+                        false,
+                    )
+                }
+                IrExpr::Checked(operation) => {
+                    let access = self.callables.dependency_accessor(operation)?;
+                    let receiver = access.receiver?;
+                    // A generic getter's instantiated virtual frame is checked below; a setter goes
+                    // through the published-class path.
+                    let generic_accessor = !access.writes()
+                        && (!access.substitutions().is_empty()
+                            || access
+                                .callable
+                                .generic_sig
+                                .as_ref()
+                                .is_some_and(|signature| !signature.formals.is_empty()));
+                    if !access.dispatches() {
+                        return None;
+                    }
+                    (
+                        access.target,
+                        receiver,
+                        access.arguments,
+                        (
+                            Some(access.property),
+                            if access.writes() {
+                                MemberRole::Setter
+                            } else {
+                                MemberRole::Getter
+                            },
+                        ),
+                        generic_accessor,
+                        access.callable.is_member_extension(),
+                    )
+                }
+                _ => return None,
+            };
         let fact = self.callables.callable(target)?;
+        if generic_accessor
+            && (member_extension
+                || (matches!(fact.kind, ExternalCallableKind::Member)
+                    && fact.member_realization == MemberRealization::Dispatch
+                    && fact.compiler_operation().is_none()))
+        {
+            // Whether an export exists must not decide virtual semantics. The direct dependency
+            // body path below cannot instantiate this generic accessor's virtual frame, so do not
+            // let it bypass a possible override.
+            return Some(Err(
+                "a generic dependency member getter whose instantiated virtual interface call is unsupported"
+                    .into(),
+            ));
+        }
+        if member_extension {
+            return None;
+        }
         if target_owns_call(self.ir, self.callables, id, fact) {
             return None;
         }
@@ -233,16 +275,43 @@ impl Body<'_> {
                 }),
             );
         }
-        if role == MemberRole::Setter {
+        // A library member call reads a property only through its checked property read.
+        if role == MemberRole::Setter
+            || (property.is_some()
+                && !matches!(
+                    node,
+                    IrExpr::Checked(operation) if matches!(
+                        &**operation,
+                        krusty::ir::IrCheckedOperation::ExternalPropertyRead { .. }
+                    )
+                ))
+        {
             return None;
         }
         let published = self.calls.external(target).is_some();
-        if !dispatches_through_library_member(self.ir, self.callables, id, fact, published) {
+        let dispatches =
+            dispatches_through_library_member(self.ir, self.callables, id, fact, published);
+        if !dispatches {
             return None;
         }
         // A function's identity names a function, and an accessor's a property.
         let identity = library_member_identity(fact, role)?;
-        Some(self.library_member_call(id, fact.clone(), identity, property, receiver, args))
+        let name = match property {
+            Some(property) => property.name.to_string(),
+            None => fact.name.clone(),
+        };
+        Some(self.library_member_call(
+            id,
+            fact.clone(),
+            LibraryMember {
+                identity,
+                role,
+                name,
+                reference_name: property.is_some_and(is_reference_name),
+            },
+            receiver,
+            args,
+        ))
     }
 
     fn published_class_call(
@@ -291,15 +360,16 @@ impl Body<'_> {
         &mut self,
         id: u32,
         fact: BackendCallableFact,
-        identity: Vec<u8>,
-        property: Option<&BackendPropertyFact>,
+        member: LibraryMember,
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
-        let role = match property {
-            Some(_) => MemberRole::Getter,
-            None => MemberRole::Function,
-        };
+        let LibraryMember {
+            identity,
+            role,
+            name,
+            reference_name,
+        } = member;
         let params = fact.declared_params.as_deref().unwrap_or(&fact.params);
         let result = fact.declared_ret.unwrap_or(fact.ret);
         if params.len() != args.len() {
@@ -313,13 +383,21 @@ impl Body<'_> {
             &identity,
             signature.clone(),
         )?;
+        // The builder's `append(CharSequence?)` reads the appended sequence through the checked
+        // `CharSequence` members on a target that copies its units.
+        if fact.builtin_implementations.iter().any(|implementation| {
+            super::string_builders::is_string_builder_type(implementation.receiver)
+        }) {
+            self.record_char_sequence_reads()?;
+        }
         self.runtime.builtin_member(
             self.module,
             member,
+            &name,
             &signature,
             &fact.builtin_implementations,
         )?;
-        if property.is_some_and(is_reference_name) {
+        if reference_name {
             self.runtime.reference_name_member(self.module, member)?;
         }
         if let Some(step) = super::array_lists::iterator_step(&fact) {
