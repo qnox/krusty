@@ -192,14 +192,17 @@ function is itself composable, so its `RuntimeFunction` declares the `$composer`
 parameters the transform appends (`appended`), and the target checks them against the compiled
 declaration's tail before it realizes the call. Durable group keys,
 `sourceInformation` strings, trace markers and `@FunctionKeyMeta` (class file only, never Kotlin
-metadata, as kotlinc's IR plugin adds it after FIR serialization) follow kotlinc's formulas. Every
+metadata, as kotlinc's IR plugin adds it after FIR serialization) follow kotlinc's formulas. A function takes a `$changed` (and `$dirty`) int for every ten
+parameters. A parameter whose type kotlinc infers stable is compared with `changed`, an unstable one
+with `changedInstance`, and one decided only when the function runs by the caller's stability bit,
+with a call passing the `$stable` of its class. Every
 other mode is an explicit decline at its declaration or call: a function with a receiver, a default
-argument that is not a constant, a vararg, more than ten parameters, a parameter whose stability kotlinc infers, or another
+argument that is not a constant, a vararg, or another
 result, any other composable function type or use of a composable lambda parameter, recursion
 through lambda parameters, an explicit applier target, a call argument the pass cannot classify as constant, passed on or computed, a grouping annotation (`@NonRestartableComposable`, `@NonSkippableComposable`,
 `@ReadOnlyComposable`, `@ExplicitGroupsComposable`), a call to a composable of another file of
 the module, a call to a library composable that takes a receiver, declares default arguments, a
-function-typed parameter or more than ten parameters, returns a result or is `inline`, a composable
+function-typed parameter, returns a result or is `inline`, a composable
 lambda that captures a composable lambda parameter or passes a captured local to a composable call, holds
 another lambda or is empty, a composable
 whose lambda numbering another lambda or overload shares, and a class whose stability its file
