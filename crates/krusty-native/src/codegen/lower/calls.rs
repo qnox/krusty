@@ -594,16 +594,9 @@ impl BodyLowering<'_, '_, '_> {
                                     },
                                     realization
                                         .owner_is_interface
-                                        .then_some(realization.dependency_callable.as_ref())
+                                        .then(|| realization.member_slot_identity())
                                         .flatten()
-                                        .map(|identity| {
-                                            (
-                                                krusty::backend::interface_identity::member_identity(
-                                                    identity,
-                                                ),
-                                                params.as_slice(),
-                                            )
-                                        }),
+                                        .map(|identity| (identity, params.as_slice())),
                                 ) {
                                     return realized;
                                 }
@@ -889,16 +882,9 @@ impl BodyLowering<'_, '_, '_> {
                             super::super::super::intrinsics::runtime_member(signature)
                         else {
                             if realization.owner_is_interface {
-                                if let Some(identity) = realization.dependency_callable.as_ref() {
+                                if let Some(identity) = realization.member_slot_identity() {
                                     return self.dependency_interface_stub(
-                                        krusty::backend::interface_identity::member_identity(
-                                            identity,
-                                        ),
-                                        signature,
-                                        receiver,
-                                        args,
-                                        params,
-                                        *ret,
+                                        identity, signature, receiver, args, params, *ret,
                                     );
                                 }
                             }

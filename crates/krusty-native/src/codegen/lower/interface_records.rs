@@ -319,19 +319,23 @@ impl FileLowering<'_> {
                 if !edge.overridden_is_interface {
                     continue;
                 }
+                // A serialized accessor a materialized class declares as a method keeps the
+                // identity of its property's getter or setter: the one a read or write of the
+                // interface property names its stub by.
                 let Some(identity) = self
                     .callables
                     .callable(target)
-                    .and_then(|fact| fact.dependency_callable.as_ref())
-                    .filter(|member| {
-                        source_modules.contains(member.module.as_str())
-                            || self.unit_kind
-                                == krusty::backend::CheckedIrUnitKind::DependencySupport
+                    .filter(|fact| {
+                        fact.dependency_callable.as_ref().is_some_and(|member| {
+                            source_modules.contains(member.module.as_str())
+                                || self.unit_kind
+                                    == krusty::backend::CheckedIrUnitKind::DependencySupport
+                        })
                     })
+                    .and_then(|fact| fact.member_slot_identity())
                 else {
                     continue;
                 };
-                let identity = member_identity(identity);
                 if implemented.iter().any(|(known, _)| *known == identity) {
                     continue;
                 }
