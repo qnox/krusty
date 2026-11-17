@@ -11,6 +11,7 @@ mod dependency_inline_templates;
 mod diagnostic_recovery;
 mod emission_session;
 mod local_visibility;
+mod lowering_failure;
 mod metadata_handoff;
 #[cfg(test)]
 mod streaming_tests;
@@ -298,12 +299,13 @@ fn emit_analyzed_into<B: Backend>(
             }
         }
         if let Err(error) = sink.accept_inline_bodies(&index, &inline_bodies) {
-            report_fir_lowering_failure(diags, "cannot consume inline FIR", &error, |target| {
-                crate::frontend::selected_external_call_diagnostic(
-                    symbols.shared_semantic_platform().as_ref(),
-                    target,
-                )
-            });
+            diags.error(
+                Span::new(0, 0),
+                format!(
+                    "internal error: cannot consume inline FIR: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
+            );
             default_arguments.take_for_source(&index, source_id);
             continue;
         }
@@ -316,7 +318,10 @@ fn emit_analyzed_into<B: Backend>(
             crate::trace_compiler!("fir", "default FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: default FIR lowering failed: {error:?}"),
+                format!(
+                    "internal error: default FIR lowering failed: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             continue;
         }
@@ -417,7 +422,8 @@ fn emit_analyzed_into<B: Backend>(
             diags.error(
                 Span::new(0, 0),
                 format!(
-                    "internal error: cannot consume completed body-local inline FIR: {error:?}"
+                    "internal error: cannot consume completed body-local inline FIR: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
                 ),
             );
             source_failed = true;
@@ -432,7 +438,10 @@ fn emit_analyzed_into<B: Backend>(
             crate::trace_compiler!("fir", "default FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: default FIR lowering failed: {error:?}"),
+                format!(
+                    "internal error: default FIR lowering failed: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             source_failed = true;
         }
@@ -452,7 +461,10 @@ fn emit_analyzed_into<B: Backend>(
             crate::trace_compiler!("fir", "FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: FIR lowering failed: {error:?}"),
+                format!(
+                    "internal error: FIR lowering failed: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             continue;
         }
@@ -1121,16 +1133,12 @@ fn consume_body_group(
                     body: &body,
                 });
                 if let Err(error) = sink.accept_streamed_body(index, inline_bodies, owner, body) {
-                    report_fir_lowering_failure(
-                        diags,
-                        "checked FIR lowering failed",
-                        &error,
-                        |target| {
-                            crate::frontend::selected_external_call_diagnostic(
-                                symbols.shared_semantic_platform().as_ref(),
-                                target,
-                            )
-                        },
+                    diags.error(
+                        Span::new(0, 0),
+                        format!(
+                            "internal error: checked FIR lowering failed: {}",
+                            lowering_failure::describe(&error, symbols.semantic_platform())
+                        ),
                     );
                     return false;
                 }
@@ -1520,27 +1528,6 @@ pub fn check_frontend_only(
     }
     assert!(default_arguments.is_empty());
     census
-}
-
-/// Preserve the lowering failure and ask the frontend to describe its exact selected dependency.
-/// The callback owns declaration presentation; the driver retains the existing error protocol.
-fn report_fir_lowering_failure(
-    diags: &mut DiagSink,
-    context: &str,
-    error: &crate::fir_lower::FirFileLoweringFailure,
-    render_selected: impl FnOnce(crate::fir::ExternalCallableId) -> Option<String>,
-) {
-    let mut message = format!("internal error: {context}: {error:?}");
-    let selected = match error {
-        crate::fir_lower::FirFileLoweringFailure::Body(
-            crate::fir_lower::FirLoweringFailure::UnsupportedExternalCall(target),
-        ) => render_selected(*target),
-        _ => None,
-    };
-    if let Some(selected) = selected {
-        message = format!("{message}; {selected}");
-    }
-    diags.error(Span::new(0, 0), message);
 }
 
 #[cfg(test)]
