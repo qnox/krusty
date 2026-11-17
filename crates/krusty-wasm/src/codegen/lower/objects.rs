@@ -28,7 +28,9 @@ use super::super::super::objects::{slot_field, REFERENCE};
 use super::super::super::runtime::{Runtime, EQZ32, OR32};
 use super::super::classes::{Accessor, FileClasses};
 use super::super::interface_members::{accessor_types, member_signature};
-use super::super::property_registry::{MemberProperty, MemberPropertyDefinition, TopLevelProperty};
+use super::super::property_registry::{
+    AccessorProperty, MemberProperty, MemberPropertyDefinition, TopLevelProperty,
+};
 use super::{carrier, Body, FileContext, Unsupported, STRING};
 
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
@@ -1001,6 +1003,12 @@ impl Body<'_> {
         receiver: Option<u32>,
     ) -> Result<(), Unsupported> {
         if receiver.is_none() {
+            // Another file's property realized through accessors also has a storage record when
+            // its defining file was lowered first; the accessor entry is its access path.
+            if let Some(entry) = self.module_accessor_property(target) {
+                self.code.call(entry.getter);
+                return Ok(());
+            }
             if let Some(storage) = self.top_level_property(target)? {
                 if !storage.direct_read {
                     return Err("a top-level property read that requires an accessor".to_string());
@@ -1070,6 +1078,14 @@ impl Body<'_> {
         value: u32,
     ) -> Result<(), Unsupported> {
         if receiver.is_none() {
+            if let Some(entry) = self.module_accessor_property(target) {
+                let setter = entry
+                    .setter
+                    .ok_or_else(|| "a read-only cross-file property was written".to_string())?;
+                self.value(value, entry.ty)?;
+                self.code.call(setter);
+                return Ok(());
+            }
             if let Some(storage) = self.top_level_property(target)? {
                 if !storage.mutable {
                     return Err("an assignment to an immutable top-level property".to_string());
@@ -1155,6 +1171,14 @@ impl Body<'_> {
         Ok(Some(entry))
     }
 
+    /// The entries of a receiver-less property another file realizes through its accessors.
+    fn module_accessor_property(&self, target: PropertyId) -> Option<AccessorProperty> {
+        if self.ir.local_property_layouts.contains_key(&target) {
+            return None;
+        }
+        self.properties.accessor(target)
+    }
+
     /// The storage selected for a receiver-less property in this or an earlier source file.
     /// Property identity, never spelling, is the cross-file key.
     fn top_level_property(
@@ -1233,10 +1257,17 @@ impl Body<'_> {
         self.laid_out_classes.published_structure(&identity)
     }
 
-    /// `x as C`: the value, cast to class `C` of this file or to an interface of the module.
+    /// `x as C`: the value, cast to an array classifier, to class `C` of this file or to an
+    /// interface of the module.
     pub(super) fn cast(&mut self, arg: u32, target: Ty, non_null: bool) -> Result<(), Unsupported> {
         self.value(arg, any())?;
-        if let Some(interface) = self.interface_of_type(target) {
+        if target.non_null().is_array() {
+            // An array's values are its array form's objects, as its type test reads them, even
+            // where a library lays the array class out as a class of its own.
+            let (form, _) = self.array_form(target)?;
+            self.code
+                .ref_cast(!non_null, HeapType::Concrete(form.object));
+        } else if let Some(interface) = self.interface_of_type(target) {
             let value = self.local(REFERENCE);
             self.code.local_tee(value);
             self.interface_test(interface, !non_null);
@@ -1282,6 +1313,10 @@ impl Body<'_> {
     /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
     /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
     fn library_interface_test(&mut self, interface: TypeName, nullable: bool) {
+        if let Some(arity) = self.function_arity(Ty::obj_name(interface)) {
+            self.function_type_test(arity, nullable, false);
+            return;
+        }
         let subtypes = self.classifiers.builtin_subtypes(interface);
         self.runtime.builtin_instances(interface, subtypes);
         self.interface_test(interface, nullable);
@@ -1380,6 +1415,10 @@ impl Body<'_> {
     /// Replace the reference on the stack with whether it is an instance of the reference type
     /// `tested` — or null, when `nullable`.
     fn reference_type_test(&mut self, tested: Ty, nullable: bool) -> Result<(), Unsupported> {
+        if let Some(arity) = self.function_arity(tested) {
+            self.function_type_test(arity, nullable, self.is_suspend_function_type(tested));
+            return Ok(());
+        }
         match tested.kind() {
             TyKind::STRING => {
                 self.code.ref_test(nullable, STRING_HEAP);

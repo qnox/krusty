@@ -19,6 +19,7 @@
 use krusty::fx_hash::{HashMap, HashSet};
 
 mod absent_arguments;
+mod accessor_property_entries;
 pub(super) mod any_members;
 mod array_lists;
 mod array_storage;
@@ -174,6 +175,8 @@ pub(super) fn lower_file(
         Ok(module.global(value))
     })?;
     let member_property_definitions = property_registry.prepare_member_properties(ir, module)?;
+    let accessor_property_definitions =
+        property_registry.prepare_accessor_properties(ir, module)?;
     let mut signatures = Vec::with_capacity(ir.functions.len());
     for (id, function) in ir.functions.iter().enumerate() {
         if ir.inline_only_fns.contains(&(id as FunId)) {
@@ -390,6 +393,7 @@ pub(super) fn lower_file(
     } else if !member_property_definitions.is_empty() {
         return Err("a member property definition without its class layout".to_string());
     }
+    accessor_property_entries::define(&context, &accessor_property_definitions, module)?;
     let initializer = if ir.statics.iter().any(|property| property.init.is_some()) {
         let index = module.declare();
         let ty = module.func_type(Vec::new(), Vec::new());
@@ -1602,7 +1606,8 @@ impl<'a> Body<'a> {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
                 type_operand,
-            } if self.class_structure(type_operand)?.is_some()
+            } if type_operand.non_null().is_array()
+                || self.class_structure(type_operand)?.is_some()
                 || self.interface_of_type(type_operand).is_some() =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
@@ -2230,21 +2235,22 @@ impl<'a> Body<'a> {
         let null_guard = matches!(op, IrBinOp::Eq | IrBinOp::Ne)
             && (matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null))
                 || matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null)));
-        let reference_or_unit =
-            |ty| Ok::<_, Unsupported>(matches!(carrier(ty)?, None | Some(ValType::Ref { .. })));
-        if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe)
-            && reference_or_unit(left)?
-            && reference_or_unit(right)?
+        // The `Unit` value is the runtime singleton object, so an identity test against it
+        // materializes that reference instead of treating the operand as carrier-less.
+        let identity_operand = |ty: Ty| -> Result<bool, Unsupported> {
+            Ok(ty == Ty::Unit || matches!(carrier(ty)?, Some(ValType::Ref { .. })))
+        };
+        if (matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) || null_guard)
+            && identity_operand(left)?
+            && identity_operand(right)?
         {
-            // Identity over objects, `Unit`'s instance among them, is the one equality rule.
-            return self.equality(op, EqualityMode::Structural, lhs, rhs);
-        }
-        if null_guard
-            && matches!(carrier(left)?, Some(ValType::Ref { .. }))
-            && matches!(carrier(right)?, Some(ValType::Ref { .. }))
-        {
-            self.expression(lhs)?;
-            self.expression(rhs)?;
+            for (operand, ty) in [(lhs, left), (rhs, right)] {
+                self.expression(operand)?;
+                if ty == Ty::Unit {
+                    let unit = self.runtime.unit_object(self.module);
+                    self.code.global_get(unit);
+                }
+            }
             self.code.ref_eq();
             if matches!(op, IrBinOp::Ne | IrBinOp::RefNe) {
                 self.code.op(EQZ32);
