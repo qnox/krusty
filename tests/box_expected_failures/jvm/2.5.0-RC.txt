@@ -10,3 +10,4 @@ contextParameters/callableReferences/contextual/delegation/unboundReceiverVar.kt
 contextParameters/callableReferences/contextual/localFunction.kt
 contextParameters/callableReferences/contextual/valueClassContextArg.kt
 inference/selfBoundedVariableFromFunctionTypeBeforeElvisThrow.kt
+suspendConversion/suspendConversionNullableNpe2.kt
