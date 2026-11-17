@@ -11,13 +11,14 @@ open class Base {
 }
 
 class Derived : Base() {
-    override fun accept(marker: Unit, suffix: String): String =
-        "derived" + marker.toString().length + suffix
+    override fun accept(marker: Unit, suffix: String): String = "derived" + describe(marker) + suffix
 }
 
 class UnitReader : Reader<Unit> {
-    override fun read(input: Unit): String = input.toString()
+    override fun read(input: Unit): String = describe(input)
 }
+
+fun describe(value: Any): String = value.toString()
 
 private class Holder {
     private fun readObject(input: Unit): Unit = input
@@ -34,11 +35,11 @@ fun effect() {
 }
 
 fun box(): String {
-    if (echo(Unit) !== Unit) return "fail echo"
-    if (Holder().call() !== Unit) return "fail private"
+    if (describe(echo(Unit)) != "kotlin.Unit") return "fail echo"
+    if (describe(Holder().call()) != "kotlin.Unit") return "fail private"
     val base: Base = Derived()
     val accepted = base.accept(effect(), "!")
-    if (accepted != "derived11!") return "fail override: $accepted"
+    if (accepted != "derivedkotlin.Unit!") return "fail override: $accepted"
     if (effects != 1) return "fail effects: $effects"
     val reader: Reader<Unit> = UnitReader()
     val read = reader.read(Unit)
