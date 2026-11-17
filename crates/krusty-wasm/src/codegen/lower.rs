@@ -22,6 +22,7 @@ mod absent_arguments;
 mod accessor_property_entries;
 pub(super) mod any_members;
 mod array_lists;
+mod array_storage;
 mod arrays;
 mod boxing;
 mod callable_reference_identity;
@@ -50,6 +51,7 @@ mod type_of;
 #[cfg(test)]
 use tests::lower_alone;
 
+pub(super) use array_storage::realizes_storage_getter;
 pub(super) use exceptions::runtime_lays_out;
 pub(super) use scalar_instructions::is_scalar_operation;
 pub(super) use scalar_value_classes::runtime_value_declaration;
@@ -64,6 +66,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
+        || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageCopy
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
         || matches!(
@@ -1371,6 +1374,22 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::External {
+                target,
+                substitutions,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.is_array_storage_copy(*target) =>
+            {
+                self.array_storage_copy(*target, substitutions, &args)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
             } if let Callee::External {
@@ -1544,7 +1563,8 @@ impl<'a> Body<'a> {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
                 type_operand,
-            } if self.class_structure(type_operand)?.is_some()
+            } if type_operand.non_null().is_array()
+                || self.class_structure(type_operand)?.is_some()
                 || self.interface_of_type(type_operand).is_some() =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
@@ -1770,7 +1790,22 @@ impl<'a> Body<'a> {
                 } = &**checked_op
                     && context_arguments.is_empty() =>
             {
-                self.property_read(*target, *dispatch_receiver)?
+                self.property_read(Some(id), *target, *dispatch_receiver)?
+            }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && let Some(element) = self.array_storage_property(*target) =>
+            {
+                self.array_storage_read(element, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } =
@@ -1899,7 +1934,7 @@ impl<'a> Body<'a> {
                 } = &**checked_op
                     && context_arguments.is_empty() =>
             {
-                self.property_write(*target, *dispatch_receiver, *value)?
+                self.property_write(Some(id), *target, *dispatch_receiver, *value)?
             }
             IrExpr::Call {
                 callee: ref call_callee,
