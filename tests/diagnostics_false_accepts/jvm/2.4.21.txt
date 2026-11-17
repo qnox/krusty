@@ -615,7 +615,6 @@ compiler/testData/diagnostics/tests/imports/ImportPrivateMemberFromOtherFile.kt
 compiler/testData/diagnostics/tests/imports/ImportPrivateMembersWithStar.kt
 compiler/testData/diagnostics/tests/imports/OperatorRenameOnImport.kt
 compiler/testData/diagnostics/tests/inapplicableTargetPropertyImmutableInPrimaryConstructor.kt
-compiler/testData/diagnostics/tests/incompleteCode/diagnosticWithSyntaxError/namedFun.kt
 compiler/testData/diagnostics/tests/incorrectSuperCall.kt
 compiler/testData/diagnostics/tests/inference/anonymousFunctionAgainsSuspendFunctionType.kt
 compiler/testData/diagnostics/tests/inference/callableReferences/adaptation/kt39697.kt
@@ -700,7 +699,6 @@ compiler/testData/diagnostics/tests/inference/pcla/specialCallsWithCallableRefer
 compiler/testData/diagnostics/tests/inference/pcla/specialCallsWithCallableReferencesErrorType.kt
 compiler/testData/diagnostics/tests/inference/pcla/stubTypes/capturedTypes.kt
 compiler/testData/diagnostics/tests/inference/pcla/stubTypes/capturedTypesId.kt
-compiler/testData/diagnostics/tests/inference/publicApproximation/twoIntersections.kt
 compiler/testData/diagnostics/tests/inference/regressions/functionalSuperTypeOfIntersectionType.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt1944.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt2179.kt
@@ -1304,7 +1302,6 @@ compiler/testData/diagnostics/tests/samConversions/GenericSubstitution.kt
 compiler/testData/diagnostics/tests/samConversions/GenericSubstitutionKT.kt
 compiler/testData/diagnostics/tests/samConversions/OverloadPriority.kt
 compiler/testData/diagnostics/tests/samConversions/samConversionWithJavaFlexibleType.kt
-compiler/testData/diagnostics/tests/samConversions/starProjectedTypesAndExplicitLambdaParameters.kt
 compiler/testData/diagnostics/tests/scopes/classHeader/companionObjectSuperConstructorArguments.kt
 compiler/testData/diagnostics/tests/scopes/classHeader/delegation.kt
 compiler/testData/diagnostics/tests/scopes/classHeader/objectSuperConstructorArguments.kt
