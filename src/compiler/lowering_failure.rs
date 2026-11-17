@@ -18,27 +18,40 @@ pub(super) fn describe(error: &FirFileLoweringFailure, source: &dyn SymbolSource
         return format!("{detail}; selected external {identity:?}: declaration unavailable");
     };
     let callable = &selected.callable;
-    format!(
-        "{detail}; selected external {identity:?}: dependency={:?}; declaration={:?}; owner={:?}; \
-         name={:?}; kind={:?}; parameters={:?}; result={:?}; declared_frame={:?}; inline={:?}; \
-         role={:?}; intrinsic={:?}",
-        selected.dependency_callable,
-        selected.declaration_signature,
-        selected.declaration_owner,
-        callable.name,
-        selected.kind,
-        callable.params,
-        callable.ret,
+    let mut context = format!("{detail}; selected external {identity:?}: v1");
+    for (key, value) in [
+        ("id", identity.raw().to_string()),
+        ("dependency", format!("{:?}", selected.dependency_callable)),
         (
-            callable.source_receiver,
-            &callable.declared_params,
-            callable.declared_ret,
-            &callable.generic_sig,
+            "declaration",
+            format!("{:?}", selected.declaration_signature),
         ),
-        callable.inline,
-        callable.semantic_role,
-        callable.compiler_intrinsic,
-    )
+        ("owner", format!("{:?}", selected.declaration_owner)),
+        ("name", format!("{:?}", callable.name)),
+        ("kind", format!("{:?}", selected.kind)),
+        ("parameters", format!("{:?}", callable.params)),
+        ("result", format!("{:?}", callable.ret)),
+        (
+            "declared_frame",
+            format!(
+                "{:?}",
+                (
+                    callable.source_receiver,
+                    &callable.declared_params,
+                    callable.declared_ret,
+                    &callable.generic_sig,
+                )
+            ),
+        ),
+        ("inline", format!("{:?}", callable.inline)),
+        ("role", format!("{:?}", callable.semantic_role)),
+        ("intrinsic", format!("{:?}", callable.compiler_intrinsic)),
+    ] {
+        use std::fmt::Write;
+        // Byte framing keeps arbitrary Debug strings opaque, including delimiters and Unicode.
+        write!(context, "; {key}={}:{value}", value.len()).unwrap();
+    }
+    context
 }
 
 #[cfg(test)]
@@ -132,19 +145,21 @@ mod tests {
 
     #[test]
     fn exact_selected_id_retains_module_signature_and_frame_for_same_spelled_declarations() {
-        for (raw, module, parameter) in [(501, "first", Ty::Int), (946, "second", Ty::Long)] {
+        for (raw, expected) in [
+            (
+                501,
+                r#"Body(UnsupportedExternalCall(ExternalCallableId(501))); selected external ExternalCallableId(501): v1; id=3:501; dependency=228:Some(KlibDependencyCallable { module: "first", declaration: Public(KlibPublicIdSignature { package: KlibNamePath { segments: ["fixture"] }, declaration: KlibNamePath { segments: ["selected"] }, member_id: Some(85), mask: 0 }) }); declaration=171:Some(Public(KlibPublicIdSignature { package: KlibNamePath { segments: ["fixture"] }, declaration: KlibNamePath { segments: ["selected"] }, member_id: Some(85), mask: 0 })); owner=34:Some(Package(TypeName("fixture"))); name=10:"selected"; kind=8:TopLevel; parameters=33:[Obj(TypeName("kotlin/Int"), [])]; result=34:Obj(TypeName("kotlin/String"), []); declared_frame=95:(None, Some([Obj(TypeName("kotlin/Int"), [])]), Some(Obj(TypeName("kotlin/String"), [])), None); inline=4:None; role=4:None; intrinsic=4:None"#,
+            ),
+            (
+                946,
+                r#"Body(UnsupportedExternalCall(ExternalCallableId(946))); selected external ExternalCallableId(946): v1; id=3:946; dependency=229:Some(KlibDependencyCallable { module: "second", declaration: Public(KlibPublicIdSignature { package: KlibNamePath { segments: ["fixture"] }, declaration: KlibNamePath { segments: ["selected"] }, member_id: Some(85), mask: 0 }) }); declaration=171:Some(Public(KlibPublicIdSignature { package: KlibNamePath { segments: ["fixture"] }, declaration: KlibNamePath { segments: ["selected"] }, member_id: Some(85), mask: 0 })); owner=34:Some(Package(TypeName("fixture"))); name=10:"selected"; kind=8:TopLevel; parameters=34:[Obj(TypeName("kotlin/Long"), [])]; result=34:Obj(TypeName("kotlin/String"), []); declared_frame=96:(None, Some([Obj(TypeName("kotlin/Long"), [])]), Some(Obj(TypeName("kotlin/String"), [])), None); inline=4:None; role=4:None; intrinsic=4:None"#,
+            ),
+        ] {
             let source = Selected::default();
             let id = ExternalCallableId::from_raw(raw);
             let error =
                 FirFileLoweringFailure::Body(FirLoweringFailure::UnsupportedExternalCall(id));
-            let signature = signature();
-            let result = Ty::String;
-            assert_eq!(
-                describe(&error, &source),
-                format!(
-                    "Body(UnsupportedExternalCall(ExternalCallableId({raw}))); selected external ExternalCallableId({raw}): dependency=Some(KlibDependencyCallable {{ module: {module:?}, declaration: {signature:?} }}); declaration=Some({signature:?}); owner=Some(Package(TypeName(\"fixture\"))); name=\"selected\"; kind=TopLevel; parameters=[{parameter:?}]; result={result:?}; declared_frame=(None, Some([{parameter:?}]), Some({result:?}), None); inline=None; role=None; intrinsic=None"
-                ),
-            );
+            assert_eq!(describe(&error, &source), expected);
             assert_eq!(*source.queries.borrow(), [id]);
         }
     }
