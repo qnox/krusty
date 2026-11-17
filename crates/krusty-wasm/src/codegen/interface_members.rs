@@ -425,6 +425,14 @@ impl FileRecorder<'_, '_, '_> {
         }
     }
 
+    /// Whether class slot `slot` of this class is abstract: no body stands there.
+    fn slot_is_abstract(&self, slot: u32) -> bool {
+        matches!(
+            self.classes.tables.table(self.id).vtable[slot as usize],
+            Slot::Abstract
+        )
+    }
+
     /// The function class slot `slot` of this class holds.
     fn slot_function(&mut self, slot: u32) -> Result<Placed, Unsupported> {
         let entry = self.classes.tables.table(self.id).vtable[slot as usize].clone();
@@ -570,6 +578,7 @@ impl FileRecorder<'_, '_, '_> {
                     self.program.runtime.unit_object(self.program.module),
                 ));
             }
+            ([ValType::Ref { .. }], []) if implemented.1 == Ty::Nothing => adapters.diverges = true,
             (declared, implementation) if declared == implementation => {}
             _ => return Err(unadapted()),
         }
@@ -662,6 +671,9 @@ impl FileRecorder<'_, '_, '_> {
                 });
                 form.emit_box(&mut code, scratch);
             }
+            ([ValType::Ref { .. }], []) if adapters.diverges => {
+                code.unreachable();
+            }
             ([wide], []) if *wide == REFERENCE => {
                 let Some(ResultAdapter::Unit(unit)) = adapters.result else {
                     return Err(unadapted());
@@ -723,13 +735,25 @@ impl FileRecorder<'_, '_, '_> {
                     if !self.implements(protocol) {
                         let any = Ty::nullable(Ty::obj_name(krusty::types::wk::any()));
                         let parameters = vec![any; arity];
-                        let implemented = self
-                            .function_edge_implementation(owner, edge, numbered, (&parameters, any))
-                            .and_then(|carried| self.implement_carried(protocol, carried));
+                        let implemented = match self.function_edge_implementation(
+                            owner,
+                            edge,
+                            numbered,
+                            (&parameters, any),
+                        ) {
+                            Ok(Some(carried)) => Some(self.implement_carried(protocol, carried)),
+                            // An abstract class's abstract override implements nothing; each
+                            // concrete subclass's table holds the body.
+                            Ok(None) => None,
+                            Err(reason) => Some(Err(reason)),
+                        };
                         // An abstract/non-instantiated producer still publishes callable
                         // membership. A later concrete class must supply its invocation; a
                         // missing body here must not poison every call of this arity.
-                        if self.record.is_some() || implemented.is_ok() {
+                        let recorded = self.record.is_some();
+                        if let Some(implemented) =
+                            implemented.filter(|implemented| recorded || implemented.is_ok())
+                        {
                             self.settle(
                                 DependencyMember {
                                     member: protocol,
@@ -752,7 +776,10 @@ impl FileRecorder<'_, '_, '_> {
                     numbered,
                     (&edge.declared_parameters, edge.declared_result),
                 ) {
-                    Ok(carried) => self.implement_carried(member.member, carried),
+                    Ok(Some(carried)) => self.implement_carried(member.member, carried),
+                    // An abstract class's abstract override implements nothing; each concrete
+                    // subclass's table holds the body.
+                    Ok(None) => continue,
                     Err(reason) => Err(reason),
                 };
                 self.settle(member, implemented)?;
@@ -842,7 +869,7 @@ impl FileRecorder<'_, '_, '_> {
         edge: &krusty::ir::IrFunctionOverride,
         numbered: &HashMap<u32, Placed>,
         declaration: (&[Ty], Ty),
-    ) -> Result<Carried, Unsupported> {
+    ) -> Result<Option<Carried>, Unsupported> {
         let ir = self.recording.ir;
         let implementation = match edge.implementation {
             ResolvedFunctionOverrideTarget::Module(callable) => Some(callable),
@@ -874,6 +901,9 @@ impl FileRecorder<'_, '_, '_> {
                     self.classes.tables.slot(owner, &key).ok_or_else(|| {
                         self.declined("a dependency's interface member with no slot")
                     })?;
+                if self.slot_is_abstract(slot) {
+                    return Ok(None);
+                }
                 (self.slot_function(slot)?, Some(slot))
             }
         };
@@ -887,13 +917,13 @@ impl FileRecorder<'_, '_, '_> {
             &implemented,
             &placed,
         )?;
-        Ok(Carried {
+        Ok(Some(Carried {
             placed,
             slot,
             declared,
             implemented,
             adapters,
-        })
+        }))
     }
 
     /// The getter and setter `owner` implements each property of a dependency's interface with.

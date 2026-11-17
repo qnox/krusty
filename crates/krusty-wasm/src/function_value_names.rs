@@ -9,13 +9,79 @@
 //! wasm-js and wasm-wasi alike: `wasm_function_values_print_their_class_names` in
 //! `tests/kotlin_box_wasm_conformance.rs` pins them.
 //!
-//! A value whose class kotlinc names otherwise is not given a name here: a lambda converted to a
-//! `fun interface`, and a reference to a property, which prints the property instead.
+//! A lambda converted to a `fun interface` is an instance of the wrapper class kotlinc-wasm declares
+//! for that interface in the conversion's container, the innermost member classifier around it or
+//! else the file's package: `pk.sam$pk_IntOp$0`, `pk.Outer.Companion.sam$pk_Outer_In$0`, and
+//! `sam$IntOp$0` in the root package. The interface's qualified name is spelled with `_` for each
+//! separator, and neither the lambda's captures nor an enclosing lambda changes the name. A
+//! conversion inside a local classifier or an anonymous object is not given a name here, nor is a
+//! reference to a property, which prints the property instead.
 
-use krusty::backend::class_names::member_class_names;
+use krusty::backend::class_names::{member_class_names, source_class_names};
 use krusty::backend::BackendClassifierSource;
-use krusty::ir::{IrCallableReferenceTarget, IrExpr};
-use krusty::types::{FnSig, Ty, TyKind};
+use krusty::ir::{ExprId, IrCallableReferenceTarget, IrExpr, IrFile, IrLocalClassOwner};
+use krusty::types::{FnSig, Ty, TyKind, TypeName};
+
+/// How kotlinc-wasm names the class of one function value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum FunctionValueName {
+    /// A class named for the value's shape and captures (see [`class_name`]).
+    Shape(NamedShape),
+    /// The qualified name of a `fun interface` conversion's wrapper class.
+    SamWrapper(String),
+}
+
+/// How kotlinc-wasm names the class of the function value the expression `site` of `ir` creates,
+/// of the checked type `instance`, or `None` for a value it names in a way not modelled here.
+pub(super) fn function_value_name(
+    ir: &IrFile,
+    site: ExprId,
+    instance: Option<Ty>,
+) -> Option<FunctionValueName> {
+    match ir.expr(site) {
+        IrExpr::Lambda {
+            sam: Some(target), ..
+        } => sam_wrapper_name(ir, site, target.classifier).map(FunctionValueName::SamWrapper),
+        expression => named_shape(expression, instance).map(FunctionValueName::Shape),
+    }
+}
+
+/// The qualified name of the wrapper class of the conversion `site` makes to `interface`.
+fn sam_wrapper_name(ir: &IrFile, site: ExprId, interface: TypeName) -> Option<String> {
+    let provenance = ir.callable_reference_provenance.get(&site)?;
+    let container = match provenance.lexical_owner {
+        Some(IrLocalClassOwner::Class(owner)) => {
+            let class = &ir.classes[owner as usize];
+            if class.is_local_class
+                || class.is_anonymous_object
+                || ir.local_class_name_provenance.contains_key(&owner)
+            {
+                return None;
+            }
+            source_class_names(ir, owner)?.qualified
+        }
+        Some(IrLocalClassOwner::External(owner)) => member_class_names(owner).qualified,
+        // Boundary conversion: the package path is spelled with `/` in the name tree.
+        None => provenance.source.package().render().replace('/', "."),
+    };
+    Some(wrapper_name(
+        &container,
+        &member_class_names(interface).qualified,
+    ))
+}
+
+/// The wrapper class name for a conversion to the interface `interface` (dotted) in `container`
+/// (dotted, empty for the root package).
+fn wrapper_name(container: &str, interface: &str) -> String {
+    let mut name = container.to_string();
+    if !name.is_empty() {
+        name.push('.');
+    }
+    name.push_str("sam$");
+    name.push_str(&interface.replace('.', "_"));
+    name.push_str("$0");
+    name
+}
 
 /// What a function value's class name is derived from, apart from its captures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,7 +96,7 @@ pub(super) struct NamedShape {
 
 /// The shape kotlinc-wasm names the function value `expression` creates, a lambda of the checked
 /// type `instance` or a callable reference, or `None` for a value it names otherwise.
-pub(super) fn named_shape(expression: &IrExpr, instance: Option<Ty>) -> Option<NamedShape> {
+fn named_shape(expression: &IrExpr, instance: Option<Ty>) -> Option<NamedShape> {
     let (reference, function_type) = match expression {
         IrExpr::Lambda { sam: None, .. } => (false, instance?),
         IrExpr::CallableReference(reference)
@@ -208,6 +274,22 @@ mod tests {
             "KFunction0R_bound1_A"
         );
         assert_eq!(class_name(shape(true, true, 0), &[]), "KSuspendFunction0R");
+    }
+
+    /// kotlinc-wasm 2.4.21's wrapper names for `fun interface` conversions, measured on wasm-js
+    /// and wasm-wasi.
+    #[test]
+    fn sam_wrappers_are_named_for_their_container_and_interface() {
+        assert_eq!(wrapper_name("pk", "pk.IntOp"), "pk.sam$pk_IntOp$0");
+        assert_eq!(
+            wrapper_name("pk.Outer.Companion", "pk.IntOp"),
+            "pk.Outer.Companion.sam$pk_IntOp$0"
+        );
+        assert_eq!(
+            wrapper_name("pk.Outer", "pk.Outer.In"),
+            "pk.Outer.sam$pk_Outer_In$0"
+        );
+        assert_eq!(wrapper_name("", "IntOp"), "sam$IntOp$0");
     }
 
     #[test]
