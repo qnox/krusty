@@ -13,6 +13,7 @@
 //! Env vars:
 //!   KRUSTY_PLUGIN_CORPUS_DIR   root holding `<plugin>/<kotlin version>/` checkouts
 //!                              (default `target/cache/plugin-corpus`; `just plugin-corpus <plugin>`)
+//!   KRUSTY_PLUGIN_CORPUS_REPORT=1    print why each case that does not pass fails
 //!   KRUSTY_BLESS_BOX_EXPECTATIONS=1  rewrite the plugin's inventories (full local run only)
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -330,6 +331,11 @@ fn run_corpus(corpus: &PluginCorpus) {
             outcomes.len()
         );
         return;
+    }
+    if std::env::var_os("KRUSTY_PLUGIN_CORPUS_REPORT").is_some() {
+        for (key, reason) in &reasons {
+            eprintln!("{} corpus: not passing: {key}: {reason}", corpus.plugin);
+        }
     }
     let root = boxes_dir(corpus);
     let included = box_ratchet::load_path(
