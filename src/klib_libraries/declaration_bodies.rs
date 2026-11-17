@@ -206,6 +206,16 @@ impl std::fmt::Display for KlibDeclarationBodiesError {
 
 impl std::error::Error for KlibDeclarationBodiesError {}
 
+/// Distinct inventories from one authenticated emitted-body traversal. Declaration roots never
+/// become executable call obligations merely by sharing this walk with callable symbols.
+#[derive(Default)]
+struct EmittedBodyInventory<'a> {
+    callables: Vec<&'a KlibIrSymbol>,
+    objects: Vec<&'a KlibIrSymbol>,
+    public_hierarchy_roots: Vec<TypeName>,
+    sam_declarations: Vec<&'a KlibIrSymbol>,
+}
+
 impl KlibDeclarationBodies {
     /// Exactly one raw class header in this module with the requested function/constructor or
     /// accessor as a direct member. An accessor is found only in the slot of its `role`, or, for a
@@ -275,25 +285,11 @@ impl KlibDeclarationBodies {
             return Ok(None);
         };
         let mut found = None;
-        for tree in self.libraries[library].trees() {
-            let mut pending = vec![&tree.declaration];
-            while let Some(member) = pending.pop() {
-                let class = match member {
-                    KlibIrMember::Class(id) => tree.arena.class(*id),
-                    KlibIrMember::EnumEntry(entry) => {
-                        let Some(id) = entry.class else { continue };
-                        tree.arena.class(id)
-                    }
-                    _ => continue,
-                };
-                pending.extend(class.members.iter());
-                if class.base.symbol.signature != KlibIrSignature::Public(signature.clone()) {
-                    continue;
-                }
-                if found.is_some() {
-                    return Err("duplicate serialized class headers");
-                }
-                found = Some((&tree.arena, class));
+        for class in self.libraries[library]
+            .classes_with_signature(&KlibIrSignature::Public(signature.clone()))
+        {
+            if found.replace(class).is_some() {
+                return Err("duplicate serialized class headers");
             }
         }
         Ok(found)
@@ -334,29 +330,14 @@ impl KlibDeclarationBodies {
             return Ok(None);
         };
         let mut found = None;
-        for tree in self.libraries[library].trees() {
-            let mut pending = vec![&tree.declaration];
-            while let Some(member) = pending.pop() {
-                let Some(class) = class_of(&tree.arena, member) else {
-                    continue;
-                };
-                pending.extend(class.members.iter());
-                let declares = class.members.iter().any(|member| {
-                    matches!(member, KlibIrMember::EnumEntry(declared)
-                        if declared.base.symbol.kind == KlibIrSymbolKind::EnumEntry
-                            && declared.base.symbol.signature == *entry)
-                });
-                if !declares {
-                    continue;
-                }
-                if found.is_some() {
-                    return Err("several serialized classes declare one enum entry");
-                }
-                found = Some(KlibEnumEntryClass {
-                    module: module.as_str(),
-                    arena: &tree.arena,
-                    class,
-                });
+        for (arena, class) in self.libraries[library].classes_declaring_enum_entry(entry) {
+            let class = KlibEnumEntryClass {
+                module: module.as_str(),
+                arena,
+                class,
+            };
+            if found.replace(class).is_some() {
+                return Err("several serialized classes declare one enum entry");
             }
         }
         Ok(found)
@@ -824,20 +805,9 @@ impl KlibDeclarationBodies {
     ) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
         let library = *self.modules.get(module)?;
         let mut found = None;
-        for tree in self.libraries[library].trees() {
-            let mut pending = vec![&tree.declaration];
-            while let Some(member) = pending.pop() {
-                let Some(class) = class_of(&tree.arena, member) else {
-                    continue;
-                };
-                pending.extend(class.members.iter());
-                if !class_declares(&tree.arena, class, signature) {
-                    continue;
-                }
-                if found.is_some() {
-                    return None;
-                }
-                found = Some((&tree.arena, class));
+        for (arena, class, _) in self.libraries[library].classes_declaring_function(signature) {
+            if found.replace((arena, class)).is_some() {
+                return None;
             }
         }
         found
@@ -855,20 +825,9 @@ impl KlibDeclarationBodies {
             let Some(&library) = self.modules.get(&owner) else {
                 continue;
             };
-            for tree in self.libraries[library].trees() {
-                let mut pending = vec![&tree.declaration];
-                while let Some(member) = pending.pop() {
-                    let Some(class) = class_of(&tree.arena, member) else {
-                        continue;
-                    };
-                    pending.extend(class.members.iter());
-                    if class.base.symbol.signature != wanted {
-                        continue;
-                    }
-                    if found.is_some() {
-                        return LocatedClass::Several;
-                    }
-                    found = Some(class);
+            for (_, class) in self.libraries[library].classes_with_signature(&wanted) {
+                if found.replace(class).is_some() {
+                    return LocatedClass::Several;
                 }
             }
         }
@@ -892,20 +851,9 @@ impl KlibDeclarationBodies {
             let Some(&library) = self.modules.get(&owner) else {
                 continue;
             };
-            for tree in self.libraries[library].trees() {
-                let mut pending = vec![&tree.declaration];
-                while let Some(member) = pending.pop() {
-                    let Some(class) = class_of(&tree.arena, member) else {
-                        continue;
-                    };
-                    pending.extend(class.members.iter());
-                    if class.base.symbol.signature != wanted {
-                        continue;
-                    }
-                    if found.is_some() {
-                        return None;
-                    }
-                    found = Some((&tree.arena, class));
+            for class in self.libraries[library].classes_with_signature(&wanted) {
+                if found.replace(class).is_some() {
+                    return None;
                 }
             }
         }
@@ -940,26 +888,18 @@ impl KlibDeclarationBodies {
             let Some(&library) = self.modules.get(&owner) else {
                 continue;
             };
-            for tree in self.libraries[library].trees() {
-                let mut pending = vec![&tree.declaration];
-                while let Some(member) = pending.pop() {
-                    let Some(class) = class_of(&tree.arena, member) else {
-                        continue;
-                    };
-                    pending.extend(class.members.iter());
-                    let Some(function) = declared_function(&tree.arena, class, signature) else {
-                        continue;
-                    };
-                    if found.is_some() {
-                        return LocatedMember::Several;
-                    }
-                    found = Some(LocatedMember::One {
-                        module: owner.clone(),
-                        arena: &tree.arena,
-                        class,
-                        function,
-                    });
+            for (arena, class, function) in
+                self.libraries[library].classes_declaring_function(signature)
+            {
+                if found.is_some() {
+                    return LocatedMember::Several;
                 }
+                found = Some(LocatedMember::One {
+                    module: owner.clone(),
+                    arena,
+                    class,
+                    function,
+                });
             }
         }
         found.unwrap_or(LocatedMember::Missing)
@@ -1026,22 +966,7 @@ impl KlibDeclarationBodies {
             .libraries
             .iter()
             .flat_map(|library| library.local_classes())
-            .flat_map(|(arena, class)| {
-                class
-                    .supertypes
-                    .iter()
-                    .filter_map(|&supertype| match arena.ty(supertype) {
-                        KlibIrType::Simple { classifier, .. }
-                            if classifier.kind == KlibIrSymbolKind::Class =>
-                        {
-                            match &classifier.signature {
-                                KlibIrSignature::Public(signature) => Some(signature),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    })
-            })
+            .flat_map(|(arena, class)| public_supertypes(arena, class))
             .collect::<Vec<_>>();
         // Stable across processes: ordered by the serialized identity, not by interning order.
         supertypes.sort_by(|left, right| {
@@ -1085,7 +1010,7 @@ impl KlibDeclarationBodies {
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibDependencyCallable> {
-        let (symbols, _, _) = self.emitted_body_symbols(identity, forms);
+        let symbols = self.emitted_body_symbols(identity, forms).callables;
         symbols
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
@@ -1105,7 +1030,7 @@ impl KlibDeclarationBodies {
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibPublicIdSignature> {
-        let (_, objects, _) = self.emitted_body_symbols(identity, forms);
+        let objects = self.emitted_body_symbols(identity, forms).objects;
         let mut seen = crate::fx_hash::HashSet::default();
         objects
             .into_iter()
@@ -1124,7 +1049,7 @@ impl KlibDeclarationBodies {
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<(KlibPublicIdSignature, TypeName)> {
         self.emitted_body_symbols(identity, forms)
-            .2
+            .sam_declarations
             .into_iter()
             .filter_map(|symbol| match &symbol.signature {
                 KlibIrSignature::Public(signature) => {
@@ -1135,19 +1060,27 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
-    /// Callable and object admission must cover exactly the same emitted roots: the selected
-    /// body, its file initialization, and the local classes those roots construct.
+    /// Public hierarchy roots of the private classes the emitted body constructs. These are
+    /// declaration facts, not executable callees: a private constructor is intentionally absent
+    /// from the public callable inventory even when its class is materialized with this body.
+    pub(crate) fn emitted_body_classifiers(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<TypeName> {
+        self.emitted_body_symbols(identity, forms)
+            .public_hierarchy_roots
+    }
+
+    /// Callable, object and hierarchy inventories cover exactly the same emitted roots: the
+    /// selected body, its file initialization, and the local classes those roots construct.
     fn emitted_body_symbols<'a>(
         &'a self,
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
-    ) -> (
-        Vec<&'a KlibIrSymbol>,
-        Vec<&'a KlibIrSymbol>,
-        Vec<&'a KlibIrSymbol>,
-    ) {
+    ) -> EmittedBodyInventory<'a> {
         let Some((trees, arena, function)) = self.function_with_trees(identity) else {
-            return (Vec::new(), Vec::new(), Vec::new());
+            return EmittedBodyInventory::default();
         };
         let mut symbols = arena.emitted_callable_symbols(function, forms);
         let mut objects = arena.emitted_object_symbols(function, forms);
@@ -1163,6 +1096,7 @@ impl KlibDeclarationBodies {
                 );
             }
         }
+        let mut classifiers = Vec::new();
         if let Some(file) = self.top_level_file(identity) {
             for initializer in self.module_file_initializers(&identity.module, file, false) {
                 let roots = vec![initializer.initializer];
@@ -1187,6 +1121,9 @@ impl KlibDeclarationBodies {
             next += 1;
             if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
                 if classes.insert(&class.base.symbol) {
+                    classifiers.extend(public_supertypes(class_arena, class).filter_map(
+                        |signature| class_identity(&KlibIrSignature::Public(signature.clone())),
+                    ));
                     let mut roots = class_arena.class_member_roots(class);
                     roots.extend(class_arena.class_superclass_delegations(class));
                     symbols.extend(class_arena.emitted_callable_symbols_from(roots.clone(), forms));
@@ -1195,7 +1132,12 @@ impl KlibDeclarationBodies {
                 }
             }
         }
-        (symbols, objects, sams)
+        EmittedBodyInventory {
+            callables: symbols,
+            objects,
+            public_hierarchy_roots: classifiers,
+            sam_declarations: sams,
+        }
     }
 
     /// Declaration facts of the class whose exact reached constructor is `identity`. Field and
@@ -1410,6 +1352,23 @@ fn inert_initializer(
     )
 }
 
+fn public_supertypes<'a>(
+    arena: &'a KlibIrArena,
+    class: &'a KlibIrClass,
+) -> impl Iterator<Item = &'a KlibPublicIdSignature> {
+    class.supertypes.iter().filter_map(|&supertype| {
+        let KlibIrType::Simple { classifier, .. } = arena.ty(supertype) else {
+            return None;
+        };
+        match &classifier.signature {
+            KlibIrSignature::Public(signature) if classifier.kind == KlibIrSymbolKind::Class => {
+                Some(signature)
+            }
+            _ => None,
+        }
+    })
+}
+
 fn class_identity(signature: &KlibIrSignature) -> Option<TypeName> {
     let KlibIrSignature::Public(signature) = signature else {
         return None;
@@ -1510,37 +1469,6 @@ fn declaration_signature(signature: &KlibIrSignature) -> Option<KlibDeclarationS
             Some(KlibDeclarationSignature::FileLocal { file, slot })
         }
     }
-}
-
-fn class_of<'a>(arena: &'a KlibIrArena, member: &'a KlibIrMember) -> Option<&'a KlibIrClass> {
-    match member {
-        KlibIrMember::Class(id) => Some(arena.class(*id)),
-        KlibIrMember::EnumEntry(entry) => entry.class.map(|id| arena.class(id)),
-        _ => None,
-    }
-}
-
-fn class_declares(arena: &KlibIrArena, class: &KlibIrClass, signature: &KlibIrSignature) -> bool {
-    declared_function(arena, class, signature).is_some()
-}
-
-fn declared_function<'a>(
-    arena: &'a KlibIrArena,
-    class: &'a KlibIrClass,
-    signature: &KlibIrSignature,
-) -> Option<&'a KlibIrFunction> {
-    class.members.iter().find_map(|member| match member {
-        KlibIrMember::Function(id) => {
-            let function = arena.function(*id);
-            (function.base.symbol.signature == *signature).then_some(function)
-        }
-        KlibIrMember::Property(property) => [property.getter, property.setter]
-            .into_iter()
-            .flatten()
-            .map(|id| arena.function(id))
-            .find(|function| function.base.symbol.signature == *signature),
-        _ => None,
-    })
 }
 
 #[cfg(test)]

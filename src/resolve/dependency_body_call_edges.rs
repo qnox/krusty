@@ -44,6 +44,9 @@ pub(crate) fn for_checked_klib_bodies<'a>(
             continue;
         }
         classifier_roots.extend(bodies.type_classifiers_in_body(&identity));
+        classifier_roots.extend(
+            bodies.emitted_body_classifiers(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
+        );
         for (signature, name) in
             bodies.emitted_body_sam_classifiers(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
         {
