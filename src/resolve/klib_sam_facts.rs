@@ -131,6 +131,5 @@ pub(super) fn freeze(
         classifier,
         target,
         overridable: overridable.into_boxed_slice(),
-        apply: crate::symbol_resolver::apply_sam_declaration,
     })
 }

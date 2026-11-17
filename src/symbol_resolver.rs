@@ -95,10 +95,7 @@ pub(crate) use hierarchy_projection::{
     inherited_classifier_shape, member_scope_receiver, supports_member_lookup,
     ClassifierCompanionInstance, SupertypeProjectionCache,
 };
-use hierarchy_projection::{
-    classifier_type_parameter_bounds, projected_supertypes, receiver_hierarchy,
-    supertype_with_classifier,
-};
+use hierarchy_projection::{projected_supertypes, receiver_hierarchy, supertype_with_classifier};
 pub use lambda_call_shape::LambdaCallShape;
 pub(crate) use member_hierarchy::{
     apply_inner_alias_outer_in_source, apply_inner_classifier_outer_in_source,
@@ -148,10 +145,7 @@ pub(crate) use resolved_symbol::ErrorReceiverSelection;
 pub use resolved_symbol::{
     AmbiguousExtensionProperty, MemberFacets, ResolvedPropertySetter, SymRecv, Symbol,
 };
-pub(crate) use sam::{
-    apply_sam_declaration, semantic_sam_signature, SamMethodDeclaration, SamMethodFrame,
-    SamSignature,
-};
+pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamMethodFrame, SamSignature};
 use scope_level_callables::{
     callables_from_symbols, fn_in_scope, level_functions, level_properties,
     symbol_levels_in_function_scope, symbols_in_function_scope,
