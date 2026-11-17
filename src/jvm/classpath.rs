@@ -4201,8 +4201,59 @@ mod fq_tests {
 
         assert!(function_parameter_erasure_matches(
             metadata,
+            false,
             erased,
             &|ty| ty.fun_arity().map(usize::from),
+        ));
+    }
+
+    #[test]
+    fn composable_function_metadata_matches_the_erasure_with_composer_and_changed() {
+        let arity = &|ty: Ty| ty.fun_arity().map(usize::from);
+        let erased = |arguments: usize| {
+            Ty::fun(
+                vec![Ty::obj("kotlin/Any"); arguments],
+                Ty::obj("kotlin/Any"),
+            )
+        };
+        let signature = |parameters: usize| {
+            let TyKind::Fun(signature) = Ty::fun(vec![Ty::Int; parameters], Ty::Unit).kind() else {
+                unreachable!()
+            };
+            signature
+        };
+
+        // `@Composable () -> Unit` is `Function2<Composer, Int, Unit>`; a parameter adds a slot.
+        assert!(function_parameter_erasure_matches(
+            signature(0),
+            true,
+            erased(2),
+            arity
+        ));
+        assert!(function_parameter_erasure_matches(
+            signature(1),
+            true,
+            erased(3),
+            arity
+        ));
+        // Past ten slots the changed words grow by one.
+        assert!(function_parameter_erasure_matches(
+            signature(11),
+            true,
+            erased(14),
+            arity
+        ));
+        assert!(!function_parameter_erasure_matches(
+            signature(0),
+            false,
+            erased(2),
+            arity
+        ));
+        assert!(!function_parameter_erasure_matches(
+            signature(0),
+            true,
+            erased(0),
+            arity
         ));
     }
 

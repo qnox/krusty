@@ -828,6 +828,40 @@ fn assert_compose_library_call_rejects(name: &str, library: &str, declarations: 
     assert_eq!(compiled.classes, Vec::<String>::new());
 }
 
+/// A library composable that takes a `@Composable () -> Unit` is compiled with the composer and
+/// `$changed` after a `Function2` value, so the declaration's source parameters still align with
+/// its method: the call resolves, and the pass alone declines the lambda it passes.
+#[test]
+fn a_library_composable_lambda_parameter_aligns_with_its_method() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let source = "package probe\nimport androidx.compose.runtime.Composable\n\
+                  import androidx.compose.runtime.ReusableContent\n\
+                  @Composable fun Greeting() {\nReusableContent(1) { }\n}\n";
+    let probe = Probe::new("compose-library-lambda-parameter", source);
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let compiled = probe.krusty(&classpath, &switches);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+    }
+    .message();
+    let file = probe.source.display();
+    assert_eq!(
+        compiled.stderr,
+        format!(
+            "info: {partial}\n\
+             {file}:4:13: error: krusty's Compose compiler plugin does not support a lambda in a \
+             composable function yet; compile this module with kotlinc\n\
+             {file}:5:1: error: krusty's Compose compiler plugin does not support a composable call \
+             outside the statements of a composable body yet; compile this module with kotlinc\n\
+             krusty: 2 error(s)\n"
+        )
+    );
+    assert_eq!(compiled.code, Some(1));
+}
+
 fn assert_compose_rejects(name: &str, declarations: &str, others: &[(&str, &str)], error: &str) {
     let compose = reference_plugin_jar("compose-compiler-plugin.jar");
     let source =

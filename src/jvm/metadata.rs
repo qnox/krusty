@@ -615,6 +615,10 @@ fn annotation_jvm_name(bodies: &[Vec<u8>], records: &[Rec], d2: &[String]) -> Op
     None
 }
 
+/// The Compose runtime's type annotation on a function type, whose values are compiled with the
+/// composer and `$changed` parameters after their own.
+const COMPOSABLE_ANNOTATION: &str = "androidx/compose/runtime/Composable";
+
 /// The declaration facts carried directly by one Kotlin metadata `Type` message.
 ///
 /// Nullability and suspend-function identity live in the same protobuf node. Decode them in one walk
@@ -1673,6 +1677,17 @@ fn decode_functions(
                                 })
                             })
                         });
+                        let composable_fun = resolved_type.is_some_and(|(body, _)| {
+                            parse_type_node(body).is_some_and(|node| {
+                                node.annotations.into_iter().any(|annotation| {
+                                    annotation.class_id().is_some_and(|id| {
+                                        resolve_class_name(records, d2, id as usize).is_some_and(
+                                            |annotation| annotation == COMPOSABLE_ANNOTATION,
+                                        )
+                                    })
+                                })
+                            })
+                        });
                         let declared = crate::metadata::DeclaredValueParameter::of_flags(p.flags);
                         MetaValueParam {
                             ty: decoded_type.and_then(declared_classifier),
@@ -1689,7 +1704,8 @@ fn decode_functions(
                                 .with_nullable(type_facts.nullable)
                                 .with_suspend_fun(type_facts.suspend_fun)
                                 .with_has_type_facts(resolved_type.is_some())
-                                .with_no_infer(no_infer),
+                                .with_no_infer(no_infer)
+                                .with_composable_fun(composable_fun),
                             recv_fun_receiver,
                         }
                     };

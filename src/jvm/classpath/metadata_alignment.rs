@@ -21,13 +21,22 @@ use crate::types::{Ty, TyKind, TypeName};
 /// the `Object` descriptor, `plusAssign(elements: Iterable)` the `Iterable` one).
 pub(super) fn function_parameter_erasure_matches(
     signature: &crate::types::FnSig,
+    composable: bool,
     descriptor: Ty,
     classifier_arity: &dyn Fn(Ty) -> Option<usize>,
 ) -> bool {
     // A suspend function value implements Function(N+1): the additional JVM argument is its
     // Continuation. A receiver is already the first semantic parameter, so it needs no separate
     // adjustment (`suspend R.() -> T` has one semantic parameter and erases to Function2).
-    classifier_arity(descriptor) == Some(signature.params.len() + usize::from(signature.suspend))
+    let semantic = signature.params.len() + usize::from(signature.suspend);
+    // A composable function value takes the composer and its `$changed` words after its own
+    // parameters: one word for each ten of its slots, and always at least one.
+    let expected = if composable {
+        semantic + 1 + semantic.div_ceil(10).max(1)
+    } else {
+        semantic
+    };
+    classifier_arity(descriptor) == Some(expected)
 }
 
 /// Descriptor slot of the metadata parameter at `index`, where `parameters()` yields the context
@@ -79,7 +88,12 @@ fn meta_callable_aligns(
                 if let Some(TyKind::Fun(signature)) =
                     signature_parameter.map(|ty| ty.non_null().kind())
                 {
-                    return function_parameter_erasure_matches(signature, *d, classifier_arity);
+                    return function_parameter_erasure_matches(
+                        signature,
+                        m.composable_fun(),
+                        *d,
+                        classifier_arity,
+                    );
                 }
                 if let Some(carrier) = signature_parameter
                     .zip(f.generic_sig.as_ref())
@@ -124,7 +138,12 @@ fn meta_callable_aligns(
                 .copied();
             if let Some(TyKind::Fun(signature)) = signature_parameter.map(|ty| ty.non_null().kind())
             {
-                return function_parameter_erasure_matches(signature, **d, classifier_arity);
+                return function_parameter_erasure_matches(
+                    signature,
+                    m.composable_fun(),
+                    **d,
+                    classifier_arity,
+                );
             }
             if let Some(carrier) = signature_parameter
                 .zip(f.generic_sig.as_ref())
