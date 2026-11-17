@@ -3,6 +3,7 @@
 mod applied_formal_bounds;
 mod bound_inner_aliases;
 mod bound_inner_constructors;
+mod receiver_parameter_overrides;
 mod result_enhancement;
 
 pub(crate) use bound_inner_aliases::{
@@ -166,6 +167,11 @@ pub(crate) fn function_override_input_slots_match(
                 .as_ref()
                 .zip(implementation.provider_override_slot.as_ref())
                 .is_some_and(|(inherited, implementation)| inherited.same_key(implementation)))
+        || receiver_parameter_overrides::function_receiver_parameter_slots_match(
+            source,
+            inherited,
+            implementation,
+        )
 }
 
 /// A declaration overrides only one whose type parameters carry the same upper bounds, compared
