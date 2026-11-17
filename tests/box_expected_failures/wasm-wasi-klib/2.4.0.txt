@@ -192,7 +192,6 @@ bridges/test20.kt
 bridges/test22.kt
 bridges/test23.kt
 bridges/test24.kt
-bridges/test25.kt
 bridges/test3.kt
 bridges/test5.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
@@ -1499,7 +1498,6 @@ inlineClasses/kt47823.kt
 inlineClasses/kt51157.kt
 inlineClasses/kt70461.kt
 inlineClasses/kt71649.kt
-inlineClasses/multifileClass.kt
 inlineClasses/overrideReturnNothing.kt
 inlineClasses/overridingFunCallingPrivateFunGeneric.kt
 inlineClasses/privateConstructorFunInterfaceMultiModule.kt
