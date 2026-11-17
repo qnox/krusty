@@ -1,66 +1,39 @@
 //! A `callsInPlace` contract declared by a class or object member of a compiled dependency is
 //! applied at the call site like one declared by a top-level function: a deferred local assigned
 //! inside the in-place lambda is definitely initialized afterwards. The dependency is built by the
-//! reference kotlinc, and both compilers must accept the consumer and run it to `OK`.
+//! reference kotlinc, as a real dependency jar's class files are, and the consumer runs to `OK`
+//! under both compilers. The whole library and consumer programs live in the shared portable
+//! inventory.
 
 use super::common;
 
-const LIBRARY: &str = r#"@file:OptIn(kotlin.contracts.ExperimentalContracts::class)
-package neutral
-
-import kotlin.contracts.*
-
-object Source {
-    inline fun fill(size: Int, action: (ByteArray, Int, Int) -> Int): Int {
-        contract { callsInPlace(action, InvocationKind.EXACTLY_ONCE) }
-        return action(ByteArray(size), 0, size)
-    }
-}
-
-class Holder {
-    inline fun once(action: () -> Int): Int {
-        contract { callsInPlace(action, InvocationKind.EXACTLY_ONCE) }
-        return action()
-    }
-}
-"#;
-
-const CONSUMER: &str = r#"import neutral.Holder
-import neutral.Source
-
-fun fromObject(): Int {
-    var result: Int
-    Source.fill(3) { _, _, end ->
-        result = end
-        result
-    }
-    return result
-}
-
-fun fromInstance(): Int {
-    val result: Int
-    Holder().once {
-        result = 4
-        result
-    }
-    return result
-}
-
-fun box(): String = if (fromObject() == 3 && fromInstance() == 4) "OK" else "FAIL"
-"#;
-
 #[test]
 fn a_dependency_members_calls_in_place_contract_initializes_deferred_locals() {
-    let library = common::kotlinc_lib_out(&[("Lib.kt", LIBRARY)])
+    let modules = krusty::conformance::split_modules(include_str!(
+        "box_regressions/multimodule/dependencyMemberContractInitialization.kt"
+    ))
+    .expect("the whole contract fixture has a library and a main module");
+    let [library, main] = modules.as_slice() else {
+        panic!("expected the library and main modules");
+    };
+    assert_eq!((library.files.len(), main.files.len()), (1, 1));
+    let (library_name, library_source) = &library.files[0];
+    let (_, main_source) = &main.files[0];
+    assert_eq!(library_name, "Lib");
+    let library_classes = common::kotlinc_lib_out(&[("Lib.kt", library_source)])
         .expect("reference kotlinc builds the contract dependency");
     assert_eq!(
-        common::kotlinc_box_result_with_classpath(CONSUMER, std::slice::from_ref(&library)),
+        common::kotlinc_box_result_with_classpath(
+            main_source,
+            std::slice::from_ref(&library_classes)
+        ),
         "OK",
         "kotlinc's own result"
     );
     assert_eq!(
-        common::expect_box_run_against_kotlinc(LIBRARY, CONSUMER).as_deref(),
-        Some("OK"),
+        common::expect_box_run_against_kotlinc(library_source, main_source)
+            .expect("the reference compiler builds the dependency"),
+        "OK",
         "krusty's result against the same dependency"
     );
 }
