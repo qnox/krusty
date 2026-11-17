@@ -5,8 +5,8 @@ usage: summarize.py [--stars <stars.tsv>] [--plugins <dir>] [--json <out.json>] 
                     <compare.json>...
 
 `--stars` lists `<name>\t<stars>` per project. `--plugins` is searched for the `<name>.plugins.tsv`
-plugin surveys the reference builds wrote. The report has the per-project table, the reasons for
-every missed compilation, every error krusty's verify compiles reported grouped by cause, the
+plugin surveys the reference builds wrote. The report has the per-project table, the failed tasks
+ranked by the compilations they kept from running, the reasons for every missed compilation, every error krusty's verify compiles reported grouped by cause, the
 projects' own tests run on krusty's classes, what each build cost, and the Gradle and Kotlin compiler
 plugins the corpus uses most.
 """
@@ -129,6 +129,35 @@ def error_causes(project):
     def compilations(entry):
         return len({task for _, tasks in entry[1] for task in tasks})
     return sorted(ranked, key=lambda entry: (-compilations(entry), -len(entry[1]), entry[0]))
+
+
+def roots(project):
+    """Every failed task of a project's krusty build with the first error it logged and how many
+    compilations it kept from running, most first; None for a result recorded before the corpus
+    traced them (it has no `failed_tasks`)."""
+    failed = project.get('failed_tasks')
+    if failed is None:
+        return None
+    blocked = collections.Counter(task for r in project['rows'] for task in r.get('blocked_by') or [])
+    return [dict(task=task, error=error, blocked=blocked[task])
+            for task, error in sorted(failed.items(), key=lambda kv: (-blocked[kv[0]], kv[0]))]
+
+
+def roots_section(projects):
+    """The failed tasks that kept compilations from running, ranked across the corpus."""
+    ranked = sorted(((p['name'], root) for p in projects for root in roots(p) or [] if root['blocked']),
+                    key=lambda entry: (-entry[1]['blocked'], entry[0].lower(), entry[1]['task']))
+    if not ranked:
+        return []
+    out = ['', '## Root failures', '',
+           'Each failed task of the krusty builds, ranked by the compilations that did not run because it failed:',
+           'fixing it lets them run. A compilation stopped by two failed tasks counts for each.', '',
+           '| Project | Failed task | First error | Compilations it kept from running |',
+           '| --- | --- | --- | ---: |']
+    for name, root in ranked:
+        error = code(root['error']).replace('|', '\\|') + ' ' if root['error'] else ''
+        out.append(f"| {name} | {code(root['task'])} | {error}| {root['blocked']} |")
+    return out
 
 
 def counted(number, noun):
@@ -378,6 +407,8 @@ def report(projects, stars, surveys, title):
     out.append(f'| **Measured total** | | | | | **{built} / {compilations}** | '
                f'**{identical:,} / {classes:,}{share(identical, classes)}** |' + (' |' if dated else ''))
 
+    out += roots_section(projects)
+
     out += ['', '## Missed compilations', '']
     any_miss = False
     for p in projects:
@@ -434,7 +465,7 @@ def main():
             json.dump(dict(projects=[dict(p, stars=stars.get(p['name']), misses=misses(p),
                                           errors=[dict(cause=c, errors=[dict(error=e, compilations=t) for e, t in errors])
                                                   for c, errors in error_causes(p)],
-                                          verification=verification(p),
+                                          verification=verification(p), roots=roots(p),
                                           plugins=surveys.get(p['name'], {})) for p in projects]),
                       f, indent=1)
 

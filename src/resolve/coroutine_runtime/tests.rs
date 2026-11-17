@@ -44,18 +44,59 @@ fn assert_selected_runtime(provider: &KlibLibraries) {
         )))
     );
 
-    let get_or_throw = provider.external_callable(runtime.get_or_throw).unwrap();
-    let get_or_throw_identity = assert_provider_identity(provider, runtime.get_or_throw);
-    assert_eq!(get_or_throw.kind, ExternalCallableKind::Extension);
-    assert_eq!(get_or_throw.callable.name, "getOrThrow");
+    let throw_on_failure = provider
+        .external_callable(runtime.throw_on_failure)
+        .unwrap();
+    let throw_on_failure_identity = assert_provider_identity(provider, runtime.throw_on_failure);
+    assert_eq!(throw_on_failure.kind, ExternalCallableKind::Extension);
+    assert_eq!(throw_on_failure.callable.name, "throwOnFailure");
     assert_eq!(
-        get_or_throw
+        throw_on_failure
             .callable
             .source_receiver
             .map(Ty::non_null)
             .and_then(Ty::obj_internal),
         Some(type_name("kotlin/Result"))
     );
+    assert_eq!(throw_on_failure.callable.ret, Ty::Unit);
+    assert_eq!(
+        Some(runtime.throw_on_failure_receiver),
+        throw_on_failure.callable.source_receiver
+    );
+
+    let create_failure = provider.external_callable(runtime.create_failure).unwrap();
+    let create_failure_identity = assert_provider_identity(provider, runtime.create_failure);
+    assert_eq!(create_failure.kind, ExternalCallableKind::TopLevel);
+    assert_eq!(create_failure.callable.name, "createFailure");
+    assert_eq!(
+        create_failure.callable.declaration_owner,
+        Some(SemanticCallableOwner::Package(type_name("kotlin")))
+    );
+    assert_eq!(create_failure.callable.params.len(), 1);
+    assert_eq!(
+        create_failure.callable.params[0].non_null().obj_internal(),
+        Some(type_name("kotlin/Throwable"))
+    );
+
+    let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+    let constructor = provider
+        .external_callable(runtime.result_constructor)
+        .unwrap();
+    let constructor_identity = assert_provider_identity(provider, runtime.result_constructor);
+    assert_eq!(constructor.kind, ExternalCallableKind::Constructor);
+    assert_eq!(
+        constructor.callable.declaration_owner,
+        Some(SemanticCallableOwner::Classifier(type_name(
+            "kotlin/Result"
+        )))
+    );
+    assert_eq!(constructor.callable.params, [any]);
+
+    let value = provider.external_property(runtime.result_value).unwrap();
+    assert_eq!(value.name, "value");
+    let value_getter = provider.external_callable(value.getter).unwrap();
+    assert_provider_identity(provider, value.getter);
+    assert_eq!(value_getter.callable.ret, any);
 
     let resume_with = provider.external_callable(runtime.resume_with).unwrap();
     let resume_with_identity = assert_provider_identity(provider, runtime.resume_with);
@@ -69,38 +110,44 @@ fn assert_selected_runtime(provider: &KlibLibraries) {
     );
     assert_eq!(resume_with.callable.params.len(), 1);
     assert_eq!(
+        runtime.resume_with_declared_parameter,
+        resume_with.callable.params[0]
+    );
+    assert_eq!(
+        runtime.resume_with_declared_result,
+        resume_with.callable.ret
+    );
+    assert_eq!(
         resume_with.callable.params[0].non_null().obj_internal(),
         Some(type_name("kotlin/Result"))
     );
     assert_eq!(resume_with.callable.ret, Ty::Unit);
 
-    let failure = provider.external_callable(runtime.result_failure).unwrap();
-    let failure_identity = assert_provider_identity(provider, runtime.result_failure);
-    assert_eq!(failure.kind, ExternalCallableKind::Member);
-    assert_eq!(failure.callable.name, "failure");
-    let companion = provider
-        .classifier(type_name("kotlin/Result"))
-        .unwrap()
-        .companion_object
-        .as_ref()
-        .unwrap()
-        .1;
+    let context = provider.external_property(runtime.context).unwrap();
+    assert_eq!(context.name, "context");
+    assert_eq!(context.getter, runtime.context_getter);
+    let context_getter = provider.external_callable(runtime.context_getter).unwrap();
     assert_eq!(
-        failure.declaration_owner,
-        Some(SemanticCallableOwner::Classifier(companion))
+        context_getter.callable.ret.non_null().obj_internal(),
+        Some(type_name("kotlin/coroutines/CoroutineContext"))
     );
-    assert!(failure.callable.source_receiver.is_none());
-    assert_eq!(failure.callable.params.len(), 1);
+    assert_provider_identity(provider, runtime.context_getter);
+    assert_eq!(context_getter.kind, ExternalCallableKind::Member);
+    assert_eq!(runtime.context_ty, context_getter.callable.ret);
     assert_eq!(
-        failure.callable.params[0].non_null().obj_internal(),
-        Some(type_name("kotlin/Throwable"))
+        runtime.context_receiver_ty.non_null().obj_internal(),
+        Some(type_name("kotlin/coroutines/Continuation"))
     );
-    assert_eq!(
-        failure.callable.ret.non_null().obj_internal(),
-        Some(type_name("kotlin/Result"))
-    );
-    assert_ne!(get_or_throw_identity, failure_identity);
-    assert_ne!(resume_with_identity, failure_identity);
+
+    let identities = [
+        throw_on_failure_identity,
+        create_failure_identity,
+        constructor_identity,
+        resume_with_identity,
+    ];
+    for (index, identity) in identities.iter().enumerate() {
+        assert!(!identities[index + 1..].contains(identity));
+    }
 
     assert_only_generated_uses_are_frozen(provider, runtime);
 }
@@ -116,10 +163,14 @@ fn assert_only_generated_uses_are_frozen(provider: &KlibLibraries, runtime: IrCo
     ir.coroutine_runtime = Some(runtime);
     let frozen = CheckedBackendCallables::freeze(&ir, provider).unwrap();
     assert!(frozen.property(runtime.suspended).is_none());
+    assert!(frozen.property(runtime.context).is_none());
+    assert!(frozen.property(runtime.result_value).is_none());
     for target in [
-        runtime.get_or_throw,
+        runtime.throw_on_failure,
+        runtime.create_failure,
+        runtime.result_constructor,
         runtime.resume_with,
-        runtime.result_failure,
+        runtime.context_getter,
     ] {
         assert!(frozen.callable(target).is_none());
     }
@@ -134,6 +185,7 @@ fn assert_only_generated_uses_are_frozen(provider: &KlibLibraries, runtime: IrCo
             arguments: Vec::new(),
             parameters: Vec::new(),
             result: marker.callable.ret,
+            substitutions: Vec::new(),
             source_receiver: None,
         },
     )));
@@ -160,9 +212,11 @@ fn assert_only_generated_uses_are_frozen(provider: &KlibLibraries, runtime: IrCo
         Some(&marker_identity)
     );
     for target in [
-        runtime.get_or_throw,
+        runtime.throw_on_failure,
+        runtime.create_failure,
+        runtime.result_constructor,
         runtime.resume_with,
-        runtime.result_failure,
+        runtime.context_getter,
     ] {
         assert!(frozen.callable(target).is_none());
     }
