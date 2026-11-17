@@ -991,6 +991,122 @@ fn applied_interface_signature_substitutes_the_supertype() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+const INHERITED_INTERFACE: &str = "\
+package fixture
+interface Root<T> {
+    fun get(): T
+}
+interface View<T> : Root<T> {
+    override fun get(): T
+}
+private class Hidden(private val value: String) : View<CharSequence> {
+    override fun get(): String = value
+}
+fun make(value: String): View<CharSequence> = Hidden(value)
+";
+
+#[test]
+fn a_file_private_class_overrides_the_interfaces_above_its_written_ones() {
+    let Some((directory, libraries)) = produce_library("inherited-interface", INHERITED_INTERFACE)
+    else {
+        return;
+    };
+    let view_get = declared_member(&libraries, "View", "get");
+    let root_get = declared_member(&libraries, "Root", "get");
+    let mut unit = DependencyBodyUnit::default();
+    lower_fixture(
+        &mut unit,
+        &libraries,
+        "make",
+        &Default::default(),
+        &libraries,
+    );
+    validated(unit.ir());
+    let ir = unit.ir();
+    for (owner, id) in [("fixture/View", view_get.id), ("fixture/Root", root_get.id)] {
+        let edge = override_edge(ir, id);
+        assert!(edge.overridden_is_interface, "{owner}");
+        assert_eq!(edge.overridden_owner.render(), owner);
+        assert_eq!(
+            type_name_of(edge.applied_result),
+            "kotlin/CharSequence",
+            "{owner}"
+        );
+        assert_eq!(
+            type_name_of(edge.implementation_result),
+            "kotlin/String",
+            "{owner}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+const ERASED_INHERITED_INTERFACE: &str = "\
+package fixture
+interface Root<T> { fun get(): T }
+interface Left<T> : Root<T>
+interface Right<T> : Root<T>
+interface Leaf<T> : Left<T>, Right<T>
+private class Hidden(private val value: String) : Leaf<CharSequence> {
+    override fun get(): String = value
+}
+interface Unused
+private class Dormant : Unused
+fun make(value: String): Any = Hidden(value)
+";
+
+#[test]
+fn an_erased_factory_freezes_only_the_private_classes_its_body_constructs() {
+    let Some((directory, libraries)) =
+        produce_library("erased-inherited-interface", ERASED_INHERITED_INTERFACE)
+    else {
+        return;
+    };
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+        "make",
+    );
+    let [function] = symbols.callables.functions() else {
+        panic!("one erased-return factory")
+    };
+    let selected = libraries
+        .external_callable(function.callable.external_identity.unwrap())
+        .unwrap();
+    let callable = selected.klib_body_callable().unwrap();
+    assert_eq!(callable.ret(), Ty::obj("kotlin/Any"));
+    let roots = libraries.declaration_bodies().emitted_body_classifiers(
+        callable.identity(),
+        crate::klib_lowering::EMITTED_CALL_FORMS,
+    );
+    assert!(roots.contains(&crate::types::type_name("fixture/Leaf")));
+    assert!(!roots.contains(&crate::types::type_name("fixture/Unused")));
+    // The declaring header is a hierarchy root, not a new public callable or source candidate.
+    assert!(libraries
+        .classifier(crate::types::type_name("fixture/Hidden"))
+        .is_none());
+    let mut unit = DependencyBodyUnit::default();
+    lower_fixture(
+        &mut unit,
+        &libraries,
+        "make",
+        &Default::default(),
+        &libraries,
+    );
+    validated(unit.ir());
+    let root = declared_member(&libraries, "Root", "get");
+    let edge = override_edge(unit.ir(), root.id);
+    assert!(edge.overridden_is_interface);
+    assert_eq!(edge.overridden_owner.render(), "fixture/Root");
+    assert!(edge.declared_parameters.is_empty());
+    assert!(matches!(
+        edge.declared_result.kind(),
+        crate::types::TyKind::TyParam(..)
+    ));
+    assert_eq!(type_name_of(edge.applied_result), "kotlin/CharSequence");
+    assert_eq!(type_name_of(edge.implementation_result), "kotlin/String");
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 const ACCESSOR_INTERFACE: &str = "\
 package fixture
 interface Sized {
@@ -1135,7 +1251,17 @@ fn lower_fixture(
         .external_callable(function.callable.external_identity.unwrap())
         .unwrap();
     let callable = selected.klib_body_callable().unwrap();
-    let callees = super::super::KlibCalleeFacts::new([callable]);
+    // The checker freezes the selected body graph, the class hierarchy above each class included,
+    // before lowering reads it.
+    let checked = crate::resolve::for_checked_klib_bodies(
+        libraries,
+        libraries.declaration_bodies(),
+        [callable],
+        &[],
+    )
+    .unwrap_or_else(|identity| panic!("{name}: no checked facts for {identity:?}"));
+    let callees =
+        super::super::KlibCalleeFacts::new([callable]).with_checked_dependency_facts(&checked);
     unit.lower_function_with_declarations(
         callable,
         libraries.declaration_bodies(),

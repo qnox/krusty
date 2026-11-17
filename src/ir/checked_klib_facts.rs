@@ -17,6 +17,7 @@ pub(crate) struct CheckedKlibDependencyFacts {
         HashMap<crate::fir::ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>>,
     member_edges: HashMap<crate::libraries::KlibDependencyCallable, CheckedMemberCallEdge>,
     type_hierarchy: Option<CheckedKlibTypeFacts>,
+    sam_declarations: HashMap<super::KlibSamKey, super::CheckedKlibSamDeclaration>,
     /// Owning tests observe exact constructor reachability without reimplementing the graph walk.
     #[cfg(test)]
     reached_constructors: crate::fx_hash::HashSet<crate::libraries::KlibDependencyCallable>,
@@ -35,9 +36,24 @@ impl CheckedKlibDependencyFacts {
             builtin_implementations,
             member_edges,
             type_hierarchy,
+            sam_declarations: HashMap::default(),
             #[cfg(test)]
             reached_constructors: crate::fx_hash::HashSet::default(),
         }
+    }
+
+    pub(crate) fn with_sam_declarations(
+        mut self,
+        declarations: HashMap<super::KlibSamKey, super::CheckedKlibSamDeclaration>,
+    ) -> Self {
+        self.sam_declarations = declarations;
+        self
+    }
+
+    pub(crate) fn sam_declarations(
+        &self,
+    ) -> &HashMap<super::KlibSamKey, super::CheckedKlibSamDeclaration> {
+        &self.sam_declarations
     }
 
     pub(crate) fn builtin_implementations(
