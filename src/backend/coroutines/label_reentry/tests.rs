@@ -218,6 +218,107 @@ fn each_suspension_takes_the_next_label_and_plain_runs_go_forward_only() {
         IrExpr::TypeOp { op: IrTypeOp::Cast, arg, .. } if matches!(ir.exprs[arg as usize], IrExpr::GetValue(11))));
 }
 
+/// A value-bearing block used as a statement still evaluates its terminal expression, after its
+/// statements, and discards the block value only at the enclosing statement boundary.
+#[test]
+fn a_statement_block_splits_its_terminal_value_after_its_statements() {
+    let (mut ir, leaf) = file();
+    let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let before = local(&mut ir, 3, one);
+    let terminal = call(&mut ir, leaf);
+    let nested = ir.add_expr(IrExpr::Block {
+        stmts: vec![before],
+        value: Some(terminal),
+    });
+
+    let (body, labels) = split(&mut ir, vec![nested]);
+
+    assert_eq!(labels, Ok(1));
+    let [rewritten] = stmts(&ir, body)[..] else {
+        panic!("one rewritten statement block");
+    };
+    let IrExpr::Block {
+        stmts: nested,
+        value: None,
+    } = &ir.exprs[rewritten as usize]
+    else {
+        panic!("the nested block preserves statement position and has no value");
+    };
+    assert_eq!(nested.len(), 2);
+    let (forward, run) = guarded(&ir, nested[0]);
+    assert!(is_label(&ir, forward, 0));
+    assert_eq!(stmts(&ir, run), [before]);
+    let [declared, step, complete] = stmts(&ir, nested[1])[..] else {
+        panic!("the terminal expression runs after the block statements");
+    };
+    assert!(matches!(
+        ir.exprs[declared as usize],
+        IrExpr::Variable { index: 10, .. }
+    ));
+    assert!(matches!(ir.exprs[step as usize], IrExpr::When { .. }));
+    let (guard, completed_terminal) = guarded(&ir, complete);
+    assert!(is_label(&ir, guard, 0));
+    assert_eq!(completed_terminal, terminal);
+    assert!(matches!(
+        ir.exprs[terminal as usize],
+        IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_value_block_in_a_statement_keeps_its_value_and_value_position_suspension_declines_untouched() {
+    let (mut ir, leaf) = file();
+    let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+    let retained_value = ir.add_expr(IrExpr::Block {
+        stmts: Vec::new(),
+        value: Some(one),
+    });
+    let terminal = call(&mut ir, leaf);
+    let after = local(&mut ir, 3, terminal);
+    let (_body, labels) = split(&mut ir, vec![retained_value, after]);
+    assert_eq!(labels, Ok(1));
+    assert!(matches!(ir.exprs[retained_value as usize],
+        IrExpr::Block { value: Some(value), .. } if value == one));
+
+    let (mut ir, leaf) = file();
+    let value_call = call(&mut ir, leaf);
+    let value_block = ir.add_expr(IrExpr::Block {
+        stmts: Vec::new(),
+        value: Some(value_call),
+    });
+    let initializer = ir.add_expr(IrExpr::Variable {
+        index: 3,
+        ty: Ty::Int,
+        init: Some(value_block),
+        named: true,
+    });
+    let body = ir.add_expr(IrExpr::Block {
+        stmts: vec![initializer],
+        value: None,
+    });
+    let expressions_before = ir
+        .exprs
+        .iter()
+        .map(|expression| format!("{expression:?}"))
+        .collect::<Vec<_>>();
+    let suspend_set = ir.suspend_funs.iter().copied().collect::<HashSet<_>>();
+
+    assert_eq!(
+        split_at_suspensions(&mut ir, body, &suspend_set, &Slots, 10),
+        Err(ReentryDecline::UnsupportedSuspension)
+    );
+    assert_eq!(
+        ir.exprs
+            .iter()
+            .map(|expression| format!("{expression:?}"))
+            .collect::<Vec<_>>(),
+        expressions_before
+    );
+}
+
 /// `if (c) { leaf() } else { 2 }`: the suspending branch is taken by its condition on label 0 or
 /// by holding label 1, without testing the condition again; the plain branch only forward.
 #[test]
@@ -345,6 +446,65 @@ fn two_suspensions_in_one_statement_decline() {
     });
 
     let (_, labels) = split(&mut ir, vec![outer]);
+
+    assert_eq!(labels, Err(ReentryDecline::UnsupportedSuspension));
+}
+
+/// `captured = leaf()` for a captured `var`: the write to its cell completes with the value the
+/// suspension resumed with, reading the same holder.
+#[test]
+fn a_captured_variable_write_completes_with_the_resumed_value() {
+    let (mut ir, leaf) = file();
+    let holder = ir.add_expr(IrExpr::GetValue(3));
+    let suspending = call(&mut ir, leaf);
+    let write = ir.add_expr(IrExpr::RefSet {
+        holder,
+        elem: Ty::Int,
+        value: suspending,
+    });
+
+    let (body, labels) = split(&mut ir, vec![write]);
+
+    assert_eq!(labels, Ok(1));
+    let [statement] = stmts(&ir, body)[..] else {
+        panic!("one suspension statement");
+    };
+    let [_, _, complete] = stmts(&ir, statement)[..] else {
+        panic!("declare, step, complete");
+    };
+    let (guard, completed) = guarded(&ir, complete);
+    assert!(is_label(&ir, guard, 0));
+    assert_eq!(completed, write);
+    assert!(matches!(ir.exprs[write as usize],
+        IrExpr::RefSet { holder: read, value, .. }
+            if read == holder && matches!(ir.exprs[value as usize],
+                IrExpr::TypeOp { op: IrTypeOp::Cast, arg, .. }
+                    if matches!(ir.exprs[arg as usize], IrExpr::GetValue(10)))));
+}
+
+/// A cell write whose holder is not an evaluated capture would read it again after resuming, so
+/// it keeps declining.
+#[test]
+fn a_cell_write_through_a_computed_holder_declines() {
+    let (mut ir, leaf) = file();
+    let other = ir.add_fun(IrFunction {
+        name: "cell".to_string(),
+        params: Vec::new(),
+        ret: Ty::Int,
+        body: None,
+        is_static: true,
+        dispatch_receiver: None,
+        param_checks: Vec::new(),
+    });
+    let holder = call(&mut ir, other);
+    let suspending = call(&mut ir, leaf);
+    let write = ir.add_expr(IrExpr::RefSet {
+        holder,
+        elem: Ty::Int,
+        value: suspending,
+    });
+
+    let (_, labels) = split(&mut ir, vec![write]);
 
     assert_eq!(labels, Err(ReentryDecline::UnsupportedSuspension));
 }
