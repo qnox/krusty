@@ -55,7 +55,7 @@ impl NoArgPlugin {
         NoArgPlugin {
             annotations: qualified
                 .into_iter()
-                .flat_map(crate::plugins::allopen::classifier_identities)
+                .flat_map(krusty_plugin_api::classifier_identities)
                 .collect(),
         }
     }
