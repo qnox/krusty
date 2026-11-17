@@ -321,7 +321,7 @@ impl Runtime {
             return Err(format!("a library member `{name}` an `ArrayList` inherits"));
         };
         let operation = super::array_lists::list_operation(name, &declaration.params)?;
-        let realized = self.array_lists.member(operation);
+        let realized = self.array_lists.member(operation)?;
         if realized.params != *params || realized.results != *results {
             return Err(format!(
                 "the `ArrayList` override of `{name}`, carried otherwise than the member"

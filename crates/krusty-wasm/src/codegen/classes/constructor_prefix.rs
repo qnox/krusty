@@ -1,6 +1,6 @@
 //! Constructor-prefix transport proved by common IR, separately from physical field ordinals.
 
-use krusty::fir::{CapturedCallableOwner, ClassCaptureIdentity, EnclosingInstanceKind};
+use krusty::fir::{ClassCaptureIdentity, EnclosingInstanceKind};
 use krusty::ir::{ClassId, IrCapturedReceiver, IrCtorArg, IrCtorParameterProvenance, IrFile};
 use krusty::types::{Ty, TyKind, TypeName};
 
@@ -95,21 +95,8 @@ fn captured_receiver(ir: &IrFile, argument: &IrCtorArg, receiver: &IrCapturedRec
             context_parameter(argument, types, *index)
         }
         IrCapturedReceiver::Lambda(_) => receiver_lambda(argument),
-        IrCapturedReceiver::Callable { owner, .. } => declaration_receiver(argument, *owner),
+        IrCapturedReceiver::Callable { .. } => callable_receiver(argument),
     }
-}
-
-// The extension receiver of the declaration the capture is written in is that declaration's own
-// parameter: an object reference stored like any captured value, as `asList`'s object literal
-// stores its array. No value identity or enclosing class stands for it. A local function's
-// receiver is another frame's and stays declined.
-fn declaration_receiver(argument: &IrCtorArg, owner: CapturedCallableOwner) -> bool {
-    owner == CapturedCallableOwner::Declaration
-        && matches!(
-            argument.capture_identity,
-            None | Some(ClassCaptureIdentity::Receiver(_))
-        )
-        && object_reference(argument.ty)
 }
 
 // A captured receiver stored as a reference holds an object, never a scalar this target carries
@@ -130,12 +117,21 @@ fn context_parameter(argument: &IrCtorArg, types: &[Ty], index: u32) -> bool {
         )
 }
 
-// A receiver lambda's value is the object the checker selected. Extension-callable receivers are
-// a different profile and stay declined.
+// A receiver lambda's value is the object the checker selected.
 fn receiver_lambda(argument: &IrCtorArg) -> bool {
     matches!(
         argument.capture_identity,
         Some(ClassCaptureIdentity::Receiver(_))
+    ) && object_reference(argument.ty)
+}
+
+// An extension receiver (`this@f`) is the object the named callable received. A checked source
+// capture proves it with its receiver identity. A class a support unit lowers from a library body
+// has no checked identity at all, which the registry comparison already requires of it.
+fn callable_receiver(argument: &IrCtorArg) -> bool {
+    matches!(
+        argument.capture_identity,
+        None | Some(ClassCaptureIdentity::Receiver(_))
     ) && object_reference(argument.ty)
 }
 

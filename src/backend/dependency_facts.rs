@@ -21,7 +21,9 @@ use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
 
 pub use crate::fir::BuiltinImplementation;
-use crate::fir::{CharSequenceProtocol, ExternalCallableId, ExternalPropertyId};
+use crate::fir::{
+    CharSequenceProtocol, CollectionProtocol, ExternalCallableId, ExternalPropertyId,
+};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
 /// A dependency classifier a target may represent itself
@@ -791,6 +793,21 @@ struct SingletonEdge {
     class_contract: Option<crate::libraries::KlibBodyClassContract>,
 }
 
+/// The physical method header of a dependency member, as its provider realized it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DependencyMemberHeader {
+    pub physical_owner: TypeName,
+    pub name: String,
+    pub physical_name: Option<String>,
+    pub descriptor: String,
+}
+
+impl DependencyMemberHeader {
+    pub fn physical_name(&self) -> &str {
+        self.physical_name.as_deref().unwrap_or(&self.name)
+    }
+}
+
 /// The frozen dependency facts of one checked file. It holds a fact for every dependency callable
 /// and property identity the file's IR references, including the accessors of each property.
 #[derive(Debug, Default)]
@@ -798,6 +815,9 @@ pub struct CheckedBackendCallables {
     callables: HashMap<ExternalCallableId, BackendCallableFact>,
     /// Header-only declaration identities never participate in executable dependency closure.
     member_declarations: HashMap<ExternalCallableId, KlibDependencyCallable>,
+    /// The method headers of dependency members a target compares by signature only (a member
+    /// slot's declarations): never called, so never an executable dependency or a dispatch.
+    member_headers: HashMap<ExternalCallableId, DependencyMemberHeader>,
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
     /// The checker-owned immutable snapshot of this file's reached KLIB declarations.
     klib_dependency_facts: crate::ir::CheckedKlibDependencyFacts,
@@ -807,6 +827,7 @@ pub struct CheckedBackendCallables {
     /// with the parameters a plugin's transform appended to each.
     plugin_runtime: HashMap<ExternalCallableId, Box<[Ty]>>,
     char_sequence_protocol: Option<CharSequenceProtocol>,
+    collection_protocol: Option<CollectionProtocol>,
 }
 
 impl CheckedBackendCallables {
@@ -964,7 +985,60 @@ impl CheckedBackendCallables {
                 .map(|declaration| declaration.dependency_callable)
                 .ok_or(DependencyFactError::UnknownCallable(identity))
         })?;
+        facts.freeze_member_headers(ir, provider)?;
         Ok(facts)
+    }
+
+    /// Freeze the header of every dependency member of the file's member slots that the file does
+    /// not otherwise reference. A slot member is declaration evidence only: a target compares its
+    /// method header and never calls it.
+    fn freeze_member_headers(
+        &mut self,
+        ir: &crate::ir::IrFile,
+        provider: &dyn SymbolSource,
+    ) -> Result<(), DependencyFactError> {
+        let identities = ir
+            .function_slot_families
+            .values()
+            .flatten()
+            .flat_map(|family| family.slots.iter().flatten())
+            .filter_map(|function| match function.target {
+                crate::fir::ResolvedFunctionOverrideTarget::External(identity) => Some(identity),
+                crate::fir::ResolvedFunctionOverrideTarget::Module(_) => None,
+            });
+        for identity in identities {
+            if self.callables.contains_key(&identity) || self.member_headers.contains_key(&identity)
+            {
+                continue;
+            }
+            let callable = provider
+                .external_callable(identity)
+                .ok_or(DependencyFactError::UnknownCallable(identity))?
+                .callable;
+            self.member_headers.insert(
+                identity,
+                DependencyMemberHeader {
+                    physical_owner: callable.owner,
+                    name: callable.name,
+                    physical_name: callable.physical_name,
+                    descriptor: callable.descriptor,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// The physical header of a dependency member the file references or compares.
+    pub fn member_header(&self, identity: ExternalCallableId) -> Option<DependencyMemberHeader> {
+        match self.callables.get(&identity) {
+            Some(callable) => Some(DependencyMemberHeader {
+                physical_owner: callable.physical_owner,
+                name: callable.name.clone(),
+                physical_name: callable.physical_name.clone(),
+                descriptor: callable.descriptor.clone(),
+            }),
+            None => self.member_headers.get(&identity).cloned(),
+        }
     }
 
     fn freeze_declaration_identities(
@@ -1114,6 +1188,33 @@ impl CheckedBackendCallables {
     /// them; `None` for every other target.
     pub fn char_sequence_protocol(&self) -> Option<CharSequenceProtocol> {
         self.char_sequence_protocol
+    }
+
+    /// Freeze the collection members a target's own list reads another collection through
+    /// ([`crate::backend::Backend::reads_collections_through_interfaces`]); no source call need
+    /// name them.
+    pub(crate) fn freeze_collection_protocol(
+        &mut self,
+        protocol: CollectionProtocol,
+        provider: &dyn SymbolSource,
+    ) -> Result<(), DependencyFactError> {
+        let mut callable = |identity| provider.external_callable(identity);
+        for member in [
+            protocol.iterator,
+            protocol.has_next,
+            protocol.next,
+            protocol.contains,
+        ] {
+            self.freeze_callable(member, &mut callable)?;
+        }
+        self.collection_protocol = Some(protocol);
+        Ok(())
+    }
+
+    /// The collection members the handoff froze for a target whose list reads another collection
+    /// through them; `None` for every other target.
+    pub fn collection_protocol(&self) -> Option<CollectionProtocol> {
+        self.collection_protocol
     }
 
     /// Copy checker-produced builtin implementation facts for every selected external member.
