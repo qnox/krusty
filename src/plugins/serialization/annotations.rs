@@ -11,7 +11,7 @@ use crate::types::{type_name, AnnotationRetention};
 use super::SERIALIZABLE_FQ;
 
 pub(super) const SERIAL_NAME_FQ: &str = "kotlinx/serialization/SerialName";
-const CONTEXTUAL_FQ: &str = "kotlinx/serialization/Contextual";
+pub(super) const CONTEXTUAL_FQ: &str = "kotlinx/serialization/Contextual";
 const USE_CONTEXTUAL_SERIALIZATION_FQ: &str = "kotlinx/serialization/UseContextualSerialization";
 
 /// `write$Self` is a Kotlin static helper, not merely a static JVM realization.
@@ -73,7 +73,7 @@ pub(super) fn declared_serializer_of(
 ) -> Option<crate::types::TypeName> {
     field_serializer_of(ctx, ir, class_id, property).or_else(|| {
         super::type_argument_serializers::named_serializer(
-            ctx.property_declared_type(ir, class_id, property),
+            &super::type_argument_serializers::declared_type_spelling(ctx, ir, class_id, property),
         )
     })
 }
