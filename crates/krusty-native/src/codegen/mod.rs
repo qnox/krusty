@@ -612,6 +612,9 @@ impl Backend for CraneliftBackend {
         for (identity, symbol) in lowered.class_descriptors {
             state.laid_out.publish_descriptor(identity, symbol);
         }
+        for (identity, entries) in lowered.value_boxes {
+            state.laid_out.publish_value_boxes(identity, entries);
+        }
         state.abi.extend(lowered.abi);
         #[cfg(feature = "test-support")]
         if file.kind == krusty::backend::CheckedIrUnitKind::Source {

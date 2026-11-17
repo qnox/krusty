@@ -26,16 +26,7 @@ fn every_backend_agrees_with_kotlinc(stem: &str, source: &str) {
 /// A delegate of this file, read through the interface.
 #[test]
 fn a_read_only_delegate_of_this_file_answers_the_read() {
-    let source = "import kotlin.properties.ReadOnlyProperty\n\
-         import kotlin.reflect.KProperty\n\
-         class Delegate : ReadOnlyProperty<Test, String> {\n\
-         \x20   override fun getValue(thisRef: Test, property: KProperty<*>) = \"OK\"\n\
-         \x20   fun getValue(thisRef: String, property: KProperty<*>) = \"wrong\"\n\
-         }\n\
-         class Test {\n\
-         \x20   val message by Delegate()\n\
-         }\n\
-         fun box(): String = Test().message\n";
+    let source = include_str!("box_regressions/readOnlyDelegateInheritedOperator.kt");
     every_backend_agrees_with_kotlinc("ReadOnlyDelegate", source);
 }
 
