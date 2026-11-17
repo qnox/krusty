@@ -58,24 +58,9 @@ pub fn checked_prepared_box_with(
     stem: &str,
     extra: &[PathBuf],
 ) -> Result<ReferenceClasses, String> {
-    if !krusty::conformance::backend_targeted(src, &["JVM", "JVM_IR"])
-        || krusty::conformance::backend_muted(src, &["JVM", "JVM_IR"])
-    {
-        return Err("owned portable box fixture may not skip the JVM oracle".into());
-    }
-    if krusty::toolchain::kotlinc_path().is_none() {
-        return Err("owned box fixture requires the configured reference Kotlin compiler".into());
-    }
-    let jdk = producing_jdk_modules()?;
+    let reference = reference_classes_with(src, stem, extra)?;
     let mut classpath = common::classpath_jars_for(src);
     classpath.extend_from_slice(extra);
-    let reference = reference_compile(
-        src,
-        stem,
-        &classpath,
-        BoxJdk::Full { root: Some(&jdk) },
-        krusty::conformance::COROUTINE_HELPERS,
-    )?;
     let units = plan_units(src, stem, krusty::conformance::COROUTINE_HELPERS)?;
     let entry = units
         .last()
@@ -104,6 +89,33 @@ pub fn checked_prepared_box_with(
         ));
     }
     Ok(reference)
+}
+
+/// The reference compiler's classes for a case already prepared by a corpus runner, with `extra`
+/// classpath entries after the ones its directives select. It checks nothing about `box()`.
+pub fn reference_classes_with(
+    src: &str,
+    stem: &str,
+    extra: &[PathBuf],
+) -> Result<ReferenceClasses, String> {
+    if !krusty::conformance::backend_targeted(src, &["JVM", "JVM_IR"])
+        || krusty::conformance::backend_muted(src, &["JVM", "JVM_IR"])
+    {
+        return Err("owned portable box fixture may not skip the JVM oracle".into());
+    }
+    if krusty::toolchain::kotlinc_path().is_none() {
+        return Err("owned box fixture requires the configured reference Kotlin compiler".into());
+    }
+    let jdk = producing_jdk_modules()?;
+    let mut classpath = common::classpath_jars_for(src);
+    classpath.extend_from_slice(extra);
+    reference_compile(
+        src,
+        stem,
+        &classpath,
+        BoxJdk::Full { root: Some(&jdk) },
+        krusty::conformance::COROUTINE_HELPERS,
+    )
 }
 
 /// Bump when the on-disk cache layout, the comparison population, or how a case's reference

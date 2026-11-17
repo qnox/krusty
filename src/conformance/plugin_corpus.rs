@@ -20,6 +20,7 @@
 //! | `upstream` | a `JetBrains/kotlin` directory holding the plugin's cases, read at the tag `v<Kotlin version>`; repeatable |
 //! | `support` | a `JetBrains/kotlin` source file every case compiles with, as another file of its module; repeatable |
 //! | `stubs` | a directory of Java sources, relative to the descriptor, compiled into a runtime the cases link against |
+//! | `check` | what a case must do: `box` (the default) compiles and runs `box()`; `classes` compiles to exactly the classes the reference compiler emits, for upstream cases that are code-generation dumps with no `box()` |
 //! | `kotlin` | the inclusive Kotlin release bracket `<min>..<max>`, either end optional |
 //!
 //! An artifact is one source or several joined by `|` (the first that provisions wins):
@@ -240,6 +241,16 @@ impl std::fmt::Display for KotlinBracket {
     }
 }
 
+/// What a corpus case must do to pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaseCheck {
+    /// Compile with the plugin and return `"OK"` from `box()`.
+    #[default]
+    Box,
+    /// Compile to exactly the classes the reference compiler and plugin emit, byte for byte.
+    Classes,
+}
+
 /// A compiler plugin's box corpus.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginCorpus {
@@ -254,6 +265,7 @@ pub struct PluginCorpus {
     pub upstream: Vec<String>,
     pub support: Vec<String>,
     pub stubs: Option<String>,
+    pub check: CaseCheck,
     pub kotlin: KotlinBracket,
 }
 
@@ -268,6 +280,7 @@ impl PluginCorpus {
         let mut upstream = Vec::new();
         let mut support = Vec::new();
         let mut stubs = None;
+        let mut check_text = None;
         let mut kotlin = None;
         let once = |slot: &mut Option<String>, key: &str, value: &str| match slot {
             Some(_) => Err(format!("`{key}` is given twice")),
@@ -295,6 +308,7 @@ impl PluginCorpus {
                 "plugin-jar" => once(&mut jar_text, key, value)?,
                 "kotlin" => once(&mut bracket_text, key, value)?,
                 "stubs" => once(&mut stubs, key, value)?,
+                "check" => once(&mut check_text, key, value)?,
                 "support" => support.push(value.to_string()),
                 "plugin-option" => {
                     let (plugin_id, option) = value
@@ -316,6 +330,11 @@ impl PluginCorpus {
         if let Some(text) = bracket_text {
             kotlin = Some(KotlinBracket::parse(&text)?);
         }
+        let check = match check_text.as_deref() {
+            None | Some("box") => CaseCheck::Box,
+            Some("classes") => CaseCheck::Classes,
+            Some(other) => return Err(format!("`check = {other}` is neither `box` nor `classes`")),
+        };
         let plugin = plugin.ok_or("a descriptor names no `plugin`")?;
         if plugin_jar.is_none() && !options.is_empty() {
             return Err(format!("plugin `{plugin}` has options but no `plugin-jar`"));
@@ -330,6 +349,7 @@ impl PluginCorpus {
             upstream,
             support,
             stubs,
+            check,
             kotlin: kotlin.unwrap_or_default(),
         })
     }
@@ -456,7 +476,7 @@ mod tests {
             "# comment\nplugin = demo\ndirective = WITH_DEMO\nplugin-jar = dist:demo.jar\n\
              plugin-option = demo.id:flag=true\nruntime = maven:g:a:1.0 | dist:a.jar\n\
              upstream = plugins/demo/testData/box\nsupport = plugins/demo/testData/lib.kt\n\
-             stubs = stubs\nkotlin = 2.4.0..2.4.20\n",
+             stubs = stubs\ncheck = classes\nkotlin = 2.4.0..2.4.20\n",
         )
         .unwrap();
         assert_eq!(
@@ -485,6 +505,7 @@ mod tests {
                 upstream: vec!["plugins/demo/testData/box".into()],
                 support: vec!["plugins/demo/testData/lib.kt".into()],
                 stubs: Some("stubs".into()),
+                check: CaseCheck::Classes,
                 kotlin: KotlinBracket {
                     min: Some(KotlinVersion::V2_4_0),
                     max: Some(KotlinVersion::V2_4_20)
@@ -520,6 +541,10 @@ mod tests {
         assert_eq!(
             refused("plugin = a\nruntime = maven:g:a\n"),
             "artifact `maven:g:a` is malformed"
+        );
+        assert_eq!(
+            refused("plugin = a\ncheck = bytes\n"),
+            "`check = bytes` is neither `box` nor `classes`"
         );
         assert_eq!(
             refused("plugin = a\nkotlin = 2.4.0\n"),

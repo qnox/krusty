@@ -462,7 +462,9 @@ cannot pass under that runtime is not applicable (`expected_not_applicable/jvm/<
 A corpus starts clean: only the cases krusty passes are listed in `included/jvm/<version>.txt` and
 each must keep passing, while a case that does not pass yet is not included and joins the list in
 the change that makes it pass. A case that passes without being included fails the run, so the
-list only catches up. Both lists sit beside the descriptor (`src/plugins/<name>/boxes/`) and follow
+list only catches up. A descriptor with `check = classes` is for upstream cases that are code-generation dump tests with no
+`box()` (Compose's `testData/codegen`): the case passes when krusty emits exactly the classes the
+reference compiler and plugin emit, byte for byte, module by module. Both lists sit beside the descriptor (`src/plugins/<name>/boxes/`) and follow
 the same release-inheritance rule as the box inventories.
 Regenerate a plugin's lists with
 `KRUSTY_BLESS_BOX_EXPECTATIONS=1 ./run-tests.sh --test conformance plugin_box_corpora_match`.
