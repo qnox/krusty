@@ -2,7 +2,9 @@
 //! where a declaration publishes it. kotlinc records the variable's upper type on the intersection
 //! when the intersection's own public approximation is not a subtype of it, and every later
 //! approximation reads it: through another generic call, a classifier argument, a local inside a
-//! lambda, or a private declaration. An unbounded parameter keeps the common supertype.
+//! lambda, or a private declaration. An unbounded parameter keeps the common supertype. An
+//! approximated intersection passed on to another bounded parameter keeps its approximation when
+//! that reaches the new bound and takes the new bound otherwise.
 use super::common;
 
 const PROGRAM: &str = include_str!("box_regressions/IntersectionUpperBoundPublication.kt");
@@ -31,6 +33,8 @@ fun check() {
     val e: Int = kept()
     val f: Int = wrapped()
     val g: Int = local()
+    val h: Int = marked()
+    val i: Int = named()
 }
 ";
     let declarations = program_files()
@@ -52,6 +56,8 @@ fun check() {
             mismatch(6, "Named"),
             mismatch(7, "Box<Named>"),
             mismatch(8, "Named"),
+            mismatch(9, "Marked"),
+            mismatch(10, "Named"),
         ]
     );
 }

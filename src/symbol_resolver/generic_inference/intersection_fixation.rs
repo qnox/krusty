@@ -17,7 +17,9 @@ use crate::types::{Ty, TyKind};
 use super::{published_declaration_type, GSigBinds};
 
 /// `bindings` with each intersection solution of a `signature` formal recording the formal's
-/// declared upper type, when the intersection's public approximation does not reach it.
+/// declared upper type, when the intersection's public approximation does not reach it. An
+/// approximation an earlier call recorded is kept when it already reaches the new bound and is
+/// replaced by the new bound otherwise; the components are preserved either way.
 pub(crate) fn with_intersection_upper_types<'a>(
     source: &dyn SymbolSource,
     signature: &GenericSig,
@@ -28,8 +30,7 @@ pub(crate) fn with_intersection_upper_types<'a>(
         let Some(&solution) = bindings.get(formal) else {
             continue;
         };
-        if !matches!(solution.non_null().kind(), TyKind::Intersection(parts) if parts.approximation().is_none())
-        {
+        if !matches!(solution.non_null().kind(), TyKind::Intersection(_)) {
             continue;
         }
         let Some(upper) = declared_upper_type(signature, bounds, bindings) else {
