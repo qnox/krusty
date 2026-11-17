@@ -979,6 +979,7 @@ impl BodyLowering<'_> {
                 inline_callee: frame.callee,
                 inline_callee_source_name: &callee,
                 crossinline_operands: &crossinline_operands,
+                parent: None,
             },
         ) {
             *malformed_anonymous = Some(failure);
