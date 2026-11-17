@@ -112,6 +112,7 @@ pub mod referenced_classifiers;
 mod references;
 mod reified_markers;
 mod reified_templates;
+mod sam_function_value_adapter;
 mod sam_target;
 mod type_tests;
 pub(crate) use type_tests::admits_null_at_runtime;
