@@ -1032,6 +1032,10 @@ pub struct LibraryCallable {
     /// default to such a declaration keeps the declaration's identity, with
     /// [`Self::default_call`] set; no platform `$default` symbol is named.
     pub defaults_from_declaration: bool,
+    /// [`Self::defaults_from_declaration`] holds because the declaration's compiled entry takes
+    /// the mask of omitted arguments after synthetic parameters a compiler plugin's transformation
+    /// appended. Only an enabled plugin that owns that calling convention can pass the mask.
+    pub defaults_by_transformed_entry: bool,
     /// For a generic `vararg` callable resolved with a bound element type (`listOf<Long>(…)` →
     /// `Long`): the *logical* element type the trailing arguments adapt to. `None` for a non-vararg
     /// call or when the element type is not recovered. The backend uses it to coerce each packed

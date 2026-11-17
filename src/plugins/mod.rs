@@ -813,6 +813,14 @@ pub trait IrPlugin {
         &[]
     }
 
+    /// Whether the plugin's transformation gives a library declaration a compiled entry that takes
+    /// the mask of omitted default arguments, and its calls pass that mask (Compose's
+    /// composables). Without such a plugin a call that omits one of those arguments has nothing
+    /// to realize the default.
+    fn passes_transformed_entry_defaults(&self) -> bool {
+        false
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
@@ -1402,6 +1410,14 @@ impl PluginHost {
     /// Names of the registered plugins, in run order (introspection / tests).
     pub fn plugin_names(&self) -> Vec<&str> {
         self.plugins.iter().map(|p| p.name()).collect()
+    }
+
+    /// Whether a registered plugin [passes the default mask of a transformed library
+    /// entry](IrPlugin::passes_transformed_entry_defaults).
+    pub fn passes_transformed_entry_defaults(&self) -> bool {
+        self.plugins
+            .iter()
+            .any(|plugin| plugin.passes_transformed_entry_defaults())
     }
 
     /// Every registered plugin's [`IrPlugin::sam_with_receiver_annotations`].

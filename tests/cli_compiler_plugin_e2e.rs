@@ -666,6 +666,40 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
     );
 }
 
+/// A library composable's default argument is realized by its transformed entry, which only the
+/// Compose plugin's calls pass the mask to: a module compiled without the plugin that omits one
+/// gets the frontend's error for a default nothing can realize.
+#[test]
+fn a_library_composable_default_is_unavailable_without_the_compose_plugin() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let library = Probe::new(
+        "compose-default-without-plugin-lib",
+        "package lib\nimport androidx.compose.runtime.Composable\n\
+         @Composable fun Sized(size: Int = 1) {}\n",
+    );
+    let built = library.krusty(&classpath, &[format!("-Xplugin={}", compose.display())]);
+    assert_eq!(built.code, Some(0), "{}", built.stderr);
+    classpath.push(library.dir.join("krusty"));
+    let probe = Probe::new(
+        "compose-default-without-plugin",
+        "package probe\nimport lib.Sized\nfun plain() { Sized() }\n",
+    );
+    let compiled = probe.krusty(&classpath, &[]);
+    assert_eq!(
+        compiled.stderr,
+        format!(
+            "{}:3:15: error: default-argument realization is unavailable for 'Sized'.\n\
+             krusty: 1 error(s)\n",
+            probe.source.display()
+        )
+    );
+    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.classes, Vec::<String>::new());
+}
+
 /// Compose's metrics and reports name files krusty does not write yet: a nonempty destination fails
 /// the compile, naming each option, and nothing is emitted. An empty one requests no report.
 #[test]

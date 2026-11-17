@@ -13,11 +13,12 @@ impl JvmLibraries {
     /// through its `$default` bridge, or as the declaration that takes the mask itself.
     pub(super) fn realize_top_level_defaults(&self, callable: &mut LibraryCallable) {
         callable.default_realization = self.top_level_default_realization(callable).map(Box::new);
-        callable.defaults_from_declaration = callable.default_realization.is_none()
+        callable.defaults_by_transformed_entry = callable.default_realization.is_none()
             && !callable.suspend
             && parse_method_desc(&callable.descriptor).is_some_and(|(descriptor, _)| {
                 declaration_takes_default_mask(&descriptor, &callable.physical_params)
             });
+        callable.defaults_from_declaration = callable.defaults_by_transformed_entry;
     }
 
     pub(super) fn top_level_default_realization(

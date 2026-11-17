@@ -37015,7 +37015,10 @@ impl<'a> Checker<'a> {
                 // arguments, so the call site passes it and no `$default` symbol is named.
                 self.resolved_library_default_literals
                     .insert(call, literals);
-            } else if selected.callable.defaults_from_declaration {
+            } else if selected.callable.defaults_from_declaration
+                && (!selected.callable.defaults_by_transformed_entry
+                    || self.native_plugins.passes_transformed_entry_defaults())
+            {
                 selected.callable.default_call = true;
             } else {
                 self.diags.error(
