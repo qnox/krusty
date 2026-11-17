@@ -581,16 +581,12 @@ impl<'a> KlibCalleeFacts<'a> {
         Option<super::continuation_intrinsics::ContinuationIntrinsicCall>,
         super::decline::KlibBodyDeclineReason,
     > {
+        // Two selected declarations prove no intrinsic; the call's own linking reports them.
         match self.get(identity) {
-            Some(KlibCalleeFact::Ambiguous) => {
-                Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
-                    "conflicting provider contracts for a continuation intrinsic".to_owned(),
-                ))
-            }
             Some(KlibCalleeFact::Selected(callables)) => {
                 super::continuation_intrinsics::authenticate(callables[0])
             }
-            None => Ok(None),
+            Some(KlibCalleeFact::Ambiguous) | None => Ok(None),
         }
     }
 

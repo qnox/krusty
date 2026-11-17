@@ -1098,12 +1098,9 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .linked_origin(&self.active_module, signature)
         {
             KlibCalleeOrigin::Exact(identity) => identity,
-            KlibCalleeOrigin::Missing => return Ok(None),
-            KlibCalleeOrigin::Ambiguous => {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "ambiguous producer origin for a continuation intrinsic".to_owned(),
-                ))
-            }
+            // An intrinsic is a positive fact about one exact declaration; the call's own
+            // linking reports the canonical producer-origin ambiguity.
+            KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => return Ok(None),
         };
         self.sources.callees.continuation_intrinsic(&identity)
     }
