@@ -552,7 +552,7 @@ fn pass_composer(
     let mut omitted = 0;
     for ((index, argument), &ty) in (0u32..).zip(arguments).zip(&shape.parameters) {
         if *argument == ArgumentState::Omitted {
-            omitted |= default_bit(index);
+            omitted |= default_bit(index - u32::from(receiver));
             let placeholder = ir.add_expr(IrExpr::Const(placeholder(ty)));
             ir.mark_positionless(placeholder);
             physical.push(placeholder);
