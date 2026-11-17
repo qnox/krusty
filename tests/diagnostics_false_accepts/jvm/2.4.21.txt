@@ -699,7 +699,6 @@ compiler/testData/diagnostics/tests/inference/pcla/specialCallsWithCallableRefer
 compiler/testData/diagnostics/tests/inference/pcla/specialCallsWithCallableReferencesErrorType.kt
 compiler/testData/diagnostics/tests/inference/pcla/stubTypes/capturedTypes.kt
 compiler/testData/diagnostics/tests/inference/pcla/stubTypes/capturedTypesId.kt
-compiler/testData/diagnostics/tests/inference/publicApproximation/twoIntersections.kt
 compiler/testData/diagnostics/tests/inference/regressions/functionalSuperTypeOfIntersectionType.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt1944.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt2179.kt
