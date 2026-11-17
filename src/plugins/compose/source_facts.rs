@@ -30,6 +30,9 @@ pub struct ComposeFileFacts {
 /// A composable function the transform turns into a restartable group.
 pub(super) struct RestartableFunction {
     pub(super) function: FunId,
+    /// Whether the function is a restartable group. A composable function with a result and no
+    /// composable call has no group: it takes the composer parameters and its trace markers only.
+    pub(super) restartable: bool,
     /// The durable group key, `DurableFunctionKeyTransformer`'s hash of the function's path.
     pub(super) key: i32,
     /// The declaration's UTF-16 start and end offsets, which `@FunctionKeyMeta` records.
@@ -260,14 +263,25 @@ pub(super) fn record(
             });
             continue;
         }
-        let Some(body) = function_body(ir, declaration.function) else {
+        let plain = !matches!(declaration.ret.kind(), TyKind::Unit);
+        let Some(body) = function_body(ir, declaration.function).or_else(|| {
+            plain
+                .then(|| expression_body(ir, declaration.function))
+                .flatten()
+        }) else {
             rejections.push(PluginRejection {
                 span,
                 message: unsupported("a composable function without a block body"),
             });
             continue;
         };
-        let Some(body_span) = source.expression_span(ir, body.block) else {
+        let Some(body_span) = source.expression_span(ir, body.block).or_else(|| {
+            // An expression body has no block of its own: its expression is the body.
+            let IrExpr::Return(Some(value)) = ir.exprs[*body.statements.last()? as usize] else {
+                return None;
+            };
+            source.expression_span(ir, value)
+        }) else {
             rejections.push(PluginRejection {
                 span,
                 message: unsupported("a composable function whose body has no source position"),
@@ -275,6 +289,17 @@ pub(super) fn record(
             continue;
         };
         let parameter_count = declaration.params.len() as u32;
+        if plain {
+            if let Some(what) =
+                unsupported_plain_body(ir, declaration.function, &body, &calls, &lambdas)
+            {
+                rejections.push(PluginRejection {
+                    span,
+                    message: unsupported(what),
+                });
+                continue;
+            }
+        }
         let invoked = |statement: ExprId| match &ir.exprs[statement as usize] {
             IrExpr::InvokeFunction { func, .. } => match ir.exprs[*func as usize] {
                 IrExpr::GetValue(index) if index < parameter_count && lambdas[index as usize] => {
@@ -292,7 +317,9 @@ pub(super) fn record(
             .collect::<Vec<_>>();
         direct_calls.extend(direct.iter().copied());
         let lambda_arguments = lambda_arguments(ir, source, &direct, composable);
-        if let Some(what) = unsupported_body_expression(ir, body.block, &lambda_arguments, &lambdas)
+        if let Some(what) = (!plain)
+            .then(|| unsupported_body_expression(ir, body.block, &lambda_arguments, &lambdas))
+            .flatten()
         {
             rejections.push(PluginRejection {
                 span,
@@ -401,7 +428,12 @@ pub(super) fn record(
                 target_constraints(ir, &lambdas, &sites),
             );
         }
-        let used = used_parameters(ir, body.block, parameter_count);
+        // A function without a group decides nothing on its parameters.
+        let used = if plain {
+            vec![false; parameter_count as usize]
+        } else {
+            used_parameters(ir, body.block, parameter_count)
+        };
         let defaults = ir
             .param_defaults(declaration.function)
             .cloned()
@@ -484,6 +516,7 @@ pub(super) fn record(
         }
         functions.push(RestartableFunction {
             function: declaration.function,
+            restartable: !plain,
             key: path.key(),
             offsets: (
                 positions.unit(span.lo) as i32,
@@ -780,8 +813,6 @@ fn unsupported_declaration(
         Some("a composable function with a vararg parameter")
     } else if let Some(&Err(what)) = stabilities.iter().find(|stability| stability.is_err()) {
         Some(what)
-    } else if !matches!(declaration.ret.kind(), TyKind::Unit) {
-        Some("a composable function with a result")
     } else if declaration.inline {
         Some("an inline composable function")
     } else if declaration.suspend {
@@ -791,6 +822,54 @@ fn unsupported_declaration(
     } else {
         None
     }
+}
+
+/// What a composable function with a result does that the pass does not cover yet. The function
+/// has no group, so its body makes no composable call and writes no lambda, takes no default
+/// argument, and its one `return` ends the body.
+fn unsupported_plain_body(
+    ir: &IrFile,
+    function: FunId,
+    body: &FunctionBody,
+    calls: &HashMap<ExprId, ComposableCall>,
+    lambdas: &[bool],
+) -> Option<&'static str> {
+    if lambdas.contains(&true) {
+        return Some("a composable function with a result and a composable lambda parameter");
+    }
+    if ir
+        .param_defaults(function)
+        .is_some_and(|defaults| defaults.iter().any(Option::is_some))
+    {
+        return Some("a composable function with a result and a default argument");
+    }
+    let Some((&last, leading)) = body.statements.split_last() else {
+        return Some("a composable function with a result and no `return`");
+    };
+    if !matches!(ir.exprs[last as usize], IrExpr::Return(Some(_))) {
+        return Some("a composable function with a result that does not end in a `return`");
+    }
+    let mut pending = leading.to_vec();
+    pending.extend(match &ir.exprs[last as usize] {
+        IrExpr::Return(value) => *value,
+        _ => None,
+    });
+    while let Some(expression) = pending.pop() {
+        if calls.contains_key(&expression) {
+            return Some("a composable function with a result that makes a composable call");
+        }
+        match &ir.exprs[expression as usize] {
+            IrExpr::Return(_) => {
+                return Some("a composable function with a result and an early `return`")
+            }
+            IrExpr::Lambda { .. } => {
+                return Some("a composable function with a result that writes a lambda")
+            }
+            _ => {}
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    None
 }
 
 /// An expression in a composable body the transform does not handle yet: an early `return`, which
@@ -1687,6 +1766,22 @@ pub(super) fn function_body(ir: &IrFile, function: FunId) -> Option<FunctionBody
     Some(FunctionBody {
         block: *block,
         statements: stmts.iter().copied().chain(*value).collect(),
+    })
+}
+
+/// The body of a function written `= expression`: the function's root block, which holds only the
+/// `return` of that expression.
+pub(super) fn expression_body(ir: &IrFile, function: FunId) -> Option<FunctionBody> {
+    let root = ir.functions[function as usize].body?;
+    let IrExpr::Block { stmts, value: None } = &ir.exprs[root as usize] else {
+        return None;
+    };
+    let [statement] = stmts.as_slice() else {
+        return None;
+    };
+    matches!(ir.exprs[*statement as usize], IrExpr::Return(Some(_))).then(|| FunctionBody {
+        block: root,
+        statements: vec![*statement],
     })
 }
 
