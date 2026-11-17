@@ -250,7 +250,11 @@ impl<'a> CommonIrBodySink<'a> {
         super::annotation_constructions::assign_evaluation_scopes(self.ir);
         super::constructors::finalize_local_superclass_captures(self.ir)?;
         finalize_enum_entries(self.ir)?;
-        finalize_properties(index, self.ir)?;
+        finalize_properties(
+            index,
+            self.ir,
+            &mut self.lowering_context.dependency_templates,
+        )?;
         finalize_constructor_field_indices(index, self.ir)?;
         super::annotation_constructions::publish_element_defaults(self.ir);
         finalize_interface_delegations(index, self.ir)?;

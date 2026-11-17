@@ -25,6 +25,7 @@ mod immediate_lambda;
 mod inline_callee;
 mod lambda_splice_contract;
 mod property_accessors;
+pub(super) use property_accessors::fresh_value_base;
 
 pub(super) use immediate_lambda::splice_immediate_lambda;
 pub(super) use inline_callee::InlineCallee;

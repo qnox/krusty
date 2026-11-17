@@ -558,7 +558,7 @@ fn protected_lambda_bodies(ir: &crate::ir::IrFile, root: ExprId) -> HashSet<Expr
 /// Each function numbers its own parameters from zero, including parameters the body never reads,
 /// so the next free index has to clear both the highest index written in the arena and the highest
 /// parameter slot reserved for a function or constructor.
-fn fresh_value_base(ir: &crate::ir::IrFile) -> u32 {
+pub(in super::super) fn fresh_value_base(ir: &crate::ir::IrFile) -> u32 {
     let mut max_index = 0u32;
     let see = |max_index: &mut u32, index: u32| *max_index = (*max_index).max(index);
     for function in &ir.functions {

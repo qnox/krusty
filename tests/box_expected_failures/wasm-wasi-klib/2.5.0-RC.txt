@@ -1099,7 +1099,6 @@ delegatedProperty/delegatedOverride.kt
 delegatedProperty/functionRefDelefate.kt
 delegatedProperty/genericDelegateUncheckedCast1.kt
 delegatedProperty/genericDelegateUncheckedCast2.kt
-delegatedProperty/insideInlinedObjectMultiModule.kt
 delegatedProperty/kt37204.kt
 delegatedProperty/kt45431.kt
 delegatedProperty/kt6722.kt
