@@ -96,6 +96,7 @@ impl BodyLowering<'_> {
         access: &KlibIrMemberAccess,
         constructor_type_arguments: u32,
         ty: Ty,
+        role: super::ConstructorRole,
     ) -> Lowered<ConstructorOperands> {
         if access.symbol.kind != KlibIrSymbolKind::Constructor {
             return Err(mismatch("a constructor call's symbol is not a constructor"));
@@ -116,7 +117,7 @@ impl BodyLowering<'_> {
             KlibIrSignature::Public(callee)
                 if !self.linker.links_privately(&access.symbol.signature) =>
             {
-                let linked = self.linker.link_constructor(self.ir, callee)?;
+                let linked = self.linker.link_constructor(self.ir, callee, role)?;
                 (linked.declaration, Some(linked.target), None)
             }
             signature => {
@@ -186,7 +187,12 @@ impl BodyLowering<'_> {
             params,
             args,
             defaults,
-        } = self.constructor_operands(access, constructor_type_arguments, ty)?;
+        } = self.constructor_operands(
+            access,
+            constructor_type_arguments,
+            ty,
+            super::ConstructorRole::Allocation,
+        )?;
         match declaration.semantic_role {
             Some(crate::types::SemanticCallRole::KotlinArrayAllocation) => {
                 // The allocated type is the constructed class's application: `Array<T>` with its
