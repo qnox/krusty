@@ -176,6 +176,34 @@ impl StaticMember {
     }
 }
 
+/// The function an enum's `entries` getter builds its list by on [`Contract::KotlinWasm`]: the
+/// stdlib's `enumEntries(Array)` that resolution selected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntriesFactory {
+    /// The selected dependency declaration, which an earlier unit emits.
+    Selected(crate::fir::EnumEntriesFactory),
+    /// This IR's own function lowering that declaration's body: a dependency support unit that
+    /// emits `enumEntries` and materializes a library enum calls the function it publishes, which
+    /// no earlier unit exports.
+    Own(FunId),
+}
+
+impl EntriesFactory {
+    /// `factory`, whose provider-assigned declaration is `identity`, as `ir` reaches it: the
+    /// function `exports` publishes under that identity, when this unit lowers it, and otherwise
+    /// the selected declaration.
+    pub fn bind(
+        factory: crate::fir::EnumEntriesFactory,
+        identity: Option<&crate::libraries::KlibDependencyCallable>,
+        exports: &super::DependencyExportSignatures,
+    ) -> Self {
+        exports
+            .callables()
+            .find(|(_, exported)| Some(*exported) == identity)
+            .map_or(Self::Selected(factory), |(function, _)| Self::Own(function))
+    }
+}
+
 /// Realize every enum class `ir` declares and rewrite every emitted use of one. Every enum's
 /// `values()`, `valueOf` and `entries` are published as entries, whether its module is a library
 /// or the program, as its constants are ([`publish_constants`]). Under [`Contract::KotlinWasm`]
@@ -184,7 +212,7 @@ impl StaticMember {
 pub fn realize(
     ir: &mut IrFile,
     contract: Contract,
-    factory: Option<crate::fir::EnumEntriesFactory>,
+    factory: Option<EntriesFactory>,
     exports: &mut super::DependencyExportSignatures,
 ) -> Result<(), String> {
     let enums: Vec<ClassId> = (0..ir.classes.len())

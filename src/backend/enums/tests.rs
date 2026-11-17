@@ -116,7 +116,7 @@ fn lowered_for(mut ir: IrFile, contract: super::Contract) -> IrFile {
     super::realize(
         &mut ir,
         contract,
-        Some(factory()),
+        Some(super::EntriesFactory::Selected(factory())),
         &mut super::super::DependencyExportSignatures::default(),
     )
     .expect("the enums are realized");
@@ -928,6 +928,34 @@ fn the_wasm_contract_publishes_each_constant_once_constructed() {
         panic!("the getter answers the list");
     };
     assert!(matches!(ir.expr(*value), IrExpr::GetStatic(slot) if slot == list));
+}
+
+/// A support unit that lowers `enumEntries` itself builds a library enum's list with its own
+/// function, which no earlier unit exports.
+#[test]
+fn a_unit_lowering_the_factory_calls_its_own_function() {
+    let mut ir = colors();
+    let own: FunId = 0;
+    super::realize(
+        &mut ir,
+        super::Contract::KotlinWasm,
+        Some(super::EntriesFactory::Own(own)),
+        &mut super::super::DependencyExportSignatures::default(),
+    )
+    .expect("the enums are realized");
+    let [_, fill, _] = statements(&ir, body_of(&ir, "Color$entries"))[..] else {
+        panic!("the getter builds the enum, fills the list, then answers it");
+    };
+    let IrExpr::When { branches } = ir.expr(fill) else {
+        panic!("the list is built when missing");
+    };
+    let [(Some(_), store)] = branches[..] else {
+        panic!("one branch");
+    };
+    let IrExpr::SetStatic { value, .. } = ir.expr(store) else {
+        panic!("the list is stored");
+    };
+    assert_eq!(local_callee(&ir, *value), Some(own));
 }
 
 fn body_of(ir: &IrFile, name: &str) -> ExprId {
