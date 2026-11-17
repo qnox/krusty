@@ -312,6 +312,8 @@ impl Backend for WasmBackend {
             // The table types are built from the plan, so they are that module's too, except a
             // dependency class's, which is the whole program's.
             started.tables.enter_plan(
+                (file.kind == krusty::backend::CheckedIrUnitKind::Source)
+                    .then_some(file.module_name),
                 file.classifiers.module().classes(),
                 &file.classifiers,
                 &started.classes,
