@@ -1657,3 +1657,54 @@ fn fully_explicit_type_arguments(type_args: &[Ty]) -> bool {
             .iter()
             .all(|argument| !argument.mentions_error() && !argument.mentions_pending())
 }
+
+/// The selected lambda shape's per-slot facts, as a bare call's postponed lambda analysis reads
+/// them. Without a selected shape every fact is absent and the shape is not inline.
+pub(super) struct SelectedLambdaInputs {
+    pub(super) param_types: Option<Vec<Vec<Ty>>>,
+    pub(super) expected_types: Option<Vec<Option<Ty>>>,
+    pub(super) fixed_expected_types: Option<Vec<Option<Ty>>>,
+    pub(super) generic_formals: Vec<crate::types::TyParamName>,
+    /// Per-param receiver function type for a classpath top-level HOF (`NavHost(builder:
+    /// NGB.()->Unit){…}`): a lambda to such a param binds its implicit `this` to the receiver.
+    /// From `@Metadata`'s `@ExtensionFunctionType`, so it needs no JVM `Signature` and also drives a
+    /// krusty-emitted module's HOF whose `Signature` attribute is absent. `None` for a user fn.
+    pub(super) receivers: Option<Vec<Option<Ty>>>,
+    pub(super) context_counts: Option<Vec<usize>>,
+    /// Per-param `crossinline`/`noinline`: a mutable local such a lambda captures is `Ref`-boxed
+    /// (see `InlineParameterModifier::boxes_captures`), not an inline splice's.
+    pub(super) boxes_captures: Option<Vec<Option<bool>>>,
+    /// The shape's own callable may be a companion's `operator fun invoke` rather than a top-level
+    /// function; its inline flag decides where a lambda's `return` may go.
+    pub(super) inline: bool,
+}
+
+impl SelectedLambdaInputs {
+    pub(super) fn of(shape: Option<&crate::symbol_resolver::LambdaCallShape>) -> Self {
+        Self {
+            param_types: shape.and_then(|shape| shape.param_types.clone()),
+            expected_types: shape.and_then(|shape| shape.expected_types.clone()),
+            fixed_expected_types: shape.and_then(|shape| shape.fixed_expected_types.clone()),
+            generic_formals: shape
+                .map(|shape| shape.generic_formals.clone())
+                .unwrap_or_default(),
+            receivers: shape.and_then(|shape| shape.receivers.clone()),
+            context_counts: shape.and_then(|shape| shape.context_counts.clone()),
+            boxes_captures: shape.and_then(|shape| shape.boxes_captures.clone()),
+            inline: shape.is_some_and(|shape| shape.inline),
+        }
+    }
+}
+
+/// Seed a call's known bindings with the formals the selected shape's explicit type arguments and
+/// receiver fixed before any argument was analyzed. An implicit receiver's extension (`runningFold`
+/// inside an extension of `List<E>`) proves `T = E` only through its shape, so its lambdas'
+/// rechecks would otherwise keep the declaration's own `T`. A binding the call already knows wins.
+pub(super) fn seed_fixed_input_bindings(
+    shape: Option<&crate::symbol_resolver::LambdaCallShape>,
+    known: &mut crate::symbol_resolver::GSigBinds,
+) {
+    for (formal, actual) in shape.iter().flat_map(|shape| &shape.fixed_input_bindings) {
+        known.entry(*formal).or_insert(*actual);
+    }
+}
