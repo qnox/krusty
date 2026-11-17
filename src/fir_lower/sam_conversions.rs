@@ -151,7 +151,7 @@ impl BodyLowering<'_> {
                 value: None,
             })
         } else {
-            self.callable_reference_adapter_body(
+            self.ir.callable_reference_adapter_body(
                 invoke,
                 conversion.result.get(),
                 conversion.result.get(),

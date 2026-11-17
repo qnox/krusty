@@ -205,6 +205,7 @@ impl Backend for CraneliftBackend {
         Some(krusty::backend::CommonIrPreparation {
             counted_loops: COUNTED_LOOPS,
             enums: krusty::backend::enums::Contract::KotlinNative,
+            property_reference_values: false,
         })
     }
 
