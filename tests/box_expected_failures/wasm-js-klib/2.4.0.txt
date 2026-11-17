@@ -2137,7 +2137,6 @@ ranges/literal/simpleRangeWithNonConstantEnds.kt
 ranges/literal/simpleSteppedDownTo.kt
 ranges/literal/simpleSteppedRange.kt
 ranges/multiAssignmentIterationOverIntRange.kt
-ranges/safeCallRangeTo.kt
 ranges/stepped/expression/downTo/emptyProgression.kt
 ranges/stepped/expression/downTo/illegalStepNegative.kt
 ranges/stepped/expression/downTo/illegalStepNonConst.kt
