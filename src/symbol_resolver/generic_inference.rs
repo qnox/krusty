@@ -17,6 +17,7 @@ mod postponed_result;
 mod receiver_constraints;
 pub(crate) use receiver_constraints::unify_receiver_from_symbols;
 
+pub(crate) use bound_relations::complete_bound_supertype_bindings;
 use bound_relations::complete_dependent_bound_bindings;
 pub(crate) use bound_relations::{
     complete_dependency_instantiated_bound_bindings,

@@ -1200,6 +1200,7 @@ pub(super) fn generic_bounds_admit_slots(
             unify_inferred_ty_impl(Some(src), parameter, *argument, &mut inferred);
         }
     }
+    complete_bound_supertype_bindings(src, gsig, &mut inferred);
     merge_generic_bindings_from(Some(src), gsig, type_args, &mut binds, inferred);
     let actuals = slots
         .iter()

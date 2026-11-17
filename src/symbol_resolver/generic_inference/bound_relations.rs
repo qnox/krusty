@@ -7,8 +7,8 @@
 
 use super::{
     formal_variance_in_type, merge_inferred_lower_bounds_from_symbols, merge_inferred_ty, ty_subst,
-    ty_subst_keep_unbound, unify_ty_from_symbols, ExplicitTypeArgumentFixity, GSigBinds,
-    GenericSig, SourceOracle, SymbolSource,
+    ty_subst_keep_unbound, unify_receiver_from_symbols, unify_ty_from_symbols,
+    ExplicitTypeArgumentFixity, GSigBinds, GenericSig, SourceOracle, SymbolSource,
 };
 use crate::types::{Ty, TyKind};
 
@@ -159,6 +159,34 @@ pub(crate) fn complete_return_only_captured_receiver_bindings(
         // approximated above.
         if solution != Ty::Error && !solution.mentions_pending() && !retains_method_formal {
             bindings.insert(crate::types::TyParamName::new(formal), solution);
+        }
+    }
+}
+
+/// Bind the formals a bound mentions from the actual its formal received: `C : Poly<T>` with
+/// `C = TaskContainer` (a `Poly<Task>`) entails `T = Task`. Only a formal still open takes the
+/// solution; one an argument or an explicit type argument already fixed keeps it. Without this, a
+/// bound that is itself a formal (`U : T`) would later give `T` the first actual that reached `U`.
+pub(crate) fn complete_bound_supertype_bindings(
+    source: &dyn SymbolSource,
+    generic_sig: &GenericSig,
+    bindings: &mut GSigBinds,
+) {
+    for (formal, bounds) in generic_sig.formals.iter().zip(&generic_sig.formal_bounds) {
+        let Some(actual) = bindings.get(formal.as_str()).copied() else {
+            continue;
+        };
+        for bound in bounds {
+            let open = generic_sig
+                .formals
+                .iter()
+                .filter(|candidate| !bindings.contains_key(candidate.as_str()))
+                .any(|candidate| {
+                    crate::types::ty_mentions_param(*bound, std::slice::from_ref(candidate))
+                });
+            if open && bound.non_null().ty_param_name().is_none() {
+                unify_receiver_from_symbols(source, *bound, actual, bindings);
+            }
         }
     }
 }
