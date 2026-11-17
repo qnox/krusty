@@ -6,7 +6,8 @@
 //! records. Which builtin classes are below an interface comes from the frontend's supertype
 //! traversal (`krusty::backend::BackendClassifierSource::builtin_subtypes`); here each of their
 //! representations is recorded an instance of the interface: a string's struct, which has no
-//! interface table, and each box's class.
+//! interface table, and each box's class. The runtime lays out `StringBuilder` too, so its class
+//! is recorded an instance of each such interface its classifier is below (`CharSequence`).
 //!
 //! An interface's builtin instances are recorded the first time something tests for it, and a box
 //! the first time a value of its type is boxed; whichever comes second records the box.
@@ -24,8 +25,15 @@ pub(super) struct BuiltinInstances {
 
 impl Runtime {
     /// Record that the builtin values of `subtypes` are instances of `interface`, which something
-    /// tests for: a string's now, and each box's now or when the box is declared.
-    pub(super) fn builtin_instances(&mut self, interface: TypeName, subtypes: Vec<Ty>) {
+    /// tests for: a string's now, and each box's now or when the box is declared. With
+    /// `string_builder`, the runtime's `StringBuilder`, whose class is below `interface`, is one
+    /// too.
+    pub(super) fn builtin_instances(
+        &mut self,
+        interface: TypeName,
+        subtypes: Vec<Ty>,
+        string_builder: bool,
+    ) {
         if self
             .builtin_instance_tests
             .interfaces
@@ -38,6 +46,11 @@ impl Runtime {
             self.objects
                 .interfaces
                 .representation_instance_of(self.string, interface);
+        }
+        if string_builder {
+            self.objects
+                .interfaces
+                .instance_of(self.string_builders.class, interface);
         }
         for form in self.box_forms() {
             if subtypes.contains(&form.boxed) {
