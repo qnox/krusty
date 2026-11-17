@@ -22,7 +22,7 @@ use krusty::types::TypeName;
 
 use super::super::encode::{Module, SubType};
 use super::super::objects::{ObjectRoot, REFERENCE};
-use super::lower::{carrier, parameter_value_carrier, Unsupported};
+use super::lower::{carrier, parameter_carrier_of, Unsupported};
 
 /// One class's table type and the function type of each of its slots, `None` for an untyped one.
 #[derive(Clone, Debug, PartialEq)]
@@ -169,8 +169,7 @@ impl ModuleTables {
                 PlannedSignature::Member { parameters, result } => {
                     let mut params = vec![REFERENCE];
                     for &parameter in parameters {
-                        params
-                            .push(parameter_value_carrier(parameter)?.ok_or("a `Unit` parameter")?);
+                        params.push(parameter_carrier_of(parameter)?.ok_or("a `Unit` parameter")?);
                     }
                     module.func_type(params, carrier(result)?.into_iter().collect())
                 }
@@ -212,8 +211,7 @@ impl ModuleTables {
                 PlannedSignature::Member { parameters, result } => {
                     let mut params = vec![REFERENCE];
                     for &parameter in parameters {
-                        params
-                            .push(parameter_value_carrier(parameter)?.ok_or("a `Unit` parameter")?);
+                        params.push(parameter_carrier_of(parameter)?.ok_or("a `Unit` parameter")?);
                     }
                     Some(module.func_type(params, carrier(result)?.into_iter().collect()))
                 }

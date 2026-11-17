@@ -358,6 +358,8 @@ impl JvmLibraries {
                         });
                         overloads.push(FunctionInfo {
                             provider_override_slot,
+                            // Java declares no extension receivers.
+                            receiver_as_first_parameter: !t.is_kotlin,
                             ret: ReturnInfo::new(
                                 m.ret_nullable()
                                     || builtin_ret_nullable

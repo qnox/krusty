@@ -26,6 +26,7 @@ pub(super) fn error_class_decl(span: Span) -> ClassDecl {
         is_value: false,
         value_modifier_span: None,
         primary_constructor_parameters_span: None,
+        primary_constructor_signature_span: None,
         kind: ClassKind::Class,
         singleton: false,
         enum_entries: Vec::new(),

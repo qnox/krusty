@@ -54,7 +54,7 @@ pub fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess>, Prop
                     substitutions: _,
                 } = &**checked_op =>
             {
-                let Some(layout) = ir.local_property_layouts.get(target).cloned() else {
+                let Some(layout) = ir.property_layout_at(operation, *target)? else {
                     continue;
                 };
                 let replacement = property_read(
@@ -80,7 +80,7 @@ pub fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess>, Prop
                     substitutions: _,
                 } = &**checked_op =>
             {
-                let Some(layout) = ir.local_property_layouts.get(target).cloned() else {
+                let Some(layout) = ir.property_layout_at(operation, *target)? else {
                     continue;
                 };
                 let replacement = property_write(
