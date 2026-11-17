@@ -348,7 +348,7 @@ impl Body<'_> {
     }
 
     /// Read the backing array of the checked Kotlin array value on the stack.
-    fn array_storage(&mut self, form: ArrayForm) {
+    pub(super) fn array_storage(&mut self, form: ArrayForm) {
         self.code
             .ref_cast(false, HeapType::Concrete(form.object))
             .struct_get(form.object, STORAGE_FIELD);

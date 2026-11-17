@@ -403,47 +403,6 @@ impl BodyLowering<'_, '_, '_> {
         self.runtime_call("kt_lazy_of", &[any()], any(), &[function])
     }
 
-    /// `getValue(thisRef, property)` / `setValue(thisRef, property, value)` on one of those delegates.
-    ///
-    /// `thisRef` is nothing either delegate reads, but an explicit operator call may supply an
-    /// arbitrary expression, so it is still evaluated in source order. The PROPERTY is carried
-    /// differently by each half. On
-    /// a WRITE it travels through as the object it is, because an observable hands it to its
-    /// callback and nothing reads it on the way. On a READ only its NAME can matter — it is the
-    /// text of the error a `notNull` read-before-write raises — and the runtime cannot ask the
-    /// object for that, so the name is a literal here, taken from the reference operand's own
-    /// declaration. A `KProperty` this file did not build has no name to take, and the read
-    /// declines rather than reporting a wrong one.
-    fn read_write_property_member(
-        &mut self,
-        signature: super::super::super::intrinsics::FunctionSignature<'_>,
-        receiver: u32,
-        args: &[u32],
-        ret: Ty,
-    ) -> Option<Result<Option<Value>, Unsupported>> {
-        if !super::super::super::intrinsics::classifier_matches(
-            signature.owner.physical(),
-            "kotlin/properties/ReadWriteProperty",
-        ) {
-            return None;
-        }
-        match (signature.name, signature.params, signature.ret, args) {
-            ("getValue", [_, _], declared, [this_ref, property]) if declared.is_reference() => {
-                let Some(text) = self.property_reference_name(*property) else {
-                    return Some(Err(
-                        "a delegated property read through a `KProperty` this file did not build"
-                            .into(),
-                    ));
-                };
-                Some(self.delegate_read(receiver, *this_ref, *property, &text, ret))
-            }
-            ("setValue", [_, _, _], Ty::Unit, [this_ref, property, value]) => {
-                Some(self.delegate_write(receiver, *this_ref, *property, *value))
-            }
-            _ => None,
-        }
-    }
-
     /// `ReadOnlyProperty.getValue` on a delegate this FILE declares.
     ///
     /// Unlike `ReadWriteProperty`, whose `notNull()` and `observable(…)` the runtime builds itself,
@@ -523,127 +482,6 @@ impl BodyLowering<'_, '_, '_> {
             },
         )?;
         Ok(produced)
-    }
-
-    /// The name a `KProperty` operand of the delegate convention carries, or `None` when the
-    /// operand is not a property reference this file built.
-    ///
-    /// An IMPLICIT COERCION is looked through: the convention's parameter is `KProperty<*>` and the
-    /// reference is narrower, so common lowering wraps it — and the wrapper changes nothing about
-    /// which declaration the reference names. So is a read of a STATIC: a top-level delegated
-    /// property's `KProperty` is built once in the file's initializer and the call site reads it
-    /// from there, so the reference is the static's INITIALIZER rather than the operand itself.
-    fn property_reference_name(&self, property: u32) -> Option<String> {
-        let property = self.through_coercions(property);
-        if let IrExpr::GetStatic(index) = self.file.ir.expr(property) {
-            let init = self.file.ir.statics.get(*index as usize)?.init?;
-            // One level only. A static's initializer is the reference itself where this applies,
-            // and following a chain of statics would be following assignments rather than reading
-            // a declaration.
-            return self.named_property_reference(self.through_coercions(init));
-        }
-        self.named_property_reference(property)
-    }
-
-    /// The name of a property-reference node, or `None` for anything else.
-    fn named_property_reference(&self, property: u32) -> Option<String> {
-        match self.file.ir.expr(property) {
-            IrExpr::LocalPropertyReference(reference) => Some(reference.name.to_string()),
-            IrExpr::Checked(checked_op)
-                if let krusty::ir::IrCheckedOperation::PropertyReference { target, .. } =
-                    &**checked_op =>
-            {
-                let target = match target {
-                    krusty::fir::FirPropertyReferenceTarget::Module(property)
-                    | krusty::fir::FirPropertyReferenceTarget::SpecializedModule {
-                        property, ..
-                    } => property,
-                    _ => return None,
-                };
-                Some(self.file.ir.checked_properties.get(target)?.name.clone())
-            }
-            _ => None,
-        }
-    }
-
-    /// An expression with every implicit coercion around it stripped.
-    fn through_coercions(&self, mut id: u32) -> u32 {
-        while let IrExpr::TypeOp {
-            op: krusty::ir::IrTypeOp::ImplicitCoercion,
-            arg,
-            ..
-        } = self.file.ir.expr(id)
-        {
-            id = *arg;
-        }
-        id
-    }
-
-    fn delegate_read(
-        &mut self,
-        receiver: u32,
-        this_ref: u32,
-        property_object: u32,
-        property: &str,
-        ret: Ty,
-    ) -> Result<Option<Value>, Unsupported> {
-        let object = self.reference(receiver)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        self.reference(this_ref)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        self.reference(property_object)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        let name = self.string_literal(property.as_bytes())?;
-        let Some(produced) = self.runtime_call(
-            "kt_rw_property_get",
-            &[any(), any()],
-            any(),
-            &[object, name],
-        )?
-        else {
-            return Ok(None);
-        };
-        self.convert(produced, Some(any()), ret)
-    }
-
-    /// The write, which carries the PROPERTY itself: an observable hands it to its callback, and
-    /// nothing in the runtime reads it, so whatever object the delegation built travels straight
-    /// through.
-    fn delegate_write(
-        &mut self,
-        receiver: u32,
-        this_ref: u32,
-        property: u32,
-        value: u32,
-    ) -> Result<Option<Value>, Unsupported> {
-        let object = self.reference(receiver)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        self.reference(this_ref)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        let named = self.reference(property)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        let written = self.reference(value)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        self.runtime_call(
-            "kt_rw_property_set",
-            &[any(), any(), any()],
-            Ty::Unit,
-            &[object, named, written],
-        )
     }
 
     /// `l.value` — a checked read of a dependency property the runtime answers.
@@ -902,9 +740,6 @@ impl BodyLowering<'_, '_, '_> {
                 args,
                 ret,
             ));
-        }
-        if has_standard_identity(ty, super::classifier_shapes::is_read_write_property) {
-            return self.read_write_property_member(signature, receiver, args, ret);
         }
         if has_standard_identity(ty, super::classifier_shapes::is_pair) {
             let (symbol, carried, answer) = pair_symbol(signature)?;

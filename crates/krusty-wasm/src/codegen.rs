@@ -151,7 +151,10 @@ impl Backend for WasmBackend {
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
+        // `Unit`'s value is the runtime's own, as a source reference of it is. Every enum
+        // constant is laid out with the runtime's `kotlin.Enum` base, so its members are too.
         classifier == krusty::types::wk::string()
+            || classifier == krusty::types::wk::kotlin_enum()
             || classifier == krusty::types::wk::unit()
             || lower::is_string_builder(classifier)
             || lower::is_array_list(classifier)
@@ -175,6 +178,14 @@ impl Backend for WasmBackend {
         operation: krusty::backend::BackendCompilerIntrinsic,
     ) -> bool {
         lower::is_direct_operation(operation)
+    }
+
+    /// An array classifier's `storage` property is this target's own array storage.
+    fn realizes_dependency_getter(
+        &self,
+        signature: krusty::backend::DependencyGetterSignature<'_>,
+    ) -> bool {
+        lower::realizes_storage_getter(signature)
     }
 
     fn emitted_constructor_initializer(

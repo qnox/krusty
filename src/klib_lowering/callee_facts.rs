@@ -29,6 +29,8 @@ pub struct KlibCalleeFacts<'a> {
     target_classifiers: Option<&'a dyn Fn(crate::types::TypeName) -> bool>,
     /// The checked call edge facts of reachable dependency members, by declaration.
     member_edges: HashMap<KlibDependencyCallable, CallEdge>,
+    /// The library objects whose values the closed bodies read, by classifier.
+    read_objects: HashMap<crate::types::TypeName, crate::libraries::KlibBodyClassContract>,
 }
 
 #[derive(Clone)]
@@ -90,6 +92,26 @@ impl<'a> KlibCalleeFacts<'a> {
         &self,
     ) -> &HashMap<crate::fir::ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>> {
         &self.builtin_implementation_facts
+    }
+
+    /// Record the library objects whose values the closed bodies read.
+    pub(crate) fn with_read_objects(
+        mut self,
+        objects: Vec<crate::libraries::KlibBodyClassContract>,
+    ) -> Self {
+        self.read_objects = objects
+            .into_iter()
+            .map(|object| (object.classifier, object))
+            .collect();
+        self
+    }
+
+    /// The object `classifier`, when the closed bodies read its value.
+    pub(crate) fn read_object(
+        &self,
+        classifier: crate::types::TypeName,
+    ) -> Option<&crate::libraries::KlibBodyClassContract> {
+        self.read_objects.get(&classifier)
     }
 
     pub(crate) fn member_edge(&self, identity: &KlibDependencyCallable) -> Option<&CallEdge> {
@@ -279,6 +301,22 @@ impl<'a> KlibCalleeFacts<'a> {
         )
     }
 
+    /// The library objects the initialization of the class `identity` constructs reads as values.
+    pub(crate) fn constructor_initialization_objects(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Vec<crate::metadata::id_signature::KlibPublicIdSignature>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        super::class_initialization::constructor_initialization_objects(
+            self.initialized_class_member(identity)?,
+            bodies,
+            self,
+        )
+    }
+
     fn initialized_class_member(
         &self,
         identity: &KlibDependencyCallable,
@@ -330,6 +368,45 @@ impl<'a> KlibCalleeFacts<'a> {
                 "an initializer has no unique selected constructor declaration".to_owned(),
             )),
         }
+    }
+
+    /// The initializer graph of the object `class`, when its initialization is admitted.
+    pub(crate) fn object_initialization_callees(
+        &self,
+        class: &crate::libraries::KlibBodyClassContract,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Option<Vec<KlibDependencyCallable>>, super::decline::KlibBodyDeclineReason> {
+        super::class_initialization::object_initialization_callees(class, bodies, self)
+    }
+
+    /// The library objects the initialization of the object `class` reads as values.
+    pub(crate) fn object_initialization_objects(
+        &self,
+        class: &crate::libraries::KlibBodyClassContract,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Vec<crate::metadata::id_signature::KlibPublicIdSignature>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        super::class_initialization::object_initialization_objects(class, bodies, self)
+    }
+
+    /// The members dispatch reaches of the object `class`.
+    pub(crate) fn object_dispatched_members(
+        &self,
+        class: &crate::libraries::KlibBodyClassContract,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Vec<KlibDependencyCallable>, super::decline::KlibBodyDeclineReason> {
+        super::class_initialization::object_dispatched_members(class, bodies, self)
+    }
+
+    /// The declarations the overrides of the object `class` override.
+    pub(crate) fn object_overridden_declarations(
+        &self,
+        class: &crate::libraries::KlibBodyClassContract,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Vec<KlibDependencyCallable>, super::decline::KlibBodyDeclineReason> {
+        super::class_initialization::object_overridden_declarations(class, bodies, self)
     }
 
     /// Check graph-owned declarations even when the root operation emits no callee body/export.
@@ -493,6 +570,24 @@ impl<'a> KlibCalleeFacts<'a> {
                 .kotlin_class_internal()
                 .is_some_and(|class| self.target_represents(class))
         }))
+    }
+
+    /// The continuation intrinsic `identity` is, which body lowering realizes as the suspension
+    /// point it stands for: no declaration of it is emitted or called.
+    pub(crate) fn continuation_intrinsic(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<
+        Option<super::continuation_intrinsics::ContinuationIntrinsicCall>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        // Two selected declarations prove no intrinsic; the call's own linking reports them.
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => {
+                super::continuation_intrinsics::authenticate(callables[0])
+            }
+            Some(KlibCalleeFact::Ambiguous) | None => Ok(None),
+        }
     }
 
     /// The range construction `identity` performs, whatever the target lays out. A membership in

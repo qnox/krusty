@@ -1340,29 +1340,7 @@ where
                 .iter()
                 .any(|diagnostic| diagnostic.severity == Severity::Error);
         parse_errors.push(parse_error);
-        // The brackets were parsed. Report the language gate only after `parse_error` is captured,
-        // so the file's declarations still join the module for every other file.
-        for span in file
-            .destructuring
-            .ungated_bracket_spans
-            .iter()
-            .copied()
-            .chain(file.destructuring.ungated_full_form_spans.iter().copied())
-        {
-            diags.error(
-                span,
-                "the feature \"name based destructuring\" is only available since language version 2.5",
-            );
-        }
-        for span in file.destructuring.ungated_short_form_spans.iter().copied() {
-            diags.error(
-                span,
-                "the feature \"enable name based destructuring short form\" is experimental and \
-                 should be enabled explicitly. This can be done by supplying the compiler \
-                 argument '-Xname-based-destructuring=complete', but note that no stability \
-                 guarantees are provided.",
-            );
-        }
+        header_validation::validate_after_parsing(&file, parser_error, diags);
         let extracted = pass1_builder.add_source(
             index,
             source,
@@ -1968,7 +1946,7 @@ where
     let analysis = SourceSetAnalysis {
         target,
         files: if retain_inspection_analysis {
-            files
+            local_class_names::restore_retained_classifier_source_names(files)
         } else {
             Vec::new()
         },

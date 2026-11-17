@@ -1898,21 +1898,6 @@ pub(super) fn throwable_field(owner: krusty::types::TypeName, name: &str) -> Opt
     }
 }
 
-/// Whether this is an object the runtime realizes ENTIRELY, so it has no instance of its own.
-///
-/// `kotlin.properties.Delegates` is one: it holds no state, and every member of it is answered
-/// directly (see [`runtime_companion_member`]), so nothing ever reads the value a reference to it
-/// would carry. A provider that materializes the receiver before the call reaches that table needs
-/// something to materialize, and for such an object the honest answer is the null reference —
-/// there is no object, and nothing dereferences it.
-pub(super) fn is_stateless_runtime_object(classifier: krusty::types::TypeName) -> bool {
-    // The stdlib's standard delegates. `Delegates` declares no state and every member of it this
-    // runtime answers takes its arguments alone. `Result.Companion` is the receiver of the inline
-    // `success` and `failure` an expanded `runCatching` reaches, whose bodies never read it.
-    classifier.matches("kotlin/properties/Delegates")
-        || classifier.matches("kotlin/Result$Companion")
-}
-
 /// The runtime entry point answering the companion object of a BUILT-IN type, if this names one.
 ///
 /// Each is declared in no file krusty compiles and carries no state — every member of one is a
@@ -1920,22 +1905,72 @@ pub(super) fn is_stateless_runtime_object(classifier: krusty::types::TypeName) -
 /// runtime holds one static object per companion, with a descriptor of its own so that
 /// `Int.Companion === Long.Companion` is false.
 ///
-/// Apart from [`is_stateless_runtime_object`], which answers a NULL for an object nothing reads:
-/// that will not do here, because `o === Int.Companion` is exactly what the corpus asks.
 pub(super) fn builtin_companion(classifier: krusty::types::TypeName) -> Option<&'static str> {
+    builtin_companion_symbols(classifier).map(|(instance, _)| instance)
+}
+
+/// The runtime descriptor of the companion object [`builtin_companion`] answers, which an `is`
+/// check against the companion's type asks its instance about.
+pub(super) fn builtin_companion_descriptor(
+    classifier: krusty::types::TypeName,
+) -> Option<&'static str> {
+    builtin_companion_symbols(classifier).map(|(_, descriptor)| descriptor)
+}
+
+fn builtin_companion_symbols(
+    classifier: krusty::types::TypeName,
+) -> Option<(&'static str, &'static str)> {
     [
-        ("kotlin/Byte$Companion", "kt_byte_companion"),
-        ("kotlin/Short$Companion", "kt_short_companion"),
-        ("kotlin/Int$Companion", "kt_int_companion"),
-        ("kotlin/Long$Companion", "kt_long_companion"),
-        ("kotlin/Char$Companion", "kt_char_companion"),
-        ("kotlin/Boolean$Companion", "kt_boolean_companion"),
-        ("kotlin/Float$Companion", "kt_float_companion"),
-        ("kotlin/Double$Companion", "kt_double_companion"),
-        ("kotlin/String$Companion", "kt_string_companion"),
+        (
+            "kotlin/Byte$Companion",
+            "kt_byte_companion",
+            "kt_type_byte_companion",
+        ),
+        (
+            "kotlin/Short$Companion",
+            "kt_short_companion",
+            "kt_type_short_companion",
+        ),
+        (
+            "kotlin/Int$Companion",
+            "kt_int_companion",
+            "kt_type_int_companion",
+        ),
+        (
+            "kotlin/Long$Companion",
+            "kt_long_companion",
+            "kt_type_long_companion",
+        ),
+        (
+            "kotlin/Char$Companion",
+            "kt_char_companion",
+            "kt_type_char_companion",
+        ),
+        (
+            "kotlin/Boolean$Companion",
+            "kt_boolean_companion",
+            "kt_type_boolean_companion",
+        ),
+        (
+            "kotlin/Float$Companion",
+            "kt_float_companion",
+            "kt_type_float_companion",
+        ),
+        (
+            "kotlin/Double$Companion",
+            "kt_double_companion",
+            "kt_type_double_companion",
+        ),
+        (
+            "kotlin/String$Companion",
+            "kt_string_companion",
+            "kt_type_string_companion",
+        ),
     ]
     .into_iter()
-    .find_map(|(owner, symbol)| classifier.matches(owner).then_some(symbol))
+    .find_map(|(owner, instance, descriptor)| {
+        classifier.matches(owner).then_some((instance, descriptor))
+    })
 }
 
 /// The runtime entry point answering a stdlib object the runtime lays out itself, if this names one.
@@ -1946,32 +1981,6 @@ pub(super) fn runtime_object(classifier: krusty::types::TypeName) -> Option<&'st
     classifier
         .matches("kotlin/collections/EmptySet")
         .then_some("kt_set_empty")
-}
-
-/// A member of a COMPANION the runtime realizes, whose receiver carries nothing.
-///
-/// Such an object has no state and no instance in any file krusty compiles, so there is no
-/// receiver to pass and none to evaluate — the call is its arguments alone. That is why these are
-/// apart from [`runtime_member`], which leads every call with the receiver.
-pub(super) fn runtime_companion_member(
-    owner: DeclarationOwner,
-    name: &str,
-    params: &[Ty],
-) -> Option<&'static str> {
-    if !owner.classifier_matches("kotlin/properties/Delegates") {
-        return None;
-    }
-    match (name, params) {
-        // `Delegates.notNull()`. `Delegates` is an OBJECT of the stdlib, carrying nothing, and the
-        // delegate it answers with starts empty — so this is the same shape: no receiver to read
-        // and no operand to pass.
-        ("notNull", []) => Some("kt_not_null_var"),
-        // `observable(initial) { property, old, new -> … }`: the initial value and the callback,
-        // both references, and the `KProperty` it later hands that callback is the one the
-        // delegation passes to `setValue` — nothing here reads it.
-        ("observable", [_, _]) => Some("kt_observable"),
-        _ => None,
-    }
 }
 
 /// The runtime function realizing the interface member `signature` on an instance of `class`, a
