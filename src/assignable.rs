@@ -647,6 +647,13 @@ fn same_type_argument_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool
                     .all(|(&left, &right)| same_flexible_type_with(oracle, left, right))
                 && same_flexible_type_with(oracle, a.ret, b.ret)
         }
+        // An intersection is the set of its components. The order inference found them in is
+        // only how it is spelled, so `A & B` and `B & A` are one argument.
+        (TyKind::Intersection(a), TyKind::Intersection(b)) => {
+            crate::types::same_component_set(&a, &b, |left, right| {
+                same_flexible_type_with(oracle, left, right)
+            })
+        }
         _ => left == right,
     }
 }
@@ -862,6 +869,26 @@ mod tests {
         assert!(ok(Ty::Int, Ty::Error));
         assert!(ok(Ty::Nothing, s("app/Dog")));
         assert!(ok(Ty::Nothing, Ty::Int));
+    }
+
+    #[test]
+    fn an_intersection_is_the_set_of_its_components() {
+        let forward = Ty::intersection(&[s("app/Dog"), s("app/Pet")]);
+        let reverse = Ty::intersection(&[s("app/Pet"), s("app/Dog")]);
+        assert_ne!(forward, reverse, "each keeps the order it was built in");
+        assert!(ok(forward, reverse) && ok(reverse, forward));
+        let invariant = |argument| g("kotlin/collections/MutableList", &[argument]);
+        assert!(ok(invariant(forward), invariant(reverse)));
+        assert!(!ok(invariant(forward), invariant(s("app/Dog"))));
+        // A nested intersection is compared as a set as well, and a component of one side never
+        // stands for two components of the other.
+        let boxed = |argument| g("app/Box", &[argument]);
+        let nested = Ty::intersection(&[boxed(forward), s("app/Cat")]);
+        let permuted = Ty::intersection(&[s("app/Cat"), boxed(reverse)]);
+        assert!(ok(invariant(nested), invariant(permuted)));
+        let other = Ty::intersection(&[boxed(reverse), s("app/Bird")]);
+        assert!(!ok(invariant(nested), invariant(other)));
+        assert!(!ok(invariant(other), invariant(nested)));
     }
 
     #[test]
