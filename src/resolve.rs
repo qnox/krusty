@@ -4133,20 +4133,17 @@ fn classifier_from_imports<S: SymbolSource + ?Sized>(
 }
 
 /// The explicit imports of one visible name whose path resolves to a classifier, with that
-/// classifier, one entry per distinct classifier.
+/// classifier. Each import path is a distinct declaration: two paths that reach one classifier
+/// (a typealias and its target) stay two candidates, as in `explicit_classifier_candidates`.
 pub(crate) fn explicit_classifier_imports<'a, S: SymbolSource + ?Sized>(
     paths: Option<&'a [String]>,
     source: &S,
 ) -> Vec<(&'a str, TypeName)> {
-    let mut selected: Vec<(&'a str, TypeName)> = Vec::new();
-    for path in paths.unwrap_or_default() {
-        if let Ok(classifier) = classifier_path(path, source, None) {
-            if !selected.iter().any(|(_, previous)| *previous == classifier) {
-                selected.push((path.as_str(), classifier));
-            }
-        }
-    }
-    selected
+    paths
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|path| Some((path.as_str(), classifier_path(path, source, None).ok()?)))
+        .collect()
 }
 
 /// The classifier the imports bind `name` to: an explicit import, else the nearest import level
