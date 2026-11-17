@@ -2063,7 +2063,7 @@ fn preinferred_local_enum_keeps_its_semantic_owner() {
          }",
     )];
     let mut diagnostics = DiagSink::new();
-    analyze_source_set_prefix_with_features_trimmed(
+    let analysis = analyze_source_set_prefix_with_features_trimmed(
         &inputs,
         1,
         1,
@@ -2087,4 +2087,57 @@ fn preinferred_local_enum_keeps_its_semantic_owner() {
             "unresolved reference 'Choice'.",
         ]
     );
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("the preinferred declaration inventory is retained")
+        .module
+        .index();
+    let declarations = index.declarations_named("Choice");
+    let [declaration] = declarations else {
+        panic!("one declaration owns the local enum: {declarations:?}")
+    };
+    assert!(index.classifier_header(*declaration).is_none());
+    let classifier = index
+        .classifier_identity(*declaration)
+        .expect("the deferred enum already has a classifier identity");
+    let constructor = index
+        .owned_declaration(*declaration, crate::fir::DeclarationKind::Constructor, 0)
+        .expect("the primary constructor belongs to the enum declaration");
+    assert_eq!(
+        index.declaration_anchor(constructor).unwrap().owner,
+        Some(*declaration)
+    );
+    let file = &analysis.files[0];
+    let classes = file
+        .decl_arena
+        .iter()
+        .filter_map(|declaration| match declaration {
+            crate::ast::Decl::Class(class) if class.name == "Choice" => Some(class),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [class] = classes.as_slice() else {
+        panic!("the complete source contains one local enum")
+    };
+    assert_eq!(class.enum_entries.len(), 2);
+    let recorded = &analysis.types[0]
+        .as_ref()
+        .expect("the checked file retains its semantic selections")
+        .resolved_enum_entry_constructors;
+    assert_eq!(recorded.len(), 2);
+    for entry in &class.enum_entries {
+        let crate::resolve::ResolvedConstructor::Source {
+            owner,
+            stable_declaration,
+            primary,
+            ..
+        } = &recorded[&(entry.span.lo, entry.span.hi)]
+        else {
+            panic!("an enum entry selects its source constructor")
+        };
+        assert_eq!(*owner, classifier);
+        assert_eq!(*stable_declaration, Some(constructor));
+        assert!(*primary);
+    }
 }
