@@ -22,12 +22,18 @@ fun Tag(name: String, size: Long = 2L) {
     log.append("$name $size;")
 }
 
+@Composable
+fun Sized(size: Int = 1) {
+    log.append("sized $size;")
+}
+
 // MODULE: main(lib)
 // FILE: screen.kt
 package app
 
 import androidx.compose.runtime.Composable
 import lib.Badge
+import lib.Sized
 import lib.Tag
 
 @Composable
@@ -38,6 +44,7 @@ fun Screen(title: String) {
     Badge(title)
     Tag(title)
     Tag("t", 9L)
+    Sized(2)
 }
 
 // FILE: box.kt
@@ -72,6 +79,6 @@ fun box(): String {
     Class.forName("app.ScreenKt")
         .getMethod("Screen", String::class.java, Composer::class.java, Integer.TYPE)
         .invoke(null, "n", composer, 0)
-    val expected = "changed n;new 1 0.5;new 5 0.5;x 1 2.5;n 1 0.5;n 2;t 9;"
+    val expected = "changed n;new 1 0.5;new 5 0.5;x 1 2.5;n 1 0.5;n 2;t 9;sized 2;"
     return if (log.toString() == expected) "OK" else log.toString()
 }

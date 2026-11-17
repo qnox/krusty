@@ -1032,6 +1032,10 @@ pub struct LibraryCallable {
     /// default to such a declaration keeps the declaration's identity, with
     /// [`Self::default_call`] set; no platform `$default` symbol is named.
     pub defaults_from_declaration: bool,
+    /// [`Self::defaults_from_declaration`] holds because the declaration's compiled entry takes
+    /// the mask of omitted arguments after synthetic parameters a compiler plugin's transformation
+    /// appended. Only an enabled plugin that owns that calling convention can pass the mask.
+    pub defaults_by_transformed_entry: bool,
     /// For a generic `vararg` callable resolved with a bound element type (`listOf<Long>(…)` →
     /// `Long`): the *logical* element type the trailing arguments adapt to. `None` for a non-vararg
     /// call or when the element type is not recovered. The backend uses it to coerce each packed
@@ -1410,6 +1414,14 @@ pub struct FunctionInfo {
     /// Provider-owned override-slot identity for declarations whose platform compatibility differs
     /// from their source-language signature. This is distinct from the physical emit handle.
     pub(crate) provider_override_slot: Option<ProviderOverrideSlot>,
+    /// How this declaration's declaring language matches its inputs against an inherited
+    /// declaration's, when that differs from how calls see them. Parallel to
+    /// [`Self::semantic_params`]: a `Some` slot matches an inherited input of exactly that
+    /// classifier, whatever its arguments, as kotlinc's Java override checker matches a raw Java
+    /// `AtomicReference` with a Kotlin `AtomicReference<Int>` by their JVM erasure while callers
+    /// still pass a Java `AtomicReference`; a `None` slot compares as usual. The relation is
+    /// one-directional, so an inherited declaration is always compared by its own inputs.
+    pub(crate) override_inputs: Option<Box<[Option<TypeName>]>>,
     /// The declaring language has no extension receivers (Java), so its provider publishes that
     /// this member overrides an inherited Kotlin extension by taking the receiver as its first
     /// parameter, as kotlinc's Java override checker matches them.
@@ -1698,6 +1710,7 @@ impl FunctionInfo {
             kind,
             source_inputs: None,
             provider_override_slot: None,
+            override_inputs: None,
             receiver_as_first_parameter: false,
             classifier_static: false,
             associated_classifier: None,

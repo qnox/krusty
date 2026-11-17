@@ -67,4 +67,8 @@ impl IrPlugin for ComposePlugin {
     fn transform_bodies(&self, ir: &mut IrFile, _ctx: &PluginContext) {
         restart_groups::transform(ir);
     }
+
+    fn passes_transformed_entry_defaults(&self) -> bool {
+        true
+    }
 }

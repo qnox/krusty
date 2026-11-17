@@ -813,6 +813,14 @@ pub trait IrPlugin {
         &[]
     }
 
+    /// Whether the plugin's transformation gives a library declaration a compiled entry that takes
+    /// the mask of omitted default arguments, and its calls pass that mask (Compose's
+    /// composables). Without such a plugin a call that omits one of those arguments has nothing
+    /// to realize the default.
+    fn passes_transformed_entry_defaults(&self) -> bool {
+        false
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
@@ -918,7 +926,7 @@ pub struct DependencyDeclaration<'a> {
 }
 
 /// What a plugin reads of a dependency function's declaration besides its parameter types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DependencyCallableShape {
     /// An `inline` function, whose body a call splices.
     pub inline: bool,
@@ -926,6 +934,10 @@ pub struct DependencyCallableShape {
     pub receiver: bool,
     /// A source parameter declares a default value.
     pub defaults: bool,
+    /// The parameters the declaration's compiled entry takes after its source parameters, which
+    /// a plugin's transformation appended (Compose's composer, `$changed` and `$default`). Empty
+    /// when it takes none, or when its entry does not begin with the source parameters.
+    pub synthetic_parameters: Box<[Ty]>,
 }
 
 /// A construct a native plugin does not implement, reported as an error at `span`.
@@ -1398,6 +1410,14 @@ impl PluginHost {
     /// Names of the registered plugins, in run order (introspection / tests).
     pub fn plugin_names(&self) -> Vec<&str> {
         self.plugins.iter().map(|p| p.name()).collect()
+    }
+
+    /// Whether a registered plugin [passes the default mask of a transformed library
+    /// entry](IrPlugin::passes_transformed_entry_defaults).
+    pub fn passes_transformed_entry_defaults(&self) -> bool {
+        self.plugins
+            .iter()
+            .any(|plugin| plugin.passes_transformed_entry_defaults())
     }
 
     /// Every registered plugin's [`IrPlugin::sam_with_receiver_annotations`].

@@ -237,8 +237,7 @@ impl JvmLibraries {
             };
             callable.physical_params = physical_params;
             if call_sig.param_defaults.iter().any(|default| *default) {
-                callable.default_realization =
-                    self.top_level_default_realization(&callable).map(Box::new);
+                self.realize_top_level_defaults(&mut callable);
             }
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
             let paired = cand.paired_common;

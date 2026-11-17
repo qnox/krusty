@@ -347,9 +347,13 @@ pub(super) fn record(
                 locations.push(call_location(&positions, call_span));
                 continue;
             }
-            if let Some((site, location)) =
-                scope.direct_call_site(ir, call, parameter_count, true, span, rejections)
-            {
+            if let Some((site, location)) = scope.direct_call_site(
+                ir,
+                call,
+                CallValues::Parameters(parameter_count),
+                span,
+                rejections,
+            ) {
                 // A remembered lambda's `rememberComposableLambda` call is a group of its own,
                 // which the function's source information lists before the call it is passed to.
                 locations.extend(
@@ -767,13 +771,13 @@ fn unsupported_body_expression(
             } if passed.iter().any(|argument| argument.lambda == expression) => {
                 for &capture in captures {
                     match ir.exprs[capture as usize] {
-                        IrExpr::GetValue(index) if lambdas.get(index as usize) == Some(&false) => {}
-                        IrExpr::GetValue(index) if (index as usize) < lambdas.len() => {
+                        IrExpr::GetValue(index) if lambdas.get(index as usize) == Some(&true) => {
                             return Some(
                                 "a composable lambda that captures a composable lambda parameter",
                             );
                         }
-                        _ => return Some("a composable lambda that captures a local value"),
+                        IrExpr::GetValue(_) => {}
+                        _ => return Some("a composable lambda that captures anything but a value"),
                     }
                 }
                 if holds_lambda(ir, *impl_fn) {
@@ -896,6 +900,23 @@ fn omitted_parameters(callee: &Callee) -> &[u32] {
     }
 }
 
+/// Whether `synthetic`, the parameters a library composable's entry takes after its `parameters`
+/// source parameters, are what `ComposerParamTransformer` appends: the composer, a `$changed` word
+/// for every ten parameters and, for a declaration with defaults, a `$default` word. The pass
+/// passes one `$default` word, which covers at most 31 parameters.
+fn takes_composer_frame(synthetic: &[Ty], parameters: usize, defaults: bool) -> bool {
+    let default_words = match (defaults, parameters <= 31) {
+        (false, _) => 0,
+        (true, true) => 1,
+        (true, false) => return false,
+    };
+    let words = super::restart_groups::changed_ints(parameters) as usize + default_words;
+    matches!(synthetic, [composer, rest @ ..]
+        if composer.obj_internal().is_some_and(|name| name.matches(super::runtime::COMPOSER))
+            && rest.len() == words
+            && rest.iter().all(|word| *word == Ty::Int))
+}
+
 /// The source name of the file's function a call calls.
 fn callee_name(ir: &IrFile, call: ExprId) -> Option<&str> {
     let IrExpr::Call { callee, .. } = &ir.exprs[call as usize] else {
@@ -986,8 +1007,7 @@ impl BodyScope<'_> {
         &self,
         ir: &IrFile,
         call: ExprId,
-        values: u32,
-        forwards: bool,
+        values: CallValues<'_>,
         span: crate::diag::Span,
         rejections: &mut Vec<PluginRejection>,
     ) -> Option<(ComposableCallSite, String)> {
@@ -1036,10 +1056,14 @@ impl BodyScope<'_> {
                         })
                         .then_some(ArgumentState::Static);
                 }
-                let state = argument_state(ir, argument, values)?;
+                // A captured local's state is its declaration's, which a lambda's body cannot see.
+                if values.reads_captured_local(ir, argument) {
+                    return None;
+                }
+                let state = argument_state(ir, argument, values.count())?;
                 // A captured value is not the lambda's parameter: its callee compares it itself.
                 Some(match state {
-                    ArgumentState::Forwarded(_) if !forwards => ArgumentState::Uncertain,
+                    ArgumentState::Forwarded(_) if !values.forwards() => ArgumentState::Uncertain,
                     state => state,
                 })
             })
@@ -1115,6 +1139,11 @@ impl BodyScope<'_> {
             Some("a call to a library composable function with a function-typed parameter")
         } else if !matches!(ret.kind(), TyKind::Unit) {
             Some("a call to a library composable function with a result")
+        } else if !takes_composer_frame(&shape.synthetic_parameters, params.len(), shape.defaults) {
+            Some(
+                "a call to a library composable function whose entry does not take the composer, \
+                 `$changed` and `$default` parameters",
+            )
         } else {
             None
         }
@@ -1138,6 +1167,17 @@ impl BodyScope<'_> {
         let IrExpr::Lambda { captures, .. } = &ir.exprs[argument.lambda as usize] else {
             unreachable!("a lambda argument is a lambda");
         };
+        let local_captures = captures
+            .iter()
+            .map(
+                |&capture| match (&ir.exprs[capture as usize], memoization) {
+                    (&IrExpr::GetValue(index), Memoization::Remembered { caller }) => {
+                        index as usize >= ir.functions[caller as usize].params.len()
+                    }
+                    _ => false,
+                },
+            )
+            .collect::<Vec<_>>();
         let captures = captures.len() as u32;
         let span = self
             .source
@@ -1193,9 +1233,13 @@ impl BodyScope<'_> {
         let mut calls = Vec::with_capacity(direct.len());
         let mut locations = Vec::with_capacity(direct.len());
         for &call in &direct {
-            if let Some((site, location)) =
-                self.direct_call_site(ir, call, captures, false, span, rejections)
-            {
+            if let Some((site, location)) = self.direct_call_site(
+                ir,
+                call,
+                CallValues::Captures(&local_captures),
+                span,
+                rejections,
+            ) {
                 calls.push(site);
                 locations.push(location);
             }
@@ -1339,6 +1383,48 @@ fn used_parameters(ir: &IrFile, block: ExprId, count: u32) -> Vec<bool> {
         push_body_children(ir, expression, &mut pending);
     }
     used
+}
+
+/// The values a body's composable calls read: a function's parameters, or a lambda's captures.
+#[derive(Clone, Copy)]
+enum CallValues<'a> {
+    /// A function with this many value parameters.
+    Parameters(u32),
+    /// A lambda's captures, each flagged when it captures a local variable, not a parameter.
+    Captures(&'a [bool]),
+}
+
+impl CallValues<'_> {
+    fn count(self) -> u32 {
+        match self {
+            CallValues::Parameters(count) => count,
+            CallValues::Captures(locals) => locals.len() as u32,
+        }
+    }
+
+    /// Whether the values are the enclosing function's own parameters, whose state its `$dirty`
+    /// bits hold.
+    fn forwards(self) -> bool {
+        matches!(self, CallValues::Parameters(_))
+    }
+
+    /// Whether `expression` reads a captured local, whose static-ness kotlinc takes from the
+    /// local's declaration (a `val` with a static initializer is static).
+    fn reads_captured_local(self, ir: &IrFile, expression: ExprId) -> bool {
+        let CallValues::Captures(locals) = self else {
+            return false;
+        };
+        let mut pending = vec![expression];
+        while let Some(expression) = pending.pop() {
+            if let IrExpr::GetValue(index) = ir.exprs[expression as usize] {
+                if locals.get(index as usize) == Some(&true) {
+                    return true;
+                }
+            }
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        }
+        false
+    }
 }
 
 /// kotlinc's `argumentMetaOf` for an argument of a call in a function with `parameters` value
@@ -1559,5 +1645,81 @@ fn simple_type_name(ty: Ty) -> String {
             .kotlin_class_internal()
             .map(|classifier| classifier.nested_segment_ref().to_string())
             .unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod composer_frame_tests {
+    use super::takes_composer_frame;
+    use crate::types::Ty;
+
+    fn composer() -> Ty {
+        Ty::obj("androidx/compose/runtime/Composer")
+    }
+
+    #[test]
+    fn the_composer_and_its_words_are_the_frame() {
+        assert!(takes_composer_frame(&[composer(), Ty::Int], 3, false));
+        assert!(takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int],
+            3,
+            true
+        ));
+    }
+
+    #[test]
+    fn a_missing_or_extra_word_is_not() {
+        assert!(!takes_composer_frame(&[composer(), Ty::Int], 3, true));
+        assert!(!takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int],
+            3,
+            false
+        ));
+        assert!(!takes_composer_frame(&[], 3, false));
+    }
+
+    #[test]
+    fn a_changed_word_follows_every_ten_parameters() {
+        assert!(takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int],
+            11,
+            false
+        ));
+        assert!(!takes_composer_frame(&[composer(), Ty::Int], 11, false));
+        assert!(takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int, Ty::Int],
+            12,
+            true
+        ));
+        // One `$default` word covers 31 parameters.
+        assert!(!takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int, Ty::Int, Ty::Int],
+            32,
+            true
+        ));
+    }
+
+    #[test]
+    fn a_wrong_role_is_not() {
+        assert!(!takes_composer_frame(
+            &[Ty::Long, Ty::Int, Ty::Int],
+            3,
+            true
+        ));
+        assert!(!takes_composer_frame(
+            &[composer(), Ty::Long, Ty::Int],
+            3,
+            true
+        ));
+        assert!(!takes_composer_frame(
+            &[Ty::Int, composer(), Ty::Int],
+            3,
+            true
+        ));
+        assert!(!takes_composer_frame(
+            &[Ty::String, Ty::Long, Ty::Int],
+            3,
+            true
+        ));
     }
 }
