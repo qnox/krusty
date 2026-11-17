@@ -973,7 +973,7 @@ impl Checker<'_> {
             if propagated.contains_key(formal.as_str()) {
                 continue;
             }
-            let Some(fact) = slots
+            let lambda_arguments = slots
                 .argument_bindings
                 .iter()
                 .filter_map(|binding| {
@@ -982,20 +982,44 @@ impl Checker<'_> {
                         return None;
                     };
                     (function.ret.non_null().ty_param_name() == Some(formal.as_str()))
-                        .then(|| self.lambda_result_intersection(binding.argument))
-                        .flatten()
+                        .then_some(binding.argument)
                 })
-                .find(|fact| fact.parts.len() > 1 && fact.selected_result == selected_argument)
+                .collect::<Vec<_>>();
+            let Some(fact) = lambda_arguments
+                .iter()
+                .find_map(|&argument| self.lambda_result_intersection(argument))
+                .filter(|fact| fact.parts.len() > 1 && fact.selected_result == selected_argument)
             else {
                 continue;
             };
+            // Every lambda that returns the variable constrains the same solution: each must
+            // produce a value that meets every retained constituent, and an explicit `return`
+            // is an exit this expression-tail proof does not cover.
+            let every_lambda_proves_parts = lambda_arguments.iter().all(|&argument| {
+                let Expr::Lambda { body, .. } = self.file.expr(argument) else {
+                    return false;
+                };
+                if Self::expression_contains_return(self.file, *body) {
+                    return false;
+                }
+                let own = self.lambda_result_intersection(argument);
+                let result = self.lambda_body_results.get(&argument).copied();
+                fact.parts.iter().all(|&part| {
+                    result.is_some_and(|result| self.receiver_is_assignable(result, part))
+                        || own.as_ref().is_some_and(|own| {
+                            own.parts
+                                .iter()
+                                .any(|&view| self.receiver_is_assignable(view, part))
+                        })
+                })
+            });
             let all_arguments_prove_parts = direct_arguments.iter().all(|other| {
                 let actual = self.expr_types[other.argument.0 as usize];
                 fact.parts
                     .iter()
                     .all(|&part| self.receiver_is_assignable(actual, part))
             });
-            if !all_arguments_prove_parts {
+            if !every_lambda_proves_parts || !all_arguments_prove_parts {
                 continue;
             }
             selected_bindings.insert(*formal, fact.parts[0]);
@@ -1003,6 +1027,21 @@ impl Checker<'_> {
             propagated.insert(formal.to_string(), fact);
         }
         propagated
+    }
+
+    /// Whether `expression` contains any `return`, whose value the tail expression does not cover.
+    fn expression_contains_return(file: &File, expression: ExprId) -> bool {
+        matches!(file.expr(expression), Expr::Return { .. })
+            || file.any_child_expr(
+                expression,
+                &mut |child| Self::expression_contains_return(file, child),
+                &mut |statement| {
+                    matches!(file.stmt(statement), Stmt::Return(..))
+                        || file.any_child_stmt(statement, &mut |child| {
+                            Self::expression_contains_return(file, child)
+                        })
+                },
+            )
     }
 
     /// The intersection a lambda argument's value expression carries, when the lambda's result is
