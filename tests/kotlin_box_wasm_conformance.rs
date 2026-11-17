@@ -971,6 +971,14 @@ fn unsigned_factory_references_compile_with_the_whole_content_to_string_branch()
 
 /// Run `src` directly against both Wasm targets' KLIBs and runtimes; every target must answer `OK`.
 /// Skips only where a directly invoked lane cannot run; target-owned harness passes require it.
+#[test]
+fn wasm_library_suspend_coroutine_runs() {
+    expect_wasm_box(
+        include_str!("box_regressions/librarySuspendCoroutine.kt"),
+        "wasmLibrarySuspendCoroutine",
+    );
+}
+
 fn expect_wasm_box(src: &str, stem: &str) {
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
