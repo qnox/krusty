@@ -20,7 +20,7 @@ use super::reference_recording_support::{kotlin_native_root, recorded};
 /// are assigned to their original fragments and its refinement edges are preserved.
 pub fn kotlin_native_multimodule_box(source: &str) -> Option<String> {
     let recorded_source = [("modules.kt", source)];
-    let fingerprint_arguments = ["native-module-graph-v5-qualified-box-entry".to_string()];
+    let fingerprint_arguments = ["native-module-graph-v6-prepared-platform-settings".to_string()];
     let files = recorded(
         CompilationTarget::Native,
         "multimodule-program",
@@ -58,6 +58,21 @@ struct NativeFragmentGraph<'a> {
     stdlib: &'a Path,
 }
 
+/// Prepare the whole case before splitting so every module sees the Native placeholder
+/// expansion and the same case-wide language/API/opt-in configuration as the target compile.
+fn native_module_sources(source: &str) -> (Vec<krusty::conformance::ModuleBlock>, Vec<String>) {
+    let prepared =
+        krusty::conformance::prepare_test_source(source, krusty::conformance::TestTarget::Native);
+    let configuration = krusty::conformance::platform_compiler_configuration(
+        &prepared,
+        krusty::conformance::TestTarget::Native,
+    )
+    .expect("Native module directives select a supported compiler configuration");
+    let modules = krusty::conformance::split_modules(&prepared)
+        .expect("the kotlinc-native multimodule oracle requires a valid // MODULE: graph");
+    (modules, configuration.arguments)
+}
+
 fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<String, Vec<u8>>> {
     let native_root = kotlin_native_root()?;
     let compiler = native_root.join("bin/kotlinc-native");
@@ -67,8 +82,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         "the Kotlin/Native distribution has no stdlib KLIB at {}",
         stdlib.display()
     );
-    let modules = krusty::conformance::split_modules(source)
-        .expect("the kotlinc-native multimodule oracle requires a valid // MODULE: graph");
+    let (modules, compiler_arguments) = native_module_sources(source);
     let units = krusty::conformance::module_units(&modules);
     assert!(
         !units.is_empty(),
@@ -150,6 +164,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         );
 
         let mut command = Command::new(&compiler);
+        command.args(&compiler_arguments);
         command.args(&source_paths);
         if let Some(runner_path) = &runner_path {
             command.arg(runner_path);
@@ -418,6 +433,54 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::*;
+
+    // PLATFORM-SPECIFIC: Native oracle configuration and prepared module inputs, not JVM ABI.
+    #[test]
+    fn every_native_module_receives_prepared_sources_and_case_language_settings() {
+        let source = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+                      // JVM_TARGET: 1.8\n\
+                      // MODULE: lib\n// FILE: W.kt\n\
+                      OPTIONAL_JVM_INLINE_ANNOTATION\n\
+                      value class W(val value: Int) { companion { fun answer() = 1 } }\n\
+                      // MODULE: main(lib)\n// FILE: Main.kt\n\
+                      fun box() = if (W.answer() == 1) \"OK\" else \"fail\"\n";
+        let (modules, arguments) = native_module_sources(source);
+        let expected = vec![
+            krusty::conformance::ModuleBlock {
+                name: "lib".to_owned(),
+                deps: Vec::new(),
+                friends: Vec::new(),
+                depends_on: Vec::new(),
+                files: vec![(
+                    "W".to_owned(),
+                    "// LANGUAGE: +CompanionBlocksAndExtensions\n// JVM_TARGET: 1.8\n\n\
+                     // FILE: W.kt\n\n\
+                     value class W(val value: Int) { companion { fun answer() = 1 } }\n"
+                        .to_owned(),
+                )],
+                java_files: Vec::new(),
+            },
+            krusty::conformance::ModuleBlock {
+                name: "main".to_owned(),
+                deps: vec!["lib".to_owned()],
+                friends: Vec::new(),
+                depends_on: Vec::new(),
+                files: vec![(
+                    "Main".to_owned(),
+                    format!(
+                        "{}// FILE: Main.kt\nfun box() = if (W.answer() == 1) \"OK\" else \"fail\"\n",
+                        "\n".repeat(7)
+                    ),
+                )],
+                java_files: Vec::new(),
+            },
+        ];
+        assert_eq!(modules, expected);
+        let flag = krusty::features::FeatureTable::for_version(krusty::kotlin_version::target())
+            .expect("the pinned feature table")
+            .language_argument("+CompanionBlocksAndExtensions");
+        assert_eq!(arguments, vec![flag]);
+    }
 
     #[test]
     fn the_runner_calls_the_box_in_its_declaring_final_unit_file() {

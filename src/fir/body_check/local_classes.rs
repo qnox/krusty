@@ -913,6 +913,36 @@ impl BodyFirChecker<'_> {
             })
     }
 
+    /// The source of a value an anonymous object constructed at `construction` carries from its
+    /// enclosing class, when the resolver placed that construction in the enclosing class's
+    /// constructor code: the constructor parameter, as kotlinc passes it (`None` otherwise).
+    fn constructed_object_capture(
+        &self,
+        construction: Option<ExprId>,
+        binding: ClassCaptureBinding,
+        span: Span,
+    ) -> Result<Option<FirLocalClassCaptureSource>, BodyCheckFailure> {
+        let constructed = construction.is_some_and(|construction| {
+            self.info
+                .local_class_capture_layouts
+                .construction_reads
+                .contains(&construction)
+        });
+        if !constructed {
+            return Ok(None);
+        }
+        match self.constructor_parameter_capture_read(binding) {
+            Some(FirExprKind::ConstructorCaptureRead {
+                owner, field, site, ..
+            }) => Ok(Some(FirLocalClassCaptureSource::ConstructorCapture {
+                owner,
+                field,
+                site,
+            })),
+            _ => Err(self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)),
+        }
+    }
+
     /// The read of `binding` from its constructor parameter, when this body is that class's own
     /// constructor code: its constructor, an initializer, or a property initializer.
     pub(super) fn constructor_parameter_capture_read(
@@ -1168,6 +1198,7 @@ impl BodyFirChecker<'_> {
         declaration: DeclarationId,
         span: Span,
         origin: OriginId,
+        construction: Option<ExprId>,
         captures: &[crate::resolve::AnonymousObjectCapture],
     ) -> Result<Box<[FirLocalClassCapture]>, BodyCheckFailure> {
         let mut checked = Vec::with_capacity(captures.len());
@@ -1296,7 +1327,11 @@ impl BodyFirChecker<'_> {
                             },
                             capture.lexical_shadow_depth,
                         );
-                        if self.reads_constructor_prefix_capture(
+                        if let Some(source) =
+                            self.constructed_object_capture(construction, binding, span)?
+                        {
+                            source
+                        } else if self.reads_constructor_prefix_capture(
                             binding.owner,
                             binding.enclosing_depth,
                         ) {
@@ -1414,7 +1449,11 @@ impl BodyFirChecker<'_> {
                         instance_owner = selected.instance_owner;
                         selected.source
                     } else if let Some(binding) = source_binding {
-                        if self.reads_constructor_prefix_capture(
+                        if let Some(source) =
+                            self.constructed_object_capture(construction, binding, span)?
+                        {
+                            source
+                        } else if self.reads_constructor_prefix_capture(
                             binding.owner,
                             binding.enclosing_depth,
                         ) {
@@ -1653,7 +1692,8 @@ impl BodyFirChecker<'_> {
             "fir",
             "anonymous body captures declaration={declaration:?} expression={expression:?} captures={captures:?}",
         );
-        let mut captures = self.checked_class_captures(declaration, span, origin, &captures)?;
+        let mut captures =
+            self.checked_class_captures(declaration, span, origin, Some(expression), &captures)?;
         let capture_order = if captures.is_empty() {
             Box::default()
         } else {
@@ -2029,7 +2069,7 @@ impl BodyFirChecker<'_> {
             }
         };
         let mut captures =
-            self.checked_class_captures(declaration, class.span, origin, &captures)?;
+            self.checked_class_captures(declaration, class.span, origin, None, &captures)?;
         for (capture, stored) in captures.iter_mut().zip(stored) {
             capture.stored = stored;
         }
