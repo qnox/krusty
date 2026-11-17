@@ -2622,6 +2622,16 @@ impl StreamedHeaderModule {
         path.rsplit('.').next()
     }
 
+    /// The source declaration segment recorded before hoisting replaced a classifier's lookup path.
+    pub fn classifier_source_spelling(&self, declaration: DeclarationId) -> Option<&str> {
+        let HeaderDeclarationKind::Classifier { source_name, .. } =
+            self.syntax.declaration(declaration)?.kind
+        else {
+            return None;
+        };
+        self.lookup_names.get(source_name)
+    }
+
     pub fn owned_stubs(&self, owner: DeclarationId) -> impl Iterator<Item = &DeclarationStub> + '_ {
         let mut positions = self
             .declarations
