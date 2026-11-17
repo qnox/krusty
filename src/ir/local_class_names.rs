@@ -1349,16 +1349,9 @@ impl super::IrFile {
             }
         }
         for overrides in self.property_overrides.values_mut() {
-            for edge in overrides {
-                name(&mut edge.implementation_owner, names);
-                name(&mut edge.overridden_owner, names);
-                edge.declared_type = ty(edge.declared_type, names);
-                edge.applied_type = ty(edge.applied_type, names);
-                edge.implementation_type = ty(edge.implementation_type, names);
-                edge.declared_receiver = edge.declared_receiver.map(|value| ty(value, names));
-                edge.implementation_receiver =
-                    edge.implementation_receiver.map(|value| ty(value, names));
-            }
+            overrides
+                .iter_mut()
+                .for_each(|edge| property_override(edge, names));
         }
         for defaults in self.inherited_defaults.values_mut() {
             for default in defaults {
@@ -1376,16 +1369,9 @@ impl super::IrFile {
             }
         }
         for overrides in self.function_overrides.values_mut() {
-            for edge in overrides {
-                name(&mut edge.implementation_owner, names);
-                name(&mut edge.overridden_owner, names);
-                tys(&mut edge.declared_parameters, names);
-                edge.declared_result = ty(edge.declared_result, names);
-                tys(&mut edge.applied_parameters, names);
-                edge.applied_result = ty(edge.applied_result, names);
-                tys(&mut edge.implementation_parameters, names);
-                edge.implementation_result = ty(edge.implementation_result, names);
-            }
+            overrides
+                .iter_mut()
+                .for_each(|edge| function_override(edge, names));
         }
         for constructor in self.checked_constructor_bodies.values_mut() {
             annotations(&mut constructor.annotations, names);
@@ -1649,6 +1635,7 @@ impl super::IrFile {
         remap_keyed(&mut self.property_overrides, names);
         remap_keyed(&mut self.function_overrides, names);
         remap_keyed(&mut self.inherited_defaults, names);
+        remap_keyed(&mut self.function_slot_families, names);
         remap_keyed(&mut self.generated_member_publications, names);
         remap_keyed(&mut self.class_type_aliases, names);
         remap_keyed(&mut self.jvm_value_class_secondary_ctors, names);
@@ -1883,6 +1870,27 @@ fn physical_name(
     }
     cache.insert(class, name);
     name
+}
+
+fn property_override(edge: &mut super::IrPropertyOverride, names: &IdentityRemap<'_>) {
+    name(&mut edge.implementation_owner, names);
+    name(&mut edge.overridden_owner, names);
+    edge.declared_type = ty(edge.declared_type, names);
+    edge.applied_type = ty(edge.applied_type, names);
+    edge.implementation_type = ty(edge.implementation_type, names);
+    edge.declared_receiver = edge.declared_receiver.map(|value| ty(value, names));
+    edge.implementation_receiver = edge.implementation_receiver.map(|value| ty(value, names));
+}
+
+fn function_override(edge: &mut super::IrFunctionOverride, names: &IdentityRemap<'_>) {
+    name(&mut edge.implementation_owner, names);
+    name(&mut edge.overridden_owner, names);
+    tys(&mut edge.declared_parameters, names);
+    edge.declared_result = ty(edge.declared_result, names);
+    tys(&mut edge.applied_parameters, names);
+    edge.applied_result = ty(edge.applied_result, names);
+    tys(&mut edge.implementation_parameters, names);
+    edge.implementation_result = ty(edge.implementation_result, names);
 }
 
 #[cfg(test)]
@@ -2144,6 +2152,91 @@ mod tests {
         let target = crate::types::type_name("sample/Target");
         let names = HashMap::from_iter([(source, target)]);
         let mut ir = super::super::IrFile::default();
+        let returned = ir.add_expr(IrExpr::UnitInstance);
+        let implementation = ir.add_fun(IrFunction {
+            name: "invoke".to_string(),
+            params: vec![Ty::obj_name(source)],
+            ret: Ty::obj_name(source),
+            body: Some(returned),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let reachable_inline_body = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Local(implementation)),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let reachable = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: Some(reachable_inline_body),
+        });
+        let other_inline_body = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Local(implementation)),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let other = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: Some(other_inline_body),
+        });
+        ir.inline_only_fns.insert(implementation);
+        ir.must_inline_lambdas.insert(implementation);
+
+        let detached = ir.remap_reachable_classifier_identities(
+            &names,
+            [reachable],
+            &HashSet::from_iter([reachable, reachable_inline_body]),
+            &mut HashSet::default(),
+        );
+
+        assert_eq!(detached.len(), 1);
+        assert_eq!(detached[0].source, implementation);
+        assert_eq!(detached[0].parent, None);
+        assert_eq!(detached[0].order, reachable);
+        assert!(detached[0].class_site);
+        assert!(matches!(
+            ir.expr(reachable),
+            IrExpr::Lambda { impl_fn, .. } if *impl_fn == detached[0].target
+        ));
+        assert!(matches!(
+            ir.expr(other),
+            IrExpr::Lambda { impl_fn, .. } if *impl_fn == implementation
+        ));
+        assert!(matches!(
+            ir.expr(reachable_inline_body),
+            IrExpr::Call { callee: call_callee, .. }
+                if matches!(&**call_callee, Callee::Local(function) if *function == detached[0].target)));
+        assert!(matches!(
+            ir.expr(other_inline_body),
+            IrExpr::Call { callee: call_callee, .. }
+                if matches!(&**call_callee, Callee::Local(function) if *function == implementation)));
+        assert!(ir.inline_only_fns.contains(&implementation));
+        assert!(ir.must_inline_lambdas.contains(&implementation));
+        assert!(!ir.inline_only_fns.contains(&detached[0].target));
+        assert!(!ir.must_inline_lambdas.contains(&detached[0].target));
+        assert_eq!(
+            ir.functions[detached[0].target as usize].params,
+            vec![Ty::obj_name(target)]
+        );
+        assert_eq!(
+            ir.functions[detached[0].target as usize].ret,
+            Ty::obj_name(target)
+        );
+    }
+
+    #[test]
+    fn reachable_remap_keeps_a_consumed_lambda_implementation_consumed_on_its_copy() {
+        let source = crate::types::type_name("sample/Source");
+        let target = crate::types::type_name("sample/Target");
+        let names = HashMap::from_iter([(source, target)]);
+        let mut ir = super::super::IrFile::default();
         let implementation = ir.add_fun(IrFunction {
             name: "invoke".to_string(),
             params: vec![Ty::obj_name(source)],
@@ -2210,8 +2303,10 @@ mod tests {
                 if matches!(&**call_callee, Callee::Local(function) if *function == implementation)));
         assert!(ir.inline_only_fns.contains(&implementation));
         assert!(ir.must_inline_lambdas.contains(&implementation));
-        assert!(!ir.inline_only_fns.contains(&detached[0].target));
-        assert!(!ir.must_inline_lambdas.contains(&detached[0].target));
+        // A splice consumed the source's body, so the copy is that consumed implementation too.
+        assert!(ir.functions[detached[0].target as usize].body.is_none());
+        assert!(ir.inline_only_fns.contains(&detached[0].target));
+        assert!(ir.must_inline_lambdas.contains(&detached[0].target));
         assert_eq!(
             ir.functions[detached[0].target as usize].params,
             vec![Ty::obj_name(target)]

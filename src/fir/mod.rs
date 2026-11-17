@@ -29,6 +29,7 @@ mod local_class_names;
 mod local_delegated_properties;
 mod lookup_scope;
 mod member_carriers;
+mod member_slots;
 mod module_symbols;
 mod overrides;
 mod parameters;
@@ -66,6 +67,7 @@ pub use local_delegated_properties::LocalDelegatedPropertyId;
 pub(crate) use local_delegated_properties::{
     FirLocalDelegateDispatchParameter, FirLocalDelegatePlan, LocalDelegateBinding,
 };
+pub use member_slots::*;
 pub(crate) use module_symbols::*;
 pub use overrides::*;
 pub use parameters::*;

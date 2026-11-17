@@ -57,6 +57,22 @@ For C interop this means a Kotlin function called *from* C, such as a `staticCFu
 must not let an exception reach C. C code does not check the slot. Like Kotlin/Native, a callback
 that throws terminates the program.
 
+## Embedding thread lifetimes
+
+A foreign host brackets each call into Kotlin with `kt_callback_enter`/`kt_callback_leave`.
+Those callbacks retain their existing temporary attachment behavior. A host that needs persistent
+per-thread object slots additionally calls `kt_thread_lifetime_begin` at OS-thread routine entry
+and its matching `kt_thread_lifetime_end` after the final callback, immediately before that routine
+exits. The registration is non-nestable and belongs to that same OS thread. Main and threads started
+by `kt_thread_start` already have managed lifetimes and need no host registration.
+
+`kt_thread_object_slot` is available only while that registered or managed thread holds the mutator
+lock in Kotlin. Its declaration token identifies one exact declaration; each thread gets a stable,
+initially null reference slot. The slot remains a GC root between callbacks, while expired callback
+stacks do not. Ending the lifetime removes those roots and frees the slots. This is an explicit
+embedding contract: it does not detect exits of unregistered foreign threads, emit module TLS, or
+by itself implement Kotlin `@ThreadLocal` object lowering.
+
 ## The linker
 
 The linker reads 64-bit little-endian ELF relocatables (`SHT_RELA` only) and writes an `ET_EXEC`
