@@ -17,24 +17,6 @@ use crate::libraries::{
 };
 use crate::types::{SemanticCallableOwner, TypeName};
 
-/// Whether `name` is a component of the value class `signed`: a property its primary constructor
-/// declares. Metadata names an underlying property only for an inline value class, but both inline
-/// and full value classes declare their components through the primary constructor.
-fn is_value_class_component(signed: &SignedClassifier, name: &str) -> bool {
-    signed.is_value
-        && signed
-            .constructors
-            .iter()
-            .find(|constructor| constructor.declaration.is_primary)
-            .is_some_and(|primary| {
-                primary
-                    .declaration
-                    .param_names
-                    .iter()
-                    .any(|parameter| parameter == name)
-            })
-}
-
 /// The complete record of the published class `identity`.
 pub(super) fn classifier_record(
     inventory: &PackageInventory,
@@ -82,10 +64,11 @@ pub(super) fn classifier_record(
         .iter()
         .map(|property| {
             let mut published = published_property(identities, property, member, enclosing);
-            published.read_stability = property
-                .declaration
-                .read_stability
-                .across_modules(is_value_class_component(signed, &property.declaration.name));
+            published.read_stability = property.declaration.read_stability.across_modules(
+                signed
+                    .value_class_components
+                    .contains(&property.declaration.name),
+            );
             (property.declaration.name.clone(), published)
         })
         .collect::<Vec<_>>();
