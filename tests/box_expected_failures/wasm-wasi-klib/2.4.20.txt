@@ -71,7 +71,6 @@ arrays/iteratorLongArrayNextLong.kt
 arrays/iteratorShortArray.kt
 arrays/kt2997.kt
 arrays/kt33.kt
-arrays/kt4118.kt
 arrays/kt42932.kt
 arrays/kt47483.kt
 arrays/kt7009.kt
@@ -343,11 +342,9 @@ classes/kt2566_2.kt
 classes/kt343.kt
 classes/kt508.kt
 classes/kt8011.kt
-classes/kt8011a.kt
 classes/nestedInitBlocksWithLambda.kt
 classes/overloadUnaryOperator.kt
 closures/anonymousObjectAsLastExpressionInLambda.kt
-closures/captureExtensionReceiver.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
 closures/capturedVarsOptimization/kt44347.kt
 closures/capturedVarsOptimization/withCoroutines.kt
@@ -1431,7 +1428,6 @@ inlineClass/nestedInlineClasses.kt
 inlineClass/secondaryConstructorWithGenerics.kt
 inlineClasses/UIntArraySortExample.kt
 inlineClasses/UIntArraySortExampleGeneric.kt
-inlineClasses/anonymousObjectAsDefaultParam.kt
 inlineClasses/anonymousObjectAsDefaultParamFull.kt
 inlineClasses/anySuperCall.kt
 inlineClasses/anySuperCallGeneric.kt
@@ -1474,7 +1470,6 @@ inlineClasses/castInsideWhenExpression.kt
 inlineClasses/castInsideWhenExpressionGeneric.kt
 inlineClasses/constructorCallableReference.kt
 inlineClasses/constructorCallableReferenceGeneric.kt
-inlineClasses/contextParameterPropertyDeserialization.kt
 inlineClasses/contextsAndAccessors/accessPrivateInlineClassConstructorFromLambda.kt
 inlineClasses/contextsAndAccessors/accessPrivateInlineClassConstructorFromLambdaGeneric.kt
 inlineClasses/contextsAndAccessors/kt27513.kt
@@ -1506,7 +1501,6 @@ inlineClasses/functionNameMangling/reflectionForFunctionWithMangledName.kt
 inlineClasses/functionNameMangling/reflectionForFunctionWithMangledNameGeneric.kt
 inlineClasses/functionNameMangling/reflectionForPropertyOfInlineClassType.kt
 inlineClasses/functionNameMangling/reflectionForPropertyOfInlineClassTypeGeneric.kt
-inlineClasses/genericInlineClassSynthMembers.kt
 inlineClasses/genericVararg2ndConstructor.kt
 inlineClasses/hiddenConstructor/kt28855.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClass.kt
@@ -1709,7 +1703,6 @@ labels/labelOnExpression.kt
 labels/nestedInlineLabels.kt
 labels/nestedLabelsInlinedClashing.kt
 labels/nestedLabelsInlinedClashingAtFunctionsWithClosure.kt
-labels/propertyAccessorObject.kt
 labels/siblingLabelsInlined.kt
 labels/siblingLabelsInlinedClashing.kt
 labels/simpleLabelInlined.kt
@@ -1742,15 +1735,8 @@ localClass/innerTakesCapturedFromOuter.kt
 localClass/noPrimaryConstructor.kt
 localClass/tryCatch.kt
 localClasses/closureWithSelfInstantiation.kt
-localClasses/inExtensionFunction.kt
-localClasses/inExtensionProperty.kt
-localClasses/inLocalExtensionFunction.kt
-localClasses/inLocalExtensionProperty.kt
-localClasses/innerOfLocalCaptureExtensionReceiver.kt
 localClasses/kt4174.kt
 localClasses/kt45383.kt
-localClasses/localClassCaptureExtensionReceiver.kt
-localClasses/subclassingExtensionReceiverClass.kt
 localEscapeAnalysis/arraysFieldWrite.kt
 lower/forLoopsLowering/arrays.kt
 lower/forLoopsLowering/lists.kt
@@ -1842,18 +1828,14 @@ objectExpression/expr3.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromAnonymousObjectInNestedClass.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlock.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlockOfNestedClass.kt
-objects/flist.kt
 objects/initializationOrderConsts.kt
 objects/interfaceCompanionObjectReference.kt
-objects/kt11117.kt
 objects/kt32351.kt
 objects/kt32749.kt
 objects/localFunctionInObjectInitializer_kt4516.kt
 objects/objectInLocalAnonymousObject.kt
-objects/receiverInConstructor.kt
 objects/useAnonymousObjectFunction.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt
-operatorConventions/kt14201_2.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
 operatorConventions/plusAssignWithComplexRHS.kt

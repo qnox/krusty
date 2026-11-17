@@ -155,7 +155,19 @@ fn specialized_transport_removal_does_not_retag_original_prefix_debug_identity()
             crossinline_parameter: None,
         },
     );
-    remove_capture(&mut ir, copy, construction, &[], 0, 0, copy_name).unwrap();
+    remove_capture(
+        &mut ir,
+        copy,
+        construction,
+        &[],
+        CaptureRemoval {
+            parameter: 0,
+            field: Some(0),
+            constructor_forest: &[],
+        },
+        copy_name,
+    )
+    .unwrap();
     assert_eq!(ir.classes[copy as usize].constructor_prefix_count, 1);
     assert!(ir.classes[copy as usize].ctor_args[0]
         .capture
@@ -222,6 +234,7 @@ fn copied_constructor_code_rewrites_a_shared_operand_once() {
         inline_callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
         inline_callee_source_name: "callee".into(),
         crossinline_operands: Vec::new(),
+        parent: None,
         method_clones: Default::default(),
         bindings: Default::default(),
         reified_bindings: Default::default(),
@@ -304,7 +317,19 @@ fn removing_a_capture_after_a_fieldless_one_keeps_the_recorded_order_by_construc
     let (class, construction) = object_with_a_fieldless_prefix_capture(&mut ir);
     let name = ir.classes[class as usize].fq_name;
 
-    remove_capture(&mut ir, class, construction, &[], 1, 0, name).unwrap();
+    remove_capture(
+        &mut ir,
+        class,
+        construction,
+        &[],
+        CaptureRemoval {
+            parameter: 1,
+            field: Some(0),
+            constructor_forest: &[],
+        },
+        name,
+    )
+    .unwrap();
 
     assert_eq!(&*ir.class_capture_order[&class], &[0, 1]);
     assert_eq!(ir.classes[class as usize].ctor_args[1].field_index, Some(0));
@@ -331,4 +356,41 @@ fn lifted_captures_after_a_fieldless_one_extend_the_recorded_order_by_constructo
     assert_eq!(field_base, 2);
     assert_eq!(&*ir.class_capture_order[&class], &[0, 2, 1, 3]);
     assert_eq!(ir.classes[class as usize].ctor_args[3].field_index, Some(2));
+}
+
+/// Constructor code that invokes a fieldless lambda parameter and also captures it in a nested
+/// lambda keeps the parameter: the capture operand is evaluated in the constructor even though
+/// the nested lambda's body is its own frame.
+#[test]
+fn a_lambda_parameter_captured_by_a_nested_lambda_is_not_consumed() {
+    let mut ir = crate::ir::IrFile::default();
+    let invoked = ir.add_expr(IrExpr::GetValue(1));
+    let invocation = ir.add_expr(IrExpr::InvokeFunction {
+        func: invoked,
+        args: Vec::new(),
+        params: Vec::new(),
+        ret: Ty::String,
+    });
+    let unit = ir.add_expr(IrExpr::UnitInstance);
+    let captured = ir.add_expr(IrExpr::GetValue(1));
+    let nested = ir.add_expr(IrExpr::Lambda {
+        impl_fn: 0,
+        arity: 0,
+        captures: vec![captured],
+        sam: None,
+        inline_body: Some(unit),
+    });
+    let body = ir.add_expr(IrExpr::Block {
+        stmts: vec![invocation, nested],
+        value: None,
+    });
+    assert!(parameter_lambda_uses(&ir, body, 1).is_none());
+
+    let only_invoked = ir.add_expr(IrExpr::Block {
+        stmts: vec![invocation],
+        value: None,
+    });
+    let uses = parameter_lambda_uses(&ir, only_invoked, 1).expect("the parameter is only invoked");
+    assert_eq!(uses.invocations, [invocation]);
+    assert!(uses.forwards.is_empty());
 }
