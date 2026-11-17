@@ -6,7 +6,7 @@ use crate::symbol_resolver::{
     compose_type_position, GSigBinds, TypePosition, UnboundSpecialization,
 };
 use crate::symbol_source::{CompositeSource, SymbolSource};
-use crate::types::{Ty, TyKind, TypeVariance};
+use crate::types::{Ty, TyKind, TypeVariance, Visibility};
 
 use super::super::ProductionSignatureSemantics;
 
@@ -43,13 +43,13 @@ pub(super) fn declaration_result(
     // exposes its result because each call site materializes a distinct anonymous implementation.
     let expose = !local_container
         && !stub.flags.has(DeclarationFlags::LOCAL_CLASS)
-        && (stub.visibility != crate::types::Visibility::Private
-            || stub.flags.has(DeclarationFlags::INLINE));
+        && (stub.visibility != Visibility::Private || stub.flags.has(DeclarationFlags::INLINE));
+    let module = crate::module_symbols::ModuleSymbols::for_file(semantics.table, stub.source.raw());
+    let source = CompositeSource::new(vec![&module, &*semantics.table.libraries]);
+    let ty = crate::symbol_resolver::published_declaration_type(&source, ty);
     if !expose || !contains_anonymous(semantics.table, semantics.headers, ty) {
         return Ok(ty);
     }
-    let module = crate::module_symbols::ModuleSymbols::for_file(semantics.table, stub.source.raw());
-    let source = CompositeSource::new(vec![&module, &*semantics.table.libraries]);
     let reject = |message: &str| {
         let span = semantics
             .headers

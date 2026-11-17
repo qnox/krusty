@@ -688,6 +688,11 @@ impl<'a> BodyLowering<'a> {
                 "INLINE_ARGS_CONTAINER"
                     | "ARGUMENTS_REORDERING_FOR_CALL"
                     | "WHEN"
+                    | "PLUSEQ"
+                    | "MINUSEQ"
+                    | "MULTEQ"
+                    | "DIVEQ"
+                    | "PERCEQ"
                     | "POSTFIX_INCR"
                     | "POSTFIX_DECR"
                     | "PREFIX_INCR"
@@ -878,12 +883,7 @@ impl<'a> BodyLowering<'a> {
         if actual.is_nullable() && !expected.is_nullable() {
             return false;
         }
-        let Some(name) = actual.non_null().kotlin_class_internal() else {
-            return false;
-        };
-        let Some(class) = self.ir.classes.iter().find(|class| {
-            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
-        }) else {
+        let Some(class) = self.local_class(actual) else {
             return false;
         };
         let parameters = self.header.type_parameters();
@@ -894,6 +894,14 @@ impl<'a> BodyLowering<'a> {
             || self
                 .linker
                 .is_subtype(parameters, Ty::obj_name(class.superclass), expected)
+    }
+
+    /// The anonymous or local class lowered in this body that `ty` names.
+    fn local_class(&self, ty: Ty) -> Option<&crate::ir::IrClass> {
+        let name = ty.non_null().kotlin_class_internal()?;
+        self.ir.classes.iter().find(|class| {
+            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
+        })
     }
 
     /// Whether `supertype` counts as a supertype of `subtype`: one recorded for a local or

@@ -880,7 +880,6 @@ fn record_constructor_exports(
         || source.is_object
         || source.is_companion
         || source.is_enum
-        || source.is_value
         || source.is_annotation
         || !source.captured_type_params.is_empty()
     {
