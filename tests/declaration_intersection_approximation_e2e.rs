@@ -4,6 +4,8 @@
 
 use super::common;
 
+const INTERSECTIONS: &str = include_str!("fixtures/diagnostics/intersectionTypes.kt");
+
 #[test]
 fn an_inferred_declaration_publishes_its_intersections_common_supertype() {
     let source = "\
@@ -101,5 +103,15 @@ fun use() { val s: String = top }
     assert_eq!(
         common::reference_error_blocks(&sources, &[]),
         ["test.kt:9:27: initializer type mismatch: expected 'String', actual 'Any'."]
+    );
+}
+
+#[test]
+fn a_bodyless_generic_function_is_rejected_in_the_complete_intersection_program() {
+    let sources = [("intersectionTypes.kt", INTERSECTIONS)];
+    common::assert_error_blocks_match_kotlinc(&sources, &[]);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &[]),
+        ["intersectionTypes.kt:9:1: function 'select' must have a body."]
     );
 }
