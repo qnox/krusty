@@ -256,7 +256,7 @@ impl<'a> FileLowering<'a> {
                     .and_then(super::super::super::intrinsics::reflection_type_descriptor)
                     .expect("just matched")
             }
-            _ => return Ok(None),
+            _ => return self.dependency_interface_descriptor(target),
         };
         self.import_data(symbol).map(Some)
     }
@@ -385,6 +385,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.file.import_data(symbol).map(Some)
             }
             Some(TypeCheckRole::MutableCollection(_)) | None => self.file.type_descriptor(ty),
+        }
+    }
+
+    /// A safe cast uses the same semantic function membership as `is`. A non-safe `as` remains a
+    /// physical cast, which is why it continues through `checked_cast_target` below.
+    fn safe_cast_target(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
+        let role_ty = match ty.non_null().kind() {
+            TyKind::TyParam(_, bound) => bound,
+            _ => ty,
+        };
+        match self.file.ir.type_check_role(role_ty.non_null()) {
+            Some(TypeCheckRole::FunctionOfArity(_))
+            | Some(TypeCheckRole::SuspendFunctionOfArity(_)) => self.instance_check_descriptor(ty),
+            _ => self.checked_cast_target(ty),
         }
     }
 
@@ -630,7 +644,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.checked_object(checked, type_operand)
             }
             IrTypeOp::SafeCast => {
-                let Some(descriptor) = self.checked_cast_target(type_operand)? else {
+                let Some(descriptor) = self.safe_cast_target(type_operand)? else {
                     return Err(declined!("an `as?` to `{}`", type_name_of(type_operand)));
                 };
                 let Some(object) = self.receiver(arg)? else {

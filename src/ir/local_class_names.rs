@@ -1657,6 +1657,7 @@ impl super::IrFile {
         remap_keyed(&mut self.property_overrides, names);
         remap_keyed(&mut self.function_overrides, names);
         remap_keyed(&mut self.inherited_defaults, names);
+        remap_keyed(&mut self.function_slot_families, names);
         remap_keyed(&mut self.generated_member_publications, names);
         remap_keyed(&mut self.class_type_aliases, names);
         remap_keyed(&mut self.jvm_value_class_secondary_ctors, names);
@@ -2174,6 +2175,91 @@ mod tests {
         let target = crate::types::type_name("sample/Target");
         let names = HashMap::from_iter([(source, target)]);
         let mut ir = super::super::IrFile::default();
+        let returned = ir.add_expr(IrExpr::UnitInstance);
+        let implementation = ir.add_fun(IrFunction {
+            name: "invoke".to_string(),
+            params: vec![Ty::obj_name(source)],
+            ret: Ty::obj_name(source),
+            body: Some(returned),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let reachable_inline_body = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Local(implementation)),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let reachable = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: Some(reachable_inline_body),
+        });
+        let other_inline_body = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Local(implementation)),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let other = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: Some(other_inline_body),
+        });
+        ir.inline_only_fns.insert(implementation);
+        ir.must_inline_lambdas.insert(implementation);
+
+        let detached = ir.remap_reachable_classifier_identities(
+            &names,
+            [reachable],
+            &HashSet::from_iter([reachable, reachable_inline_body]),
+            &mut HashSet::default(),
+        );
+
+        assert_eq!(detached.len(), 1);
+        assert_eq!(detached[0].source, implementation);
+        assert_eq!(detached[0].parent, None);
+        assert_eq!(detached[0].order, reachable);
+        assert!(detached[0].class_site);
+        assert!(matches!(
+            ir.expr(reachable),
+            IrExpr::Lambda { impl_fn, .. } if *impl_fn == detached[0].target
+        ));
+        assert!(matches!(
+            ir.expr(other),
+            IrExpr::Lambda { impl_fn, .. } if *impl_fn == implementation
+        ));
+        assert!(matches!(
+            ir.expr(reachable_inline_body),
+            IrExpr::Call { callee: call_callee, .. }
+                if matches!(&**call_callee, Callee::Local(function) if *function == detached[0].target)));
+        assert!(matches!(
+            ir.expr(other_inline_body),
+            IrExpr::Call { callee: call_callee, .. }
+                if matches!(&**call_callee, Callee::Local(function) if *function == implementation)));
+        assert!(ir.inline_only_fns.contains(&implementation));
+        assert!(ir.must_inline_lambdas.contains(&implementation));
+        assert!(!ir.inline_only_fns.contains(&detached[0].target));
+        assert!(!ir.must_inline_lambdas.contains(&detached[0].target));
+        assert_eq!(
+            ir.functions[detached[0].target as usize].params,
+            vec![Ty::obj_name(target)]
+        );
+        assert_eq!(
+            ir.functions[detached[0].target as usize].ret,
+            Ty::obj_name(target)
+        );
+    }
+
+    #[test]
+    fn reachable_remap_keeps_a_consumed_lambda_implementation_consumed_on_its_copy() {
+        let source = crate::types::type_name("sample/Source");
+        let target = crate::types::type_name("sample/Target");
+        let names = HashMap::from_iter([(source, target)]);
+        let mut ir = super::super::IrFile::default();
         let implementation = ir.add_fun(IrFunction {
             name: "invoke".to_string(),
             params: vec![Ty::obj_name(source)],
@@ -2240,8 +2326,10 @@ mod tests {
                 if matches!(&**call_callee, Callee::Local(function) if *function == implementation)));
         assert!(ir.inline_only_fns.contains(&implementation));
         assert!(ir.must_inline_lambdas.contains(&implementation));
-        assert!(!ir.inline_only_fns.contains(&detached[0].target));
-        assert!(!ir.must_inline_lambdas.contains(&detached[0].target));
+        // A splice consumed the source's body, so the copy is that consumed implementation too.
+        assert!(ir.functions[detached[0].target as usize].body.is_none());
+        assert!(ir.inline_only_fns.contains(&detached[0].target));
+        assert!(ir.must_inline_lambdas.contains(&detached[0].target));
         assert_eq!(
             ir.functions[detached[0].target as usize].params,
             vec![Ty::obj_name(target)]

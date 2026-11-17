@@ -824,6 +824,37 @@ fn a_collection_started_during_a_collection_fails() {
     );
 }
 
+// PLATFORM-SPECIFIC: explicit Native embedding lifetimes and their GC roots.
+#[test]
+fn registered_os_thread_object_slots_survive_callbacks_and_end_with_the_thread() {
+    run_driver_everywhere("thread_object_lifetimes");
+}
+
+// PLATFORM-SPECIFIC: exact misuse diagnostics for the embedding lifetime ABI.
+#[test]
+fn a_foreign_host_cannot_nest_os_thread_lifetimes() {
+    run_driver_everywhere_expecting_failure(
+        "thread_lifetime_nested",
+        "krusty: the OS thread already has a runtime lifetime\n",
+    );
+}
+
+#[test]
+fn an_embedding_lifetime_end_must_be_balanced() {
+    run_driver_everywhere_expecting_failure(
+        "thread_lifetime_unbalanced",
+        "krusty: ending a thread lifetime outside its inactive owner\n",
+    );
+}
+
+#[test]
+fn an_unregistered_callback_cannot_request_persistent_object_slots() {
+    run_driver_everywhere_expecting_failure(
+        "thread_object_unregistered",
+        "krusty: object slots require an active registered OS-thread lifetime\n",
+    );
+}
+
 #[test]
 fn threads_started_by_foreign_code_share_the_heap_through_collections() {
     run_driver_everywhere("threads_share_the_heap");
