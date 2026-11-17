@@ -128,7 +128,7 @@ impl CraneliftBackend {
 #[derive(Default)]
 pub struct CodegenModule {
     #[cfg(feature = "test-support")]
-    driver_entries: driver_entries::EmittedEntries,
+    driver_entries: driver_entries::PublishedEntries,
     /// The file that declared `main`, so a second one is an error rather than two entry points.
     entry_file: Option<String>,
     /// The prebuilt runtime's defined symbols, read by the first file that needs them.

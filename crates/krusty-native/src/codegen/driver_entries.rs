@@ -11,6 +11,16 @@ pub(super) struct DriverExports {
     pub entries: Vec<DriverEntry>,
 }
 
-/// The selected entries the module's files emitted, by callable identity.
-#[cfg(feature = "test-support")]
-pub(super) type EmittedEntries = krusty::fx_hash::HashSet<krusty::ir::CallableId>;
+/// Selected declarations whose validated driver trampolines were emitted successfully.
+#[derive(Default)]
+pub(super) struct PublishedEntries(krusty::fx_hash::HashSet<krusty::ir::CallableId>);
+
+impl PublishedEntries {
+    pub(super) fn extend(&mut self, entries: impl IntoIterator<Item = krusty::ir::CallableId>) {
+        self.0.extend(entries);
+    }
+
+    pub(super) fn contains(&self, entry: &krusty::ir::CallableId) -> bool {
+        self.0.contains(entry)
+    }
+}
