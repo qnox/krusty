@@ -615,7 +615,6 @@ compiler/testData/diagnostics/tests/imports/ImportPrivateMemberFromOtherFile.kt
 compiler/testData/diagnostics/tests/imports/ImportPrivateMembersWithStar.kt
 compiler/testData/diagnostics/tests/imports/OperatorRenameOnImport.kt
 compiler/testData/diagnostics/tests/inapplicableTargetPropertyImmutableInPrimaryConstructor.kt
-compiler/testData/diagnostics/tests/incompleteCode/diagnosticWithSyntaxError/namedFun.kt
 compiler/testData/diagnostics/tests/incorrectSuperCall.kt
 compiler/testData/diagnostics/tests/inference/anonymousFunctionAgainsSuspendFunctionType.kt
 compiler/testData/diagnostics/tests/inference/callableReferences/adaptation/kt39697.kt
