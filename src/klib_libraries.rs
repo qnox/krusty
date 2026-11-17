@@ -308,10 +308,14 @@ impl SymbolSource for KlibLibraries {
                 .inventory
                 .dependency_property(identity)
                 .is_some_and(|(_, property, _)| property.compiler_builtin_owner),
-            _ => self
-                .inventory
-                .dependency_function(identity)
-                .is_some_and(|(_, function)| function.compiler_builtin_owner),
+            _ => match self.inventory.dependency_function(identity) {
+                Some((_, function)) => function.compiler_builtin_owner,
+                // A constructor belongs to the stdlib exactly when its declaring class does.
+                None => self
+                    .inventory
+                    .dependency_constructor(identity)
+                    .is_some_and(|(_, classifier, _)| classifier.compiler_builtin_owner),
+            },
         }
     }
 

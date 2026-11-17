@@ -144,12 +144,14 @@ pub(super) fn bind_value_try_to_local(
             ),
         })
         .collect();
-    ir.add_expr(IrExpr::Try {
+    let attempt = ir.add_expr(IrExpr::Try {
         body: new_body,
         catches: new_catches,
         finally: parts.finally,
         result: Ty::Unit,
-    })
+    });
+    ir.set_logical_type(attempt, Ty::Unit);
+    attempt
 }
 
 /// Rewrite a `try`/`catch` branch into a value-LESS block that runs its statements and assigns its VALUE

@@ -139,7 +139,7 @@ class RunScript(unittest.TestCase):
     checkout, so the krusty test build cannot read the kotlinc one's. The test build runs on the
     measured outputs, snapshotted before it starts; anything it changes in them is detected."""
 
-    def run_corpus(self, work, gradlew):
+    def run_corpus(self, work, gradlew, expected_exit=0):
         repo = f'{work}/upstream'
         write(f'{repo}/gradlew', gradlew)
         os.chmod(f'{repo}/gradlew', 0o755)
@@ -155,9 +155,20 @@ class RunScript(unittest.TestCase):
         result = subprocess.run(['bash', os.path.join(HERE, 'run.sh'), 'p', f'{work}/corpus',
                                  '/nonexistent/krusty', '/nonexistent/repository', '0'],
                                 env=env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, expected_exit, result.stderr)
+        self.stderr = result.stderr
         with open(f'{work}/corpus/out/p/compare.json') as f:
             return json.load(f)
+
+    def test_a_failed_reference_build_is_compared_and_then_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as work:
+            # Every build records its one compilation; only the plain (kotlinc) builds fail.
+            project = self.run_corpus(work, '#!/bin/sh\n'
+                                            'if [ -n "$CORPUS_COMPILATIONS" ]; then : > "$CORPUS_COMPILATIONS"; fi\n'
+                                            'case "$*" in *krusty.binary*) exit 0;; *) exit 3;; esac\n',
+                                      expected_exit=1)
+        self.assertEqual(project['reference_exit'], 3)
+        self.assertIn("p: the reference kotlinc build failed (exit 3); see p.kotlinc.log", self.stderr)
 
     def test_each_test_build_reports_on_its_own_classes(self):
         with tempfile.TemporaryDirectory() as work:

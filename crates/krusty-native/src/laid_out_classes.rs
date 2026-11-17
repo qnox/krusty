@@ -379,6 +379,25 @@ impl LaidOutClasses {
         }
     }
 
+    /// The linkable initializer entry an emitted object published for exactly `constructor` of
+    /// `class`. Only a physically defined layout answers; a conflicting one never does.
+    pub(crate) fn published_constructor(
+        &self,
+        class: &krusty::backend::KlibClassIdentity,
+        constructor: &krusty::backend::KlibDependencyCallable,
+    ) -> Option<&Signature> {
+        match self
+            .published_layout(class)
+            .ok()
+            .flatten()?
+            .constructors
+            .get(constructor)?
+        {
+            ObjectFunction::Linked { signature, .. } => Some(signature),
+            ObjectFunction::Local(_) => None,
+        }
+    }
+
     /// The record of `class`: a class of the current source module, or a dependency class.
     pub(crate) fn get(&self, class: TypeName) -> Option<&LaidOutClass> {
         self.classes
@@ -525,6 +544,64 @@ mod descriptor_tests {
         layouts.publish_layout(published_layout(first.clone(), "kt_type_sample_Owner"));
         assert!(layouts.published_layout(&first).unwrap().is_some());
         assert!(layouts.published_layout(&second).unwrap().is_none());
+    }
+
+    #[test]
+    fn only_a_linked_published_constructor_entry_acknowledges_an_initializer() {
+        use krusty::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
+        let class = identity("producer");
+        // Distinct exact declarations; only their identity matters to the registry.
+        let constructor = |name: &str| KlibDependencyCallable {
+            module: "producer".into(),
+            declaration: KlibDeclarationSignature::Public(metadata_class_signature(
+                MetadataContainer {
+                    package: &["sample".into()],
+                    classes: &[],
+                    native_interop_library: false,
+                },
+                MetadataClass {
+                    name,
+                    type_params: &[],
+                    expect: false,
+                },
+            )),
+        };
+        let mut entry = Signature::new(CallConv::SystemV);
+        entry.params.push(cranelift_codegen::ir::AbiParam::new(
+            cranelift_codegen::ir::types::I64,
+        ));
+        let mut layout = published_layout(class.clone(), "kt_type_sample_Owner");
+        layout.constructors.insert(
+            constructor("linked"),
+            ObjectFunction::Linked {
+                symbol: "kt_sample_Owner__super_0".into(),
+                signature: entry.clone(),
+            },
+        );
+        layout.constructors.insert(
+            constructor("local"),
+            ObjectFunction::Local("kt_sample_Owner__super_1".into()),
+        );
+        let mut layouts = LaidOutClasses::default();
+        assert!(layouts
+            .published_constructor(&class, &constructor("linked"))
+            .is_none());
+        layouts.publish_layout(layout.clone());
+        assert_eq!(
+            layouts.published_constructor(&class, &constructor("linked")),
+            Some(&entry)
+        );
+        assert!(layouts
+            .published_constructor(&class, &constructor("local"))
+            .is_none());
+        assert!(layouts
+            .published_constructor(&class, &constructor("absent"))
+            .is_none());
+        // A conflicting producer poisons the identity, and with it every entry it published.
+        layouts.publish_layout(layout);
+        assert!(layouts
+            .published_constructor(&class, &constructor("linked"))
+            .is_none());
     }
 
     #[test]

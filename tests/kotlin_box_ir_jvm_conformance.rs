@@ -844,6 +844,16 @@ fn compose_library_default_arguments_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_captured_locals_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("capturedLocals");
+}
+
+#[test]
+fn compose_captured_local_read_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("capturedLocalRead");
+}
+
+#[test]
 fn compose_generic_field_stability_is_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("genericFieldStability");
 }
