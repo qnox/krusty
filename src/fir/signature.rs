@@ -556,6 +556,13 @@ pub trait SignatureConstraintEvaluator {
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedSignature, DiagnosticId>;
 
+    /// Bracket the evaluation of `declaration`'s signature. The solver's cycle stack, made visible
+    /// to semantic selection so a candidate whose type is still being inferred can be told apart
+    /// from one that is unavailable.
+    fn enter_declaration(&self, _declaration: DeclarationId) {}
+
+    fn leave_declaration(&self, _declaration: DeclarationId) {}
+
     /// Create the declaration-local diagnostic emitted for an unanchored inference cycle.
     fn recursive_inference_diagnostic(&self, declaration: DeclarationId) -> DiagnosticId;
 
@@ -1000,6 +1007,11 @@ pub trait SignatureSemantics:
     fn recursive_inference_diagnostic(&self, declaration: DeclarationId) -> DiagnosticId;
 
     fn missing_signature_diagnostic(&self, declaration: DeclarationId) -> DiagnosticId;
+
+    /// See [`SignatureConstraintEvaluator::enter_declaration`].
+    fn enter_declaration(&self, _declaration: DeclarationId) {}
+
+    fn leave_declaration(&self, _declaration: DeclarationId) {}
 }
 
 mod delegate_site;
@@ -1344,9 +1356,11 @@ fn resolve_signature(
     };
     states.insert(declaration, SignatureState::Computing);
     computing.push(declaration);
+    evaluator.enter_declaration(declaration);
     let evaluated = evaluator.evaluate(declaration, constraint.result, graph, &mut |dependency| {
         resolve_signature(graph, states, computing, dependency, evaluator)
     });
+    evaluator.leave_declaration(declaration);
     let popped = computing.pop();
     debug_assert_eq!(popped, Some(declaration));
 

@@ -101,6 +101,8 @@ struct ProductionSignatureSemantics<'a> {
     scoped_receivers: RefCell<HashMap<crate::fir::DeclarationId, Vec<SignatureImplicitReceiver>>>,
     /// The declarations whose context parameter types are being resolved, innermost last.
     context_headers_in_resolution: RefCell<Vec<crate::fir::DeclarationId>>,
+    /// The declarations whose signatures the solver is evaluating, innermost last.
+    declarations_in_evaluation: RefCell<Vec<crate::fir::DeclarationId>>,
     scoped_frames: semantics::scoped_constraint_frames::ScopedConstraintFrames,
     stable_functions: stable_function_index::StableFunctionIndex,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
@@ -3272,6 +3274,7 @@ pub(crate) fn finalized_streamed_signature_index(
         signature_origins: HashMap::default(),
         scoped_receivers: RefCell::new(HashMap::default()),
         context_headers_in_resolution: Default::default(),
+        declarations_in_evaluation: Default::default(),
         scoped_frames: Default::default(),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
@@ -4046,6 +4049,7 @@ pub(crate) fn finalized_streamed_signature_index(
         signature_origins,
         scoped_receivers: RefCell::new(HashMap::default()),
         context_headers_in_resolution: Default::default(),
+        declarations_in_evaluation: Default::default(),
         scoped_frames: Default::default(),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),

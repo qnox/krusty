@@ -3,6 +3,17 @@
 use super::ProductionSignatureSemantics;
 use crate::types::Ty;
 
+/// How a selected member property is used, which decides what an inference cycle through it means.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PropertyUse {
+    /// The property's value is read.
+    Read,
+    /// The property's value is the callee of call syntax, a candidate that only exists once its
+    /// type is known. A property still being inferred has no such type, so it offers no candidate
+    /// and the call continues to the next level of the scope tower.
+    InvokeCallee,
+}
+
 impl ProductionSignatureSemantics<'_> {
     pub(super) fn selected_member_property_type(
         &self,
@@ -10,6 +21,49 @@ impl ProductionSignatureSemantics<'_> {
         receiver: Ty,
         spelling: &str,
         publication_origin: Option<crate::fir::OriginId>,
+        demand: &mut dyn FnMut(
+            crate::fir::DeclarationId,
+        )
+            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
+        self.select_member_property(
+            scope,
+            receiver,
+            spelling,
+            publication_origin,
+            PropertyUse::Read,
+            demand,
+        )
+    }
+
+    /// The type of the member property `spelling` as the callee of call syntax.
+    pub(super) fn selected_invoke_callee_property_type(
+        &self,
+        scope: crate::fir::SignatureScope,
+        receiver: Ty,
+        spelling: &str,
+        demand: &mut dyn FnMut(
+            crate::fir::DeclarationId,
+        )
+            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
+        self.select_member_property(
+            scope,
+            receiver,
+            spelling,
+            None,
+            PropertyUse::InvokeCallee,
+            demand,
+        )
+    }
+
+    fn select_member_property(
+        &self,
+        scope: crate::fir::SignatureScope,
+        receiver: Ty,
+        spelling: &str,
+        publication_origin: Option<crate::fir::OriginId>,
+        property_use: PropertyUse,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
@@ -96,6 +150,15 @@ impl ProductionSignatureSemantics<'_> {
             result
         };
         if let Some(property) = selected.property.as_ref() {
+            if property_use == PropertyUse::InvokeCallee
+                && property.stable_declaration.is_some_and(|declaration| {
+                    self.declarations_in_evaluation
+                        .borrow()
+                        .contains(&declaration)
+                })
+            {
+                return Ok(None);
+            }
             if let Some(declaration) = property.stable_declaration {
                 if self
                     .headers

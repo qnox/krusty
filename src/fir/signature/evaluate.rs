@@ -2197,6 +2197,14 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
         })
     }
 
+    fn enter_declaration(&self, declaration: DeclarationId) {
+        self.semantics.enter_declaration(declaration);
+    }
+
+    fn leave_declaration(&self, declaration: DeclarationId) {
+        self.semantics.leave_declaration(declaration);
+    }
+
     fn recursive_inference_diagnostic(&self, declaration: DeclarationId) -> DiagnosticId {
         self.semantics.recursive_inference_diagnostic(declaration)
     }
