@@ -121,10 +121,18 @@ type ClassifierBinding = (
     Option<u32>,
 );
 
+/// One complete path from an import rung: the candidate it names (with the typealias declaration
+/// it was written through) and the selection a single completion commits.
+struct ImportedCompletion {
+    candidate: ScopedClassifier,
+    alias: Option<SelectedTypeAlias>,
+    classifier_segment: Option<u32>,
+}
+
 enum CompleteImportedSelection {
     None(Option<ClassifierBinding>),
     Selected(ClassifierBinding),
-    Ambiguous(Vec<TypeName>),
+    Ambiguous(Vec<ScopedClassifier>),
 }
 
 impl Checker<'_> {
@@ -342,7 +350,7 @@ impl Checker<'_> {
                 CompleteImportedSelection::Ambiguous(candidates) => {
                     return (
                         InheritedNestedClassifier::Ambiguous,
-                        Some(ClassifierMiss::Ambiguous(unaliased_candidates(candidates))),
+                        Some(ClassifierMiss::Ambiguous(candidates)),
                         None,
                         None,
                     );
@@ -509,9 +517,17 @@ impl Checker<'_> {
                 .collect::<Vec<_>>();
             debug_assert!(!roots.is_empty());
 
-            let mut completed: Vec<(TypeName, Option<SelectedTypeAlias>, Option<u32>)> = Vec::new();
+            // One completion per selected declaration: two typealiases that complete to the same
+            // classifier, or an alias and its own target, are distinct candidates.
+            let mut completed: Vec<ImportedCompletion> = Vec::new();
             for (root, declaration) in roots {
                 let alias = selected_alias_from_declaration(root, declaration.as_ref());
+                let declared_alias = match &declaration {
+                    Some(crate::libraries::ClassifierDeclaration::TypeAlias(binding)) => {
+                        Some(binding.clone())
+                    }
+                    _ => None,
+                };
                 let binding = self.commit_classifier_suffix(
                     source,
                     ResolvedQualifier::Classifier(root),
@@ -530,39 +546,39 @@ impl Checker<'_> {
                 };
                 let selected_alias = binding.2;
                 let classifier_segment = binding.3;
-                if let Some((_, previous_alias, previous_segment)) = completed
-                    .iter()
-                    .find(|(previous, _, _)| *previous == classifier)
-                {
-                    if !same_selected_alias(previous_alias.as_ref(), selected_alias.as_ref())
-                        || *previous_segment != classifier_segment
-                    {
-                        return CompleteImportedSelection::Selected(Self::invalid_alias_selection(
-                            root_name,
-                        ));
-                    }
+                if completed.iter().any(|previous| {
+                    previous.candidate.classifier == classifier
+                        && same_selected_alias(previous.alias.as_ref(), selected_alias.as_ref())
+                        && previous.classifier_segment == classifier_segment
+                }) {
                     continue;
                 }
-                completed.push((classifier, selected_alias, classifier_segment));
+                completed.push(ImportedCompletion {
+                    candidate: ScopedClassifier::new(
+                        classifier,
+                        declared_alias.filter(|_| classifier == root),
+                    ),
+                    alias: selected_alias,
+                    classifier_segment,
+                });
             }
 
             match completed.len() {
                 0 => {}
                 1 => {
-                    let (classifier, alias, classifier_segment) =
-                        completed.pop().expect("one completed type path");
+                    let completion = completed.pop().expect("one completed type path");
                     return CompleteImportedSelection::Selected((
-                        InheritedNestedClassifier::Found(classifier),
+                        InheritedNestedClassifier::Found(completion.candidate.classifier),
                         None,
-                        alias,
-                        classifier_segment,
+                        completion.alias,
+                        completion.classifier_segment,
                     ));
                 }
                 _ => {
                     return CompleteImportedSelection::Ambiguous(
                         completed
                             .into_iter()
-                            .map(|(classifier, _, _)| classifier)
+                            .map(|completion| completion.candidate)
                             .collect(),
                     );
                 }

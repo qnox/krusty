@@ -42,12 +42,20 @@ pub(super) struct FunctionBridgeEntry {
 pub(super) struct SignatureAdapters {
     /// Indexed by physical parameter, including an empty receiver entry at index zero.
     pub(super) parameters: Vec<Option<BoxAdapter>>,
-    pub(super) result: Option<BoxAdapter>,
+    pub(super) result: Option<ResultAdapter>,
     /// What a collection special bridge answers when its argument is not the override's element.
     pub(super) rejection: Option<i32>,
     /// The implementation returns `Nothing`: it never answers, so the bridge's reference result
     /// follows a call that does not return.
     pub(super) diverges: bool,
+}
+
+/// Result adaptation selected from the checked logical result while its type is live.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ResultAdapter {
+    Box(BoxAdapter),
+    /// The existing runtime singleton, for a Unit body with no physical result.
+    Unit(u32),
 }
 
 impl SignatureAdapters {
@@ -98,6 +106,9 @@ pub(super) struct LaidOutClass {
     pub(super) interface_bodies: HashMap<u32, Placed>,
     /// How it implements each member of a dependency's interface, most derived first.
     pub(super) dependency_implementations: Vec<(MemberRef, DependencyImplementation)>,
+    /// Checked callable membership, retained even when no invocation adapter could be emitted.
+    pub(super) function_arities: Vec<usize>,
+    pub(super) suspend_function_arities: Vec<usize>,
     /// Why a subclass cannot extend it, where it has no instances of its own and so its file
     /// needed none of what a subclass would inherit.
     pub(super) refusal: Option<String>,
@@ -518,6 +529,8 @@ mod tests {
             slot_types: Vec::new(),
             entries: Vec::new(),
             function_bridge: None,
+            function_arities: Vec::new(),
+            suspend_function_arities: Vec::new(),
             ancestors: Vec::new(),
             constructors: vec![None; 3],
             constructor_entries: vec![

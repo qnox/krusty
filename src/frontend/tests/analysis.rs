@@ -646,7 +646,7 @@ fn backend_names_and_erasure_do_not_change_frontend_overload_identity() {
 }
 
 #[test]
-fn inferred_conflict_displays_only_source_signature_types() {
+fn inferred_conflict_displays_its_inferred_result_as_kotlinc_does() {
     let inputs = [
         SourceInput::kotlin("package sample\nclass Result\nfun choose(value: Int) = Result()"),
         SourceInput::kotlin("package sample\nfun choose(value: Int) = Result()"),
@@ -669,8 +669,8 @@ fn inferred_conflict_displays_only_source_signature_types() {
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>(),
         [
-            "conflicting overloads:\nfun choose(value: Int)",
-            "conflicting overloads:\nfun choose(value: Int)",
+            "conflicting overloads:\nfun choose(value: Int): Result",
+            "conflicting overloads:\nfun choose(value: Int): Result",
         ]
     );
 }

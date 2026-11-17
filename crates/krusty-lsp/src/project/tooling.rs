@@ -264,6 +264,13 @@ fn slot(kind: ClientKind) -> &'static Mutex<Option<LiveClient>> {
     }
 }
 
+/// The one stdout line the tooling client is allowed to emit. Maven prints
+/// `[WARNING] The POM for ... is invalid` on stdout while a resolve is still running;
+/// that line does not deserialize, and treating it as the response stops the batch.
+fn is_tool_response(line: &str) -> bool {
+    serde_json::from_str::<ToolResponse>(line).is_ok()
+}
+
 fn transact(kind: ClientKind, line: &str, timeout: Duration) -> io::Result<ToolResponse> {
     let mutex = slot(kind);
     let mut slot = mutex
@@ -389,6 +396,11 @@ fn spawn(kind: ClientKind) -> io::Result<LiveClient> {
                         if line.ends_with('\r') {
                             line.pop();
                         }
+                    }
+                    // A resolver warning is not the response. Waiting for the JSON line lets the
+                    // rest of the batch finish; taking the warning ends the request.
+                    if !is_tool_response(&line) {
+                        continue;
                     }
                     if sender.send(Ok(line)).is_err() {
                         break;
@@ -677,6 +689,17 @@ mod tests {
         assert!(!MAVEN_CLIENT.contains("ProcessBuilder"));
         assert!(!MAVEN_CLIENT.contains("mvn"));
         assert!(!MAVEN_CLIENT.contains("dependency:resolve"));
+        assert!(MAVEN_CLIENT.contains("Protocol.capture()"));
+        assert!(GRADLE_CLIENT.contains("Protocol.capture()"));
+    }
+
+    #[test]
+    fn a_maven_pom_warning_is_not_the_protocol_response() {
+        let warning = "[WARNING] The POM for com.hankcs:aho-corasick-double-array-trie:jar:1.2.3 is invalid, transitive dependencies (if any) will not be available, enable debug logging for more details";
+        assert!(!is_tool_response(warning));
+        assert!(is_tool_response(
+            r#"{"status":1,"stdout":"","stderr":"missing"}"#
+        ));
     }
 
     #[test]
