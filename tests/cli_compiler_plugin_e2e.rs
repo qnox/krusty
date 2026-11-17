@@ -547,6 +547,20 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          with a default argument that is not a constant yet",
     );
     assert_compose_rejects(
+        "compose-function-type-with-result",
+        "fun keep(content: @Composable () -> Int) {}\n",
+        &[],
+        "1:1: error: krusty's Compose compiler plugin does not support the composable function \
+         type in `keep` yet",
+    );
+    assert_compose_rejects(
+        "compose-suspend-function-type",
+        "fun keep(content: @Composable suspend () -> Unit) {}\n",
+        &[],
+        "1:1: error: krusty's Compose compiler plugin does not support the composable function \
+         type in `keep` yet",
+    );
+    assert_compose_rejects(
         "compose-inferred-stability",
         "@Composable fun Greeting(names: List<String>) {}\n",
         &[],
@@ -638,7 +652,8 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "val action: () -> Unit = {}\n@Composable fun Greeting() {\nandroidx.compose.runtime.SideEffect(action)\n}\n",
         &[],
         "5:1: error: krusty's Compose compiler plugin does not support a call to a library \
-         composable function with a function-typed parameter other than `@Composable () -> Unit` yet",
+         composable function with a function-typed parameter that is not a composable function \
+         type yet",
     );
     assert_compose_library_call_rejects(
         "compose-library-call-forwarded-lambda",
