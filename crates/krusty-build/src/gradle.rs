@@ -235,7 +235,6 @@ mod tests {
 
     mod body_only_dependents;
     mod compiler_options;
-    use krusty::plugins::registry::PluginDiagnostic;
 
     #[test]
     fn failed_gradle_output_keeps_stderr_and_stdout_tails_separate() {
