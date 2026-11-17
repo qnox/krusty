@@ -1,8 +1,8 @@
 name: oss corpus
 
 # Conformance on the top-starred Kotlin projects and the Android sample listed in
-# scripts/oss-corpus/projects.tsv. Rows whose lane is `lsp` only (intellij-community and kotlin)
-# are measured by scripts/parity-scan.py and are not built here. Each built project builds twice from a pinned commit with its own
+# scripts/oss-corpus/projects.tsv. Rows whose lane is `lsp` only (intellij-community) are measured
+# by scripts/parity-scan.py and are not built here. Each built project builds twice from a pinned commit with its own
 # Gradle build: once with kotlinc, once with the krusty Gradle plugin applied by an init script. The
 # run reports, per project, how many Kotlin/JVM compilations krusty built, how many classes match
 # kotlinc's byte for byte, why the rest missed, how many of the project's own tests that pass on
@@ -118,7 +118,11 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
+          # kotlin's own build asks for JDK 8, 11 and 17 toolchains; run.sh offers Gradle every one
+          # installed here. The last one listed is JAVA_HOME.
           java-version: |
+            8
+            11
             25
             17
             21

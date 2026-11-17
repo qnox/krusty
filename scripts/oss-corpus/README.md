@@ -4,7 +4,7 @@ The `oss corpus` workflow (`.github/workflows/oss-corpus.yml`, nightly on master
 never on pull requests) builds the most-starred Kotlin projects listed in `projects.tsv`, and Now
 in Android as the Android sample, each from a pinned commit with its own Gradle build. A row whose
 last field is `lsp` stays in that project set for the language server (`scripts/parity-scan.py`)
-and is not built here; `intellij-community` and `kotlin` are those rows. The scan reports whether
+and is not built here; `intellij-community` is that row. The scan reports whether
 each module opened completely, how many errors it produced, and how long the server's
 go-to-definition and find-references lookups took. It does not time parsing or type information
 separately from the combined analysis. Each built project runs three builds:
@@ -22,7 +22,7 @@ separately from the combined analysis. Each built project runs three builds:
    reported. The verify build exists for those errors; its classes and cost are not compared.
 
 `corpus.init.gradle` adds the `corpusCompile` task, which depends on every non-Android Kotlin/JVM
-compile task, lists each with its output directory, and records the Gradle and compiler plugins
+compile task (or, for a project with a target set, the ones the set needs: see below), lists each with its output directory, and records the Gradle and compiler plugins
 each project applies. After each build, `outputs.py` moves exactly the directories that build
 listed out of the checkout, wherever a task writes them, after checking that each is owned by one
 task inside the Gradle root; the next build therefore starts without them. `compare.py` compares
@@ -112,6 +112,23 @@ These projects carry a patch for that bump:
 - `okhttp`: Kotlin 2.4 infers `kotlin-test-junit5` beside the declared `kotlin-test-junit`; the
   inference is turned off.
 - `okhttp` and `okio`: the Burst compiler plugin moves to a release built for Kotlin 2.4.
+- `kotlin`: the build compiles itself with a bootstrap compiler, by default a development build
+  from JetBrains' bootstrap repository. The patch takes the bootstrap from Maven Central instead, at
+  the version the pin (`bootstrap.kotlin.version` in `gradle.properties`) names, and turns Gradle's
+  dependency verification off, since its metadata lists only the default bootstrap's artifacts. The
+  pinned commit is the v2.4.21 tag, whose sources are Kotlin 2.4.
+
+A project too large to build whole on one runner names a target set in `gradle/<name>.targets`: Gradle
+task paths, one per line. `corpusCompile` then builds only the listed tasks that are not tests, the
+compiles picked are those the build runs for them (the targets and every compile they depend on),
+and `corpusTest` runs only the listed test tasks. `kotlin` lists its JVM standard library and the Compose compiler
+plugin (`compiler-hosted`, a kotlinc plugin built on the compiler's FIR and IR APIs), each with its
+tests' compile, and its whole JVM compiler (`:compiler:cli-jvm`), and runs the standard library's
+JVM tests.
+
+Every Gradle build is offered each JDK the runner installed (`JAVA_HOME_<version>_X64`) as a Java
+toolchain (`toolchains.sh`), since Gradle does not look there by itself. `kotlin` compiles its modules
+with JDK 8, 11 and 17 toolchains, and its build logic cannot download one.
 
 Only the main build is measured: buildSrc and included builds are build logic, and the init scripts
 leave them alone. Gradle runs without the configuration cache and isolated projects, since the init

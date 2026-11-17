@@ -57,6 +57,15 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 if [ "${android_variant:--}" != - ]; then
   export CORPUS_ANDROID_VARIANT=$android_variant
 fi
+# A project too large to build whole lists its target set in gradle/<name>.targets: the Gradle tasks
+# whose compiles, with everything they depend on, are compared, and the test tasks that are run.
+targets=${CORPUS_TARGETS_DIR:-$here/gradle}/$name.targets
+if [ -f "$targets" ]; then
+  export CORPUS_TARGETS=$targets
+else
+  unset CORPUS_TARGETS
+fi
+. "$here/toolchains.sh"
 
 # One build of the Gradle root. The init scripts read every project of the build, so the
 # configuration cache and isolated projects are off. The Gradle exit status is left in `status`.
@@ -77,7 +86,7 @@ build() {
     CORPUS_COMPILATIONS=$manifest CORPUS_TASK_TIMES=$logs/$name.$mode.tasks.tsv \
       python3 "$here/measure.py" "$logs/$name.$mode.metrics.json" \
       timeout 5400 ./gradlew --no-daemon -I "$here/corpus.init.gradle" \
-      "${offline[@]}" "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand \
+      "${toolchains[@]}" "${offline[@]}" "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand \
       --no-configuration-cache -Dorg.gradle.isolated-projects=false
   ) >"$logs/$name.$mode.log" 2>&1 || code=$?
   echo "$name $mode exit $code seconds $(($(date +%s) - start))" >>"$logs/STATUS"
@@ -103,7 +112,7 @@ run_tests() {
     cd "$root"
     CORPUS_TESTS=$manifest python3 "$here/measure.py" "$logs/$name.$mode.tests.metrics.json" \
       timeout "${CORPUS_TEST_TIMEOUT:-3600}" ./gradlew --no-daemon -I "$here/corpus.init.gradle" \
-      "$@" corpusTest --continue --no-configure-on-demand --no-configuration-cache \
+      "${toolchains[@]}" "$@" corpusTest --continue --no-configure-on-demand --no-configuration-cache \
       -Dorg.gradle.isolated-projects=false
   ) >"$logs/$name.$mode.tests.log" 2>&1 || code=$?
   echo "$name $mode tests exit $code seconds $(($(date +%s) - start))" >>"$logs/STATUS"
