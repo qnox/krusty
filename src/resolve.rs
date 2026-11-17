@@ -44467,7 +44467,13 @@ impl<'a> Checker<'a> {
     /// subject, and the comparison can be non-trivially true for exactly the same subtype reason. How
     /// a target boxes the value is its own representation, never a semantic supertype.
     fn when_objs_comparable(&self, st: Ty, ct: Ty) -> bool {
-        match (st.kind(), ct.kind()) {
+        // `Unit` is not a reference type in the checked model, but `Unit -> …` compares the
+        // `kotlin/Unit` object with the subject like any other object arm.
+        let as_classifier = |ty: Ty| match ty.kind() {
+            TyKind::Unit => Ty::obj_name(crate::types::wk::unit()),
+            _ => ty,
+        };
+        match (as_classifier(st).kind(), as_classifier(ct).kind()) {
             (TyKind::Obj(a, _), TyKind::Obj(b, _)) => {
                 self.obj_name_is_subtype(a, b) || self.obj_name_is_subtype(b, a)
             }
