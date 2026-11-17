@@ -390,6 +390,7 @@ pub(super) fn declarations(
 
 pub(super) struct OrdinaryRootCapabilities<'a> {
     pub(super) realizes_intrinsic: &'a dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
+    pub(super) realizes_getter: &'a dyn Fn(crate::backend::DependencyGetterSignature<'_>) -> bool,
     pub(super) represents_classifier: &'a dyn Fn(crate::types::TypeName) -> bool,
     pub(super) retains_initializer: &'a dyn Fn(KlibBodyCallable<'_>) -> Result<bool, &'static str>,
 }
@@ -643,6 +644,14 @@ pub(super) fn ordinary_roots<'a>(
             .target_intrinsic(selected.identity(), bodies, target_realizes_intrinsic)
             .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?
             .is_some()
+        {
+            continue;
+        }
+        // A getter the target answers itself (an array's `storage`) is realized at each read,
+        // as the closure leaves it, never lowered from its body.
+        if callees
+            .target_getter(selected.identity(), bodies, capabilities.realizes_getter)
+            .map_err(|reason| format!("an invalid target getter declaration: {reason:?}"))?
         {
             continue;
         }

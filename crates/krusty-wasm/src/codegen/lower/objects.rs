@@ -1221,10 +1221,17 @@ impl Body<'_> {
         self.laid_out_classes.published_structure(&identity)
     }
 
-    /// `x as C`: the value, cast to class `C` of this file or to an interface of the module.
+    /// `x as C`: the value, cast to an array classifier, to class `C` of this file or to an
+    /// interface of the module.
     pub(super) fn cast(&mut self, arg: u32, target: Ty, non_null: bool) -> Result<(), Unsupported> {
         self.value(arg, any())?;
-        if let Some(interface) = self.interface_of_type(target) {
+        if target.non_null().is_array() {
+            // An array's values are its array form's objects, as its type test reads them, even
+            // where a library lays the array class out as a class of its own.
+            let (form, _) = self.array_form(target)?;
+            self.code
+                .ref_cast(!non_null, HeapType::Concrete(form.object));
+        } else if let Some(interface) = self.interface_of_type(target) {
             let value = self.local(REFERENCE);
             self.code.local_tee(value);
             self.interface_test(interface, !non_null);
