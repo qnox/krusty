@@ -1219,8 +1219,9 @@ fn only_a_value_class_component_keeps_its_stability_for_another_module() {
         property.read_stability = PropertyReadStability::Stable;
         property
     };
-    let class_with_value = |is_value: bool| {
+    let class_with_value = |is_value: bool, constructor: Visibility| {
         let mut class = in_memory_class(1);
+        class.constructors[0].visibility = constructor;
         class.properties = vec![stable("value"), stable("other")];
         if is_value {
             class.metadata_flags |= 1 << 13;
@@ -1230,8 +1231,11 @@ fn only_a_value_class_component_keeps_its_stability_for_another_module() {
     let libraries = KlibLibraries::from_packages(vec![(
         segments(&["p"]),
         package_with_classes(vec![
-            ("p/Wrapper", class_with_value(true)),
-            ("p/Plain", class_with_value(false)),
+            ("p/Wrapper", class_with_value(true, Visibility::Public)),
+            // A private primary constructor is not a published candidate, but it still declares
+            // the components.
+            ("p/Hidden", class_with_value(true, Visibility::Private)),
+            ("p/Plain", class_with_value(false, Visibility::Public)),
         ]),
     )])
     .expect("in-memory classes are signable");
