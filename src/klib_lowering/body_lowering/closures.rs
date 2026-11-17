@@ -2,7 +2,8 @@
 
 use super::super::function_lowering::{closure_header, declare_function, CaptureParameter};
 use super::*;
-use crate::ir::{IrCapturedDeclaration, IrParameterIdentity, IrValueCapture};
+use crate::ir::type_reflection::type_parameters_named_by;
+use crate::ir::{IrCapturedDeclaration, IrParameterIdentity, IrTypeParameter, IrValueCapture};
 use crate::metadata::klib_ir::tree::{KlibIrBody, KlibIrFunctionId};
 use crate::types::TyKind;
 
@@ -16,9 +17,6 @@ impl BodyLowering<'_> {
         let TyKind::Fun(signature) = ty.kind() else {
             return unsupported("a closure of a non-function type");
         };
-        if signature.suspend {
-            return unsupported("a suspend closure");
-        }
         // The serialized source-form marker owns this distinction. Neither the expression's
         // encoding nor the FunctionN.invoke override proves whether source used `fun` or braces.
         let capturer = match super::super::closure_forms::source_form(source_form) {
@@ -117,9 +115,21 @@ impl BodyLowering<'_> {
                 "a closure's declaration disagrees with its function type",
             ));
         }
-        let arity = u8::try_from(signature.params.len())
-            .map_err(|_| mismatch("a closure has too many invocation parameters"))?;
+        // A suspend lambda's invocation takes its continuation after its parameters; common CPS
+        // lowering adds that parameter to the implementation it records as a suspend function.
+        let arity = signature
+            .params
+            .len()
+            .checked_add(usize::from(signature.suspend))
+            .and_then(|arity| u8::try_from(arity).ok())
+            .ok_or_else(|| mismatch("a closure has too many invocation parameters"))?;
+        let type_parameters = self.closure_type_parameters(ty)?;
         let implementation = declare_function(self.ir, &header);
+        self.ir
+            .record_lambda_type_parameters(implementation, type_parameters);
+        if signature.suspend {
+            self.ir.suspend_funs.push(implementation);
+        }
         self.ir.lambda_own_params_from.insert(
             implementation,
             u32::try_from(captures.len()).expect("a capture list fits u32"),
@@ -155,5 +165,45 @@ impl BodyLowering<'_> {
             sam: None,
             inline_body: None,
         }))
+    }
+
+    /// The declaration-owned formals the closure's function type `ty` names, closed over their
+    /// bounds in first-use order, as checked FIR records a source lambda's. The enclosing
+    /// declarations bound each of them with its declared bounds and variance.
+    fn closure_type_parameters(&mut self, ty: Ty) -> Lowered<Vec<IrTypeParameter>> {
+        let mut names = Vec::new();
+        type_parameters_named_by(ty, &mut names);
+        let header = self.header;
+        let types = header.type_parameters();
+        let mut parameters = Vec::with_capacity(names.len());
+        let mut next = 0;
+        while let Some(&name) = names.get(next) {
+            next += 1;
+            let Some(declared) = types.declared_bounds(name) else {
+                return Err(mismatch(
+                    "a closure's function type names a formal no enclosing declaration declares",
+                ));
+            };
+            let mut bounds = Vec::with_capacity(declared.len());
+            for &bound in declared {
+                type_parameters_named_by(bound, &mut names);
+                // A bound naming another type parameter names no classifier.
+                let interface = match bound.non_null().kotlin_class_internal() {
+                    Some(classifier) => self.linker.is_interface(classifier)?,
+                    None => false,
+                };
+                bounds.push((bound, interface));
+            }
+            parameters.push(IrTypeParameter {
+                name: crate::types::type_parameter_source_name(name).to_owned(),
+                semantic_name: name.to_owned(),
+                bounds,
+                variance: types.declared_variance(name),
+                // A serialized body with a reified formal is declined where it is bound.
+                reified: false,
+                captured_from_enclosing: false,
+            });
+        }
+        Ok(parameters)
     }
 }

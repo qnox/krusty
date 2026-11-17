@@ -297,7 +297,8 @@ impl Backend for CraneliftBackend {
         file.ir.realize_local_class_names_in_packages();
         // The accessors a reference to a DEPENDENCY property is reached through, which the
         // generator's own object is built from; see `native::dependency_references`.
-        let properties = super::dependency_references::realize_properties(&mut file.ir);
+        let properties =
+            super::dependency_references::realize_properties(&mut file.ir, &file.callables);
         if state.runtime_symbols.is_none() {
             match super::linker::runtime_symbols(self.target) {
                 Ok(symbols) => {
@@ -611,6 +612,7 @@ impl Backend for CraneliftBackend {
         for (identity, symbol) in lowered.class_descriptors {
             state.laid_out.publish_descriptor(identity, symbol);
         }
+        state.abi.extend(lowered.abi);
         #[cfg(feature = "test-support")]
         if file.kind == krusty::backend::CheckedIrUnitKind::Source {
             if let Some(exports) = self
@@ -633,11 +635,25 @@ impl Backend for CraneliftBackend {
                 );
             }
         }
-        state.abi.extend(lowered.abi);
         for (class, record) in lowered.laid_out {
             state.laid_out.insert(class, record);
         }
         vec![(format!("{object_stem}.o"), lowered.object)]
+    }
+
+    fn emitted_constructor_initializer(
+        &self,
+        state: &mut Self::State,
+        declaration: &krusty::backend::ConstructorInitializerDeclaration,
+    ) -> bool {
+        // The entry takes the allocated object, then the declared frame, and returns nothing.
+        state
+            .laid_out
+            .published_constructor(&declaration.class, &declaration.constructor)
+            .is_some_and(|signature| {
+                signature.params.len() == declaration.parameters.len() + 1
+                    && signature.returns.is_empty()
+            })
     }
 
     fn check_module(&self, state: &Self::State, diags: &mut DiagSink) {

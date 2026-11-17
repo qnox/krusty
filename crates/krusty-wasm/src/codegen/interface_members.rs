@@ -76,6 +76,9 @@ pub(super) struct Recording<'a> {
     pub(super) functions: &'a [Option<u32>],
     pub(super) callables: &'a CheckedBackendCallables,
     pub(super) exports: &'a DependencyExportSignatures,
+    /// The frozen classifier facts, whose published supertypes name the interfaces a class
+    /// inherits through a library superclass.
+    pub(super) classifiers: &'a dyn krusty::backend::BackendClassifierSource,
 }
 
 /// Where a recording writes: the module, the runtime and the callables of the program.
@@ -1149,7 +1152,19 @@ impl FileRecorder<'_, '_, '_> {
             .into_iter()
             .flatten()
             .map(|applied| applied.classifier);
-        for interface in module.chain(hierarchy).chain(class.interfaces.iter()) {
+        // A class below a library class is also an instance of every interface that class
+        // implements, which neither the module numbering nor the class's own list repeats.
+        let classifiers = self.recording.classifiers;
+        let inherited = [class.fq_name_id(), class.superclass]
+            .into_iter()
+            .chain(class.interfaces.iter())
+            .flat_map(|supertype| classifiers.inherited_interfaces(supertype))
+            .collect::<Vec<_>>();
+        for interface in module
+            .chain(hierarchy)
+            .chain(class.interfaces.iter())
+            .chain(inherited)
+        {
             self.program
                 .runtime
                 .objects
