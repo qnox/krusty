@@ -32551,6 +32551,13 @@ type OwnedPropertyFacts = (
     Option<crate::fir::DeclarationId>,
 );
 
+/// The type a flow fact proved for one implicit receiver, named by that receiver's tower identity.
+#[derive(Clone, Copy)]
+struct ReceiverNarrowing {
+    receiver: (usize, usize),
+    ty: Ty,
+}
+
 struct Checker<'a> {
     file: &'a File,
     /// Interned source package of `file`, computed once from its dotted spelling.
@@ -32759,8 +32766,9 @@ struct Checker<'a> {
     /// be `B` (a subtype of `this_ty`) inside the guarded branch, so a bare member of `B` resolves.
     /// Separate from `this_ty` (which stays the DECLARED receiver type so `this` still types as it,
     /// and the lowerer inserts a `checkcast` only where the narrowing was actually used). Cleared at
-    /// every scope boundary, like local flow-narrowings.
-    this_narrow: Option<Ty>,
+    /// every scope boundary, like local flow-narrowings. It names the receiver it narrows: a
+    /// receiver lambda inside the branch pushes a nearer receiver that the proof says nothing about.
+    this_narrow: Option<ReceiverNarrowing>,
     /// Stack of labeled receivers in scope, innermost LAST. Each entry is `(label, ty, is_class)`:
     /// a class body pushes `(ClassName, ty, true)`; a receiver lambda / scope function pushes
     /// `(fnName, receiverTy, false)`. Resolves `this@Label`. The innermost entry is the current `this`
@@ -34000,7 +34008,11 @@ impl<'a> Checker<'a> {
         r
     }
 
-    fn with_this_narrow<R>(&mut self, narrow: Option<Ty>, f: impl FnOnce(&mut Self) -> R) -> R {
+    fn with_this_narrow<R>(
+        &mut self,
+        narrow: Option<ReceiverNarrowing>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         let prev = self.this_narrow;
         if let Some(n) = narrow {
             self.this_narrow = Some(n);
@@ -34012,14 +34024,23 @@ impl<'a> Checker<'a> {
 
     /// Current smart-cast type of the implicit receiver.
     fn effective_this_narrow(&self, scope: &CheckerScope<'_>) -> Option<Ty> {
-        self.this_narrow.or_else(|| {
+        self.current_receiver_narrowing(scope).or_else(|| {
             self.lookup(scope, "this")
                 .map(|local| self.local_narrowing(scope, "this").unwrap_or(local.ty))
         })
     }
 
+    /// The type `if (this is B)` proved for the receiver `this` currently denotes. The proof belongs
+    /// to the receiver it was made about, so it is absent inside a receiver lambda that pushed a
+    /// nearer one.
+    fn current_receiver_narrowing(&self, scope: &CheckerScope<'_>) -> Option<Ty> {
+        let narrowing = self.this_narrow?;
+        let current = self.declared_implicit_receivers(scope).into_iter().next()?;
+        (current.identity == narrowing.receiver).then_some(narrowing.ty)
+    }
+
     fn actual_this_narrow(&self, scope: &CheckerScope<'_>) -> Option<Ty> {
-        self.this_narrow
+        self.current_receiver_narrowing(scope)
             .or_else(|| self.local_narrowing(scope, "this"))
             .or_else(|| self.lookup_path_narrowing(scope, &self.current_receiver_path(scope)?))
             .or_else(|| {
@@ -39878,7 +39899,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         cond: ExprId,
         for_else: bool,
-    ) -> Option<Ty> {
+    ) -> Option<ReceiverNarrowing> {
         let Expr::Is {
             operand,
             ty,
@@ -39921,7 +39942,13 @@ impl<'a> Checker<'a> {
                 )
             })
             .unwrap_or(runtime_tt);
-        runtime_tt.is_reference().then_some(runtime_tt)
+        let scope::PathRoot::Receiver(receiver) = self.current_receiver_path(scope)?.root else {
+            return None;
+        };
+        runtime_tt.is_reference().then_some(ReceiverNarrowing {
+            receiver,
+            ty: runtime_tt,
+        })
     }
 
     /// The type a successful checked cast narrows a stable path to. A nullable target accepts null,
@@ -51894,7 +51921,7 @@ impl<'a> Checker<'a> {
                 fallthrough_declined: Vec<(String, Ty)>,
                 arm_casts: Vec<(NarrowPath, Ty)>,
                 arm_declined: Vec<(String, Ty)>,
-                this_narrow: Option<Ty>,
+                this_narrow: Option<ReceiverNarrowing>,
             }
             let mut arm_results = Vec::with_capacity(arms.len());
             let has_else = arms.iter().any(|arm| arm.conditions.is_empty());
