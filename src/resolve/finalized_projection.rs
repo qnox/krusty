@@ -362,10 +362,7 @@ pub(crate) fn project_finalized_signatures(index: &ResolvedModuleIndex, table: &
 /// written through, its written arguments). A declaration whose signature failed has no header and
 /// no spelling; every finalized one has both, whether or not the module as a whole finalized, so
 /// diagnostic recovery checks the same facts as a successful compilation.
-pub(crate) fn publish_stable_declaration_spellings(
-    index: &mut ResolvedModuleIndex,
-    table: &SymbolTable,
-) {
+pub(crate) fn publish_declared_spellings(index: &mut ResolvedModuleIndex, table: &SymbolTable) {
     let mut spellings = table
         .stable_declared_spellings
         .iter()
@@ -423,7 +420,7 @@ pub(crate) fn publish_stable_declaration_metadata(
     for (declaration, hierarchy) in classifier_hierarchies {
         index.publish_classifier_hierarchy(declaration, hierarchy);
     }
-    publish_stable_declaration_spellings(index, table);
+    publish_declared_spellings(index, table);
     for class in table.classes.values() {
         if let Some(declaration) = class.stable_declaration {
             index.publish_declaration_applied_annotations(

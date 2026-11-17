@@ -1845,7 +1845,7 @@ where
         // unresolved in an editor's steady state. Failed declarations remain absent.
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
         // Pass 2 checks each finalized declaration type against the spelling it was written with.
-        crate::resolve::publish_stable_declaration_spellings(&mut index, &symbols);
+        crate::resolve::publish_declared_spellings(&mut index, &symbols);
         // File-level policies (`@file:Suppress`, opt-ins) govern the recovery diagnostics too.
         crate::resolve::publish_file_annotations(
             &files[..inferred_end],
