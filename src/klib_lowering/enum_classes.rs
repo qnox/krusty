@@ -1,44 +1,34 @@
-//! An authenticated dependency enum class, which a support unit materializes so that the shared
-//! enum realization builds its constants as it builds a source enum's.
+//! The entries of an admitted dependency enum class and its delegation to `kotlin.Enum`.
 //!
-//! The serialized class is the producer's declaration, so it is the authority: the class must be
-//! an enum class extending `kotlin.Enum` of itself, its one constructor must only delegate to
-//! `kotlin.Enum`'s and run its instance initializer, and each entry must call that constructor
-//! with no arguments and declare no body. The compiler-generated members (`values`, `valueOf` and
-//! `entries`) are recognized by their synthetic bodies; the common realization provides them.
-//! Any other member, constructor parameter or entry body is a capability this does not model yet
-//! and declines the read.
+//! An enum class is initialized as any admitted class is (`class_initialization`): its private
+//! primary constructor stores its own state, after delegating to `kotlin.Enum`'s constructor,
+//! whose `name` and `ordinal` the target supplies for each constant, as it does for a source enum.
+//! What this module authenticates is particular to enums: that delegation, and each entry, a call
+//! of the enum's constructor whose arguments the shared enum realization evaluates in declaration
+//! order. An entry with a body of its own is a capability this does not model yet.
 
+use super::class_headers::ClassMemberHeader;
+use super::class_initialization::SuperclassCall;
 use super::decline::KlibBodyDeclineReason;
-use super::klib_types::{classifier_declaration, classifier_name, semantic_type};
-use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies, KlibEnumEntryClass};
-use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
+use super::klib_types::semantic_type;
+use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies};
+use crate::libraries::KlibDeclarationSignature;
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
-    KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction,
-    KlibIrMember, KlibIrStatement, KlibIrSyntheticBody,
+    KlibIrArguments, KlibIrExprId, KlibIrExprKind, KlibIrMember, KlibIrMemberAccess,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
-use crate::types::{ClassifierDeclarationName, Ty, TypeName};
+use crate::types::{Ty, TypeName};
 
-/// What a support unit materializes for one dependency enum class.
-pub(super) struct EnumClass {
-    /// The enum's constructor, the identity its materialization is keyed by.
-    pub(super) constructor: KlibDependencyCallable,
-    pub(super) classifier: TypeName,
-    pub(super) declaration_name: ClassifierDeclarationName,
-    /// Its declared supertype, `kotlin.Enum` of the enum itself.
-    pub(super) supertype: Ty,
-    /// Its constants, in declaration order.
-    pub(super) entries: Vec<String>,
+/// One constant of an admitted enum class, in declaration order: its name, and the arguments its
+/// declaration passes to the enum's constructor, in that constructor's parameter order.
+pub(super) struct EnumEntryInitialization {
+    pub(super) name: String,
+    pub(super) arguments: Vec<KlibIrExprId>,
 }
 
 fn mismatch(detail: &str) -> KlibBodyDeclineReason {
     KlibBodyDeclineReason::SignatureMismatch(detail.to_owned())
-}
-
-fn unsupported(what: &'static str) -> KlibBodyDeclineReason {
-    KlibBodyDeclineReason::UnsupportedDeclaration(what)
 }
 
 /// The enum class declaring `entry`, which a body of `body_module` reads, and that entry's name.
@@ -46,14 +36,24 @@ pub(super) fn authenticate_entry(
     bodies: &KlibDeclarationBodies,
     body_module: &str,
     entry: &KlibPublicIdSignature,
-) -> Result<(EnumClass, String), KlibBodyDeclineReason> {
-    let declared = bodies
+) -> Result<(TypeName, String), KlibBodyDeclineReason> {
+    let class = bodies
         .enum_entry_class(body_module, entry)
         .map_err(mismatch)?
         .ok_or_else(|| mismatch("an enum entry has no serialized declaring class"))?;
-    let class = authenticate(bodies, &declared)?;
-    let name = declared
-        .class
+    let KlibIrSignature::Public(signature) = &class.base.symbol.signature else {
+        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "a file-private enum class",
+        ));
+    };
+    if class.base.symbol.kind != KlibIrSymbolKind::Class
+        || crate::metadata::semantic::class_kind(class.base.flags)
+            != crate::libraries::TypeKind::Enum
+        || signature.member_id().is_some()
+    {
+        return Err(mismatch("an enum entry's class is not an enum class"));
+    }
+    let name = class
         .members
         .iter()
         .find_map(|member| match member {
@@ -65,174 +65,65 @@ pub(super) fn authenticate_entry(
             _ => None,
         })
         .expect("the declaring class was found by this entry");
-    Ok((class, name))
+    Ok((super::klib_types::classifier_name(signature)?, name))
 }
 
-fn authenticate(
-    bodies: &KlibDeclarationBodies,
-    declared: &KlibEnumEntryClass<'_>,
-) -> Result<EnumClass, KlibBodyDeclineReason> {
-    let (arena, class) = (declared.arena, declared.class);
-    let KlibIrSignature::Public(signature) = &class.base.symbol.signature else {
-        return Err(unsupported("a file-private enum class"));
-    };
-    if class.base.symbol.kind != KlibIrSymbolKind::Class
-        || crate::metadata::semantic::class_kind(class.base.flags)
-            != crate::libraries::TypeKind::Enum
-        || class.value_class_representation.is_some()
-    {
-        return Err(mismatch("an enum entry's class is not an enum class"));
-    }
-    if signature.member_id().is_some() {
-        return Err(mismatch("an enum class signature names a member"));
-    }
-    if !class.type_parameters.is_empty() {
-        return Err(mismatch("an enum class declares type parameters"));
-    }
-    let classifier = classifier_name(signature)?;
-    let parameters = super::klib_types::KlibTypeParameters::default();
-    let self_type = Ty::obj_name(classifier);
-    let receiver = class
-        .this_receiver
-        .as_ref()
-        .ok_or_else(|| mismatch("an enum class has no serialized instance receiver"))?;
-    if semantic_type(arena, &parameters, receiver.ty)? != self_type {
-        return Err(mismatch(
-            "an enum instance receiver has another declared type",
-        ));
-    }
-    let supertype = Ty::obj_args_name(crate::types::wk::kotlin_enum(), &[self_type]);
-    if class
-        .supertypes
-        .iter()
-        .map(|ty| semantic_type(arena, &parameters, *ty))
-        .collect::<Result<Vec<_>, _>>()?
-        != [supertype]
-    {
-        return Err(unsupported("an enum class implementing an interface"));
-    }
-
-    let mut constructors = Vec::new();
+/// The entries of the enum class `header` initializes, in declaration order. Each must call the
+/// constructor `header` authenticates with a value for every parameter, and declare no body.
+pub(super) fn entries(
+    header: &ClassMemberHeader<'_, '_>,
+) -> Result<Vec<EnumEntryInitialization>, KlibBodyDeclineReason> {
+    let parameters = header.function.regular_parameters.len();
     let mut entries = Vec::new();
-    for member in &class.members {
-        match member {
-            KlibIrMember::Function(function) => {
-                let function = arena.function(*function);
-                if function.constructor {
-                    constructors.push(function);
-                } else if !matches!(
-                    (function.name.as_str(), special_member_body(function)),
-                    ("values", Some(KlibIrSyntheticBody::EnumValues))
-                        | ("valueOf", Some(KlibIrSyntheticBody::EnumValueOf))
-                ) {
-                    return Err(unsupported("an enum class with member functions"));
-                }
-            }
-            KlibIrMember::Property(property) => {
-                let getter = property.getter.map(|getter| arena.function(getter));
-                if property.backing_field.is_some()
-                    || property.setter.is_some()
-                    || property.name != "entries"
-                    || !getter.is_some_and(|getter| {
-                        special_member_body(getter) == Some(KlibIrSyntheticBody::EnumEntries)
-                    })
-                {
-                    return Err(unsupported("an enum class with member properties"));
-                }
-            }
-            KlibIrMember::EnumEntry(entry) => entries.push(entry),
-            _ => return Err(unsupported("an enum class with nested declarations")),
+    for member in &header.class.members {
+        let KlibIrMember::EnumEntry(entry) = member else {
+            continue;
+        };
+        if entry.class.is_some() {
+            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                "an enum entry with a body",
+            ));
         }
+        let initializer = entry
+            .initializer
+            .ok_or_else(|| mismatch("an enum entry has no serialized initializer"))?;
+        let KlibIrExprKind::EnumConstructorCall(access) = &header.arena.expr(initializer).kind
+        else {
+            return Err(mismatch(
+                "an enum entry does not call its enum's constructor",
+            ));
+        };
+        if access.symbol != header.function.base.symbol || !access.type_arguments.is_empty() {
+            return Err(mismatch(
+                "an enum entry's constructor call disagrees with its enum's constructor",
+            ));
+        }
+        let arguments = value_operands(access)?
+            .iter()
+            .copied()
+            .collect::<Option<Vec<_>>>()
+            .filter(|arguments| arguments.len() == parameters)
+            .ok_or_else(|| {
+                mismatch("an enum entry does not pass a value for each constructor parameter")
+            })?;
+        entries.push(EnumEntryInitialization {
+            name: entry.name.clone(),
+            arguments,
+        });
     }
-    let [constructor] = constructors.as_slice() else {
-        return Err(unsupported("an enum class with several constructors"));
-    };
-    authenticate_constructor(
-        bodies,
-        declared.module,
-        arena,
-        class,
-        constructor,
-        self_type,
-    )?;
-    let names = entries
-        .iter()
-        .map(|entry| {
-            if entry.class.is_some() {
-                return Err(unsupported("an enum entry with a body"));
-            }
-            let initializer = entry
-                .initializer
-                .ok_or_else(|| mismatch("an enum entry has no serialized initializer"))?;
-            let KlibIrExprKind::EnumConstructorCall(access) = &arena.expr(initializer).kind else {
-                return Err(mismatch(
-                    "an enum entry does not call its enum's constructor",
-                ));
-            };
-            if access.symbol != constructor.base.symbol
-                || !access.type_arguments.is_empty()
-                || !no_operands(&access.arguments)
-            {
-                return Err(mismatch(
-                    "an enum entry's constructor call disagrees with its enum's constructor",
-                ));
-            }
-            Ok(entry.name.clone())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let KlibIrSignature::Public(constructor_signature) = &constructor.base.symbol.signature else {
-        return Err(mismatch("an enum constructor has no public signature"));
-    };
-    Ok(EnumClass {
-        constructor: KlibDependencyCallable {
-            module: declared.module.to_owned(),
-            declaration: KlibDeclarationSignature::Public(constructor_signature.clone()),
-        },
-        classifier,
-        declaration_name: classifier_declaration(signature)?,
-        supertype,
-        entries: names,
-    })
+    Ok(entries)
 }
 
-/// The synthetic body of a compiler-generated enum member, which the common realization provides.
-fn special_member_body(function: &KlibIrFunction) -> Option<KlibIrSyntheticBody> {
-    match &function.body {
-        Some(KlibIrBody::Synthetic(body))
-            if function.base.origin == "ENUM_CLASS_SPECIAL_MEMBER" =>
-        {
-            Some(*body)
-        }
-        _ => None,
-    }
-}
-
-/// The constructor only delegates to `kotlin.Enum`'s and then runs the instance initializer, so
-/// constructing a constant does nothing beyond the `kotlin.Enum` storage the target owns.
-fn authenticate_constructor(
+/// The delegation `delegate` of the enum constructor `header` to `kotlin.Enum`'s constructor,
+/// which the target lays out: `kotlin.Enum` applied to the enum itself, with its `name` and
+/// `ordinal` left to the target, as a source enum's are. Answers the call and the superclass type.
+pub(super) fn kotlin_enum_delegation(
+    header: &ClassMemberHeader<'_, '_>,
     bodies: &KlibDeclarationBodies,
-    module: &str,
-    arena: &KlibIrArena,
-    class: &KlibIrClass,
-    constructor: &KlibIrFunction,
-    self_type: Ty,
-) -> Result<(), KlibBodyDeclineReason> {
-    if !constructor.regular_parameters.is_empty()
-        || !constructor.context_parameters.is_empty()
-        || constructor.extension_receiver.is_some()
-        || !constructor.type_parameters.is_empty()
-    {
-        return Err(unsupported("an enum constructor with parameters"));
-    }
-    let Some(KlibIrBody::Block(statements)) = &constructor.body else {
-        return Err(mismatch("an enum constructor has no serialized body"));
-    };
-    let [KlibIrStatement::Expression(delegate), KlibIrStatement::Expression(initialize)] =
-        statements.as_slice()
-    else {
-        return Err(unsupported("a nontrivial enum constructor body"));
-    };
-    let KlibIrExprKind::EnumConstructorCall(access) = &arena.expr(*delegate).kind else {
+    callees: &super::KlibCalleeFacts<'_>,
+    delegate: KlibIrExprId,
+) -> Result<(SuperclassCall, Ty), KlibBodyDeclineReason> {
+    let KlibIrExprKind::EnumConstructorCall(access) = &header.arena.expr(delegate).kind else {
         return Err(mismatch(
             "an enum constructor does not delegate to kotlin.Enum",
         ));
@@ -242,8 +133,8 @@ fn authenticate_constructor(
             "an enum constructor delegates to a file-private constructor",
         ));
     };
-    let enum_constructor = match bodies.linked_origin(
-        module,
+    let identity = match bodies.linked_origin(
+        &header.contract.module,
         &KlibDeclarationSignature::Public(enum_constructor.clone()),
     ) {
         KlibCalleeOrigin::Exact(identity) => identity,
@@ -256,20 +147,19 @@ fn authenticate_constructor(
             ))
         }
     };
-    let enum_class = KlibPublicIdSignature::classifier(crate::types::wk::kotlin_enum());
+    let kotlin_enum = crate::types::wk::kotlin_enum();
     let delegated = bodies
         .class_member_header(
-            &enum_constructor,
-            &enum_class,
+            &identity,
+            &KlibPublicIdSignature::classifier(kotlin_enum),
             Some(crate::libraries::KlibAccessorRole::Getter),
         )
         .map_err(mismatch)?
         .ok_or_else(|| mismatch("an enum constructor delegates past kotlin.Enum"))?;
-    // `kotlin.Enum`'s `name` and `ordinal` are absent operands: the target supplies each
-    // constant's, as it does for a source enum.
-    let implicit_operands = matches!(&access.arguments, KlibIrArguments::Flat(values)
-        if values.len() == delegated.function.regular_parameters.len()
-            && values.iter().all(Option::is_none));
+    let self_type = header.contract.self_type();
+    let operands = value_operands(access)?;
+    let implicit_operands = operands.len() == delegated.function.regular_parameters.len()
+        && operands.iter().all(Option::is_none);
     let [Some(applied)] = access.type_arguments.as_slice() else {
         return Err(mismatch(
             "an enum constructor applies kotlin.Enum to no single type",
@@ -278,28 +168,40 @@ fn authenticate_constructor(
     if access.symbol.kind != KlibIrSymbolKind::Constructor
         || !delegated.function.constructor
         || !implicit_operands
-        || semantic_type(
-            arena,
-            &super::klib_types::KlibTypeParameters::default(),
-            *applied,
-        )? != self_type
-        || !matches!(&arena.expr(*initialize).kind,
-            KlibIrExprKind::InstanceInitializerCall(initialized) if *initialized == class.base.symbol)
+        || semantic_type(header.arena, &header.types, *applied)? != self_type
     {
         return Err(mismatch(
-            "an enum constructor does not delegate to kotlin.Enum before initialization",
+            "an enum constructor does not delegate to kotlin.Enum of itself",
         ));
     }
-    Ok(())
+    if !callees.target_represents(kotlin_enum) {
+        return Err(mismatch("the target does not lay out kotlin.Enum"));
+    }
+    Ok((
+        SuperclassCall {
+            constructor: identity,
+            arguments: Vec::new(),
+            owner: kotlin_enum,
+            params: Vec::new(),
+            materialized: false,
+        },
+        Ty::obj_args_name(kotlin_enum, &[self_type]),
+    ))
 }
 
-fn no_operands(arguments: &KlibIrArguments) -> bool {
-    match arguments {
-        KlibIrArguments::Flat(values) => values.is_empty(),
-        KlibIrArguments::Split {
-            dispatch_receiver,
-            extension_receiver,
+/// The value operands of a constructor call, which passes no receiver.
+fn value_operands(
+    access: &KlibIrMemberAccess,
+) -> Result<&[Option<KlibIrExprId>], KlibBodyDeclineReason> {
+    match &access.arguments {
+        KlibIrArguments::Flat(values)
+        | KlibIrArguments::Split {
+            dispatch_receiver: None,
+            extension_receiver: None,
             values,
-        } => dispatch_receiver.is_none() && extension_receiver.is_none() && values.is_empty(),
+        } => Ok(values),
+        KlibIrArguments::Split { .. } => {
+            Err(mismatch("an enum constructor call passes a receiver"))
+        }
     }
 }

@@ -324,7 +324,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         let emitted_roots::FrozenClosure {
             declarations,
             authorized_member_edges,
-            read_objects,
+            read_classes,
         } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
@@ -336,7 +336,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         )
         .with_checked_dependency_facts(source.callables.klib_dependency_facts())
         .with_authorized_member_edges(authorized_member_edges)
-        .with_read_objects(read_objects)
+        .with_read_classes(read_classes)
         .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
@@ -376,7 +376,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         }
         for object in root_objects {
             let class = callees
-                .read_object(object.classifier)
+                .read_class(object.classifier)
                 .expect("the closure froze the objects the source reads");
             if let Err(decline) =
                 unit.lower_object(class, bodies, &callees, intrinsics, &externals, platform)
@@ -963,6 +963,14 @@ fn prepare_bodyless_externals(
         .iter()
         .map(|root| root.identity().clone())
         .collect::<VecDeque<_>>();
+    // An object a body reads is materialized with the members its initialization reaches.
+    match emitted_roots::read_class_initializations(platform, bodies, capabilities.callees) {
+        Ok(edges) => pending.extend(edges),
+        Err(error) => {
+            diags.error(Span::new(0, 0), format!("internal error: {error}"));
+            return false;
+        }
+    }
     let mut visited = HashSet::default();
     while let Some(identity) = pending.pop_front() {
         if !visited.insert(identity.clone()) {

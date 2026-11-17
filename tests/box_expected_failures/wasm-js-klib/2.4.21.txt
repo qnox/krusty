@@ -846,8 +846,6 @@ enum/defaultCtor/constructorWithVararg.kt
 enum/defaultCtor/entryClassConstructorWithVarargs.kt
 enum/defaultCtor/noPrimaryConstructor.kt
 enum/enumCompanionInit.kt
-enum/enumEntriesInCompanion.kt
-enum/enumEntriesMultimoduleNoMappings.kt
 enum/enumEntriesNameClashes.kt
 enum/enumEntryMembers.kt
 enum/enumNestedObjectInit.kt

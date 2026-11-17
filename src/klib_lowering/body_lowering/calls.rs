@@ -97,6 +97,11 @@ impl BodyLowering<'_> {
             }
             BuiltinCallDisposition::Dependency => {
                 let signature = crate::libraries::KlibDeclarationSignature::Public(callee.clone());
+                if let Some((classifier, member)) =
+                    self.linker.implicit_enum_member(self.ir, &signature)?
+                {
+                    return self.implicit_enum_member(classifier, member, access, ty);
+                }
                 if let Some(suspension) = self.linker.unintercepted_suspension(&signature)? {
                     return self.unintercepted_suspension_call(suspension, access, ty);
                 }
@@ -915,6 +920,9 @@ impl BodyLowering<'_> {
         ty: Ty,
     ) -> Lowered<ExprId> {
         let signature = crate::libraries::KlibDeclarationSignature::Accessor(accessor.clone());
+        if let Some((classifier, member)) = self.linker.implicit_enum_member(self.ir, &signature)? {
+            return self.implicit_enum_member(classifier, member, access, ty);
+        }
         if let Some(primitive) = self.linker.common_primitive(&signature)? {
             return self.primitive_call(primitive, access, ty);
         }

@@ -25,6 +25,7 @@ mod compiler_blocks;
 mod conditionals;
 mod constructions;
 mod elvis_blocks;
+mod enum_members;
 mod instance_storage;
 mod loops;
 mod object_literals;
@@ -37,6 +38,7 @@ mod try_catch;
 mod type_operators;
 
 pub(super) use blocks::publish_parameter_defaults;
+pub(super) use enum_members::ImplicitEnumMember;
 
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::FunctionHeader;
@@ -149,6 +151,17 @@ pub(super) trait CallLinker {
         &self,
         _callee: &crate::libraries::KlibDeclarationSignature,
     ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
+        Ok(None)
+    }
+
+    /// The enum class whose implicit `values`, `valueOf` or `entries` getter a call of
+    /// `callee` names, which the linker has materialized, and that member. Template linkers keep
+    /// the call's ordinary declaration boundary.
+    fn implicit_enum_member(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<(TypeName, ImplicitEnumMember)>> {
         Ok(None)
     }
 
