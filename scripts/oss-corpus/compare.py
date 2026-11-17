@@ -310,7 +310,9 @@ def compare(work, name):
                          only_krusty=len(set(candidate) - set(reference)) if built else None,
                          seconds={mode: compile_seconds(times[mode], task, mode) for mode in times},
                          verify=verify.get(task),
-                         blocked_by=blocked_by(task, graph, failed) if error == not_run else []))
+                         # A compile that never ran, its own or kotlinc's when it was left to
+                         # kotlinc, names the failed tasks that stopped it.
+                         blocked_by=blocked_by(task, graph, failed) if not built and task not in ran else []))
     # Every failed task, with the first error it logged when it is a compile: the roots the
     # summary ranks by the compilations they kept from running.
     return rows, empty, {task: errors.get(task) for task in sorted(failed)}

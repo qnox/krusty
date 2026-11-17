@@ -99,7 +99,12 @@ class RootFailures(unittest.TestCase):
                 write(f'{out}/kotlinc/{module}/build/classes/kotlin/main/{module.upper()}.class', b'K')
             write(f'{work}/logs/p.kotlinc.compilations.tsv', ''.join(
                 f':{m}:compileKotlin\t{m}/build/classes/kotlin/main\n' for m in 'abcd').encode())
+            # e is left to kotlinc, and its kotlinc compile never ran either: a failure stopped it.
+            write(f'{out}/kotlinc/e/build/classes/kotlin/main/E.class', b'K')
+            with open(f'{work}/logs/p.kotlinc.compilations.tsv', 'a') as f:
+                f.write(':e:compileKotlin\te/build/classes/kotlin/main\n')
             write(f'{work}/logs/p.krusty.log', (
+                "krusty: task ':e:compileKotlin' is left to kotlinc: unsupported plugin\n"
                 '> Task :a:compileKotlinWithKrusty\n'
                 'e: a/A.kt:1:1 Unresolved reference: foo\n'
                 '> Task :a:compileKotlinWithKrusty FAILED\n'
@@ -120,7 +125,8 @@ class RootFailures(unittest.TestCase):
                   b':x:jar\t:k:kspKotlin\n'
                   b':k:kspKotlin\t:b:compileKotlinWithKrusty\n'
                   b':d:compileKotlin\t:d:compileKotlinWithKrusty\n'
-                  b':d:compileKotlinWithKrusty\t:c:compileKotlin\n')
+                  b':d:compileKotlinWithKrusty\t:c:compileKotlin\n'
+                  b':e:compileKotlin\t:a:compileKotlin\n')
             subprocess.run([sys.executable, os.path.join(HERE, 'compare.py'), work, 'p', '0'],
                            check=True, stdout=subprocess.DEVNULL)
             with open(f'{out}/compare.json') as f:
@@ -130,6 +136,7 @@ class RootFailures(unittest.TestCase):
             (':b:compileKotlin', 'krusty wrote no class', []),
             (':c:compileKotlin', 'not run: a task it depends on failed', [':a:compileKotlin', ':k:kspKotlin']),
             (':d:compileKotlin', 'not run: a task it depends on failed', [':a:compileKotlin', ':k:kspKotlin']),
+            (':e:compileKotlin', None, [':a:compileKotlin']),
         ])
         self.assertEqual(summary['failed_tasks'], {':a:compileKotlin': 'e: a/A.kt:1:1 Unresolved reference: foo',
                                                    ':k:kspKotlin': None})
