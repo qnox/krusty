@@ -47,14 +47,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         declared: &[Ty],
     ) -> Option<ImplementorArm> {
         let ir = self.file.ir;
-        let class_name = ir.classes[class as usize].fq_name;
-        let edge = ir
-            .function_overrides
-            .get(&class_name)?
-            .iter()
-            .find(|edge| {
-                edge.overridden == krusty::fir::ResolvedFunctionOverrideTarget::External(overridden)
-            })?;
+        // The class's own override, else the one it inherits from its nearest superclass in this
+        // file that has one, as a getter's is found.
+        let target = krusty::fir::ResolvedFunctionOverrideTarget::External(overridden);
+        let mut at = Some(class);
+        let edge = loop {
+            let id = at?;
+            if let Some(edge) = ir
+                .function_overrides
+                .get(&ir.classes[id as usize].fq_name)
+                .into_iter()
+                .flatten()
+                .find(|edge| edge.overridden == target)
+            {
+                break edge;
+            }
+            at = self.file.model.layout(id).superclass;
+        };
         let function = edge.implementation_function.or_else(|| {
             let krusty::fir::ResolvedFunctionOverrideTarget::Module(callable) = edge.implementation
             else {
@@ -141,6 +150,74 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         params: &[Ty],
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
+        let (number, declared_member_params) =
+            self.interface_stub_number(identity, &signature, params)?;
+        let runtime = self.runtime_implementations(signature)?;
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        let arguments = self.arguments(args, params)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let operands: Vec<(Value, Option<Ty>)> = arguments
+            .iter()
+            .zip(params)
+            .map(|(&value, &param)| (value, Some(param)))
+            .collect();
+        self.dispatch_runtime_implementations(&runtime, object, &operands, ret, |body| {
+            body.dispatch_through_stub(
+                object,
+                number,
+                &operands,
+                &declared_member_params,
+                signature.ret,
+                ret,
+            )
+        })
+    }
+
+    /// Call the link stub `number` with `operands`. The stub takes the declaration's own ABI,
+    /// whatever types the call applies: an applied primitive or value class crosses into the
+    /// declared (erased) parameter and the declared result back into the applied one, as through
+    /// a bridge.
+    fn dispatch_through_stub(
+        &mut self,
+        object: Value,
+        number: u32,
+        operands: &[(Value, Option<Ty>)],
+        declared_params: &[Ty],
+        declared_ret: Ty,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let mut declared_arguments = Vec::with_capacity(operands.len());
+        for (&(value, applied), &declared) in operands.iter().zip(declared_params) {
+            let Some(converted) = self.convert(value, applied, declared)? else {
+                return Ok(None);
+            };
+            declared_arguments.push(converted);
+        }
+        let produced = self.dispatch_through(
+            object,
+            model::Dispatch::Interface(number),
+            declared_params,
+            declared_ret,
+            &declared_arguments,
+        )?;
+        match produced {
+            Some(value) if !self.terminated => self.convert(value, Some(declared_ret), ret),
+            _ => Ok(None),
+        }
+    }
+
+    /// The number of the link stub for the dependency interface member `identity`, called with
+    /// `params`, and the parameters the member declares, which the stub takes.
+    fn interface_stub_number(
+        &mut self,
+        identity: Vec<u8>,
+        signature: &super::super::super::intrinsics::FunctionSignature<'_>,
+        params: &[Ty],
+    ) -> Result<(u32, Vec<Ty>), Unsupported> {
         let mut declared_member_params = signature.params.to_vec();
         if let Some(receiver) = signature.receiver {
             if signature.context_count > declared_member_params.len() {
@@ -157,45 +234,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 signature.name
             ));
         }
-        let runtime = self.runtime_implementations(signature)?;
-        let number = self.file.dependency_interface_number(identity);
-        let Some(object) = self.receiver(receiver)? else {
-            return Ok(None);
-        };
-        let arguments = self.arguments(args, params)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        let operands: Vec<(Value, Option<Ty>)> = arguments
-            .iter()
-            .zip(params)
-            .map(|(&value, &param)| (value, Some(param)))
-            .collect();
-        self.dispatch_runtime_implementations(&runtime, object, &operands, ret, |body| {
-            // The stub takes the declaration's own ABI, whatever types this call applies: an
-            // applied primitive or value class crosses into the declared (erased) parameter and
-            // the declared result back into the applied one, as through a bridge.
-            let mut declared_arguments = Vec::with_capacity(arguments.len());
-            for ((&value, &applied), &declared) in
-                arguments.iter().zip(params).zip(&declared_member_params)
-            {
-                let Some(converted) = body.convert(value, Some(applied), declared)? else {
-                    return Ok(None);
-                };
-                declared_arguments.push(converted);
-            }
-            let produced = body.dispatch_through(
-                object,
-                model::Dispatch::Interface(number),
-                &declared_member_params,
-                signature.ret,
-                &declared_arguments,
-            )?;
-            match produced {
-                Some(value) if !body.terminated => body.convert(value, Some(signature.ret), ret),
-                _ => Ok(None),
-            }
-        })
+        Ok((
+            self.file.dependency_interface_number(identity),
+            declared_member_params,
+        ))
     }
 
     /// A read of a dependency interface's abstract property this file finds no other realization
@@ -381,19 +423,24 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .class_id_by_name(internal)
             .filter(|&class| !self.file.ir.classes[class as usize].is_interface)?;
         let arm = self.external_override_slot(class, target, signature.params)?;
-        Some(self.dependency_interface_dispatch(&[arm], &[], call, false, None))
+        Some(self.dependency_interface_dispatch(&[arm], &[], call, false, None, None))
     }
 
     /// Dispatch one dependency interface member by the exact override edge each implementor
     /// published. An implementor without that edge leaves the call to the paths that already
     /// know the member; this does not recover an implementation by its name. A member the runtime
     /// also answers is left there too.
+    ///
+    /// `stub` is the member's KLIB identity and the parameters a call applies to it. An object
+    /// another file or module made, which none of these classes is, reaches the member through its
+    /// link stub, as a call this file does not implement does.
     pub(super) fn dependency_interface_member(
         &mut self,
         internal: krusty::types::TypeName,
         target: krusty::fir::ExternalCallableId,
         signature: super::super::super::intrinsics::FunctionSignature<'_>,
         call: InterfaceMemberCall<'_>,
+        stub: Option<(Vec<u8>, &[Ty])>,
     ) -> Option<Result<Option<Value>, Unsupported>> {
         if self.runtime_owns_member(internal, signature) {
             return None;
@@ -406,6 +453,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if implementors.is_empty() || implementors.len() != declared.len() {
             return None;
         }
+        let stub = match stub
+            .map(|(identity, params)| self.interface_stub_number(identity, &signature, params))
+            .transpose()
+        {
+            Ok(stub) => stub,
+            Err(declined) => return Some(Err(declined)),
+        };
         let runtime = match self.runtime_implementations(signature) {
             Ok(runtime) => runtime,
             Err(declined) => return Some(Err(declined)),
@@ -422,7 +476,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             super::lists::collection_runtime_member(self.file, ty, signature, call.physical)
                 .filter(|(_, carried, _)| carried.len() == call.args.len() + 1)
         });
-        Some(self.dependency_interface_dispatch(&implementors, &runtime, call, bridge, collection))
+        Some(self.dependency_interface_dispatch(
+            &implementors,
+            &runtime,
+            call,
+            bridge,
+            collection,
+            stub.map(|(number, params)| (number, params, signature.ret)),
+        ))
     }
 
     /// Dispatch among the classes of this file implementing a dependency interface member, then
@@ -438,6 +499,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         call: InterfaceMemberCall<'_>,
         bridge: bool,
         collection: Option<(&'static str, Vec<Ty>, Ty)>,
+        stub: Option<(u32, Vec<Ty>, Ty)>,
     ) -> Result<Option<Value>, Unsupported> {
         let object = self.reference(call.receiver)?;
         if self.terminated {
@@ -477,9 +539,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     &runtime_operands,
                     call.ret,
                     |body| {
-                        // No source class and no runtime function realizes this member.
-                        body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
-                        Ok(None)
+                        let Some((number, params, declared_ret)) = stub else {
+                            // No source class and no runtime function realizes this member.
+                            body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
+                            return Ok(None);
+                        };
+                        body.dispatch_through_stub(
+                            object,
+                            number,
+                            &runtime_operands,
+                            &params,
+                            declared_ret,
+                            call.ret,
+                        )
                     },
                 )
             },

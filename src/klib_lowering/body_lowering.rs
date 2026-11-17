@@ -679,12 +679,17 @@ impl<'a> BodyLowering<'a> {
                 let crate::types::TyKind::Fun(signature) = ty.kind() else {
                     return unsupported("a closure of a non-function type");
                 };
+                // A suspend lambda overrides `SuspendFunctionN.invoke`, any other `FunctionN.invoke`.
                 let invocation = match &overridden.signature {
-                    crate::metadata::klib_ir::KlibIrSignature::Public(signature)
+                    crate::metadata::klib_ir::KlibIrSignature::Public(invoke)
                         if overridden.kind
                             == crate::metadata::klib_ir::KlibIrSymbolKind::Function =>
                     {
-                        super::klib_types::function_invocation_arity(signature)
+                        if signature.suspend {
+                            super::klib_types::suspend_function_invocation_arity(invoke)
+                        } else {
+                            super::klib_types::function_invocation_arity(invoke)
+                        }
                     }
                     _ => None,
                 };

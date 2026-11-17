@@ -592,6 +592,18 @@ impl BodyLowering<'_, '_, '_> {
                                         ret: *ret,
                                         physical: &realization.physical_params,
                                     },
+                                    realization
+                                        .owner_is_interface
+                                        .then_some(realization.dependency_callable.as_ref())
+                                        .flatten()
+                                        .map(|identity| {
+                                            (
+                                                krusty::backend::interface_identity::member_identity(
+                                                    identity,
+                                                ),
+                                                params.as_slice(),
+                                            )
+                                        }),
                                 ) {
                                     return realized;
                                 }

@@ -643,7 +643,13 @@ impl<'a> BodyLowering<'a> {
                     };
                     self.ir.classes[class_id as usize]
                         .properties
-                        .push(property_declaration(&name, ret, fun, setter));
+                        .push(property_declaration(
+                            &name,
+                            property.base.flags,
+                            ret,
+                            fun,
+                            setter,
+                        )?);
                     self.record_property_override(&name, &getter, fun, owner, supertypes, ret)?;
                 }
                 _ => {}
@@ -950,8 +956,23 @@ struct MemberFrame<'a> {
     null_proven: HashSet<super::safe_calls::NullProvenRead>,
 }
 
-fn property_declaration(name: &str, ty: Ty, getter: FunId, setter: Option<FunId>) -> IrProperty {
-    IrProperty {
+/// An object literal property, with the modality its serialized declaration flags state: only an
+/// `open` or `abstract` one (an `override` not marked `final` included) dispatches.
+fn property_declaration(
+    name: &str,
+    flags: u64,
+    ty: Ty,
+    getter: FunId,
+    setter: Option<FunId>,
+) -> Lowered<IrProperty> {
+    use crate::metadata::semantic::KotlinModality;
+    let modality = match crate::metadata::semantic::declaration_modality(flags) {
+        KotlinModality::Final => crate::ir::IrPropertyModality::Final,
+        KotlinModality::Open => crate::ir::IrPropertyModality::Open,
+        KotlinModality::Abstract => crate::ir::IrPropertyModality::Abstract,
+        KotlinModality::Sealed => return Err(mismatch("an object literal property is sealed")),
+    };
+    Ok(IrProperty {
         name: name.to_owned(),
         origin: crate::ir::IrPropertyOrigin::Declaration,
         diagnostic_span: None,
@@ -970,9 +991,9 @@ fn property_declaration(name: &str, ty: Ty, getter: FunId, setter: Option<FunId>
         storage_ty: None,
         backing_field: None,
         is_var: setter.is_some(),
-        is_open: true,
+        is_open: modality != crate::ir::IrPropertyModality::Final,
         modifiers: crate::ir::IrPropertyModifiers {
-            modality: crate::ir::IrPropertyModality::Open,
+            modality,
             declared_getter: true,
             ..crate::ir::IrPropertyModifiers::default()
         },
@@ -984,5 +1005,5 @@ fn property_declaration(name: &str, ty: Ty, getter: FunId, setter: Option<FunId>
         setter,
         needs_access_bridge: false,
         accessor_annotations: Default::default(),
-    }
+    })
 }

@@ -218,13 +218,17 @@ impl ContinuationFields {
         receiver
     }
 
+    /// A read of one of the machine's own fields, typed as the field is declared.
     fn read(&self, ir: &mut IrFile, field: u32) -> ExprId {
         let receiver = self.this(ir);
-        ir.add_expr(IrExpr::GetField {
+        let ty = ir.classes[self.class as usize].fields[field as usize].ty;
+        let read = ir.add_expr(IrExpr::GetField {
             receiver,
             class: self.class,
             index: field,
-        })
+        });
+        ir.set_logical_type(read, ty);
+        read
     }
 
     fn write(&self, ir: &mut IrFile, field: u32, value: ExprId) -> ExprId {

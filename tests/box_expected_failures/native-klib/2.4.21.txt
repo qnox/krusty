@@ -703,7 +703,6 @@ coroutines/multiModule/inlineMultiModule.kt
 coroutines/multiModule/inlineMultiModuleOverride.kt
 coroutines/multiModule/inlineMultiModuleWithController.kt
 coroutines/multiModule/inlineMultiModuleWithInnerInlining.kt
-coroutines/multiModule/inlineTailCall.kt
 coroutines/multiModule/simple.kt
 coroutines/multipleInvokeCalls.kt
 coroutines/multipleInvokeCallsInsideInlineLambda1.kt
@@ -1012,7 +1011,6 @@ functions/localFunctions/definedWithinLambdaInnerUsage1.kt
 functions/localFunctions/definedWithinLambdaInnerUsage2.kt
 ieee754/equalsNaN_properIeeeComparisons.kt
 increment/augmentedAssignmentWithComplexRhs.kt
-inference/builderInferenceLeakingVariable.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
 inference/kt39824.kt
 inference/overrideDefaultProperty.kt
@@ -1153,7 +1151,6 @@ inline/typeParameterSymbolIsUnbound.kt
 inline/vararg.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
 inlineArgsInPlace/kt49370.kt
-inlineArgsInPlace/suspensionPointInsideArgument.kt
 inlineClass/customEquals.kt
 inlineClass/defaultEquals.kt
 inlineClass/nestedInlineClasses.kt
