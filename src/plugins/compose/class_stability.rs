@@ -360,7 +360,7 @@ fn stable_bits(ir: &mut IrFile, bits: i32) -> ExprId {
 }
 
 /// Read `class`'s `$stable`.
-fn read_stable(ir: &mut IrFile, class: TypeName) -> ExprId {
+pub(super) fn read_stable(ir: &mut IrFile, class: TypeName) -> ExprId {
     let value = ir.external_static_field_name(class, "$stable", "I");
     ir.mark_positionless(value);
     value
@@ -399,6 +399,8 @@ struct Inference<'a> {
 pub(super) enum ParameterStability {
     Stable,
     Unstable,
+    /// Known only when the function runs, or not known at all: compared like a stable one.
+    Undecided,
 }
 
 /// kotlinc's `stabilityOf` for the type of a composable function's parameter, or why it is not
@@ -421,8 +423,26 @@ pub(super) fn parameter_stability(
     } else if stability == Stability::UNSTABLE {
         Ok(ParameterStability::Unstable)
     } else {
-        Err("a composable function parameter whose stability is decided when it runs")
+        Ok(ParameterStability::Undecided)
     }
+}
+
+/// The classes whose `$stable` a call reads to tell its callee how stable an argument of type `ty`
+/// is: none when kotlinc decides the stability when it compiles the call.
+pub(super) fn parameter_stability_reads(
+    ir: &IrFile,
+    runtime: &dyn PluginRuntime,
+    ty: Ty,
+) -> Result<Vec<TypeName>, &'static str> {
+    let mut inference = Inference {
+        ir,
+        runtime,
+        analyzed: Default::default(),
+        substitutions: Vec::new(),
+        resolving: Vec::new(),
+    };
+    let stability = inference.of_type(ty, &mut Vec::new())?.normalize();
+    Ok(stability.runtime_reads(&[]).unwrap_or_default())
 }
 
 /// The type parameters `class` declares, as its declaration names them.

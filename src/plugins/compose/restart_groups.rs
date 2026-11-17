@@ -48,8 +48,9 @@ use crate::ir::{
     Callee, ExprId, FunId, IrBinOp, IrConst, IrEnclosure, IrExpr, IrFile, IrFunction,
     IrNodePosition, IrParameterIdentity, IrShortCircuitKind, IrTypeOp,
 };
-use crate::types::{EqualityMode, Ty};
+use crate::types::{EqualityMode, Ty, TypeName};
 
+use super::class_stability::{read_stable, ParameterStability};
 use super::runtime::{self, ComposeRuntime};
 use super::source_facts::{
     function_body, lambda_body, ArgumentState, ComposableCallSite, ComposableLambda, Memoization,
@@ -66,6 +67,8 @@ pub(super) const SLOTS_PER_INT: usize = 10;
 const SAME: i32 = 0b001;
 const DIFFERENT: i32 = 0b010;
 const STATIC: i32 = 0b011;
+/// The stability bit of a slot, set when the argument's type is unstable.
+const STABILITY: i32 = 0b100;
 /// A slot's two state bits and its stability bit.
 const SLOT_MASK: i32 = 0b111;
 
@@ -528,11 +531,13 @@ fn pass_composer(
         call,
         ref arguments,
         library_mask,
+        ref stability,
     } = *site;
     let arguments = arguments.as_slice();
+    let stability = stability.as_slice();
     if let IrExpr::InvokeFunction { .. } = ir.exprs[call as usize] {
         let composer = ir.add_expr(IrExpr::GetValue(caller.composer));
-        let changed = changed_arguments(ir, caller, arguments);
+        let changed = changed_arguments(ir, caller, arguments, stability);
         ir.mark_positionless(composer);
         for &int in &changed {
             ir.mark_positionless(int);
@@ -571,7 +576,7 @@ fn pass_composer(
             }
         }
         let composer = ir.add_expr(IrExpr::GetValue(caller.composer));
-        let changed = changed_arguments(ir, caller, arguments);
+        let changed = changed_arguments(ir, caller, arguments, stability);
         ir.mark_positionless(composer);
         for &int in &changed {
             ir.mark_positionless(int);
@@ -615,7 +620,7 @@ fn pass_composer(
         }
     }
     let composer = ir.add_expr(IrExpr::GetValue(caller.composer));
-    let changed = changed_arguments(ir, caller, arguments);
+    let changed = changed_arguments(ir, caller, arguments, stability);
     // kotlinc builds these arguments without offsets, so the call's line begins at its dispatch.
     ir.mark_positionless(composer);
     for &int in &changed {
@@ -652,21 +657,33 @@ fn placeholder(ty: Ty) -> IrConst {
 }
 
 /// `buildChangedArgumentForCall`: the `$changed` ints of a call, one for each ten arguments.
-fn changed_arguments(ir: &mut IrFile, caller: Slots, arguments: &[ArgumentState]) -> Vec<ExprId> {
+fn changed_arguments(
+    ir: &mut IrFile,
+    caller: Slots,
+    arguments: &[ArgumentState],
+    stability: &[Vec<TypeName>],
+) -> Vec<ExprId> {
     (0..changed_ints(arguments.len()))
         .map(|int| {
-            let first = int as usize * SLOTS_PER_INT;
-            let covered = &arguments[first.min(arguments.len())..];
+            let first = (int as usize * SLOTS_PER_INT).min(arguments.len());
+            let covered = &arguments[first..];
             let covered = &covered[..covered.len().min(SLOTS_PER_INT)];
-            changed_argument(ir, caller, covered)
+            let stability = &stability[first.min(stability.len())..];
+            changed_argument(ir, caller, covered, stability)
         })
         .collect()
 }
 
 /// A constant holding each static argument's state, or'ed with the caller's own `$dirty` bits for
 /// each parameter it passes on, moved to the callee's slot, for the arguments of one `$changed`
-/// int.
-fn changed_argument(ir: &mut IrFile, caller: Slots, arguments: &[ArgumentState]) -> ExprId {
+/// int. An argument of a type whose stability the callee reads at run time carries the `$stable` of
+/// its class, moved to the argument's slot.
+fn changed_argument(
+    ir: &mut IrFile,
+    caller: Slots,
+    arguments: &[ArgumentState],
+    stability: &[Vec<TypeName>],
+) -> ExprId {
     let mut constant = 0;
     let mut forwarded = Vec::new();
     for (slot, argument) in (0u32..).zip(arguments) {
@@ -693,7 +710,26 @@ fn changed_argument(ir: &mut IrFile, caller: Slots, arguments: &[ArgumentState])
                         ir.add_arithmetic(shift, bits, distance, Ty::Int)
                     }
                 };
-                forwarded.push(ir.add_arithmetic(IrBinOp::BitAnd, mask, shifted, Ty::Int));
+                let masked = ir.add_arithmetic(IrBinOp::BitAnd, mask, shifted, Ty::Int);
+                let reads = stability.get(slot as usize).map_or(&[][..], Vec::as_slice);
+                let mut stable = None;
+                for &class in reads {
+                    let mut read = read_stable(ir, class);
+                    if slot != 0 {
+                        let distance = (slot * BITS_PER_SLOT) as i32;
+                        let distance = ir.add_expr(IrExpr::Const(IrConst::Int(distance)));
+                        read = ir.add_arithmetic(IrBinOp::Shl, read, distance, Ty::Int);
+                    }
+                    stable = Some(match stable {
+                        None => read,
+                        Some(combined) => or(ir, combined, read),
+                    });
+                }
+                let bits = match stable {
+                    None => masked,
+                    Some(stable) => or(ir, stable, masked),
+                };
+                forwarded.push(bits);
             }
         }
     }
@@ -766,12 +802,41 @@ fn dirty_preamble(
         let uncertain = int_comparison(ir, IrBinOp::Eq, isolated, 0);
         let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
         let value = ir.add_expr(IrExpr::GetValue(index));
-        let changed = if parameter.lambda || parameter.unstable {
-            &runtime.changed_instance
-        } else {
-            runtime.changed_for(parameter.ty)
+        let compared = match parameter.stability {
+            ParameterStability::Stable => {
+                let changed = if parameter.lambda {
+                    &runtime.changed_instance
+                } else {
+                    runtime.changed_for(parameter.ty)
+                };
+                runtime::call(ir, changed, Some(composer), vec![value])
+            }
+            ParameterStability::Unstable => {
+                runtime::call(ir, &runtime.changed_instance, Some(composer), vec![value])
+            }
+            // The caller's stability bit for the slot says, when the function runs, which
+            // comparison applies: by value when it is clear, by identity when it is set.
+            ParameterStability::Undecided => {
+                let stable =
+                    and_constant(ir, slots.changed_int(int), bits_for_slot(STABILITY, slot));
+                let by_value = int_comparison(ir, IrBinOp::Eq, stable, 0);
+                let by_value_call = runtime::call(
+                    ir,
+                    runtime.changed_for(parameter.ty),
+                    Some(composer),
+                    vec![value],
+                );
+                let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
+                let value = ir.add_expr(IrExpr::GetValue(index));
+                let by_identity =
+                    runtime::call(ir, &runtime.changed_instance, Some(composer), vec![value]);
+                let when = ir.add_expr(IrExpr::When {
+                    branches: vec![(Some(by_value), by_value_call), (None, by_identity)],
+                });
+                ir.whens.exhaustive.insert(when, Ty::Boolean);
+                when
+            }
         };
-        let compared = runtime::call(ir, changed, Some(composer), vec![value]);
         let different = ir.add_expr(IrExpr::Const(IrConst::Int(bits_for_slot(DIFFERENT, slot))));
         let same = ir.add_expr(IrExpr::Const(IrConst::Int(bits_for_slot(SAME, slot))));
         let state = ir.add_expr(IrExpr::When {
