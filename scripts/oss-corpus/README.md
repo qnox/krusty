@@ -142,7 +142,9 @@ A project with a `bazel/<name>/` directory builds with Bazel: `run.sh` hands it 
 this repository whose patches route the project's Kotlin compile actions to krusty
 (`tools/krusty-bazel/intellij` for intellij-community, see `tools/krusty-bazel/intellij.md`). The
 patches are applied after checkout and change nothing until a build passes the krusty binary as
-`--repo_env=KRUSTY_BINARY=…`: the reference build is the project's own (`JvmCompile`, its builder
+`--repo_env=KRUSTY_BINARY=…`. An optional `bazel/<name>/checkouts` pins further repositories the build
+reads, cloned into the checkout first (intellij-community's project model reads the Android plugin,
+`android/`). The reference build is the project's own (`JvmCompile`, its builder
 with the embedded kotlinc), and in the krusty build each Kotlin-only action without source jars or
 compiler plugins is a `KrustyCompile` while the rest stay on the project's builder and count as
 misses with that reason. intellij-community is pinned at the last revision built with Kotlin 2.4.20

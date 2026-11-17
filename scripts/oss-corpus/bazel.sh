@@ -10,7 +10,10 @@
 # (for intellij-community, `tools/krusty-bazel/intellij`). Those patches are applied once, after
 # checkout: with `KRUSTY_BINARY` unset they change nothing, so the reference build is the project's
 # own, and with it set every eligible action is compiled by krusty (`KrustyCompile`) while the rest
-# stay on the project's builder (`JvmCompile`).
+# stay on the project's builder (`JvmCompile`). An optional `bazel/<name>/checkouts` lists, one per
+# line and tab-separated, further repositories the build reads (`<directory> <git URL> <commit>`),
+# each checked out at its pinned commit into that directory of the checkout first: intellij-community
+# reads the project model of the Android plugin, a repository of its own (`getPlugins.sh`).
 #
 # A warm-up (`build --nobuild`) fetches every repository both builds need and is not compared. Each
 # measured build then starts from `bazel clean`, without a disk cache and with downloads disabled, so
@@ -54,6 +57,18 @@ checkout=$work/src/$name
 logs=$work/logs
 mkdir -p "$logs"
 "$here/checkout.sh" "$name" "$checkout"
+if [ -f "$project/checkouts" ]; then
+  while IFS=$'\t' read -r dir url commit; do
+    git init -q "$checkout/$dir"
+    git -C "$checkout/$dir" remote add origin "$url"
+    git -C "$checkout/$dir" fetch -q --depth 1 origin "$commit"
+    git -C "$checkout/$dir" checkout -q FETCH_HEAD
+    if [ "$(git -C "$checkout/$dir" rev-parse HEAD)" != "$commit" ]; then
+      echo "$name: $dir is not at the pinned $commit" >&2
+      exit 1
+    fi
+  done < <(sed 's/#.*//' "$project/checkouts" | awk NF)
+fi
 for patch in "${patches[@]}"; do
   git -C "$checkout" apply "$patch"
 done

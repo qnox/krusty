@@ -203,6 +203,15 @@ class Runner(unittest.TestCase):
             subprocess.run(git + ['commit', '-qm', 'init'], check=True)
             commit = subprocess.run(git + ['rev-parse', 'HEAD'], check=True, capture_output=True,
                                     text=True).stdout.strip()
+            plugin = Path(work, 'plugin')
+            plugin.mkdir()
+            Path(plugin, 'plugin.iml').write_text('<module/>\n')
+            pgit = ['git', '-C', str(plugin), '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(['git', 'init', '-q', str(plugin)], check=True)
+            subprocess.run(pgit + ['add', '.'], check=True)
+            subprocess.run(pgit + ['commit', '-qm', 'init'], check=True)
+            plugin_commit = subprocess.run(pgit + ['rev-parse', 'HEAD'], check=True, capture_output=True,
+                                           text=True).stdout.strip()
             projects = Path(work, 'projects.tsv')
             projects.write_text(f'p\tfile://{repo}\t{commit}\t.\t21\t-\t-\tcompile,lsp\n')
             integration = Path(work, 'integration')
@@ -213,6 +222,7 @@ class Runner(unittest.TestCase):
             bazel.mkdir(parents=True)
             Path(bazel, 'targets').write_text('# comment\n//a:a\n\n//b:b  # trailing comment\n')
             Path(bazel, 'integration').write_text(f'{integration}\n')
+            Path(bazel, 'checkouts').write_text(f'# a repository the build reads\nandroid\tfile://{plugin}\t{plugin_commit}\n')
             krusty = Path(work, 'krusty')
             krusty.write_text('#!/bin/sh\n')
             calls = Path(work, 'calls')
@@ -222,6 +232,7 @@ class Runner(unittest.TestCase):
                                      '/nonexistent/repository', '0'], env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(Path(work, 'corpus/src/p/KRUSTY').read_text(), 'patched\n')
+            self.assertEqual(Path(work, 'corpus/src/p/android/plugin.iml').read_text(), '<module/>\n')
             common = '--disk_cache= --color=no --curses=no --show_progress_rate_limit=60'
             measured = (f'--keep_going --repository_disable_download --execution_log_json_file={work}/corpus/logs/'
                         '{mode}.exec.json --execution_log_sort=false -- //a:a //b:b')
