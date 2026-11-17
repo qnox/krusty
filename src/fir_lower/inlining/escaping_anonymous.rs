@@ -1176,6 +1176,8 @@ fn specialization_descends_from(
 /// Property reads inside the copy still name the declaration's property. That layout's owner is
 /// the declaration class, and the copy does not inherit it, so a virtual call would target the
 /// declaration with the copy as the receiver. The copied accessor is an ordinary method of the copy.
+/// A field-backed access keeps its checked operation and records the copy as its dispatch class,
+/// which projects the declaration's layout onto the copy's own storage in every backend.
 fn retarget_copied_property_calls(
     ir: &mut crate::ir::IrFile,
     copy_id: ClassId,
@@ -1349,23 +1351,19 @@ fn retarget_property_operation(
     }
     let CopiedPropertyLayout::Member {
         backing_field: true,
-        property,
         ..
     } = layout
     else {
         return Err(malformed(source_name));
     };
-    if extension_receiver.is_some()
-        || !context_arguments.is_empty()
-        || ir.classes[copy_id as usize]
-            .properties
-            .get(property as usize)
-            .is_none()
-    {
+    if extension_receiver.is_some() || !context_arguments.is_empty() {
         return Err(malformed(source_name));
     }
-    ir.dispatch_classes
-        .insert(expression, ir.classes[copy_id as usize].fq_name);
+    // A field-backed access stays the checked operation. Its receiver is this copy, so every
+    // backend realizes it through the copy's projection of the declaration's layout, as it does
+    // any other access to a copied property.
+    let owner = ir.classes[copy_id as usize].fq_name;
+    ir.dispatch_classes.insert(expression, owner);
     Ok(())
 }
 
@@ -1375,7 +1373,6 @@ enum CopiedPropertyLayout {
         backing_field: bool,
         getter: Option<FunId>,
         setter: Option<FunId>,
-        property: u32,
     },
     Extension {
         declaring_class: ClassId,
@@ -1396,7 +1393,6 @@ fn copied_property_layout(
             backing_field,
             getter,
             setter,
-            property,
             ..
         } => {
             let declaring_class = lineage.iter().find_map(|(candidate, name)| {
@@ -1407,7 +1403,6 @@ fn copied_property_layout(
                 backing_field: backing_field.is_some(),
                 getter: *getter,
                 setter: *setter,
-                property: *property,
             })
         }
         crate::ir::IrLocalPropertyLayout::MemberExtension {

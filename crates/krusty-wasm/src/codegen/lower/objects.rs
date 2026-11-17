@@ -889,7 +889,7 @@ impl Body<'_> {
                             .dispatch_member_extension_property(
                                 class, *property, false, receiver, args,
                             ),
-                        _ if args.is_empty() => self.property_read(*property, Some(receiver)),
+                        _ if args.is_empty() => self.property_read(None, *property, Some(receiver)),
                         _ => Err("a property getter call with arguments".to_string()),
                     },
                     IrVirtualTarget::PropertySetter(ResolvedPropertyOverrideTarget::Module(
@@ -900,7 +900,7 @@ impl Body<'_> {
                                 class, *property, true, receiver, args,
                             ),
                         _ if args.len() == 1 => {
-                            self.property_write(*property, Some(receiver), args[0])
+                            self.property_write(None, *property, Some(receiver), args[0])
                         }
                         _ => Err("a property setter call with the wrong arguments".to_string()),
                     },
@@ -930,22 +930,24 @@ impl Body<'_> {
     }
 
     /// The class property a checked property identity names, and its index there.
+    /// The class and property index serving `target`. At a checked operation this is the layout at
+    /// the operation's dispatch class, so a call-site copy of an inline object reaches its own
+    /// storage and accessors; without one it is the declaration's.
     fn member_property(
         &self,
-        target: PropertyId,
         operation: Option<u32>,
+        target: PropertyId,
     ) -> Result<(ClassId, usize), Unsupported> {
         let layout = match operation {
-            Some(operation) => self
-                .ir
-                .property_layout_at(operation, target)
-                .map_err(|_| "a malformed property specialization".to_owned())?,
+            Some(operation) => self.ir.property_layout_at(operation, target).map_err(|_| {
+                "a copied property with no projection onto its dispatch class".to_string()
+            })?,
             None => self.ir.local_property_layouts.get(&target).cloned(),
         };
-        match layout.as_ref() {
+        match layout {
             Some(IrLocalPropertyLayout::Member {
                 class, property, ..
-            }) if self.classes.is_some() => Ok((*class, *property as usize)),
+            }) if self.classes.is_some() => Ok((class, property as usize)),
             Some(_) => Err("a property that is not a class member".to_string()),
             None => Err("a property of another file".to_string()),
         }
@@ -958,7 +960,7 @@ impl Body<'_> {
         receiver: u32,
     ) -> Result<(), Unsupported> {
         let target = self.realized_property(operation)?;
-        self.property_read_at(target, Some(receiver), Some(operation))
+        self.property_read(Some(operation), target, Some(receiver))
     }
 
     /// A member write common realization left for this backend (`receiver.p = value`).
@@ -969,7 +971,7 @@ impl Body<'_> {
         value: u32,
     ) -> Result<(), Unsupported> {
         let target = self.realized_property(operation)?;
-        self.property_write_at(target, Some(receiver), value, Some(operation))
+        self.property_write(Some(operation), target, Some(receiver), value)
     }
 
     fn realized_property(&self, operation: u32) -> Result<PropertyId, Unsupported> {
@@ -980,17 +982,9 @@ impl Body<'_> {
 
     pub(super) fn property_read(
         &mut self,
-        target: PropertyId,
-        receiver: Option<u32>,
-    ) -> Result<(), Unsupported> {
-        self.property_read_at(target, receiver, None)
-    }
-
-    fn property_read_at(
-        &mut self,
-        target: PropertyId,
-        receiver: Option<u32>,
         operation: Option<u32>,
+        target: PropertyId,
+        receiver: Option<u32>,
     ) -> Result<(), Unsupported> {
         if receiver.is_none() {
             // Another file's property realized through accessors also has a storage record when
@@ -1022,7 +1016,7 @@ impl Body<'_> {
                 return Ok(());
             }
         }
-        let (class, index) = self.member_property(target, operation)?;
+        let (class, index) = self.member_property(operation, target)?;
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less read of `{}`", property.name))?;
@@ -1060,19 +1054,10 @@ impl Body<'_> {
 
     pub(super) fn property_write(
         &mut self,
-        target: PropertyId,
-        receiver: Option<u32>,
-        value: u32,
-    ) -> Result<(), Unsupported> {
-        self.property_write_at(target, receiver, value, None)
-    }
-
-    fn property_write_at(
-        &mut self,
-        target: PropertyId,
-        receiver: Option<u32>,
-        value: u32,
         operation: Option<u32>,
+        target: PropertyId,
+        receiver: Option<u32>,
+        value: u32,
     ) -> Result<(), Unsupported> {
         if receiver.is_none() {
             if let Some(entry) = self.module_accessor_property(target) {
@@ -1114,7 +1099,7 @@ impl Body<'_> {
                 return Ok(());
             }
         }
-        let (class, index) = self.member_property(target, operation)?;
+        let (class, index) = self.member_property(operation, target)?;
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less write of `{}`", property.name))?;
