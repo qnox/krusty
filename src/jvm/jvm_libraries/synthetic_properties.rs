@@ -22,48 +22,7 @@ pub(super) fn declares_field(class: &crate::jvm::classreader::ClassInfo, name: &
     })
 }
 
-/// The synthetic property the Java accessor `method` declares, from its spelling alone: `getUrl` →
-/// `url`, `getURLPath` → `urlPath`, `getIsOpen` → `isOpen`, `isOpen` → `isOpen`. A lowercase letter
-/// after the prefix (`getaway`, `island`) declares nothing.
-pub(super) fn accessor_property_name(method: &str) -> Option<String> {
-    if let Some(stem) = method.strip_prefix("is") {
-        if stem.chars().next().is_some_and(char::is_uppercase) {
-            return Some(method.to_string());
-        }
-    }
-    get_prefixed_property_name(method)
-}
-
-/// Kotlin's decapitalize-smart mapping of a `get`-prefixed accessor: a LEADING UPPERCASE RUN
-/// lowercases as a block (`getID` → `id`, `getURLPath` → `urlPath`).
-fn get_prefixed_property_name(method: &str) -> Option<String> {
-    let stem = method.strip_prefix("get")?;
-    if !stem.is_ascii() {
-        let mut chars = stem.chars();
-        let first = chars.next()?;
-        if !first.is_uppercase() {
-            return None;
-        }
-        return Some(format!("{}{}", first.to_lowercase(), chars.as_str()));
-    }
-    let first = stem.as_bytes().first()?;
-    if !first.is_ascii_uppercase() {
-        return None;
-    }
-    let bytes = stem.as_bytes();
-    let lower = bytes.iter().position(u8::is_ascii_lowercase);
-    let prefix = match lower {
-        None => bytes.len(),
-        Some(0) => return None,
-        Some(1) => 1,
-        Some(index) => index - 1,
-    };
-    Some(format!(
-        "{}{}",
-        stem[..prefix].to_ascii_lowercase(),
-        &stem[prefix..]
-    ))
-}
+pub(super) use crate::names::accessor_property_name;
 
 /// The setter paired with the getter `getter`: `set` plus the getter's spelling without its
 /// accessor prefix. `isOpen` pairs with `setOpen`, `getIsOpen` with `setIsOpen`, and `getURLPath`

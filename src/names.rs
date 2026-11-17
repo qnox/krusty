@@ -56,6 +56,60 @@ pub fn property_setter_name(prop: &str) -> String {
     }
 }
 
+/// The property the accessor `method` is named for, from its spelling alone: `getUrl` →
+/// `url`, `getURLPath` → `urlPath`, `getIsOpen` → `isOpen`, `isOpen` → `isOpen`. A lowercase letter
+/// after the prefix (`getaway`, `island`) declares nothing.
+pub fn accessor_property_name(method: &str) -> Option<String> {
+    if let Some(stem) = method.strip_prefix("is") {
+        if stem.chars().next().is_some_and(char::is_uppercase) {
+            return Some(method.to_string());
+        }
+    }
+    get_prefixed_property_name(method)
+}
+
+/// Kotlin's decapitalize-smart mapping of a `get`-prefixed accessor: a LEADING UPPERCASE RUN
+/// lowercases as a block (`getID` → `id`, `getURLPath` → `urlPath`).
+fn get_prefixed_property_name(method: &str) -> Option<String> {
+    let stem = method.strip_prefix("get")?;
+    if !stem.is_ascii() {
+        let mut chars = stem.chars();
+        let first = chars.next()?;
+        if !first.is_uppercase() {
+            return None;
+        }
+        return Some(format!("{}{}", first.to_lowercase(), chars.as_str()));
+    }
+    let first = stem.as_bytes().first()?;
+    if !first.is_ascii_uppercase() {
+        return None;
+    }
+    let bytes = stem.as_bytes();
+    let lower = bytes.iter().position(u8::is_ascii_lowercase);
+    let prefix = match lower {
+        None => bytes.len(),
+        Some(0) => return None,
+        Some(1) => 1,
+        Some(index) => index - 1,
+    };
+    Some(format!(
+        "{}{}",
+        stem[..prefix].to_ascii_lowercase(),
+        &stem[prefix..]
+    ))
+}
+
+/// The properties whose setter could be named `method`: `setOpen` sets `open` or `isOpen`.
+pub fn setter_property_names(method: &str) -> Vec<String> {
+    let Some(stem) = method.strip_prefix("set") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    names.extend(accessor_property_name(&format!("get{stem}")));
+    names.push(format!("is{stem}"));
+    names
+}
+
 /// Kotlin's file part short name for a file named `file_stem`, `box` → `BoxKt`: its
 /// `PackagePartClassUtils.getFilePartShortName`. It names more than the JVM's file facade: the
 /// Compose plugin names each file's `ComposableSingletons$<part>` object after it on every target,

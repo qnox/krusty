@@ -76,7 +76,6 @@ compiler/testData/diagnostics/tests/annotations/parameters/expressions/paranthes
 compiler/testData/diagnostics/tests/annotations/referenceOfAnnotatedFunctionInAnnotation.kt
 compiler/testData/diagnostics/tests/annotations/rendering/conflictingOverloads.kt
 compiler/testData/diagnostics/tests/annotations/rendering/multipleInheritedDefaults.kt
-compiler/testData/diagnostics/tests/annotations/rendering/typeMismatchOnOverride.kt
 compiler/testData/diagnostics/tests/annotations/repeatable/containerArguments.kt
 compiler/testData/diagnostics/tests/annotations/repeatable/containerRetention.kt
 compiler/testData/diagnostics/tests/annotations/repeatable/containerTarget.kt
@@ -424,7 +423,6 @@ compiler/testData/diagnostics/tests/delegation/clashes/returnTypeMismatch.kt
 compiler/testData/diagnostics/tests/delegation/clashes/varOverriddenByVal.kt
 compiler/testData/diagnostics/tests/delegation/covariantOverrides/fromClass.kt
 compiler/testData/diagnostics/tests/delegation/covariantOverrides/irrelevant.kt
-compiler/testData/diagnostics/tests/delegation/covariantOverrides/kt13952.kt
 compiler/testData/diagnostics/tests/delegation/covariantOverrides/simple.kt
 compiler/testData/diagnostics/tests/delegation/kt40510.kt
 compiler/testData/diagnostics/tests/deprecated/deprecatedSinceKotlin/checkValuesAreParseableAsVersion.kt
@@ -1124,11 +1122,9 @@ compiler/testData/diagnostics/tests/platformTypes/notNullTypeParameter/enhanceme
 compiler/testData/diagnostics/tests/platformTypes/nullabilityWarnings/throw.kt
 compiler/testData/diagnostics/tests/platformTypes/safeCall.kt
 compiler/testData/diagnostics/tests/platformTypes/typeEnhancement/supertypeDifferentParameterNullability.kt
-compiler/testData/diagnostics/tests/platformTypes/typeEnhancement/supertypeDifferentReturnNullability.kt
 compiler/testData/diagnostics/tests/privateInFile/visibility.kt
 compiler/testData/diagnostics/tests/privateSetterSmartcastsToPublicSetter.kt
 compiler/testData/diagnostics/tests/problems/definitelyNotNullAndOriginalType.kt
-compiler/testData/diagnostics/tests/problems/inaccessibleJavaGetter.kt
 compiler/testData/diagnostics/tests/problems/kt14687.kt
 compiler/testData/diagnostics/tests/problems/kt4597.kt
 compiler/testData/diagnostics/tests/problems/kt49700.kt

@@ -3,6 +3,7 @@
 mod applied_formal_bounds;
 mod bound_inner_aliases;
 mod bound_inner_constructors;
+mod java_accessor_overrides;
 mod receiver_parameter_overrides;
 mod result_enhancement;
 
@@ -742,6 +743,14 @@ fn members_in_hierarchy_for(
         };
         let (mut current_functions, mut current_properties) =
             declared_callables(source, &classifier, current, name).into_parts();
+        current_functions.overloads.retain(|function| {
+            !java_accessor_overrides::overrides_kotlin_property_accessor(
+                source,
+                &classifier,
+                current,
+                function,
+            )
+        });
         if view == HierarchyMemberView::Declarations {
             // A member extension is absent from ordinary dispatch lookup: it has an implicit
             // dispatch receiver and a separate extension receiver, so `host.ext()` must not make

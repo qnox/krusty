@@ -115,11 +115,8 @@ impl Checker<'_> {
                     implementation,
                 )
         }) {
-            let expected = selected_result_publication::declared_flexibility(
-                candidate
-                    .declaration_identity
-                    .as_ref()
-                    .map_or(candidate.callable.ret, |declared| declared.ret),
+            let expected = selected_result_publication::inherited_result(
+                &candidate.callable,
                 candidate.ret.apply(candidate.callable.ret),
             );
             if expected == Ty::Error
