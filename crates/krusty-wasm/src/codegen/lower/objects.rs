@@ -1231,6 +1231,51 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// A class another file declares has one nominal table type from the checked module plan.
+    /// Testing that table needs neither the other file's object fields nor its emission order.
+    pub(super) fn planned_class_table(&self, ty: Ty) -> Result<Option<u32>, Unsupported> {
+        let tested = ty.non_null();
+        let Some(owner) = tested.obj_internal() else {
+            return Ok(None);
+        };
+        // Runtime arrays and scalar boxes have their own authenticated representation, even
+        // when a dependency's class inventory also contains their Kotlin declaration.
+        if tested.is_array() || !matches!(carrier(tested)?, Some(ValType::Ref { .. })) {
+            return Ok(None);
+        }
+        self.planned_tables
+            .get(&owner)
+            .map(|table| {
+                table
+                    .as_ref()
+                    .map(|table| table.table_type)
+                    .map_err(Clone::clone)
+            })
+            .transpose()
+    }
+
+    /// Test the nominal class table of an object, retaining the ordinary nullable target rule.
+    /// A scalar box, string or unrelated object cannot acquire a class identity from its payload.
+    fn class_table_test(&mut self, table: u32, nullable: bool) {
+        let value = self.local(REFERENCE);
+        let object = self.runtime.objects.object;
+        self.code
+            .local_set(value)
+            .local_get(value)
+            .ref_test(false, HeapType::Concrete(object))
+            .if_(BlockType::Value(ValType::I32))
+            .local_get(value)
+            .ref_cast(false, HeapType::Concrete(object))
+            .struct_get(object, 0)
+            .ref_test(false, HeapType::Concrete(table))
+            .else_()
+            .i32_const(0)
+            .end();
+        if nullable {
+            self.code.local_get(value).ref_is_null().op(OR32);
+        }
+    }
+
     /// The interface `ty` names, when it is one of this file or numbered for the module.
     pub(super) fn interface_of_type(&self, ty: Ty) -> Option<TypeName> {
         let TyKind::Obj(name, _) = ty.non_null().kind() else {
@@ -1403,9 +1448,15 @@ impl Body<'_> {
                 }
                 (None, None) => match self.library_interface_of_type(tested) {
                     Some(interface) => self.library_interface_test(interface, nullable),
-                    None => {
-                        return Err(format!("a type test against `{}`", super::describe(tested)));
-                    }
+                    None => match self.planned_class_table(tested)? {
+                        Some(table) => self.class_table_test(table, nullable),
+                        None => {
+                            return Err(format!(
+                                "a type test against `{}`",
+                                super::describe(tested)
+                            ));
+                        }
+                    },
                 },
             },
         }

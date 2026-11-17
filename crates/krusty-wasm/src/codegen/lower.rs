@@ -451,8 +451,8 @@ pub(super) fn lower_file(
     })
 }
 
-/// The module table of every class another file declares whose member a body of `ir` calls
-/// virtually, built before any body is emitted.
+/// The nominal module table of every class another file declares that a body dispatches through
+/// or tests. The checked slot plan owns its identity even before the declaring file is emitted.
 fn planned_tables(
     ir: &IrFile,
     plan: &ModuleSlotPlan,
@@ -465,17 +465,24 @@ fn planned_tables(
         .into_iter()
         .flat_map(|root| krusty::ir::value_namespace_expressions(ir, root))
     {
-        let IrExpr::Call { callee, .. } = ir.expr(expression) else {
-            continue;
+        let owner = match ir.expr(expression) {
+            IrExpr::Call { callee, .. } => match &**callee {
+                Callee::Virtual { owner, .. } => *owner,
+                _ => continue,
+            },
+            IrExpr::TypeOp { type_operand, .. } => {
+                let Some(owner) = type_operand.non_null().obj_internal() else {
+                    continue;
+                };
+                owner
+            }
+            _ => continue,
         };
-        let Callee::Virtual { owner, .. } = &**callee else {
-            continue;
-        };
-        if ir.class_id_by_name(*owner).is_some() || planned.contains_key(owner) {
+        if ir.class_id_by_name(owner).is_some() || planned.contains_key(&owner) {
             continue;
         }
-        if let Some(table) = tables.table(plan, *owner, module, objects) {
-            planned.insert(*owner, table);
+        if let Some(table) = tables.table(plan, owner, module, objects) {
+            planned.insert(owner, table);
         }
     }
     planned
@@ -1546,7 +1553,8 @@ impl<'a> Body<'a> {
                 type_operand,
             } if self.class_structure(type_operand)?.is_some()
                 || self.interface_of_type(type_operand).is_some()
-                || self.library_interface_of_type(type_operand).is_some() =>
+                || self.library_interface_of_type(type_operand).is_some()
+                || self.planned_class_table(type_operand)?.is_some() =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
