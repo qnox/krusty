@@ -326,7 +326,29 @@ fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frame
             &represents_sam_ir_classifier,
         );
         assert!(!represented_members.is_empty());
-        assert_eq!(represented_members.len(), externals.len());
+        let supported_operations = checked_member_leaves(
+            &libraries,
+            &callees,
+            &member_snapshots,
+            &supports_sam_ir_operation,
+            &|_| false,
+        );
+        let expected = supported_operations
+            .keys()
+            .chain(represented_members.keys())
+            .collect::<crate::fx_hash::HashSet<_>>();
+        assert_eq!(
+            externals.keys().collect::<crate::fx_hash::HashSet<_>>(),
+            expected
+        );
+        for (identity, leaf) in &externals {
+            // An operation capability takes precedence when the target also represents its class.
+            let expected = supported_operations
+                .get(identity)
+                .or_else(|| represented_members.get(identity))
+                .expect("every external leaf has an authenticated target capability");
+            assert_eq!(leaf.target(), expected.target());
+        }
         let mut raw = DependencyBodyUnit::default();
         raw.lower_function_with_declarations(
             callable,
