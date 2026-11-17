@@ -223,9 +223,7 @@ fn read_object_callees(
         let Some(class) = crate::klib_lowering::object_classifier(&object)
             .filter(|classifier| seen.insert(*classifier))
             .and_then(|classifier| source.klib_body_class_contract(classifier))
-            .filter(|class| {
-                class.kind == crate::libraries::TypeKind::Object && class.emits_members()
-            })
+            .filter(|class| class.declares_instances() && class.emits_members())
         else {
             continue;
         };
@@ -238,12 +236,12 @@ fn read_object_callees(
         };
         let chain = superclass_realizations(source, bodies, &constructor);
         let facts = with_chain(crate::klib_lowering::KlibCalleeFacts::new([]), &chain);
-        if let Ok(Some(initialization)) = facts.object_initialization_callees(&class, bodies) {
+        if let Ok(Some(initialization)) = facts.declared_instances_callees(&class, bodies) {
             callees.extend(initialization);
         }
         pending.extend(
             facts
-                .object_initialization_objects(&class, bodies)
+                .declared_instances_objects(&class, bodies)
                 .unwrap_or_default(),
         );
     }

@@ -19,6 +19,14 @@ pub(crate) struct EmittedCallForms {
     pub(crate) implied_callee: fn(&KlibIrArena, &KlibIrExpr) -> Option<&'static KlibIrSymbol>,
 }
 
+/// What the bodies reached from a set of roots emit: their calls, and the objects and enum
+/// entries whose values they read.
+struct EmittedWalk<'a> {
+    calls: Vec<&'a KlibIrSymbol>,
+    objects: Vec<&'a KlibIrSymbol>,
+    enum_entries: Vec<&'a KlibIrSymbol>,
+}
+
 impl KlibIrArena {
     /// Closure selection belongs to common lowering; this arena supplies only the structural walk.
     /// The function's own parameter defaults are roots, since its default-argument entry runs
@@ -70,7 +78,7 @@ impl KlibIrArena {
         forms: EmittedCallForms,
         functions: HashSet<KlibIrSymbol>,
     ) -> Vec<&KlibIrSymbol> {
-        self.emitted_walk(pending, forms, functions).0
+        self.emitted_walk(pending, forms, functions).calls
     }
 
     /// The objects whose values the bodies reached from `roots` read, through the closures
@@ -80,7 +88,18 @@ impl KlibIrArena {
         roots: Vec<KlibIrExprId>,
         forms: EmittedCallForms,
     ) -> Vec<&KlibIrSymbol> {
-        self.emitted_walk(roots, forms, HashSet::default()).1
+        self.emitted_walk(roots, forms, HashSet::default()).objects
+    }
+
+    /// The enum entries whose values the bodies reached from `roots` read, through the closures
+    /// `forms` lowers with them. A support unit builds each such entry's enum class.
+    pub(crate) fn emitted_enum_entry_symbols_from(
+        &self,
+        roots: Vec<KlibIrExprId>,
+        forms: EmittedCallForms,
+    ) -> Vec<&KlibIrSymbol> {
+        self.emitted_walk(roots, forms, HashSet::default())
+            .enum_entries
     }
 
     /// [`Self::emitted_object_symbols_from`] of `function`'s body and parameter defaults.
@@ -89,6 +108,23 @@ impl KlibIrArena {
         function: &'a KlibIrFunction,
         forms: EmittedCallForms,
     ) -> Vec<&'a KlibIrSymbol> {
+        self.emitted_function_walk(function, forms).objects
+    }
+
+    /// [`Self::emitted_enum_entry_symbols_from`] of `function`'s body and parameter defaults.
+    pub(crate) fn emitted_enum_entry_symbols<'a>(
+        &'a self,
+        function: &'a KlibIrFunction,
+        forms: EmittedCallForms,
+    ) -> Vec<&'a KlibIrSymbol> {
+        self.emitted_function_walk(function, forms).enum_entries
+    }
+
+    fn emitted_function_walk<'a>(
+        &'a self,
+        function: &'a KlibIrFunction,
+        forms: EmittedCallForms,
+    ) -> EmittedWalk<'a> {
         let mut roots = Vec::new();
         let mut functions = HashSet::default();
         functions.insert(function.base.symbol.clone());
@@ -103,26 +139,30 @@ impl KlibIrArena {
                 .chain(&function.regular_parameters)
                 .filter_map(|parameter| parameter.default_value),
         );
-        self.emitted_walk(roots, forms, functions).1
+        self.emitted_walk(roots, forms, functions)
     }
 
-    /// The emitted calls and the object values reached from `pending`, through reached closures.
+    /// The emitted calls and the object and enum entry values reached from `pending`, through
+    /// reached closures.
     fn emitted_walk(
         &self,
         mut pending: Vec<KlibIrExprId>,
         forms: EmittedCallForms,
         mut functions: HashSet<KlibIrSymbol>,
-    ) -> (Vec<&KlibIrSymbol>, Vec<&KlibIrSymbol>) {
+    ) -> EmittedWalk<'_> {
         let mut expressions = HashSet::default();
         let mut calls = self.unfolded_call_symbols(pending.clone(), forms);
         let mut objects = Vec::new();
+        let mut enum_entries = Vec::new();
         while let Some(id) = pending.pop() {
             if !expressions.insert(id) {
                 continue;
             }
             let expression = self.expr(id);
-            if let KlibIrExprKind::GetObject(symbol) = &expression.kind {
-                objects.push(symbol);
+            match &expression.kind {
+                KlibIrExprKind::GetObject(symbol) => objects.push(symbol),
+                KlibIrExprKind::GetEnumValue(symbol) => enum_entries.push(symbol),
+                _ => {}
             }
             push_child_expressions(self, &expression.kind, &mut pending);
             if let Some(nested) = (forms.closure)(self, expression) {
@@ -137,7 +177,11 @@ impl KlibIrArena {
                 }
             }
         }
-        (calls, objects)
+        EmittedWalk {
+            calls,
+            objects,
+            enum_entries,
+        }
     }
 
     /// The callable symbols reached from `pending`, except those of calls `forms` fold.

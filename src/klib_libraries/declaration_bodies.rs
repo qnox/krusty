@@ -84,11 +84,13 @@ pub(crate) struct KlibClassMember<'a> {
     pub(crate) function: &'a KlibIrFunction,
 }
 
-/// The one serialized class declaring an enum entry, in the module that serializes it.
-pub(crate) struct KlibEnumEntryClass<'a> {
-    pub(crate) module: &'a str,
-    pub(crate) arena: &'a KlibIrArena,
-    pub(crate) class: &'a crate::metadata::klib_ir::tree::KlibIrClass,
+/// The symbols an emitted body reaches: its callees, and the objects and enum entries whose
+/// values it reads.
+#[derive(Default)]
+struct EmittedBodySymbols<'a> {
+    callables: Vec<&'a KlibIrSymbol>,
+    objects: Vec<&'a KlibIrSymbol>,
+    enum_entries: Vec<&'a KlibIrSymbol>,
 }
 
 /// One decoded KLIB together with the producer graph recorded in its manifest.
@@ -338,7 +340,7 @@ impl KlibDeclarationBodies {
         &self,
         body_module: &str,
         entry: &KlibPublicIdSignature,
-    ) -> Result<Option<KlibEnumEntryClass<'_>>, &'static str> {
+    ) -> Result<Option<&crate::metadata::klib_ir::tree::KlibIrClass>, &'static str> {
         let entry = KlibIrSignature::Public(entry.clone());
         if let Some(found) = self.module_enum_entry_class(body_module, &entry)? {
             return Ok(Some(found));
@@ -361,17 +363,12 @@ impl KlibDeclarationBodies {
         &self,
         module: &str,
         entry: &KlibIrSignature,
-    ) -> Result<Option<KlibEnumEntryClass<'_>>, &'static str> {
-        let Some((module, &library)) = self.modules.get_key_value(module) else {
+    ) -> Result<Option<&crate::metadata::klib_ir::tree::KlibIrClass>, &'static str> {
+        let Some(&library) = self.modules.get(module) else {
             return Ok(None);
         };
         let mut found = None;
-        for (arena, class) in self.libraries[library].classes_declaring_enum_entry(entry) {
-            let class = KlibEnumEntryClass {
-                module: module.as_str(),
-                arena,
-                class,
-            };
+        for (_, class) in self.libraries[library].classes_declaring_enum_entry(entry) {
             if found.replace(class).is_some() {
                 return Err("several serialized classes declare one enum entry");
             }
@@ -1067,8 +1064,8 @@ impl KlibDeclarationBodies {
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibDependencyCallable> {
-        let (symbols, _) = self.emitted_body_symbols(identity, forms);
-        symbols
+        self.emitted_body_symbols(identity, forms)
+            .callables
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(
@@ -1080,37 +1077,69 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
-    /// The public objects whose values the emitted body of `identity` reads, through the
-    /// closures `forms` lowers with it and the members of the file-local classes it constructs.
+    /// The public classes whose declared instances the emitted body of `identity` reads, through
+    /// the closures `forms` lowers with it and the members of the file-local classes it
+    /// constructs: each object it reads, then the enum class of each entry it reads, resolved in
+    /// the body's producer graph as the read itself is.
     pub(crate) fn emitted_body_objects(
         &self,
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibPublicIdSignature> {
-        let (_, objects) = self.emitted_body_symbols(identity, forms);
-        let mut seen = crate::fx_hash::HashSet::default();
-        objects
-            .into_iter()
-            .filter_map(|symbol| match &symbol.signature {
-                KlibIrSignature::Public(signature) => Some(signature.clone()),
-                _ => None,
-            })
-            .filter(|signature| seen.insert(signature.clone()))
-            .collect()
+        let symbols = self.emitted_body_symbols(identity, forms);
+        let mut classes: Vec<KlibPublicIdSignature> = Vec::new();
+        for symbol in symbols.objects {
+            if let KlibIrSignature::Public(signature) = &symbol.signature {
+                if !classes.contains(signature) {
+                    classes.push(signature.clone());
+                }
+            }
+        }
+        for class in self.enum_entry_classes(&identity.module, symbols.enum_entries) {
+            if !classes.contains(&class) {
+                classes.push(class);
+            }
+        }
+        classes
     }
 
-    /// Callable and object admission must cover exactly the same emitted roots: the selected
-    /// body, its file initialization, and the local classes those roots construct.
+    /// The enum classes declaring `entries`, read by a body of `body_module`, without repeats. An
+    /// entry no single producer declares names no class here; reading it declines in lowering.
+    pub(crate) fn enum_entry_classes<'a>(
+        &self,
+        body_module: &str,
+        entries: impl IntoIterator<Item = &'a KlibIrSymbol>,
+    ) -> Vec<KlibPublicIdSignature> {
+        let mut classes = Vec::new();
+        for entry in entries {
+            let KlibIrSignature::Public(entry) = &entry.signature else {
+                continue;
+            };
+            let Ok(Some(declared)) = self.enum_entry_class(body_module, entry) else {
+                continue;
+            };
+            if let KlibIrSignature::Public(class) = &declared.base.symbol.signature {
+                if !classes.contains(class) {
+                    classes.push(class.clone());
+                }
+            }
+        }
+        classes
+    }
+
+    /// Callable, object and enum entry admission must cover exactly the same emitted roots: the
+    /// selected body, its file initialization, and the local classes those roots construct.
     fn emitted_body_symbols<'a>(
         &'a self,
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
-    ) -> (Vec<&'a KlibIrSymbol>, Vec<&'a KlibIrSymbol>) {
+    ) -> EmittedBodySymbols<'a> {
         let Some((trees, arena, function)) = self.function_with_trees(identity) else {
-            return (Vec::new(), Vec::new());
+            return EmittedBodySymbols::default();
         };
         let mut symbols = arena.emitted_callable_symbols(function, forms);
         let mut objects = arena.emitted_object_symbols(function, forms);
+        let mut entries = arena.emitted_enum_entry_symbols(function, forms);
         if let Some(file) = self.top_level_file(identity) {
             for initializer in self.module_file_initializers(&identity.module, file, false) {
                 let roots = vec![initializer.initializer];
@@ -1119,7 +1148,16 @@ impl KlibDeclarationBodies {
                         .arena
                         .emitted_callable_symbols_from(roots.clone(), forms),
                 );
-                objects.extend(initializer.arena.emitted_object_symbols_from(roots, forms));
+                objects.extend(
+                    initializer
+                        .arena
+                        .emitted_object_symbols_from(roots.clone(), forms),
+                );
+                entries.extend(
+                    initializer
+                        .arena
+                        .emitted_enum_entry_symbols_from(roots, forms),
+                );
             }
         }
         // A constructed local class is materialized with every member and its superclass
@@ -1133,11 +1171,16 @@ impl KlibDeclarationBodies {
                     let mut roots = class_arena.class_member_roots(class);
                     roots.extend(class_arena.class_superclass_delegations(class));
                     symbols.extend(class_arena.emitted_callable_symbols_from(roots.clone(), forms));
-                    objects.extend(class_arena.emitted_object_symbols_from(roots, forms));
+                    objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
+                    entries.extend(class_arena.emitted_enum_entry_symbols_from(roots, forms));
                 }
             }
         }
-        (symbols, objects)
+        EmittedBodySymbols {
+            callables: symbols,
+            objects,
+            enum_entries: entries,
+        }
     }
 
     /// Declaration facts of the class whose exact reached constructor is `identity`. Field and
