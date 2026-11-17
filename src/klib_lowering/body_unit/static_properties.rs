@@ -85,6 +85,10 @@ impl Linker<'_, '_> {
             ret: declared.ret,
             context_count: ir.declared_parameters(function).context_count,
             class_type_parameters: Vec::new(),
+            callable: None,
+            type_parameters: Vec::new(),
+            type_parameter_bounds: Vec::new(),
+            reified_type_parameters: Vec::new(),
         }))
     }
 
