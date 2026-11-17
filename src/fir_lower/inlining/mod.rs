@@ -17,6 +17,7 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty, TyKind};
 
 use super::BodyLowering;
 
+mod caller_sites;
 mod converted_inline_lambda;
 mod escaping_anonymous;
 mod escaping_lambda;
@@ -974,6 +975,7 @@ impl BodyLowering<'_> {
                 caller: self.expansion_enclosure,
                 caller_is_default: self.in_default_argument,
                 caller_source_name: &caller_source_name,
+                caller_site: self.caller_site(caller_declaration),
                 inline_callee: frame.callee,
                 inline_callee_source_name: &callee,
                 crossinline_operands: &crossinline_operands,
@@ -1000,6 +1002,7 @@ impl BodyLowering<'_> {
                 invocation,
                 LambdaParameterBinding::Declared {
                     callee: Some(&callee),
+                    specialization: Some(&bindings),
                 },
             )
             .expect("the complete declared-lambda splice list was preflighted before commit");
@@ -1291,7 +1294,17 @@ impl BodyLowering<'_> {
             }
             _ => return None,
         };
-        let parameter_types = self.ir.functions.get(impl_fn as usize)?.params.clone();
+        let mut parameter_types = self.ir.functions.get(impl_fn as usize)?.params.clone();
+        if let LambdaParameterBinding::Declared {
+            specialization: Some(bindings),
+            ..
+        } = binding
+        {
+            let formals = bindings.keys().cloned().collect::<Vec<_>>();
+            for ty in &mut parameter_types {
+                *ty = crate::types::ty_subst_formals(*ty, &formals, bindings);
+            }
+        }
 
         let receiver_parameter = self
             .ir
@@ -1429,6 +1442,7 @@ impl BodyLowering<'_> {
         // callable it was passed to.
         if let LambdaParameterBinding::Declared {
             callee: Some(callee),
+            ..
         } = binding
         {
             declarations.push(self.inline_marker(
@@ -2079,18 +2093,23 @@ fn specialize_checked_operation(
         IrCheckedOperation::ExternalPropertyRead {
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         }
         | IrCheckedOperation::ExternalPropertyWrite {
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         } => {
             specialize_tys(parameters, bindings);
             specialize_ty(result, bindings);
             specialize_optional_ty(source_receiver, bindings);
+            for substitution in substitutions {
+                specialize_checked_substitution(substitution, bindings);
+            }
         }
         IrCheckedOperation::RangeConstruction {
             start_type,

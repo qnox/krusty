@@ -166,54 +166,85 @@ impl Body<'_> {
         node: &IrExpr,
     ) -> Option<Result<(), Unsupported>> {
         // A function's overrides are named by the function, an accessor's by its property.
-        let (target, receiver, args, (property, role)) = match node {
-            IrExpr::Call {
-                callee,
-                dispatch_receiver: Some(receiver),
-                args,
-            } => {
-                let Callee::External {
-                    target,
-                    defaults,
-                    extension_receiver_parameter: None,
-                    ..
-                } = &**callee
-                else {
-                    return None;
-                };
-                if !defaults.is_empty() {
-                    return None;
-                }
-                (
-                    *target,
-                    *receiver,
-                    args.as_slice(),
-                    (None, MemberRole::Function),
-                )
-            }
-            IrExpr::Checked(operation) => {
-                let access = self.callables.dependency_accessor(operation)?;
-                let receiver = access.receiver?;
-                if !access.dispatches() || access.callable.is_member_extension() {
-                    return None;
-                }
-                (
-                    access.target,
-                    receiver,
-                    access.arguments,
+        let (target, receiver, args, (property, role), generic_accessor, member_extension) =
+            match node {
+                IrExpr::Call {
+                    callee,
+                    dispatch_receiver: Some(receiver),
+                    args,
+                } => {
+                    let Callee::External {
+                        target,
+                        defaults,
+                        extension_receiver_parameter: None,
+                        ..
+                    } = &**callee
+                    else {
+                        return None;
+                    };
+                    if !defaults.is_empty() {
+                        return None;
+                    }
                     (
-                        Some(access.property),
-                        if access.writes() {
-                            MemberRole::Setter
-                        } else {
-                            MemberRole::Getter
-                        },
-                    ),
-                )
-            }
-            _ => return None,
-        };
+                        *target,
+                        *receiver,
+                        args.as_slice(),
+                        (None, MemberRole::Function),
+                        false,
+                        false,
+                    )
+                }
+                IrExpr::Checked(operation) => {
+                    let access = self.callables.dependency_accessor(operation)?;
+                    let receiver = access.receiver?;
+                    // A generic getter's instantiated virtual frame is checked below; a setter goes
+                    // through the published-class path.
+                    let generic_accessor = !access.writes()
+                        && (!access.substitutions().is_empty()
+                            || access
+                                .callable
+                                .generic_sig
+                                .as_ref()
+                                .is_some_and(|signature| !signature.formals.is_empty()));
+                    if !access.dispatches() {
+                        return None;
+                    }
+                    (
+                        access.target,
+                        receiver,
+                        access.arguments,
+                        (
+                            Some(access.property),
+                            if access.writes() {
+                                MemberRole::Setter
+                            } else {
+                                MemberRole::Getter
+                            },
+                        ),
+                        generic_accessor,
+                        access.callable.is_member_extension(),
+                    )
+                }
+                _ => return None,
+            };
         let fact = self.callables.callable(target)?;
+        if generic_accessor
+            && (member_extension
+                || (matches!(fact.kind, ExternalCallableKind::Member)
+                    && fact.member_realization == MemberRealization::Dispatch
+                    && fact.compiler_operation().is_none()))
+        {
+            // Whether an export exists must not decide virtual semantics. The direct dependency
+            // body path below cannot instantiate this generic accessor's virtual frame, so do not
+            // let it bypass a possible override.
+            return Some(Err(
+                "a generic dependency member getter whose instantiated virtual interface call is unsupported"
+                    .into(),
+            ));
+        }
+        if member_extension {
+            return None;
+        }
         if target_owns_call(self.ir, self.callables, id, fact) {
             return None;
         }
@@ -258,7 +289,9 @@ impl Body<'_> {
             return None;
         }
         let published = self.calls.external(target).is_some();
-        if !dispatches_through_library_member(self.ir, self.callables, id, fact, published) {
+        let dispatches =
+            dispatches_through_library_member(self.ir, self.callables, id, fact, published);
+        if !dispatches {
             return None;
         }
         // A function's identity names a function, and an accessor's a property.

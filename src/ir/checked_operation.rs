@@ -53,6 +53,10 @@ pub enum IrCheckedOperation {
         arguments: Vec<ExprId>,
         parameters: Vec<Ty>,
         result: Ty,
+        /// Declaration-owned type arguments selected for the exact accessor that this property
+        /// identity resolves to. The backend carries these into the ordinary checked external
+        /// call contract; it must not infer generic bindings from the receiver or property name.
+        substitutions: Vec<IrCheckedSubstitution>,
         source_receiver: Option<Ty>,
     },
     /// Write a dependency property selected by checked FIR. As with `ExternalPropertyRead`, the
@@ -64,6 +68,10 @@ pub enum IrCheckedOperation {
         arguments: Vec<ExprId>,
         parameters: Vec<Ty>,
         result: Ty,
+        /// Declaration-owned type arguments selected for the exact accessor that this property
+        /// identity resolves to. The backend carries these into the ordinary checked external
+        /// call contract; it must not infer generic bindings from the receiver or property name.
+        substitutions: Vec<IrCheckedSubstitution>,
         source_receiver: Option<Ty>,
     },
     LateinitFieldRead {

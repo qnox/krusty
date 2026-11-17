@@ -391,6 +391,23 @@ impl Body<'_> {
         self.coerce_emitted_value(any, ret)
     }
 
+    /// `startCoroutineUninterceptedOrReturnIntrinsicN(f, inputs.., completion)`: `f`'s suspend
+    /// entry, which takes its inputs and then its continuation, called with `completion` as that
+    /// continuation. It answers what the entry answers: `COROUTINE_SUSPENDED` or the value.
+    pub(super) fn start_coroutine_unintercepted_or_return(
+        &mut self,
+        args: &[u32],
+        params: &[Ty],
+    ) -> Result<(), Unsupported> {
+        let (Some((&function, operands)), Some((_, operand_params))) =
+            (args.split_first(), params.split_first())
+        else {
+            return Err("a coroutine start without its suspend function".into());
+        };
+        let any = Ty::nullable(Ty::obj_name(krusty::types::wk::any()));
+        self.invoke_function(function, operands, operand_params, any)
+    }
+
     /// `value as F` for a function type `F`: the value, which must be a function value invoked
     /// with `F`'s arguments. A suspend function type is invoked with its caller's continuation as
     /// one more argument, so `suspend () -> R` and `(Continuation<R>) -> Any?` share a shape, as
