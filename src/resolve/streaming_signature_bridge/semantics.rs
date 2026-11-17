@@ -2504,6 +2504,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         // property candidates as an ordinary value read. Its reflective result type depends on the
         // property's semantic type, so demand an inferred source property before constructing
         // `KProperty0<T>`/`KMutableProperty0<T>`.
+        let binds_contexts = self.headers.scopes.binds_reference_contexts(scope.source);
         if let Ok(property) = self.with_resolver(scope, |resolver| {
             let crate::symbol_resolver::Symbol::Member(facets) = resolver.resolve_symbol(
                 crate::symbol_resolver::SymRecv::TopLevel,
@@ -2518,8 +2519,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .values
                 .into_iter()
                 .filter(|property| {
+                    // A reference binds the property's context parameters at its own site; its
+                    // reflective type does not show them.
                     property.kind == crate::libraries::PropKind::TopLevel
-                        && property.context_count == 0
+                        && (property.context_count == 0 || binds_contexts)
                 })
                 .collect::<Vec<_>>();
             match properties.as_slice() {
@@ -2640,10 +2643,18 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     (parameters, selected.callable.ret)
                 }
             };
+        // A reference that binds the declaration's context parameters at its own site does not
+        // show them in its type.
+        let (parameters, context_count) = if binds_contexts {
+            let contexts = selected.context_count.min(parameters.len());
+            (parameters[contexts..].to_vec(), 0)
+        } else {
+            (parameters, selected.context_count)
+        };
         crate::fir::ResolvedTy::new(Ty::fun_with_shape(
             parameters,
             result,
-            selected.context_count,
+            context_count,
             selected.is_extension(),
             selected.callable.suspend,
         ))

@@ -239,13 +239,14 @@ impl Checker<'_> {
         };
         match self.select_context_arguments_with_types(scope, &context_types) {
             Ok(arguments) => {
-                self.context_args.insert(
-                    e,
-                    arguments
-                        .into_iter()
-                        .map(|(argument, _)| argument)
-                        .collect(),
-                );
+                let arguments = arguments
+                    .into_iter()
+                    .map(|(argument, _)| argument)
+                    .collect::<Vec<_>>();
+                // A receiver passed as a context argument is a use of it, exactly as for a call:
+                // a local classifier or callable enclosing the reference captures it.
+                self.mark_context_extension_receiver_used(scope, e, &arguments);
+                self.context_args.insert(e, arguments);
                 ty
             }
             Err(missing) => {
