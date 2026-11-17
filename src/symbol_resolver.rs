@@ -100,9 +100,10 @@ pub use lambda_call_shape::LambdaCallShape;
 pub(crate) use member_hierarchy::{
     apply_inner_alias_outer_in_source, apply_inner_classifier_outer_in_source,
     bound_inner_classifier_in_source, bound_inner_constructor_candidates,
-    declared_member_callables, declared_member_declarations, function_declaration_identity,
-    function_input_shapes_match, function_override_input_slots_match, function_result_refines,
-    imported_object_member_symbols, inherited_nested_classifier_name,
+    checked_function_result_refines, declared_member_callables, declared_member_declarations,
+    function_declaration_identity, function_input_shapes_match,
+    function_override_input_slots_match, function_result_refines, imported_object_member_symbols,
+    inherited_function_result, inherited_nested_classifier_name,
     inherits_nested_classifiers_through, lexical_enclosing_classifier_names,
     member_declarations_in_hierarchy, member_is_inheritable, members_in_hierarchy,
     nested_classifier_supertypes, normalize_inherited_member_functions,

@@ -115,12 +115,13 @@ impl Checker<'_> {
                     implementation,
                 )
         }) {
-            let expected = substituted_result(candidate);
+            let expected = crate::symbol_resolver::inherited_function_result(candidate);
             if expected == Ty::Error
-                || crate::symbol_resolver::resolution_subtype(
+                || crate::symbol_resolver::checked_function_result_refines(
                     &source,
-                    canonical_result(actual, implementation, candidate),
-                    canonical_result(expected, candidate, candidate),
+                    implementation,
+                    actual,
+                    candidate,
                 )
             {
                 continue;
@@ -191,63 +192,6 @@ impl Checker<'_> {
         }
         super::access_control::owner_display(declaring)
     }
-}
-
-/// `candidate`'s result as seen from the overriding class. A Java type argument that names a type
-/// parameter is flexible (`Inv<T!>`), so its substituted argument stays flexible too: an override
-/// may return `Inv<E?>` for `Inv<E!>!`. Kotlin declarations publish no flexible types.
-fn substituted_result(candidate: &FunctionInfo) -> Ty {
-    let substituted = candidate.semantic_signature().ret;
-    match candidate.declaration_identity.as_ref() {
-        Some(declared) if matches!(declared.ret.kind(), TyKind::PlatformNullable(_)) => {
-            flexible_type_arguments(declared.ret, substituted)
-        }
-        _ => substituted,
-    }
-}
-
-fn flexible_type_arguments(declared: Ty, substituted: Ty) -> Ty {
-    match (declared.kind(), substituted.kind()) {
-        (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(substituted)) => {
-            Ty::platform_nullable(flexible_type_arguments(declared, substituted))
-        }
-        (TyKind::Obj(_, declared_args), TyKind::Obj(name, substituted_args))
-            if declared_args.len() == substituted_args.len() =>
-        {
-            let arguments = declared_args
-                .iter()
-                .zip(substituted_args)
-                .map(|(declared, substituted)| match declared.kind() {
-                    TyKind::TyParam(..)
-                        if !matches!(
-                            substituted.kind(),
-                            TyKind::PlatformNullable(_) | TyKind::Nullable(_)
-                        ) && substituted.projection_inner().is_none() =>
-                    {
-                        Ty::platform_nullable(*substituted)
-                    }
-                    _ => flexible_type_arguments(*declared, *substituted),
-                })
-                .collect::<Vec<_>>();
-            Ty::obj_args_name(name, &arguments)
-        }
-        _ => substituted,
-    }
-}
-
-/// `ret`, a result of `function`, with `function`'s own type parameters named positionally and
-/// then as `inherited` names them, so an override's `<T>` and the overridden `<T>` compare as one.
-fn canonical_result(ret: Ty, function: &FunctionInfo, inherited: &FunctionInfo) -> Ty {
-    let formals = |function: &FunctionInfo| {
-        function
-            .generic_sig
-            .as_ref()
-            .map_or(Vec::new(), |signature| signature.formals.clone())
-    };
-    crate::types::ty_canonicalize_params(
-        crate::types::ty_canonicalize_params(ret, &formals(function)),
-        &formals(inherited),
-    )
 }
 
 /// `function` as rendered with the result `ret`: an inferred result once its body is checked, or

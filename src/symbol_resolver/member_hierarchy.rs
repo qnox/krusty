@@ -966,19 +966,76 @@ pub(crate) fn function_result_refines(
     implementation: &FunctionInfo,
     inherited: &FunctionInfo,
 ) -> bool {
+    checked_function_result_refines(
+        source,
+        implementation,
+        inherited_function_result(implementation),
+        inherited,
+    )
+}
+
+/// [`function_result_refines`] for an implementation whose result `result` its checked body
+/// supplies rather than its published header.
+pub(crate) fn checked_function_result_refines(
+    source: &dyn SymbolSource,
+    implementation: &FunctionInfo,
+    result: Ty,
+    inherited: &FunctionInfo,
+) -> bool {
     resolution_subtype(
         source,
-        normalized_function_result(implementation),
-        normalized_function_result(inherited),
+        normalized_function_result(implementation, result),
+        normalized_function_result(inherited, inherited_function_result(inherited)),
     )
+}
+
+/// `function`'s result as its owner's hierarchy rung substitutes it. A Java type argument naming a
+/// type parameter is flexible (`Inv<T!>`), so its substituted argument stays flexible as well:
+/// `Inv<E!>!` admits `Inv<E?>`. Kotlin declarations publish no flexible types.
+pub(crate) fn inherited_function_result(function: &FunctionInfo) -> Ty {
+    let substituted = function.ret.apply(function.callable.ret);
+    match function.declaration_identity.as_ref() {
+        Some(declared) if matches!(declared.ret.kind(), TyKind::PlatformNullable(_)) => {
+            flexible_type_arguments(declared.ret, substituted)
+        }
+        _ => substituted,
+    }
+}
+
+fn flexible_type_arguments(declared: Ty, substituted: Ty) -> Ty {
+    match (declared.kind(), substituted.kind()) {
+        (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(substituted)) => {
+            Ty::platform_nullable(flexible_type_arguments(declared, substituted))
+        }
+        (TyKind::Obj(_, declared_args), TyKind::Obj(name, substituted_args))
+            if declared_args.len() == substituted_args.len() =>
+        {
+            let arguments = declared_args
+                .iter()
+                .zip(substituted_args)
+                .map(|(declared, substituted)| match declared.kind() {
+                    TyKind::TyParam(..)
+                        if !matches!(
+                            substituted.kind(),
+                            TyKind::PlatformNullable(_) | TyKind::Nullable(_)
+                        ) && substituted.projection_inner().is_none() =>
+                    {
+                        Ty::platform_nullable(*substituted)
+                    }
+                    _ => flexible_type_arguments(*declared, *substituted),
+                })
+                .collect::<Vec<_>>();
+            Ty::obj_args_name(name, &arguments)
+        }
+        _ => substituted,
+    }
 }
 
 /// A result under alpha-normalized declaration variables and their complete declared bounds.
 /// Override input matching has already established that the declarations have the same generic
 /// shape; result covariance must therefore compare their variables by ordinal, not by source or
 /// metadata spelling (`fun <T> f(): T` and `fun <U> f(): U` are the same contract).
-fn normalized_function_result(function: &FunctionInfo) -> Ty {
-    let result = function.ret.apply(function.callable.ret);
+fn normalized_function_result(function: &FunctionInfo, result: Ty) -> Ty {
     let Some(signature) = function.generic_sig.as_ref() else {
         return result;
     };
