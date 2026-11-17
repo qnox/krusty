@@ -694,7 +694,6 @@ coroutines/stackUnwinding/rethrowInFinallyWithSuspension.kt
 coroutines/stopAfter.kt
 coroutines/suspendConversion.kt
 coroutines/suspendConversion/intersectionTypeToSubtypeConversion.kt
-coroutines/suspendConversion/onNullableArgument.kt
 coroutines/suspendConversion/subtypeOfFunctionalTypeToSuspendConversion.kt
 coroutines/suspendConversion/suspendConversionBetweenFunInterfaces.kt
 coroutines/suspendDefaultImpl.kt
@@ -1488,7 +1487,6 @@ multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/expectActualInheritance2-2.kt
 multiplatform/k2/hmpp/expectActualInheritance3-3.kt
 multiplatform/k2/hmpp/expectActualInheritanceTwoLibs.kt
-multiplatform/k2/hmpp/genericTypealiasSameNameTwoLibs.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
 multiplatform/k2/hmpp/inheritanceFromExpected3-3.kt
@@ -1561,7 +1559,6 @@ properties/accessorForProtectedPropertyWithPrivateSetterInObjectLiteral.kt
 properties/accessorForProtectedPropertyWithPrivateSetterViaSuper.kt
 properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
 properties/backingField/backingFieldInitializedInInit.kt
-properties/backingField/backingFieldWithSmartTypeParameters.kt
 properties/backingField/equalsHashCodeWithValueClassExplicitBackingFieldAndSupertype.kt
 properties/backingField/explicitFieldCallableReference.kt
 properties/complexPropertyInitializer.kt
