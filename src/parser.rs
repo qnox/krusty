@@ -408,6 +408,7 @@ fn hoist_local_classes(file: &mut File) {
     // need telling apart; the statement index is unique by construction.
     let mut taken: crate::fx_hash::HashSet<String> = crate::fx_hash::HashSet::default();
     for (stmt, mut c) in hoisted {
+        let source_name = c.name.clone();
         let mut name = match owner_of.get(&stmt) {
             Some((owner, _, _)) => format!("{owner}.{}", c.name),
             None => format!("loc{}.{}", stmt.0, c.name),
@@ -456,6 +457,7 @@ fn hoist_local_classes(file: &mut File) {
         c.name = name;
         let id = file.add_decl(Decl::Class(c));
         file.decls.push(id);
+        file.hoisted_classifier_source_names.insert(id, source_name);
         file.mark_local_declaration(id);
         file.local_class_decls.insert(stmt, id);
         if let Some(enclosing) = enclosing {
