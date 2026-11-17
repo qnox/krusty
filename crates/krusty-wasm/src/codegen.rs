@@ -173,9 +173,10 @@ impl Backend for WasmBackend {
     }
 
     /// The WASI stdlib's `StringBuilder.append(CharSequence?)` copies the sequence's `length`
-    /// indexed `Char`s; the JS one appends its `toString` (`crate::string_builders`).
-    fn appends_char_sequences_by_index(&self) -> bool {
-        self.target == WasmTarget::Wasi
+    /// indexed `Char`s, and both stdlibs' `appendRange` checks its range against `length`
+    /// (`crate::string_builders`, `crate::char_sequence_appends`).
+    fn reads_char_sequence_members(&self) -> bool {
+        true
     }
 
     /// The runtime's `ArrayList` walks a collection argument with its `iterator()` and asks it

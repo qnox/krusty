@@ -8,6 +8,7 @@
 
 use krusty::backend::BackendCallableFact;
 use krusty::fir::ExternalCallableId;
+use krusty::libraries::RuntimeExceptionKind;
 use krusty::types::{SemanticCallableOwner, TypeName};
 
 use super::library_members::{library_member_identity, MemberRole};
@@ -46,6 +47,9 @@ enum Appended {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Member {
     Append(Appended),
+    /// `appendRange(value, startIndex, endIndex)` of the declared `value` type: a `CharSequence`
+    /// or a `CharArray`.
+    AppendRange(Ty),
     Length,
     Get,
 }
@@ -73,6 +77,9 @@ fn is_char_sequence(ty: Ty) -> bool {
 fn member(fact: &BackendCallableFact) -> Option<Member> {
     match (fact.name.as_str(), fact.params.as_slice()) {
         ("append", [param]) => appended(*param).map(Member::Append),
+        ("appendRange", [value, Ty::Int, Ty::Int]) if fact.ret == builder_type() => {
+            Some(Member::AppendRange(*value))
+        }
         ("<get-length>", []) if fact.ret == Ty::Int => Some(Member::Length),
         ("get", [Ty::Int]) if fact.ret == Ty::Char => Some(Member::Get),
         _ => None,
@@ -176,6 +183,9 @@ impl Body<'_> {
                 self.value(*value, fact.params[0])?;
                 self.code.call(append);
             }
+            (Member::AppendRange(declared), [value, start, end]) => {
+                self.append_range(declared, *value, *start, *end)?;
+            }
             (Member::Length, []) => {
                 self.code.call(length);
             }
@@ -218,6 +228,219 @@ impl Body<'_> {
             .is_some_and(declared_by_string_builder)
     }
 
+    /// `appendRange(value, start, end)` on the builder on the stack, leaving the builder.
+    ///
+    /// Both Wasm stdlibs first check the range as `AbstractList.checkBoundsIndexes(start, end,
+    /// value.length)` does. Kotlin/Wasm JS then appends that range of `value.toString()`; WASI
+    /// copies a `String`'s range whole and reads every other sequence one `value[index]` at a
+    /// time. A `CharArray`'s units are copied on both.
+    fn append_range(
+        &mut self,
+        declared: Ty,
+        value: u32,
+        start: u32,
+        end: u32,
+    ) -> Result<(), Unsupported> {
+        let builder = self.local(REFERENCE);
+        self.code.local_set(builder);
+        let (first, last, size) = (
+            self.local(ValType::I32),
+            self.local(ValType::I32),
+            self.local(ValType::I32),
+        );
+        if is_char_sequence(declared) {
+            let reads = self.char_sequence_reads()?;
+            let sequence = self.local(REFERENCE);
+            self.value(value, declared)?;
+            self.code.local_set(sequence);
+            self.value(start, Ty::Int)?;
+            self.code.local_set(first);
+            self.value(end, Ty::Int)?;
+            self.code.local_set(last);
+            let length = self
+                .runtime
+                .objects
+                .interfaces
+                .stub(self.module, reads.length);
+            self.code.local_get(sequence).call(length).local_set(size);
+            self.check_bounds_indexes(first, last, size)?;
+            self.append_sequence_range(builder, sequence, first, last, reads);
+            return Ok(());
+        }
+        let (form, element) = self.array_form(declared)?;
+        if element != Ty::Char {
+            return Err("an `appendRange` of an array other than `CharArray`".into());
+        }
+        let storage = self.local(ValType::reference(form.storage));
+        self.value(value, declared)?;
+        self.array_storage(form);
+        self.code.local_set(storage);
+        self.value(start, Ty::Int)?;
+        self.code.local_set(first);
+        self.value(end, Ty::Int)?;
+        self.code.local_set(last);
+        self.code.local_get(storage).array_len().local_set(size);
+        self.check_bounds_indexes(first, last, size)?;
+        let append_char = self.runtime.string_builders.append_char;
+        self.code
+            .block(BlockType::Empty)
+            .loop_(BlockType::Empty)
+            .local_get(first)
+            .local_get(last)
+            .op(GE_S32)
+            .br_if(1)
+            .local_get(builder)
+            .local_get(storage)
+            .local_get(first)
+            .array_get_u(form.storage)
+            .call(append_char)
+            .drop_()
+            .local_get(first)
+            .i32_const(1)
+            .op(ADD32)
+            .local_set(first)
+            .br(0)
+            .end()
+            .end()
+            .local_get(builder);
+        Ok(())
+    }
+
+    /// Append `sequence[first, last)` to `builder` once the range is checked, as the target's
+    /// stdlib reads it, leaving the builder.
+    fn append_sequence_range(
+        &mut self,
+        builder: u32,
+        sequence: u32,
+        first: u32,
+        last: u32,
+        reads: crate::char_sequence_appends::SequenceReads,
+    ) {
+        let append_range = self.runtime.string_builders.append_range;
+        if !self.runtime.char_sequence_appends.reads_by_index() {
+            self.code
+                .local_get(builder)
+                .local_get(sequence)
+                .call(self.runtime.object_strings.any_to_string)
+                .local_get(first)
+                .local_get(last)
+                .call(append_range);
+            return;
+        }
+        let string = HeapType::Concrete(self.runtime.string);
+        // A string's range is copied whole, as `insertString` does.
+        self.code
+            .local_get(sequence)
+            .ref_test(false, string)
+            .if_(BlockType::Empty)
+            .local_get(builder)
+            .local_get(sequence)
+            .ref_cast(false, string)
+            .local_get(first)
+            .local_get(last)
+            .call(append_range)
+            .drop_()
+            .else_();
+        let (get, append_char) = (
+            self.runtime.objects.interfaces.stub(self.module, reads.get),
+            self.runtime.string_builders.append_char,
+        );
+        self.code
+            .block(BlockType::Empty)
+            .loop_(BlockType::Empty)
+            .local_get(first)
+            .local_get(last)
+            .op(GE_S32)
+            .br_if(1)
+            .local_get(builder)
+            .local_get(sequence)
+            .local_get(first)
+            .call(get)
+            .call(append_char)
+            .drop_()
+            .local_get(first)
+            .i32_const(1)
+            .op(ADD32)
+            .local_set(first)
+            .br(0)
+            .end()
+            .end()
+            .end()
+            .local_get(builder);
+    }
+
+    /// `AbstractList.checkBoundsIndexes(first, last, size)`: `IndexOutOfBoundsException` for a
+    /// range reaching outside `0..size`, then `IllegalArgumentException` for a reversed one, each
+    /// worded as the Wasm stdlib words it.
+    fn check_bounds_indexes(
+        &mut self,
+        first: u32,
+        last: u32,
+        size: u32,
+    ) -> Result<(), Unsupported> {
+        self.code
+            .local_get(first)
+            .i32_const(0)
+            .op(LT_S32)
+            .local_get(last)
+            .local_get(size)
+            .op(GT_S32)
+            .op(OR32)
+            .if_(BlockType::Empty);
+        self.throw_worded(
+            RuntimeExceptionKind::IndexOutOfBounds,
+            &[
+                ("startIndex: ", first),
+                (", endIndex: ", last),
+                (", size: ", size),
+            ],
+        )?;
+        self.code
+            .end()
+            .local_get(first)
+            .local_get(last)
+            .op(GT_S32)
+            .if_(BlockType::Empty);
+        self.throw_worded(
+            RuntimeExceptionKind::IllegalArgument,
+            &[("startIndex: ", first), (" > endIndex: ", last)],
+        )?;
+        self.code.end();
+        Ok(())
+    }
+
+    /// Throw the runtime exception `kind` whose message is each text followed by its `Int`
+    /// local's decimal rendering.
+    fn throw_worded(
+        &mut self,
+        kind: RuntimeExceptionKind,
+        parts: &[(&str, u32)],
+    ) -> Result<(), Unsupported> {
+        let structure =
+            self.runtime
+                .exception_class(self.module, self.classifiers, kind.classifier())?;
+        for (index, (text, value)) in parts.iter().enumerate() {
+            self.string_constant(text);
+            if index > 0 {
+                self.code.call(self.runtime.string_concat);
+            }
+            self.code
+                .local_get(*value)
+                .call(self.runtime.string_of_i32)
+                .call(self.runtime.string_concat);
+        }
+        let message = self.local(STRING);
+        self.code.local_set(message);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            structure,
+            Some(message),
+            self.runtime.string,
+        )?;
+        self.code.throw(self.runtime.exceptions.tag);
+        Ok(())
+    }
+
     /// The runtime's `StringBuilder.append(CharSequence?)` (`crate::char_sequence_appends`).
     fn char_sequence_append(&mut self) -> Result<u32, Unsupported> {
         self.record_char_sequence_reads()?;
@@ -228,12 +451,31 @@ impl Body<'_> {
     /// `CharSequence.length` and `get` it reads them through, with what a string and the builder
     /// run for each. A file without them records nothing, and an append declines.
     pub(super) fn record_char_sequence_reads(&mut self) -> Result<(), Unsupported> {
-        let appends = &self.runtime.char_sequence_appends;
-        if !appends.reads_by_index() || appends.has_reads() {
+        if !self.runtime.char_sequence_appends.reads_by_index() {
             return Ok(());
         }
+        self.recorded_char_sequence_reads().map(drop)
+    }
+
+    /// The checked `CharSequence.length` and `get` an `appendRange` reads on either target.
+    fn char_sequence_reads(
+        &mut self,
+    ) -> Result<crate::char_sequence_appends::SequenceReads, Unsupported> {
+        self.recorded_char_sequence_reads()?.ok_or_else(|| {
+            "an `appendRange` without the checked `CharSequence.length` and `get`".into()
+        })
+    }
+
+    /// Record the checked `CharSequence` reads with what a string and the builder run for each,
+    /// once, or `None` for a file without them.
+    fn recorded_char_sequence_reads(
+        &mut self,
+    ) -> Result<Option<crate::char_sequence_appends::SequenceReads>, Unsupported> {
+        if let Some(reads) = self.runtime.char_sequence_appends.reads() {
+            return Ok(Some(reads));
+        }
         let Some(protocol) = self.callables.char_sequence_protocol() else {
-            return Ok(());
+            return Ok(None);
         };
         let property = self
             .callables
@@ -242,10 +484,9 @@ impl Body<'_> {
         let (getter, name) = (property.getter, property.name.to_string());
         let length = self.char_sequence_member(getter, MemberRole::Getter, &name)?;
         let get = self.char_sequence_member(protocol.get, MemberRole::Function, "get")?;
-        self.runtime
-            .char_sequence_appends
-            .record_reads(crate::char_sequence_appends::SequenceReads { length, get });
-        Ok(())
+        let reads = crate::char_sequence_appends::SequenceReads { length, get };
+        self.runtime.char_sequence_appends.record_reads(reads);
+        Ok(Some(reads))
     }
 
     /// The library member `target` is in `role`, with its builtin implementations recorded.

@@ -197,9 +197,7 @@ pub(super) fn lower_file(
             .params
             .iter()
             .enumerate()
-            .map(|(parameter, _)| {
-                parameter_carrier(module, ir, id as FunId, parameter as u32)
-            })
+            .map(|(parameter, _)| parameter_carrier(module, ir, id as FunId, parameter as u32))
             .collect::<Result<Vec<_>, _>>()?;
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));

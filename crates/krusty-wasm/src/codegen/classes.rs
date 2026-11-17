@@ -642,9 +642,7 @@ pub(super) fn method_type(
     };
     let mut params = vec![receiver];
     for parameter in 0..declaration.params.len() {
-        params.push(
-            parameter_carrier(module, ir, function, parameter as u32)?,
-        );
+        params.push(parameter_carrier(module, ir, function, parameter as u32)?);
     }
     let results = carrier(declaration.ret)?.into_iter().collect();
     Ok(module.func_type(params, results))
