@@ -19864,12 +19864,7 @@ impl<'a> Checker<'a> {
                 if !deferred {
                     let actual = self.recorded_expression_type_for_expected(scope, init, it, d);
                     self.narrow_platform_value(d, init, PlatformNarrowing::Declaration);
-                    self.expect_assignable(
-                        d,
-                        actual,
-                        self.value_diagnostic_span(init, actual),
-                        "initializer",
-                    );
+                    self.expect_assignable(d, actual, self.span(init), "initializer");
                 }
                 d
             }
@@ -42613,7 +42608,7 @@ impl<'a> Checker<'a> {
                                 nominal,
                                 declared,
                             );
-                            let sp = self.value_diagnostic_span(init, it);
+                            let sp = self.span(init);
                             self.narrow_platform_value(
                                 declared,
                                 init,
@@ -43980,7 +43975,7 @@ impl<'a> Checker<'a> {
                             self.expect_assignable(
                                 declared,
                                 it,
-                                self.value_diagnostic_span(init, it),
+                                self.span(init),
                                 "property initializer",
                             );
                         }
