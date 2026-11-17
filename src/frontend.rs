@@ -1959,11 +1959,6 @@ where
         (Vec::new(), streamed)
     };
     let streamed = streamed.or(recovery_streamed);
-    if retain_inspection_analysis {
-        for file in &mut files {
-            restore_local_classifier_source_names(file);
-        }
-    }
     if let Err(error) = symbols.libraries.validate_initialization() {
         diags.diags.truncate(diagnostics_start);
         diags.set_file(0);
@@ -1973,7 +1968,7 @@ where
     let analysis = SourceSetAnalysis {
         target,
         files: if retain_inspection_analysis {
-            files
+            local_class_names::restore_retained_classifier_source_names(files)
         } else {
             Vec::new()
         },
@@ -1994,24 +1989,6 @@ where
         );
     }
     analysis
-}
-
-/// Checking used the hoisted lookup path. The retained source shows the name that was written.
-fn restore_local_classifier_source_names(file: &mut crate::ast::File) {
-    let locals = file.local_class_decls.values().copied().collect::<Vec<_>>();
-    for declaration in locals {
-        let Some(source_name) = file
-            .hoisted_classifier_source_names
-            .get(&declaration)
-            .cloned()
-        else {
-            continue;
-        };
-        let crate::ast::Decl::Class(class) = file.decl_mut(declaration) else {
-            continue;
-        };
-        class.name = source_name;
-    }
 }
 
 fn check_source_set_skipping_with_index(

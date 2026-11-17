@@ -52,6 +52,7 @@ pub enum InvokeSelection {
     Inapplicable(DiagnosticId),
 }
 mod classifier_headers;
+mod compact_declaration;
 mod declaration_metadata;
 mod serialization_records;
 pub use declaration_metadata::{NoArgSuperConstructor, PropertyAccessor};
@@ -2325,20 +2326,6 @@ impl ResolvedModuleIndex {
                     .or_default()
                     .push(declaration);
             }
-        }
-    }
-
-    /// The source segment a hoisted classifier was declared with. Parser hoisting stores a
-    /// qualified lookup path on the declaration header; the segment is the name that owns it.
-    pub(crate) fn index_declaration_source_spelling(
-        &mut self,
-        declaration: DeclarationId,
-        spelling: &str,
-    ) {
-        let name = self.intern_declaration_name(spelling);
-        let entries = self.declarations_by_name.entry(name).or_default();
-        if !entries.contains(&declaration) {
-            entries.push(declaration);
         }
     }
 
