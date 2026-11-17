@@ -92,6 +92,7 @@ impl Body<'_> {
         {
             return Err("an ArrayList construction disagreeing with its constructor".into());
         }
+        self.record_collection_arguments()?;
         let new = self.runtime.array_lists.new;
         let add_all = self.runtime.array_lists.add_all;
         match args {
@@ -103,9 +104,12 @@ impl Body<'_> {
                 self.code.call(new);
             }
             [elements] => {
-                self.code.i32_const(0).call(new);
+                // `ArrayList(elements)` is a new list holding the elements, so the list stays
+                // the construction's value after `addAll` answers whether it changed.
+                let list = self.local(REFERENCE);
+                self.code.i32_const(0).call(new).local_tee(list);
                 self.value(*elements, fact.params[0])?;
-                self.code.call(add_all).drop_();
+                self.code.call(add_all).drop_().local_get(list);
             }
             _ => return Err("an ArrayList constructor the runtime does not realize".into()),
         }
@@ -184,5 +188,55 @@ impl Body<'_> {
             .property(target)
             .and_then(|property| self.callables.callable(property.getter))
             .is_some_and(declared_by_array_list)
+    }
+}
+
+impl Body<'_> {
+    /// Record the checked collection members the runtime list reads a collection argument
+    /// through (`crate::collection_arguments`), with what the list and the builtin classes run for
+    /// each. Every runtime list comes from a construction, so recording there covers every list.
+    fn record_collection_arguments(&mut self) -> Result<(), Unsupported> {
+        if self.runtime.collection_arguments.has_members() {
+            return Ok(());
+        }
+        let protocol = self.callables.collection_protocol().ok_or(
+            "a runtime `ArrayList` without the checked collection members it reads an argument \
+             through",
+        )?;
+        let members = crate::collection_arguments::CollectionMembers {
+            iterator: self.collection_member(protocol.iterator, (1, 1))?,
+            has_next: self.collection_member(protocol.has_next, (1, 1))?,
+            next: self.collection_member(protocol.next, (1, 1))?,
+            contains: self.collection_member(protocol.contains, (2, 1))?,
+        };
+        self.runtime.collection_arguments.record(members);
+        Ok(())
+    }
+
+    /// The library member `target`, carried as `arity` wasm parameters (the receiver first) and
+    /// results, as the runtime list calls it.
+    fn collection_member(
+        &mut self,
+        target: ExternalCallableId,
+        (params, results): (usize, usize),
+    ) -> Result<crate::interface_dispatch::MemberRef, Unsupported> {
+        let fact = self
+            .callables
+            .callable(target)
+            .ok_or("a collection member without its declaration")?
+            .clone();
+        let role = super::library_members::MemberRole::Function;
+        let (carried_params, carried_results) =
+            super::library_members::library_member_signature(&fact, role)?;
+        if carried_params.len() != params || carried_results.len() != results {
+            return Err(format!(
+                "the collection member `{}`, carried otherwise than the runtime list reads it",
+                fact.name
+            ));
+        }
+        let identity = super::library_members::library_member_identity(&fact, role)
+            .ok_or("a collection member without its identity")?;
+        let name = fact.name.clone();
+        self.library_member_of(&fact, identity, role, &name)
     }
 }

@@ -107,6 +107,8 @@ pub(super) struct ListMember {
 pub(super) struct ArrayLists {
     /// The list's class, which implements the collection members `ArrayList` overrides.
     pub(super) class: ClassRef,
+    /// The list's struct type.
+    pub(super) list: u32,
     pub(super) iterator: u32,
     pub(super) new: u32,
     pub(super) add: u32,
@@ -135,6 +137,12 @@ pub(super) struct ArrayLists {
     /// `next()` and `previous()` that throw `NoSuchElementException` past the list's ends, once
     /// something calls them.
     pub(super) checked_steps: [Option<u32>; 2],
+    /// `(collection) -> list`: a collection argument as a list the runtime laid out, the argument
+    /// itself when it is one (`crate::collection_arguments`).
+    pub(super) elements_of: u32,
+    /// `(collection, element) -> Boolean`: whether a collection argument contains the element, as
+    /// its own `contains` answers (`crate::collection_arguments`).
+    pub(super) argument_contains: u32,
 }
 
 impl ArrayLists {
@@ -176,6 +184,7 @@ impl ArrayLists {
         let (_, iter_table) = dispatch_table(module, objects, identity, iterator, iter_text);
         let lists = Self {
             class,
+            list,
             iterator,
             new: module.declare(),
             add: module.declare(),
@@ -198,6 +207,8 @@ impl ArrayLists {
             next_index: module.declare(),
             previous_index: module.declare(),
             checked_steps: [None; 2],
+            elements_of: module.declare(),
+            argument_contains: module.declare(),
         };
         let layout = Layout {
             list,
@@ -545,7 +556,9 @@ impl ArrayLists {
         let ty = module.func_type(vec![REFERENCE, REFERENCE], vec![ValType::I32]);
         let (list, other, count, index) = (0, 1, 2, 3);
         let mut code = Code::default();
-        require_list(&mut code, layout, other);
+        code.local_get(other)
+            .call(self.elements_of)
+            .local_set(other);
         layout.length(&mut code, other);
         code.local_set(count);
         code.block(BlockType::Empty).loop_(BlockType::Empty);
@@ -580,7 +593,9 @@ impl ArrayLists {
         let ty = module.func_type(vec![REFERENCE, REFERENCE], vec![ValType::I32]);
         let (list, other, count, index) = (0, 1, 2, 3);
         let mut code = Code::default();
-        require_list(&mut code, layout, other);
+        code.local_get(other)
+            .call(self.elements_of)
+            .local_set(other);
         layout.length(&mut code, other);
         code.local_set(count);
         code.block(BlockType::Empty).loop_(BlockType::Empty);
@@ -614,7 +629,7 @@ impl ArrayLists {
     }
 
     /// `removeAll` when `drop_contained` is set, otherwise `retainAll`. Both walk the receiver and
-    /// ask the argument, which is itself a list the runtime laid out.
+    /// ask the argument whether it contains each element.
     fn define_remove_where(
         &self,
         module: &mut Module,
@@ -625,7 +640,6 @@ impl ArrayLists {
         let ty = module.func_type(vec![REFERENCE, REFERENCE], vec![ValType::I32]);
         let (list, other, index, changed) = (0, 1, 2, 3);
         let mut code = Code::default();
-        require_list(&mut code, layout, other);
         code.block(BlockType::Empty).loop_(BlockType::Empty);
         code.local_get(index);
         layout.length(&mut code, list);
@@ -634,7 +648,7 @@ impl ArrayLists {
             .local_get(list)
             .local_get(index)
             .call(self.get)
-            .call(self.contains);
+            .call(self.argument_contains);
         if !drop_contained {
             code.op(EQZ32);
         }
@@ -818,15 +832,6 @@ fn iterator_index(code: &mut Code, layout: Layout, iter: u32) {
 }
 
 /// Trap unless local `other` is a list this runtime laid out.
-fn require_list(code: &mut Code, layout: Layout, other: u32) {
-    code.local_get(other)
-        .ref_test(false, HeapType::Concrete(layout.list))
-        .op(EQZ32)
-        .if_(BlockType::Empty)
-        .unreachable()
-        .end();
-}
-
 #[derive(Clone, Copy)]
 struct Layout {
     list: u32,
