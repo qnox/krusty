@@ -11,7 +11,9 @@
 #   release-publisher.sh record                       advance the released ref with a lease
 #
 # Environment: RELEASE_SHA (GITHUB_SHA), RELEASE_REMOTE (origin), RELEASE_BRANCH (master),
-# RELEASE_LOCK_TTL seconds (1800), RELEASE_LOCK_WAIT seconds (900), RELEASE_LOCK_POLL seconds (10).
+# RELEASE_LOCK_TTL seconds (1800), RELEASE_LOCK_WAIT seconds (900), RELEASE_LOCK_POLL seconds (10),
+# RELEASE_TOKEN (a token that may push refs/krusty/*; the release job checks out without persisted
+# credentials, so only this script's pushes are authenticated).
 set -euo pipefail
 shopt -s inherit_errexit
 
@@ -24,6 +26,28 @@ released_ref=refs/krusty/released
 ttl=${RELEASE_LOCK_TTL:-1800}
 wait_limit=${RELEASE_LOCK_WAIT:-900}
 poll=${RELEASE_LOCK_POLL:-10}
+
+# The header actions/checkout would have persisted, set for this process's Git commands only.
+if [ -n "${RELEASE_TOKEN:-}" ]; then
+  config_count=${GIT_CONFIG_COUNT:-0}
+  if ! [[ "$config_count" =~ ^[0-9]+$ ]]; then
+    echo "release-publisher: GIT_CONFIG_COUNT must be a decimal count" >&2
+    exit 2
+  fi
+  # Normalize leading zeroes before arithmetic and leave room in Git's count for one entry.
+  config_count=${config_count#"${config_count%%[!0]*}"}
+  config_count=${config_count:-0}
+  if (( ${#config_count} > 10 )) ||
+    { (( ${#config_count} == 10 )) && [[ "$config_count" > "2147483646" ]]; }; then
+    echo "release-publisher: GIT_CONFIG_COUNT cannot append another entry" >&2
+    exit 2
+  fi
+  printf -v "GIT_CONFIG_KEY_${config_count}" '%s' http.https://github.com/.extraheader
+  printf -v "GIT_CONFIG_VALUE_${config_count}" 'AUTHORIZATION: basic %s' \
+    "$(printf 'x-access-token:%s' "$RELEASE_TOKEN" | base64 | tr -d '\n')"
+  GIT_CONFIG_COUNT=$((10#$config_count + 1))
+  export GIT_CONFIG_COUNT "GIT_CONFIG_KEY_${config_count}" "GIT_CONFIG_VALUE_${config_count}"
+fi
 
 usage() {
   echo "usage: $0 acquire|release LOCK|check|bind-tag TAG|acquire-latest|release-latest LOCK|check-promotion|record" >&2

@@ -587,6 +587,7 @@ impl FileClasses {
                         interfaces: self.tables.interface_tables.implemented[id as usize].clone(),
                         interface_entries: self.tables.interface_tables.members[id as usize]
                             .clone(),
+                        members: self.tables.members[id as usize].clone(),
                     },
                     interface_bodies: self.interface_bodies[id as usize].clone(),
                     dependency_implementations: self.dependency_implementations[id as usize]
@@ -706,6 +707,42 @@ pub(super) fn module_plan(
             }))
         },
     )
+}
+
+/// The table of `record`, a class an earlier file laid out, as a class of `ir` extending it reads
+/// it. A dependency member is numbered by its declaration, which `ir` names by callable identities
+/// of its own module: each one an override edge of `ir` names finds its slot through the member's
+/// declaration identity, not through the identity another module's file gave it.
+fn inherited_table(
+    record: &LaidOutClass,
+    ir: &IrFile,
+    callables: &krusty::backend::CheckedBackendCallables,
+) -> LaidOutSuperclass {
+    use krusty::backend::class_tables::module_slots::PlanKey;
+    let mut table = record.table.clone();
+    table
+        .members
+        .retain(|member, _| !matches!(member, PlanKey::DependencyCallable(_)));
+    let overridden =
+        ir.function_overrides
+            .values()
+            .flatten()
+            .filter_map(|edge| match edge.overridden {
+                krusty::fir::ResolvedFunctionOverrideTarget::External(target) => Some(target),
+                krusty::fir::ResolvedFunctionOverrideTarget::Module(_) => None,
+            });
+    for target in overridden {
+        let Some(declaration) = callables.declaration_identity(target) else {
+            continue;
+        };
+        let identity = krusty::backend::interface_identity::member_identity(declaration);
+        if let Some(&slot) = record.declaration_slots.get(&identity) {
+            table
+                .members
+                .insert(PlanKey::DependencyCallable(target), slot);
+        }
+    }
+    table
 }
 
 /// Reject, by name, a class this form does not lay out.
@@ -868,6 +905,8 @@ pub(super) struct BeyondFile<'a> {
     pub(super) plan: &'a ModuleSlotPlan,
     /// The classes earlier files of the module laid out.
     pub(super) laid_out: &'a LaidOutClasses,
+    /// The dependency declarations this file's callable identities stand for.
+    pub(super) callables: &'a krusty::backend::CheckedBackendCallables,
 }
 
 pub(super) fn declare(
@@ -883,6 +922,7 @@ pub(super) fn declare(
         classifiers,
         plan,
         laid_out,
+        callables,
     } = beyond;
     for class in 0..ir.classes.len() {
         check_supported(ir, class as ClassId)?;
@@ -893,7 +933,11 @@ pub(super) fn declare(
         &WasmRepresentation { classifiers },
         ir,
         plan,
-        &|superclass| laid_out.get(superclass).map(|record| record.table.clone()),
+        &|superclass| {
+            laid_out
+                .get(superclass)
+                .map(|record| inherited_table(record, ir, callables))
+        },
     )?;
     let superclasses: HashMap<TypeName, LaidOutClass> = tables
         .tables

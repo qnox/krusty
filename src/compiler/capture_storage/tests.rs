@@ -489,6 +489,7 @@ fn specialized_copy_and_source_snapshots_keep_their_storage() {
             inline_callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
             inline_callee_source_name: "callee".into(),
             crossinline_operands: Vec::new(),
+            parent: None,
             method_clones: Default::default(),
             bindings: Default::default(),
             reified_bindings: Default::default(),

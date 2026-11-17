@@ -46,12 +46,17 @@ concurrency:
 # copies of the toolchains and Gradle caches (several GB) evicted the master entries that every
 # branch restores, so later runs downloaded the toolchains again.
 jobs:
-  # Asks the runner controller where this run's jobs should run (infragnite/route-runner). In shadow
-  # mode the answer is only logged and recorded beside where each job really ran; every job keeps
-  # its own runs-on. No job waits for this one.
+  # Asks the runner controller where this run's jobs should run (infragnite/route-runner). The jobs
+  # it places read its answer in their runs-on and fall back to their own labels when the answer
+  # has no entry for them. In shadow mode the answer is each job's own labels, and the controller
+  # records its proposal beside where each job really ran. A failure here must not stop the run:
+  # without an answer every job keeps its own labels.
   route:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    continue-on-error: true
+    outputs:
+      runs-on: ${{ steps.route.outputs.runs-on }}
     permissions:
       contents: read
       id-token: write
@@ -69,25 +74,23 @@ jobs:
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: just
-      # The same value build-tool-bins publishes as its matrix output.
-      - name: select supported Kotlin versions
-        id: versions
-        run: echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
-      - uses: infragnite/route-runner@2c24bcc9fe2f764ea321e285faeffda8e50f89ea # v1
+      # Only the jobs ready when the run starts: everything after build-tool-bins is placed by its
+      # last step, when those jobs are released, on the queues as they are then.
+      - id: route
+        uses: infragnite/route-runner@8250bb2ba7237ccbcd01788e91d4b45da1db8c8a # main
         with:
           workflow: .github/workflows/ci.yml
           asking: route
-          outputs: build-tool-bins.matrix=${{ steps.versions.outputs.matrix }}
+          only: lint plugin-host build-tool-bins build-gradle-plugin build-maven-plugin
 
   # Lint and the own test suites are independent merge gates. Give each its own runner so the clean
   # Clippy build does not sit on the test critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
-  # TEMP (2026-11-07): GHA hosted queue is backed up — temporarily run the heavy ubuntu-latest
-  # jobs on self-hosted rust-4c-8gb too. Revert once the hosted backlog clears; then dual-label +
-  # route enforce can choose GHA vs own. route stays on ubuntu-latest. Fork PRs no longer run CI:
-  # only the queue's own branches do.
+  # Their own labels are self-hosted rust-4c-8gb; the route answer may move them to GitHub's
+  # runners. Fork PRs no longer run CI: only the queue's own branches do.
   lint:
-    runs-on: [self-hosted, rust-4c-8gb]
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['lint'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     permissions:
       contents: read
       # Cancels the rest of a merge queue run after a lint failure.
@@ -122,6 +125,14 @@ jobs:
       - name: validate Gradle wrappers
         id: gradle_wrappers
         run: scripts/check-gradle-wrappers.sh
+      # A tag can be moved to other code after review; a commit cannot. Dependabot advances the pins.
+      - name: actions are pinned to a commit
+        id: action_pins
+        run: |
+          if grep -rnE '^ *(- )?uses: ' .github/workflows | grep -vE 'uses: [^ ]+@[0-9a-f]{40}( |$)'; then
+            echo "pin each action above to a full commit SHA, with its version as a comment" >&2
+            exit 1
+          fi
       - name: outcome manifests only shrink
         id: outcome_lists
         env:
@@ -156,7 +167,8 @@ jobs:
         if: >-
           failure() && startsWith(github.ref, 'refs/heads/mq/')
           && (steps.attribution.outcome == 'failure' || steps.intellij_patch.outcome == 'failure'
-          || steps.gradle_wrappers.outcome == 'failure' || steps.outcome_lists.outcome == 'failure'
+          || steps.gradle_wrappers.outcome == 'failure' || steps.action_pins.outcome == 'failure'
+          || steps.outcome_lists.outcome == 'failure'
           || steps.lint.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
@@ -168,7 +180,8 @@ jobs:
   plugin-host:
     # GitHub-hosted: these tests ran out of memory on the 8 GB self-hosted runners, and GitHub's
     # Linux runners (16 GB) had free slots.
-    runs-on: [self-hosted, rust-4c-8gb]
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['plugin-host'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -445,12 +458,18 @@ jobs:
           key: ${{ steps.kotlin-toolchain-cli.outputs.cache-primary-key }}
 
   build-tool-bins:
-    runs-on: [self-hosted, rust-4c-8gb]
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['build-tool-bins'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The last step asks the runner controller where the jobs waiting for this one run.
+      id-token: write
     outputs:
       # Every consumer already waits for this artifact family. Publish the manifest-derived matrix
       # here instead of scheduling a separate ten-second runner solely for these two values.
       matrix: ${{ steps.versions.outputs.matrix }}
       max: ${{ steps.versions.outputs.max }}
+      runs-on: ${{ steps.route.outputs.runs-on }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -512,13 +531,23 @@ jobs:
             krusty
             krusty-build-tests
           if-no-files-found: error
+      # Last, so the jobs this releases are placed on the queues as they are the moment they become
+      # ready. A failed ask leaves the answer empty and every job keeps its own labels.
+      - id: route
+        continue-on-error: true
+        uses: infragnite/route-runner@8250bb2ba7237ccbcd01788e91d4b45da1db8c8a # main
+        with:
+          workflow: .github/workflows/ci.yml
+          asking: build-tool-bins
+          only: e2e conformance build-tools gradle maven bazel
+          outputs: build-tool-bins.matrix=${{ steps.versions.outputs.matrix }}
 
   # The product e2e suite, uninstrumented, from build-tool-bins' binary. The binary reads its fixtures
   # through the checkout path it was built in, which every runner of this pool shares, so it runs on
   # the pool that built it. Coverage runs it instrumented every night (.github/workflows/coverage.yml).
   e2e:
-    needs: build-tool-bins
-    runs-on: [self-hosted, rust-4c-8gb]
+    needs: [build-tool-bins]
+    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['e2e'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - *mq-base
@@ -653,7 +682,7 @@ jobs:
 
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    needs: build-tool-bins
+    needs: [build-tool-bins]
     strategy:
       fail-fast: false
       matrix:
@@ -665,7 +694,7 @@ jobs:
     # 8s above the JVM deadline. Every target uses the guarded self-hosted pool. Native once reached
     # its suite deadline on these 8 GB runners; sharing decoded KLIB trees (#3274) halved its lane
     # and its peak memory. Separate target rows preserve independent measurements.
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['conformance'][format('{0}|{1}', matrix.version, matrix.target)] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     env:
       KRUSTY_BOX_CASE_TIMEOUT_MS: '8000'
       # Each target row keeps its own kotlinc box reference cache; see its restore step.
@@ -1137,7 +1166,8 @@ jobs:
   build-gradle-plugin:
     # GitHub-hosted: a one- or two-minute producer that the gradle matrix waits for; in the
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
-    runs-on: [self-hosted, rust-4c-8gb]
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['build-gradle-plugin'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1230,7 +1260,7 @@ jobs:
       fail-fast: false
       matrix:
         kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['build-tools'][matrix.kotlin] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1290,7 +1320,7 @@ jobs:
           - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true,  suite: boundary }
           - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true,  suite: boundary }
           - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false, suite: boundary }
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['gradle'][format('{0}|{1}|{2}|{3}', matrix.kotlin, matrix.gradle, matrix.ksp, matrix.suite)] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     # A lane takes under 10 minutes; one stuck on its runner (a download that never finished) ran for
     # hours, holding the batch that waits on it.
     timeout-minutes: 30
@@ -1403,9 +1433,10 @@ jobs:
   build-maven-plugin:
     # GitHub-hosted: a one- or two-minute producer that the maven matrix waits for; in the
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
-    runs-on: [self-hosted, rust-4c-8gb]
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['build-maven-plugin'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The commit history only: the build number counts commits and lint reads their
           # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
@@ -1413,7 +1444,7 @@ jobs:
           filter: tree:0
       - *just-on-path
       - *install-just
-      - uses: actions/setup-java@v6.2.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
           java-version: '17'
@@ -1427,7 +1458,7 @@ jobs:
           set -euo pipefail
           version=$(just version)
           scripts/package-maven-plugin.sh "$version" "$PWD/dist-maven"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: krusty-maven-plugin
           path: |
@@ -1440,9 +1471,9 @@ jobs:
   # kotlin-maven-plugin builds, with the shared krusty binary.
   maven:
     needs: [build-tool-bins, build-maven-plugin]
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['maven'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The commit history only: the build number counts commits and lint reads their
           # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
@@ -1450,7 +1481,7 @@ jobs:
           filter: tree:0
       - *just-on-path
       - *install-just
-      - uses: actions/setup-java@v6.2.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
           java-version: '17'
@@ -1459,10 +1490,10 @@ jobs:
       - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
         with:
           maven-version: '3.9.11'
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: krusty-maven-plugin
           path: dist-maven
@@ -1489,7 +1520,7 @@ jobs:
       fail-fast: false
       matrix:
         bazel: [8.4.2, 9.3.1]
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['bazel'][matrix.bazel] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1625,6 +1656,9 @@ jobs:
     runs-on: [self-hosted, rust-4c-8gb]
     # Shorter than either lock's TTL; only dead jobs' locks may be taken over.
     timeout-minutes: 25
+    # The publishing secrets live in this environment, which only master may deploy to, so a
+    # branch that edits this workflow cannot read them.
+    environment: release
     permissions:
       contents: write
       # Dispatches the pages workflow, which regenerates the Bazel registry.
@@ -1633,16 +1667,21 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      # No persisted token: the Gradle builds below run third-party code next to the signing key.
+      # Only the steps that push get the token.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The commit history only: the build number counts commits and lint reads their
           # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
           filter: tree:0
+          persist-credentials: false
       # Every validated master ancestor publishes. Only retries of this exact commit wait on
       # this lock; slow immutable package publication cannot hold the global latest/badge lock.
       - name: take the commit publication lock
         id: lock
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           lock=$(scripts/release-publisher.sh acquire)
@@ -1749,6 +1788,8 @@ jobs:
         if: steps.tip.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          # bind-tag pushes the immutable tag; the checkout no longer authenticates Git.
+          RELEASE_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.v.outputs.tag }}
           VER: ${{ steps.v.outputs.ver }}
@@ -1816,6 +1857,9 @@ jobs:
       - name: publish the Gradle plugin to Maven Central
         if: steps.tip.outputs.publish == 'true'
         env:
+          # Records the upload in refs/krusty/central/<version>; the checkout no longer
+          # authenticates Git. The script keeps it from the Gradle build.
+          RELEASE_TOKEN: ${{ github.token }}
           # A Central Portal user token for the verified dev.krustythecompiler namespace.
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
@@ -1862,6 +1906,8 @@ jobs:
       - name: take the latest promotion lock
         if: steps.tip.outputs.publish == 'true'
         id: latest_lock
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           lock=$(scripts/release-publisher.sh acquire-latest)
@@ -1874,6 +1920,8 @@ jobs:
       # SHA may retry; an older publisher can never overwrite it after the lock is released.
       - name: record the promoted commit
         if: steps.latest.outputs.promote == 'true'
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
         run: scripts/release-publisher.sh record
       - name: promote the GitHub release
         if: steps.latest.outputs.promote == 'true'
@@ -1884,7 +1932,11 @@ jobs:
         run: gh release edit "$TAG" --latest
       - name: drop the latest promotion lock
         if: always() && steps.latest_lock.outputs.lock != ''
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
         run: scripts/release-publisher.sh release-latest "${{ steps.latest_lock.outputs.lock }}"
       - name: drop the release lock
         if: always() && steps.lock.outputs.lock != ''
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
         run: scripts/release-publisher.sh release "${{ steps.lock.outputs.lock }}"

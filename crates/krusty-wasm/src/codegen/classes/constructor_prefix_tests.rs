@@ -909,7 +909,7 @@ fn non_enclosing_receiver_profiles_remain_unsupported() {
 }
 
 #[test]
-fn proven_context_and_lambda_receivers_are_ordinary_references() {
+fn proven_context_lambda_and_callable_receivers_are_ordinary_references() {
     let (original, class, parameter) = stored_enclosing_receiver();
     let declared = original.classes[class as usize].ctor_args[parameter as usize].ty;
     let identity = ClassCaptureIdentity::Receiver(0);
@@ -986,7 +986,29 @@ fn proven_context_and_lambda_receivers_are_ordinary_references() {
             owner: krusty::fir::CapturedCallableOwner::Declaration,
         },
     );
-    assert_eq!(check_supported(&callable, class), expected);
+    assert_eq!(check_supported(&callable, class), Ok(()));
+
+    // A support unit's class has no checked identity on the parameter or in the registry.
+    let mut unchecked = copy_transport(&callable);
+    unchecked.classes[class as usize].ctor_args[parameter as usize].capture_identity = None;
+    unchecked
+        .class_capture_identities
+        .remove(&(class, parameter));
+    assert_eq!(check_supported(&unchecked, class), Ok(()));
+
+    let mut unregistered = copy_transport(&callable);
+    unregistered
+        .class_capture_identities
+        .remove(&(class, parameter));
+    assert_eq!(check_supported(&unregistered, class), expected);
+
+    let mut scalar = copy_transport(&callable);
+    let field = scalar.classes[class as usize].ctor_args[parameter as usize]
+        .field_index
+        .unwrap();
+    scalar.classes[class as usize].ctor_args[parameter as usize].ty = Ty::Unit;
+    scalar.classes[class as usize].fields[field as usize].ty = Ty::Unit;
+    assert_eq!(check_supported(&scalar, class), expected);
 }
 
 #[test]
@@ -1281,6 +1303,71 @@ fn interface_delegate_prefix_requires_positive_role_and_unique_typed_storage() {
         assert_eq!(check_supported(&ir, class), expected, "{label}");
     }
     assert_eq!(check_supported(&original, class), Ok(()));
+}
+
+/// A state machine's frame is no closure: it has no constructor prefix. It may keep a shared
+/// holder in a field its own code fills, or one an ordinary constructor parameter stores. Any
+/// other transport of a holder into such a field still declines.
+#[test]
+fn a_frame_keeps_shared_holders_it_fills_or_its_parameters_store() {
+    let element = Ty::Int;
+    let frame = || {
+        let mut ir = IrFile::default();
+        let mut class = IrClass::synthetic(type_name("p/Frame"));
+        class.fields = vec![
+            krusty::ir::IrField::new("$frame$1".to_string(), element),
+            krusty::ir::IrField::new("$frame$0".to_string(), element),
+        ];
+        class.ctor_param_count = 1;
+        class.ctor_args = vec![krusty::ir::IrCtorArg {
+            name: None,
+            context_kind: krusty::types::ContextParameterKind::None,
+            ty: element,
+            declared_ty: Some(element),
+            is_field: true,
+            field_index: Some(1),
+            has_default: false,
+            is_vararg: false,
+            type_param: None,
+            check: None,
+            anonymous_super_forward: None,
+            capture: None,
+            provenance: IrCtorParameterProvenance::Value,
+            capture_identity: None,
+        }];
+        let class = ir.add_class(class);
+        ir.shared_class_capture_fields.insert((class, 0), element);
+        ir.shared_class_capture_fields.insert((class, 1), element);
+        (ir, class)
+    };
+    let (ir, class) = frame();
+    assert_eq!(check_supported(&ir, class), Ok(()));
+
+    type Mutation = fn(&mut IrFile, ClassId);
+    let mutations: &[(&str, Mutation)] = &[
+        ("parameter of another type", |ir, id| {
+            ir.classes[id as usize].ctor_args[0].ty = Ty::Long
+        }),
+        ("field of another type", |ir, id| {
+            ir.classes[id as usize].fields[0].ty = Ty::Long
+        }),
+        ("two parameters store the field", |ir, id| {
+            let duplicate = ir.classes[id as usize].ctor_args[0].clone();
+            ir.classes[id as usize].ctor_args.push(duplicate);
+        }),
+        ("capture outside a prefix", |ir, id| {
+            ir.classes[id as usize].ctor_args[0].provenance = IrCtorParameterProvenance::Capture
+        }),
+        ("pre-super store", |ir, id| {
+            ir.classes[id as usize].pre_super_param_fields.push((0, 1))
+        }),
+    ];
+    let expected = Err("a class capturing its surroundings (`p/Frame`)".to_string());
+    for (label, mutate) in mutations {
+        let (mut ir, class) = frame();
+        mutate(&mut ir, class);
+        assert_eq!(check_supported(&ir, class), expected, "{label}");
+    }
 }
 
 #[test]

@@ -64,10 +64,6 @@ pub(super) fn is_lazy(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/Lazy"])
 }
 
-pub(super) fn is_read_write_property(internal: TypeName) -> bool {
-    is_identity(internal, &["kotlin/properties/ReadWriteProperty"])
-}
-
 pub(super) fn is_read_only_property(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/properties/ReadOnlyProperty"])
 }
@@ -164,11 +160,13 @@ pub(super) fn runtime_member_classes() -> [(TypeName, &'static str); 1] {
 /// companions of the built-in types, the bases a source class's layout extends (`Number` and the
 /// throwables), the shared empty set, text, the arrays, the unsigned integers (carried as the value
 /// they wrap), the builder it constructs, the integral ranges and progressions, and the standard
-/// collection implementations. A dependency body's call of such
-/// a member, or read of such an object, is lowered here as a source one is.
+/// collection implementations. A dependency body's call of such a member, or read of such an
+/// object, is lowered here as a source one is.
 pub(in super::super) fn represents_dependency_classifier(internal: TypeName) -> bool {
     super::super::super::intrinsics::is_any(internal)
         || internal == krusty::types::wk::unit()
+        // Every enum constant is laid out with the runtime's `kotlin.Enum` base.
+        || internal == krusty::types::wk::kotlin_enum()
         || super::super::super::intrinsics::builtin_companion(internal).is_some()
         || super::super::super::intrinsics::runtime_object(internal).is_some()
         || internal == krusty::types::wk::string()
@@ -662,7 +660,8 @@ impl<'a> FileLowering<'a> {
     /// interface written on `ListQueue`. That superclass is someone else's declaration, so its
     /// frozen supertypes name the interface. A superclass this file does declare stays its own
     /// arm; the subclass is not a second one, because an instance test of the superclass already
-    /// matches it.
+    /// matches it. An abstract superclass is no arm, so its concrete subclasses are, through it:
+    /// a dependency support unit's object literal extending a materialized abstract class.
     pub(super) fn implementors_of(&self, internal: TypeName) -> Vec<ClassId> {
         (0..self.ir.classes.len() as ClassId)
             .filter(|&id| {
@@ -690,8 +689,19 @@ impl<'a> FileLowering<'a> {
             if named == internal {
                 return true;
             }
-            if self.ir.class_id_by_name(named).is_none() {
-                external_supertypes.push(named);
+            match self.ir.class_id_by_name(named) {
+                None => external_supertypes.push(named),
+                // An abstract superclass is no arm of its own, so a concrete class stands behind
+                // what it implements.
+                Some(superclass) => {
+                    let superclass = &self.ir.classes[superclass as usize];
+                    if superclass.is_abstract
+                        && !superclass.is_interface
+                        && self.class_stands_behind(superclass, internal)
+                    {
+                        return true;
+                    }
+                }
             }
         }
         external_supertypes

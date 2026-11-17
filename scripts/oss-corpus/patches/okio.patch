@@ -9,3 +9,28 @@ index cdc1103..da423b2 100644
  jmh = "1.37"
  kotlin = "2.2.21"
  # Set to lower version than KGP version to maximize compatibility
+diff --git a/okio/src/jvmTest/kotlin/okio/PipeKotlinTest.kt b/okio/src/jvmTest/kotlin/okio/PipeKotlinTest.kt
+index c6cfe8d..83b9ebd 100644
+--- a/okio/src/jvmTest/kotlin/okio/PipeKotlinTest.kt
++++ b/okio/src/jvmTest/kotlin/okio/PipeKotlinTest.kt
+@@ -30,7 +30,7 @@ import org.junit.jupiter.api.Assertions.fail
+ import org.junit.jupiter.api.Test
+ import org.junit.jupiter.api.Timeout
+ 
+-@Timeout(5, unit = TimeUnit.SECONDS)
++@FiveSecondTimeout
+ class PipeKotlinTest {
+ 
+   @InterceptTest
+@@ -909,3 +909,11 @@ class PipeKotlinTest {
+     val biggerDeadlineNanos = TimeUnit.MILLISECONDS.toNanos(1500L)
+   }
+ }
++
++/**
++ * Burst copies the test class's annotations into each intercepted test, and kotlinc 2.4.21 crashes
++ * instantiating JUnit's Java `@Timeout` there. JUnit reads `@Timeout` through this meta-annotation.
++ */
++@Timeout(5, unit = TimeUnit.SECONDS)
++@Target(AnnotationTarget.CLASS)
++annotation class FiveSecondTimeout
