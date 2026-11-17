@@ -698,9 +698,13 @@ pub(super) fn authenticate(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
 ) -> Option<KlibIntrinsicShape> {
+    if platform == Some(TargetIntrinsicPlatform::Native) {
+        if let Some(shape) = native_continuation(placement, declaration) {
+            return Some(shape);
+        }
+    }
     if declaration.context_count != 0
         || !declaration.context_kinds.is_empty()
-        || !declaration.formals.is_empty()
         || declaration.is_suspend
         || declaration.is_inline
         || declaration.is_expect
@@ -712,10 +716,170 @@ pub(super) fn authenticate(
     {
         return None;
     }
-    match platform? {
-        TargetIntrinsicPlatform::Native => native(placement, declaration),
-        TargetIntrinsicPlatform::Wasm => wasm(placement, declaration),
+    // Past the continuation intrinsics above, only `wasm_array_copy` is generic: its one type
+    // parameter is the GC array type both operands share.
+    match (platform?, declaration.formals.is_empty()) {
+        (TargetIntrinsicPlatform::Native, true) => native(placement, declaration),
+        (TargetIntrinsicPlatform::Wasm, true) => wasm(placement, declaration),
+        (TargetIntrinsicPlatform::Wasm, false) => wasm_array_copy(placement, declaration),
+        (TargetIntrinsicPlatform::Native, false) => None,
     }
+}
+
+/// Native's two continuation intrinsics in `kotlin.native.internal`, which kotlinc's
+/// pre-serialization inliner leaves in a KLIB body that expanded
+/// `suspendCoroutineUninterceptedOrReturn<T>`: the external `getContinuation<T>(): Continuation<T>`
+/// and the external suspend `returnIfSuspended<T>(argument: Any?): T`. Each has exactly one type
+/// parameter, which its result states.
+fn native_continuation(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    if placement
+        != crate::libraries::CallablePlacement::Package(type_name("kotlin/native/internal"))
+        || !declaration.is_external
+        || declaration.is_inline
+        || declaration.is_expect
+        || declaration.receiver.is_some()
+        || declaration.context_count != 0
+        || !declaration.context_kinds.is_empty()
+        || declaration.vararg.is_some()
+        || declaration
+            .param_defaults
+            .iter()
+            .any(|defaulted| *defaulted)
+    {
+        return None;
+    }
+    let [formal] = declaration.formals.as_slice() else {
+        return None;
+    };
+    if formal.reified {
+        return None;
+    }
+    let names_formal = |ty: &KotlinType| matches!(ty, KotlinType::Param { id, nullable: false, .. } if *id == formal.id);
+    let entry = string_annotation(
+        &declaration.annotation_applications,
+        type_name("kotlin/native/internal/TypedIntrinsic"),
+        "kind",
+    )?;
+    let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+    let (operation, params) = match entry {
+        "GET_CONTINUATION"
+            if !declaration.is_suspend
+                && declaration.params.is_empty()
+                && matches!(
+                    &declaration.ret,
+                    KotlinType::Class {
+                        internal,
+                        args,
+                        nullable: false,
+                        shape: KotlinFunctionTypeShape {
+                            receiver: false,
+                            context_count: 0,
+                            suspend: false,
+                        },
+                    } if internal == "kotlin/coroutines/Continuation"
+                        && matches!(args.as_slice(), [argument] if names_formal(argument))
+                ) =>
+        {
+            (CompilerIntrinsic::CurrentContinuation, Vec::new())
+        }
+        "RETURN_IF_SUSPENDED"
+            if declaration.is_suspend
+                && matches!(
+                    declaration.params.as_slice(),
+                    [KotlinType::Class { internal, args, nullable: true, .. }]
+                        if internal == "kotlin/Any" && args.is_empty()
+                )
+                && names_formal(&declaration.ret) =>
+        {
+            (CompilerIntrinsic::ReturnIfSuspended, vec![any])
+        }
+        _ => return None,
+    };
+    // The result names the declaration's own type parameter, which each call binds: the shape
+    // records it as the erased reference a call's type argument substitutes.
+    let ret = match operation {
+        CompilerIntrinsic::CurrentContinuation => {
+            Ty::obj_args("kotlin/coroutines/Continuation", &[any])
+        }
+        _ => any,
+    };
+    Some(KlibIntrinsicShape {
+        operation,
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params,
+        ret,
+    })
+}
+
+fn is_nullable_any(ty: &KotlinType) -> bool {
+    matches!(
+        ty,
+        KotlinType::Class {
+            internal,
+            args,
+            nullable: true,
+            shape: KotlinFunctionTypeShape {
+                receiver: false,
+                context_count: 0,
+                suspend: false,
+            },
+        } if internal == "kotlin/Any" && args.is_empty()
+    )
+}
+
+/// `wasm_array_copy<T>(destination: T, destinationIndex: Int, source: T, sourceIndex: Int,
+/// length: Int)` in `kotlin.wasm.internal`. It is `@ExcludedFromCodegen`: kotlinc binds the
+/// declaration by this name and lowers its call to `array.copy` over the two GC arrays, whose
+/// type is the call's type argument.
+fn wasm_array_copy(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let [element] = declaration.formals.as_slice() else {
+        return None;
+    };
+    let [destination, destination_index, source, source_index, length] =
+        declaration.params.as_slice()
+    else {
+        return None;
+    };
+    let is_element = |ty: &KotlinType| matches!(ty, KotlinType::Param { id, nullable: false, .. } if *id == element.id);
+    let excluded = declaration
+        .annotation_applications
+        .iter()
+        .filter(|annotation| {
+            annotation.identity == type_name("kotlin/wasm/internal/ExcludedFromCodegen")
+        })
+        .count();
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"))
+        && declaration.name == "wasm_array_copy"
+        && excluded == 1
+        && declaration.receiver.is_none()
+        && !element.reified
+        && element.bounds.iter().all(is_nullable_any)
+        && is_element(destination)
+        && is_element(source)
+        && [destination_index, source_index, length]
+            .into_iter()
+            .all(|index| semantic_type(index) == Some(Ty::Int))
+        && exact_type(&declaration.ret, "kotlin/Unit"))
+    .then(|| {
+        let array = Ty::ty_param(
+            &element.name,
+            Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+        );
+        KlibIntrinsicShape {
+            operation: CompilerIntrinsic::ArrayStorageCopy,
+            kind: ExternalCallableKind::TopLevel,
+            receiver: None,
+            params: vec![array, Ty::Int, array, Ty::Int, Ty::Int],
+            ret: Ty::Unit,
+        }
+    })
 }
 
 /// `intToString(value: Int, radix: Int): String` and its `Long` counterpart in `kotlin.text`.
@@ -1756,6 +1920,93 @@ mod tests {
             gc_unsafe("Kotlin_Int_toStringRadix"),
         );
         assert!(authenticate(native, text, &swapped).is_none());
+    }
+
+    #[test]
+    fn wasm_array_copy_requires_its_exact_generic_declaration() {
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let internal =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"));
+        let excluded = AnnotationApplication {
+            identity: type_name("kotlin/wasm/internal/ExcludedFromCodegen"),
+            arguments: Vec::new(),
+        };
+        let element = crate::metadata::semantic::KotlinTypeParameterId(7);
+        let element_type = KotlinType::Param {
+            name: "T".to_owned(),
+            id: element,
+            nullable: false,
+        };
+        let generic = |name: &str, annotation: AnnotationApplication| {
+            let mut copy = declaration(
+                name,
+                &[
+                    "kotlin/Int",
+                    "kotlin/Int",
+                    "kotlin/Int",
+                    "kotlin/Int",
+                    "kotlin/Int",
+                ],
+                "kotlin/Unit",
+                annotation,
+            );
+            copy.is_external = false;
+            copy.formals = vec![crate::metadata::semantic::KotlinTypeParameter {
+                id: element,
+                name: "T".to_owned(),
+                bounds: Vec::new(),
+                variance: crate::types::TypeVariance::Invariant,
+                only_input: false,
+                reified: false,
+            }];
+            copy.params[0] = element_type.clone();
+            copy.params[2] = element_type.clone();
+            copy
+        };
+        let exact = generic("wasm_array_copy", excluded.clone());
+        let storage = Ty::ty_param("T", Ty::nullable(Ty::obj_name(crate::types::wk::any())));
+        assert_eq!(
+            authenticate(wasm, internal, &exact),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::ArrayStorageCopy,
+                kind: ExternalCallableKind::TopLevel,
+                receiver: None,
+                params: vec![storage, Ty::Int, storage, Ty::Int, Ty::Int],
+                ret: Ty::Unit,
+            })
+        );
+        assert!(authenticate(Some(TargetIntrinsicPlatform::Native), internal, &exact).is_none());
+        assert!(authenticate(
+            wasm,
+            crate::libraries::CallablePlacement::Package(type_name("kotlin")),
+            &exact
+        )
+        .is_none());
+        assert!(
+            authenticate(wasm, internal, &generic("wasm_array_new", excluded.clone())).is_none()
+        );
+        assert!(authenticate(
+            wasm,
+            internal,
+            &generic("wasm_array_copy", wasm_annotation("ARRAY_COPY"))
+        )
+        .is_none());
+        let mut nullable = generic("wasm_array_copy", excluded.clone());
+        nullable.params[2] = KotlinType::Param {
+            name: "T".to_owned(),
+            id: element,
+            nullable: true,
+        };
+        assert!(authenticate(wasm, internal, &nullable).is_none());
+        let mut bounded = generic("wasm_array_copy", excluded.clone());
+        bounded.formals[0].bounds = vec![KotlinType::class("kotlin/Any")];
+        assert!(authenticate(wasm, internal, &bounded).is_none());
+        let mut reified = generic("wasm_array_copy", excluded.clone());
+        reified.formals[0].reified = true;
+        assert!(authenticate(wasm, internal, &reified).is_none());
+        let mut concrete = generic("wasm_array_copy", excluded);
+        concrete.params[2] = KotlinType::class("kotlin/Int");
+        assert!(authenticate(wasm, internal, &concrete).is_none());
     }
 
     #[test]

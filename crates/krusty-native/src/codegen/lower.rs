@@ -2137,6 +2137,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 self.throwable_field_read(symbol, *receiver)
             }
+            // A getter the provider realizes as an exact operation reads as its call does.
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    result,
+                    ..
+                } = &**checked_op
+                    && let Some(getter) = self.operation_getter(*target) =>
+            {
+                self.realized_operation_call(id, getter, Some(*receiver), &[], None, *result)
+                    .expect("the guard selected a getter with an exact operation")
+            }
             // `array.size` read through its getter, as an expanded library body reads it.
             IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::ExternalPropertyRead {
@@ -2370,6 +2383,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             {
                 self.statement(id)?;
                 Ok(None)
+            }
+            IrExpr::Checked(ref checked_op)
+                if let Some(read) = self.dependency_interface_getter(checked_op) =>
+            {
+                read
             }
             other => Err(self.describe_declined(&other).into()),
         }

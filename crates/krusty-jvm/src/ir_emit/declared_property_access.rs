@@ -6,11 +6,56 @@
 use super::*;
 
 impl Emitter<'_> {
+    /// The JVM access of a property read realized before emission: a physical access recorded
+    /// from metadata, or the checked active-source target at this operation's dispatch class.
+    pub(super) fn realized_property_read_access(
+        &self,
+        operation: &PropertyOperation<'_>,
+        realization: &crate::property_realizations::PropertyRealization,
+        selected_accessor: Option<&str>,
+    ) -> Option<krusty::jvm::inline::PropertyAccess> {
+        match realization {
+            crate::property_realizations::PropertyRealization::Physical(access) => {
+                Some(access.clone())
+            }
+            crate::property_realizations::PropertyRealization::Local(target) => self
+                .local_property_read_access(
+                    operation.expression,
+                    *target,
+                    selected_accessor,
+                    operation.interface,
+                    self.ir.dispatch_classes.get(&operation.expression).copied(),
+                ),
+        }
+    }
+
+    /// The write analogue of [`Self::realized_property_read_access`]. A realized local member
+    /// write always has an exact access.
+    pub(super) fn realized_property_write_access(
+        &self,
+        operation: &PropertyOperation<'_>,
+        realization: &crate::property_realizations::PropertyRealization,
+    ) -> krusty::jvm::inline::PropertyAccess {
+        match realization {
+            crate::property_realizations::PropertyRealization::Physical(access) => access.clone(),
+            crate::property_realizations::PropertyRealization::Local(target) => self
+                .local_property_write_access(
+                    operation.expression,
+                    *target,
+                    self.ir.dispatch_classes.get(&operation.expression).copied(),
+                )
+                .expect("a realized local member property write has exact JVM access"),
+        }
+    }
+
     /// Select the JVM access for an active-source property by the exact declaration coordinate
-    /// retained from checked FIR. Companion storage may already have been moved to the outer class;
-    /// consume that backend table directly instead of recovering the property from its spelling.
+    /// retained from checked FIR, projected to the class this operation dispatches on (an inline
+    /// object's call-site copy owns its own storage and accessors). Companion storage may already
+    /// have been moved to the outer class; consume that backend table directly instead of
+    /// recovering the property from its spelling.
     pub(super) fn local_property_read_access(
         &self,
+        operation: krusty::ir::ExprId,
         target: krusty::fir::PropertyId,
         selected_accessor: Option<&str>,
         selected_interface: bool,
@@ -22,15 +67,15 @@ impl Emitter<'_> {
             name,
             property,
             ..
-        } = self.ir.local_property_layouts.get(&target)?
+        } = self.ir.property_layout_at(operation, target).ok()??
         else {
             return None;
         };
-        debug_assert_eq!(self.ir.classes[*class as usize].fq_name, *owner);
+        debug_assert_eq!(self.ir.classes[class as usize].fq_name, owner);
         self.declared_property_read_access(
-            *owner,
-            name,
-            Some(*property as usize),
+            owner,
+            &name,
+            Some(property as usize),
             selected_accessor,
             selected_interface,
             receiver,
@@ -348,6 +393,7 @@ impl Emitter<'_> {
 
     pub(super) fn local_property_write_access(
         &self,
+        operation: krusty::ir::ExprId,
         target: krusty::fir::PropertyId,
         receiver: Option<TypeName>,
     ) -> Option<krusty::jvm::inline::PropertyAccess> {
@@ -357,18 +403,18 @@ impl Emitter<'_> {
             name,
             property,
             ..
-        } = self.ir.local_property_layouts.get(&target)?
+        } = self.ir.property_layout_at(operation, target).ok()??
         else {
             return None;
         };
-        let class = self.ir.classes.get(*class as usize)?;
-        debug_assert_eq!(class.fq_name, *owner);
-        let index = *property as usize;
+        let class = self.ir.classes.get(class as usize)?;
+        debug_assert_eq!(class.fq_name, owner);
+        let index = property as usize;
         let declared = class.properties.get(index)?;
         self.realize_declared_property_write_access(
             class,
-            *owner,
-            name,
+            owner,
+            &name,
             Some((index, declared)),
             receiver,
         )
