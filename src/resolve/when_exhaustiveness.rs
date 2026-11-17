@@ -39,7 +39,7 @@ impl Checker<'_> {
         has_subject: bool,
     ) {
         self.exhaustive_whens.whens.insert(when);
-        if has_else || !has_subject || !self.file.no_when_branch_matched_with_subject {
+        if has_else || !has_subject || !self.file.language.no_when_branch_matched_with_subject {
             return;
         }
         if self.exhaustive_whens.failing_with_subject.is_empty() {

@@ -30,6 +30,7 @@ impl ClassDecl {
         };
         if let Some(value_span) = self.value_modifier_span {
             let explicit_inline = file
+                .language
                 .explicit_inline_value_classes
                 .then(inline_span)
                 .flatten();

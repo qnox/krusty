@@ -71,6 +71,8 @@ pub struct FileLanguagePolicy {
     /// `+FullValueClasses`: a `value class` without `@JvmInline` is a boxed class with structural
     /// `equals`/`hashCode`/`toString`. Without the feature that declaration is an error.
     pub full_value_classes: bool,
+    /// `+ExplicitInlineValueClassesSyntax`: `inline value class` declares an inline class.
+    pub explicit_inline_value_classes: bool,
     /// `+AllowSmartCastsOnValueClassUnderlyingProperties`: a value class's component declared in
     /// another module is a stable smart-cast subject.
     pub smart_cast_value_class_components: bool,
@@ -91,6 +93,9 @@ pub struct FileLanguagePolicy {
     /// `+NormalizeNaNValuesInConstContext`: every NaN a compile-time constant evaluates to is the
     /// canonical NaN of its type, whatever sign and payload the arithmetic produced.
     pub normalize_nan_in_const_context: bool,
+    /// `+NoWhenBranchMatchedExceptionWithMessage`: an exhaustive subject `when` without an `else`
+    /// fails through `kotlin.internal.throwNoWhenBranchMatchedException(subject)`.
+    pub no_when_branch_matched_with_subject: bool,
     /// `+IntrinsicConstEvaluation`: a constant context (an annotation argument, a `const val`)
     /// also evaluates the intrinsic-const reads it otherwise rejects, such as an entry's `name`.
     pub intrinsic_const_evaluation: bool,
