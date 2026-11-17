@@ -5257,6 +5257,7 @@ impl<'a> Emitter<'a> {
                 }
                 crate::property_realizations::PropertyRealization::Local(target) => self
                     .local_property_read_access(
+                        operation.expression,
                         *target,
                         selected.map(|(name, _)| name.as_str()),
                         operation.interface,
@@ -5361,7 +5362,7 @@ impl<'a> Emitter<'a> {
                     access.clone()
                 }
                 crate::property_realizations::PropertyRealization::Local(target) => self
-                    .local_property_write_access(*target, receiver_class)
+                    .local_property_write_access(operation.expression, *target, receiver_class)
                     .expect("a realized local member property write has exact JVM access"),
             })
             .or_else(|| {
