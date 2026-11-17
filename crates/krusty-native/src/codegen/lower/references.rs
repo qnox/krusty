@@ -836,7 +836,7 @@ impl<'a> FileLowering<'a> {
         base: &str,
         property: &str,
     ) -> Result<(), Unsupported> {
-        let text = format!("property {property} (Kotlin reflection is not available)");
+        let text = krusty::backend::reference_names::property_reference_text(property);
         self.define_reference_text(id, &format!("{base}_to_string"), &text)
     }
 

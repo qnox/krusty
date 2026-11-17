@@ -4,6 +4,9 @@
 //! reference (an adapter, a lifted local function, a dependency's physical entry). Every backend
 //! that realizes `KCallable.name` as a member of its reference objects reads it here, so each one
 //! answers the same name for the same reference.
+//!
+//! The same holds for what a property reference prints: [`property_reference_text`] is the one
+//! text every backend's `toString` of a property reference answers.
 
 use crate::ir::{
     IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable, IrFile,
@@ -68,4 +71,11 @@ pub fn callable_reference_name(
             .to_string(),
         ),
     }
+}
+
+/// What `toString` of a property reference named `name` answers without the reflection library:
+/// `property NAME (Kotlin reflection is not available)`, mutable or not, as the Kotlin/JVM,
+/// Kotlin/Native and Kotlin/Wasm standard libraries print it.
+pub fn property_reference_text(name: &str) -> String {
+    format!("property {name} (Kotlin reflection is not available)")
 }

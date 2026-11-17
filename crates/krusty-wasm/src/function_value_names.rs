@@ -46,8 +46,8 @@ pub(super) fn property_reference_string(
         return None;
     }
     let name = krusty::backend::reference_names::callable_reference_name(ir, callables, reference)?;
-    Some(format!(
-        "property {name} (Kotlin reflection is not available)"
+    Some(krusty::backend::reference_names::property_reference_text(
+        &name,
     ))
 }
 
