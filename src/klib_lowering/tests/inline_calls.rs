@@ -152,3 +152,46 @@ fn an_inline_body_returning_early_leaves_through_its_expansion_frame() {
         .iter()
         .any(|expression| matches!(expression, IrExpr::Const(IrConst::Int(2)))));
 }
+
+#[test]
+fn a_declined_inline_expansion_leaves_its_function_id_free_for_an_ordinary_callable() {
+    let demo = demo_inlining(
+        &[
+            ("loops", &[T::Int], T::Int),
+            ("caller", &[T::Int], T::Int),
+            ("plain", &[T::Int], T::Int),
+        ],
+        &["loops"],
+        |name, body| match name {
+            "loops" => {
+                let argument = body.param(0);
+                let call = body.call("loops", vec![argument], T::Int);
+                Some(vec![body.ret(call)])
+            }
+            "caller" => {
+                let argument = body.param(0);
+                let call = body.call("loops", vec![argument], T::Int);
+                Some(vec![body.ret(call)])
+            }
+            _ => sole_return(body),
+        },
+    );
+    let mut unit = DependencyBodyUnit::default();
+    demo.lower(&mut unit, "caller", &["caller", "loops"])
+        .expect_err("a recursive inline function cannot be expanded");
+    assert!(unit.ir().inline_fns.is_empty());
+    assert!(unit.ir().inline_only_fns.is_empty());
+    // The retry reuses the function id the declined lowering declared.
+    let plain = demo
+        .lower(&mut unit, "plain", &["plain"])
+        .expect("an ordinary callable lowers");
+    validated(unit.ir());
+    assert!(!unit.ir().inline_only_fns.contains(&plain));
+    assert_eq!(
+        unit.callable_functions()
+            .map(|(_, function)| function)
+            .collect::<Vec<_>>(),
+        vec![plain],
+        "the ordinary callable is still emitted"
+    );
+}
