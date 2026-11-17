@@ -819,3 +819,86 @@ esac
         assert_eq!(fs::read_to_string(&calls).unwrap(), expected);
     }
 }
+
+#[test]
+fn the_push_token_reaches_git_without_being_persisted() {
+    let remote = Remote::new("token");
+    let first = remote.push_commit("first");
+    let token = [("RELEASE_TOKEN", "release-token-for-tests")];
+
+    let acquire = remote.publisher(&first, &["acquire"], &token);
+    assert_eq!(acquire.status.code(), Some(0), "{acquire:?}");
+    assert_eq!(acquire.stderr, b"");
+    let lock = text(acquire.stdout).trim().to_owned();
+    let bind = remote.publisher(&first, &["bind-tag", "v1"], &token);
+    assert_eq!(bind.status.code(), Some(0), "{bind:?}");
+    assert_eq!(bind.stderr, b"");
+    let latest = remote.publisher(&first, &["acquire-latest"], &token);
+    assert_eq!(latest.status.code(), Some(0), "{latest:?}");
+    assert_eq!(latest.stderr, b"");
+    let latest_lock = text(latest.stdout).trim().to_owned();
+    let record = remote.publisher(&first, &["record"], &token);
+    assert_eq!(record.status.code(), Some(0), "{record:?}");
+    assert_eq!(record.stderr, b"");
+    let release_latest = remote.publisher(&first, &["release-latest", &latest_lock], &token);
+    assert_eq!(release_latest.status.code(), Some(0), "{release_latest:?}");
+    assert_eq!(release_latest.stderr, b"");
+    let release = remote.publisher(&first, &["release", &lock], &token);
+    assert_eq!(release.status.code(), Some(0), "{release:?}");
+    assert_eq!(release.stderr, b"");
+    assert_eq!(
+        remote.remote_ref(RELEASED_REF).as_deref(),
+        Some(first.as_str())
+    );
+    assert_eq!(
+        remote.remote_ref("refs/tags/v1").as_deref(),
+        Some(first.as_str())
+    );
+    assert_eq!(remote.remote_ref(&publication_lock(&first)), None);
+    assert_eq!(remote.remote_ref(LATEST_LOCK_REF), None);
+
+    let config = fs::read_to_string(remote.root.join("work/.git/config")).expect("read config");
+    assert!(
+        !config.contains("extraheader") && !config.contains("release-token-for-tests"),
+        "the token lives only in the publisher's environment: {config}"
+    );
+}
+
+#[test]
+fn a_push_token_preserves_the_inherited_git_configuration() {
+    let remote = Remote::new("inherited-config");
+    let first = remote.push_commit("first");
+    let alias = "release-test://repository";
+    let token = "release-token-for-tests";
+    let missing_alias = remote.publisher(
+        &first,
+        &["acquire"],
+        &[("RELEASE_REMOTE", alias), ("RELEASE_TOKEN", token)],
+    );
+    assert!(!missing_alias.status.success());
+    assert_eq!(remote.remote_ref(&publication_lock(&first)), None);
+
+    let key = format!("url.{}.insteadOf", remote.root.join("remote.git").display());
+    let inherited = [
+        ("RELEASE_REMOTE", alias),
+        ("RELEASE_TOKEN", token),
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", key.as_str()),
+        ("GIT_CONFIG_VALUE_0", alias),
+    ];
+    let acquire = remote.publisher(&first, &["acquire"], &inherited);
+    assert_eq!(acquire.status.code(), Some(0), "{acquire:?}");
+    assert_eq!(acquire.stderr, b"");
+    let lock = text(acquire.stdout).trim().to_owned();
+    let record = remote.publisher(&first, &["record"], &inherited);
+    assert_eq!(record.status.code(), Some(0), "{record:?}");
+    assert_eq!(record.stderr, b"");
+    assert_eq!(
+        remote.remote_ref(RELEASED_REF).as_deref(),
+        Some(first.as_str())
+    );
+    let release = remote.publisher(&first, &["release", &lock], &inherited);
+    assert_eq!(release.status.code(), Some(0), "{release:?}");
+    assert_eq!(release.stderr, b"");
+    assert_eq!(remote.remote_ref(&publication_lock(&first)), None);
+}
