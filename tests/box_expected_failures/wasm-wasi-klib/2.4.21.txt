@@ -435,7 +435,6 @@ coroutines/controlFlow/breakFinally.kt
 coroutines/controlFlow/breakStatement.kt
 coroutines/controlFlow/doWhileStatement.kt
 coroutines/controlFlow/doWhileWithInline.kt
-coroutines/controlFlow/doubleBreak.kt
 coroutines/controlFlow/forContinue.kt
 coroutines/controlFlow/forStatement.kt
 coroutines/controlFlow/forWithStep.kt
@@ -445,7 +444,6 @@ coroutines/controlFlow/returnFromFinally.kt
 coroutines/controlFlow/returnWithFinally.kt
 coroutines/controlFlow/switchLikeWhen.kt
 coroutines/controlFlow/throwFromCatch.kt
-coroutines/controlFlow/throwFromFinally.kt
 coroutines/controlFlow/throwInTryWithHandleResult.kt
 coroutines/controlFlow/whileStatement.kt
 coroutines/controlFlow_chain.kt
@@ -653,7 +651,6 @@ coroutines/iterateOverArray.kt
 coroutines/kt15016.kt
 coroutines/kt15930.kt
 coroutines/kt21080.kt
-coroutines/kt21605.kt
 coroutines/kt24135.kt
 coroutines/kt25912.kt
 coroutines/kt28844.kt
@@ -680,7 +677,6 @@ coroutines/longRangeInSuspendCall.kt
 coroutines/mergeNullAndString.kt
 coroutines/multiModule/inheritFromAnotherModule.kt
 coroutines/multiModule/inlineMultiModuleOverride.kt
-coroutines/multiModule/inlineMultiModuleWithController.kt
 coroutines/multiModule/simple.kt
 coroutines/multipleInvokeCalls.kt
 coroutines/multipleInvokeCallsInsideInlineLambda1.kt
@@ -1615,11 +1611,7 @@ ranges/contains/evaluationOrderForRangeLiteral.kt
 ranges/contains/evaluationOrderForRangeLiteralReversed.kt
 ranges/contains/evaluationOrderForUntil.kt
 ranges/contains/evaluationOrderForUntilReversed.kt
-ranges/contains/generated/arrayIndices.kt
 ranges/contains/generated/charDownTo.kt
-ranges/contains/generated/collectionIndices.kt
-ranges/contains/generated/doubleRangeTo.kt
-ranges/contains/generated/floatRangeTo.kt
 ranges/contains/generated/intDownTo.kt
 ranges/contains/generated/longDownTo.kt
 ranges/contains/generated/uintDownTo.kt
