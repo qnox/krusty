@@ -203,8 +203,8 @@ pub enum PluginDiagnostic {
     /// A declared option setting krusty's native implementation does not honour yet — hard error.
     UnimplementedOption { option: PluginOption },
     /// krusty substitutes a native pass that covers only part of what the plugin generates. Not an
-    /// error for a compilation, which rejects an uncovered construct itself, but a refusal for a
-    /// build that must choose a compiler before it knows the sources.
+    /// error for a compilation, which rejects an uncovered construct itself as a plugin refusal
+    /// (`DiagnosticKind::PluginRefusal`) that a build can hand to kotlinc.
     PartialSubstitution { plugin_id: String },
 }
 
@@ -217,11 +217,6 @@ impl PluginDiagnostic {
                 | PluginDiagnostic::UnsupportedOption { .. }
                 | PluginDiagnostic::UnimplementedOption { .. }
         )
-    }
-
-    /// Whether a build asking which compilations krusty takes must give this one to kotlinc.
-    pub fn is_refusal(&self) -> bool {
-        self.is_error() || matches!(self, PluginDiagnostic::PartialSubstitution { .. })
     }
 
     pub fn message(&self) -> String {
@@ -837,7 +832,7 @@ mod tests {
     }
 
     #[test]
-    fn atomicfu_runs_natively_but_a_build_is_refused_it_until_coverage_is_complete() {
+    fn atomicfu_runs_natively_and_notes_that_its_coverage_is_partial() {
         let jar = plugin_jar(
             "kotlin-atomicfu-compiler-plugin-embeddable.jar",
             &[registrar_of(ATOMICFU_PLUGIN_ID)],
@@ -851,11 +846,10 @@ mod tests {
             &resolved.diagnostics[0],
             PluginDiagnostic::PartialSubstitution { plugin_id } if plugin_id == ATOMICFU_PLUGIN_ID
         ));
-        assert!(resolved.diagnostics[0].is_refusal());
     }
 
     #[test]
-    fn compose_runs_natively_but_a_build_is_refused_it_until_coverage_is_complete() {
+    fn compose_runs_natively_and_notes_that_its_coverage_is_partial() {
         let jar = plugin_jar(
             "compose-compiler-plugin.jar",
             &["androidx.compose.compiler.plugins.kotlin.ComposePluginRegistrar"],
@@ -873,7 +867,6 @@ mod tests {
             &resolved.diagnostics[0],
             PluginDiagnostic::PartialSubstitution { plugin_id } if plugin_id == COMPOSE_PLUGIN_ID
         ));
-        assert!(resolved.diagnostics[0].is_refusal());
     }
 
     #[test]

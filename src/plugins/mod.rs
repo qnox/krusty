@@ -308,6 +308,28 @@ pub struct FrontendDeclaredProperty {
 pub struct FrontendPluginDiagnostic {
     pub span: crate::diag::Span,
     pub message: String,
+    /// The plugin does not implement the construct yet, as opposed to the source being invalid.
+    pub refusal: bool,
+}
+
+impl FrontendPluginDiagnostic {
+    /// The source is invalid under the plugin's rules, as kotlinc's plugin reports it.
+    pub fn error(span: crate::diag::Span, message: String) -> Self {
+        Self {
+            span,
+            message,
+            refusal: false,
+        }
+    }
+
+    /// The source is valid, but the plugin's native pass does not implement it yet.
+    pub fn refusal(span: crate::diag::Span, message: String) -> Self {
+        Self {
+            span,
+            message,
+            refusal: true,
+        }
+    }
 }
 
 /// A source classifier as a plugin sees it when one of its annotations names a CLASS the plugin

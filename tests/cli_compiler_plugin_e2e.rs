@@ -429,21 +429,12 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
             String::new()
         )
     );
-    // Compose runs as a partial native pass, which a build is refused until it is complete.
+    // Compose runs as a partial native pass. A build still tries krusty, which rejects a construct
+    // the pass does not cover with its own exit status, so the support check does not refuse it.
     let compose = reference_plugin_jar("compose-compiler-plugin.jar");
     assert_eq!(
         check(&[format!("-Xplugin={}", compose.display())]),
-        (
-            Some(1),
-            format!(
-                "{}\n",
-                PluginDiagnostic::PartialSubstitution {
-                    plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string()
-                }
-                .message()
-            ),
-            String::new()
-        )
+        (Some(0), String::new(), String::new())
     );
     // So is a Kotlin release krusty does not support: kotlinc of that release compiles it.
     assert_eq!(
@@ -855,7 +846,7 @@ fn assert_atomicfu_rejects(name: &str, declarations: &str, error: &str) {
             probe.source.display()
         )
     );
-    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.code, Some(3));
     assert_eq!(compiled.classes, Vec::<String>::new());
 }
 
@@ -892,7 +883,7 @@ fn assert_compose_library_call_rejects(name: &str, library: &str, declarations: 
             probe.source.display()
         )
     );
-    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.code, Some(3));
     assert_eq!(compiled.classes, Vec::<String>::new());
 }
 
@@ -1083,7 +1074,7 @@ fn assert_compose_rejects(name: &str, declarations: &str, others: &[(&str, &str)
             probe.source.display()
         )
     );
-    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.code, Some(3));
     assert_eq!(compiled.classes, Vec::<String>::new());
 }
 

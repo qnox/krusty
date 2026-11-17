@@ -135,7 +135,11 @@ pub(super) fn checked_ir_file<'a>(
     );
     if !rejections.is_empty() {
         for rejection in rejections {
-            diags.error(rejection.span, rejection.message);
+            diags.error_kind(
+                rejection.span,
+                crate::diag::DiagnosticKind::PluginRefusal,
+                rejection.message,
+            );
         }
         return None;
     }
