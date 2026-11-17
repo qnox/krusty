@@ -2369,7 +2369,6 @@ storeStackBeforeInline/primitiveMerge.kt
 storeStackBeforeInline/simple.kt
 storeStackBeforeInline/unreachableMarker.kt
 storeStackBeforeInline/withLambda.kt
-strictEquals/crossModuleInheritance.kt
 strictEquals/delegated.kt
 stringTrim/stringTrim.kt
 strings/charSequenceGet.kt

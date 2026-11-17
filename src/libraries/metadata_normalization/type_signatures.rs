@@ -64,6 +64,22 @@ pub(crate) fn declared_function_generic_sig(
     )
 }
 
+/// A function's `@EqualityBound`, with the same type-parameter identities and enclosing bounds
+/// as its declared signature.
+pub(crate) fn declared_function_equality_bound(
+    function: &KotlinFunction,
+    enclosing: &EnclosingBounds,
+    identities: &TypeParameterIdentities,
+) -> Option<crate::types::Ty> {
+    let bound = function.equality_bound.as_ref()?;
+    let bounds = semantic_bounds_with_identities(&function.formals, enclosing, identities.by_id());
+    Some(semantic_ty_with_identities(
+        bound,
+        &bounds,
+        identities.by_id(),
+    ))
+}
+
 /// A property's declared signature, in the shape of its getter, with declaration-owned parameter
 /// identities and the semantic bounds its enclosing classes put in scope.
 pub(crate) fn declared_property_generic_sig(
