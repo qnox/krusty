@@ -116,7 +116,6 @@ boxingOptimization/safeCallWithElvis.kt
 boxingOptimization/safeCallWithElvisMultipleFiles.kt
 boxingOptimization/simple.kt
 boxingOptimization/simpleUninitializedMerge.kt
-boxingOptimization/taintedValues.kt
 boxingOptimization/unsafeRemoving.kt
 boxingOptimization/unsignedArrayForEach.kt
 boxingOptimization/variables.kt
@@ -930,7 +929,6 @@ inference/pcla/memberScope.kt
 inference/pcla/nestedNonExhaustiveIf.kt
 inference/pcla/substituteStubTypeIntoCR.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt
-inference/pcla/withoutAnnotation.kt
 inference/plusAssignInsideLambda.kt
 initializers/correctOrder1.kt
 initializers/correctOrder2.kt
