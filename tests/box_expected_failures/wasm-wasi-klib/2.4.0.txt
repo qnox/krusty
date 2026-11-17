@@ -1992,11 +1992,13 @@ ranges/forInCharSequenceLengthIncreasedInLoopBody.kt
 ranges/forInCharSequenceWithCustomIterator.kt
 ranges/forInCharSequenceWithMultipleGetFunctions.kt
 ranges/forInCustomIterable.kt
+ranges/forInDoubleRangeWithCustomIterator.kt
 ranges/forInDownTo/forIntInDownTo.kt
 ranges/forInDownTo/forIntInDownToWithNonConstBounds.kt
 ranges/forInDownTo/forIntInNonOptimizedDownTo.kt
 ranges/forInDownTo/forLongInDownTo.kt
 ranges/forInDownTo/forNullableIntInDownTo.kt
+ranges/forInFloatRangeWithCustomIterator.kt
 ranges/forInIndices/forInArrayListIndices.kt
 ranges/forInIndices/forInCollectionImplicitReceiverIndices.kt
 ranges/forInIndices/forInCollectionIndices.kt

@@ -48,6 +48,8 @@ pub struct SamSignature {
     /// call specializes them: a type parameter the call binds to `Int` stays that type parameter.
     /// A target realizes its result and bridge descriptors from these.
     pub(crate) overridden_results: Vec<Ty>,
+    pub(crate) dispatch_methods: Vec<SamMethodFrame>,
+    pub(crate) default_methods: Vec<SamMethodFrame>,
     /// The interface is a Kotlin declaration, not a Java one.
     pub(crate) kotlin_interface: bool,
     /// Provider-normalized semantic identities parallel to `declared_params`.
@@ -55,6 +57,24 @@ pub struct SamSignature {
     /// The interface's own type parameters, in declaration order, with every declared upper bound
     /// and whether that bound is an interface type. `declared_params` and `declared_ret` name them.
     pub(crate) type_parameters: Vec<SamTypeParameter>,
+}
+
+/// One checked declaration in a SAM dispatch family or an effective default slot.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SamMethodFrame {
+    pub(crate) declaration: Option<SamMethodDeclaration>,
+    pub(crate) parameters: Vec<Ty>,
+    pub(crate) result: Ty,
+}
+
+impl SamMethodFrame {
+    fn of(declaration: &CollectedDeclaration) -> Self {
+        Self {
+            declaration: declaration.declaration,
+            parameters: declaration.member.params.clone(),
+            result: declaration.member.ret,
+        }
+    }
 }
 
 /// One type parameter the functional interface declares.
@@ -181,6 +201,7 @@ pub(crate) fn semantic_sam_signature(
     }
 
     let mut abstract_method = None;
+    let mut default_methods = Vec::new();
     for (_, declarations) in declarations {
         let nearest = declarations
             .iter()
@@ -196,6 +217,10 @@ pub(crate) fn semantic_sam_signature(
                 overridden_results.push(result);
             }
         }
+        let dispatch_methods = declarations
+            .iter()
+            .map(SamMethodFrame::of)
+            .collect::<Vec<_>>();
         let nearest = declarations
             .into_iter()
             .filter(|declaration| declaration.depth == nearest)
@@ -204,6 +229,12 @@ pub(crate) fn semantic_sam_signature(
             .iter()
             .any(|declaration| !declaration.member.is_abstract())
         {
+            default_methods.extend(
+                nearest
+                    .iter()
+                    .filter(|declaration| !declaration.member.is_abstract())
+                    .map(SamMethodFrame::of),
+            );
             continue;
         }
         let CollectedDeclaration {
@@ -224,14 +255,23 @@ pub(crate) fn semantic_sam_signature(
                 declaration,
                 overridden_results,
                 receiver_convention,
+                dispatch_methods,
             ))
             .is_some()
         {
             return None;
         }
     }
-    let (sam, params, contravariant_params, ret, declaration, overridden_results, convention) =
-        abstract_method?;
+    let (
+        sam,
+        params,
+        contravariant_params,
+        ret,
+        declaration,
+        overridden_results,
+        convention,
+        dispatch_methods,
+    ) = abstract_method?;
     let parameter_identities = sam_parameter_identities(&sam)?;
     let type_parameters = target_classifier
         .type_params()
@@ -274,6 +314,8 @@ pub(crate) fn semantic_sam_signature(
         has_receiver,
         suspend: sam.suspend(),
         overridden_results,
+        dispatch_methods,
+        default_methods,
         kotlin_interface,
         parameter_identities,
         type_parameters,
@@ -407,6 +449,7 @@ fn collect_member(
     // then the interface's functional method and must not be erased merely because its signature
     // resembles `Any`.
     if member.visibility != Visibility::Public
+        || member.is_classifier_static()
         || (!retain_direct_kotlin_object_method && is_public_object_method(member))
     {
         return;
