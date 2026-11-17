@@ -66,6 +66,18 @@ pub(super) fn ordinary_subtype(
     sub == sup || classes.is_some_and(|classes| satisfies(Some(classes), parameters, sub, sup))
 }
 
+/// The declared upper bounds of `owner`'s type parameter at `index`, from the calling
+/// compilation's class model. Without the model no bound is known.
+pub(super) fn classifier_parameter_bounds(
+    classes: Option<&dyn TypeOracle>,
+    owner: TypeName,
+    index: usize,
+) -> Vec<Ty> {
+    classes.map_or_else(Vec::new, |classes| {
+        classes.type_param_upper_bounds(owner, index)
+    })
+}
+
 /// Whether `left` and `right` are one type once every projection that only restates its
 /// parameter's declaration-site variance is dropped: `Iterator<out T>` is `Iterator<T>` because
 /// `Iterator` declares its parameter `out`. A star in that covariant slot likewise reads its

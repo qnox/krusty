@@ -1419,6 +1419,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.sources.callees.same_type(left, right)
     }
 
+    fn classifier_parameter_bounds(&self, owner: TypeName, index: usize) -> Vec<Ty> {
+        self.sources
+            .callees
+            .classifier_parameter_bounds(owner, index)
+    }
+
     fn link_constructor(
         &mut self,
         ir: &mut IrFile,
@@ -2430,6 +2436,14 @@ impl<'s> Linker<'_, 's> {
             // A singleton edge reads the object it dispatches to, which its receiver proof
             // selects; no class is materialized for it.
             (Some(_), Some(selected)) if selected.singleton_dispatch().is_some() => None,
+            // An interface's default reads its receiver as whichever instance inherits it.
+            (Some(_), Some(selected))
+                if selected.class_contract().is_some_and(
+                    crate::libraries::KlibBodyClassContract::emits_default_members,
+                ) =>
+            {
+                None
+            }
             (Some(_), Some(selected)) => Some(self.materialize_member_class(ir, selected)?),
             (Some(_), None) => {
                 return Err(KlibBodyDeclineReason::SignatureMismatch(
