@@ -104,6 +104,35 @@ KT_FUNCTION_TYPE(20)
 KT_FUNCTION_TYPE(21)
 KT_FUNCTION_TYPE(22)
 
+/* Suspend function markers use source arity. Their values also wear the ordinary FunctionN marker
+   for the physical invoke signature, which includes the continuation parameter. */
+#define KT_SUSPEND_FUNCTION_TYPE(arity) \
+    KT_MARKER_TYPE(kt_type_suspend_function##arity, "kotlin.coroutines.", "SuspendFunction" #arity)
+
+KT_SUSPEND_FUNCTION_TYPE(0)
+KT_SUSPEND_FUNCTION_TYPE(1)
+KT_SUSPEND_FUNCTION_TYPE(2)
+KT_SUSPEND_FUNCTION_TYPE(3)
+KT_SUSPEND_FUNCTION_TYPE(4)
+KT_SUSPEND_FUNCTION_TYPE(5)
+KT_SUSPEND_FUNCTION_TYPE(6)
+KT_SUSPEND_FUNCTION_TYPE(7)
+KT_SUSPEND_FUNCTION_TYPE(8)
+KT_SUSPEND_FUNCTION_TYPE(9)
+KT_SUSPEND_FUNCTION_TYPE(10)
+KT_SUSPEND_FUNCTION_TYPE(11)
+KT_SUSPEND_FUNCTION_TYPE(12)
+KT_SUSPEND_FUNCTION_TYPE(13)
+KT_SUSPEND_FUNCTION_TYPE(14)
+KT_SUSPEND_FUNCTION_TYPE(15)
+KT_SUSPEND_FUNCTION_TYPE(16)
+KT_SUSPEND_FUNCTION_TYPE(17)
+KT_SUSPEND_FUNCTION_TYPE(18)
+KT_SUSPEND_FUNCTION_TYPE(19)
+KT_SUSPEND_FUNCTION_TYPE(20)
+KT_SUSPEND_FUNCTION_TYPE(21)
+KT_SUSPEND_FUNCTION_TYPE(22)
+
 /* Kotlin's reflection hierarchy, as far as a PROPERTY REFERENCE wears it. None has instances of
    its own — a reference object's type is one the generator emits per property — so these are what
    an `is` against `KProperty0` or `KMutableProperty` compares with. */
