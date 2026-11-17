@@ -16,6 +16,20 @@ pub(super) struct ContextualPropertyDisplay<'a> {
     pub(super) mutable: bool,
 }
 
+/// How many of a declaration's `context_count` leading context parameters a reference fills from its
+/// own site: all of them when the file binds reference contexts (`CallableReferencesToContextual`),
+/// otherwise none, and they stay ordinary leading inputs of the reference's function type.
+pub(super) fn bound_reference_contexts(
+    binds_reference_contexts: bool,
+    context_count: usize,
+) -> usize {
+    if binds_reference_contexts {
+        context_count
+    } else {
+        0
+    }
+}
+
 impl Checker<'_> {
     /// Apply an expected callable shape to one generic declaration before reference adaptation.
     /// An extension contributes its already-selected receiver as inference evidence; references
@@ -184,11 +198,10 @@ impl Checker<'_> {
         &self,
         function: &crate::libraries::FunctionInfo,
     ) -> usize {
-        if self.file.callable_references_to_contextual {
-            function.context_count
-        } else {
-            0
-        }
+        bound_reference_contexts(
+            self.file.callable_references_to_contextual,
+            function.context_count,
+        )
     }
 
     /// Without `CallableReferencesToContextual` a declaration with context parameters cannot be
