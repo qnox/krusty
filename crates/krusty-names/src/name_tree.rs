@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-pub struct NameId(pub(crate) u32);
+pub struct NameId(pub u32);
 
 #[derive(Debug)]
 struct NameNode {
@@ -409,7 +409,7 @@ impl NameTree {
     /// requiring the owner class itself to be present. `owner_segment` is the owner's final path
     /// segment (`Outer`, `Outer$Inner`), so a flat `insert("pkg/Outer$Companion")` is found even
     /// when `pkg/Outer` itself was never inserted.
-    pub(crate) fn existing_nested_under(
+    pub fn existing_nested_under(
         &self,
         parent: NameId,
         owner_segment: &str,
@@ -505,7 +505,7 @@ impl NameTree {
     /// the classifier's final segment into JVM nested-class separators. Keeping the split here
     /// prevents backend callers from rendering an identity and then rediscovering its name-tree
     /// structure with string scans.
-    pub(crate) fn jvm_binary_name(&self, id: NameId) -> String {
+    pub fn jvm_binary_name(&self, id: NameId) -> String {
         if id == Self::ROOT {
             return String::new();
         }
@@ -532,7 +532,7 @@ impl NameTree {
     }
 
     /// JVM classfile spelling of a nested classifier below `owner`, without interning the child.
-    pub(crate) fn jvm_nested_binary_name(&self, owner: NameId, nested: &str) -> String {
+    pub fn jvm_nested_binary_name(&self, owner: NameId, nested: &str) -> String {
         let mut out = self.jvm_binary_name(owner);
         out.reserve(nested.len() + 1);
         out.push('$');
@@ -683,12 +683,7 @@ impl NameTree {
     /// Whether `path` is the JVM classfile spelling of `owner`'s direct nested classifier. The
     /// comparison walks the stored namespace and final segment without rendering or interning the
     /// candidate; source/metadata dots in the class tail compare as JVM `$` separators.
-    pub(crate) fn nested_child_matches_path(
-        &self,
-        owner: NameId,
-        nested: &str,
-        path: &str,
-    ) -> bool {
+    pub fn nested_child_matches_path(&self, owner: NameId, nested: &str, path: &str) -> bool {
         let (namespace, candidate) = path.rsplit_once('/').unwrap_or(("", path));
         let owner = self.node(owner);
         let Some(parent) = owner.parent else {
@@ -735,7 +730,7 @@ impl NameTree {
     }
 
     /// The exact nesting edge published by nested-child construction, without decoding spelling.
-    pub(crate) fn exact_nested_owner(&self, nested: NameId) -> Option<NameId> {
+    pub fn exact_nested_owner(&self, nested: NameId) -> Option<NameId> {
         let exact = self.node(nested).exact_nested_owner.load(Ordering::Acquire);
         exact.checked_sub(1).map(NameId)
     }
@@ -786,7 +781,7 @@ impl NameTree {
     /// [`Self::nested_owner`]: a generated local name such as `Outer$build$1` has no semantic owner
     /// encoded by its last boundary, while the JVM `InnerClasses` backend may still need to compare
     /// all textual boundaries against the exact declarations of the current file.
-    pub(crate) fn existing_nested_owners(&self, nested: NameId) -> Vec<NameId> {
+    pub fn existing_nested_owners(&self, nested: NameId) -> Vec<NameId> {
         let node = self.node(nested);
         let Some(parent) = node.parent else {
             return Vec::new();
@@ -800,7 +795,7 @@ impl NameTree {
     /// The classifier segment of `candidate` relative to an already-resolved enclosing classifier.
     /// Nested JVM segments are flattened (`Outer$Nested$Deep`), so this preserves every `$` that is
     /// part of the source nested name without rendering either identity.
-    pub(crate) fn nested_segment_within(&self, candidate: NameId, owner: NameId) -> Option<&str> {
+    pub fn nested_segment_within(&self, candidate: NameId, owner: NameId) -> Option<&str> {
         let candidate = self.node(candidate);
         let owner = self.node(owner);
         (candidate.parent == owner.parent)
@@ -812,7 +807,7 @@ impl NameTree {
     /// Split the last JVM nesting boundary for backend emission when no enclosing classifier is
     /// declared in the current file. The split stays in the name tree; callers receive the final
     /// external strings rather than rendering a name and interpreting it themselves.
-    pub(crate) fn jvm_nested_parts(&self, nested: NameId) -> Option<(String, String)> {
+    pub fn jvm_nested_parts(&self, nested: NameId) -> Option<(String, String)> {
         let node = self.node(nested);
         let split = node.segment.rfind('$')?;
         let parent = node.parent?;
@@ -825,7 +820,7 @@ impl NameTree {
     }
 
     /// Lexicographic ordering of two stored paths without allocating their rendered forms.
-    pub(crate) fn path_cmp(&self, left: NameId, right: NameId) -> std::cmp::Ordering {
+    pub fn path_cmp(&self, left: NameId, right: NameId) -> std::cmp::Ordering {
         self.path_bytes(left).cmp(self.path_bytes(right))
     }
 
@@ -849,7 +844,7 @@ impl NameTree {
     /// Requiring exclusive access prevents a probe from holding a previous table pointer while
     /// this drops it. The jimage index calls this at the end of its single-threaded build, before
     /// the tree is published.
-    pub(crate) fn reclaim_retired_tables(&mut self) {
+    pub fn reclaim_retired_tables(&mut self) {
         let writer = self.writer.get_mut().unwrap();
         if writer.tables.len() <= 1 {
             return;
@@ -863,12 +858,10 @@ impl NameTree {
         writer.tables.push(live);
     }
 
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.arena.len() as usize
     }
 
-    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.arena.len() == 0
     }
