@@ -256,7 +256,7 @@ impl<'a> FileLowering<'a> {
                     .and_then(super::super::super::intrinsics::reflection_type_descriptor)
                     .expect("just matched")
             }
-            _ => return Ok(None),
+            _ => return self.dependency_interface_descriptor(target),
         };
         self.import_data(symbol).map(Some)
     }

@@ -133,13 +133,41 @@ impl Body<'_> {
         operand: u32,
         reference: ValType,
     ) -> Result<(), Unsupported> {
+        self.expression(operand)?;
+        self.require_nonnull_reference(reference)
+    }
+
+    /// Consume the type test on the stack, throwing the runtime `ClassCastException` through the
+    /// Kotlin exception tag when it failed, as kotlinc-wasm's checked cast does.
+    pub(super) fn throw_class_cast_unless(&mut self) -> Result<(), Unsupported> {
+        let failure = self.runtime.exception_class(
+            self.module,
+            self.classifiers,
+            krusty::libraries::RuntimeExceptionKind::ClassCast.classifier(),
+        )?;
+        self.code.op(EQZ32).if_(BlockType::Empty);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            failure,
+            None,
+            self.runtime.string,
+        )?;
+        self.code.throw(self.runtime.exceptions.tag).end();
+        Ok(())
+    }
+
+    /// Replace the `reference` value on the stack with itself as a non-null reference; a null
+    /// throws the authenticated Kotlin NPE through the ordinary exception tag.
+    pub(super) fn require_nonnull_reference(
+        &mut self,
+        reference: ValType,
+    ) -> Result<(), Unsupported> {
         let structure = self.runtime.exception_class(
             self.module,
             self.classifiers,
             krusty::libraries::RuntimeExceptionKind::NullPointer.classifier(),
         )?;
         let value = self.local(reference);
-        self.expression(operand)?;
         self.code
             .local_set(value)
             .local_get(value)

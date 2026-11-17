@@ -40,9 +40,15 @@ pub struct IrSamTarget {
     /// The converted value's own callable view is `suspend`. A non-suspend value adapted to a
     /// suspend method is stored as that value's `FunctionN`; the continuation stays on the method.
     pub source_suspend: bool,
+    /// The selected declaration requires the object-method dispatch path, not an ordinary slot.
+    pub requires_object_dispatch: bool,
     /// The distinct own results of the declarations the method overrides, unspecialized. A target
     /// whose method result or bridges depend on the overridden results realizes them from these.
     pub overridden_results: Vec<Ty>,
+    /// Exact declarations in the implemented override family, including inherited aliases.
+    pub dispatch_methods: Vec<IrSamMethodFrame>,
+    /// Effective inherited default declarations; header evidence alone does not call their bodies.
+    pub default_methods: Vec<IrSamMethodFrame>,
     /// A fun-interface conversion of a callable reference delegates equality/hashCode through
     /// Kotlin's `FunctionAdapter` contract. Ordinary lambdas remain identity objects.
     pub function_adapter: bool,
@@ -62,6 +68,36 @@ pub struct IrSamTarget {
     /// The interface's own type parameters in declaration order, which the declared shape names.
     /// A target that writes a class implementing the interface declares them on that class.
     pub type_parameters: Vec<IrSamTypeParameter>,
+    /// The declaration whose code holds the conversion, where a target that writes a class for
+    /// it places that class.
+    pub placement: IrSamPlacement,
+}
+
+/// Where the code holding a SAM conversion stands after inlining: Kotlin places the class a
+/// conversion compiles to in the class whose member holds it, or at its file's level. A target
+/// that names that class (kotlinc-wasm's `pkg.Owner.sam$pkg_Interface$0`) formats it from this.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrSamPlacement {
+    /// Code of the file being lowered, inlined copies included: the classifier owning the
+    /// expression ([`super::IrFile::expression_owners`]), or else this file's package.
+    ThisFile,
+    /// A dependency's code at the level of a file declaring `package`, a package name-tree node
+    /// ([`TypeName::ROOT`] for the root package).
+    DependencyFile { package: TypeName },
+    /// A dependency's code in a member of its classifier `owner`.
+    DependencyMember { owner: TypeName },
+    /// A dependency's code in a member of a class private to its file, which the dependency does
+    /// not name to this compilation.
+    UnnamedDependencyClass,
+}
+
+/// An exact checked declaration and the unspecialized frame its interface slot carries.
+/// `None` retains unavailable declaration evidence rather than guessing a nominal member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrSamMethodFrame {
+    pub method: Option<IrSamMethod>,
+    pub parameters: Vec<Ty>,
+    pub result: Ty,
 }
 
 /// One type parameter a functional interface declares: its semantic identity, and each declared

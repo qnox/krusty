@@ -41,6 +41,7 @@ mod enum_materialization;
 #[cfg(test)]
 mod initializer_capability_tests;
 mod local_class;
+mod sam_placement;
 mod static_properties;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
@@ -1115,6 +1116,19 @@ impl<'s> CallLinker for Linker<'_, 's> {
         })
     }
 
+    fn sam_declaration(
+        &self,
+        classifier: &KlibPublicIdSignature,
+    ) -> Result<crate::ir::CheckedKlibSamDeclaration, KlibBodyDeclineReason> {
+        self.sources
+            .callees
+            .sam_declaration(&self.active_module, classifier)
+            .cloned()
+            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a SAM conversion without a checked declaration",
+            ))
+    }
+
     fn declares_implementation(
         &self,
         callee: &KlibPublicIdSignature,
@@ -1295,9 +1309,9 @@ impl<'s> CallLinker for Linker<'_, 's> {
                     .sources
                     .bodies
                     .module_file_package(&self.active_module, *file)?;
-                return Some(IrSiteClassContainer::Package(
-                    super::klib_types::package_name(package),
-                ));
+                return super::klib_types::package_name(package)
+                    .ok()
+                    .map(IrSiteClassContainer::Package);
             }
         };
         // A public identity's declaration path is its enclosing classifiers, then its own name.
@@ -1306,9 +1320,9 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 .ok()
                 .map(IrSiteClassContainer::Classifier)
         } else {
-            Some(IrSiteClassContainer::Package(
-                super::klib_types::package_name(declared.package().segments()),
-            ))
+            super::klib_types::package_name(declared.package().segments())
+                .ok()
+                .map(IrSiteClassContainer::Package)
         }
     }
 
@@ -1577,6 +1591,10 @@ impl<'s> CallLinker for Linker<'_, 's> {
             owner,
             &|sub, owner| callees.applied_supertype(sub, owner),
         )
+    }
+
+    fn sam_placement(&self) -> Result<crate::ir::IrSamPlacement, KlibBodyDeclineReason> {
+        self.active_sam_placement()
     }
 
     fn dependency_override(

@@ -148,7 +148,10 @@ pub(crate) use resolved_symbol::ErrorReceiverSelection;
 pub use resolved_symbol::{
     AmbiguousExtensionProperty, MemberFacets, ResolvedPropertySetter, SymRecv, Symbol,
 };
-pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
+pub(crate) use sam::{
+    apply_sam_declaration, semantic_sam_signature, SamMethodDeclaration, SamMethodFrame,
+    SamSignature,
+};
 use scope_level_callables::{
     callables_from_symbols, fn_in_scope, level_functions, level_properties,
     symbol_levels_in_function_scope, symbols_in_function_scope,

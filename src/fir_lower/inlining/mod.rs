@@ -1968,6 +1968,14 @@ fn specialize_sam_target(target: &mut IrSamTarget, bindings: &HashMap<String, Ty
     specialize_ty(&mut target.result, bindings);
     specialize_tys(&mut target.declared_parameters, bindings);
     specialize_ty(&mut target.declared_result, bindings);
+    for frame in target
+        .dispatch_methods
+        .iter_mut()
+        .chain(&mut target.default_methods)
+    {
+        specialize_tys(&mut frame.parameters, bindings);
+        specialize_ty(&mut frame.result, bindings);
+    }
 }
 
 fn specialize_reference_adaptation(

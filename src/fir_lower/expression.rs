@@ -1828,11 +1828,18 @@ impl BodyLowering<'_> {
                         has_receiver: conversion.has_receiver,
                         suspend: conversion.suspend,
                         source_suspend: conversion.source_suspend,
+                        requires_object_dispatch: conversion.requires_object_dispatch,
                         overridden_results: conversion
                             .overridden_results
                             .iter()
                             .map(|ty| ty.get())
                             .collect(),
+                        dispatch_methods: super::sam_conversions::ir_sam_frames(
+                            &conversion.dispatch_methods,
+                        ),
+                        default_methods: super::sam_conversions::ir_sam_frames(
+                            &conversion.default_methods,
+                        ),
                         function_adapter: false,
                         wraps_function_value: false,
                         // The lambda object is created here. A null check applies to a captured
@@ -1845,6 +1852,7 @@ impl BodyLowering<'_> {
                             .iter()
                             .map(crate::ir::IrSamTypeParameter::lowered)
                             .collect(),
+                        placement: crate::ir::IrSamPlacement::ThisFile,
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,

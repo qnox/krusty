@@ -10,17 +10,14 @@
 //! `tests/kotlin_box_wasm_conformance.rs` pins them.
 //!
 //! A lambda converted to a `fun interface` is an instance of the wrapper class kotlinc-wasm declares
-//! for that interface in the conversion's container, the innermost member classifier around it or
-//! else the file's package: `pk.sam$pk_IntOp$0`, `pk.Outer.Companion.sam$pk_Outer_In$0`, and
-//! `sam$IntOp$0` in the root package. The interface's qualified name is spelled with `_` for each
-//! separator, and neither the lambda's captures nor an enclosing lambda changes the name. A
-//! conversion inside a local classifier or an anonymous object is not given a name here, nor is a
-//! reference to a property, which prints the property instead.
+//! for that interface where the code holding the conversion stands ([`sam_class_name`]):
+//! `pk.sam$pk_IntOp$0`, `pk.Outer.Companion.sam$pk_Outer_In$0`, and `sam$IntOp$0` in the root
+//! package. A reference to a property is not given a name here: it prints the property instead.
 
 use krusty::backend::class_names::{member_class_names, source_class_names};
 use krusty::backend::BackendClassifierSource;
-use krusty::ir::{ExprId, IrCallableReferenceTarget, IrExpr, IrFile, IrLocalClassOwner};
-use krusty::types::{FnSig, Ty, TyKind, TypeName};
+use krusty::ir::{ExprId, IrCallableReferenceTarget, IrExpr, IrFile, IrSamPlacement};
+use krusty::types::{FnSig, Ty, TyKind};
 
 /// How kotlinc-wasm names the class of one function value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,35 +36,11 @@ pub(super) fn function_value_name(
     instance: Option<Ty>,
 ) -> Option<FunctionValueName> {
     match ir.expr(site) {
-        IrExpr::Lambda {
-            sam: Some(target), ..
-        } => sam_wrapper_name(ir, site, target.classifier).map(FunctionValueName::SamWrapper),
+        IrExpr::Lambda { sam: Some(_), .. } => {
+            sam_class_name(ir, site).map(FunctionValueName::SamWrapper)
+        }
         expression => named_shape(expression, instance).map(FunctionValueName::Shape),
     }
-}
-
-/// The qualified name of the wrapper class of the conversion `site` makes to `interface`.
-fn sam_wrapper_name(ir: &IrFile, site: ExprId, interface: TypeName) -> Option<String> {
-    let provenance = ir.callable_reference_provenance.get(&site)?;
-    let container = match provenance.lexical_owner {
-        Some(IrLocalClassOwner::Class(owner)) => {
-            let class = &ir.classes[owner as usize];
-            if class.is_local_class
-                || class.is_anonymous_object
-                || ir.local_class_name_provenance.contains_key(&owner)
-            {
-                return None;
-            }
-            source_class_names(ir, owner)?.qualified
-        }
-        Some(IrLocalClassOwner::External(owner)) => member_class_names(owner).qualified,
-        // Boundary conversion: the package path is spelled with `/` in the name tree.
-        None => provenance.source.package().render().replace('/', "."),
-    };
-    Some(wrapper_name(
-        &container,
-        &member_class_names(interface).qualified,
-    ))
 }
 
 /// The wrapper class name for a conversion to the interface `interface` (dotted) in `container`
@@ -112,6 +85,54 @@ fn named_shape(expression: &IrExpr, instance: Option<Ty>) -> Option<NamedShape> 
         suspend: signature.suspend,
         arity: signature.params.len(),
     })
+}
+
+/// The qualified name of the class kotlinc-wasm compiles the conversion `expression` of a lambda
+/// to a `fun interface` to, or `None` for any other expression and for a conversion whose
+/// container it names otherwise.
+///
+/// The name is the container's qualified name, then `sam$`, the interface's qualified name with
+/// `_` for `.`, and `$0`: `p.q.C.sam$p_q_F$0`. The container is the member classifier whose
+/// member holds the conversion, or else the package of the file holding it, whose root adds no
+/// segment (`sam$kotlin_Comparator$0`). Inlined code stands in its caller. kotlinc-wasm 2.5.0-RC
+/// keeps one class per container and interface, so every such conversion shares the `$0` name.
+/// `wasm_sam_conversions_print_their_class_names` in `tests/kotlin_box_wasm_conformance.rs` pins
+/// them.
+fn sam_class_name(ir: &IrFile, expression: ExprId) -> Option<String> {
+    let IrExpr::Lambda {
+        sam: Some(target), ..
+    } = ir.expr(expression)
+    else {
+        return None;
+    };
+    // Boundary conversions: kotlinc-wasm spells these names into the class name it prints.
+    let container = match target.placement {
+        IrSamPlacement::ThisFile => match ir.expression_owners.get(&expression) {
+            Some(&owner) => member_classifier_name(ir, owner)?,
+            None => ir.package.clone().unwrap_or_default(),
+        },
+        IrSamPlacement::DependencyFile { package } => package.render().replace('/', "."),
+        IrSamPlacement::DependencyMember { owner } => member_class_names(owner).qualified,
+        IrSamPlacement::UnnamedDependencyClass => return None,
+    };
+    Some(wrapper_name(
+        &container,
+        &member_class_names(target.classifier).qualified,
+    ))
+}
+
+/// The qualified name of this file's member classifier `owner`. A local classifier or an
+/// anonymous object has none of this shape.
+fn member_classifier_name(ir: &IrFile, owner: krusty::types::TypeName) -> Option<String> {
+    let class = ir.class_id_by_name(owner)?;
+    let declaration = &ir.classes[class as usize];
+    if declaration.is_local_class
+        || declaration.is_anonymous_object
+        || ir.local_class_name_provenance.contains_key(&class)
+    {
+        return None;
+    }
+    Some(source_class_names(ir, class)?.qualified)
 }
 
 fn function_signature(ty: Ty) -> Option<&'static FnSig> {

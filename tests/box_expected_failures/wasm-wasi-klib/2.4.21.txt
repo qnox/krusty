@@ -58,7 +58,6 @@ arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
 arrays/hashMap.kt
 arrays/inProjectionOfList.kt
 arrays/kt33.kt
-arrays/kt42932.kt
 arrays/kt47483.kt
 arrays/kt7009.kt
 arrays/kt950.kt
@@ -69,7 +68,6 @@ associatedObjects/findAssociatedObject.kt
 associatedObjects/findAssociatedObjectAndDCE.kt
 associatedObjects/findAssociatedObjectLazyness.kt
 basics/canonical_name.kt
-basics/cast_null.kt
 basics/const_infinity.kt
 basics/expression_as_statement.kt
 basics/k42000_1.kt
@@ -240,8 +238,6 @@ callableReference/callableReferencetoInnerAndLocal.kt
 callableReference/equality/conversionCombinations.kt
 callableReference/equality/kpropertyWithCapturingInequality.kt
 callableReference/equality/suspendFunctionEquality.kt
-callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
-callableReference/funInterfaceConstructor/funInterfaceConstructorIsKFunction.kt
 callableReference/function/booleanNotIntrinsic.kt
 callableReference/function/enumValueOfMethod.kt
 callableReference/function/genericCallableReferenceArgumentsNonJVM.kt
@@ -298,12 +294,8 @@ callableReference/starProjectionCallableReference.kt
 casts/asForConstants.kt
 casts/asToNothing.kt
 casts/asUnit.kt
-casts/castGenericNull.kt
 casts/functions/asFunKBig.kt
-casts/functions/asFunKSmall.kt
 casts/functions/reifiedAsFunKBig.kt
-casts/functions/reifiedAsFunKSmall.kt
-casts/kt50577.kt
 casts/kt53677.kt
 casts/kt65197.kt
 casts/kt68509.kt
@@ -315,7 +307,6 @@ casts/mutableCollections/reifiedAsWithMutable.kt
 casts/mutableCollections/reifiedIsWithMutable.kt
 casts/mutableCollections/reifiedSafeAsWithMutable.kt
 casts/mutableCollections/safeAsWithMutable.kt
-casts/mutableCollections/weirdMutableCasts.kt
 casts/nullableSafeCastToTypeParameterWithInterfaceUpperBound.kt
 casts/wasmCastMessages.kt
 classDelegation/multipleModules.kt
@@ -1107,7 +1098,6 @@ evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/kt9443.kt
 evaluate/objectConstValInAnnotationArgument.kt
 evaluate/serialization/typeAnnotation.kt
-evaluate/thisPlusString.kt
 evaluate/ubyteOperations.kt
 evaluate/uintOperations.kt
 evaluate/ulongOperations.kt
@@ -1157,23 +1147,18 @@ fullValueClasses/nonFinalRegularClassInheritsSideEffects.kt
 fullValueClasses/nonFinalSecondaryConstructorSideEffects.kt
 fullValueClasses/nonFinalSingleFieldSideEffects.kt
 fullValueClasses/nonFinalThisInInitSideEffects.kt
-funInterface/basicFunInterfaceConversionClash.kt
 funInterface/equality/localFunctionReferences.kt
 funInterface/funInterfaceInheritance.kt
 funInterface/funInterfaceWithSuspendMethod.kt
 funInterface/implIsNotFunction.kt
-funInterface/inlinedSamWrapper.kt
 funInterface/intersectionTypeToFunInterfaceConversion.kt
-funInterface/irrelevantPrivateDeclarations.kt
 funInterface/kt41670.kt
-funInterface/kt46512_indyFunInterfaceOverCallableReference.kt
 funInterface/kt49384.kt
 funInterface/kt49384_getSame.kt
 funInterface/kt77685-sam.kt
 funInterface/kt77685.kt
 funInterface/kt79092-sam.kt
 funInterface/kt79092.kt
-funInterface/multimodule.kt
 funInterface/nonAbstractMethod.kt
 funInterface/nonTrivialProjectionInSuperType.kt
 funInterface/nullableSam.kt
@@ -1216,9 +1201,6 @@ functions/localFunctions/callInlineLocalInLambda.kt
 functions/localFunctions/definedWithinLambda.kt
 functions/localFunctions/definedWithinLambdaInnerUsage1.kt
 functions/localFunctions/definedWithinLambdaInnerUsage2.kt
-ieee754/asComparableToDouble.kt
-ieee754/asComparableToDouble_properIeeeComparisons.kt
-ieee754/comparableTypeCast.kt
 ieee754/equalsNaN_properIeeeComparisons.kt
 ieee754/equalsNullableDouble_properIeeeComparisons.kt
 ieee754/equalsNullableFloat_properIeeeComparisons.kt
@@ -1453,14 +1435,8 @@ inlineClasses/dnnInValue.kt
 inlineClasses/equalityForBoxesOfNullableValuesOfInlineClass.kt
 inlineClasses/equalityForBoxesOfNullableValuesOfInlineClassGeneric.kt
 inlineClasses/equalsEvaluationOrderPrimitiveGeneric.kt
-inlineClasses/funInterface/argumentResult.kt
-inlineClasses/funInterface/kt51121.kt
-inlineClasses/funInterface/kt51121_2.kt
 inlineClasses/funInterface/mangledSamWrappers.kt
 inlineClasses/funInterface/mangledSamWrappersGeneric.kt
-inlineClasses/funInterface/returnResult.kt
-inlineClasses/funInterfaceDoubleSuffux.kt
-inlineClasses/funInterfaceDoubleSuffux2.kt
 inlineClasses/functionNameMangling/reflectionForFunctionWithMangledName.kt
 inlineClasses/functionNameMangling/reflectionForFunctionWithMangledNameGeneric.kt
 inlineClasses/functionNameMangling/reflectionForPropertyOfInlineClassType.kt
@@ -1502,7 +1478,6 @@ inlineClasses/kt27096.kt
 inlineClasses/kt27096Generic.kt
 inlineClasses/kt27113.kt
 inlineClasses/kt27140Generic.kt
-inlineClasses/kt28405.kt
 inlineClasses/kt28585.kt
 inlineClasses/kt32793.kt
 inlineClasses/kt33119Generic.kt
@@ -1512,8 +1487,6 @@ inlineClasses/kt51157.kt
 inlineClasses/kt70461.kt
 inlineClasses/kt71649.kt
 inlineClasses/overridingFunCallingPrivateFunGeneric.kt
-inlineClasses/privateConstructorFunInterfaceMultiModule.kt
-inlineClasses/privateConstructorFunInterfaceMultiModuleGeneric.kt
 inlineClasses/propertyDelegation/kt27070.kt
 inlineClasses/propertyDelegation/kt27070Generic.kt
 inlineClasses/referToPropertyInCompanionObjectOfInlineClass.kt
@@ -1527,7 +1500,6 @@ inlineClasses/secondaryConstructorsInsideInlineClassWithPrimitiveCarrierTypeGene
 inlineClasses/secondaryConstructorsWithBody.kt
 inlineClasses/smartCastOnThisOfInlineClassTypeGeneric.kt
 inlineClasses/toStringCallingPrivateFunGeneric.kt
-inlineClasses/unboxGenericParameter/funInterface/nullableResult.kt
 inlineClasses/unboxGenericParameter/funInterface/primitive.kt
 inlineClasses/unboxGenericParameter/funInterface/resultAny.kt
 inlineClasses/unboxGenericParameter/funInterface/resultAnyGeneric.kt
@@ -1753,7 +1725,6 @@ multiplatform/k2/hmpp/mutlipleExpectsForOneActual.kt
 multiplatform/k2/hmpp/overloadAlias3-3.kt
 multiplatform/k2/hmpp/propertyAlias3-3.kt
 multiplatform/k2/hmpp/propertyAliasTwoLibs.kt
-multiplatform/k2/hmpp/typealiasNameClash.kt
 multiplatform/k2/internalOverride2.kt
 multiplatform/k2/kt66970.kt
 nameBasedDestructuring/fullFormExtraPropType.kt
@@ -1894,7 +1865,6 @@ ranges/contains/generated/ulongDownTo.kt
 ranges/contains/generated/ulongRangeTo.kt
 ranges/contains/generated/ulongRangeUntil.kt
 ranges/contains/generated/ulongUntil.kt
-ranges/contains/inCharSequence.kt
 ranges/contains/inComparableRange.kt
 ranges/contains/inCustomObjectRange.kt
 ranges/contains/inDoubleRangeLiteralVsComparableRangeLiteral.kt
@@ -1984,13 +1954,11 @@ ranges/forInCharSequenceLengthIncreasedInLoopBody.kt
 ranges/forInCharSequenceWithCustomIterator.kt
 ranges/forInCharSequenceWithMultipleGetFunctions.kt
 ranges/forInCustomIterable.kt
-ranges/forInDoubleRangeWithCustomIterator.kt
 ranges/forInDownTo/forIntInDownTo.kt
 ranges/forInDownTo/forIntInDownToWithNonConstBounds.kt
 ranges/forInDownTo/forIntInNonOptimizedDownTo.kt
 ranges/forInDownTo/forLongInDownTo.kt
 ranges/forInDownTo/forNullableIntInDownTo.kt
-ranges/forInFloatRangeWithCustomIterator.kt
 ranges/forInIndices/forInArrayListIndices.kt
 ranges/forInIndices/forInCollectionImplicitReceiverIndices.kt
 ranges/forInIndices/forInCollectionIndices.kt
@@ -2075,7 +2043,6 @@ ranges/literal/simpleRangeWithNonConstantEnds.kt
 ranges/literal/simpleSteppedDownTo.kt
 ranges/literal/simpleSteppedRange.kt
 ranges/multiAssignmentIterationOverIntRange.kt
-ranges/safeCallRangeTo.kt
 ranges/stepped/expression/downTo/emptyProgression.kt
 ranges/stepped/expression/downTo/illegalStepNegative.kt
 ranges/stepped/expression/downTo/illegalStepNonConst.kt
@@ -2660,7 +2627,6 @@ regressions/collectionSizeOrDefault.kt
 regressions/directInvokeDestructuring.kt
 regressions/directInvokeNameBasedDestructuring.kt
 regressions/floatingRangeContainsMixedWidths.kt
-regressions/generic.kt
 regressions/inlineCallsInInitializerLambda.kt
 regressions/kt15196.kt
 regressions/kt1800.kt
@@ -2733,9 +2699,7 @@ sam/constructors/sameWrapperClass2.kt
 sam/constructors/suspendSamConstructorAdaptation.kt
 sam/funInterfaceExtendsSuspendFunction.kt
 sam/funInterfaceExtendsSuspendFunction2.kt
-sam/kt59858.kt
 sam/kt63564.kt
-sam/kt64116.kt
 sam/samWithAbstractToString.kt
 sam/samWithAbstractToString2.kt
 sam/samWithAbstractToString3.kt

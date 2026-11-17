@@ -25,7 +25,7 @@ use crate::ir::{
     ClassId, IrClass, IrConstructorAccess, IrConstructorTarget, IrCtorArg,
     IrCtorParameterProvenance, IrField,
 };
-use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies, LocatedClass, LocatedMember};
+use crate::klib_libraries::{KlibDeclarationBodies, LocatedClass, LocatedMember};
 use crate::libraries::{KlibBodyClassParameters, KlibDependencyCallable, TypeKind};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
@@ -1367,7 +1367,10 @@ fn member_overrides(
     function: &KlibIrFunction,
     scope: &MemberScope<'_>,
 ) -> Result<Vec<MemberOverride>, KlibBodyDeclineReason> {
-    let mut overrides = Vec::with_capacity(function.overridden.len());
+    // An override overrides every declaration the ones it names override in turn:
+    // `ArrayAsCollection.iterator` overrides `Collection.iterator` and, through it,
+    // `Iterable.iterator`, which interface dispatch keys by.
+    let mut identities = Vec::<KlibDependencyCallable>::new();
     for symbol in &function.overridden {
         if symbol.kind != KlibIrSymbolKind::Function {
             return Err(unsupported(
@@ -1379,17 +1382,22 @@ fn member_overrides(
         let Some(declaration) = crate::klib_libraries::member_signature(&symbol.signature) else {
             return Err(unsupported("an override of a non-public declaration"));
         };
-        let identity = match scope.bodies.linked_origin(scope.module, &declaration) {
-            KlibCalleeOrigin::Exact(identity) => identity,
-            KlibCalleeOrigin::Missing => {
-                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+        let closure = scope
+            .bodies
+            .overridden_closure(scope.module, &declaration)
+            .map_err(|_| {
+                KlibBodyDeclineReason::UnsupportedDeclaration(
                     "an override this library does not authenticate",
-                ))
+                )
+            })?;
+        for identity in closure {
+            if !identities.contains(&identity) {
+                identities.push(identity);
             }
-            KlibCalleeOrigin::Ambiguous => {
-                return Err(mismatch("two libraries serialize one overridden function"))
-            }
-        };
+        }
+    }
+    let mut overrides = Vec::with_capacity(identities.len());
+    for identity in identities {
         let Some((_, realization)) = scope
             .declarations
             .external_callable_by_dependency(&identity)
