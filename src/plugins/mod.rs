@@ -1023,7 +1023,7 @@ fn triggered(ir: &IrFile, plugins: &registry::NativePlugins, ctx: &PluginContext
     });
     uses_serialization
         || ir.compose.is_some()
-        || ir.atomicfu.is_some()
+        || ir.plugin_facts.contains::<atomicfu::AtomicfuFileFacts>()
         || ir.parcelize.is_some()
         || !ctx
             .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
