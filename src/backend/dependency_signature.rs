@@ -49,6 +49,7 @@ impl<'a> CheckedDependencyApplication<'a> {
 pub struct DependencyFunctionSignature {
     parameters: Box<[Ty]>,
     result: Ty,
+    coroutine_abi: bool,
 }
 
 impl DependencyFunctionSignature {
@@ -76,9 +77,25 @@ impl DependencyFunctionSignature {
             _ => return Err("a dependency export whose member receiver disagrees with its body"),
         }
         parameters.extend_from_slice(&declared.params);
+        let coroutine_abi = if let Some((source_parameters, source_result)) =
+            ir.suspend_declared_sigs.get(&function)
+        {
+            let (continuation, completed) = crate::types::continuation_passing(*source_result);
+            let mut expected = source_parameters.clone();
+            expected.push(continuation);
+            if declared.params != expected || declared.ret != completed {
+                return Err(
+                    "a coroutine export whose CPS signature disagrees with its source declaration",
+                );
+            }
+            true
+        } else {
+            false
+        };
         Ok(Self {
             parameters: parameters.into_boxed_slice(),
             result: declared.ret,
+            coroutine_abi,
         })
     }
 
@@ -88,6 +105,66 @@ impl DependencyFunctionSignature {
     pub fn result(&self) -> Ty {
         self.result
     }
+
+    /// Whether this exported function was realized with the common CPS calling convention.
+    pub fn has_coroutine_abi(&self) -> bool {
+        self.coroutine_abi
+    }
+}
+
+/// Authenticate a checked dependency suspend call after common lowering adds its physical CPS
+/// operand and result carrier. The source application still owns declaration selection and generic
+/// substitution; this separate physical application must be exactly that source signature plus the
+/// continuation required by its logical result, and the exact export must be a CPS realization.
+pub fn authenticate_dependency_coroutine_call(
+    source: &Callee,
+    physical: &Callee,
+    logical_result: Ty,
+    export: &DependencyFunctionSignature,
+) -> Result<(), &'static str> {
+    let Callee::External {
+        target: source_target,
+        default_provider: source_default_provider,
+        params: source_params,
+        ret: source_result,
+        substitutions: source_substitutions,
+        defaults: source_defaults,
+        extension_receiver_parameter: source_extension_receiver,
+    } = source
+    else {
+        return Err("a dependency coroutine call without its checked source declaration");
+    };
+    let Callee::External {
+        target,
+        default_provider,
+        params,
+        ret,
+        substitutions,
+        defaults,
+        extension_receiver_parameter,
+    } = physical
+    else {
+        return Err("a dependency coroutine call without its physical external identity");
+    };
+    let (continuation, completed) = crate::types::continuation_passing(*source_result);
+    let mut expected_params = source_params.clone();
+    expected_params.push(continuation);
+    if source_target != target
+        || source_default_provider != default_provider
+        || source_substitutions != substitutions
+        || source_defaults != defaults
+        || source_extension_receiver != extension_receiver_parameter
+        || *source_result != logical_result
+        || *params != expected_params
+        || *ret != completed
+        || !defaults.is_empty()
+        || !export.has_coroutine_abi()
+    {
+        return Err(
+            "a dependency coroutine call whose selected source and exported CPS signatures disagree",
+        );
+    }
+    Ok(())
 }
 
 /// The provider declaration instantiated by this exact checked call. This validates source
