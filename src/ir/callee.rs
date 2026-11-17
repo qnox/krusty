@@ -103,6 +103,19 @@ pub enum Callee {
         /// Omission masks continue to number only `params`, excluding this receiver.
         dispatch_receiver_ty: Option<Ty>,
     },
+    /// The default-argument entry of a constructor of a class another source unit of the current
+    /// module declares, published by that file under the checked constructor declaration
+    /// `constructor`. The entry answers the new instance. The argument vector holds an inner
+    /// class's enclosing instance, of type `outer`, then the whole parameter frame of `params`,
+    /// with an [`IrExpr::AbsentArgument`](super::IrExpr::AbsentArgument) for each omitted
+    /// parameter, followed by the omission mask words. A backend maps the identity to its physical
+    /// entry; it does not rebuild the masks or the frame.
+    ModuleConstructorDefaultEntry {
+        constructor: crate::fir::DeclarationId,
+        outer: Option<Ty>,
+        params: Vec<Ty>,
+        ret: Ty,
+    },
     /// A dependency callable selected by the frontend. The opaque declaration identity is realized
     /// by the target provider after common lowering; semantic parameters/results remain available to
     /// backend-neutral passes without exposing an owner or descriptor.

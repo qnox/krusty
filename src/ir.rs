@@ -17,6 +17,11 @@
 use crate::kt_string::KtString;
 use crate::types::{Ty, TypeName, TypeNameList};
 
+mod checked_klib_facts;
+pub(crate) use checked_klib_facts::{CheckedKlibDependencyFacts, CheckedKlibTypeFacts};
+mod checked_member_call_edge;
+pub(crate) use checked_member_call_edge::CheckedMemberCallEdge;
+
 pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
@@ -677,10 +682,13 @@ pub enum IrExpr {
     /// class's `$WhenMappings` table for `classifier` at `subject`'s runtime ordinal. Value type:
     /// `Int`. `registrations` are the table entries this subject `when` (and every subject `when`
     /// nested in it) claims, in kotlinc's visiting order; see [`EnumSwitchRegistration`].
+    /// `source_order` is the source `when`'s start offset ([`IrFile::start_offset`]), which
+    /// places these claims among the other claims of the class the backend emits it in.
     EnumSwitchOrdinal {
         classifier: TypeName,
         subject: ExprId,
         registrations: Box<[EnumSwitchRegistration]>,
+        source_order: Option<u32>,
     },
     /// The `$WhenMappings` key of one enum entry in the emitting class's table. Value type: `Int`.
     EnumSwitchKey {
@@ -1385,6 +1393,11 @@ pub struct IrSpecializedAnonymousClass {
     /// the copy's methods. `field_count` still counts them on the declaration, so later fields
     /// appended to the declaration stay past that prefix.
     pub omitted_capture_fields: u32,
+    /// For each constructor parameter of the copy, the declaration's parameter it was copied from,
+    /// or `None` for a value the copy keeps in place of an inlined lambda. Constructor code the
+    /// copy takes from the declaration once lowering has realized it (the superclass constructor
+    /// call and the initializer) reads its parameters through this.
+    pub constructor_parameters: Vec<Option<u32>>,
     /// Property reads and writes in the inlined caller whose receiver is this copy's construction.
     /// Accessor functions are not available when the construction is retargeted, so the read is
     /// rebound once the copy's properties exist.
@@ -1489,6 +1502,11 @@ pub struct IrFile {
     pub classifier_hierarchies: crate::fx_hash::HashMap<TypeName, Vec<IrAppliedClassifier>>,
     /// The interface defaults each source classifier inherits without overriding, as override
     /// resolution selected them; a target backend realizes each record without selecting one.
+    /// The function names of each source classifier that keep more than one member slot, as
+    /// override resolution grouped them. A target whose realization can merge two slots checks
+    /// these records; it never compares the declarations again.
+    pub function_slot_families:
+        crate::fx_hash::HashMap<TypeName, Vec<crate::fir::ResolvedFunctionSlotFamily>>,
     pub inherited_defaults:
         crate::fx_hash::HashMap<TypeName, Vec<crate::fir::ResolvedInheritedDefault>>,
     /// The frontend-selected custom serializer construction of each source classifier whose
@@ -1905,6 +1923,11 @@ pub struct IrFile {
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub default_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each checked constructor another file may build through with arguments left out, by its
+    /// declaration: the constructor of its class that the shared default-argument lowering
+    /// realized as that constructor's entry. See [`crate::backend::construction_entries`].
+    pub constructor_default_entries:
+        crate::fx_hash::HashMap<crate::fir::DeclarationId, IrConstructorTarget>,
     /// Each entry another module constructs a class of this file, or reads its object, through,
     /// by the entry's `FunId`: the class it answers. See [`crate::backend::construction_entries`].
     pub(crate) construction_entries: crate::fx_hash::HashMap<FunId, ClassId>,
@@ -2858,7 +2881,7 @@ mod external_overrides;
 mod generated_members;
 pub use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
-pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
+pub use debug_locals::{IrCatchBinding, IrCatchName, IrLambdaForm, IrLambdaOrigin};
 pub use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
 pub use generated_members::{IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember};
 pub use generated_members::{
@@ -2866,14 +2889,13 @@ pub use generated_members::{
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
 };
 mod checked_operation;
-pub use checked_operation::IrCheckedOperation;
+pub use checked_operation::{IrCheckedOperation, IrModulePropertyReference};
 mod exported_entries;
 mod function_parameters;
 pub use function_parameters::*;
 mod traversal;
 pub use traversal::*;
 pub mod clone;
-pub use clone::clone_expression_dag;
 #[cfg(test)]
 pub(crate) use clone::make_expression_children_unique;
 pub use clone::make_expression_children_unique_tracked;
@@ -2881,6 +2903,7 @@ pub(crate) use clone::{
     clone_class_method, clone_expression_with_own_lambdas, clone_function_implementation,
     clone_with_operands,
 };
+pub use clone::{clone_expression_dag, clone_expression_dags};
 mod semantic_validation;
 pub use semantic_validation::{
     IncompleteIrFact, InvalidIrContract, NullableSamContractViolation, UndeterminedIrType,

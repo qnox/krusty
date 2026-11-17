@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::libraries::{
-    CompilerIntrinsic, ExternalCallableKind, KlibDeclarationSignature, KlibDependencyCallable,
-    ScalarClass, ScalarComparison, ScalarInstruction,
+    AtomicOperation, CompilerIntrinsic, ExternalCallableKind, KlibDeclarationSignature,
+    KlibDependencyCallable, ScalarClass, ScalarComparison, ScalarInstruction,
 };
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrExprKind, KlibIrFunction, KlibIrNullability, KlibIrType,
@@ -21,6 +21,8 @@ use crate::metadata::semantic::{
 use crate::types::{type_name, Ty, TypeName};
 
 use super::declaration_signatures::SignedFunction;
+
+mod atomic_array_elements;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TargetIntrinsicPlatform {
@@ -78,6 +80,12 @@ impl KlibIntrinsicCallable {
 #[derive(Clone, Debug, Default)]
 pub struct KlibIntrinsicFacts {
     callables: HashMap<KlibDependencyCallable, KlibIntrinsicCallable>,
+    /// Native's atomic accesses through a property reference to a backing field. The reference is
+    /// not a value, so these never become ordinary calls: body lowering realizes the field access.
+    atomic_fields: HashMap<KlibDependencyCallable, AtomicOperation>,
+    /// Native's atomic accesses to one element of an array, which body lowering realizes as that
+    /// element access.
+    atomic_array_elements: HashMap<KlibDependencyCallable, AtomicOperation>,
 }
 
 impl KlibIntrinsicFacts {
@@ -129,6 +137,30 @@ impl KlibIntrinsicFacts {
         arena: &KlibIrArena,
         function: &KlibIrFunction,
     ) {
+        for (authenticate, accesses) in [
+            (
+                authenticate_atomic_field as fn(_, _, _) -> _,
+                &mut self.atomic_fields,
+            ),
+            (
+                atomic_array_elements::authenticate,
+                &mut self.atomic_array_elements,
+            ),
+        ] {
+            if let Some(operation) = authenticate(platform, arena, function) {
+                let KlibIrSignature::Public(signature) = &function.base.symbol.signature else {
+                    unreachable!("an authenticated atomic access has a public signature");
+                };
+                accesses.insert(
+                    KlibDependencyCallable {
+                        module: module.to_owned(),
+                        declaration: KlibDeclarationSignature::Public(signature.clone()),
+                    },
+                    operation,
+                );
+                return;
+            }
+        }
         let Some(shape) = authenticate_ir(platform, arena, function) else {
             return;
         };
@@ -156,6 +188,41 @@ impl KlibIntrinsicFacts {
         self.callables.get(identity)
     }
 
+    #[cfg(test)]
+    pub(crate) fn atomic_field_declarations(
+        &self,
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, AtomicOperation)> {
+        self.atomic_fields
+            .iter()
+            .map(|(identity, operation)| (identity, *operation))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn atomic_array_element_declarations(
+        &self,
+    ) -> impl Iterator<Item = (&KlibDependencyCallable, AtomicOperation)> {
+        self.atomic_array_elements
+            .iter()
+            .map(|(identity, operation)| (identity, *operation))
+    }
+
+    /// The atomic array element access `identity` declares, when it is an authenticated Native
+    /// one.
+    pub(crate) fn atomic_array_element(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<AtomicOperation> {
+        self.atomic_array_elements.get(identity).copied()
+    }
+
+    /// The atomic field access `identity` declares, when it is an authenticated Native one.
+    pub(crate) fn atomic_field(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<AtomicOperation> {
+        self.atomic_fields.get(identity).copied()
+    }
+
     pub fn len(&self) -> usize {
         self.callables.len()
     }
@@ -163,6 +230,135 @@ impl KlibIntrinsicFacts {
     pub fn is_empty(&self) -> bool {
         self.callables.is_empty()
     }
+}
+
+/// Native's `kotlin.concurrent` atomic field accesses: an external `TypedIntrinsic` extension of
+/// `KMutableProperty0<V>` whose operands are `V` and whose result the operation fixes. `V` is the
+/// declaration's one type parameter, or a scalar for an addition specialized to it.
+fn authenticate_atomic_field(
+    platform: Option<TargetIntrinsicPlatform>,
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> Option<AtomicOperation> {
+    let KlibIrSignature::Public(signature) = &function.base.symbol.signature else {
+        return None;
+    };
+    if platform != Some(TargetIntrinsicPlatform::Native)
+        || signature.package().segments() != ["kotlin", "concurrent"]
+        || signature.declaration().segments().len() != 1
+        || function.base.symbol.kind != KlibIrSymbolKind::Function
+        || function.constructor
+        || function.body.is_some()
+        || function.type_parameters.len() > 1
+        || function.dispatch_receiver.is_some()
+        || !function.context_parameters.is_empty()
+    {
+        return None;
+    }
+    let operation = match ir_string_annotation(
+        arena,
+        &function.base.annotations,
+        &["kotlin", "native", "internal"],
+        &["TypedIntrinsic", "<init>"],
+    )? {
+        "ATOMIC_GET_FIELD" => AtomicOperation::Load,
+        "ATOMIC_SET_FIELD" => AtomicOperation::Store,
+        "GET_AND_SET_FIELD" => AtomicOperation::Exchange,
+        "COMPARE_AND_SET_FIELD" => AtomicOperation::CompareAndSet,
+        "COMPARE_AND_EXCHANGE_FIELD" => AtomicOperation::CompareAndExchange,
+        "GET_AND_ADD_FIELD" => AtomicOperation::FetchAndAdd,
+        _ => return None,
+    };
+    // The receiver is the property reference itself, which the serializer records as definitely
+    // not null.
+    let KlibIrType::Simple {
+        classifier,
+        nullability: KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull,
+        arguments,
+        annotations,
+        abbreviation: None,
+    } = arena.ty(function.extension_receiver.as_ref()?.ty)
+    else {
+        return None;
+    };
+    let KlibIrSignature::Public(reference) = &classifier.signature else {
+        return None;
+    };
+    let [crate::metadata::klib_ir::tree::KlibIrTypeArgument::Type { ty: value, .. }] =
+        arguments.as_slice()
+    else {
+        return None;
+    };
+    let scalar = ir_semantic_type(arena, *value);
+    let value = arena.ty(*value);
+    // A scalar is compared by what it denotes; the serializer spells one either way.
+    let is_value = |id| match scalar {
+        Some(scalar) => ir_semantic_type(arena, id) == Some(scalar),
+        None => arena.ty(id) == value,
+    };
+    // The value is the declaration's one type parameter, or the scalar an addition is specialized
+    // to when it declares none.
+    let admitted = match function.type_parameters.as_slice() {
+        [parameter] => matches!(
+            value,
+            KlibIrType::Simple {
+                classifier,
+                nullability: KlibIrNullability::NotSpecified,
+                arguments,
+                annotations,
+                abbreviation: None,
+            } if classifier == &parameter.base.symbol && arguments.is_empty() && annotations.is_empty()
+        ),
+        _ => operation == AtomicOperation::FetchAndAdd && scalar.is_some(),
+    };
+    if !admitted
+        || classifier.kind != KlibIrSymbolKind::Class
+        || !annotations.is_empty()
+        || reference.member_id().is_some()
+        || reference.package().segments() != ["kotlin", "reflect"]
+        || reference.declaration().segments() != ["KMutableProperty0"]
+        || function.regular_parameters.len() != operation.operands()
+        || function
+            .regular_parameters
+            .iter()
+            .any(|parameter| !is_value(parameter.ty))
+    {
+        return None;
+    }
+    let answers = match operation {
+        AtomicOperation::Store => ir_unit(arena, function.return_type),
+        AtomicOperation::CompareAndSet => {
+            ir_semantic_type(arena, function.return_type) == Some(Ty::Boolean)
+        }
+        AtomicOperation::Load
+        | AtomicOperation::Exchange
+        | AtomicOperation::CompareAndExchange
+        | AtomicOperation::FetchAndAdd => is_value(function.return_type),
+    };
+    answers.then_some(operation)
+}
+
+/// Whether `id` is exactly `kotlin.Unit`.
+fn ir_unit(arena: &KlibIrArena, id: crate::metadata::klib_ir::tree::KlibIrTypeId) -> bool {
+    let KlibIrType::Simple {
+        classifier,
+        nullability: KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull,
+        arguments,
+        annotations,
+        abbreviation: None,
+    } = arena.ty(id)
+    else {
+        return false;
+    };
+    let KlibIrSignature::Public(signature) = &classifier.signature else {
+        return false;
+    };
+    classifier.kind == KlibIrSymbolKind::Class
+        && arguments.is_empty()
+        && annotations.is_empty()
+        && signature.member_id().is_none()
+        && signature.package().segments() == ["kotlin"]
+        && signature.declaration().segments() == ["Unit"]
 }
 
 fn authenticate_ir(
@@ -456,9 +652,11 @@ fn ir_semantic_type(
     arena: &KlibIrArena,
     id: crate::metadata::klib_ir::tree::KlibIrTypeId,
 ) -> Option<Ty> {
+    // A class type is not null whether the serializer leaves its nullability unspecified or
+    // records it as definitely not null.
     let KlibIrType::Simple {
         classifier,
-        nullability: KlibIrNullability::NotSpecified,
+        nullability: KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull,
         arguments,
         annotations,
         abbreviation: None,
@@ -483,6 +681,8 @@ fn ir_semantic_type(
     }
     match signature.declaration().segments()[0].as_str() {
         "Boolean" => Some(Ty::Boolean),
+        "Byte" => Some(Ty::Byte),
+        "Short" => Some(Ty::Short),
         "Int" => Some(Ty::Int),
         "UInt" => Some(Ty::UInt),
         "Long" => Some(Ty::Long),
@@ -541,6 +741,69 @@ fn radix_to_string(
     })
 }
 
+/// `String.unsafeRangeEquals(thisOffset: Int, other: String, otherOffset: Int, length: Int):
+/// Boolean` in `kotlin.text`.
+fn string_range_equals(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let string = Ty::obj("kotlin/String");
+    let [this_offset, other, other_offset, length] = declaration.params.as_slice() else {
+        return None;
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/text"))
+        && declaration
+            .receiver
+            .as_ref()
+            .is_some_and(|receiver| exact_type(receiver, "kotlin/String"))
+        && semantic_type(this_offset) == Some(Ty::Int)
+        && exact_type(other, "kotlin/String")
+        && semantic_type(other_offset) == Some(Ty::Int)
+        && semantic_type(length) == Some(Ty::Int)
+        && exact_type(&declaration.ret, "kotlin/Boolean"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::StringRangeEquals,
+        kind: ExternalCallableKind::Extension,
+        receiver: Some(string),
+        params: vec![string, Ty::Int, string, Ty::Int, Ty::Int],
+        ret: Ty::Boolean,
+    })
+}
+
+/// `arrayCopy(array, fromIndex: Int, destination, toIndex: Int, count: Int)` in
+/// `kotlin.collections`, where both arrays are `declared`, the array of `element`: a specialized
+/// primitive array, or `Array<Any?>`.
+fn array_copy(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    element: Ty,
+    declared: KotlinType,
+) -> Option<KlibIntrinsicShape> {
+    let array = Ty::array(element);
+    if declared.internal().map(type_name) != array.obj_internal() {
+        return None;
+    }
+    let is_array = |ty: &KotlinType| *ty == declared;
+    let [source, from, destination, to, count] = declaration.params.as_slice() else {
+        return None;
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/collections"))
+        && declaration.receiver.is_none()
+        && is_array(source)
+        && is_array(destination)
+        && [from, to, count]
+            .into_iter()
+            .all(|index| semantic_type(index) == Some(Ty::Int))
+        && exact_type(&declaration.ret, "kotlin/Unit"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::ArrayCopy { array },
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params: vec![array, Ty::Int, array, Ty::Int, Ty::Int],
+        ret: Ty::Unit,
+    })
+}
+
 fn native(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
@@ -577,9 +840,95 @@ fn native(
                 },
                 Ty::Double,
             ),
+            "Kotlin_Array_copyImpl" => {
+                let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+                return array_copy(
+                    placement,
+                    declaration,
+                    any,
+                    KotlinType::Class {
+                        internal: "kotlin/Array".to_owned(),
+                        args: vec![KotlinType::Class {
+                            internal: "kotlin/Any".to_owned(),
+                            args: Vec::new(),
+                            nullable: true,
+                            shape: KotlinFunctionTypeShape::default(),
+                        }],
+                        nullable: false,
+                        shape: KotlinFunctionTypeShape::default(),
+                    },
+                );
+            }
+            "Kotlin_BooleanArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Boolean,
+                    KotlinType::class("kotlin/BooleanArray"),
+                )
+            }
+            "Kotlin_ByteArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Byte,
+                    KotlinType::class("kotlin/ByteArray"),
+                )
+            }
+            "Kotlin_CharArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Char,
+                    KotlinType::class("kotlin/CharArray"),
+                )
+            }
+            "Kotlin_ShortArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Short,
+                    KotlinType::class("kotlin/ShortArray"),
+                )
+            }
+            "Kotlin_IntArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Int,
+                    KotlinType::class("kotlin/IntArray"),
+                )
+            }
+            "Kotlin_LongArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Long,
+                    KotlinType::class("kotlin/LongArray"),
+                )
+            }
+            "Kotlin_FloatArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Float,
+                    KotlinType::class("kotlin/FloatArray"),
+                )
+            }
+            "Kotlin_DoubleArray_copyImpl" => {
+                return array_copy(
+                    placement,
+                    declaration,
+                    Ty::Double,
+                    KotlinType::class("kotlin/DoubleArray"),
+                )
+            }
             "Kotlin_Int_toStringRadix" => return radix_to_string(placement, declaration, Ty::Int),
             "Kotlin_Long_toStringRadix" => {
                 return radix_to_string(placement, declaration, Ty::Long)
+            }
+            "Kotlin_String_unsafeRangeEquals" => {
+                return string_range_equals(placement, declaration)
             }
             _ => return None,
         };
@@ -1407,5 +1756,184 @@ mod tests {
             gc_unsafe("Kotlin_Int_toStringRadix"),
         );
         assert!(authenticate(native, text, &swapped).is_none());
+    }
+
+    #[test]
+    fn native_gc_unsafe_string_range_equality_requires_the_exact_entry_package_and_shape() {
+        let gc_unsafe = |callee: &str| AnnotationApplication {
+            identity: type_name("kotlin/native/internal/GCUnsafeCall"),
+            arguments: vec![(
+                "callee".to_owned(),
+                AnnotationArgument::String(callee.to_owned()),
+            )],
+        };
+        let native = Some(TargetIntrinsicPlatform::Native);
+        let text = crate::libraries::CallablePlacement::Package(type_name("kotlin/text"));
+        let params = ["kotlin/Int", "kotlin/String", "kotlin/Int", "kotlin/Int"];
+        let range_equals = |params: &[&str], ret: &str, callee: &str| {
+            let mut declaration = declaration("unsafeRangeEquals", params, ret, gc_unsafe(callee));
+            declaration.visibility = Visibility::Private;
+            declaration.receiver = Some(KotlinType::class("kotlin/String"));
+            declaration
+        };
+        let exact = range_equals(&params, "kotlin/Boolean", "Kotlin_String_unsafeRangeEquals");
+        let string = Ty::obj("kotlin/String");
+        assert_eq!(
+            authenticate(native, text, &exact),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::StringRangeEquals,
+                kind: ExternalCallableKind::Extension,
+                receiver: Some(string),
+                params: vec![string, Ty::Int, string, Ty::Int, Ty::Int],
+                ret: Ty::Boolean,
+            })
+        );
+        assert!(authenticate(None, text, &exact).is_none());
+        assert!(authenticate(
+            native,
+            crate::libraries::CallablePlacement::Package(type_name("spoof")),
+            &exact
+        )
+        .is_none());
+        let mut bodyful =
+            range_equals(&params, "kotlin/Boolean", "Kotlin_String_unsafeRangeEquals");
+        bodyful.is_external = false;
+        assert!(authenticate(native, text, &bodyful).is_none());
+        let mut top_level =
+            range_equals(&params, "kotlin/Boolean", "Kotlin_String_unsafeRangeEquals");
+        top_level.receiver = None;
+        assert!(authenticate(native, text, &top_level).is_none());
+        let mut builder_receiver =
+            range_equals(&params, "kotlin/Boolean", "Kotlin_String_unsafeRangeEquals");
+        builder_receiver.receiver = Some(KotlinType::class("kotlin/text/StringBuilder"));
+        assert!(authenticate(native, text, &builder_receiver).is_none());
+        let swapped = range_equals(
+            &["kotlin/String", "kotlin/Int", "kotlin/Int", "kotlin/Int"],
+            "kotlin/Boolean",
+            "Kotlin_String_unsafeRangeEquals",
+        );
+        assert!(authenticate(native, text, &swapped).is_none());
+        let wrong_result = range_equals(&params, "kotlin/Int", "Kotlin_String_unsafeRangeEquals");
+        assert!(authenticate(native, text, &wrong_result).is_none());
+        let spoofed = range_equals(&params, "kotlin/Boolean", "User_String_unsafeRangeEquals");
+        assert!(authenticate(native, text, &spoofed).is_none());
+    }
+
+    #[test]
+    fn native_gc_unsafe_array_copy_requires_the_exact_entry_package_and_arrays() {
+        let gc_unsafe = |callee: &str| AnnotationApplication {
+            identity: type_name("kotlin/native/internal/GCUnsafeCall"),
+            arguments: vec![(
+                "callee".to_owned(),
+                AnnotationArgument::String(callee.to_owned()),
+            )],
+        };
+        let native = Some(TargetIntrinsicPlatform::Native);
+        let collections =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/collections"));
+        let copy = |array: KotlinType, entry: &str| {
+            let mut declaration = declaration(
+                "arrayCopy",
+                &[
+                    "kotlin/Int",
+                    "kotlin/Int",
+                    "kotlin/Int",
+                    "kotlin/Int",
+                    "kotlin/Int",
+                ],
+                "kotlin/Unit",
+                gc_unsafe(entry),
+            );
+            declaration.params[0] = array.clone();
+            declaration.params[2] = array;
+            declaration
+        };
+        let any_array = KotlinType::Class {
+            internal: "kotlin/Array".to_owned(),
+            args: vec![KotlinType::Class {
+                internal: "kotlin/Any".to_owned(),
+                args: Vec::new(),
+                nullable: true,
+                shape: KotlinFunctionTypeShape::default(),
+            }],
+            nullable: false,
+            shape: KotlinFunctionTypeShape::default(),
+        };
+        for (entry, declared, array) in [
+            (
+                "Kotlin_IntArray_copyImpl",
+                KotlinType::class("kotlin/IntArray"),
+                Ty::array(Ty::Int),
+            ),
+            (
+                "Kotlin_BooleanArray_copyImpl",
+                KotlinType::class("kotlin/BooleanArray"),
+                Ty::array(Ty::Boolean),
+            ),
+            (
+                "Kotlin_Array_copyImpl",
+                any_array.clone(),
+                Ty::array(Ty::nullable(Ty::obj("kotlin/Any"))),
+            ),
+        ] {
+            assert_eq!(
+                authenticate(native, collections, &copy(declared.clone(), entry)),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::ArrayCopy { array },
+                    kind: ExternalCallableKind::TopLevel,
+                    receiver: None,
+                    params: vec![array, Ty::Int, array, Ty::Int, Ty::Int],
+                    ret: Ty::Unit,
+                }),
+                "{entry}"
+            );
+            assert!(
+                authenticate(None, collections, &copy(declared.clone(), entry)).is_none(),
+                "{entry}"
+            );
+            assert!(
+                authenticate(
+                    native,
+                    crate::libraries::CallablePlacement::Package(type_name("kotlin")),
+                    &copy(declared.clone(), entry)
+                )
+                .is_none(),
+                "{entry}"
+            );
+            let mut mixed = copy(declared.clone(), entry);
+            mixed.params[2] = KotlinType::class("kotlin/LongArray");
+            assert!(
+                authenticate(native, collections, &mixed).is_none(),
+                "{entry}"
+            );
+            let mut counted_long = copy(declared, entry);
+            counted_long.params[4] = KotlinType::class("kotlin/Long");
+            assert!(
+                authenticate(native, collections, &counted_long).is_none(),
+                "{entry}"
+            );
+        }
+        // An entry names the one array kind it copies.
+        assert!(authenticate(
+            native,
+            collections,
+            &copy(
+                KotlinType::class("kotlin/LongArray"),
+                "Kotlin_IntArray_copyImpl"
+            )
+        )
+        .is_none());
+        assert!(authenticate(
+            native,
+            collections,
+            &copy(
+                KotlinType::class("kotlin/IntArray"),
+                "Kotlin_Array_copyImpl"
+            )
+        )
+        .is_none());
+        assert!(
+            authenticate(native, collections, &copy(any_array, "User_Array_copyImpl")).is_none()
+        );
     }
 }

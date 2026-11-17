@@ -60,6 +60,8 @@ pub(super) struct ObjectRoot {
     pub(super) itable: u32,
     /// `$AnyTable`: `kotlin.Any`'s three slots, the interface table, then the type information.
     pub(super) any_table: u32,
+    /// `$FunctionTable`: `$AnyTable` plus an erased `FunctionN.invoke` entry.
+    pub(super) function_table: u32,
     /// `$Object`: the dispatch table, and nothing else yet.
     pub(super) object: u32,
     /// `$Identified`: `$Object`, then the object's immutable identity hash
@@ -106,6 +108,24 @@ impl ObjectRoot {
             supertype: None,
             open: true,
         });
+        let function_table = module.subtype(SubType {
+            composite: CompositeType::Struct(
+                any_slot_types
+                    .iter()
+                    .map(|ty| immutable(ValType::reference(*ty)))
+                    .chain([
+                        immutable(ValType::nullable(itable)),
+                        immutable(ValType::nullable(type_infos.ty)),
+                        immutable(ValType::Ref {
+                            nullable: true,
+                            heap: HeapType::Func,
+                        }),
+                    ])
+                    .collect(),
+            ),
+            supertype: Some(any_table),
+            open: true,
+        });
         let object = module.subtype(SubType {
             composite: CompositeType::Struct(vec![immutable(ValType::reference(any_table))]),
             supertype: None,
@@ -143,6 +163,7 @@ impl ObjectRoot {
         Self {
             itable,
             any_table,
+            function_table,
             object,
             identified,
             enum_base,

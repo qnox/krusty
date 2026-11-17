@@ -287,6 +287,12 @@ KRef kt_unsigned_array_wrap(const KType *type, KRef storage);
    a spread needs: `f(a, *xs, b)` builds one array whose size only run time knows. */
 kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source);
 
+/* Kotlin/Native's `arrayCopy` of one specialized primitive array or `Array<Any?>`: `count` elements of `source`
+   from `from` into `destination` at `to`. A range outside either array raises its
+   `ArrayIndexOutOfBoundsException`, with no message, before anything is copied. The ranges may
+   overlap within one array. */
+void kt_array_copy_range(KRef source, kt_int from, KRef destination, kt_int to, kt_int count);
+
 /* An index outside `0 until size`: raises Kotlin's `IndexOutOfBoundsException`, with the JVM's
    wording, and returns; the caller returns too. */
 void kt_index_out_of_bounds(kt_int index, kt_int size);
@@ -350,6 +356,31 @@ extern const KType kt_type_function19;
 extern const KType kt_type_function20;
 extern const KType kt_type_function21;
 extern const KType kt_type_function22;
+
+/* Semantic source-arity markers for Kotlin suspend function types. */
+extern const KType kt_type_suspend_function0;
+extern const KType kt_type_suspend_function1;
+extern const KType kt_type_suspend_function2;
+extern const KType kt_type_suspend_function3;
+extern const KType kt_type_suspend_function4;
+extern const KType kt_type_suspend_function5;
+extern const KType kt_type_suspend_function6;
+extern const KType kt_type_suspend_function7;
+extern const KType kt_type_suspend_function8;
+extern const KType kt_type_suspend_function9;
+extern const KType kt_type_suspend_function10;
+extern const KType kt_type_suspend_function11;
+extern const KType kt_type_suspend_function12;
+extern const KType kt_type_suspend_function13;
+extern const KType kt_type_suspend_function14;
+extern const KType kt_type_suspend_function15;
+extern const KType kt_type_suspend_function16;
+extern const KType kt_type_suspend_function17;
+extern const KType kt_type_suspend_function18;
+extern const KType kt_type_suspend_function19;
+extern const KType kt_type_suspend_function20;
+extern const KType kt_type_suspend_function21;
+extern const KType kt_type_suspend_function22;
 
 /* Kotlin's reflection hierarchy, as far as a PROPERTY REFERENCE wears it. Each reference object
    has a type of its own — one per property — so an `is` against `KProperty0` cannot ask about that
@@ -841,6 +872,11 @@ KRef kt_string_substring_from(KRef self, kt_int start);
 /* `a.compareTo(b)`, by UTF-16 code unit and with Java's magnitude: the difference of the first
    units that differ, or of the lengths when one string is a prefix of the other. */
 kt_int kt_string_compare_to(KRef a, KRef b);
+
+/* Whether `length` UTF-16 units of `self` from `self_offset` equal `other`'s from `other_offset`;
+   both ranges are already within their strings (Kotlin/Native's `unsafeRangeEquals`). */
+kt_boolean kt_string_range_equals(KRef self, kt_int self_offset, KRef other, kt_int other_offset,
+                                  kt_int length);
 
 /* `s.removeSuffix(suffix)`: the receiver without it, cut by UTF-16 unit as `endsWith` and
    `substring` are; either may be a `StringBuilder`. A string that does not end there comes back
@@ -1338,6 +1374,23 @@ KRef kt_read_line_or_throw(void);
 
 typedef struct KThread KThread;
 
+/* Explicit embedding lifetime. A foreign host calls begin once at OS-thread routine entry, and
+   end with its returned token after the routine's final callback, immediately before thread exit.
+   Both run outside Kotlin, without holding the mutator lock. Begin is not nestable and rejects
+   an existing registration; the token is valid only until its one matching end on the same thread.
+   They do not detect OS exit and must not bracket individual callbacks. Main and kt_thread_start
+   threads are already managed and must not be registered or ended by the host.
+   Unregistered hosts retain the existing temporary callback behavior, without persistent slots. */
+KThread *kt_thread_lifetime_begin(void);
+void kt_thread_lifetime_end(KThread *thread);
+
+/* A declaration's reference slot in the current managed/registered OS-thread lifetime. The caller
+   holds the mutator lock. The nonnull token must identify the same exact declaration in every
+   module; the runtime never interprets it. The stable zero-initialized slot is a GC root until
+   the declared thread end, including gaps between callbacks. Allocation/initialization of its
+   value belongs to the caller. An unregistered temporary callback cannot use this operation. */
+KRef *kt_thread_object_slot(const void *canonical_declaration_token);
+
 /* Release the lock for a call into foreign code, recording the caller's callee-saved registers and
    stack pointer so its frames stay roots while it is away. Pass the answer to `kt_native_leave`
    when the foreign call returns. */
@@ -1349,6 +1402,8 @@ typedef struct KThreadEntry {
     KThread *thread;
     /* Whether this entry attached the thread, and so detaches it on the way out. */
     bool attached;
+    /* An explicitly registered thread was outside every callback, with no Kotlin stack. */
+    bool outer_dormant;
     /* A thread that was already attached, in a `kt_native_enter`: its released state, put back on
        the way out. */
     uintptr_t outer_registers[KT_SAVED_REGISTERS];
@@ -1358,7 +1413,8 @@ typedef struct KThreadEntry {
 
 /* Enter Kotlin from foreign code, taking the lock. `stack_bottom` is the address of a local in the
    caller's frame, above every Kotlin frame the callback will run; it matters only for a thread the
-   runtime has not seen, which is attached for the callback's duration. */
+   runtime has not seen, which is attached for the callback's duration, or a registered
+   thread reentering after its previous callback returned. */
 void kt_callback_enter(KThreadEntry *entry, void *stack_bottom);
 
 /* Leave Kotlin for the foreign code that called in, releasing the lock. An exception the callback

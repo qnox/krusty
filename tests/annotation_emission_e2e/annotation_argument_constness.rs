@@ -537,3 +537,25 @@ const val C = \"c\"
 ";
     common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
 }
+
+/// An entry's `name` is a constant only under `+IntrinsicConstEvaluation`, and then only for an
+/// entry named directly: a name read through a value is not constant in either mode.
+#[test]
+fn an_enum_name_is_constant_only_under_intrinsic_const_evaluation() {
+    let body = "annotation class A(val s: String)
+enum class E { OK }
+val e = E.OK
+@A(e.name) fun throughValue() {}
+@A(\"${e.name}\") fun throughValueTemplate() {}
+";
+    let without = format!(
+        "{body}@A(E.OK.name) fun direct() {{}}\n@A(\"x\" + E.OK.name) fun concatenated() {{}}\n"
+    );
+    common::assert_errors_match_kotlinc(&[("main.kt", &without)], &[]);
+    let with =
+        format!("// LANGUAGE: +IntrinsicConstEvaluation\n{body}@A(E.OK.name) fun direct() {{}}\n");
+    common::assert_errors_match_kotlinc(
+        &[("main.kt", &with)],
+        &common::language_directives::kotlinc_args(&with),
+    );
+}

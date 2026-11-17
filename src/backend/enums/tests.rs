@@ -113,7 +113,11 @@ fn lowered(ir: IrFile) -> IrFile {
 }
 
 fn lowered_for(mut ir: IrFile, contract: super::Contract) -> IrFile {
-    super::realize(&mut ir, contract);
+    super::realize(
+        &mut ir,
+        contract,
+        &mut super::super::DependencyExportSignatures::default(),
+    );
     ir
 }
 
@@ -604,6 +608,44 @@ fn the_enum_entries_intrinsic_reads_the_entries_slot() {
     };
     assert!(calls_initializer(&ir, stmts[0], initializer));
     assert!(matches!(ir.expr(*value), IrExpr::GetStatic(slot) if *slot == entries));
+}
+
+/// Another file calls an enum's `values()` and `valueOf` through entries of this file: the very
+/// functions this file's own calls are rewritten to, published by the enum and the member.
+#[test]
+fn an_enum_publishes_its_values_and_value_of() {
+    let mut ir = IrFile::default();
+    shade(&mut ir);
+    let mut exports = super::super::DependencyExportSignatures::default();
+    super::realize(&mut ir, super::Contract::KotlinNative, &mut exports);
+
+    let shade = type_name("Shade");
+    let published = exports
+        .instance_entries()
+        .iter()
+        .map(|(instance, entry)| (instance.clone(), *entry))
+        .collect::<Vec<_>>();
+    let values = function(&ir, "Shade$values");
+    let value_of = function(&ir, "Shade$valueOf");
+    assert_eq!(
+        published,
+        [
+            (
+                super::super::instance_links::InstanceEntry::EnumMember {
+                    classifier: shade,
+                    member: super::StaticMember::Values,
+                },
+                values,
+            ),
+            (
+                super::super::instance_links::InstanceEntry::EnumMember {
+                    classifier: shade,
+                    member: super::StaticMember::ValueOf,
+                },
+                value_of,
+            ),
+        ]
+    );
 }
 
 /// A default is evaluated by the target, in an entry or a constructor's frame, so an enum constant

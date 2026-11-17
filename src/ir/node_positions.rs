@@ -29,6 +29,10 @@ pub struct IrNodePosition {
     /// from a node that carries the statement's start offset itself. Once lowering gives every
     /// node its FIR expression's position this goes, and the JVM line rule reads node kinds only.
     pub statement_line: Option<u32>,
+    /// Where the expression's source text starts in its file, kotlinc's `startOffset`: compared
+    /// only with another expression of the same file, for a decision kotlinc makes by visiting a
+    /// file's declarations in source order.
+    pub start_offset: Option<u32>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -88,6 +92,7 @@ impl InheritedFacts for IrNodePositions {
             source_line,
             end_line,
             statement_line,
+            start_offset,
         } = self.get(source);
         let copy = self.settle(target);
         for (copied, line) in [
@@ -101,6 +106,9 @@ impl InheritedFacts for IrNodePositions {
         }
         if statement_line.is_some() {
             copy.statement_line = statement_line;
+        }
+        if start_offset.is_some() {
+            copy.start_offset = start_offset;
         }
     }
 }
@@ -210,6 +218,15 @@ impl IrFile {
         self.positions.settle(expression).source_line = Some(line);
     }
 
+    /// Where `expression`'s source text starts in its file.
+    pub fn start_offset(&self, expression: ExprId) -> Option<u32> {
+        self.positions.get(expression).start_offset
+    }
+
+    pub fn set_start_offset(&mut self, expression: ExprId, offset: u32) {
+        self.positions.settle(expression).start_offset = Some(offset);
+    }
+
     pub fn set_end_line(&mut self, expression: ExprId, line: u32) {
         self.positions.settle(expression).end_line = Some(line);
     }
@@ -299,6 +316,7 @@ mod tests {
             source_line: Some(line),
             end_line: Some(line + 1),
             statement_line: None,
+            start_offset: None,
         }
     }
 
@@ -324,6 +342,7 @@ mod tests {
                 source_line: Some(2),
                 end_line: None,
                 statement_line: None,
+                start_offset: None,
             }
         );
         assert_eq!(ir.position(positionless as u32), IrNodePosition::default());

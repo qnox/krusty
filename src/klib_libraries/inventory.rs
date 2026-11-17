@@ -95,6 +95,10 @@ pub(super) struct PackageInventory {
     /// it is not a child of any namespace.
     namespaces: HashSet<TypeName>,
     intrinsics: KlibIntrinsicFacts,
+    /// Private top-level externals by declaring package. Kotlin/Native serializes an external
+    /// under a public identity even when it is file-private, because the runtime implements it by
+    /// name; a body of its own file calls it by that identity. It names nothing in its package.
+    private_externals: Vec<(TypeName, SignedFunction)>,
 }
 
 /// Exact prepared-inline declarations selected by metadata, grouped by declaring module.
@@ -177,6 +181,7 @@ impl PackageInventory {
             companion_properties: HashMap::default(),
             namespaces: HashSet::default(),
             intrinsics: KlibIntrinsicFacts::default(),
+            private_externals: Vec::new(),
         };
         // A type alias's qualified identity omits its declaring archive. When an ordinary
         // dependency and an exact friend both publish the same identity, keep the friend-owned
@@ -216,12 +221,37 @@ impl PackageInventory {
                     inventory.type_aliases.insert(expansion.identity, expansion);
                 }
             }
-            let signed = package
+            // A private top-level function is visible only inside its own file. Its library
+            // serializes it under a file-local identity, unless it is external.
+            let (private, functions): (Vec<_>, Vec<_>) = package
                 .functions
                 .into_iter()
-                // A private top-level function is visible only inside its own file; its library
-                // serializes it under a file-local identity, never a public one.
-                .filter(|function| function.visibility != Visibility::Private)
+                .partition(|function| function.visibility == Visibility::Private);
+            for function in private.into_iter().filter(|function| function.is_external) {
+                let mut signed = sign_package_function(
+                    &segments,
+                    function,
+                    internal_friend,
+                    module.as_deref(),
+                    native_interop_library,
+                )?;
+                signed.compiler_builtin_owner = compiler_builtin_owner;
+                signed.direct_c_function = super::direct_c_calls::authenticate(
+                    &segments,
+                    native_interop_library,
+                    crate::libraries::CallablePlacement::Package(identity),
+                    &signed.declaration,
+                )?;
+                signed.target_intrinsic = super::target_intrinsics::authenticate(
+                    intrinsic_platform,
+                    crate::libraries::CallablePlacement::Package(identity),
+                    &signed.declaration,
+                );
+                inventory.intrinsics.insert(&signed);
+                inventory.private_externals.push((identity, signed));
+            }
+            let signed = functions
+                .into_iter()
                 .map(|function| {
                     sign_package_function(
                         &segments,
@@ -592,6 +622,18 @@ impl PackageInventory {
                             crate::libraries::CallablePlacement::Package(package),
                             function,
                         )
+                    })
+            })
+            .or_else(|| {
+                self.private_externals
+                    .iter()
+                    .find_map(|(package, function)| {
+                        (function.module.as_deref() == Some(identity.module.as_str())
+                            && &function.signature == signature)
+                            .then_some((
+                                crate::libraries::CallablePlacement::Package(*package),
+                                function,
+                            ))
                     })
             })
             .or_else(|| {

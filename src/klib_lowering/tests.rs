@@ -553,7 +553,7 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
                 .map(|catch| format!(
                     " catch(v{} {:?}: {}) {}",
                     catch.var,
-                    catch.binding.as_ref().map(|binding| binding.name.as_str()),
+                    catch.binding.as_ref().map(|binding| &binding.name),
                     type_name_of(catch.ty),
                     render(ir, catch.body)
                 ))
@@ -1647,7 +1647,7 @@ pub(super) fn non_overriding_edges<'a>(
 }
 
 pub(super) fn checked_backend_klib_facts(
-    facts: crate::fir::CheckedKlibDependencyFacts,
+    facts: crate::ir::CheckedKlibDependencyFacts,
 ) -> CheckedBackendCallables {
     let mut checked = CheckedBackendCallables::default();
     checked

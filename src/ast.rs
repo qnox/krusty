@@ -31,6 +31,7 @@ mod property_shape;
 mod type_refs;
 pub use type_refs::{QualifierArgumentLists, QualifierSegmentArguments, TrFlags, TypeRef};
 mod use_site_annotations;
+mod value_class_syntax;
 pub use backing_field_reads::{accessor_uses_backing_field, getter_declares_field};
 pub use binary_reference_tokens::BinaryReferenceTokens;
 pub(crate) use call_shape::explicit_call_receiver;
@@ -49,6 +50,7 @@ pub use property_shape::{
     is_computed_member_prop,
 };
 pub use use_site_annotations::UseSiteAnnotation;
+pub use value_class_syntax::ValueClassKeyword;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct ExprId(pub u32);
@@ -264,6 +266,8 @@ pub enum UnsupportedAnnotationArgument {
 #[derive(Clone, Debug)]
 pub struct CatchClause {
     pub name: String,
+    /// `catch (_: E)`: the parameter declares no name.
+    pub unused: bool,
     pub ty: TypeRef,
     pub body: ExprId,
     /// The full catch parameter (`name: ty`) span used by parameter diagnostics.
@@ -477,6 +481,8 @@ pub struct TypeAliasDecl {
     pub span: Span,
     /// Exact span of the alias's NAME, like [`FunDecl::name_span`].
     pub name_span: Span,
+    /// The whole declaration, from its first annotation or modifier through its target.
+    pub declaration_span: Span,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1024,6 +1030,10 @@ pub struct ClassDecl {
     /// Span of the primary constructor's parameter list, `(` through `)`. Absent when the class
     /// writes no parameter list.
     pub primary_constructor_parameters_span: Option<Span>,
+    /// Span of the primary constructor's signature: its `constructor` keyword when written,
+    /// otherwise its `(`, through the `)`. Absent when the class writes no
+    /// parameter list; a declaration-level constructor diagnostic then names the class.
+    pub primary_constructor_signature_span: Option<Span>,
     /// `enum class Name { A, B }` — the entries in declaration order (extends `java/lang/Enum`). Each
     /// [`AstEnumEntry`] carries its own name / constructor args / body methods / body properties.
     pub enum_entries: Vec<AstEnumEntry>,
@@ -1865,6 +1875,10 @@ pub struct File {
     /// span. Diagnostics consume this parser-owned source fact instead of guessing an offset from
     /// the referenced type, which may be separated from the keyword by trivia.
     pub type_projection_spans: crate::fx_hash::HashMap<Span, Span>,
+    /// Exact `<…>` span of the type-argument list written on a classifier reference's own (last)
+    /// segment, keyed by that reference's type span. Diagnostics about the written arguments report
+    /// at the list itself, which the reference's span does not cover.
+    pub type_argument_list_spans: crate::fx_hash::HashMap<Span, Span>,
     /// Every `typealias Name<T…> = Target`: the alias name, its declared type-parameter names, and
     /// the complete source target shape. Resolution binds this once for semantic use and metadata.
     pub type_alias_fun: Vec<(String, Vec<String>, TypeRef)>,
@@ -1987,6 +2001,9 @@ pub struct File {
     /// `+NormalizeNaNValuesInConstContext`: every NaN a compile-time constant evaluates to is the
     /// canonical NaN of its type, whatever sign and payload the arithmetic produced.
     pub normalize_nan_in_const_context: bool,
+    /// `+IntrinsicConstEvaluation`: a constant context (an annotation argument, a `const val`)
+    /// also evaluates the intrinsic-const reads it otherwise rejects, such as an entry's `name`.
+    pub intrinsic_const_evaluation: bool,
     /// `+CustomEqualsInValueClasses`: permit the typed `equals(Self)` convention in a value class
     /// whose selected representation is inline rather than full/boxed.
     pub custom_equals_in_value_classes: bool,

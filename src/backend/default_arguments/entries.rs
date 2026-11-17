@@ -83,6 +83,33 @@ impl Entries {
         }
     }
 
+    /// Build the entry of every checked constructor with defaults that another file may build an
+    /// instance through, `constructible` says which, and record it by the constructor's
+    /// declaration. Such a constructor is never private, and its class is neither sealed nor an
+    /// enum, so whoever may call it may call its entry.
+    pub(super) fn publish_constructors(
+        &mut self,
+        ir: &mut IrFile,
+        constructible: impl Fn(crate::fir::DeclarationId) -> bool,
+    ) {
+        let mut published = ir
+            .checked_constructor_bodies
+            .iter()
+            .filter(|(&declaration, _)| constructible(declaration))
+            .map(|(&declaration, body)| (declaration, body.class, body.ordinal))
+            .collect::<Vec<_>>();
+        published.sort_unstable_by_key(|&(declaration, _, _)| declaration.raw());
+        for (declaration, class, ordinal) in published {
+            let target = IrConstructorTarget {
+                ordinal,
+                access: crate::ir::IrConstructorAccess::Unrestricted,
+            };
+            if let Some(entry) = self.constructor_entry(ir, class, target) {
+                ir.constructor_default_entries.insert(declaration, entry);
+            }
+        }
+    }
+
     /// The entry of `declaration`, built on first use. `form` is how a declaration without a
     /// dispatch receiver is called; a member is reached through its receiver instead.
     pub(super) fn entry(
@@ -181,13 +208,11 @@ pub fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> 
     let mut identities = match ir.inherited_param_default_provider(declaration) {
         // An overriding member forwards inherited defaults through the entry of the declaration
         // that owns them. Publishing this implementation under that same provider identity would
-        // make multiple overrides compete for one module entry. Top-level actual declarations
-        // retain the expect identity below; they have no dispatch slot/provider implementation to
-        // publish elsewhere.
-        Some(ResolvedFunctionOverrideTarget::Module(_))
-            if ir.functions[declaration as usize]
-                .dispatch_receiver
-                .is_some() =>
+        // make multiple overrides compete for one module entry. An `actual` declaration, top-level
+        // or member, overrides nothing: it retains the expect identity below, which is what the
+        // callers selected.
+        Some(ResolvedFunctionOverrideTarget::Module(provider))
+            if overrides(ir, declaration, provider) =>
         {
             Vec::new()
         }
@@ -202,6 +227,22 @@ pub fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> 
     };
     identities.sort_unstable_by_key(|callable| callable.raw());
     identities
+}
+
+/// Whether member `declaration` implements `provider` by an override edge: its own, one a subclass
+/// records when `declaration` implements a supertype member it does not itself override, or the
+/// edge of a delegation forwarder.
+fn overrides(ir: &IrFile, declaration: FunId, provider: CallableId) -> bool {
+    ir.function_overrides.values().flatten().any(|edge| {
+        let implements = edge.implementation_function == Some(declaration)
+            || match edge.implementation {
+                ResolvedFunctionOverrideTarget::Module(implementation) => {
+                    ir.checked_callable_functions.get(&implementation) == Some(&declaration)
+                }
+                ResolvedFunctionOverrideTarget::External(_) => false,
+            };
+        implements && edge.overridden == ResolvedFunctionOverrideTarget::Module(provider)
+    })
 }
 
 /// How the entry of `declaration` reaches it, when this lowering can build one.

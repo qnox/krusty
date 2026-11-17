@@ -49,22 +49,19 @@ fn candidate_from_record(record: &crate::libraries::ResolvedSymbols) -> Option<S
     })
 }
 
+/// Collect one candidate per declaration. Repeated records of one declaration collapse, but two
+/// typealias declarations, or an alias and its own target, stay distinct even when they expand to
+/// the same classifier, exactly as [`explicit_classifier_candidates`] keeps them.
 fn retain_classifier_candidate(
     candidates: &mut Vec<ScopedClassifier>,
     candidate: ScopedClassifier,
 ) {
-    match candidates
-        .iter_mut()
-        .find(|previous| previous.classifier == candidate.classifier)
-    {
-        Some(previous) => {
-            if previous.alias.as_ref().map(|alias| alias.identity)
-                != candidate.alias.as_ref().map(|alias| alias.identity)
-            {
-                previous.alias = None;
-            }
-        }
-        None => candidates.push(candidate),
+    let alias_identity = candidate.alias.as_ref().map(|alias| alias.identity);
+    if !candidates.iter().any(|previous| {
+        previous.classifier == candidate.classifier
+            && previous.alias.as_ref().map(|alias| alias.identity) == alias_identity
+    }) {
+        candidates.push(candidate);
     }
 }
 

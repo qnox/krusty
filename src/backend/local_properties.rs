@@ -54,7 +54,7 @@ pub fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess>, Prop
                     substitutions: _,
                 } = &**checked_op =>
             {
-                let Some(layout) = ir.local_property_layouts.get(target).cloned() else {
+                let Some(layout) = ir.property_layout_at(operation, *target)? else {
                     continue;
                 };
                 let replacement = property_read(
@@ -80,7 +80,7 @@ pub fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess>, Prop
                     substitutions: _,
                 } = &**checked_op =>
             {
-                let Some(layout) = ir.local_property_layouts.get(target).cloned() else {
+                let Some(layout) = ir.property_layout_at(operation, *target)? else {
                     continue;
                 };
                 let replacement = property_write(
@@ -118,6 +118,26 @@ pub fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess>, Prop
             {
                 ir.call_declared_params
                     .insert(operation, parameters.clone().into_boxed_slice());
+            }
+        }
+        // A getter call of a module accessor yields its declaration's result, as any other call of
+        // that accessor does; a generic `T` merely specialized at this read stays the declared one.
+        if let IrExpr::Call { callee, .. } = &replacement {
+            let declared = match &**callee {
+                Callee::Virtual {
+                    params: Some((parameters, ret)),
+                    ..
+                } => Some((parameters.clone(), *ret)),
+                callee => callee.source_function().map(|getter| {
+                    let getter = &ir.functions[getter as usize];
+                    (getter.params.clone(), getter.ret)
+                }),
+            };
+            if let (true, Some((parameters, ret))) = (read, declared) {
+                ir.call_declared_ret.insert(operation, ret);
+                ir.call_declared_params
+                    .entry(operation)
+                    .or_insert_with(|| parameters.into_boxed_slice());
             }
         }
         let first_operand = match &replacement {

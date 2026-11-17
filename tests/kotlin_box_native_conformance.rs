@@ -296,6 +296,17 @@ fn kotlin_codegen_box_native_conformance() {
     box_lane::run(&NativeLane { target: host() });
 }
 
+#[test]
+fn native_dependency_interface_aliases_join_by_identity() {
+    let source = include_str!("box_regressions/multimodule/nativeInterfaceAliasJoin.kt");
+    super::box_reference_classes::checked_box(source, "nativeInterfaceAliasJoin")
+        .expect("pinned kotlinc must run the exact KLIB module graph");
+    assert_eq!(
+        run_native_abi_case(source, "nativeInterfaceAliasJoin"),
+        Outcome::Pass,
+        "consumer files must share interface import numbers and join their aliases"
+    );
+}
 fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
     if let Some(reason) = not_applicable(source) {
         return Outcome::NotApplicable(reason);
@@ -487,6 +498,45 @@ fn native_generic_class_members_instantiate_their_declared_dependency_exports() 
 }
 
 #[test]
+fn native_cross_module_superclasses_keep_selected_constructor_and_generic_method_frames() {
+    let source = include_str!("box_regressions/multimodule/sourceLibraryGenericClassDispatch.kt");
+    let stem = "sourceLibraryGenericClassDispatch";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete source superclass module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "Native must preserve selected superclass ABI across module boundaries"
+    );
+}
+
+#[test]
+fn native_cross_module_superclass_publishes_the_bridges_its_function_supertype_needs() {
+    let source = include_str!("box_regressions/multimodule/sourceLibraryUnboxedFunctionBridge.kt");
+    let stem = "sourceLibraryUnboxedFunctionBridge";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete source superclass module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "a library class's vtable bridges must be linkable by a subclass in another module"
+    );
+}
+
+/// One module of two files: the superclass's secondary constructor is reached from the other file.
+#[test]
+fn native_cross_file_superclasses_keep_selected_secondary_constructor() {
+    assert_eq!(
+        run_native_portable_box(
+            include_str!("box_regressions/crossFileSuperclassSecondary.kt"),
+            "crossFileSuperclassSecondary",
+        ),
+        Outcome::Pass,
+        "Native must preserve the selected superclass constructor across file boundaries"
+    );
+}
+
+#[test]
 fn native_data_class_signed_array_members_are_lowered_from_the_library_klib() {
     let source = include_str!("box_regressions/multimodule/dataClassSignedArrayMembers.kt");
     let stem = "dataClassSignedArrayMembers";
@@ -510,12 +560,11 @@ fn run_native_portable_box(source: &str, stem: &str) -> Outcome {
     let lane = NativeLane {
         target: Some(target),
     };
-    lane.compile_and_run(
-        &std::env::temp_dir(),
-        stem,
-        &[(format!("{stem}.kt"), source.to_string())],
-        source,
-    )
+    let sources = match box_lane::prepare_sources(source, stem, TestTarget::Native) {
+        Ok(sources) => sources,
+        Err(outcome) => return outcome,
+    };
+    lane.compile_and_run(&std::env::temp_dir(), stem, &sources, source)
 }
 
 /// A `StringBuilder` appended to through `Appendable` from a file declaring no `Appendable` of

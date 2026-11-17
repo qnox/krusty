@@ -12,6 +12,7 @@
 
 mod extended_classes;
 mod properties;
+mod published_descriptors;
 mod value_boxes;
 
 pub(super) use extended_classes::{exported_classes, ExtensionEntries};

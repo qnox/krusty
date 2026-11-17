@@ -2,13 +2,57 @@
 
 use crate::backend::CheckedIrFile;
 use crate::fx_hash::{HashMap, HashSet};
-use crate::ir::{Callee, IrCheckedOperation, IrExpr};
+use crate::ir::{Callee, IrCheckedOperation, IrExpr, IrFile};
 use crate::klib_libraries::{KlibDeclarationBodies, KlibIntrinsicFacts};
 use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, KlibBodyCallable, KlibDependencyCallable,
     SemanticPlatform,
 };
 use std::collections::VecDeque;
+
+/// The exact external callable declarations reached from emitted expression roots. The frozen
+/// callable inventory includes expression-arena nodes left behind by earlier rewrites; those nodes
+/// are declaration evidence, not executable uses, and must not cause intrinsic support emission.
+pub(super) fn emitted_dependency_targets(
+    ir: &IrFile,
+    mut property_accessor: impl FnMut(
+        crate::fir::ExternalPropertyId,
+        bool,
+    ) -> Result<Option<crate::fir::ExternalCallableId>, String>,
+) -> Result<Vec<(crate::ir::ExprId, crate::fir::ExternalCallableId, bool)>, String> {
+    let mut targets = Vec::new();
+    for expression in crate::ir::emitted_body_roots(ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+    {
+        match ir.expr(expression) {
+            IrExpr::Call { callee, .. } => {
+                if let Callee::External { target, .. } = &**callee {
+                    targets.push((expression, *target, false));
+                }
+            }
+            IrExpr::New {
+                external_target: Some(target),
+                ..
+            } => targets.push((expression, *target, true)),
+            IrExpr::Checked(operation) => match &**operation {
+                IrCheckedOperation::ExternalPropertyRead { target, .. } => {
+                    if let Some(callable) = property_accessor(*target, false)? {
+                        targets.push((expression, callable, false));
+                    }
+                }
+                IrCheckedOperation::ExternalPropertyWrite { target, .. } => {
+                    if let Some(callable) = property_accessor(*target, true)? {
+                        targets.push((expression, callable, false));
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    Ok(targets)
+}
 
 /// The declarations a unit's closure freezes.
 pub(super) struct FrozenClosure {
@@ -66,9 +110,10 @@ pub(super) fn declarations(
             );
             continue;
         }
-        // A top-level function private to its file has no provider declaration either; only a
-        // body of its own module calls it, and it is emitted with that body.
-        if let crate::libraries::KlibDeclarationSignature::FileLocal { .. } = identity.declaration {
+        // A top-level function private to its file, or a member of a class private to its
+        // library, has no provider declaration either; only a body of its own module calls it, and
+        // it is emitted with that body.
+        if bodies.is_library_private(&identity) {
             pending.extend(
                 bodies
                     .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
@@ -127,6 +172,24 @@ pub(super) fn declarations(
             capabilities.callees.with_declaration(selected),
             &superclasses,
         );
+        let retained = externals
+            .get(&identity)
+            .and_then(|external| external.constructor_initializer_target());
+        if let Some(target) = retained {
+            if target != declaration_target {
+                return Err("an emitted initializer changed its rebound provider handle".into());
+            }
+            if !facts
+                .authenticates_retained_constructor(&identity, bodies)
+                .map_err(|reason| {
+                    format!("an invalid retained constructor declaration: {reason:?}")
+                })?
+            {
+                return Err("an emitted initializer lost its constructor declaration".into());
+            }
+            declarations.push((declaration_target, realization));
+            continue;
+        }
         let constructor = facts
             .authenticates_constructor(&identity, bodies)
             .map_err(|reason| format!("an invalid constructor declaration: {reason:?}"))?;
@@ -197,9 +260,9 @@ pub(super) fn declarations(
         } else {
             None
         };
-        let external_member = outside_edge
-            .as_ref()
-            .is_some_and(|edge| capabilities.target_realizes_bodyless || realizes_any_member(edge));
+        let external_member = outside_edge.as_ref().is_some_and(|edge| {
+            capabilities.target_realizes_bodyless || edge.realizes_any_member()
+        });
         // A call of a member realized outside the unit carries the facts the member hierarchy
         // decorates a source call of it with; the edge is what authorizes the call.
         if let Some(edge) = outside_edge.filter(|_| external_member) {
@@ -228,16 +291,17 @@ pub(super) fn declarations(
             return Err(format!("a transitive KLIB body has no supported ordinary declaration contract: {identity:?}"));
         }
         if emits_body {
-            // A member of an ordinary class is called on an instance its primary constructor
-            // created, which materializes the class.
-            if let Some(primary) = selected
+            // A member of an ordinary class is called on an instance one of the constructors
+            // that initialize the class created, which materializes the class.
+            if let Some(class) = selected
                 .class_contract()
                 .filter(|class| !class.is_value && selected.kind() == ExternalCallableKind::Member)
-                .map(|class| ordinary_class_constructor(platform, bodies, &facts, class))
-                .transpose()?
-                .flatten()
             {
-                pending.push_back((primary, None));
+                pending.extend(
+                    ordinary_class_constructors(platform, bodies, &facts, class)?
+                        .into_iter()
+                        .map(|constructor| (constructor, None)),
+                );
             }
             let member_class = selected
                 .class_contract()
@@ -258,49 +322,40 @@ pub(super) fn declarations(
     })
 }
 
+pub(super) struct OrdinaryRootCapabilities<'a> {
+    pub(super) realizes_intrinsic: &'a dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
+    pub(super) represents_classifier: &'a dyn Fn(crate::types::TypeName) -> bool,
+    pub(super) retains_initializer: &'a dyn Fn(KlibBodyCallable<'_>) -> Result<bool, &'static str>,
+}
+
 pub(super) fn ordinary_roots<'a>(
     platform: &dyn SemanticPlatform,
     source: &'a CheckedIrFile<'_>,
     bodies: &KlibDeclarationBodies,
     intrinsics: &KlibIntrinsicFacts,
     callees: &crate::klib_lowering::KlibCalleeFacts<'a>,
-    target_realizes_intrinsic: &dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
-    target_represents_classifier: &dyn Fn(crate::types::TypeName) -> bool,
+    capabilities: &OrdinaryRootCapabilities<'_>,
 ) -> Result<Vec<KlibBodyCallable<'a>>, String> {
+    let target_realizes_intrinsic = capabilities.realizes_intrinsic;
+    let target_represents_classifier = capabilities.represents_classifier;
     let mut roots = Vec::new();
     let mut seen = HashSet::default();
-    for expression in crate::ir::emitted_body_roots(&source.ir)
-        .into_iter()
-        .flat_map(|root| crate::ir::value_namespace_expressions(&source.ir, root))
-    {
-        let target = match source.ir.expr(expression) {
-            IrExpr::Call { callee, .. } => match &**callee {
-                // A call leaving arguments out reaches the same body through its default entry.
-                Callee::External { target, .. } => *target,
-                _ => continue,
-            },
-            IrExpr::New {
-                external_target: Some(target),
-                ..
-            } => *target,
-            IrExpr::Checked(operation) => match &**operation {
-                IrCheckedOperation::ExternalPropertyRead { target, .. } => {
-                    source
-                        .callables
-                        .property(*target)
-                        .ok_or("an emitted dependency property has no frozen fact")?
-                        .getter
-                }
-                IrCheckedOperation::ExternalPropertyWrite { target, .. } => source
-                    .callables
-                    .property(*target)
-                    .ok_or("an emitted dependency property has no frozen fact")?
+    for (expression, target, construction) in
+        emitted_dependency_targets(&source.ir, |property, setter| {
+            let property = source
+                .callables
+                .property(property)
+                .ok_or("an emitted dependency property has no frozen fact")?;
+            if setter {
+                property
                     .setter
-                    .ok_or("an emitted dependency property write has no selected setter")?,
-                _ => continue,
-            },
-            _ => continue,
-        };
+                    .map(Some)
+                    .ok_or("an emitted dependency property write has no selected setter".to_owned())
+            } else {
+                Ok(Some(property.getter))
+            }
+        })?
+    {
         let callable = source
             .callables
             .callable(target)
@@ -308,7 +363,6 @@ pub(super) fn ordinary_roots<'a>(
         let Some(selected) = source.callables.klib_body_callable_at(expression, target) else {
             continue;
         };
-        let construction = matches!(source.ir.expr(expression), IrExpr::New { .. });
         if construction != (callable.kind == ExternalCallableKind::Constructor) {
             return Err(
                 "an emitted dependency construction disagrees with its selected callable role"
@@ -400,6 +454,17 @@ pub(super) fn ordinary_roots<'a>(
         else {
             continue;
         };
+        if (capabilities.retains_initializer)(selected)? {
+            if !callees
+                .authenticates_retained_constructor(selected.identity(), bodies)
+                .map_err(|reason| {
+                    format!("an invalid retained superclass initializer: {reason:?}")
+                })?
+            {
+                return Err("a retained superclass initializer without its authenticated constructor header".into());
+            }
+            continue;
+        }
         if bodies.function_has_body(selected.identity()) != Some(true) {
             continue;
         }
@@ -431,7 +496,7 @@ fn is_materialized_class_member(
     if crate::klib_lowering::is_receiver_member(callable, bodies, callees) {
         // Every target realizes one of `kotlin.Any`'s members from the receiver's own
         // representation, a builtin value included, so such a member stays the target's.
-        return Ok(!realizes_any_member(&member_edge(callees, callable)?));
+        return Ok(!member_edge(callees, callable)?.realizes_any_member());
     }
     let Some(class) = callable
         .class_contract()
@@ -442,41 +507,45 @@ fn is_materialized_class_member(
     if class.is_value {
         return Ok(true);
     }
-    Ok(ordinary_class_constructor(platform, bodies, callees, class)?.is_some())
+    Ok(!ordinary_class_constructors(platform, bodies, callees, class)?.is_empty())
 }
 
-/// The primary constructor of the ordinary class `class`, when its admitted initialization
-/// materializes the class.
-fn ordinary_class_constructor(
+/// The constructors that initialize the ordinary class `class`, when each one's admitted
+/// initialization materializes the class: its primary constructor, or each constructor of a class
+/// without one. Empty when the class is not materialized.
+fn ordinary_class_constructors(
     platform: &dyn SemanticPlatform,
     bodies: &KlibDeclarationBodies,
     callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
     class: &crate::libraries::KlibBodyClassContract,
-) -> Result<Option<KlibDependencyCallable>, String> {
-    let Some(primary) = class.primary_constructor.clone() else {
-        return Ok(None);
+) -> Result<Vec<KlibDependencyCallable>, String> {
+    let Some(constructors) = crate::klib_lowering::initializing_constructors(class, bodies) else {
+        return Ok(Vec::new());
     };
-    let identity = KlibDependencyCallable {
-        module: class.module.clone(),
-        declaration: crate::libraries::KlibDeclarationSignature::Public(primary),
-    };
-    let Some((_, realization)) = platform.external_callable_by_dependency(&identity) else {
-        return Ok(None);
-    };
-    let Some(constructor) = realization.klib_body_callable() else {
-        return Ok(None);
-    };
-    // A class whose constructor has no serialized declaration, such as one of a module compiled
-    // from source alongside, is realized from its own declarations, never materialized from a KLIB.
-    if bodies.function_has_body(&identity).is_none() {
-        return Ok(None);
+    for identity in &constructors {
+        let Some((_, realization)) = platform.external_callable_by_dependency(identity) else {
+            return Ok(Vec::new());
+        };
+        let Some(constructor) = realization.klib_body_callable() else {
+            return Ok(Vec::new());
+        };
+        // A class whose constructor has no serialized declaration, such as one of a module
+        // compiled from source alongside, is realized from its own declarations, never
+        // materialized from a KLIB.
+        if bodies.function_has_body(identity).is_none() {
+            return Ok(Vec::new());
+        }
+        let superclasses = superclass_realizations(platform, bodies, identity);
+        let admitted =
+            with_realized_declarations(callees.with_declaration(constructor), &superclasses)
+                .constructor_initialization_callees(identity, bodies)
+                .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
+                .is_some();
+        if !admitted {
+            return Ok(Vec::new());
+        }
     }
-    let superclasses = superclass_realizations(platform, bodies, &identity);
-    let admitted = with_realized_declarations(callees.with_declaration(constructor), &superclasses)
-        .constructor_initialization_callees(&identity, bodies)
-        .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
-        .is_some();
-    Ok(admitted.then_some(identity))
+    Ok(constructors)
 }
 
 /// The realizations of the superclass constructors a class's primary constructor `identity`
@@ -519,19 +588,19 @@ fn with_realized_declarations<'a>(
     facts
 }
 
-/// The primary constructor which materializes the ordinary class declaring the member
-/// `identity`, which every instance the member is called on was created by.
-pub(super) fn member_class_constructor(
+/// The constructors which materialize the ordinary class declaring the member `identity`, one
+/// of which created every instance the member is called on. Empty when no unit materializes it.
+pub(super) fn member_class_constructors(
     platform: &dyn SemanticPlatform,
     bodies: &KlibDeclarationBodies,
     callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
     identity: &KlibDependencyCallable,
-) -> Result<Option<KlibDependencyCallable>, String> {
+) -> Result<Vec<KlibDependencyCallable>, String> {
     let Some((_, realization)) = platform.external_callable_by_dependency(identity) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let Some(selected) = realization.klib_body_callable() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     match selected.class_contract() {
         Some(class)
@@ -539,9 +608,9 @@ pub(super) fn member_class_constructor(
                 && class.emits_members()
                 && selected.kind() == ExternalCallableKind::Member =>
         {
-            ordinary_class_constructor(platform, bodies, callees, class)
+            ordinary_class_constructors(platform, bodies, callees, class)
         }
-        _ => Ok(None),
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -569,19 +638,6 @@ fn member_edge(
                 selected.identity()
             )
         })
-}
-
-/// Whether a call with `edge` invokes one of `kotlin.Any`'s members, which every target realizes
-/// from the receiver's own representation.
-fn realizes_any_member(edge: &crate::klib_lowering::CallEdge) -> bool {
-    matches!(
-        edge.semantic_role,
-        Some(
-            crate::types::SemanticCallRole::KotlinAnyEquals
-                | crate::types::SemanticCallRole::KotlinAnyHashCode
-                | crate::types::SemanticCallRole::KotlinAnyToString
-        )
-    )
 }
 
 /// Whether `identity` is a member of a class no support unit materializes. Support bodies call it
@@ -612,4 +668,53 @@ fn is_outside_units(
 ) -> Result<bool, String> {
     Ok(callable.kind() == ExternalCallableKind::Member
         && !is_materialized_class_member(platform, bodies, callees, callable)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{IrFile, IrFunction};
+    use crate::types::Ty;
+
+    #[test]
+    fn intrinsic_scalar_roots_ignore_orphan_external_call_nodes() {
+        let mut ir = IrFile::default();
+        let live_target = crate::fir::ExternalCallableId::from_raw(17);
+        let orphan_target = crate::fir::ExternalCallableId::from_raw(23);
+        let call = |ir: &mut IrFile, target| {
+            ir.add_expr(IrExpr::Call {
+                callee: Box::new(Callee::External {
+                    target,
+                    default_provider: None,
+                    params: Vec::new(),
+                    ret: Ty::Unit,
+                    substitutions: Vec::new(),
+                    defaults: Vec::new(),
+                    extension_receiver_parameter: None,
+                }),
+                dispatch_receiver: None,
+                args: Vec::new(),
+            })
+        };
+        let body = call(&mut ir, live_target);
+        call(&mut ir, orphan_target);
+        ir.add_fun(IrFunction {
+            name: "emitted".to_owned(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+
+        let mut expected = HashSet::default();
+        expected.insert(live_target);
+        let actual = emitted_dependency_targets(&ir, |_, _| Ok(None))
+            .unwrap()
+            .into_iter()
+            .map(|(_, target, _)| target)
+            .collect::<HashSet<_>>();
+        assert_eq!(actual, expected);
+    }
 }

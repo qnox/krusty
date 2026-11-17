@@ -56,6 +56,7 @@ mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
 mod static_properties;
 mod synthetic_properties;
+mod type_safe_builtin_overrides;
 pub mod unsigned_intrinsics;
 use static_properties::StaticAccessor;
 use synthetic_properties::{accessor_property_name, setter_name_for_getter, AccessorInventory};
@@ -96,13 +97,6 @@ use crate::types::{
 };
 
 use java_operator_convention::java_method_has_operator_convention;
-
-fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
-    class
-        .inner_class_self()
-        .map(|entry| entry.access)
-        .unwrap_or(class.access)
-}
 
 /// The JVM platform's contribution to Kotlin's default imports. The language-level `kotlin.*` set is
 /// composed with this list in the import-level builder and in the seed filter, so neither list is duplicated.
@@ -1138,85 +1132,6 @@ impl JvmLibraries {
         )
     }
 
-    /// Receiver type-parameter bindings at a classpath hierarchy node.
-    fn receiver_type_bindings_name(
-        &self,
-        receiver: Ty,
-        target_internal: TypeName,
-    ) -> crate::fx_hash::HashMap<String, Ty> {
-        let TyKind::Obj(start, start_args) = receiver.kind() else {
-            return crate::fx_hash::HashMap::default();
-        };
-        let target = super::jvm_class_map::to_jvm_type_name(target_internal);
-        let mut seen = crate::fx_hash::HashSet::default();
-        let mut q = std::collections::VecDeque::new();
-        q.push_back((
-            super::jvm_class_map::to_jvm_type_name(start),
-            start_args.to_vec(),
-        ));
-        while let Some((internal, targs)) = q.pop_front() {
-            if !seen.insert(internal) {
-                continue;
-            }
-            let ci = self.cp.find_name(internal);
-            // A Kotlin builtin whose mapped JVM class is absent (a no-JDK compile) has no `.class` and
-            // so no class `Signature`; its `.kotlin_builtins` declaration carries the same two facts —
-            // the formals and the argument-carrying supertypes — so bind through that instead.
-            let (formals, supers) = match &ci {
-                Some(ci) => ci
-                    .signature
-                    .as_deref()
-                    .and_then(parse_class_gsig)
-                    .map(|(formals, _, supertypes)| (formals, supertypes))
-                    .unzip(),
-                None => self.cp.builtin_class_gsig_name(internal).unzip(),
-            };
-            if ci.is_none() && formals.is_none() {
-                continue;
-            }
-            let formals = formals.unwrap_or_default();
-            let binds: crate::fx_hash::HashMap<String, Ty> =
-                formals.iter().cloned().zip(targs.iter().copied()).collect();
-            if internal == target {
-                return binds;
-            }
-            match (supers, &ci) {
-                (Some(supers), _) => {
-                    for sup in supers {
-                        if let TyKind::Obj(sup_internal, sup_args) = sup.kind() {
-                            let sup_targs = ty_subst_all(sup_args.as_slice(), &binds);
-                            q.push_back((
-                                super::jvm_class_map::to_jvm_type_name(sup_internal),
-                                sup_targs,
-                            ));
-                        }
-                    }
-                }
-                (None, Some(ci)) => {
-                    for i in ci.interfaces.iter_ids().chain(ci.super_class) {
-                        q.push_back((i, vec![]));
-                    }
-                }
-                (None, None) => {}
-            }
-        }
-        crate::fx_hash::HashMap::default()
-    }
-
-    /// Class bindings excluding method parameters that shadow them.
-    fn member_receiver_bindings_name(
-        &self,
-        receiver: Ty,
-        target_internal: TypeName,
-        method_formals: &[crate::types::TyParamName],
-    ) -> crate::fx_hash::HashMap<String, Ty> {
-        let mut bindings = self.receiver_type_bindings_name(receiver, target_internal);
-        for formal in method_formals {
-            bindings.remove(formal.as_str());
-        }
-        bindings
-    }
-
     fn sam_eligible_for_class(ci: &crate::jvm::classreader::ClassInfo) -> bool {
         ci.is_interface() && (!ci.meta.is_present() || ci.meta.is_fun_interface)
     }
@@ -1698,6 +1613,35 @@ impl JvmLibraries {
                             m.descriptor.as_str(),
                         )),
                     );
+                    if let Some(params) = (uses_java_type_semantics
+                        && !m.is_static()
+                        && m.name != "<init>"
+                        && !super::jvm_class_map::is_mapped_collection_face(internal_name))
+                    .then(|| {
+                        self.type_safe_builtin_override_params(
+                            &ci,
+                            &class_bounds,
+                            type_safe_builtin_overrides::JavaMethod {
+                                name: &m.name,
+                                descriptor: &m.descriptor,
+                                parameter_nullability: &m.parameter_nullability,
+                            },
+                        )
+                    })
+                    .flatten()
+                    {
+                        member
+                            .generic_sig
+                            .get_or_insert_with(|| GenericSig {
+                                formals: Vec::new(),
+                                formal_bounds: Vec::new(),
+                                receiver: None,
+                                params: Vec::new(),
+                                ret: member.ret,
+                                return_policy: Default::default(),
+                            })
+                            .params = params;
+                    }
                 }
                 let value_arity = member.params.len();
                 if member.suspend() {
@@ -1903,8 +1847,9 @@ impl JvmLibraries {
             // correct: nothing decodes there, so `kotlin/String` keeps the JVM class's supertypes
             // rather than being left with none (it would otherwise lose `CharSequence`, `Comparable`
             // and `Any`, and every subtype test against them would start failing).
-            let kotlin_scope_is_authoritative = is_mapped_builtin
-                && self.cp.builtin_is_interface_name(internal_name).is_some()
+            let builtin_declaration_decoded =
+                is_mapped_builtin && self.cp.builtin_is_interface_name(internal_name).is_some();
+            let kotlin_scope_is_authoritative = builtin_declaration_decoded
                 // Scope provenance belongs to the central Kotlin↔JVM mapping. Keeping the policy
                 // there avoids a classpath-origin branch (and a second collection/String name list)
                 // in this loader; this site only combines that semantic policy with the runtime
@@ -1917,10 +1862,7 @@ impl JvmLibraries {
             // erased Java `next(): Any!` compete with the Kotlin declaration.
             let kotlin_supertypes_are_authoritative = metadata_class_signature.is_some();
             let mut supertypes = TypeNameList::new();
-            if kotlin_scope_is_authoritative {
-                // Nothing from the Java class: `java/io/Serializable`, the one JVM supertype kotlinc
-                // keeps on a mapped builtin, comes from `JvmBuiltInsCustomizer`, JDK or not.
-            } else if let Some((_, _, declared)) = &metadata_class_signature {
+            if let Some((_, _, declared)) = &metadata_class_signature {
                 // A function-type supertype (`KProperty0<V> : () -> V`) is an edge to the function
                 // classifier it instantiates, which declares the inherited `invoke`.
                 for supertype in declared {
@@ -1931,6 +1873,13 @@ impl JvmLibraries {
                         supertypes.push_name(name);
                     }
                 }
+            } else if builtin_declaration_decoded {
+                // A decoded builtin declaration states the mapped classifier's whole Kotlin
+                // supertype list, even where its members still join the JVM class's. The JVM
+                // class's own interfaces (`java.lang.Integer : Constable, ConstantDesc`,
+                // `java.lang.Enum : Constable`) are realization details kotlinc never publishes.
+                // `java/io/Serializable`, the one JVM supertype kotlinc keeps on a mapped builtin,
+                // comes from `JvmBuiltInsCustomizer`, JDK or not.
             } else {
                 for s in ci.interfaces.iter_ids() {
                     supertypes.push_name(s);
@@ -2401,6 +2350,7 @@ impl JvmLibraries {
             let own_type_parameter_count = application_header.own_count;
             let type_parameters = application_header.parameters;
             Some(LibraryType {
+                klib_identity: None,
                 runtime_exception: None,
                 declaration_name: if ci.this_class == internal_name {
                     classifier_facts::classifier_declaration_name(&ci)
@@ -2409,20 +2359,7 @@ impl JvmLibraries {
                 },
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
-                access: if let Some(visibility) = ci.meta.class_visibility {
-                    visibility.into()
-                } else {
-                    let access = effective_class_access(&ci);
-                    if access & 0x0001 != 0 {
-                        crate::libraries::ClassifierAccess::Public
-                    } else if access & 0x0004 != 0 {
-                        crate::libraries::ClassifierAccess::Protected
-                    } else if access & 0x0002 != 0 {
-                        crate::libraries::ClassifierAccess::Private
-                    } else {
-                        crate::libraries::ClassifierAccess::PackagePrivate
-                    }
-                },
+                access: classifier_facts::classifier_access(&ci),
                 source_file: None,
                 stable_declaration: None,
                 is_nested: ci.inner_class_self().is_some(),

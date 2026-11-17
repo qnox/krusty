@@ -11,11 +11,13 @@ mod deprecation;
 mod diagnostic_rendering;
 mod intersection;
 pub use intersection::declaration_approximation;
+pub(crate) use intersection::{same_component_set, same_structure};
 mod overridden_declaration;
 mod qualified_name;
 mod semantic_call_role;
 mod semantic_callable_owner;
 mod suspension;
+mod value_conversion;
 pub use classifier_declarations::{
     ClassifierDeclarationFacts, ClassifierDeclarationKind, ClassifierDeclarationName,
     DeclaredValueClass, GeneratedClassifierFact, GeneratedClassifierKind,
@@ -30,6 +32,7 @@ pub use overridden_declaration::OverriddenDeclaration;
 pub use semantic_call_role::{ConstNumericOperation, SemanticCallRole};
 pub use semantic_callable_owner::SemanticCallableOwner;
 pub use suspension::continuation_passing;
+pub(crate) use value_conversion::{value_conversion, ValueConversion};
 mod annotation_targets;
 mod interning;
 mod spelling;
@@ -62,7 +65,6 @@ pub(crate) use raw_erasure::{formal_erasures, raw_member_type, DeclaredFormals};
 mod thin_handles;
 mod ty_kind;
 mod ty_table;
-pub(crate) use primitive_arrays::array_declaration_name;
 pub use primitive_arrays::{prim_array_element, prim_array_name, primitive_array_creator_element};
 pub(crate) use spelling::type_name_from_multifile_facade;
 pub use spelling::{existing_type_name, existing_type_name_child, type_name, type_name_from};
