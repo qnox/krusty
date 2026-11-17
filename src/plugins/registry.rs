@@ -28,7 +28,6 @@
 //!     → ERROR. Silently ignoring it would emit wrong bytecode, so a drop-in must fail loudly.
 
 use crate::compilation_target::CompilationTarget;
-use crate::plugins::assignment::AssignmentPlugin;
 use crate::plugins::atomicfu::AtomicfuPlugin;
 use crate::plugins::cli::{
     PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, ASSIGNMENT_PLUGIN_ID, ATOMICFU_PLUGIN_ID,
@@ -462,7 +461,10 @@ fn build_assignment(
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(AssignmentPlugin::from_options(options))
+    Box::new(ConventionInstance::new(
+        &krusty_plugin_assignment::PLUGIN,
+        options,
+    ))
 }
 
 /// The set of extensions krusty knows about — independent of any compilation.
