@@ -52,8 +52,8 @@ use crate::types::{EqualityMode, Ty};
 
 use super::runtime::{self, ComposeRuntime};
 use super::source_facts::{
-    function_body, lambda_body, ArgumentState, ComposableLambda, Memoization, RestartableFunction,
-    TrackedParameter,
+    function_body, lambda_body, ArgumentState, ComposableCallSite, ComposableLambda, Memoization,
+    RestartableFunction, TrackedParameter,
 };
 
 /// Bits per parameter slot of a `$changed` int, after its low "force" bit.
@@ -168,7 +168,7 @@ pub(super) fn transform(ir: &mut IrFile) {
         add_lambda_composer_parameters(ir, lambda);
         let slots = Slots::lambda(lambda.captures);
         for site in &lambda.calls {
-            pass_composer(ir, slots, &callees, site.call, &site.arguments);
+            pass_composer(ir, slots, &callees, site);
         }
         lambda_group(ir, &facts.runtime, lambda);
         annotate_lambda(ir, lambda);
@@ -186,7 +186,7 @@ pub(super) fn transform(ir: &mut IrFile) {
             }
         }
         for site in &function.calls {
-            pass_composer(ir, slots, &callees, site.call, &site.arguments);
+            pass_composer(ir, slots, &callees, site);
         }
         restart_group(ir, &facts.runtime, function);
         annotate_key(ir, function);
@@ -477,9 +477,14 @@ fn pass_composer(
     ir: &mut IrFile,
     caller: Slots,
     callees: &crate::fx_hash::HashMap<FunId, CalleeShape>,
-    call: ExprId,
-    arguments: &[ArgumentState],
+    site: &ComposableCallSite,
 ) {
+    let ComposableCallSite {
+        call,
+        ref arguments,
+        library_mask,
+    } = *site;
+    let arguments = arguments.as_slice();
     if let IrExpr::InvokeFunction { .. } = ir.exprs[call as usize] {
         let composer = ir.add_expr(IrExpr::GetValue(caller.composer));
         let changed = changed_argument(ir, caller, arguments);
@@ -495,16 +500,45 @@ fn pass_composer(
     let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
         unreachable!("a composable call is a call");
     };
-    // A library composable takes the composer parameters already, after every declared one.
-    if let Callee::External { .. } = **callee {
+    // A library composable takes the composer parameters already, after every declared one, and
+    // the mask of the omitted ones when it declares defaults.
+    if let Callee::External { params, .. } = &**callee {
+        let params = params.clone();
+        let mut supplied = args.clone().into_iter();
+        let mut physical = Vec::with_capacity(params.len() + 3);
+        let mut omitted = 0;
+        for ((index, argument), &ty) in (0u32..).zip(arguments).zip(&params) {
+            if *argument == ArgumentState::Omitted {
+                omitted |= default_bit(index);
+                let placeholder = ir.add_expr(IrExpr::Const(placeholder(ty)));
+                ir.mark_positionless(placeholder);
+                physical.push(placeholder);
+            } else {
+                physical.push(
+                    supplied
+                        .next()
+                        .expect("a supplied argument per provided parameter"),
+                );
+            }
+        }
         let composer = ir.add_expr(IrExpr::GetValue(caller.composer));
         let changed = changed_argument(ir, caller, arguments);
         ir.mark_positionless(composer);
         ir.mark_positionless(changed);
-        let IrExpr::Call { args, .. } = &mut ir.exprs[call as usize] else {
+        physical.extend([composer, changed]);
+        if library_mask {
+            let mask = ir.add_expr(IrExpr::Const(IrConst::Int(omitted)));
+            ir.mark_positionless(mask);
+            physical.push(mask);
+        }
+        let IrExpr::Call { callee, args, .. } = &mut ir.exprs[call as usize] else {
             unreachable!("a composable call is a call");
         };
-        args.extend([composer, changed]);
+        // The callee fills its own defaults now, so the call passes every parameter.
+        if let Callee::External { defaults, .. } = &mut **callee {
+            defaults.clear();
+        }
+        *args = physical;
         return;
     }
     let function = callee

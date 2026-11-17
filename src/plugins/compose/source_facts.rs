@@ -116,6 +116,9 @@ pub(super) struct ComposableCallSite {
     /// The callee's parameters in order, the omitted ones included; an `invoke`'s one slot is the
     /// called value itself.
     pub(super) arguments: Vec<ArgumentState>,
+    /// A library callee declares parameter defaults, so it takes a `$default` mask after its
+    /// `$changed`, whether or not the call omits an argument.
+    pub(super) library_mask: bool,
 }
 
 /// What kotlinc's `argumentMetaOf` finds about one argument of a composable call.
@@ -330,6 +333,7 @@ pub(super) fn record(
                 sites.push(ComposableCallSite {
                     call,
                     arguments: vec![ArgumentState::Forwarded(index)],
+                    library_mask: false,
                 });
                 locations.push(call_location(&positions, call_span));
                 continue;
@@ -543,10 +547,12 @@ pub(super) fn record(
         .chain(composable_lambdas.iter().flat_map(|lambda| &lambda.calls));
     for site in sites {
         if let Some(CalleeOrigin::Library(target)) = calls.get(&site.call).map(|call| call.origin) {
-            runtime.appended_parameters(
-                target,
-                vec![Ty::nullable(super::runtime::composer()), Ty::Int],
-            );
+            let mut appended = vec![Ty::nullable(super::runtime::composer()), Ty::Int];
+            // The `$default` mask of a declaration with defaults follows its `$changed`.
+            if site.library_mask {
+                appended.push(Ty::Int);
+            }
+            runtime.appended_parameters(target, appended);
         }
     }
     match ComposeRuntime::bind(runtime) {
@@ -879,6 +885,7 @@ fn supplied_arguments<'a>(
 fn omitted_parameters(callee: &Callee) -> &[u32] {
     match callee {
         Callee::LocalWithDefaults { defaults, .. } => defaults,
+        Callee::External { defaults, .. } => defaults,
         _ => &[],
     }
 }
@@ -1041,8 +1048,20 @@ impl BodyScope<'_> {
             });
             return None;
         };
+        let library_mask = match found.origin {
+            CalleeOrigin::Library(target) => self
+                .source
+                .checked
+                .dependency_shape(target)
+                .is_some_and(|shape| shape.defaults),
+            _ => false,
+        };
         Some((
-            ComposableCallSite { call, arguments },
+            ComposableCallSite {
+                call,
+                arguments,
+                library_mask,
+            },
             call_location(self.positions, call_span),
         ))
     }
@@ -1065,7 +1084,6 @@ impl BodyScope<'_> {
         let Callee::External {
             params,
             ret,
-            defaults,
             extension_receiver_parameter,
             ..
         } = &**callee
@@ -1084,8 +1102,6 @@ impl BodyScope<'_> {
             || extension_receiver_parameter.is_some()
         {
             Some("a call to a library composable function with a receiver")
-        } else if shape.defaults || !defaults.is_empty() {
-            Some("a call to a library composable function with default arguments")
         } else if params
             .iter()
             .any(|param| matches!(param.kind(), TyKind::Fun(_)))

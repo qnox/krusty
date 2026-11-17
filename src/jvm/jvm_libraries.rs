@@ -505,6 +505,9 @@ impl JvmLibraries {
             if !is_default && call_sig.param_defaults.iter().any(|default| *default) {
                 callable.default_realization =
                     self.top_level_default_realization(&callable).map(Box::new);
+                // Without a `$default` bridge the declaration itself takes the mask of the
+                // arguments a call omits, as a function a compiler plugin transformed does.
+                callable.defaults_from_declaration = callable.default_realization.is_none();
             }
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
             let generic_sig = generic_sig_for_callable;
