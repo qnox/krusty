@@ -350,6 +350,24 @@ fn native_an_observable_member_delegate_notifies_its_instance() {
     expect_native_klib_box(source, "nativeObservableDelegateMember");
 }
 
+#[test]
+fn native_an_explicit_not_null_delegate_write_evaluates_this_ref() {
+    let source = include_str!("box_regressions/notNullDelegateExplicitWriteEffects.kt");
+    expect_native_klib_box(source, "nativeNotNullDelegateExplicitWriteEffects");
+}
+
+#[test]
+fn native_a_not_null_delegate_read_before_it_was_written_raises() {
+    let source = include_str!("box_regressions/notNullDelegateReadBeforeWrite.kt");
+    expect_native_klib_box(source, "nativeNotNullDelegateReadBeforeWrite");
+}
+
+#[test]
+fn native_an_observable_delegate_reports_each_write_after_it_happened() {
+    let source = include_str!("box_regressions/observableDelegateWrites.kt");
+    expect_native_klib_box(source, "nativeObservableDelegateWrites");
+}
+
 fn expect_native_klib_box(source: &str, stem: &str) {
     super::common::expect_box_ok_with_stdlib(source, &format!("{stem}Oracle"));
     let target = host().expect("Native KLIB/runtime is required for this test");
