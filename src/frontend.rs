@@ -1968,7 +1968,7 @@ where
     let analysis = SourceSetAnalysis {
         target,
         files: if retain_inspection_analysis {
-            files
+            local_class_names::restore_retained_classifier_source_names(files)
         } else {
             Vec::new()
         },
