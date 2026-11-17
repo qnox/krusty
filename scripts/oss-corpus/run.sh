@@ -18,6 +18,7 @@
 
 # Setup fails fast: a failed fetch, checkout, patch or version-pin rewrite stops the run before
 # anything is measured. Only the two Gradle builds' exit statuses are captured rather than fatal.
+# A failed reference build fails the run once everything has been compared.
 set -euo pipefail
 
 name=$1
@@ -211,3 +212,9 @@ verified=$status
 snapshot verify
 rm -rf "$work/out/$name/verify" "$logs/$name.verify.metrics.json" "$logs/$name.verify.tasks.tsv"
 python3 "$here/compare.py" "$work" "$name" "$reference" "$kotlinc_tests" "$krusty_tests" "$verified"
+# A failed reference build is still compared as far as it got, then fails the run: every project is
+# meant to build with kotlinc, and a project that does not measures only what its build reached.
+if [ "$reference" -ne 0 ]; then
+  echo "$name: the reference kotlinc build failed (exit $reference); see $name.kotlinc.log" >&2
+  exit 1
+fi
