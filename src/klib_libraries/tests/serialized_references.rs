@@ -454,3 +454,104 @@ fn native_stdlib_fake_override_references_preserve_applied_parent_arguments() {
         );
     }
 }
+
+#[test]
+// Platform-specific: Native's stdlib declares its atomic field accesses as typed intrinsics.
+fn native_stdlib_authenticates_its_atomic_field_accesses() {
+    let Some(root) = std::env::var_os("KRUSTY_KOTLIN_NATIVE") else {
+        assert!(std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none());
+        return;
+    };
+    let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+        std::path::PathBuf::from(root).join("klib/common/stdlib"),
+        KlibStdlibSemantics::Native,
+    )])
+    .unwrap();
+    let mut authenticated = libraries
+        .intrinsic_facts()
+        .atomic_field_declarations()
+        .map(|(identity, operation)| {
+            let crate::libraries::KlibDeclarationSignature::Public(signature) =
+                &identity.declaration
+            else {
+                panic!("an atomic field access without a public signature");
+            };
+            (
+                signature.package().segments().join("."),
+                signature.declaration().segments().join("."),
+                operation,
+            )
+        })
+        .collect::<Vec<_>>();
+    authenticated.sort_by_key(|entry| format!("{entry:?}"));
+    use crate::libraries::AtomicOperation::*;
+    let expected = [
+        ("atomicGetField", Load),
+        ("atomicSetField", Store),
+        ("compareAndExchangeField", CompareAndExchange),
+        ("compareAndSetField", CompareAndSet),
+        ("getAndAddField", FetchAndAdd),
+        ("getAndAddField", FetchAndAdd),
+        ("getAndAddField", FetchAndAdd),
+        ("getAndAddField", FetchAndAdd),
+        ("getAndSetField", Exchange),
+    ]
+    .map(|(name, operation)| ("kotlin.concurrent".to_owned(), name.to_owned(), operation));
+    assert_eq!(authenticated, expected);
+}
+
+#[test]
+// Platform-specific: Native's stdlib declares its atomic array element accesses as typed
+// intrinsics.
+fn native_stdlib_authenticates_its_atomic_array_element_accesses() {
+    let Some(root) = std::env::var_os("KRUSTY_KOTLIN_NATIVE") else {
+        assert!(std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none());
+        return;
+    };
+    let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+        std::path::PathBuf::from(root).join("klib/common/stdlib"),
+        KlibStdlibSemantics::Native,
+    )])
+    .unwrap();
+    let mut authenticated = libraries
+        .intrinsic_facts()
+        .atomic_array_element_declarations()
+        .map(|(identity, operation)| {
+            let crate::libraries::KlibDeclarationSignature::Public(signature) =
+                &identity.declaration
+            else {
+                panic!("an atomic array element access without a public signature");
+            };
+            (
+                signature.package().segments().join("."),
+                signature.declaration().segments().join("."),
+                operation,
+            )
+        })
+        .collect::<Vec<_>>();
+    authenticated.sort_by_key(|entry| format!("{entry:?}"));
+    use crate::libraries::AtomicOperation::*;
+    // One declaration of each operation for `IntArray`, `LongArray` and `Array<T>`, except that
+    // `Array<T>` has no addition.
+    let expected = [
+        ("atomicGet", Load),
+        ("atomicGet", Load),
+        ("atomicGet", Load),
+        ("atomicSet", Store),
+        ("atomicSet", Store),
+        ("atomicSet", Store),
+        ("compareAndExchange", CompareAndExchange),
+        ("compareAndExchange", CompareAndExchange),
+        ("compareAndExchange", CompareAndExchange),
+        ("compareAndSet", CompareAndSet),
+        ("compareAndSet", CompareAndSet),
+        ("compareAndSet", CompareAndSet),
+        ("getAndAdd", FetchAndAdd),
+        ("getAndAdd", FetchAndAdd),
+        ("getAndSet", Exchange),
+        ("getAndSet", Exchange),
+        ("getAndSet", Exchange),
+    ]
+    .map(|(name, operation)| ("kotlin.concurrent".to_owned(), name.to_owned(), operation));
+    assert_eq!(authenticated, expected);
+}

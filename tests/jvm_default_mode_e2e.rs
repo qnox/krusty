@@ -1721,3 +1721,58 @@ fn an_annotated_value_class_in_another_file_uses_its_own_default_mode() {
     assert_eq!(reference_result, "OK");
     assert_eq!(ours_result, reference_result);
 }
+
+/// Property annotation carriers are static declarations, but their owner follows the interface
+/// body strategy. A legacy holder owns the carrier without gaining an interface receiver.
+#[test]
+fn interface_property_annotation_carriers_keep_their_mode_selected_owner() {
+    let source = r#"
+annotation class PropertyMark(val value: String)
+interface MarkerI {
+    fun f(): String = "f"
+    @PropertyMark("property")
+    var p: String
+        @PropertyMark("getter") get() = "p"
+        @PropertyMark("setter") set(value) {}
+}
+class MarkerC : MarkerI
+"#;
+    for (mode, flag) in [
+        (JvmDefaultMode::Disable, "disable"),
+        (JvmDefaultMode::Enable, "enable"),
+        (JvmDefaultMode::NoCompatibility, "no-compatibility"),
+    ] {
+        let ours = compile_source(mode, source, "Marker");
+        let reference = compile_reference_source(flag, source, "Marker");
+        for owner in ["MarkerI", "MarkerI$DefaultImpls"] {
+            let actual = ours
+                .iter()
+                .find_map(|(name, bytes)| (name == owner).then_some(bytes));
+            let expected = reference
+                .iter()
+                .find_map(|(name, bytes)| (name == owner).then_some(bytes));
+            let Some(expected) = expected else {
+                assert!(actual.is_none(), "unexpected {owner} under {mode:?}");
+                continue;
+            };
+            let actual = actual.unwrap_or_else(|| panic!("missing {owner} under {mode:?}"));
+            if owner == "MarkerI$DefaultImpls" {
+                assert_class_abi_matches(actual, expected, owner);
+            }
+            let marker_frame = |bytes: &[u8]| {
+                krusty::jvm::classreader::parse_class(bytes)
+                    .expect("parse annotation carrier owner")
+                    .methods
+                    .into_iter()
+                    .filter(|method| method.name == "getP$annotations")
+                    .map(|method| (method.name, method.descriptor, method.access))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                marker_frame(actual),
+                marker_frame(expected),
+                "{owner} under {mode:?}"
+            );
+        }
+    }
+}

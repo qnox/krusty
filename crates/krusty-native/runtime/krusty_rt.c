@@ -861,6 +861,30 @@ kt_boolean kt_string_contains(KRef self, KRef other) {
     return 0;
 }
 
+/* Whether `length` UTF-16 units of `self` from `self_offset` equal those of `other` from
+   `other_offset`: Kotlin/Native's `Kotlin_String_unsafeRangeEquals`, which `regionMatches` calls
+   once it has checked both ranges against their strings' lengths. It walks units rather than
+   bytes, because an offset may fall between the halves of a surrogate pair. */
+kt_boolean kt_string_range_equals(KRef self, kt_int self_offset, KRef other, kt_int other_offset,
+                                  kt_int length) {
+    KUnits left = kt_units_of(self);
+    KUnits right = kt_units_of(other);
+    kt_char x = 0;
+    kt_char y = 0;
+    for (kt_int unit = 0; unit < self_offset; unit++) {
+        (void)kt_units_next(&left, &x);
+    }
+    for (kt_int unit = 0; unit < other_offset; unit++) {
+        (void)kt_units_next(&right, &y);
+    }
+    for (kt_int unit = 0; unit < length; unit++) {
+        if (!kt_units_next(&left, &x) || !kt_units_next(&right, &y) || x != y) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* `s.removeSuffix(suffix)`, for a `String` or a `StringBuilder` receiver and suffix. It is
    `endsWith` and then `substring` by unit, which is how Kotlin defines it, and that is what cuts a
    pair in two when the suffix is its low half: `"😀".removeSuffix("\uDE00")` is `"\uD83D"`.
@@ -2020,133 +2044,6 @@ static KRef kt_lazy_to_string(KRef self) {
     return kt_to_string(lazy->value);
 }
 
-/* ---- Delegates.notNull ------------------------------------------------------------------------
-
-   `var x: T by Delegates.notNull()`. One reference and the rule that reading it before it is
-   written is an error — Kotlin's `NotNullVar`, whose whole content is that check. `null` is not a
-   value it can hold (its `T` is non-null by declaration), so the empty slot needs no flag beside
-   it the way a lazy's `computed` does.
-
-   The message names the PROPERTY, as Kotlin's does. The name is a string the generator hands over,
-   read at the call site from the `KProperty` operand the delegate convention passes: the runtime
-   cannot ask the object for it, since a property reference answers `name` from a table of the
-   emitted code's own. The raise itself is `kt_raise_uninitialized_property`, with the other
-   stdlib throwers in `krusty_classes.c`. */
-
-typedef struct KNotNullVar {
-    KObjectHeader header;
-    KRef value;
-} KNotNullVar;
-
-static const uint32_t kt_not_null_var_offsets[] = {offsetof(KNotNullVar, value)};
-
-/* Identity, as Kotlin leaves them: `NotNullVar` is no data class, and `toString` is `Any`'s. */
-static const kt_fn kt_not_null_var_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
-                                           (kt_fn)kt_any_to_string};
-
-const KType kt_type_not_null_var = {KT_NAMED("kotlin.properties.", "NotNullVar"),
-                                    .instance_size = sizeof(KNotNullVar),
-                                    .reference_count = 1,
-                                    .reference_offsets = kt_not_null_var_offsets,
-                                    .super = &kt_type_any,
-                                    .vtable = kt_not_null_var_vtable,
-                                    .vtable_length = 3};
-
-KRef kt_not_null_var(void) {
-    KNotNullVar *var = (KNotNullVar *)kt_gc_allocate(&kt_type_not_null_var, sizeof(KNotNullVar));
-    var->value = NULL;
-    return (KRef)var;
-}
-
-/* `Delegates.observable(initial) { property, old, new -> … }`. Kotlin's `ObservableProperty`: the
-   value, and a callback run AFTER each write with the property and both values. The callback is an
-   ordinary function value, invoked through the one slot every function value declares.
-
-   The `KProperty` is not read here, only passed along — which is what lets this runtime carry it
-   without any reflection: whatever object the emitted code built for the delegation, the callback
-   receives that same object. */
-typedef struct KObservable {
-    KObjectHeader header;
-    KRef value;
-    KRef on_change;
-} KObservable;
-
-static const uint32_t kt_observable_offsets[] = {offsetof(KObservable, value),
-                                                 offsetof(KObservable, on_change)};
-
-static const kt_fn kt_observable_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
-                                             (kt_fn)kt_any_to_string};
-
-const KType kt_type_observable = {KT_NAMED("kotlin.properties.", "ObservableProperty"),
-                                  .instance_size = sizeof(KObservable),
-                                  .reference_count = 2,
-                                  .reference_offsets = kt_observable_offsets,
-                                  .super = &kt_type_any,
-                                  .vtable = kt_observable_vtable,
-                                  .vtable_length = 3};
-
-KRef kt_observable(KRef initial, KRef on_change) {
-    KObservable *observable =
-        (KObservable *)kt_gc_allocate(&kt_type_observable, sizeof(KObservable));
-    observable->value = initial;
-    observable->on_change = on_change;
-    return (KRef)observable;
-}
-
-/* The two entry points a `ReadWriteProperty` receiver reaches, dispatching on the DESCRIPTOR. No
-   static type separates the delegates this runtime builds — `notNull()` and `observable(…)` are
-   both a `ReadWriteProperty<Any?, T>` at the call site — so the object says which it is, exactly as
-   every other runtime answer here does. Each of the two descriptors is checked by name; any other
-   object arriving here is a delegate these two entry points do not implement, and reading its
-   fields as either layout would answer from memory that means something else, so that is a loud
-   failure naming the descriptor.
-
-   `get` is handed the property's NAME rather than the property, because the only thing it can need
-   is the text of the error a `notNull` read-before-write raises. `set` is handed the PROPERTY,
-   because an observable passes it to the callback. */
-KRef kt_rw_property_get(KRef self, KRef name) {
-    if (self == NULL) {
-        kt_null_receiver();
-        return NULL;
-    }
-    if (self->header.type == &kt_type_observable) {
-        return ((const KObservable *)self)->value;
-    }
-    if (self->header.type != &kt_type_not_null_var) {
-        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty read of a ", self->header.type,
-                              ", which is neither Delegates.notNull() nor "
-                              "Delegates.observable()\n");
-    }
-    KRef value = ((const KNotNullVar *)self)->value;
-    if (value == NULL) {
-        kt_raise_uninitialized_property(name);
-        return NULL;
-    }
-    return value;
-}
-
-void kt_rw_property_set(KRef self, KRef property, KRef value) {
-    if (self == NULL) {
-        kt_null_receiver();
-        return;
-    }
-    if (self->header.type == &kt_type_not_null_var) {
-        ((KNotNullVar *)self)->value = value;
-        return;
-    }
-    if (self->header.type != &kt_type_observable) {
-        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty write of a ", self->header.type,
-                              ", which is neither Delegates.notNull() nor "
-                              "Delegates.observable()\n");
-    }
-    KObservable *observable = (KObservable *)self;
-    KRef old = observable->value;
-    observable->value = value;
-    /* AFTER the write, which is Kotlin's order: a callback reading the property sees the new
-       value. `beforeChange` is `observable`'s own constant true, so there is nothing to veto. */
-    (void)kt_invoke_three(observable->on_change, property, old, value);
-}
-
 /* ---- pairs --------------------------------------------------------------------------------- */
 
 /* `a to b`. Two references and nothing else — Kotlin's `Pair` is a data class over two values, and
@@ -3097,6 +2994,43 @@ static KRef kt_range_to_string(KRef self) {
    whose size nothing static can compute, and copying is what the callee's own array must contain.
    A copy, rather than passing `xs` itself, is also what keeps the callee from writing through to
    the caller's array. */
+void kt_array_copy_range(KRef source, kt_int from, KRef destination, kt_int to, kt_int count) {
+    if (destination == NULL || source == NULL) {
+        kt_null_receiver();
+        return;
+    }
+    if (source->header.type != destination->header.type
+        || destination->header.type->element_size == 0) {
+        KT_FAIL("krusty: an array copy between arrays of different kinds\n");
+    }
+    /* Both ends are compared at 64 bits, so a start near `Int.MAX_VALUE` cannot wrap past the
+       length. */
+    if (from < 0 || to < 0 || count < 0
+        || (kt_long)from + count > ((const KArray *)source)->length
+        || (kt_long)to + count > ((const KArray *)destination)->length) {
+        kt_throw(kt_throwable_new(&kt_type_array_index_out_of_bounds_exception, NULL));
+        return;
+    }
+    uint32_t stride = destination->header.type->element_size;
+    unsigned char *into = (unsigned char *)(KArray *)destination + sizeof(KArray)
+                          + (size_t)to * stride;
+    const unsigned char *out = (const unsigned char *)(const KArray *)source + sizeof(KArray)
+                               + (size_t)from * stride;
+    size_t length = (size_t)count * stride;
+    /* Within one array the ranges may overlap: a copy forward reads each byte before it is
+       overwritten exactly when the destination does not start inside the source's range. The
+       comparison is on the addresses as integers, as the two arrays are as often two objects. */
+    if ((uintptr_t)into - (uintptr_t)out >= length) {
+        for (size_t i = 0; i < length; i++) {
+            into[i] = out[i];
+        }
+    } else {
+        for (size_t i = length; i > 0; i--) {
+            into[i - 1] = out[i - 1];
+        }
+    }
+}
+
 kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source) {
     if (destination == NULL || source == NULL) {
         kt_null_receiver();

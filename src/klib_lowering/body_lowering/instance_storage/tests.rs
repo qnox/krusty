@@ -1,14 +1,24 @@
+use super::super::super::function_lowering::{raw_function_header_with_class, HeaderPurpose};
+use super::super::super::tests::{base, local_symbol, public_symbol};
 use super::*;
-use crate::klib_lowering::function_lowering::{raw_function_header_with_class, HeaderPurpose};
-use crate::klib_lowering::tests::{base, local_symbol, public_symbol};
 use crate::metadata::klib_ir::tree::{
     KlibIrFunction, KlibIrNullability, KlibIrParameter, KlibIrType, KlibIrTypeArgument,
     KlibIrTypeId, KlibIrVariance,
 };
 use crate::metadata::klib_ir::KlibIrSymbolKind;
 
-struct NoCalls;
+/// A linker with no calls, except that a call of any function is the atomic field access
+/// `atomic_field`, when one is set.
+struct NoCalls {
+    atomic_field: Option<crate::libraries::AtomicOperation>,
+}
 impl CallLinker for NoCalls {
+    fn atomic_field(
+        &self,
+        _: &KlibPublicIdSignature,
+    ) -> Lowered<Option<crate::libraries::AtomicOperation>> {
+        Ok(self.atomic_field)
+    }
     fn requires_declaration(&self, _: &KlibPublicIdSignature) -> Lowered<bool> {
         panic!("no call")
     }
@@ -29,7 +39,7 @@ impl CallLinker for NoCalls {
     ) -> Lowered<LinkedAccessor> {
         panic!("no accessor")
     }
-    fn singleton(&self, _: TypeName) -> Lowered<()> {
+    fn singleton(&mut self, _: &mut IrFile, _: TypeName) -> Lowered<()> {
         panic!("no singleton")
     }
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
@@ -74,6 +84,10 @@ struct Fixture {
     int_type: KlibIrTypeId,
     unit_type: KlibIrTypeId,
     owner: TypeName,
+    /// The atomic field access every call in a lowered body is.
+    atomic_field: Option<crate::libraries::AtomicOperation>,
+    /// The serialized declaration of `owner`, which declares `fields`.
+    declaring: KlibIrSymbol,
 }
 
 impl Fixture {
@@ -200,6 +214,11 @@ impl Fixture {
             int_type,
             unit_type,
             owner,
+            atomic_field: None,
+            declaring: public_symbol(
+                KlibIrSymbolKind::Class,
+                KlibPublicIdSignature::classifier(owner),
+            ),
         }
     }
 
@@ -209,11 +228,21 @@ impl Fixture {
         receiver: Option<KlibIrExprId>,
         ty: KlibIrTypeId,
     ) -> KlibIrExprId {
+        self.qualified_read(slot, None, receiver, ty)
+    }
+
+    fn qualified_read(
+        &mut self,
+        slot: usize,
+        super_qualifier: Option<KlibIrSymbol>,
+        receiver: Option<KlibIrExprId>,
+        ty: KlibIrTypeId,
+    ) -> KlibIrExprId {
         self.arena.push_expr(
             Some(ty),
             KlibIrExprKind::GetField {
                 symbol: self.fields[slot].base.symbol.clone(),
-                super_qualifier: None,
+                super_qualifier,
                 receiver,
                 origin: None,
             },
@@ -226,11 +255,21 @@ impl Fixture {
         receiver: Option<KlibIrExprId>,
         ty: KlibIrTypeId,
     ) -> KlibIrExprId {
+        self.qualified_write(slot, None, receiver, ty)
+    }
+
+    fn qualified_write(
+        &mut self,
+        slot: usize,
+        super_qualifier: Option<KlibIrSymbol>,
+        receiver: Option<KlibIrExprId>,
+        ty: KlibIrTypeId,
+    ) -> KlibIrExprId {
         self.arena.push_expr(
             Some(ty),
             KlibIrExprKind::SetField {
                 symbol: self.fields[slot].base.symbol.clone(),
-                super_qualifier: None,
+                super_qualifier,
                 receiver,
                 value: self.value,
                 origin: None,
@@ -323,9 +362,11 @@ impl Fixture {
             class.fields.truncate(1);
         }
         let class = ir.add_class(class);
-        let function = crate::klib_lowering::function_lowering::declare_function(&mut ir, &header);
+        let function = super::super::super::function_lowering::declare_function(&mut ir, &header);
         let builtins = IrBuiltinOperators::new();
-        let mut linker = NoCalls;
+        let mut linker = NoCalls {
+            atomic_field: self.atomic_field,
+        };
         let mut lowering = BodyLowering::new(
             &self.arena,
             LoweredFunction {
@@ -338,15 +379,23 @@ impl Fixture {
             &mut linker,
         );
         if matches!(access, Access::ValueReadOnly) {
-            lowering = lowering.reading_through(class, &[&self.fields[0]], true);
+            lowering = lowering.reading_through(
+                class,
+                &self.declaring,
+                &[&self.fields[0]],
+                Vec::new(),
+                true,
+            );
             if no_declared_receiver {
                 lowering.instance_storage.as_mut().unwrap().receiver = None;
             }
         } else {
             lowering.instance_storage = Some(InstanceStorageFrame {
                 class,
+                declaring: &self.declaring,
                 receiver: Some(self.receiver_ty),
                 access,
+                properties: Vec::new(),
                 fields: self
                     .fields
                     .iter()
@@ -414,6 +463,94 @@ fn initializer_writes_final_and_mutable_fields_and_keeps_operand_order() {
         assert_eq!(ir.checked_type(receiver), Some(fixture.receiver_ty));
         assert_eq!(ir.checked_type(value), Some(fixture.field_ty));
         assert_eq!(ir.checked_type(result), Some(Ty::Unit));
+    }
+}
+
+#[test]
+fn an_atomic_field_access_without_arguments_is_a_shape_mismatch() {
+    for operation in [
+        crate::libraries::AtomicOperation::Load,
+        crate::libraries::AtomicOperation::CompareAndSet,
+    ] {
+        let mut fixture = Fixture::new(false);
+        fixture.atomic_field = Some(operation);
+        let call = fixture.arena.push_expr(
+            Some(fixture.field_type),
+            KlibIrExprKind::Call {
+                access: KlibIrMemberAccess {
+                    symbol: public_symbol(
+                        KlibIrSymbolKind::Function,
+                        KlibPublicIdSignature::classifier(crate::types::type_name(
+                            "kotlin/concurrent/atomicGetField",
+                        )),
+                    ),
+                    arguments: crate::metadata::klib_ir::tree::KlibIrArguments::Flat(vec![]),
+                    type_arguments: vec![],
+                    origin: None,
+                },
+                super_qualifier: None,
+            },
+        );
+        assert_eq!(
+            fixture.lower(call, Access::Member).1,
+            Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an atomic field access has no property reference".to_owned()
+            ))
+        );
+    }
+}
+
+#[test]
+fn a_super_qualifier_naming_the_declaring_class_reaches_its_own_field() {
+    for access in [Access::Initializer, Access::Member] {
+        let mut fixture = Fixture::new(false);
+        let own = Some(fixture.declaring.clone());
+        let read =
+            fixture.qualified_read(1, own.clone(), Some(fixture.receiver), fixture.field_type);
+        let (ir, result) = fixture.lower(read, access);
+        let IrExpr::GetField { class, index, .. } = *ir.expr(result.expect("own field read"))
+        else {
+            panic!("field read")
+        };
+        assert_eq!((class, index), (0, 1));
+        let write = fixture.qualified_write(1, own, Some(fixture.receiver), fixture.unit_type);
+        let (ir, result) = fixture.lower(write, access);
+        let IrExpr::SetField { class, index, .. } = *ir.expr(result.expect("own field write"))
+        else {
+            panic!("field store")
+        };
+        assert_eq!((class, index), (0, 1));
+    }
+}
+
+#[test]
+fn a_super_qualifier_naming_another_class_is_a_superclass_field_access() {
+    for access in [Access::Initializer, Access::Member] {
+        let mut fixture = Fixture::new(false);
+        let superclass = Some(public_symbol(
+            KlibIrSymbolKind::Class,
+            KlibPublicIdSignature::classifier(crate::types::type_name("demo/Base")),
+        ));
+        let read = fixture.qualified_read(
+            1,
+            superclass.clone(),
+            Some(fixture.receiver),
+            fixture.field_type,
+        );
+        assert_eq!(
+            fixture.lower(read, access).1,
+            Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a superclass field read"
+            ))
+        );
+        let write =
+            fixture.qualified_write(1, superclass, Some(fixture.receiver), fixture.unit_type);
+        assert_eq!(
+            fixture.lower(write, access).1,
+            Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a superclass field write"
+            ))
+        );
     }
 }
 

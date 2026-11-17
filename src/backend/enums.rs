@@ -38,15 +38,20 @@
 //! function of this file answering the constant ([`publish_constants`]), which a target exports by
 //! the enum and constant name, as it exports an object's instance entry. Only the declaring file
 //! holds the constants' storage, so every read of a constant, in any file, finds the one object.
+//! `values()` and `valueOf` read that storage too, so the functions realizing them are entries
+//! of the same kind, published by the enum and the member ([`realize`]): another file's call of
+//! either is a call of the declaring file's function.
 //!
-//! A file may read a constant before the file declaring its enum is lowered. Both files link the
-//! read by the constant's identity, as they link an object's instance (see
-//! [`super::instance_links`]), so the order of files does not matter.
+//! A file may read a constant, or call `values()` or `valueOf`, before the file declaring its enum
+//! is lowered. Both files link the use by the enum's identity, as they link an object's instance
+//! (see [`super::instance_links`]), so the order of files does not matter.
 //!
 //! A target runs this before the shared default-argument lowering, which then realizes a
 //! constant that leaves constructor arguments out like any other construction. The JVM keeps
 //! kotlinc's `<clinit>`, `$VALUES` and `$ENTRIES` and does not run it. An enum that another file
-//! declares keeps its use nodes; the target declines them by name.
+//! declares keeps its use nodes, which a target lowers as calls of the linked entries. Its
+//! `entries` has none yet: the list exists only when the declaring file reads it, so a target
+//! declines another file's read by name.
 
 mod initializer;
 #[cfg(test)]
@@ -114,8 +119,7 @@ pub fn publish_constants(ir: &mut IrFile, exports: &mut super::DependencyExportS
                 name: name.clone(),
             });
             ir.set_logical_type(value, result);
-            let entry = super::construction_entries::entry(
-                ir,
+            let entry = ir.add_generated_entry(
                 &format!("<enum constant {name}>$get"),
                 Vec::new(),
                 result,
@@ -133,8 +137,34 @@ pub fn publish_constants(ir: &mut IrFile, exports: &mut super::DependencyExportS
     }
 }
 
-/// Realize every enum class `ir` declares and rewrite every emitted use of one.
-pub fn realize(ir: &mut IrFile, contract: Contract) {
+/// One of the members of an enum class that answer its constants and that another file calls
+/// through the declaring file's entry (see [`super::instance_links`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StaticMember {
+    /// `values()`: a fresh array of the constants.
+    Values,
+    /// `valueOf(name)`: the constant of that name, or the target's failure.
+    ValueOf,
+}
+
+impl StaticMember {
+    /// How Kotlin source spells the member, for a diagnostic.
+    pub fn source_name(self) -> &'static str {
+        match self {
+            Self::Values => "`values()`",
+            Self::ValueOf => "`valueOf`",
+        }
+    }
+}
+
+/// Realize every enum class `ir` declares and rewrite every emitted use of one. Every enum's
+/// `values()` and `valueOf` are published as entries, whether its module is a library or the
+/// program, as its constants are ([`publish_constants`]).
+pub fn realize(
+    ir: &mut IrFile,
+    contract: Contract,
+    exports: &mut super::DependencyExportSignatures,
+) {
     let enums: Vec<ClassId> = (0..ir.classes.len())
         .map(|class| ClassId::try_from(class).expect("too many classes"))
         .filter(|&class| is_enum(&ir.classes[class as usize]))
@@ -145,7 +175,17 @@ pub fn realize(ir: &mut IrFile, contract: Contract) {
         let reads_entries = entries_read.contains(&ir.classes[class as usize].fq_name_id());
         let enum_class = initializer::build(ir, class, reads_entries, contract);
         ir.enum_initializers.insert(class, enum_class.initializer);
-        realized.insert(ir.classes[class as usize].fq_name_id(), enum_class);
+        let classifier = ir.classes[class as usize].fq_name_id();
+        for (member, entry) in [
+            (StaticMember::Values, enum_class.values),
+            (StaticMember::ValueOf, enum_class.value_of),
+        ] {
+            exports.record_instance_entry(
+                super::instance_links::InstanceEntry::EnumMember { classifier, member },
+                entry,
+            );
+        }
+        realized.insert(classifier, enum_class);
     }
     if !realized.is_empty() {
         uses::rewrite(ir, &realized, contract);

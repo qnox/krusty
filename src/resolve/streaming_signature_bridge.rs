@@ -860,21 +860,8 @@ impl ProductionSignatureSemantics<'_> {
         source: crate::fir::SourceFileId,
         reference: &TypeRef,
     ) -> Option<crate::fir::DiagnosticId> {
-        fn extent(reference: &TypeRef, lo: &mut u32, hi: &mut u32) {
-            *lo = (*lo).min(reference.span.lo);
-            *hi = (*hi).max(reference.span.hi);
-            for component in reference
-                .fun_params
-                .iter()
-                .chain(reference.arg.iter().map(|argument| &**argument))
-                .chain(reference.targs.iter())
-            {
-                extent(component, lo, hi);
-            }
-        }
-        let mut lo = reference.span.lo;
-        let mut hi = reference.span.hi;
-        extent(reference, &mut lo, &mut hi);
+        let (lo, hi) =
+            super::type_argument_arity::written_extent(&self.headers.syntax, source, reference);
         self.diagnostics
             .borrow()
             .iter()
@@ -2652,9 +2639,7 @@ pub(crate) fn install_streamed_anonymous_capture_declarations(
                 // physical field later; it must never replace the source-visible signature.
                 continue;
             }
-            let sibling = u32::MAX
-                .checked_sub(u32::try_from(ordinal).expect("too many anonymous-object captures"))
-                .expect("too many anonymous-object captures");
+            let sibling = DeclarationAnchor::capture_storage_sibling(ordinal);
             let declaration = headers.declarations.intern(DeclarationAnchor {
                 source: crate::fir::SourceFileId::from_raw(source),
                 range: class.span,
@@ -3137,9 +3122,9 @@ pub(crate) fn finalized_streamed_signature_index(
         false
     }
 
-    /// `equals`/`hashCode`/`toString` stubs are recorded for every final `value` keyword. A boxed
-    /// or an unboxed value class generates them; a `value class` rejected (for example because
-    /// `FullValueClasses` is off) is an ordinary class and keeps `Any`'s members.
+    /// `equals`/`hashCode`/`toString` stubs are recorded for every final `value`/`inline` class. A
+    /// boxed or an unboxed value class generates them; a rejected one (`FullValueClasses` off, a
+    /// bad constructor shape) is an ordinary class and keeps `Any`'s members.
     fn generated_value_keyword_method_is_suppressed(
         headers: &crate::fir::StreamedHeaderModule,
         table: &SymbolTable,
@@ -3163,10 +3148,10 @@ pub(crate) fn finalized_streamed_signature_index(
         let Some(owner_stub) = headers.stubs.iter().find(|candidate| candidate.id == owner) else {
             return false;
         };
-        if !owner_stub
-            .flags
-            .has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
-            || owner_stub.flags.has(crate::fir::DeclarationFlags::DATA)
+        let owner_flags = owner_stub.flags;
+        if !(owner_flags.has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
+            || owner_flags.has(crate::fir::DeclarationFlags::VALUE))
+            || owner_flags.has(crate::fir::DeclarationFlags::DATA)
         {
             return false;
         }
@@ -4203,20 +4188,20 @@ pub(crate) fn finalized_streamed_signature_index(
             .anchor(stub.id)
             .expect("a compact stub must retain its stable anchor");
         let mut flags = open_by_default.status(headers, stub.id, stub.kind, stub.flags);
+        use crate::fir::DeclarationFlags as F;
         if stub.kind == DeclarationKind::Classifier
-            && flags.has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
+            && (flags.has(F::VALUE_KEYWORD) || flags.has(F::VALUE))
         {
             let class = table
                 .classes
                 .values()
                 .find(|class| class.stable_declaration == Some(stub.id));
             // Signature collection decided the representation for the compilation target; an
-            // inline value class is the one it gave an underlying field.
-            if class.is_some_and(|class| class.value_field.is_some()) {
-                flags = flags.with(crate::fir::DeclarationFlags::VALUE, true);
-            } else if class.is_some_and(|class| class.full_value) {
-                flags = flags.with(crate::fir::DeclarationFlags::FULL_VALUE, true);
-            }
+            // inline value class is the one it gave an underlying field, and a rejected one is
+            // neither inline nor full.
+            let inline = class.is_some_and(|class| class.value_field.is_some());
+            let full = !inline && class.is_some_and(|class| class.full_value);
+            flags = flags.with(F::VALUE, inline).with(F::FULL_VALUE, full);
         }
         let Some(visibility) = generated_member_header::visibility(&semantics, stub) else {
             stop_with_failure!(stub.id);

@@ -541,6 +541,42 @@ kt_boolean kt_mutable_list_remove(KRef self, KRef value) {
     return true;
 }
 
+/* `removeAll` / `retainAll`: walk the receiver and drop each element `elements` does or does not
+   contain, answering whether the receiver changed. Kotlin asks `contains` of the live argument,
+   including when the argument is the receiver itself, so this does not snapshot it. */
+static kt_boolean kt_mutable_list_drop_where(KRef self, KRef elements, kt_boolean drop_contained) {
+    kt_boolean changed = false;
+    kt_int at = 0;
+    while (at < kt_list_size(self)) {
+        KRef element = kt_list_get(self, at);
+        if (kt_raised()) {
+            return false;
+        }
+        kt_boolean contained = kt_iterable_contains(elements, element);
+        if (kt_raised()) {
+            return false;
+        }
+        if (contained == drop_contained) {
+            kt_mutable_list_remove_at(self, at);
+            if (kt_raised()) {
+                return false;
+            }
+            changed = true;
+        } else {
+            at++;
+        }
+    }
+    return changed;
+}
+
+kt_boolean kt_mutable_list_remove_all(KRef self, KRef elements) {
+    return kt_mutable_list_drop_where(self, elements, true);
+}
+
+kt_boolean kt_mutable_list_retain_all(KRef self, KRef elements) {
+    return kt_mutable_list_drop_where(self, elements, false);
+}
+
 void kt_mutable_list_clear(KRef self) {
     KMutableList *list = (KMutableList *)self;
     KRef *elements = kt_elements_of(list->elements);
@@ -1640,15 +1676,6 @@ void kt_list_sort_with(KRef list, KRef comparator) {
             hole--;
         }
     }
-}
-
-KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third) {
-    if (function == NULL || function->header.type->vtable == NULL ||
-        function->header.type->vtable_length <= KT_SLOT_INVOKE) {
-        KT_FAIL("krusty: a function value was expected here\n");
-    }
-    return ((KRef(*)(KRef, KRef, KRef, KRef))function->header.type->vtable[KT_SLOT_INVOKE])(
-        function, first, second, third);
 }
 
 /* Whether a predicate answered true for an element. The answer arrives BOXED, because a function

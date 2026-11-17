@@ -54,6 +54,9 @@ pub enum DiagnosticIdentity {
     /// A type parameter whose upper bounds name one another. The source occurrence identifies the
     /// report however many times the declaration's bounds are resolved.
     CyclicUpperBound { reference: Span },
+    /// A classifier or typealias applied with the wrong number of type arguments. The source
+    /// occurrence identifies the report however many times its declaration's types are resolved.
+    TypeArgumentCount { reference: Span },
 }
 
 impl DiagnosticIdentity {

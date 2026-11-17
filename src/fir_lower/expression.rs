@@ -1202,10 +1202,13 @@ impl BodyLowering<'_> {
                         }
                         Ok(IrCatch {
                             var: self.value_slot(catch.parameter),
-                            binding: self
-                                .body
-                                .debug_value_name(catch.parameter)
-                                .map(|name| crate::ir::IrCatchBinding::source(name.to_owned())),
+                            binding: if catch.unused {
+                                Some(crate::ir::IrCatchBinding::unused())
+                            } else {
+                                self.body
+                                    .debug_value_name(catch.parameter)
+                                    .map(|name| crate::ir::IrCatchBinding::source(name.to_owned()))
+                            },
                             ty: parameter_ty,
                             body: self.expression(catch.body)?,
                             line: (catch.debug_line != 0).then_some(catch.debug_line),
@@ -1227,17 +1230,14 @@ impl BodyLowering<'_> {
                 subject_variable,
                 branches,
                 deeply_exhaustive,
-            } => {
-                let line = self.body.expression_debug_lines(expression_id).source;
-                self.when_expression(
-                    *subject,
-                    *subject_variable,
-                    branches,
-                    expression.ty.get(),
-                    *deeply_exhaustive,
-                    line,
-                )?
-            }
+            } => self.when_expression(
+                *subject,
+                *subject_variable,
+                branches,
+                expression.ty.get(),
+                *deeply_exhaustive,
+                self.body.expression_debug_lines(expression_id),
+            )?,
             FirExprKind::Block { statements, result } => {
                 let mut lowered_statements = Vec::new();
                 for statement in statements.iter().copied() {

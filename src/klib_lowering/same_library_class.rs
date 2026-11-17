@@ -10,6 +10,9 @@
 //! subtyping reads: `Any`, because the constructor's delegation to it was authenticated, or an
 //! interface this library's producer graph serializes. Any other hierarchy is refused before the
 //! class is admitted.
+//!
+//! A class private to its enclosing class is linked the same way. Its signatures are public, but
+//! no provider publishes it and no other library names it.
 
 use super::class_initialization::{record_initializer, InitializationStep};
 use super::class_storage::{member_field, stored_field};
@@ -23,9 +26,7 @@ use crate::ir::{
     IrCtorParameterProvenance, IrField,
 };
 use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies, LocatedClass, LocatedMember};
-use crate::libraries::{
-    KlibBodyClassParameters, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
-};
+use crate::libraries::{KlibBodyClassParameters, KlibDependencyCallable, TypeKind};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction,
@@ -75,6 +76,8 @@ pub(super) struct LocalStoredField<'a> {
 /// The initializer frame queued for a file-local class.
 pub(super) struct LocalInitialize<'a> {
     pub(super) class: ClassId,
+    /// The serialized declaration of `class`.
+    pub(super) declaring: &'a KlibIrSymbol,
     pub(super) receiver_symbol: &'a KlibIrSymbol,
     pub(super) receiver_ty: Ty,
     pub(super) fields: Vec<LocalStoredField<'a>>,
@@ -84,6 +87,8 @@ pub(super) struct LocalInitialize<'a> {
 /// The field frame of one member of a file-local class.
 pub(super) struct LocalMemberFields<'a> {
     pub(super) class: ClassId,
+    /// The serialized declaration of `class`.
+    pub(super) declaring: &'a KlibIrSymbol,
     pub(super) receiver: Ty,
     pub(super) fields: Vec<LocalStoredField<'a>>,
 }
@@ -98,6 +103,7 @@ pub(super) enum LocalBody<'a> {
 /// The prepared class borrows only the library; the module name and the root check do not.
 pub(super) struct LocalClassSource<'bodies, 'call> {
     pub(super) bodies: &'bodies KlibDeclarationBodies,
+    pub(super) declarations: &'bodies dyn crate::symbol_source::SymbolSource,
     pub(super) module: &'call str,
     pub(super) validate_root:
         &'call dyn Fn(&KlibPublicIdSignature) -> Result<(), KlibBodyDeclineReason>,
@@ -135,6 +141,8 @@ pub(super) struct MemberOverride {
     pub(super) declared_result: Ty,
     pub(super) applied_parameters: Vec<Ty>,
     pub(super) applied_result: Ty,
+    pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
+    pub(super) is_interface: bool,
 }
 
 /// `parameters` and `result` after substituting each declaring type parameter in `formals` with
@@ -264,6 +272,11 @@ pub(super) fn realized_member_override(
         declared_result,
         applied_parameters,
         applied_result,
+        semantic_role: realization.callable.semantic_role,
+        is_interface: realization
+            .klib_body_class_contract
+            .as_ref()
+            .is_some_and(|contract| contract.kind == TypeKind::Interface),
     })
 }
 
@@ -373,6 +386,8 @@ pub(super) struct PreparedLocalClass<'a> {
     /// The declared bounds of each class type parameter, in its order.
     pub(super) class_type_parameter_bounds: Vec<Vec<Ty>>,
     pub(super) constructor_symbol: &'a KlibIrSymbol,
+    /// The serialized declaration of the class.
+    pub(super) declaring: &'a KlibIrSymbol,
     pub(super) arena: &'a KlibIrArena,
     pub(super) receiver_symbol: &'a KlibIrSymbol,
     pub(super) receiver_ty: Ty,
@@ -381,11 +396,16 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) members: Vec<PreparedMember<'a>>,
 }
 
-/// The classifier identity of a file-local class in `module`. The file and slot are the identity;
-/// the source spelling is not.
+/// The classifier identity of a class only `module`'s bodies link. A file-local class is named
+/// by its file and slot, not its source spelling. A class private to its enclosing class keeps
+/// the qualified name its public signature serializes, as every type that mentions it does.
 pub(super) fn classifier_name(module: &str, signature: &KlibIrSignature) -> Option<TypeName> {
-    let KlibIrSignature::FileLocal { file, slot } = signature else {
-        return None;
+    let (file, slot) = match signature {
+        KlibIrSignature::FileLocal { file, slot } => (file, slot),
+        KlibIrSignature::Public(public) => {
+            return super::klib_types::classifier_name(public).ok();
+        }
+        KlibIrSignature::Accessor(_) => return None,
     };
     Some(
         TypeName::ROOT
@@ -580,8 +600,10 @@ fn constructor_class(
     }
     let _ = arguments;
     match &classifier.signature {
-        KlibIrSignature::FileLocal { .. } => Ok(classifier.signature.clone()),
-        KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_) => Err(non_public_type()),
+        KlibIrSignature::FileLocal { .. } | KlibIrSignature::Public(_) => {
+            Ok(classifier.signature.clone())
+        }
+        KlibIrSignature::Accessor(_) => Err(non_public_type()),
     }
 }
 
@@ -690,6 +712,7 @@ fn prepare_class<'a>(
         resolve: &resolve,
         self_type,
         bodies: source.bodies,
+        declarations: source.declarations,
         module: source.module,
         interfaces: &interfaces,
     };
@@ -742,6 +765,7 @@ fn prepare_class<'a>(
         class_type_parameters,
         class_type_parameter_bounds,
         constructor_symbol: &function.base.symbol,
+        declaring: &class.base.symbol,
         arena,
         receiver_symbol: &receiver.base.symbol,
         receiver_ty: self_type,
@@ -811,6 +835,7 @@ struct MemberScope<'a> {
     resolve: &'a dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
     self_type: Ty,
     bodies: &'a KlibDeclarationBodies,
+    declarations: &'a dyn crate::symbol_source::SymbolSource,
     module: &'a str,
     interfaces: &'a [AdmittedInterface],
 }
@@ -862,9 +887,9 @@ fn members_and_storage<'a>(
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {}
-            KlibIrMember::Class(_) => {
-                return Err(unsupported("a nested class of a non-public class"))
-            }
+            // A nested class is its own declaration, prepared when a body constructs it or
+            // calls one of its members. It shares no storage or initialization with this class.
+            KlibIrMember::Class(_) => {}
             KlibIrMember::EnumEntry(_) => return Err(unsupported("a non-public enum")),
             KlibIrMember::TypeAlias(_) => {
                 return Err(unsupported("a type alias of a non-public class"))
@@ -914,10 +939,11 @@ fn member_overrides(
                 "an override of a declaration other than a function",
             ));
         }
-        let KlibIrSignature::Public(signature) = &symbol.signature else {
+        // A property accessor overrides the interface's accessor by its accessor signature, as a
+        // function overrides by its public one; `function_owner` locates either.
+        let Some(declaration) = crate::klib_libraries::member_signature(&symbol.signature) else {
             return Err(unsupported("an override of a non-public declaration"));
         };
-        let declaration = KlibDeclarationSignature::Public(signature.clone());
         let identity = match scope.bodies.linked_origin(scope.module, &declaration) {
             KlibCalleeOrigin::Exact(identity) => identity,
             KlibCalleeOrigin::Missing => {
@@ -929,40 +955,91 @@ fn member_overrides(
                 return Err(mismatch("two libraries serialize one overridden function"))
             }
         };
-        let (owner_arena, owner, declared) =
-            match scope.bodies.function_owner(scope.module, &symbol.signature) {
-                LocatedMember::One {
-                    module: owner_module,
-                    arena,
-                    class,
-                    function,
-                } => {
-                    if owner_module != identity.module {
-                        return Err(mismatch("an overridden function is not in its class"));
-                    }
-                    (arena, class, function)
-                }
-                LocatedMember::Several => {
-                    return Err(mismatch("two classes serialize one overridden function"))
-                }
-                LocatedMember::Missing => {
-                    return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                        "an override this library does not authenticate",
-                    ))
-                }
-            };
-        if class_kind(owner.base.flags) != TypeKind::Interface {
-            return Err(unsupported("an override of a class member"));
-        }
-        let Some(interface) = scope
-            .interfaces
-            .iter()
-            .find(|interface| interface.signature == owner.base.symbol.signature)
+        let Some((_, realization)) = scope
+            .declarations
+            .external_callable_by_dependency(&identity)
         else {
             return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                "an override of a supertype this library does not authenticate",
+                "an override this library does not authenticate",
             ));
         };
+        let (owner_arena, owner, declared) = match scope.bodies.member_owner(&identity) {
+            LocatedMember::One {
+                module: owner_module,
+                arena,
+                class,
+                function,
+            } => {
+                if owner_module != identity.module {
+                    return Err(mismatch("an overridden function is not in its class"));
+                }
+                (arena, class, function)
+            }
+            LocatedMember::Several => {
+                return Err(mismatch("two classes serialize one overridden function"))
+            }
+            LocatedMember::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "an override this library does not authenticate",
+                ))
+            }
+        };
+        let is_interface = class_kind(owner.base.flags) == TypeKind::Interface;
+        let metadata_owner = match realization.declaration_owner {
+            Some(crate::types::SemanticCallableOwner::Classifier(owner)) => owner,
+            _ => return Err(unsupported("an override without a classifier owner")),
+        };
+        if realization
+            .klib_body_class_contract
+            .as_ref()
+            .is_none_or(|contract| {
+                contract.classifier != metadata_owner
+                    || contract.kind != class_kind(owner.base.flags)
+                    || contract.module != identity.module
+                    || KlibIrSignature::Public(contract.signature.clone())
+                        != owner.base.symbol.signature
+            })
+        {
+            return Err(mismatch(
+                "an override owner disagrees with its provider contract",
+            ));
+        }
+        let (owner_name, arguments) = if is_interface {
+            let Some(interface) = scope
+                .interfaces
+                .iter()
+                .find(|interface| interface.signature == owner.base.symbol.signature)
+            else {
+                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "an override of a supertype this library does not authenticate",
+                ));
+            };
+            (interface.name, interface.arguments.as_slice())
+        } else if metadata_owner == crate::types::wk::any() {
+            (metadata_owner, &[][..])
+        } else {
+            return Err(unsupported("an override of a class member"));
+        };
+        // Locating the member by its signature does not prove membership. The declaring class's
+        // raw header must hold it directly: a function as a member, an accessor in its own
+        // property group and in the slot of its shape.
+        let KlibIrSignature::Public(owner_signature) = &owner.base.symbol.signature else {
+            return Err(mismatch(
+                "an overridden member's class has no public signature",
+            ));
+        };
+        match scope
+            .bodies
+            .class_member_header(&identity, owner_signature, None)
+        {
+            Ok(Some(member)) if std::ptr::eq(member.function, declared) => {}
+            Ok(_) => {
+                return Err(mismatch(
+                    "an overridden member is not a direct member of its class's header",
+                ))
+            }
+            Err(reason) => return Err(mismatch(reason)),
+        }
         if !declared.type_parameters.is_empty() || declared.constructor {
             return Err(unsupported(
                 "an override of a generic or constructor declaration",
@@ -988,15 +1065,17 @@ fn member_overrides(
             &declared_signature.parameters,
             declared_signature.result,
             &formals,
-            &interface.arguments,
+            arguments,
         )?;
         overrides.push(MemberOverride {
             identity,
-            owner: interface.name,
+            owner: owner_name,
             declared_parameters: declared_signature.parameters,
             declared_result: declared_signature.result,
             applied_parameters,
             applied_result,
+            semantic_role: realization.callable.semantic_role,
+            is_interface,
         });
     }
     Ok(overrides)

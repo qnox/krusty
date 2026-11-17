@@ -14,6 +14,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 mod arrays;
+mod atomic_array_elements;
 mod blocks;
 mod callable_references;
 mod calls;
@@ -29,6 +30,7 @@ mod loops;
 mod object_literals;
 mod range_membership;
 mod safe_calls;
+use safe_calls::NullProvenRead;
 mod string_templates;
 mod try_catch;
 mod type_operators;
@@ -116,14 +118,37 @@ pub(super) struct RangeMembershipHeader {
     pub(super) ret: Ty,
 }
 
+/// The exact provider-selected `suspendCoroutineUninterceptedOrReturn<T>` call shape.
+pub(super) struct UninterceptedSuspensionCall {
+    pub(super) parameter: Ty,
+    pub(super) result: Ty,
+    pub(super) formal: crate::types::TyParamName,
+}
+
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
 pub(super) trait CallLinker {
+    /// Whether this exact provider-assigned dependency callable is declared `suspend`. A selected
+    /// suspend call in a KLIB body keeps its source result type in common IR; the common coroutine
+    /// preparation later supplies the target continuation ABI.
+    fn is_suspend_callable(&self, _target: crate::fir::ExternalCallableId) -> bool {
+        false
+    }
+
     /// The same authenticated primitive call shape that dependency planning treats as a leaf.
     /// Template linkers retain their ordinary checked external-call boundary by default.
     fn common_primitive(
         &self,
         _callee: &crate::libraries::KlibDeclarationSignature,
     ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
+        Ok(None)
+    }
+
+    /// The provider-selected compiler suspension intrinsic, if this template linker owns its
+    /// identity and has authenticated its serialized header.
+    fn unintercepted_suspension(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<UninterceptedSuspensionCall>> {
         Ok(None)
     }
 
@@ -141,6 +166,13 @@ pub(super) trait CallLinker {
     /// Such calls must remain callable edges; only a compiler builtin without either obligation
     /// may be folded into a common-IR operation.
     fn requires_declaration(&self, callee: &KlibPublicIdSignature) -> Lowered<bool>;
+
+    /// Whether the serialized declaration of `callee` carries a body. A function this unit
+    /// declares gets its body only when its queued entry is lowered, so the declaration, not the
+    /// lowered function, proves a member concrete. A linker that cannot read it declines.
+    fn declares_implementation(&self, _callee: &KlibPublicIdSignature) -> Lowered<bool> {
+        unsupported("a `super` call whose member's implementation this linker cannot read")
+    }
 
     /// The serialized header of the member `callee` an `in` over a range literal calls, read
     /// only to prove it is the range's own membership operator: its dispatch receiver, value
@@ -185,6 +217,24 @@ pub(super) trait CallLinker {
         Ok(false)
     }
 
+    /// The atomic field access `callee` is, when its exact declaration is the target stdlib's
+    /// authenticated intrinsic over a property reference. Template linkers keep an ordinary call.
+    fn atomic_field(
+        &self,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<Option<crate::libraries::AtomicOperation>> {
+        Ok(None)
+    }
+
+    /// The atomic array element access `callee` is, when its exact declaration is the target
+    /// stdlib's authenticated intrinsic over an array. Template linkers keep an ordinary call.
+    fn atomic_array_element(
+        &self,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<Option<crate::libraries::AtomicOperation>> {
+        Ok(None)
+    }
+
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 
@@ -210,6 +260,19 @@ pub(super) trait CallLinker {
         _signature: &crate::metadata::klib_ir::KlibIrSignature,
     ) -> Lowered<Option<crate::types::TypeName>> {
         Ok(None)
+    }
+
+    /// The declaration that names the local classifiers of the body being lowered: the package
+    /// of a top-level function, or the classifier a member belongs to. `None` when the linker
+    /// lowers no declared body or that body belongs to a classifier with no member name.
+    fn site_container(&self) -> Option<crate::ir::IrSiteClassContainer> {
+        None
+    }
+
+    /// Whether `callee`, a public or accessor signature, is a constructor or member of a class private to the
+    /// library of the body being lowered. Such a call links as a file-local one does.
+    fn links_privately(&self, _callee: &crate::metadata::klib_ir::KlibIrSignature) -> bool {
+        false
     }
 
     /// The constructor a file-local construction invokes. Template linkers keep the refusal.
@@ -238,8 +301,26 @@ pub(super) trait CallLinker {
         callee: &KlibAccessorIdSignature,
     ) -> Lowered<LinkedAccessor>;
 
-    /// Proves that `classifier` is a dependency object, whose value a body may read.
-    fn singleton(&self, classifier: TypeName) -> Lowered<()>;
+    /// The static storage of the top-level property whose backing field is `field`, which a body
+    /// of that property's own library reads or writes. `None` leaves the access to the body's
+    /// instance storage frame. Template linkers materialize no storage.
+    fn static_field(
+        &mut self,
+        _ir: &mut IrFile,
+        _field: &KlibIrSymbol,
+    ) -> Lowered<Option<StaticField>> {
+        Ok(None)
+    }
+
+    /// Proves that `classifier` is a dependency object, whose value a body may read, and
+    /// materializes it in `ir` when its instance is the linker's to create.
+    fn singleton(&mut self, ir: &mut IrFile, classifier: TypeName) -> Lowered<()>;
+
+    /// Whether the target owns the representation of `classifier`, which a class of this unit
+    /// extends without the unit materializing it. A linker that knows no such class says no.
+    fn target_represents(&self, _classifier: TypeName) -> bool {
+        false
+    }
 
     /// The dependency enum class whose constant `entry` a body reads, with that constant's name.
     /// A linker that materializes no class declines the read.
@@ -318,6 +399,50 @@ pub(super) struct LinkedAccessor {
     pub(super) context_count: usize,
     /// As [`LinkedCallee::class_type_parameters`].
     pub(super) class_type_parameters: Vec<String>,
+    /// The exact provider-selected external accessor called by this property operation, when the
+    /// target is a dependency property.
+    pub(super) callable: Option<crate::fir::ExternalCallableId>,
+    /// This accessor's own formal identities and bounds, distinct from declaring-class formals.
+    pub(super) type_parameters: Vec<crate::types::TyParamName>,
+    pub(super) type_parameter_bounds: Vec<Vec<Ty>>,
+    pub(super) reified_type_parameters: Vec<u32>,
+}
+
+/// The value of a serialized constant typed `ty`, and the type the lowered constant has: `null`
+/// is the null value, typed `Nothing?`; any other constant has its value's own type.
+pub(super) fn constant_value(constant: &KlibIrConstant, ty: Ty) -> Lowered<(IrConst, Ty)> {
+    let (value, constant_ty) = match constant {
+        KlibIrConstant::Null => {
+            if ty != Ty::nullable(Ty::Nothing) {
+                return Err(mismatch("a `null` is not typed `Nothing?`"));
+            }
+            return Ok((IrConst::Null, Ty::Null));
+        }
+        KlibIrConstant::Boolean(value) => (IrConst::Boolean(*value), Ty::Boolean),
+        KlibIrConstant::Char(value) => (IrConst::Char(*value), Ty::Char),
+        KlibIrConstant::Byte(value) => (IrConst::Byte(*value), Ty::Byte),
+        KlibIrConstant::Short(value) => (IrConst::Short(*value), Ty::Short),
+        KlibIrConstant::Int(value) => (IrConst::Int(*value), Ty::Int),
+        KlibIrConstant::Long(value) => (IrConst::Long(*value), Ty::Long),
+        KlibIrConstant::Float(value) => (IrConst::Float(*value), Ty::Float),
+        KlibIrConstant::Double(value) => (IrConst::Double(*value), Ty::Double),
+        KlibIrConstant::String(value) => (IrConst::String(value.as_str().into()), Ty::String),
+    };
+    if constant_ty != ty {
+        // An unsigned constant, for one, is serialized as its signed value typed `UInt`.
+        return unsupported("a constant of another type than its value's");
+    }
+    Ok((value, ty))
+}
+
+/// The static storage a top-level property's backing field is realized as in a unit.
+#[derive(Clone, Copy)]
+pub(super) struct StaticField {
+    /// The property's entry in the unit's `IrFile::statics`.
+    pub(super) index: u32,
+    pub(super) ty: Ty,
+    /// Whether a body may store to it: the field is not final.
+    pub(super) writable: bool,
 }
 
 /// What an accessor call reaches.
@@ -350,8 +475,9 @@ pub(super) struct BodyLowering<'a> {
     /// Compiler temporaries that name another immutable value, by the initializer each read of
     /// them lowers as.
     compiler_aliases: HashMap<KlibIrSymbol, KlibIrExprId>,
-    /// Safe-call receiver temporaries, inside the selector their `null` test guards.
-    null_proven: HashSet<KlibIrSymbol>,
+    /// Reads proven non-null where they are lowered: safe-call receiver temporaries inside the
+    /// selector their `null` test guards, and fields a compiler-generated `when` tests.
+    null_proven: HashSet<NullProvenRead>,
     /// All enclosing return-target declarations, including tail-only blocks without a frame.
     returnable_targets: Vec<KlibIrSymbol>,
     /// Enclosing serialized returnable blocks, whose exact symbols own their local exits.
@@ -367,6 +493,9 @@ pub(super) struct BodyLowering<'a> {
     instance_storage: Option<instance_storage::InstanceStorageFrame<'a>>,
     /// Enclosing values a member of an object literal reads through its constructor fields.
     captures: HashMap<KlibIrSymbol, object_literals::CaptureField>,
+    /// The members of the object literals being lowered, by serialized signature.
+    object_members:
+        HashMap<crate::metadata::klib_ir::KlibIrSignature, object_literals::ObjectMember>,
     /// The member function whose `return`s are being lowered, when that is not the template.
     member_return: Option<KlibIrSymbol>,
     /// The result type of [`Self::member_return`].
@@ -401,24 +530,31 @@ impl<'a> BodyLowering<'a> {
             captures: HashMap::default(),
             member_return: None,
             member_result: None,
+            object_members: HashMap::default(),
         }
     }
 
-    /// This body as a member of the materialized class `class`, which reads its receiver's
-    /// `fields`. A value class member reads its one value and writes nothing.
+    /// This body as a member of the materialized class `class`, which `declaring` declares and
+    /// which reads its receiver's
+    /// `fields`, the backing fields of `properties`. A value class member reads its one value
+    /// and writes nothing.
     pub(super) fn reading_through(
         mut self,
         class: crate::ir::ClassId,
+        declaring: &'a KlibIrSymbol,
         fields: &[&'a crate::metadata::klib_ir::tree::KlibIrField],
+        properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
         value: bool,
     ) -> Self {
         let declared = &self.ir.classes[class as usize].fields;
         self.instance_storage = Some(instance_storage::InstanceStorageFrame::member(
             class,
+            declaring,
             fields
                 .iter()
                 .zip(declared)
                 .map(|(field, declared)| (&field.base.symbol, declared.ty, declared.is_final())),
+            properties,
             self.header.value_receiver(),
             value,
         ));
@@ -475,17 +611,19 @@ impl<'a> BodyLowering<'a> {
                 super_qualifier,
             } => {
                 let ty = self.ty(expression, "call")?;
-                if super_qualifier.is_some() {
-                    return unsupported("a `super` call");
-                }
-                let lowered =
-                    match super::range_membership::range_literal_membership(arena, expression) {
+                if let Some(qualifier) = super_qualifier {
+                    (self.super_call(qualifier, access, ty)?, ty)
+                } else {
+                    let lowered = match super::range_membership::range_literal_membership(
+                        arena, expression,
+                    ) {
                         Some(membership) => self.range_literal_membership(membership, ty, false)?,
                         None => None,
                     };
-                match lowered {
-                    Some(lowered) => (lowered, ty),
-                    None => (self.call(access, ty)?, ty),
+                    match lowered {
+                        Some(lowered) => (lowered, ty),
+                        None => (self.call(access, ty)?, ty),
+                    }
                 }
             }
             KlibIrExprKind::Return { target, value } => {
@@ -645,11 +783,14 @@ impl<'a> BodyLowering<'a> {
                 super_qualifier,
                 ..
             } => {
-                if super_qualifier.is_some() {
-                    return unsupported("a superclass field read");
-                }
                 let ty = self.ty(expression, "field read")?;
-                return self.initialized_field(symbol, *receiver, None, ty);
+                return self.initialized_field(
+                    symbol,
+                    super_qualifier.as_ref(),
+                    *receiver,
+                    None,
+                    ty,
+                );
             }
             KlibIrExprKind::SetField {
                 symbol,
@@ -658,11 +799,14 @@ impl<'a> BodyLowering<'a> {
                 super_qualifier,
                 ..
             } => {
-                if super_qualifier.is_some() {
-                    return unsupported("a superclass field write");
-                }
                 let ty = self.ty(expression, "field write")?;
-                return self.initialized_field(symbol, *receiver, Some(*value), ty);
+                return self.initialized_field(
+                    symbol,
+                    super_qualifier.as_ref(),
+                    *receiver,
+                    Some(*value),
+                    ty,
+                );
             }
             KlibIrExprKind::GetObject(symbol) => {
                 let ty = self.ty(expression, "object value")?;
@@ -770,22 +914,39 @@ impl<'a> BodyLowering<'a> {
         if actual.is_nullable() && !expected.is_nullable() {
             return false;
         }
-        let Some(name) = actual.non_null().kotlin_class_internal() else {
-            return false;
-        };
-        let Some(class) = self.ir.classes.iter().find(|class| {
-            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
-        }) else {
-            return false;
-        };
         let parameters = self.header.type_parameters();
-        class
-            .supertypes
-            .iter()
-            .any(|supertype| self.linker.is_subtype(parameters, *supertype, expected))
-            || self
-                .linker
-                .is_subtype(parameters, Ty::obj_name(class.superclass), expected)
+        self.local_class_supertypes(actual)
+            .is_some_and(|mut supertypes| {
+                supertypes.any(|supertype| self.linker.is_subtype(parameters, supertype, expected))
+            })
+    }
+
+    /// The direct supertypes recorded for the local or anonymous class lowered in this body that
+    /// the non-null `actual` names; `None` when it names no such class.
+    fn local_class_supertypes(&self, actual: Ty) -> Option<impl Iterator<Item = Ty> + '_> {
+        let name = actual.non_null().kotlin_class_internal()?;
+        let class = self.ir.classes.iter().find(|class| {
+            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
+        })?;
+        Some(
+            class
+                .supertypes
+                .iter()
+                .copied()
+                .chain(std::iter::once(Ty::obj_name(class.superclass))),
+        )
+    }
+
+    /// The generic class `owner` as `sub` applies it through its hierarchy: through the supertypes
+    /// recorded for a local or anonymous class lowered in this body, or the calling compilation's
+    /// class model otherwise.
+    fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
+        match self.local_class_supertypes(sub) {
+            Some(mut supertypes) => {
+                supertypes.find_map(|supertype| self.linker.applied_supertype(supertype, owner))
+            }
+            None => self.linker.applied_supertype(sub, owner),
+        }
     }
 
     /// Whether `supertype` counts as a supertype of `subtype`: one recorded for a local or
@@ -811,6 +972,9 @@ impl<'a> BodyLowering<'a> {
         }
         if let Some(widened) = self.nullable_widening(lowered, actual, expected) {
             return Ok(widened);
+        }
+        if let Some(narrowed) = self.null_proven_field(id, lowered, actual, expected) {
+            return Ok(narrowed);
         }
         self.upcast(lowered, actual, expected)
             .ok_or(KlibBodyDeclineReason::ImplicitConversion)
@@ -845,28 +1009,8 @@ impl<'a> BodyLowering<'a> {
     /// The constant `constant` the KLIB types `ty`, with the type checked FIR lowering records for
     /// it: `null` is serialized as `Nothing?` and typed as the null literal.
     fn constant(&mut self, constant: &KlibIrConstant, ty: Ty) -> Lowered<(ExprId, Ty)> {
-        let (value, constant_ty) = match constant {
-            KlibIrConstant::Null => {
-                if ty != Ty::nullable(Ty::Nothing) {
-                    return Err(mismatch("a `null` is not typed `Nothing?`"));
-                }
-                return Ok((self.ir.add_expr(IrExpr::Const(IrConst::Null)), Ty::Null));
-            }
-            KlibIrConstant::Boolean(value) => (IrConst::Boolean(*value), Ty::Boolean),
-            KlibIrConstant::Char(value) => (IrConst::Char(*value), Ty::Char),
-            KlibIrConstant::Byte(value) => (IrConst::Byte(*value), Ty::Byte),
-            KlibIrConstant::Short(value) => (IrConst::Short(*value), Ty::Short),
-            KlibIrConstant::Int(value) => (IrConst::Int(*value), Ty::Int),
-            KlibIrConstant::Long(value) => (IrConst::Long(*value), Ty::Long),
-            KlibIrConstant::Float(value) => (IrConst::Float(*value), Ty::Float),
-            KlibIrConstant::Double(value) => (IrConst::Double(*value), Ty::Double),
-            KlibIrConstant::String(value) => (IrConst::String(value.as_str().into()), Ty::String),
-        };
-        if constant_ty != ty {
-            // An unsigned constant, for one, is serialized as its signed value typed `UInt`.
-            return unsupported("a constant of another type than its value's");
-        }
-        Ok((self.ir.add_expr(IrExpr::Const(value)), ty))
+        let (value, constant_ty) = constant_value(constant, ty)?;
+        Ok((self.ir.add_expr(IrExpr::Const(value)), constant_ty))
     }
 
     fn read(&mut self, symbol: &KlibIrSymbol) -> Lowered<ExprId> {
@@ -992,12 +1136,20 @@ impl<'a> BodyLowering<'a> {
         if is_value_of(actual, declared) {
             return Ok(lowered);
         }
+        let parameters = self.header.type_parameters();
+        // A value of a subtype of `declared`, as `suspendCoroutine` passes its `SafeContinuation`
+        // to a `(Continuation<T>) -> Unit` block, is one by subsumption. It crosses as the checked
+        // source argument does, with the conversion the checker decides for the same two types.
+        if self.linker.is_subtype(parameters, actual, declared) {
+            return Ok(match crate::types::value_conversion(actual, declared) {
+                None => lowered,
+                Some(_) => self.coercion(lowered, declared),
+            });
+        }
         // A prepared copy also erases the type parameters of the inline functions it already
         // expanded, so the value may be typed with the erasure's bound: a supertype of `declared`.
         if actual != self.header.erased(declared)
-            && !self
-                .linker
-                .is_subtype(self.header.type_parameters(), declared, actual)
+            && !self.linker.is_subtype(parameters, declared, actual)
         {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         }

@@ -1,10 +1,11 @@
 //! Links from one file to an instance of a classifier another file realizes: an object's single
-//! instance, one constant of an enum, or a new instance built by one of its constructors.
+//! instance, one constant of an enum, or a new instance built by one of its constructors; and to
+//! an enum's `values()` and `valueOf`, which answer its constants.
 //!
 //! Only the declaring file holds such an instance's layout, storage and initialization, so it
 //! realizes an entry, an ordinary function answering the instance: an object's and a
-//! constructor's in `super::construction_entries`, an enum constant's in `super::enums`. Every
-//! other file reads the instance by calling that entry. These are the same problem, so they
+//! constructor's in `super::construction_entries`, an enum constant's, `values()` and `valueOf`
+//! in `super::enums`. Every other file reads the instance by calling that entry. These are the same problem, so they
 //! share one identity ([`InstanceEntry`]), one Pass-1 fact
 //! (`super::BackendModuleFacts::declares_instance`) and one table of links
 //! ([`super::module_links::ModuleLinks`]): whichever of the reading and the declaring file is
@@ -25,10 +26,25 @@ pub enum InstanceEntry {
     /// The single instance of an `object` or companion object.
     Object(TypeName),
     EnumConstant(EnumConstant),
+    /// The `values()` or `valueOf` of an enum, which read the constants the declaring file holds;
+    /// the entry takes the member's own parameters.
+    EnumMember {
+        classifier: TypeName,
+        member: super::enums::StaticMember,
+    },
     /// A new instance, built by the checked constructor declaration of the named source module;
     /// the entry takes the constructor's declared parameters. A declaration identity belongs to
     /// one module's analysis, so the module qualifies it.
     Constructor {
+        module: Box<str>,
+        declaration: DeclarationId,
+    },
+    /// A new instance, built by a construction that leaves arguments of the checked constructor
+    /// declaration to their defaults; the entry takes an inner class's enclosing instance, the
+    /// constructor's whole parameter frame and the omission mask words (see
+    /// `super::default_arguments`). The module qualifies the declaration as for
+    /// [`Self::Constructor`].
+    ConstructorDefaults {
         module: Box<str>,
         declaration: DeclarationId,
     },
@@ -39,7 +55,10 @@ impl InstanceEntry {
     pub fn enum_constant(&self) -> Option<&EnumConstant> {
         match self {
             Self::EnumConstant(constant) => Some(constant),
-            Self::Object(_) | Self::Constructor { .. } => None,
+            Self::Object(_)
+            | Self::EnumMember { .. }
+            | Self::Constructor { .. }
+            | Self::ConstructorDefaults { .. } => None,
         }
     }
 }
@@ -63,7 +82,8 @@ pub fn link_entries<V: Clone>(
         .collect()
 }
 
-/// The link of each instance of another file's classifier that `ir` emits a read of: the declaring
+/// The link of each instance of another file's classifier that `ir` emits a read of, and of each
+/// `values()` and `valueOf` of another file's enum it calls: the declaring
 /// file's defined link, or, for an instance `module` certifies but whose file comes later, a link
 /// reserved from `allocate` for that file to define. An instance of neither kind has no link, and
 /// the target declines its read.
@@ -84,14 +104,26 @@ pub fn link_reads<V: Clone>(
                 name: name.clone(),
             }),
             IrExpr::SingletonValue { classifier } => InstanceEntry::Object(*classifier),
+            IrExpr::EnumValues { classifier } => InstanceEntry::EnumMember {
+                classifier: *classifier,
+                member: super::enums::StaticMember::Values,
+            },
+            IrExpr::EnumValueOf { classifier, .. } => InstanceEntry::EnumMember {
+                classifier: *classifier,
+                member: super::enums::StaticMember::ValueOf,
+            },
             _ => continue,
         };
         let declared_here = match &instance {
-            InstanceEntry::Object(classifier) => ir.class_id_by_name(*classifier).is_some(),
+            InstanceEntry::Object(classifier) | InstanceEntry::EnumMember { classifier, .. } => {
+                ir.class_id_by_name(*classifier).is_some()
+            }
             InstanceEntry::EnumConstant(constant) => {
                 ir.class_id_by_name(constant.classifier).is_some()
             }
-            InstanceEntry::Constructor { .. } => continue,
+            InstanceEntry::Constructor { .. } | InstanceEntry::ConstructorDefaults { .. } => {
+                continue
+            }
         };
         if declared_here || reads.contains_key(&instance) {
             continue;
@@ -105,9 +137,10 @@ pub fn link_reads<V: Clone>(
 }
 
 /// The link of each constructor of another file's class that `ir` builds an instance through,
-/// reserved or found like [`link_reads`] does for the instances it reads. A construction the
-/// checker selected a module constructor for whose class `ir` does not declare, and that `module`
-/// does not certify, has no link, and the target declines it.
+/// reserved or found like [`link_reads`] does for the instances it reads: a construction the
+/// checker selected a module constructor for whose class `ir` does not declare, and a call of a
+/// constructor's default-argument entry. One whose constructor `module` does not certify has no
+/// link, and the target declines it.
 pub fn link_constructor_reads<V: Clone>(
     ir: &IrFile,
     module_name: &str,
@@ -120,18 +153,31 @@ pub fn link_constructor_reads<V: Clone>(
         .into_iter()
         .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
     {
-        let IrExpr::New { internal, .. } = ir.expr(expression) else {
-            continue;
-        };
-        let Some(&constructor) = ir.module_constructions.selected.get(&expression) else {
-            continue;
-        };
-        if ir.class_id_by_name(*internal).is_some() {
-            continue;
-        }
-        let instance = InstanceEntry::Constructor {
-            module: module_name.into(),
-            declaration: constructor,
+        let instance = match ir.expr(expression) {
+            IrExpr::New { internal, .. } => {
+                let Some(&constructor) = ir.module_constructions.selected.get(&expression) else {
+                    continue;
+                };
+                if ir.class_id_by_name(*internal).is_some() {
+                    continue;
+                }
+                InstanceEntry::Constructor {
+                    module: module_name.into(),
+                    declaration: constructor,
+                }
+            }
+            IrExpr::Call { callee, .. } => {
+                let crate::ir::Callee::ModuleConstructorDefaultEntry { constructor, .. } =
+                    &**callee
+                else {
+                    continue;
+                };
+                InstanceEntry::ConstructorDefaults {
+                    module: module_name.into(),
+                    declaration: *constructor,
+                }
+            }
+            _ => continue,
         };
         if reads.contains_key(&instance) {
             continue;

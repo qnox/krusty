@@ -30,6 +30,36 @@ pub enum ListStorageConstruction {
     MutablePacked,
 }
 
+/// One access a target realizes as a single atomic instruction on one storage location. The
+/// operand list after the location follows the declaration: a stored value, an expected value and
+/// its replacement, or an addend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AtomicOperation {
+    /// Read the value.
+    Load,
+    /// Write `newValue`.
+    Store,
+    /// Write `newValue` and answer the value it replaced.
+    Exchange,
+    /// Write `newValue` when the value is `expectedValue`, and answer whether it did.
+    CompareAndSet,
+    /// Write `newValue` when the value is `expectedValue`, and answer the value it found.
+    CompareAndExchange,
+    /// Add `delta` and answer the value before the addition.
+    FetchAndAdd,
+}
+
+impl AtomicOperation {
+    /// The operands after the storage location.
+    pub const fn operands(self) -> usize {
+        match self {
+            Self::Load => 0,
+            Self::Store | Self::Exchange | Self::FetchAndAdd => 1,
+            Self::CompareAndSet | Self::CompareAndExchange => 2,
+        }
+    }
+}
+
 /// A source-declared callable whose implementation is supplied by the compiler after ordinary symbol
 /// and overload selection. Providers attach this to the exact declaration identity; lowering never
 /// grants intrinsic behavior from a coincidental source name.
@@ -135,6 +165,10 @@ pub enum CompilerIntrinsic {
     CoroutineContext,
     CoroutineSuspended,
     SuspendCoroutineUninterceptedOrReturn,
+    /// A target stdlib's `startCoroutineUninterceptedOrReturnIntrinsicN(f, inputs.., completion)`:
+    /// the suspend function value `f` invoked with its inputs and `completion` as its
+    /// continuation. Its stdlib body only says the compiler implements it.
+    StartCoroutineUninterceptedOrReturn,
     EnumValues,
     EnumValueOf,
     /// The zero-argument `kotlin.enums.enumEntries<T>()`. Its stdlib body only throws; the selected
@@ -204,8 +238,21 @@ pub enum CompilerIntrinsic {
     RadixToString {
         operand: crate::types::Ty,
     },
+    /// Native's runtime comparison of two `String` ranges' UTF-16 units, whose bounds the stdlib
+    /// already checked (`kotlin.text.unsafeRangeEquals`, a private `@GCUnsafeCall` external).
+    StringRangeEquals,
+    /// Native's runtime copy of `count` elements of one array into another of its kind, a
+    /// specialized primitive array or `Array<Any?>` (`kotlin.collections.arrayCopy`, a
+    /// `@GCUnsafeCall` external without a body). It checks both ranges itself and copies as if
+    /// through a temporary buffer, so the two ranges may overlap within one array.
+    ArrayCopy {
+        array: crate::types::Ty,
+    },
     /// A fully normalized `Result` helper reached from an expanded library inline body.
     ResultFailure(ResultFailureIntrinsic),
+    /// The `exception` property getter on the compiler-builtin `Result.Failure` carrier. The
+    /// target owns that carrier's storage and reads it through its runtime ABI.
+    ResultFailureException,
     /// `next()` declared by a Kotlin primitive iterator (`kotlin.collections.IntIterator.next`).
     /// A target may call the iterator's unboxed element operation instead of the boxed
     /// `Iterator<T>.next` bridge (kotlinc's `IteratorNext` intrinsic); outside that target rule the

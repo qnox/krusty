@@ -48,6 +48,9 @@
 //! cache hit. The box harness's `KRUSTY_CLASS_DUMP` double-build comparison is how a regression is
 //! caught.
 
+// `coverage(off)` keeps the digest's SIMD kernel out of nightly instrumented builds.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 pub mod abi;
 pub mod cache;
 pub mod compiler;

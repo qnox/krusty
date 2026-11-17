@@ -3,11 +3,15 @@
 use crate::ir::{ExprId, FunId, IrFile};
 
 /// What a file held before a lowering began. Lowering appends functions and expressions and
-/// records facts keyed by them; restoring removes exactly those.
+/// records facts keyed by them, and may append members to a class it materialized before;
+/// restoring removes exactly those.
 pub(super) struct LoweringCheckpoint {
     expressions: usize,
     functions: usize,
     classes: usize,
+    /// Each existing class's method and secondary-constructor counts.
+    class_members: Vec<(usize, usize)>,
+    statics: usize,
     class_self_types: crate::fx_hash::HashSet<crate::types::TypeName>,
 }
 
@@ -17,6 +21,12 @@ impl LoweringCheckpoint {
             expressions: ir.exprs.len(),
             functions: ir.functions.len(),
             classes: ir.classes.len(),
+            class_members: ir
+                .classes
+                .iter()
+                .map(|class| (class.methods.len(), class.secondary_ctors.len()))
+                .collect(),
+            statics: ir.statics.len(),
             class_self_types: ir.declared_class_self_type_owners(),
         }
     }
@@ -25,25 +35,11 @@ impl LoweringCheckpoint {
     pub(super) fn restore(self, ir: &mut IrFile) -> FunId {
         let first = ExprId::try_from(self.expressions).expect("an expression id fits u32");
         ir.exprs.truncate(self.expressions);
-        ir.truncate_types(first);
-        ir.checked_return_depths
-            .retain(|expression, _| *expression < first);
-        ir.binding_read_stability
-            .retain(|expression, _| *expression < first);
-        ir.callable_scopes.retain(|expression| *expression < first);
+        crate::ir::truncate_expression_facts(ir, first);
+        ir.statics.truncate(self.statics);
         ir.callable_reference_adapter_results
             .retain(|body, result| *body < first && *result < first);
-        ir.negations.retain(|expression| *expression < first);
-        ir.short_circuits
-            .retain(|expression, _| *expression < first);
-        ir.written_casts.retain(|expression| *expression < first);
-        ir.construction_targets
-            .retain(|expression, _| *expression < first);
-        ir.whens
-            .exhaustive
-            .retain(|expression, _| *expression < first);
-        ir.external_singleton_dispatches
-            .retain(|expression, _| *expression < first);
+        // The exhaustive classifier above prunes inherited and operation-owned expression facts.
         let first = FunId::try_from(self.functions).expect("a function id fits u32");
         let removed = ir.classes[self.classes..]
             .iter()
@@ -51,6 +47,10 @@ impl LoweringCheckpoint {
             .collect::<Vec<_>>();
         ir.functions.truncate(self.functions);
         ir.classes.truncate(self.classes);
+        for (class, (methods, secondaries)) in ir.classes.iter_mut().zip(self.class_members) {
+            class.methods.truncate(methods);
+            class.secondary_ctors.truncate(secondaries);
+        }
         for class in removed {
             ir.function_overrides.remove(&class);
             ir.property_overrides.remove(&class);
@@ -70,5 +70,32 @@ impl LoweringCheckpoint {
         ir.singleton_extension_unread_receivers
             .retain(|function, _| *function < first);
         first
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LoweringCheckpoint;
+    use crate::ir::{IrConst, IrExpr, IrFile, IrIntrinsicSuspensionPoint};
+    use crate::types::Ty;
+
+    #[test]
+    fn rollback_removes_suspension_facts_before_reusing_expression_ids() {
+        let mut ir = IrFile::default();
+        ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let checkpoint = LoweringCheckpoint::of(&ir);
+        let appended = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        ir.suspend_calls.insert(appended, Ty::String);
+        ir.intrinsic_suspension_points
+            .insert(appended, IrIntrinsicSuspensionPoint { result: Ty::String });
+
+        checkpoint.restore(&mut ir);
+
+        assert!(!ir.suspend_calls.contains_key(&appended));
+        assert!(!ir.intrinsic_suspension_points.contains_key(&appended));
+        let reused = ir.add_expr(IrExpr::Const(IrConst::Int(2)));
+        assert_eq!(reused, appended);
+        assert!(!ir.suspend_calls.contains_key(&reused));
+        assert!(!ir.intrinsic_suspension_points.contains_key(&reused));
     }
 }

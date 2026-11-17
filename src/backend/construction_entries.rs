@@ -11,8 +11,7 @@
 //! to by the object (see `super::instance_links`).
 
 use super::DependencyExportSignatures;
-use crate::ir::{ExprId, FunId, IrExpr, IrFile, IrFunction};
-use crate::types::Ty;
+use crate::ir::{FunId, IrExpr, IrFile};
 
 /// Build the entry of every constructor of `ir` that `module` certifies another file may build an
 /// instance through, and record it as that constructor's instance (see `super::instance_links`).
@@ -40,9 +39,48 @@ pub fn publish_constructors(
             class,
             secondary: ordinal.checked_sub(1).map(|index| index as usize),
         };
-        if let Some(entry) = build(ir, constructor) {
-            ir.construction_entries.insert(entry, class);
-            exports.record_instance_entry(instance, entry);
+        if let Some(entry) = ir.add_construction_entry(constructor.class, constructor.secondary) {
+            exports.record_instance_entry(instance, entry.function);
+        }
+    }
+    publish_constructor_defaults(ir, (module_name, module), exports);
+}
+
+/// Build the entry of every constructor's default-argument entry (see `super::default_arguments`)
+/// whose constructor `module` certifies another file may build an instance through, and record it
+/// as that constructor's default-argument instance. A construction in another file that leaves
+/// arguments out calls it with the whole frame and the omission masks.
+fn publish_constructor_defaults(
+    ir: &mut IrFile,
+    (module_name, module): (&str, &super::BackendModuleFacts),
+    exports: &mut DependencyExportSignatures,
+) {
+    let mut published = ir
+        .constructor_default_entries
+        .iter()
+        .filter_map(|(&declaration, &target)| {
+            let class = ir.checked_constructor_bodies.get(&declaration)?.class;
+            Some((declaration, class, target))
+        })
+        .collect::<Vec<_>>();
+    published.sort_unstable_by_key(|&(declaration, _, _)| declaration.raw());
+    for (declaration, class, target) in published {
+        let instance = super::instance_links::InstanceEntry::ConstructorDefaults {
+            module: module_name.into(),
+            declaration,
+        };
+        if !module.declares_instance(&instance) {
+            continue;
+        }
+        // The default-argument entry is always a secondary constructor of its class.
+        let Some(secondary) = target.ordinal.checked_sub(1) else {
+            continue;
+        };
+        if let Some(entry) = ir.add_construction_entry(class, Some(secondary as usize)) {
+            // A mask word can make the entry's parameter list equal to a declared constructor's,
+            // so the construction names the entry by its place.
+            ir.construction_targets.insert(entry.construction, target);
+            exports.record_instance_entry(instance, entry.function);
         }
     }
 }
@@ -70,7 +108,9 @@ pub fn realize(ir: &mut IrFile, exports: &mut DependencyExportSignatures) {
     for (constructor, identity) in constructors {
         let entry = match published.get(&constructor) {
             Some(&entry) => Some(entry),
-            None => build(ir, constructor),
+            None => ir
+                .add_construction_entry(constructor.class, constructor.secondary)
+                .map(|entry| entry.function),
         };
         if let Some(entry) = entry {
             ir.construction_entries.insert(entry, constructor.class);
@@ -123,81 +163,5 @@ fn instance(ir: &mut IrFile, classifier: crate::types::TypeName) -> Option<FunId
     let result = ir.declared_class_self_type(classifier)?;
     let value = ir.add_expr(IrExpr::SingletonValue { classifier });
     ir.set_logical_type(value, result);
-    Some(entry(ir, "<instance>$get", Vec::new(), result, value))
-}
-
-/// A compiler-generated static function of the file returning `value`.
-pub(super) fn entry(
-    ir: &mut IrFile,
-    name: &str,
-    parameters: Vec<Ty>,
-    result: Ty,
-    value: ExprId,
-) -> FunId {
-    let last = ir.add_expr(IrExpr::Return(Some(value)));
-    let body = ir.add_expr(IrExpr::Block {
-        stmts: vec![last],
-        value: None,
-    });
-    let entry = ir.add_fun(IrFunction {
-        name: name.to_owned(),
-        params: parameters,
-        ret: result,
-        body: Some(body),
-        is_static: true,
-        dispatch_receiver: None,
-        param_checks: Vec::new(),
-    });
-    // Compiler-generated: no source declaration of its own, and no public name.
-    ir.synthetic_methods.insert(entry);
-    entry
-}
-
-/// The entry constructing `constructor`'s class, when the file lays out its object.
-fn build(ir: &mut IrFile, constructor: super::ExportedConstructor) -> Option<FunId> {
-    let class = &ir.classes[constructor.class as usize];
-    let internal = class.fq_name;
-    let result = ir.declared_class_self_type(internal)?;
-    let (parameters, selected, declared) = match constructor.secondary {
-        None => (
-            class.ctor_args.iter().map(|argument| argument.ty).collect(),
-            None,
-            class
-                .ctor_args
-                .iter()
-                .map(|argument| argument.declared_ty.unwrap_or(argument.ty))
-                .collect::<Vec<_>>(),
-        ),
-        Some(ordinal) => {
-            let secondary = class.secondary_ctors.get(ordinal)?;
-            // An inner class's constructors lead with the enclosing instance, as its primary's
-            // `ctor_args` do; the selection spells the whole list.
-            let mut all = secondary.prefix_params.clone();
-            all.extend(secondary.params.iter().copied());
-            (all.clone(), Some(all.clone()), all)
-        }
-    };
-    let arguments = parameters
-        .iter()
-        .enumerate()
-        .map(|(slot, &ty)| read(ir, u32::try_from(slot).expect("too many parameters"), ty))
-        .collect();
-    let construction = ir.add_expr(IrExpr::New {
-        internal,
-        args: arguments,
-        ctor_params: selected,
-        declared_params: Some(declared.into_boxed_slice()),
-        ctor_desc: None,
-        external_target: None,
-        defaults: Box::default(),
-        default_prefix_count: 0,
-    });
-    ir.set_logical_type(construction, result);
-    Some(entry(ir, "<init>$new", parameters, result, construction))
-}
-
-fn read(ir: &mut IrFile, slot: u32, ty: Ty) -> ExprId {
-    let read = ir.add_expr(IrExpr::GetValue(slot));
-    ir.set_logical_type(read, ty);
-    read
+    Some(ir.add_generated_entry("<instance>$get", Vec::new(), result, value))
 }

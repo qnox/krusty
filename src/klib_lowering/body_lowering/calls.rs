@@ -7,7 +7,9 @@ use super::super::array_content_members;
 use super::super::ir_builtins::{
     BuiltinCallDisposition, BuiltinOperator, BuiltinRelation, DataClassArrayMember,
 };
-use super::super::klib_types::function_invocation_arity;
+use super::super::klib_types::{
+    classifier_name, function_invocation_arity, member_owner, suspend_function_invocation_arity,
+};
 use super::{
     mismatch, unsupported, BodyLowering, LinkedAccessor, LinkedAccessorTarget, LinkedCallee,
     Lowered,
@@ -21,10 +23,19 @@ use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignatu
 use crate::metadata::klib_ir::tree::{
     KlibIrArguments, KlibIrExprId, KlibIrExprKind, KlibIrMemberAccess,
 };
-use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
+use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::{EqualityMode, Ty, TyKind};
 
 use super::super::decline::KlibBodyDeclineReason;
+
+/// How a call of a member reaches its implementation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CallDispatch {
+    /// Through the receiver's dispatch table when a subclass may override the member.
+    Virtual,
+    /// To the declared implementation itself: a `super` call.
+    Direct,
+}
 
 impl BodyLowering<'_> {
     /// A call of a compiler built-in operator or of a dependency function. A built-in operator
@@ -34,23 +45,43 @@ impl BodyLowering<'_> {
         if access.symbol.kind != KlibIrSymbolKind::Function {
             return Err(mismatch("a call target's symbol is not a function"));
         }
-        let callee = match &access.symbol.signature {
-            KlibIrSignature::Public(callee) => callee,
-            KlibIrSignature::FileLocal { .. } => {
-                let linked = self
-                    .linker
-                    .link_local_function(self.ir, &access.symbol.signature)?;
+        let signature = &access.symbol.signature;
+        let callee = match signature {
+            KlibIrSignature::Public(callee) if !self.linker.links_privately(signature) => callee,
+            KlibIrSignature::Accessor(accessor) if !self.linker.links_privately(signature) => {
+                return self.accessor_call(accessor, access, ty)
+            }
+            KlibIrSignature::Public(_)
+            | KlibIrSignature::Accessor(_)
+            | KlibIrSignature::FileLocal { .. } => {
+                let linked = match self.object_members.get(signature) {
+                    Some(member) => member.linked(),
+                    None => self.linker.link_local_function(self.ir, signature)?,
+                };
                 return self.linked_call(linked, access, ty);
             }
-            KlibIrSignature::Accessor(accessor) => return self.accessor_call(accessor, access, ty),
         };
+        if let Some(operation) = self.linker.atomic_field(callee)? {
+            return self.atomic_field(operation, access, ty);
+        }
+        if let Some(operation) = self.linker.atomic_array_element(callee)? {
+            return self.atomic_array_element(operation, access, ty);
+        }
+        if let Some(arity) = suspend_function_invocation_arity(callee) {
+            if !access.type_arguments.is_empty() {
+                return Err(mismatch(
+                    "a suspend function invocation is called with type arguments",
+                ));
+            }
+            return self.function_invocation(access, arity, ty, true);
+        }
         if let Some(arity) = function_invocation_arity(callee) {
             if !access.type_arguments.is_empty() {
                 return Err(mismatch(
                     "a function invocation is called with type arguments",
                 ));
             }
-            return self.function_invocation(access, arity, ty);
+            return self.function_invocation(access, arity, ty, false);
         }
         // A checked source call or retained external export needs the exact declaration edge.
         // Only a builtin without either obligation is folded into its common-IR operation.
@@ -67,6 +98,9 @@ impl BodyLowering<'_> {
             }
             BuiltinCallDisposition::Dependency => {
                 let signature = crate::libraries::KlibDeclarationSignature::Public(callee.clone());
+                if let Some(suspension) = self.linker.unintercepted_suspension(&signature)? {
+                    return self.unintercepted_suspension_call(suspension, access, ty);
+                }
                 if let Some(primitive) = self.linker.common_primitive(&signature)? {
                     return self.primitive_call(primitive, access, ty);
                 }
@@ -109,7 +143,7 @@ impl BodyLowering<'_> {
             access,
             ty,
             CalleeShape {
-                receiver: Some(primitive.receiver),
+                receiver: primitive.receiver,
                 params: &primitive.params,
                 ret: primitive.ret,
                 context_count: 0,
@@ -117,14 +151,21 @@ impl BodyLowering<'_> {
                 parameter_defaults: &[],
             },
         )?;
-        let receiver = operands
-            .receiver
-            .expect("a validated primitive has dispatch");
+        // An array factory is the array its one vararg argument packs, as checked FIR lowers a
+        // source call of it to an array literal. Every other primitive is a member operation.
+        let (Some(receiver), Some(receiver_type)) = (operands.receiver, primitive.receiver) else {
+            return match (primitive.operation, operands.args.as_slice()) {
+                (CommonPrimitive::ArrayLiteral, &[array]) => Ok(self.typed(array, operands.ret)),
+                _ => Err(mismatch(
+                    "a member primitive is called without its dispatch receiver",
+                )),
+            };
+        };
         Ok(match primitive.operation {
             CommonPrimitive::Unary(operation) => {
                 // Match checked FIR's selected promotion before unary realization. In particular,
                 // negate is an IEEE unary operation, never subtraction from positive zero.
-                let operand = if primitive.receiver == primitive.ret {
+                let operand = if receiver_type == primitive.ret {
                     receiver
                 } else {
                     self.coercion(receiver, primitive.ret)
@@ -152,16 +193,39 @@ impl BodyLowering<'_> {
                         arguments: Vec::new(),
                         parameters: Vec::new(),
                         result: operands.ret,
+                        substitutions: Vec::new(),
                         source_receiver: operands.receiver_type,
                     },
                 )))
             }
             // A numeric conversion, as checked FIR lowers the source conversion.
+            CommonPrimitive::ArrayLiteral => {
+                return Err(mismatch(
+                    "an array factory is called with a dispatch receiver",
+                ))
+            }
             CommonPrimitive::Conversion => self.ir.add_expr(IrExpr::TypeOp {
                 op: crate::ir::IrTypeOp::ImplicitCoercion,
                 arg: receiver,
                 type_operand: primitive.ret,
             }),
+            // The character at the index, as checked FIR lowers a source `String.get` call.
+            CommonPrimitive::StringGet => {
+                let &[index] = operands.args.as_slice() else {
+                    return Err(mismatch(
+                        "a string read is called with another shape than its declaration's",
+                    ));
+                };
+                let read = self.ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Intrinsic {
+                        operation: IrIntrinsic::StringGet,
+                        ret: Ty::Char,
+                    }),
+                    dispatch_receiver: Some(receiver),
+                    args: vec![index],
+                });
+                self.typed(read, Ty::Char)
+            }
             // `compareTo` of a builtin scalar, as checked FIR lowers a call of it: the comparison
             // at the provider's common carrier, the operands promoted to a numeric carrier first.
             CommonPrimitive::Compare { operand } => {
@@ -179,7 +243,7 @@ impl BodyLowering<'_> {
                         lowering.coercion(value, operand)
                     }
                 };
-                let receiver = promote(self, receiver, primitive.receiver);
+                let receiver = promote(self, receiver, receiver_type);
                 let other = promote(self, other, other_type);
                 let relational_operator = matches!(
                     access.origin.as_deref(),
@@ -211,7 +275,7 @@ impl BodyLowering<'_> {
                     IrCheckedOperation::RangeConstruction {
                         operation,
                         start: receiver,
-                        start_type: primitive.receiver,
+                        start_type: receiver_type,
                         end,
                         end_type,
                         result: primitive.ret,
@@ -475,6 +539,7 @@ impl BodyLowering<'_> {
         access: &KlibIrMemberAccess,
         arity: usize,
         ty: Ty,
+        suspend: bool,
     ) -> Lowered<ExprId> {
         let arguments = arguments(access);
         let Some((Some(function), arguments)) = arguments.split_first() else {
@@ -496,7 +561,7 @@ impl BodyLowering<'_> {
         }
         // A context or extension function type's parameters lead with its context parameters and
         // receiver, as the function class's invocation takes them.
-        if signature.params.len() != arity || signature.suspend {
+        if signature.params.len() != arity || signature.suspend != suspend {
             return Err(mismatch(
                 "a function invocation's value has another shape than its function class",
             ));
@@ -514,7 +579,7 @@ impl BodyLowering<'_> {
             ));
         }
         let params = signature.params.to_vec();
-        let mut args = Vec::with_capacity(arity);
+        let mut args = Vec::with_capacity(arguments.len());
         for (argument, parameter) in arguments.iter().zip(&params) {
             let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
                 "a function invocation that omits an argument",
@@ -527,6 +592,9 @@ impl BodyLowering<'_> {
             params,
             ret: signature.ret,
         });
+        if suspend {
+            self.ir.suspend_calls.insert(invocation, signature.ret);
+        }
         Ok(if signature.ret == ty {
             invocation
         } else {
@@ -535,6 +603,44 @@ impl BodyLowering<'_> {
             self.erasure_coercions.insert(erased);
             erased
         })
+    }
+
+    /// `super<Q>.f(…)`: the qualifier's own implementation of `f`, called on the receiver without
+    /// dispatch, as checked FIR lowers a source `super` call. The KLIB names the member through
+    /// the qualifier, so the callee must be a member `Q` declares, and only an implementation this
+    /// unit lowers is reached directly: no override of a subclass may replace it.
+    pub(super) fn super_call(
+        &mut self,
+        qualifier: &KlibIrSymbol,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let (KlibIrSymbolKind::Class, KlibIrSignature::Public(qualifier)) =
+            (qualifier.kind, &qualifier.signature)
+        else {
+            return Err(mismatch("a `super` qualifier is not a public class"));
+        };
+        let (KlibIrSymbolKind::Function, KlibIrSignature::Public(callee)) =
+            (access.symbol.kind, &access.symbol.signature)
+        else {
+            return unsupported("a `super` call of a member without a public signature");
+        };
+        if member_owner(callee)? != classifier_name(qualifier)? {
+            return Err(mismatch(
+                "a `super` call names a member its qualifier does not declare",
+            ));
+        }
+        let linked = self.linker.link(self.ir, callee)?;
+        if !matches!(linked.callee, Callee::Local(_)) {
+            return unsupported("a `super` call of a member this unit does not implement");
+        }
+        if linked.receiver.is_none() {
+            return Err(mismatch("a `super` call names a member without a receiver"));
+        }
+        if !self.linker.declares_implementation(callee)? {
+            return Err(mismatch("a `super` call names an abstract member"));
+        }
+        self.linked_call_with(linked, access, ty, CallDispatch::Direct)
     }
 
     /// A call of a dependency function, which the unit lowers too.
@@ -554,6 +660,18 @@ impl BodyLowering<'_> {
         access: &KlibIrMemberAccess,
         ty: Ty,
     ) -> Lowered<ExprId> {
+        self.linked_call_with(linked, access, ty, CallDispatch::Virtual)
+    }
+
+    /// [`Self::linked_call`], with the dispatch the call site names: a `super` call reaches the
+    /// qualifier's implementation itself, never a subclass's override.
+    fn linked_call_with(
+        &mut self,
+        linked: LinkedCallee,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+        dispatch: CallDispatch,
+    ) -> Lowered<ExprId> {
         let linked = self.substituted(linked, access)?;
         let operands = self.call_operands(
             access,
@@ -571,6 +689,12 @@ impl BodyLowering<'_> {
         if let Callee::External { params, ret, .. } = &mut callee {
             (*params, *ret) = (operands.params, operands.ret);
         }
+        let suspend_result = match &callee {
+            Callee::External { target, .. } if self.linker.is_suspend_callable(*target) => {
+                Some(operands.ret)
+            }
+            _ => None,
+        };
         let declared_ret = match callee {
             Callee::Local(function) => Some(self.ir.functions[function as usize].ret),
             _ => None,
@@ -596,6 +720,7 @@ impl BodyLowering<'_> {
         // A member dispatch reaches on an instance of a class this unit materializes, which a
         // subclass may override, is called through the class's dispatch table.
         let overridable = match (&callee, dispatch_receiver) {
+            _ if dispatch == CallDispatch::Direct => None,
             (Callee::Local(function), Some(receiver)) => self
                 .ir
                 .overridable_method(*function)
@@ -622,6 +747,9 @@ impl BodyLowering<'_> {
                 args,
             }),
         };
+        if let Some(result) = suspend_result {
+            self.ir.suspend_calls.insert(call, result);
+        }
         if let Some(role) = linked.edge.semantic_role {
             self.ir.semantic_call_roles.insert(call, role);
         }
@@ -635,9 +763,20 @@ impl BodyLowering<'_> {
                 .insert(call, classifier);
         }
         // The result of a generic local function is its declared type parameter; the call's
-        // value is that result at the call's type arguments.
+        // value is that result at the call's type arguments. The call itself keeps the
+        // declaration's result, as a source call of a local function does, and the coercion
+        // carries the substituted one. A backend reads that published result rather than
+        // reconstructing it from the callee.
+        if let Some(declared) =
+            declared_ret.filter(|_| matches!(self.ir.expr(call), IrExpr::Call { .. }))
+        {
+            self.ir.call_declared_ret.insert(call, declared);
+        }
         Ok(match declared_ret {
             Some(declared) if declared != operands.ret => {
+                // As checked FIR lowering does for a source call, the inner call publishes the
+                // declaration's result it evaluates to, and the coercion the use's type.
+                self.ir.call_declared_ret.insert(call, declared);
                 let coerced = self.coercion(call, operands.ret);
                 self.ir.set_logical_type(coerced, operands.ret);
                 coerced
@@ -648,6 +787,70 @@ impl BodyLowering<'_> {
 }
 
 impl BodyLowering<'_> {
+    fn unintercepted_suspension_call(
+        &mut self,
+        selected: super::UninterceptedSuspensionCall,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let [Some(type_argument)] = access.type_arguments.as_slice() else {
+            return Err(mismatch(
+                "an unintercepted suspension call has another type-argument shape",
+            ));
+        };
+        let type_argument = self.semantic(*type_argument)?;
+        let mut bindings = crate::fx_hash::HashMap::default();
+        bindings.insert(selected.formal, type_argument);
+        let parameter =
+            crate::types::ty_subst_formals(selected.parameter, &[selected.formal], &bindings);
+        let result = crate::types::ty_subst_formals(selected.result, &[selected.formal], &bindings);
+        let operands = self.call_operands(
+            access,
+            ty,
+            CalleeShape {
+                receiver: None,
+                params: &[parameter],
+                ret: result,
+                context_count: 0,
+                class_type_parameters: &[],
+                parameter_defaults: &[],
+            },
+        )?;
+        let logical_result = operands.ret;
+        let [block] = operands.args.as_slice() else {
+            return Err(mismatch(
+                "an unintercepted suspension call has another operand shape",
+            ));
+        };
+        let IrExpr::Lambda {
+            impl_fn,
+            inline_body,
+            ..
+        } = &mut self.ir.exprs[*block as usize]
+        else {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "an unintercepted suspension block that is not a KLIB closure",
+            ));
+        };
+        let body = self
+            .ir
+            .functions
+            .get(*impl_fn as usize)
+            .and_then(|function| function.body);
+        let Some(body) = body else {
+            return Err(KlibBodyDeclineReason::NoBody);
+        };
+        *inline_body = Some(body);
+        let invocation = self.ir.invoke_with_current_continuation(*block).ok_or(
+            KlibBodyDeclineReason::UnsupportedOperation(
+                "an unintercepted suspension block with another invocation shape",
+            ),
+        )?;
+        self.ir
+            .mark_unintercepted_suspension(invocation, logical_result);
+        Ok(invocation)
+    }
+
     /// A call of a dependency property's accessor, lowered as checked FIR lowers a source access
     /// of the property: a read through its getter, a write through its setter.
     fn accessor_call(
@@ -656,14 +859,63 @@ impl BodyLowering<'_> {
         access: &KlibIrMemberAccess,
         ty: Ty,
     ) -> Lowered<ExprId> {
-        if !access.type_arguments.is_empty() {
-            return unsupported("an access of a generic property");
-        }
         let signature = crate::libraries::KlibDeclarationSignature::Accessor(accessor.clone());
         if let Some(primitive) = self.linker.common_primitive(&signature)? {
             return self.primitive_call(primitive, access, ty);
         }
-        let linked = self.linker.link_accessor(self.ir, accessor)?;
+        let mut linked = self.linker.link_accessor(self.ir, accessor)?;
+        if linked.type_parameters.len() != access.type_arguments.len() {
+            return Err(mismatch(
+                "a property access has another number of type arguments than its selected accessor",
+            ));
+        }
+        if !linked.reified_type_parameters.is_empty() {
+            return unsupported("a reified generic property accessor");
+        }
+        let mut bindings = crate::fx_hash::HashMap::default();
+        for (formal, argument) in linked.type_parameters.iter().zip(&access.type_arguments) {
+            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a property access that leaves a type argument unset",
+            ))?;
+            bindings.insert(*formal, self.semantic(argument)?);
+        }
+        if linked.type_parameter_bounds.len() != linked.type_parameters.len() {
+            return Err(mismatch(
+                "the selected accessor's bounds do not match its formal identities",
+            ));
+        }
+        let mut substitutions = Vec::with_capacity(linked.type_parameters.len());
+        if !linked.type_parameters.is_empty() {
+            let target = linked.callable.ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "a generic accessor has no exact external callable identity".to_owned(),
+                )
+            })?;
+            for (ordinal, formal) in linked.type_parameters.iter().enumerate() {
+                let value = bindings[formal];
+                substitutions.push(IrCheckedSubstitution {
+                    parameter: FirTypeParameterRef::External {
+                        callable: target,
+                        ordinal: u32::try_from(ordinal).map_err(|_| {
+                            mismatch("a property accessor has too many type parameters")
+                        })?,
+                    },
+                    reified: false,
+                    value,
+                    reified_runtime: value,
+                    additional_bounds: Vec::new(),
+                });
+            }
+            // The accessor's own formals are bound here; a declaring-class formal stays as written
+            // until the dispatch receiver applies it.
+            let formals = &linked.type_parameters;
+            let own = |ty| crate::types::ty_subst_formals(ty, formals, &bindings);
+            for parameter in &mut linked.params {
+                *parameter = own(*parameter);
+            }
+            linked.ret = own(linked.ret);
+            linked.receiver = linked.receiver.map(own);
+        }
         let CallOperands {
             receiver,
             args: arguments,
@@ -684,6 +936,47 @@ impl BodyLowering<'_> {
                 parameter_defaults: &[],
             },
         )?;
+        // Accessor bounds may mention both accessor formals and declaring-class formals. The
+        // former are known from the serialized accessor type arguments; the latter are only
+        // known after the dispatch receiver has been applied to its declaring class.
+        let mut bound_bindings = bindings;
+        if !linked.class_type_parameters.is_empty() {
+            let receiver_type = source_receiver.ok_or_else(|| {
+                mismatch("a generic member accessor has no applied dispatch receiver")
+            })?;
+            if receiver_type.type_args().len() != linked.class_type_parameters.len() {
+                return Err(mismatch(
+                    "an accessor receiver applies another number of declaring-class type arguments",
+                ));
+            }
+            bound_bindings.extend(
+                linked
+                    .class_type_parameters
+                    .iter()
+                    .map(crate::types::TyParamName::from)
+                    .zip(receiver_type.type_args().iter().copied()),
+            );
+        }
+        for (formal, bounds) in linked
+            .type_parameters
+            .iter()
+            .zip(&linked.type_parameter_bounds)
+        {
+            let value = bound_bindings[formal];
+            for bound in bounds {
+                let bound = crate::types::ty_subst_formals(
+                    *bound,
+                    &linked.type_parameters,
+                    &bound_bindings,
+                );
+                if !self
+                    .linker
+                    .is_subtype(self.header.type_parameters(), value, bound)
+                {
+                    return Err(KlibBodyDeclineReason::ImplicitConversion);
+                }
+            }
+        }
         let LinkedAccessor { target, write, .. } = linked;
         let target = match target {
             LinkedAccessorTarget::External(property) => property,
@@ -704,6 +997,7 @@ impl BodyLowering<'_> {
                 arguments,
                 parameters,
                 result,
+                substitutions,
                 source_receiver,
             }
         } else {
@@ -714,6 +1008,7 @@ impl BodyLowering<'_> {
                 arguments,
                 parameters,
                 result,
+                substitutions,
                 source_receiver,
             }
         }))))
@@ -830,7 +1125,6 @@ impl BodyLowering<'_> {
             return Err(KlibBodyDeclineReason::ImplicitConversion);
         }
         let applied = self
-            .linker
             .applied_supertype(actual, owner)
             .ok_or(KlibBodyDeclineReason::ImplicitConversion)?;
         if applied.type_args().len() != declared.type_args().len() {

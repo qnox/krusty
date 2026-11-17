@@ -287,6 +287,12 @@ KRef kt_unsigned_array_wrap(const KType *type, KRef storage);
    a spread needs: `f(a, *xs, b)` builds one array whose size only run time knows. */
 kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source);
 
+/* Kotlin/Native's `arrayCopy` of one specialized primitive array or `Array<Any?>`: `count` elements of `source`
+   from `from` into `destination` at `to`. A range outside either array raises its
+   `ArrayIndexOutOfBoundsException`, with no message, before anything is copied. The ranges may
+   overlap within one array. */
+void kt_array_copy_range(KRef source, kt_int from, KRef destination, kt_int to, kt_int count);
+
 /* An index outside `0 until size`: raises Kotlin's `IndexOutOfBoundsException`, with the JVM's
    wording, and returns; the caller returns too. */
 void kt_index_out_of_bounds(kt_int index, kt_int size);
@@ -453,6 +459,9 @@ void kt_mutable_list_add_at(KRef self, kt_int index, KRef value);
 KRef kt_mutable_list_set(KRef self, kt_int index, KRef value);
 KRef kt_mutable_list_remove_at(KRef self, kt_int index);
 kt_boolean kt_mutable_list_remove(KRef self, KRef value);
+/* `removeAll` / `retainAll`: whether the list changed. See the definitions. */
+kt_boolean kt_mutable_list_remove_all(KRef self, KRef elements);
+kt_boolean kt_mutable_list_retain_all(KRef self, KRef elements);
 void kt_mutable_list_clear(KRef self);
 /* `list += element` and `list += elements`: Kotlin's `plusAssign`, which is `add`/`addAll` and
    answers `Unit`. */
@@ -666,27 +675,6 @@ kt_boolean kt_floating_range_is_empty(KRef range);
 kt_double kt_floating_range_start(KRef range);
 kt_double kt_floating_range_end(KRef range);
 
-/* ---- Delegates.notNull -------------------------------------------------------------------------
-
-   `var x: T by Delegates.notNull()`: one reference, and reading it before it is written is an
-   error. The NAME the error reports is handed over by the caller, read from the `KProperty`
-   operand the delegate convention passes. */
-extern const KType kt_type_not_null_var;
-
-KRef kt_not_null_var(void);
-/* `Delegates.observable(initial) { property, old, new -> … }`: the value and a callback run after
-   each write. The `KProperty` is passed along, never read, which is what lets this carry it without
-   any reflection. */
-extern const KType kt_type_observable;
-KRef kt_observable(KRef initial, KRef on_change);
-/* The two entry points a `ReadWriteProperty` receiver reaches; the DESCRIPTOR says which delegate
-   it is, no static type separating them. `get` takes the property's NAME, the only thing it can
-   need (the text of a `notNull` read-before-write error); `set` takes the PROPERTY, which an
-   observable passes to its callback. Any object other than those two delegates ends the program
-   with a message naming its descriptor. */
-KRef kt_rw_property_get(KRef self, KRef name);
-void kt_rw_property_set(KRef self, KRef property, KRef value);
-
 /* ---- comparable ranges ------------------------------------------------------------------------
 
    `"a".."c"`, and every other `a..b` ordered by `Comparable` rather than by a machine comparison.
@@ -838,6 +826,11 @@ KRef kt_string_substring_from(KRef self, kt_int start);
 /* `a.compareTo(b)`, by UTF-16 code unit and with Java's magnitude: the difference of the first
    units that differ, or of the lengths when one string is a prefix of the other. */
 kt_int kt_string_compare_to(KRef a, KRef b);
+
+/* Whether `length` UTF-16 units of `self` from `self_offset` equal `other`'s from `other_offset`;
+   both ranges are already within their strings (Kotlin/Native's `unsafeRangeEquals`). */
+kt_boolean kt_string_range_equals(KRef self, kt_int self_offset, KRef other, kt_int other_offset,
+                                  kt_int length);
 
 /* `s.removeSuffix(suffix)`: the receiver without it, cut by UTF-16 unit as `endsWith` and
    `substring` are; either may be a `StringBuilder`. A string that does not end there comes back
@@ -1049,6 +1042,7 @@ KRef kt_throwable_new_defaulted(const KType *type);
 /* `kotlin.Result`'s failed state, and kotlin-test's `checkResultIsFailure` over one. */
 extern const KType kt_type_result_failure;
 KRef kt_result_failure_new(KRef exception);
+KRef kt_result_failure_exception(KRef failure);
 KRef kt_check_result_is_failure(KRef expected, KRef message, KRef result);
 /* A `Result` held where its class is not known statically, and the value back out of one. */
 extern const KType kt_type_result;

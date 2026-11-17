@@ -5,6 +5,30 @@
 
 use super::*;
 
+/// A closed target operation, shared by dependency-root admission and ordinary-call emission.
+/// Frozen provider facts, not a callable spelling, grant this realization.
+pub(super) fn member_operation(
+    operation: krusty::libraries::CompilerIntrinsic,
+) -> Option<IrIntrinsic> {
+    match operation {
+        krusty::libraries::CompilerIntrinsic::StringGet => Some(IrIntrinsic::StringGet),
+        _ => None,
+    }
+}
+
+pub(super) fn string_get_frame(
+    params: &[Ty],
+    ret: Ty,
+    defaults: &[u32],
+    extension: Option<u32>,
+) -> Result<(), Unsupported> {
+    if params == [Ty::Int] && ret == Ty::Char && defaults.is_empty() && extension.is_none() {
+        Ok(())
+    } else {
+        Err("an authenticated string read with a mismatched call frame".into())
+    }
+}
+
 impl Body<'_> {
     pub(super) fn intrinsic(
         &mut self,
@@ -57,9 +81,21 @@ impl Body<'_> {
                 let (Some(receiver), [index]) = (receiver, args) else {
                     return Err("a malformed string read".to_string());
                 };
+                // Kotlin's `String.get` throws for an index outside the string, whatever the
+                // array bounds policy.
+                let (chars, offset) = (
+                    self.local(ValType::reference(self.runtime.chars)),
+                    self.local(ValType::I32),
+                );
                 self.string_storage(receiver)?;
+                self.code.local_set(chars);
                 self.value(*index, Ty::Int)?;
-                self.code.array_get_u(self.runtime.chars);
+                self.code.local_tee(offset).local_get(chars).array_len();
+                self.throw_unless_index_below()?;
+                self.code
+                    .local_get(chars)
+                    .local_get(offset)
+                    .array_get_u(self.runtime.chars);
                 Ok(())
             }
             IrIntrinsic::UnsignedToString { source } => {
@@ -89,7 +125,7 @@ impl Body<'_> {
                 };
                 self.generated_property_equals(*left, *right, ty)
             }
-            IrIntrinsic::DataClassArrayToString { ty } => {
+            IrIntrinsic::GeneratedPropertyArrayToString { ty } => {
                 let (None, [value]) = (receiver, args) else {
                     return Err("a malformed generated array rendering".to_string());
                 };
@@ -168,3 +204,6 @@ impl Body<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

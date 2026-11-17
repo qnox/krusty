@@ -142,7 +142,7 @@ impl BodyFirChecker<'_> {
             };
         }
 
-        if let Some(ExprLowering::SamConstructorReference { signature, sam }) =
+        if let Some(ExprLowering::SamConstructorReference { signature, sam, .. }) =
             self.info.expr_lowers.get(&expression).cloned()
         {
             let internal = sam.internal;
@@ -1071,6 +1071,7 @@ impl BodyFirChecker<'_> {
             parameters,
             result,
             suspend,
+            inline,
             reified_type_parameter_ordinals,
         } = target;
         let span = self.file.expr_span(expression);
@@ -1114,6 +1115,7 @@ impl BodyFirChecker<'_> {
                 .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
             return Ok(FirExprKind::CallableReference {
                 target: FirCallableReferenceTarget::ArrayFactory {
+                    declaration,
                     operation,
                     array_type,
                     element_type: resolved(element_type)?,
@@ -1166,6 +1168,7 @@ impl BodyFirChecker<'_> {
                 result: resolved(result)?,
                 declared_result: declared_result.map(resolved).transpose()?,
                 suspend,
+                inline,
                 semantic_role,
                 overridden_declarations: overridden_declarations.into(),
             },
@@ -1550,6 +1553,7 @@ struct ExternalReferenceDeclaration<'a> {
     /// The declaration itself is `suspend`, as opposed to a reference suspend-converted to a
     /// `suspend` function type.
     suspend: bool,
+    inline: crate::libraries::InlineKind,
     reified_type_parameter_ordinals: &'a [u32],
 }
 
@@ -1572,6 +1576,7 @@ impl<'a> ExternalReferenceDeclaration<'a> {
             parameters,
             result: callable.ret,
             suspend: callable.suspend,
+            inline: callable.inline,
             reified_type_parameter_ordinals: &callable.reified_type_parameter_ordinals,
         }
     }
@@ -1594,6 +1599,7 @@ impl<'a> ExternalReferenceDeclaration<'a> {
             parameters: &member.params,
             result: member.ret,
             suspend: member.suspend(),
+            inline: member.inline,
             reified_type_parameter_ordinals: &member.call_sig.reified_type_parameter_ordinals,
         }
     }

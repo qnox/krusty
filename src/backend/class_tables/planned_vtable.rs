@@ -9,7 +9,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::{CallableId, PropertyId, ResolvedPropertyOverrideTarget};
-use crate::ir::{ClassId, FunId, IrClass, IrFile, IrLocalPropertyLayout};
+use crate::ir::{FunId, IrClass, IrFile, IrLocalPropertyLayout};
 use crate::types::TypeName;
 
 use super::class_vtable::{
@@ -19,17 +19,7 @@ use super::class_vtable::{
 use super::members::{function_key, overridden_functions};
 use super::module_interfaces::ModuleInterfaces;
 use super::module_slots::{PlanKey, PlannedSlot, PlannedTable};
-use super::{AnyMember, ClassTable, LaidOutSuperclass, Representation, Slot, SlotKey, Unsupported};
-
-/// The class a planned table is filled for, and what it extends.
-pub(super) struct PlannedClass<'t> {
-    pub(super) id: ClassId,
-    /// Its superclass in this file, already tabled as `parent`.
-    pub(super) superclass: Option<ClassId>,
-    pub(super) parent: Option<&'t ClassTable>,
-    /// The nearest superclass another file laid out, which `superclass` (if any) extends in turn.
-    pub(super) laid_out: Option<(TypeName, &'t LaidOutSuperclass)>,
-}
+use super::{AnyMember, ClassTable, Representation, Slot, SlotKey, TabledClass, Unsupported};
 
 /// The table of `planned_class` as `planned` numbers it.
 ///
@@ -38,11 +28,11 @@ pub(super) struct PlannedClass<'t> {
 pub(super) fn planned_class_table(
     representation: &dyn Representation,
     ir: &IrFile,
-    planned_class: PlannedClass<'_>,
+    planned_class: TabledClass<'_>,
     planned: &PlannedTable,
     numbered: &ModuleInterfaces,
 ) -> Result<ClassTable, Unsupported> {
-    let PlannedClass {
+    let TabledClass {
         id,
         superclass,
         parent,
@@ -122,6 +112,10 @@ pub(super) fn planned_class_table(
         vtable.push(match *entry {
             PlannedSlot::Any(member) => Slot::AnyMember(member),
             PlannedSlot::Reserved => Slot::Abstract,
+            PlannedSlot::Inherited { slot } if elsewhere(slot as usize) => Slot::Inherited { slot },
+            PlannedSlot::Inherited { .. } => {
+                return Err("an opaque producer slot without its laid-out superclass".into())
+            }
             PlannedSlot::Member(PlanKey::Callable(callable)) => match lowered(callable) {
                 Some(fid) => method(fid),
                 None if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
@@ -182,6 +176,20 @@ pub(super) fn planned_class_table(
                 _ => Slot::Bridge {
                     declared: function(declared)?,
                     target_slot: Some(target_slot),
+                    target: function(target)?,
+                },
+            },
+            PlannedSlot::DeclaredBridge {
+                ref parameters,
+                result,
+                target_slot,
+                target,
+            } => match lowered(target) {
+                None if elsewhere(slot) => Slot::Inherited { slot: slot as u32 },
+                _ => Slot::DeclaredBridge {
+                    parameters: parameters.clone(),
+                    result,
+                    target_slot,
                     target: function(target)?,
                 },
             },

@@ -118,7 +118,7 @@ impl Checker<'_> {
     /// The constructors of `internal` competing with the same-named receiver-less functions of a
     /// bare call, stamped with the scope rung on which the file/import tower selects `internal`
     /// for `name`, so one selection ranks the two families. Empty when that tower does not select
-    /// `internal` itself: a local, nested or inherited classifier, or one named through an alias.
+    /// `internal` itself: a local, nested or inherited classifier.
     fn competing_scope_constructors(
         &self,
         scope: &CheckerScope<'_>,
@@ -131,7 +131,7 @@ impl Checker<'_> {
         else {
             return Vec::new();
         };
-        if selected.classifier != internal || selected.alias.is_some() {
+        if selected.classifier != internal {
             return Vec::new();
         }
         let mut constructors = self.scope_constructor_candidates(scope, internal, call);

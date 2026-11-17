@@ -70,24 +70,29 @@ impl FileLowering<'_> {
 }
 
 impl FileLowering<'_> {
-    /// The stub number of one dependency interface member this file calls. The same member keeps
-    /// one number, after the numbers of this module's own interfaces.
-    pub(super) fn dependency_interface_number(
-        &mut self,
-        identity: &krusty::libraries::KlibDependencyCallable,
-    ) -> u32 {
-        let bytes = krusty::backend::interface_identity::member_identity(identity);
-        if let Some((number, _)) = self
+    /// The stub number of one dependency interface member this file calls, by the member's
+    /// interface identity (`krusty::backend::interface_identity`). The same member keeps one
+    /// number, after the numbers of this module's own interfaces.
+    pub(super) fn dependency_interface_number(&mut self, bytes: Vec<u8>) -> u32 {
+        let base = self.slot_plan.interfaces().count();
+        let number = match self.dependency_interface_numbers.get(&bytes).copied() {
+            Some(number) => number,
+            None => {
+                let number = base
+                    + u32::try_from(self.dependency_interface_numbers.len())
+                        .expect("a dependency interface number fits u32");
+                self.dependency_interface_numbers
+                    .insert(bytes.clone(), number);
+                number
+            }
+        };
+        if !self
             .dependency_interface_calls
             .iter()
-            .find(|(_, known)| *known == bytes)
+            .any(|(known, _)| *known == number)
         {
-            return *number;
+            self.dependency_interface_calls.push((number, bytes));
         }
-        let number = self.slot_plan.interfaces().count()
-            + u32::try_from(self.dependency_interface_calls.len())
-                .expect("a dependency interface number fits u32");
-        self.dependency_interface_calls.push((number, bytes));
         number
     }
 
@@ -184,7 +189,14 @@ impl FileLowering<'_> {
                     slot,
                     declared,
                     implemented,
-                } => Some(self.dependency_bridge(slot, &declared, &implemented)?),
+                } => {
+                    let function = self.dependency_bridge(class, slot, &declared, &implemented)?;
+                    if self.exported.contains(&class) {
+                        self.published_dependency_bridges
+                            .insert((class, identity.clone()), self.object_function(function));
+                    }
+                    Some(function)
+                }
             }
             .ok_or_else(|| {
                 declined!(
@@ -226,20 +238,44 @@ impl FileLowering<'_> {
         Ok(())
     }
 
+    /// The bridges of a class no instance of which is made here, which a class of another module
+    /// extending it inherits: published like those of an instantiable class, with no record of
+    /// their own since the class has no type to record them for.
+    pub(super) fn publish_dependency_bridges(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        for (identity, implementation) in self.dependency_implementations(class)? {
+            if let DependencyImplementation::Bridge {
+                slot,
+                declared,
+                implemented,
+            } = implementation
+            {
+                let function = self.dependency_bridge(class, slot, &declared, &implemented)?;
+                self.published_dependency_bridges
+                    .insert((class, identity), self.object_function(function));
+            }
+        }
+        Ok(())
+    }
+
     /// A bridge standing for the member a dependency's interface declares as `declared`, which
     /// the override at `slot` implements as `implemented`; see
     /// [`DependencyImplementation::Bridge`].
     fn dependency_bridge(
         &mut self,
+        class: ClassId,
         slot: u32,
         declared: &(Vec<Ty>, Ty),
         implemented: &(Vec<Ty>, Ty),
     ) -> Result<FuncId, Unsupported> {
         let mut params = vec![any()];
         params.extend(declared.0.iter().copied());
-        let name = format!("kt_dependency_bridge_{}", self.dependency_bridges);
+        let name = format!(
+            "kt_{}__dependency_bridge_{}",
+            self.class_base(class),
+            self.dependency_bridges
+        );
         self.dependency_bridges += 1;
-        let id = self.declare_local_function(&name, &params, declared.1)?;
+        let id = self.declare_class_function(class, &name, &params, declared.1)?;
         self.define_converting_bridge(
             (&declared.0, declared.1),
             (&implemented.0, implemented.1),

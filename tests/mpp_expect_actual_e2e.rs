@@ -658,3 +658,45 @@ fun box(): String {
 "#;
     run_source_set_same_as_kotlinc(COMMON, PLATFORM);
 }
+
+/// An `expect` interface that an `actual typealias` actualizes to a Java interface is that Java
+/// interface in the platform compilation. A common class implementing it, and an `expect`
+/// interface extending it, inherit the Java interface's members, not the `expect` declaration's.
+#[test]
+fn an_inherited_default_of_an_alias_actualized_expect_interface_dispatches_through_the_actual() {
+    // The checked hierarchy of `Resource` names the expect; the default `twice` is reached and
+    // dispatched through `PlatformCloser`, as kotlinc's actualizer substitutes it everywhere.
+    let (common, platform) = include_str!(
+        "box_regressions/multimodule/multimoduleAliasActualizedExpectInterfaceDefault.kt"
+    )
+    .split_once("// MODULE: main()()(common)")
+    .expect("the regression is a common/main module pair");
+    run_source_set_same_as_kotlinc(
+        &format!("// LANGUAGE: +MultiPlatformProjects\n{common}"),
+        &format!("// LANGUAGE: +MultiPlatformProjects\n{platform}"),
+    );
+}
+
+#[test]
+fn an_inherited_java_default_of_an_alias_actualized_expect_interface_dispatches_through_the_actual()
+{
+    run_source_set_same_as_kotlinc(
+        r#"// LANGUAGE: +MultiPlatformProjects
+package p
+expect interface Cmp<T> { fun compare(a: T, b: T): Int }
+abstract class ByLength : Cmp<String>
+"#,
+        r#"// LANGUAGE: +MultiPlatformProjects
+package p
+actual typealias Cmp<T> = java.util.Comparator<T>
+class Lengths : ByLength() {
+    override fun compare(a: String, b: String): Int = a.length - b.length
+}
+fun box(): String {
+    val reversed = Lengths().reversed()
+    if (reversed.compare("a", "bb") <= 0) return "reversed"
+    return if (Lengths().thenComparing(reversed).compare("ab", "cd") == 0) "OK" else "thenComparing"
+}
+"#,
+    );
+}

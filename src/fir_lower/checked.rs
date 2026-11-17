@@ -224,6 +224,7 @@ impl BodyLowering<'_> {
             );
         }
         if let crate::fir::FirCallableReferenceTarget::ArrayFactory {
+            declaration,
             operation,
             array_type,
             element_type,
@@ -234,14 +235,17 @@ impl BodyLowering<'_> {
                 return Err(FirLoweringFailure::UnsupportedIntrinsicCall);
             }
             return self.checked_array_factory_reference(
-                *operation,
-                *array_type,
-                *element_type,
-                parameters,
+                super::array_references::ArrayFactoryReference {
+                    declaration: *declaration,
+                    operation: *operation,
+                    array_type: *array_type,
+                    element_type: *element_type,
+                    parameters,
+                    reflection_owner,
+                },
                 binding,
                 adaptation,
                 reference_ty,
-                reflective,
             );
         }
         let crate::fir::FirCallableReferenceTarget::Module(target) = target else {
@@ -1287,6 +1291,7 @@ impl BodyLowering<'_> {
                     },
                     extension_receiver,
                     arguments: &arguments,
+                    substitutions,
                     write: false,
                 })
                 .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))
@@ -1384,6 +1389,7 @@ impl BodyLowering<'_> {
                     },
                     extension_receiver,
                     arguments: &arguments,
+                    substitutions,
                     write: true,
                 })
                 .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))

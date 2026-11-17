@@ -25,7 +25,7 @@ use krusty::kotlin_version::KotlinVersion;
 use super::box_ratchet;
 use super::box_reference_classes;
 use super::common;
-use super::kotlin_box_ir_jvm_conformance::{compile_box_case, CompiledClasses};
+use super::kotlin_box_ir_jvm_conformance::{compile_box_case, CompileFailure, CompiledClasses};
 
 /// One bytecode corpus and the check its lane applies.
 pub struct Suite {
@@ -288,8 +288,14 @@ fn krusty_outcome(corpus: &Corpus<'_>, path: &Path) -> Outcome {
         )
     }));
     let compiled: CompiledClasses = match compiled {
-        Ok(Some(compiled)) => compiled,
-        Ok(None) => return Outcome::Fail("krusty did not compile the case".to_string()),
+        Ok(Ok(compiled)) if !compiled.flat.is_empty() => compiled,
+        Ok(Err(CompileFailure::Rejected { report, .. })) => {
+            eprintln!("{report}");
+            return Outcome::Fail("krusty did not compile the case".to_string());
+        }
+        Ok(Ok(_)) | Ok(Err(_)) => {
+            return Outcome::Fail("krusty did not compile the case".to_string());
+        }
         Err(panic) => {
             let reason = panic
                 .downcast_ref::<String>()
@@ -497,6 +503,24 @@ fn load_expectation(path: &Path) -> BTreeSet<String> {
 }
 
 impl Suite {
+    /// Check a whole owned case through the corpus compiler and the same reference listing,
+    /// without consulting failure inventories or applying a corpus substring filter.
+    pub fn assert_owned_case(&self, path: &Path) {
+        let corpus = Corpus::new(self);
+        assert_eq!(
+            reference_outcome(&corpus, path),
+            Outcome::Pass,
+            "reference {}",
+            path.display()
+        );
+        assert_eq!(
+            krusty_outcome(&corpus, path),
+            Outcome::Pass,
+            "krusty {}",
+            path.display()
+        );
+    }
+
     fn failures(&self) -> String {
         format!("{}_expected_failures", self.inventory)
     }

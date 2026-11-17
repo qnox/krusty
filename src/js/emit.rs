@@ -804,6 +804,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             }
             // Only a target that runs the shared default-argument lowering builds this callee.
             Callee::ModuleDefaultEntry { .. } => unsupported_expression("ModuleDefaultEntry"),
+            Callee::ModuleConstructorDefaultEntry { .. } => {
+                unsupported_expression("ModuleConstructorDefaultEntry")
+            }
             Callee::External { target, .. } => format!(
                 "__krusty_external_{}({})",
                 target.raw(),
@@ -962,7 +965,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     "(String({}).split('').reduce((h,c)=>((h*31+c.charCodeAt(0))|0),0))",
                     emit_expr(ir, args[0], inst)
                 ),
-                crate::ir::IrIntrinsic::DataClassArrayToString { .. } => {
+                crate::ir::IrIntrinsic::GeneratedPropertyArrayToString { .. } => {
                     format!("String([{}])", emit_expr(ir, args[0], inst))
                 }
             },
@@ -1303,6 +1306,7 @@ mod tests {
             is_source_declared: true,
             is_compiler_generated: false,
             is_anonymous_object: false,
+            site_name: None,
             enclosure: None,
             is_inner_class: false,
             is_local_class: false,
