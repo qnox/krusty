@@ -851,6 +851,42 @@ mod tests {
         );
     }
 
+    /// intellij-community's integration patch forwards the build's own Kotlin release, so the worker
+    /// reproduces the kotlinc the project's builder embeds, and refuses a release krusty lacks.
+    #[test]
+    fn a_forwarded_reference_version_selects_the_kotlinc_release() {
+        use krusty::kotlin_version::KotlinVersion;
+        let request = |version: &str| {
+            translate(&args(&[
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+                "--kotlinc-arg",
+                &format!("-Xkotlin-reference-version={version}"),
+            ]))
+        };
+        let unit = request("2.4.20").expect("must translate");
+        let parsed = crate::cli::parse(unit.compiler_arguments());
+        assert_eq!(
+            parsed.kotlin_reference_version,
+            Some(KotlinVersion::V2_4_20)
+        );
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let supported = KotlinVersion::supported()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(
+            request("2.4.10-RC2"),
+            Err(Refusal::Unsupported(format!(
+                "-Xkotlin-reference-version=2.4.10-RC2 names no supported Kotlin release \
+                 (supported: {supported})"
+            )))
+        );
+    }
+
     /// The argument list intellij-community's own rules produce for a Kotlin-only target.
     fn intellij_request() -> Vec<String> {
         args(&[
