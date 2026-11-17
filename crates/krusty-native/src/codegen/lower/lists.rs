@@ -197,10 +197,9 @@ fn list_symbol(
         ("get", [Ty::Int], ret) if reads && ret.is_reference() => {
             ("kt_list_get", vec![any(), Ty::Int], any())
         }
-        // The range of a list as a view. Only the read-only face's: `MutableList.subList` answers a
-        // view that writes through, which the runtime does not realize, and an `ArrayList` is that
-        // face too, so a declaration that also mutates stays with the member's own decline.
-        ("subList", [Ty::Int, Ty::Int], ret) if reads && !mutates && ret.is_reference() => {
+        // The range of a list as a view. Either face selects it: whether the view may write is the
+        // parent's to say at run time, as it is for the JVM's, not the static type's.
+        ("subList", [Ty::Int, Ty::Int], ret) if (reads || mutates) && ret.is_reference() => {
             ("kt_list_sub_list", vec![any(), Ty::Int, Ty::Int], any())
         }
         ("indexOf", [element], Ty::Int) if reads && element.is_reference() => {
