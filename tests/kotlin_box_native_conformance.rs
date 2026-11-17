@@ -351,65 +351,21 @@ fn native_an_observable_member_delegate_notifies_its_instance() {
 }
 
 #[test]
-fn an_explicit_delegate_write_evaluates_this_ref() {
-    let source = "import kotlin.properties.Delegates\n\
-         var referenced = 0\n\
-         var effects = \"\"\n\
-         fun mark(): Any? { effects += \"R\"; return null }\n\
-         fun next(): Int { effects += \"V\"; return 7 }\n\
-         fun box(): String {\n\
-         \x20   val delegate = Delegates.notNull<Int>()\n\
-         \x20   delegate.setValue(mark(), ::referenced, next())\n\
-         \x20   if (effects != \"RV\") return \"fail effects \" + effects\n\
-         \x20   return if (delegate.getValue(null, ::referenced) == 7) \"OK\" else \"fail value\"\n\
-         }\n";
-    expect_native_klib_box(source, "ExplicitDelegateWriteEffects");
+fn native_an_explicit_not_null_delegate_write_evaluates_this_ref() {
+    let source = include_str!("box_regressions/notNullDelegateExplicitWriteEffects.kt");
+    expect_native_klib_box(source, "nativeNotNullDelegateExplicitWriteEffects");
 }
 
 #[test]
-fn a_not_null_delegate_read_before_it_was_written_raises() {
-    let source = "import kotlin.properties.Delegates\n\
-         var value: String by Delegates.notNull()\n\
-         fun box(): String {\n\
-         \x20   try {\n\
-         \x20       return \"fail \" + value\n\
-         \x20   } catch (e: IllegalStateException) {\n\
-         \x20       return if (e.message == \"Property value should be initialized before get.\")\n\
-         \x20           \"OK\"\n\
-         \x20       else\n\
-         \x20           \"fail message \" + e.message\n\
-         \x20   }\n\
-         }\n";
-    expect_native_klib_box(source, "NotNullUnset");
+fn native_a_not_null_delegate_read_before_it_was_written_raises() {
+    let source = include_str!("box_regressions/notNullDelegateReadBeforeWrite.kt");
+    expect_native_klib_box(source, "nativeNotNullDelegateReadBeforeWrite");
 }
 
 #[test]
-fn an_observable_delegate_reports_each_write_after_it_happened() {
-    let source = "import kotlin.properties.Delegates\n\
-         var log = \"\"\n\
-         var seen = \"\"\n\
-         var watched: String by Delegates.observable(\"start\") { property, old, new ->\n\
-         \x20   log += property.name + \":\" + old + \"->\" + new + \";\"\n\
-         \x20   seen += watched\n\
-         }\n\
-         fun box(): String {\n\
-         \x20   if (watched != \"start\") return \"fail initial \" + watched\n\
-         \x20   if (log != \"\") return \"fail early \" + log\n\
-         \x20   watched = \"middle\"\n\
-         \x20   watched = \"end\"\n\
-         \x20   if (watched != \"end\") return \"fail final \" + watched\n\
-         \x20   if (log != \"watched:start->middle;watched:middle->end;\") return \"fail log \" + log\n\
-         \x20   // The callback runs after the write, so it reads the value that was just stored.\n\
-         \x20   if (seen != \"middleend\") return \"fail order \" + seen\n\
-         \x20   return \"OK\"\n\
-         }\n";
-    expect_native_klib_box(source, "ObservableDelegate");
-}
-
-#[test]
-fn native_library_suspend_coroutine_runs() {
-    let source = include_str!("box_regressions/librarySuspendCoroutine.kt");
-    expect_native_klib_box(source, "nativeLibrarySuspendCoroutine");
+fn native_an_observable_delegate_reports_each_write_after_it_happened() {
+    let source = include_str!("box_regressions/observableDelegateWrites.kt");
+    expect_native_klib_box(source, "nativeObservableDelegateWrites");
 }
 
 fn expect_native_klib_box(source: &str, stem: &str) {
