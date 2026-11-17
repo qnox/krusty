@@ -1236,7 +1236,9 @@ fn value_class_block_members_take_the_value_class_member_names() {
     let [(_, src)] = files.as_slice() else {
         panic!("the whole same-file companion program")
     };
-    let src = src.strip_prefix(LANGUAGE).expect("the companion feature");
+    let src = src
+        .strip_prefix("// LANGUAGE: +CompanionBlocks\n")
+        .expect("the companion feature");
     assert_members_and_metadata_match_kotlinc("ValueClassBlock", src, &["W"]);
     assert_eq!(run(src).expect("value class block members"), "OK");
 }
