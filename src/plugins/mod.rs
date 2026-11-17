@@ -22,7 +22,6 @@ pub mod cli;
 pub mod compose;
 mod convention;
 pub mod deps;
-pub mod noarg;
 pub mod parcelize;
 mod plugin_release;
 pub use plugin_release::PluginRelease;

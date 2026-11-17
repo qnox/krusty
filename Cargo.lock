@@ -839,6 +839,7 @@ dependencies = [
  "krusty-plugin-api",
  "krusty-plugin-host",
  "krusty-plugin-ir",
+ "krusty-plugin-noarg",
  "krusty-test-modules",
  "krusty-wasm",
  "libc",
@@ -950,6 +951,13 @@ dependencies = [
 [[package]]
 name = "krusty-plugin-ir"
 version = "0.0.1"
+
+[[package]]
+name = "krusty-plugin-noarg"
+version = "0.0.1"
+dependencies = [
+ "krusty-plugin-api",
+]
 
 [[package]]
 name = "krusty-test-modules"
