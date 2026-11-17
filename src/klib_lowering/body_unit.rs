@@ -2571,7 +2571,8 @@ impl<'s> Linker<'_, 's> {
         // expanded.
         let root = self.root.is_some_and(|root| root.identity() == identity);
         if !root && inline_functions::declares_inline(function) {
-            inline_functions::declare(ir, declared, function, &header)?;
+            let modifiers = selected.map(KlibBodyCallable::inline_modifiers);
+            inline_functions::declare(ir, declared, function, &header, modifiers)?;
         }
         self.functions.insert(identity.clone(), declared);
         if let Some(receiver) = header.value_receiver() {
