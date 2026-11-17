@@ -279,9 +279,9 @@ fn admit<'a, 'b>(
             let argument = argument.ok_or_else(|| {
                 mismatch("a superclass constructor delegation omits a type argument")
             })?;
-            semantic_type(header.arena, &header.types, argument)
+            Ok(semantic_type(header.arena, &header.types, argument)?)
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, KlibBodyDeclineReason>>()?;
     let applied = |owner| {
         if type_arguments.is_empty() {
             Ty::obj_name(owner)
@@ -480,9 +480,9 @@ pub(super) fn primary_delegation<'a, 'b>(
             let argument = argument.ok_or_else(|| {
                 mismatch("a primary constructor delegation omits a type argument")
             })?;
-            semantic_type(header.arena, &header.types, argument)
+            Ok(semantic_type(header.arena, &header.types, argument)?)
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, KlibBodyDeclineReason>>()?;
     if *type_arguments != *contract.parameters.formals {
         return Err(mismatch(
             "a primary constructor delegation applies other type arguments than the class's own",

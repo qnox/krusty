@@ -123,14 +123,27 @@ fn classifier_supertypes_from_templates(
     if classifier.supertype_templates.is_empty() {
         return classifier.supertypes.iter_ids().map(Ty::obj_name).collect();
     }
-    let formals = classifier.type_params();
-    let bounds = classifier.type_param_bounds();
+    applied_supertype_templates(
+        &classifier.type_parameters,
+        &classifier.supertype_templates,
+        ty,
+    )
+}
+
+/// A classifier's direct supertype templates, which name its `formals`, applied to the
+/// classifier's application `ty`.
+pub(crate) fn applied_supertype_templates(
+    formals: &crate::types::TypeParameters<Vec<Vec<Ty>>>,
+    templates: &[Ty],
+    ty: Ty,
+) -> Vec<Ty> {
+    let bounds = formals.type_param_bounds();
+    let formals = formals.type_params();
     let arguments = ty.type_args();
     let any = Ty::obj_name(crate::types::wk::any());
     // Apply only this classifier's arguments. Enclosing type variables remain symbolic, and
     // applied arguments keep their validated nullability instead of being narrowed again here.
-    classifier
-        .supertype_templates
+    templates
         .iter()
         .map(|supertype| {
             crate::types::ty_subst_supertype_template(
