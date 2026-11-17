@@ -302,22 +302,9 @@ impl KlibDeclarationBodies {
             let Some(&library) = self.modules.get(&module) else {
                 continue;
             };
-            for tree in self.libraries[library].trees() {
-                let mut pending = vec![&tree.declaration];
-                while let Some(declaration) = pending.pop() {
-                    let KlibIrMember::Class(id) = declaration else {
-                        continue;
-                    };
-                    let class = tree.arena.class(*id);
-                    pending.extend(class.members.iter());
-                    let KlibIrSignature::Public(signature) = &class.base.symbol.signature else {
-                        continue;
-                    };
-                    if member.is_member_of(signature)
-                        && found.replace((&tree.arena, class)).is_some()
-                    {
-                        return Err(());
-                    }
+            for class in self.libraries[library].classes_owning_member(member) {
+                if found.replace(class).is_some() {
+                    return Err(());
                 }
             }
         }

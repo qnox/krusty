@@ -42,7 +42,7 @@ pub(super) fn declared_field<'a>(
     identities: &mut HashSet<&'a KlibIrSymbol>,
 ) -> Result<crate::libraries::KlibStoredField, KlibBodyDeclineReason> {
     stored_field(field, identities, || {
-        Ok(semantic_type(header.arena, &header.types, field.ty)?)
+        semantic_type(header.arena, &header.types, field.ty)
     })
 }
 

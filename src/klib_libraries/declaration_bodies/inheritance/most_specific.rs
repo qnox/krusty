@@ -10,11 +10,13 @@
 //! `Reader<List<E>>.read(): List<E>?` is less specific than `Strict<E>.read(): List<E>`, and
 //! `Cov<String>` is more specific than `Cov<CharSequence>` for `interface Cov<out T>`.
 
-use super::super::super::semantic_types::{classifier_name, semantic_type, KlibTypeParameters};
 use crate::assignable::{TyCtx, TypeOracle};
 use crate::fx_hash::HashMap;
 use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::metadata::klib_ir::semantic_types::{
+    classifier_name, semantic_type, KlibTypeParameters,
+};
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrClass, KlibIrFunction, KlibIrType, KlibIrTypeArgument, KlibIrTypeId,
     KlibIrTypeParameter, KlibIrVariance,
