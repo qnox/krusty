@@ -1,0 +1,19 @@
+# Settings the merge queue reads from this branch.
+#
+# autoheal: when a run fails only because a box case listed as an expected failure (or as not
+# applicable) now passes, the queue removes that entry from the list the failing lane read, commits
+# it on the PR and tests the PR again. Recipes only ever delete lines, so the lists only shrink.
+autoheal:
+  recipes:
+    - name: stale-expected-failures
+      uses: remove-lines
+      match: '^  (?<entry>\S+): expected fail, got pass$(?=[\s\S]*?^\S+ box conformance disagrees with \S*?(?<list>tests/box_expected_failures/[^/\s]+/[^/\s]+\.txt) and )'
+      file: '{list}'
+      line: '{entry}'
+      paths: ['tests/box_expected_failures/*/*.txt']
+    - name: stale-not-applicable
+      uses: remove-lines
+      match: '^  (?<entry>\S+): expected not-applicable, got pass$(?=[\s\S]*?^\S+ box conformance disagrees with \S+ and \S*?(?<list>tests/box_expected_not_applicable/[^/\s]+/[^/\s]+\.txt);)'
+      file: '{list}'
+      line: '{entry}'
+      paths: ['tests/box_expected_not_applicable/*/*.txt']
