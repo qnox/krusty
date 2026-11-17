@@ -310,6 +310,7 @@ fn annotation_implementation(
         is_source_declared: false,
         is_compiler_generated: false,
         is_anonymous_object: false,
+        site_name: None,
         enclosure: Some(enclosure),
         is_inner_class: false,
         is_local_class: false,

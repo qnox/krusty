@@ -23,6 +23,7 @@ mod class_initialization;
 mod class_storage;
 mod closure_forms;
 mod constructor_calls;
+mod continuation_intrinsics;
 mod decline;
 mod enum_classes;
 mod for_loops;
@@ -35,6 +36,7 @@ mod lowering_checkpoint;
 mod primitive_calls;
 mod range_membership;
 mod same_library_class;
+mod site_containers;
 #[cfg(test)]
 mod tests;
 mod type_evidence;

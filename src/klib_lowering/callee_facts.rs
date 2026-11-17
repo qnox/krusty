@@ -114,13 +114,6 @@ impl<'a> KlibCalleeFacts<'a> {
         self.read_objects.get(&classifier)
     }
 
-    /// The library objects the closed bodies read, which the unit materializes.
-    pub(crate) fn read_objects(
-        &self,
-    ) -> impl Iterator<Item = &crate::libraries::KlibBodyClassContract> {
-        self.read_objects.values()
-    }
-
     pub(crate) fn member_edge(&self, identity: &KlibDependencyCallable) -> Option<&CallEdge> {
         self.member_edges.get(identity)
     }
@@ -582,6 +575,24 @@ impl<'a> KlibCalleeFacts<'a> {
                 .kotlin_class_internal()
                 .is_some_and(|class| self.target_represents(class))
         }))
+    }
+
+    /// The continuation intrinsic `identity` is, which body lowering realizes as the suspension
+    /// point it stands for: no declaration of it is emitted or called.
+    pub(crate) fn continuation_intrinsic(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<
+        Option<super::continuation_intrinsics::ContinuationIntrinsicCall>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        // Two selected declarations prove no intrinsic; the call's own linking reports them.
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => {
+                super::continuation_intrinsics::authenticate(callables[0])
+            }
+            Some(KlibCalleeFact::Ambiguous) | None => Ok(None),
+        }
     }
 
     /// The range construction `identity` performs, whatever the target lays out. A membership in

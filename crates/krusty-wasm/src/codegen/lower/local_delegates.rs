@@ -65,7 +65,6 @@ pub(super) fn prepare(ir: &IrFile, module: &mut Module, runtime: &Runtime) -> Pr
             .entry(reference.property)
             .or_insert_with(|| module.global(ValType::nullable(struct_type)));
     }
-    drop(property_struct);
     let mut helpers = HashMap::default();
     for (plan, declaration) in ir.local_delegate_plans.iter().enumerate() {
         let plan = plan as u32;

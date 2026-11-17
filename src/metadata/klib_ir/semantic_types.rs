@@ -35,6 +35,8 @@ pub(crate) enum KlibTypeError {
 pub(crate) struct KlibTypeParameters {
     bindings: HashMap<KlibIrSymbol, Ty>,
     bounds: HashMap<String, Vec<Ty>>,
+    /// Each class formal's declared variance. A function formal is always invariant.
+    variances: HashMap<String, crate::types::TypeVariance>,
 }
 
 impl KlibTypeParameters {
@@ -42,6 +44,11 @@ impl KlibTypeParameters {
     /// declaration.
     pub(crate) fn bind(&mut self, symbol: &KlibIrSymbol, semantic: Ty) -> bool {
         self.bindings.insert(symbol.clone(), semantic).is_none()
+    }
+
+    /// Whether the serialized type parameter `symbol` is bound.
+    pub(crate) fn binds(&self, symbol: &KlibIrSymbol) -> bool {
+        self.bindings.contains_key(symbol)
     }
 
     pub(crate) fn record_bounds(&mut self, formal: Ty, bounds: Vec<Ty>) -> bool {
@@ -60,6 +67,29 @@ impl KlibTypeParameters {
 
     pub(crate) fn declared_bounds(&self, name: &str) -> Option<&[Ty]> {
         self.bounds.get(name).map(Vec::as_slice)
+    }
+
+    /// Record the declared variance of the class formal `formal`.
+    pub(crate) fn record_variance(
+        &mut self,
+        formal: Ty,
+        variance: crate::types::TypeVariance,
+    ) -> bool {
+        let TyKind::TyParam(identity, _) = formal.kind() else {
+            return false;
+        };
+        self.variances
+            .insert(identity.as_str().to_owned(), variance)
+            .is_none()
+    }
+
+    /// The declared variance of the formal `name`: a class formal's recorded one, otherwise the
+    /// invariance every function formal has.
+    pub(crate) fn declared_variance(&self, name: &str) -> crate::types::TypeVariance {
+        self.variances
+            .get(name)
+            .copied()
+            .unwrap_or(crate::types::TypeVariance::Invariant)
     }
 }
 
@@ -219,9 +249,11 @@ fn function_shape(
     Ok(None)
 }
 
-/// The outer function-class shape, independent of the enclosing type-parameter bindings.
-/// Full argument types are checked by `semantic_type` when the body is lowered.
-pub(crate) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Option<usize> {
+/// The source arity of a closure of the serialized function type `id`, and whether that type is a
+/// suspend function type, whose invocation also takes the continuation after those parameters.
+/// The outer shape is independent of the enclosing type-parameter bindings; full argument types are
+/// checked by `semantic_type` when the body is lowered.
+pub(crate) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Option<(usize, bool)> {
     let KlibIrType::Simple {
         classifier,
         nullability,
@@ -239,9 +271,7 @@ pub(crate) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Optio
     }
     let (name, _) = class_head(classifier, annotations, &|_| Ok::<_, KlibTypeError>(None)).ok()?;
     let function = function_shape(name, arguments.len()).ok()??;
-    // A suspend lambda's implementation also takes the continuation, which closure planning does
-    // not model yet.
-    (!function.is_reflective() && !function.is_suspend()).then(|| function.arity())
+    (!function.is_reflective()).then(|| (function.arity(), function.is_suspend()))
 }
 
 /// One type argument, as the provider converts a metadata type argument.
@@ -278,26 +308,34 @@ pub(crate) fn annotation_classifier(annotation: &KlibIrAnnotation) -> Option<Typ
     declaration_name(constructor.package().segments(), class).ok()
 }
 
-/// The arity of the invocation the public declaration `member` is, when the function classifier
-/// that owns it declares it with the Kotlin function invocation role. The member is joined to the
-/// builtins provider's declaration of its exact classifier by its serialized name; that
-/// declaration's role, not the name, decides. Suspend and reflective classifiers are not invoked
-/// here.
+/// The source arity of an ordinary invocation the public declaration `member` is, when its
+/// function classifier declares the Kotlin function invocation role. The member is joined to the
+/// compiler-owned declaration of its exact classifier; its role, not its name, decides.
 pub(crate) fn function_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
-    invocation_arity(member, false)
+    invocation_arity(member, false, false)
+}
+
+/// The source arity of a declared `SuspendFunctionN.invoke`. Common CPS lowering supplies the
+/// physical trailing continuation after this semantic call has been recorded.
+pub(crate) fn suspend_function_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
+    invocation_arity(member, false, true)
 }
 
 /// A reflective function's inherited invocation, authenticated against the same builtins
 /// declaration as its ordinary function supertype. This grants no reflection-operation support.
 pub(crate) fn reference_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
-    invocation_arity(member, true)
+    invocation_arity(member, true, false)
 }
 
-fn invocation_arity(member: &KlibPublicIdSignature, reflective: bool) -> Option<usize> {
+fn invocation_arity(
+    member: &KlibPublicIdSignature,
+    reflective: bool,
+    suspend: bool,
+) -> Option<usize> {
     let (name, class) = member.declaration().segments().split_last()?;
     let owner = declaration_name(member.package().segments(), class).ok()?;
     let function = function_classifiers::classifier(owner)?;
-    if function.is_suspend() || function.is_reflective() != reflective {
+    if function.is_suspend() != suspend || function.is_reflective() != reflective {
         return None;
     }
     let declaration = function_classifiers::synthetic(function.invocation_classifier());
@@ -311,6 +349,13 @@ fn invocation_arity(member: &KlibPublicIdSignature, reflective: bool) -> Option<
     };
     (declared.callable.semantic_role == Some(crate::types::SemanticCallRole::KotlinFunctionInvoke))
         .then(|| declared.semantic_params().len())
+}
+
+/// Intern a package identity one signature segment at a time.
+pub(crate) fn package_name(package: &[String]) -> TypeName {
+    package.iter().fold(TypeName::ROOT, |parent, segment| {
+        type_name_child(parent, segment)
+    })
 }
 
 /// Intern a classifier identity one signature segment at a time. Package segments are namespace
@@ -461,8 +506,7 @@ mod tests {
 
     /// kotlinc serializes the receiver of `startCoroutine`, `suspend () -> T`, as
     /// `kotlin.coroutines.SuspendFunction0<T>`: the suspend function type checked source gives
-    /// the same declaration. Closure planning gives a suspend lambda no closure arity, since its
-    /// implementation also takes the continuation.
+    /// the same declaration. Closure planning reads its source arity and that it suspends.
     #[test]
     fn a_suspend_function_classifier_is_the_suspend_function_type() {
         let mut arena = KlibIrArena::default();
@@ -485,7 +529,7 @@ mod tests {
             semantic_type(&arena, &parameters, plain).expect("a function type"),
             Ty::fun_with_shape(vec![int_ty], string_ty, 0, false, false)
         );
-        assert_eq!(closure_type_arity(&arena, suspend), None);
-        assert_eq!(closure_type_arity(&arena, plain), Some(1));
+        assert_eq!(closure_type_arity(&arena, suspend), Some((1, true)));
+        assert_eq!(closure_type_arity(&arena, plain), Some((1, false)));
     }
 }

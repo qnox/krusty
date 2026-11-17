@@ -41,7 +41,11 @@ impl<'s> Linker<'_, 's> {
                         classifier,
                     } => {
                         // The library superclass is extended only where this unit materializes it.
-                        let linked = self.link_constructor(ir, signature)?;
+                        let linked = self.link_constructor(
+                            ir,
+                            signature,
+                            super::ConstructorRole::Delegation,
+                        )?;
                         if linked.declaration.classifier != classifier
                             || !self
                                 .classes
