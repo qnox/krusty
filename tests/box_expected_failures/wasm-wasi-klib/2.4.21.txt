@@ -89,7 +89,6 @@ basics/unchecked_cast5.kt
 basics/unchecked_cast6x.kt
 basics/unchecked_cast7.kt
 basics/unchecked_cast9.kt
-basics/unit4.kt
 bce/bceCases.kt
 bce/customGetter.kt
 bce/delegatedProperty.kt
@@ -423,8 +422,6 @@ coroutines/asyncIteratorNullMerge_1_3.kt
 coroutines/asyncIteratorToList_1_3.kt
 coroutines/asyncIterator_1_3.kt
 coroutines/await.kt
-coroutines/beginWithException.kt
-coroutines/beginWithExceptionNoHandleException.kt
 coroutines/bridges/interfaceGenericDefault.kt
 coroutines/bridges/interfaceSpecialization.kt
 coroutines/bridges/mapSuspendAbstractClear.kt
@@ -438,18 +435,15 @@ coroutines/controlFlow/breakFinally.kt
 coroutines/controlFlow/breakStatement.kt
 coroutines/controlFlow/doWhileStatement.kt
 coroutines/controlFlow/doWhileWithInline.kt
-coroutines/controlFlow/doubleBreak.kt
 coroutines/controlFlow/forContinue.kt
 coroutines/controlFlow/forStatement.kt
 coroutines/controlFlow/forWithStep.kt
 coroutines/controlFlow/ifStatement.kt
 coroutines/controlFlow/kt22694_1_3.kt
-coroutines/controlFlow/labeledWhile.kt
 coroutines/controlFlow/returnFromFinally.kt
 coroutines/controlFlow/returnWithFinally.kt
 coroutines/controlFlow/switchLikeWhen.kt
 coroutines/controlFlow/throwFromCatch.kt
-coroutines/controlFlow/throwFromFinally.kt
 coroutines/controlFlow/throwInTryWithHandleResult.kt
 coroutines/controlFlow/whileStatement.kt
 coroutines/controlFlow_chain.kt
@@ -477,7 +471,6 @@ coroutines/coroutineContext1.kt
 coroutines/coroutineContext2.kt
 coroutines/coroutineContextInInlinedLambda.kt
 coroutines/correctOrder1.kt
-coroutines/createCoroutineSafe.kt
 coroutines/defaultParameterLambdaInSuspend.kt
 coroutines/defaultParametersInSuspend.kt
 coroutines/degenerate1.kt
@@ -515,8 +508,6 @@ coroutines/functionReference_eqeq_name.kt
 coroutines/functionReference_invokeAsFunction.kt
 coroutines/functionReference_simple.kt
 coroutines/handleException.kt
-coroutines/handleResultCallEmptyBody.kt
-coroutines/handleResultNonUnitExpression.kt
 coroutines/indirectInlineUsedAsNonInline.kt
 coroutines/inlineClasses/direct/boxTypeParameterOfSuperType.kt
 coroutines/inlineClasses/direct/boxTypeParameterOfSuperTypeResult.kt
@@ -657,7 +648,6 @@ coroutines/iterateOverArray.kt
 coroutines/kt15016.kt
 coroutines/kt15930.kt
 coroutines/kt21080.kt
-coroutines/kt21605.kt
 coroutines/kt24135.kt
 coroutines/kt25912.kt
 coroutines/kt28844.kt
@@ -683,10 +673,7 @@ coroutines/localFunctions/named/stateMachine.kt
 coroutines/longRangeInSuspendCall.kt
 coroutines/mergeNullAndString.kt
 coroutines/multiModule/inheritFromAnotherModule.kt
-coroutines/multiModule/inlineMultiModule.kt
 coroutines/multiModule/inlineMultiModuleOverride.kt
-coroutines/multiModule/inlineMultiModuleWithController.kt
-coroutines/multiModule/inlineMultiModuleWithInnerInlining.kt
 coroutines/multiModule/simple.kt
 coroutines/multipleInvokeCalls.kt
 coroutines/multipleInvokeCallsInsideInlineLambda1.kt
@@ -696,14 +683,12 @@ coroutines/nestedTryCatch.kt
 coroutines/nonLocalReturnFromInlineLambda.kt
 coroutines/nonLocalReturnFromInlineLambdaDeep.kt
 coroutines/overrideDefaultArgument.kt
-coroutines/recursiveSuspend.kt
 coroutines/redundantLocalsElimination/ktor_receivedMessage.kt
 coroutines/returnsNothing1.kt
 coroutines/returnsUnit1.kt
 coroutines/simple2.kt
 coroutines/simpleException.kt
 coroutines/simpleWithDefaultValue.kt
-coroutines/simpleWithHandleResult.kt
 coroutines/stackUnwinding/rethrowInFinallyWithSuspension.kt
 coroutines/stopAfter.kt
 coroutines/suspendConversion.kt
@@ -711,7 +696,6 @@ coroutines/suspendConversion/intersectionTypeToSubtypeConversion.kt
 coroutines/suspendConversion/onNullableArgument.kt
 coroutines/suspendConversion/subtypeOfFunctionalTypeToSuspendConversion.kt
 coroutines/suspendConversion/suspendConversionBetweenFunInterfaces.kt
-coroutines/suspendCoroutineFromStateMachine.kt
 coroutines/suspendDefaultImpl.kt
 coroutines/suspendFunImportedFromObject.kt
 coroutines/suspendFunctionAsCoroutine/handleException.kt
@@ -732,7 +716,6 @@ coroutines/suspensionInsideSafeCallWithElvis.kt
 coroutines/tailCallOptimizations/crossinline.kt
 coroutines/tailCallOptimizations/innerObjectRetransformation.kt
 coroutines/tailCallOptimizations/tryCatch.kt
-coroutines/tailCallOptimizations/unit/kt55559.kt
 coroutines/tailCallOptimizations/wrapContinuation/multilineSuspendingCallWithDefaultParameterValue.kt
 coroutines/tailCallToNothing.kt
 coroutines/tailOperations/suspendWithTryCatch.kt
@@ -1184,7 +1167,6 @@ inlineClasses/anySuperCall.kt
 inlineClasses/anySuperCallGeneric.kt
 inlineClasses/boxImplDoesNotExecuteInSecondaryConstructorGeneric.kt
 inlineClasses/boxResultInlineClassOfConstructorCallGeneric.kt
-inlineClasses/boxReturnValueInLambda/kt27586_2.kt
 inlineClasses/boxReturnValueOnOverride/kt31585.kt
 inlineClasses/boxReturnValueOnOverride/kt31585Generic.kt
 inlineClasses/boxReturnValueOnOverride/kt35234.kt
@@ -1236,8 +1218,6 @@ inlineClasses/dnnInValue.kt
 inlineClasses/equalityForBoxesOfNullableValuesOfInlineClass.kt
 inlineClasses/equalityForBoxesOfNullableValuesOfInlineClassGeneric.kt
 inlineClasses/equalsEvaluationOrderPrimitiveGeneric.kt
-inlineClasses/funInterface/mangledSamWrappers.kt
-inlineClasses/funInterface/mangledSamWrappersGeneric.kt
 inlineClasses/functionNameMangling/reflectionForFunctionWithMangledName.kt
 inlineClasses/functionNameMangling/reflectionForFunctionWithMangledNameGeneric.kt
 inlineClasses/functionNameMangling/reflectionForPropertyOfInlineClassType.kt
