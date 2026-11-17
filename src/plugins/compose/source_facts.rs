@@ -337,6 +337,20 @@ pub(super) fn record(
             if let Some((site, location)) =
                 scope.direct_call_site(ir, call, parameter_count, true, span, rejections)
             {
+                // The applier scheme a library callee's parameter takes is not inferred yet, so a
+                // composable lambda parameter cannot be passed on to one.
+                let forwarded = site.arguments.iter().any(|argument| {
+                    matches!(*argument, ArgumentState::Forwarded(parameter) if lambdas[parameter as usize])
+                });
+                if forwarded && matches!(calls[&call].origin, CalleeOrigin::Library(_)) {
+                    rejections.push(PluginRejection {
+                        span: calls[&call].span.unwrap_or(span),
+                        message: unsupported(
+                            "a composable lambda parameter passed to a library composable",
+                        ),
+                    });
+                    continue;
+                }
                 // A remembered lambda's `rememberComposableLambda` call is a group of its own,
                 // which the function's source information lists before the call it is passed to.
                 locations.extend(

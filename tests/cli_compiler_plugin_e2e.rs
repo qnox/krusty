@@ -641,6 +641,13 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          composable function with a function-typed parameter other than `@Composable () -> Unit` yet",
     );
     assert_compose_library_call_rejects(
+        "compose-library-call-forwarded-lambda",
+        "@Composable fun Frame(content: @Composable () -> Unit) { content() }\n",
+        "import lib.Frame\n@Composable fun Wrapper(content: @Composable () -> Unit) {\nFrame(content)\n}\n",
+        "5:1: error: krusty's Compose compiler plugin does not support a composable lambda \
+         parameter passed to a library composable yet",
+    );
+    assert_compose_library_call_rejects(
         "compose-library-call-defaults",
         "@Composable fun Sized(size: Int = 1) {}\n",
         "@Composable fun Greeting() {\nlib.Sized(2)\n}\n",
