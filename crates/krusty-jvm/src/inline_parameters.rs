@@ -64,7 +64,7 @@ pub(crate) struct CrossinlineBodies(krusty::fx_hash::HashSet<ExprId>);
 impl CrossinlineBodies {
     /// The children a walk visits under `expression`, each with whether its code exports private
     /// access: what `expression`'s own code does, or, for the body of one of its `crossinline`
-    /// literals, always. A callable reference placed as a literal inlines its template, which is
+    /// literals or the code an expansion spliced from such a body, always. A callable reference placed as a literal inlines its template, which is
     /// no child of the reference: where that template's code exports private access (the
     /// reference is itself a `crossinline` literal, or it stands in code that exports), the walk
     /// meets the template where the reference stands.
@@ -84,7 +84,10 @@ impl CrossinlineBodies {
         }
         children
             .into_iter()
-            .map(|child| (child, export_private || self.0.contains(&child)))
+            .map(|child| {
+                let crossinline = self.0.contains(&child) || ir.is_crossinline_body(child);
+                (child, export_private || crossinline)
+            })
             .collect()
     }
 }
