@@ -890,6 +890,18 @@ fn omitted_parameters(callee: &Callee) -> &[u32] {
     }
 }
 
+/// Whether `synthetic`, the parameters a library composable's entry takes after its source
+/// parameters, are what `ComposerParamTransformer` appends: the composer, one `$changed` word,
+/// and, for a declaration with defaults, one `$default` word. The pass passes a library call no
+/// more than ten parameters, which one word of each covers.
+fn takes_composer_frame(synthetic: &[Ty], defaults: bool) -> bool {
+    let words = if defaults { 2 } else { 1 };
+    matches!(synthetic, [composer, rest @ ..]
+        if composer.obj_internal().is_some_and(|name| name.matches(super::runtime::COMPOSER))
+            && rest.len() == words
+            && rest.iter().all(|word| *word == Ty::Int))
+}
+
 /// The source name of the file's function a call calls.
 fn callee_name(ir: &IrFile, call: ExprId) -> Option<&str> {
     let IrExpr::Call { callee, .. } = &ir.exprs[call as usize] else {
@@ -1111,6 +1123,11 @@ impl BodyScope<'_> {
             Some("a call to a library composable function with more than ten parameters")
         } else if !matches!(ret.kind(), TyKind::Unit) {
             Some("a call to a library composable function with a result")
+        } else if !takes_composer_frame(&shape.synthetic_parameters, shape.defaults) {
+            Some(
+                "a call to a library composable function whose entry does not take the composer, \
+                 `$changed` and `$default` parameters",
+            )
         } else {
             None
         }
@@ -1557,5 +1574,45 @@ fn simple_type_name(ty: Ty) -> String {
             .kotlin_class_internal()
             .map(|classifier| classifier.nested_segment_ref().to_string())
             .unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod composer_frame_tests {
+    use super::takes_composer_frame;
+    use crate::types::Ty;
+
+    fn composer() -> Ty {
+        Ty::obj("androidx/compose/runtime/Composer")
+    }
+
+    #[test]
+    fn the_composer_and_its_words_are_the_frame() {
+        assert!(takes_composer_frame(&[composer(), Ty::Int], false));
+        assert!(takes_composer_frame(&[composer(), Ty::Int, Ty::Int], true));
+    }
+
+    #[test]
+    fn a_missing_or_extra_word_is_not() {
+        assert!(!takes_composer_frame(&[composer(), Ty::Int], true));
+        assert!(!takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int],
+            false
+        ));
+        assert!(!takes_composer_frame(&[], false));
+    }
+
+    #[test]
+    fn a_wrong_role_is_not() {
+        assert!(!takes_composer_frame(&[Ty::Long, Ty::Int, Ty::Int], true));
+        assert!(!takes_composer_frame(
+            &[composer(), Ty::Long, Ty::Int],
+            true
+        ));
+        assert!(!takes_composer_frame(&[Ty::Int, composer(), Ty::Int], true));
+        assert!(!takes_composer_frame(
+            &[Ty::String, Ty::Long, Ty::Int],
+            true
+        ));
     }
 }

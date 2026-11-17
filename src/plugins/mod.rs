@@ -918,7 +918,7 @@ pub struct DependencyDeclaration<'a> {
 }
 
 /// What a plugin reads of a dependency function's declaration besides its parameter types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DependencyCallableShape {
     /// An `inline` function, whose body a call splices.
     pub inline: bool,
@@ -926,6 +926,10 @@ pub struct DependencyCallableShape {
     pub receiver: bool,
     /// A source parameter declares a default value.
     pub defaults: bool,
+    /// The parameters the declaration's compiled entry takes after its source parameters, which
+    /// a plugin's transformation appended (Compose's composer, `$changed` and `$default`). Empty
+    /// when it takes none, or when its entry does not begin with the source parameters.
+    pub synthetic_parameters: Box<[Ty]>,
 }
 
 /// A construct a native plugin does not implement, reported as an error at `span`.

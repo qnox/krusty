@@ -14,7 +14,7 @@ use crate::types::{type_name, Ty};
 const RUNTIME: &str = "androidx/compose/runtime";
 const INTERNAL: &str = "androidx/compose/runtime/internal";
 const COMPOSABLE_LAMBDA: &str = "androidx/compose/runtime/internal/ComposableLambda";
-const COMPOSER: &str = "androidx/compose/runtime/Composer";
+pub(super) const COMPOSER: &str = "androidx/compose/runtime/Composer";
 const SCOPE_UPDATE_SCOPE: &str = "androidx/compose/runtime/ScopeUpdateScope";
 const FUNCTION_KEY_META: &str = "androidx/compose/runtime/internal/FunctionKeyMeta";
 const COMPOSABLE_INFERRED_TARGET: &str = "androidx/compose/runtime/ComposableInferredTarget";
