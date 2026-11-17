@@ -2057,7 +2057,8 @@ fn consume_trivially_spliceable_lambdas(
             class,
             pending_property_roots,
             lambda.field,
-            lambda.inline_body,
+            lambda,
+            inline_callee,
         ) {
             continue;
         }
@@ -2455,25 +2456,38 @@ fn splice_lifted_body(
         class,
         field_base,
     );
+    ir.exprs[invocation as usize] =
+        spliced_lambda_frame(ir, spliced, lambda.impl_fn, inline_callee);
+    ir.suspend_calls.remove(&invocation);
+    ir.suspend_call_overridden_results.remove(&invocation);
+    Ok(())
+}
+
+/// A lambda body spliced into a regenerated object opens its own inline frame, as an inlined
+/// lambda body does at an ordinary call: the marker local is named after the inline callable the
+/// lambda was passed to and the lambda's own class.
+fn spliced_lambda_frame(
+    ir: &mut crate::ir::IrFile,
+    spliced: ExprId,
+    implementation: FunId,
+    inline_callee: &str,
+) -> IrExpr {
     let marker = ir.add_expr(IrExpr::InlineFrameMarker);
     ir.value_names.insert(marker, inline_callee.to_owned());
     ir.set_debug_local_provenance(
         marker,
         crate::ir::IrDebugLocalProvenance::LambdaFrameMarker {
-            implementation: lambda.impl_fn,
+            implementation,
             depth: 0,
         },
     );
     // The spliced caller body is copied code: the holder classes it names are not mapped into
     // this class's `InnerClasses`, and its lines are not the declaration's.
     mark_inline_copy_tree(ir, spliced);
-    ir.exprs[invocation as usize] = IrExpr::Block {
+    IrExpr::Block {
         stmts: vec![marker],
         value: Some(spliced),
-    };
-    ir.suspend_calls.remove(&invocation);
-    ir.suspend_call_overridden_results.remove(&invocation);
-    Ok(())
+    }
 }
 
 fn replace_lifted_capture_reads(
@@ -2555,8 +2569,10 @@ fn inline_lambda_into_field_invokes(
     class: ClassId,
     pending_property_roots: &[ExprId],
     field: u32,
-    inline_body: ExprId,
+    lambda: &InlineLambdaArgument,
+    inline_callee: &str,
 ) -> bool {
+    let (inline_body, implementation) = (lambda.inline_body, lambda.impl_fn);
     let mut roots = ir.classes[class as usize]
         .methods
         .iter()
@@ -2602,10 +2618,8 @@ fn inline_lambda_into_field_invokes(
     }
     for invocation in invocations {
         let (body, _) = crate::ir::clone_expression_dag(ir, inline_body);
-        ir.exprs[invocation as usize] = IrExpr::Block {
-            stmts: Vec::new(),
-            value: Some(body),
-        };
+        ir.exprs[invocation as usize] =
+            spliced_lambda_frame(ir, body, implementation, inline_callee);
         ir.suspend_calls.remove(&invocation);
         ir.suspend_call_overridden_results.remove(&invocation);
     }
