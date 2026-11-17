@@ -92,6 +92,11 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         let Some(selected) = realization.klib_body_callable() else {
             continue;
         };
+        // A continuation interception's call expands to its coroutine class's own interception.
+        match crate::klib_lowering::expansion_member(selected, bodies) {
+            Ok(member) => pending.extend(member),
+            Err(_) => return Err(external),
+        }
         semantic_types.extend(selected.params().iter().copied());
         semantic_types.push(selected.ret());
         semantic_types.extend(selected.type_parameters().iter().copied());

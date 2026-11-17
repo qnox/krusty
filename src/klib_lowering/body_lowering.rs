@@ -152,6 +152,16 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The continuation interception this linker's selected declaration of `callee` is:
+    /// Kotlin/Wasm's `interceptedIntrinsic`, which a body expands to its coroutine class's own
+    /// interception.
+    fn intercepted_continuation(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<super::intercepted_continuation::InterceptedContinuationExpansion>> {
+        Ok(None)
+    }
+
     /// The continuation intrinsic this linker's selected declaration of `callee` is: Native's
     /// `getContinuation`/`returnIfSuspended`, which a body realizes as its suspension point.
     fn continuation_intrinsic(

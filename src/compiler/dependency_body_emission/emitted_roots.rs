@@ -205,6 +205,16 @@ pub(super) fn declarations(
             capabilities.callees.with_declaration(selected),
             &superclasses,
         );
+        // A continuation interception expands to its coroutine class's own interception, which
+        // the expansion calls in its stead: the closure reaches that member, never the
+        // intrinsic's excluded body. The intrinsic's declaration is what selects the expansion.
+        if let Some(member) = crate::klib_lowering::expansion_member(selected, bodies)
+            .map_err(|reason| format!("an invalid continuation interception: {reason:?}"))?
+        {
+            state.pending.push_back((member, None));
+            state.declarations.push((declaration_target, realization));
+            continue;
+        }
         let retained = externals
             .get(&identity)
             .and_then(|external| external.constructor_initializer_target());
