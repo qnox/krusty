@@ -69,7 +69,6 @@ basics/unchecked_cast6x.kt
 basics/unchecked_cast7.kt
 basics/unchecked_cast8.kt
 basics/unchecked_cast9.kt
-basics/unit4.kt
 bce/bceCases.kt
 bce/customGetter.kt
 bce/delegatedProperty.kt
@@ -874,7 +873,6 @@ exceptions/catch1.kt
 exceptions/catch2.kt
 exceptions/rethrow.kt
 exceptions/throw_from_catch.kt
-extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/suspendConversionForExtensionFunAsAFunType.kt
 extensionFunctions/suspendConversionForExtensionFunAsAPropertyType.kt
 extensionFunctions/suspendConversionForExtensionFunAsASuperType.kt
