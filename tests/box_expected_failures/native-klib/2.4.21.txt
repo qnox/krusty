@@ -106,7 +106,6 @@ boxingOptimization/casts.kt
 boxingOptimization/checkcastAndInstanceOf2.kt
 boxingOptimization/fold.kt
 boxingOptimization/foldRange.kt
-boxingOptimization/kt19767_2.kt
 boxingOptimization/kt5844.kt
 boxingOptimization/kt6842.kt
 boxingOptimization/maxMinByOrNull.kt
@@ -336,8 +335,6 @@ coroutines/bridges/interfaceGenericDefault.kt
 coroutines/bridges/interfaceSpecialization.kt
 coroutines/bridges/lambdaWithLongReceiver.kt
 coroutines/bridges/lambdaWithMultipleParameters.kt
-coroutines/bridges/mapSuspendAbstractClear.kt
-coroutines/bridges/mapSuspendClear.kt
 coroutines/captureInfixFun.kt
 coroutines/captureMutableLocalVariableInsideCoroutineBlock.kt
 coroutines/captureUnaryOperator.kt
@@ -2102,7 +2099,6 @@ specialBuiltins/emptyList.kt
 specialBuiltins/emptyMap.kt
 specialBuiltins/emptyStringMap.kt
 specialBuiltins/enumAsOrdinaled.kt
-specialBuiltins/maps.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
 specialBuiltins/throwableComplex.kt
