@@ -926,6 +926,8 @@ pub struct DependencyCallableShape {
     pub receiver: bool,
     /// A source parameter declares a default value.
     pub defaults: bool,
+    /// Per logical parameter, whether its declared type is a `@Composable` function type.
+    pub composable_parameters: crate::libraries::ParamFlags,
 }
 
 /// A construct a native plugin does not implement, reported as an error at `span`.

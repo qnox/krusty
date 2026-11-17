@@ -839,6 +839,11 @@ fn compose_library_calls_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_library_lambda_parameters_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("libraryLambdaParameters");
+}
+
+#[test]
 fn compose_generic_field_stability_is_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("genericFieldStability");
 }

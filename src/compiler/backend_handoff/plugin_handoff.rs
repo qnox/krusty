@@ -62,6 +62,7 @@ impl CheckedSourceFacts for HandoffSourceFacts<'_> {
             inline: fact.inline != crate::libraries::InlineKind::None,
             receiver: fact.source_receiver.is_some() || fact.context_count > 0,
             defaults: fact.declares_parameter_defaults,
+            composable_parameters: fact.composable_parameters,
         })
     }
 }

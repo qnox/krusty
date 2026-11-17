@@ -638,7 +638,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "val action: () -> Unit = {}\n@Composable fun Greeting() {\nandroidx.compose.runtime.SideEffect(action)\n}\n",
         &[],
         "5:1: error: krusty's Compose compiler plugin does not support a call to a library \
-         composable function with a function-typed parameter yet",
+         composable function with a function-typed parameter other than `@Composable () -> Unit` yet",
     );
     assert_compose_library_call_rejects(
         "compose-library-call-defaults",

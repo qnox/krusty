@@ -289,6 +289,14 @@ impl JvmLibraries {
                         .publish_external_callable_parameter_defaults(identity);
                 }
             }
+            if let Some(identity) = function.callable.external_identity {
+                if function.call_sig.composable_params.contains(&true) {
+                    self.cp.publish_external_callable_composable_parameters(
+                        identity,
+                        function.call_sig.composable_params,
+                    );
+                }
+            }
             if let (Some(identity), Some(parameter_identities)) =
                 (function.callable.external_identity, parameter_identities)
             {
