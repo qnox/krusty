@@ -1055,7 +1055,6 @@ fullValueClasses/lateinit.kt
 fullValueClasses/multiModuleAbstractValueBaseDispatch.kt
 fullValueClasses/multiModuleRegularFromAbstractValue.kt
 fullValueClasses/nonFinal.kt
-fullValueClasses/smartCastOnPropertyFromOtherModule.kt
 fullValueClasses/vararg.kt
 funInterface/basicFunInterfaceConversionClash.kt
 funInterface/funInterfaceWithSuspendMethod.kt

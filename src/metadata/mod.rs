@@ -61,6 +61,8 @@ pub(crate) mod function_flags {
     pub const MEMBER_KIND_MASK: u64 = 3 << 6;
 }
 
+pub(crate) mod property_read_stability;
+
 pub(crate) mod property_flags {
     /// Public, final property with a default getter; protobuf omits field 11 at this value.
     pub const DEFAULT: u64 = 518;

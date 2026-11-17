@@ -298,6 +298,8 @@ pub struct KotlinProperty {
     /// Qualified identities of annotations declared on this property.
     pub annotations: Vec<crate::types::TypeName>,
     pub return_value_status: crate::types::ReturnValueStatus,
+    /// Whether repeated reads observe one value within the declaring module.
+    pub read_stability: crate::libraries::PropertyReadStability,
 }
 
 pub struct KotlinConstructor {

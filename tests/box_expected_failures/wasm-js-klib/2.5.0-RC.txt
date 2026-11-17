@@ -1284,7 +1284,6 @@ fullValueClasses/nonFinalRegularClassInheritsSideEffects.kt
 fullValueClasses/nonFinalSecondaryConstructorSideEffects.kt
 fullValueClasses/nonFinalSingleFieldSideEffects.kt
 fullValueClasses/nonFinalThisInInitSideEffects.kt
-fullValueClasses/smartCastOnPropertyFromOtherModule.kt
 fullValueClasses/vararg.kt
 funInterface/basicFunInterfaceConversionClash.kt
 funInterface/equality/localFunctionReferences.kt
