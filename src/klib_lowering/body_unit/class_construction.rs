@@ -235,6 +235,11 @@ impl<'u, 's> Linker<'u, 's> {
                 "a storage accessor has no exact producer".to_owned(),
             ));
         };
+        // An accessor the target realizes itself, or an earlier unit already exported, is linked
+        // as that external edge; the class's storage does not re-emit it.
+        if self.sources.externals.contains_key(&identity) {
+            return Ok(());
+        }
         // An accessor the program's closure never selected has no caller to export it to.
         let selected = match self.sources.callees.get(&identity) {
             Some(KlibCalleeFact::Selected(callables)) => callables[0],
