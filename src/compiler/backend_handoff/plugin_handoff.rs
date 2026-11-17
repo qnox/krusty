@@ -60,7 +60,8 @@ impl CheckedSourceFacts for HandoffSourceFacts<'_> {
         let fact = self.callables.callable(callable)?;
         Some(DependencyCallableShape {
             inline: fact.inline != crate::libraries::InlineKind::None,
-            receiver: fact.source_receiver.is_some() || fact.context_count > 0,
+            extension: fact.source_receiver.is_some(),
+            context_parameters: fact.context_count > 0,
             defaults: fact.declares_parameter_defaults,
             synthetic_parameters: synthetic_parameters(&fact.descriptor, &fact.physical_params),
         })

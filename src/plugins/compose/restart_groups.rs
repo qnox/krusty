@@ -483,6 +483,7 @@ fn pass_composer(
         call,
         ref arguments,
         library_mask,
+        receiver,
     } = *site;
     let arguments = arguments.as_slice();
     if let IrExpr::InvokeFunction { .. } = ir.exprs[call as usize] {
@@ -507,7 +508,8 @@ fn pass_composer(
         let mut supplied = args.clone().into_iter();
         let mut physical = Vec::with_capacity(params.len() + 3);
         let mut omitted = 0;
-        for ((index, argument), &ty) in (0u32..).zip(arguments).zip(&params) {
+        let declared = &arguments[usize::from(receiver)..];
+        for ((index, argument), &ty) in (0u32..).zip(declared).zip(&params) {
             if *argument == ArgumentState::Omitted {
                 omitted |= default_bit(index);
                 let placeholder = ir.add_expr(IrExpr::Const(placeholder(ty)));
@@ -706,7 +708,7 @@ fn dirty_preamble(
         let compare = match (parameter.default, slots.default) {
             // A constant default is static: an omitted argument needs no comparison.
             (Some(_), Some(default)) => {
-                let omitted = is_omitted(ir, default, slot);
+                let omitted = is_omitted(ir, default, slot - u32::from(facts.receiver));
                 let static_bits =
                     ir.add_expr(IrExpr::Const(IrConst::Int(bits_for_slot(STATIC, slot))));
                 let defaulted = or_into(ir, dirty, static_bits);
@@ -756,7 +758,7 @@ fn assign_defaults(ir: &mut IrFile, facts: &RestartableFunction, slots: Slots) -
         .zip(&facts.parameters)
         .filter_map(|(index, parameter)| Some((index, parameter.default?)))
         .map(|(index, value)| {
-            let omitted = is_omitted(ir, default, index);
+            let omitted = is_omitted(ir, default, index - u32::from(facts.receiver));
             let assign = ir.add_expr(IrExpr::SetValue { var: index, value });
             if_then(ir, omitted, assign)
         })

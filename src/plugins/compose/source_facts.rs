@@ -48,8 +48,11 @@ pub(super) struct RestartableFunction {
     pub(super) declaration_line: u32,
     /// The 1-based line of the body's closing brace, where the group ends.
     pub(super) closing_line: u32,
-    /// The function's value parameters, which its `$changed` bits track slot by slot.
+    /// The function's value parameters, which its `$changed` bits track slot by slot. An extension
+    /// function's receiver is the first, and `$default` bits number the parameters after it.
     pub(super) parameters: Vec<TrackedParameter>,
+    /// Whether the first tracked parameter is the extension receiver.
+    pub(super) receiver: bool,
     /// The function's direct composable calls, in source order.
     pub(super) calls: Vec<ComposableCallSite>,
     /// The lifting sequence the function's recompose lambda is numbered in, and the function's
@@ -119,6 +122,9 @@ pub(super) struct ComposableCallSite {
     /// A library callee declares parameter defaults, so it takes a `$default` mask after its
     /// `$changed`, whether or not the call omits an argument.
     pub(super) library_mask: bool,
+    /// The first of `arguments` is the receiver of an extension function. It takes the first
+    /// `$changed` slot but no `$default` bit, and is the call's dispatch receiver, not an argument.
+    pub(super) receiver: bool,
 }
 
 /// What kotlinc's `argumentMetaOf` finds about one argument of a composable call.
@@ -262,7 +268,12 @@ pub(super) fn record(
             });
             continue;
         };
-        let parameter_count = declaration.params.len() as u32;
+        // An extension receiver is the first value of the frame, ahead of the declared parameters.
+        let lambdas = std::iter::repeat(false)
+            .take(usize::from(declaration.receiver.is_some()))
+            .chain(lambdas)
+            .collect::<Vec<_>>();
+        let parameter_count = lambdas.len() as u32;
         let invoked = |statement: ExprId| match &ir.exprs[statement as usize] {
             IrExpr::InvokeFunction { func, .. } => match ir.exprs[*func as usize] {
                 IrExpr::GetValue(index) if index < parameter_count && lambdas[index as usize] => {
@@ -334,6 +345,7 @@ pub(super) fn record(
                     call,
                     arguments: vec![ArgumentState::Forwarded(index)],
                     library_mask: false,
+                    receiver: false,
                 });
                 locations.push(call_location(&positions, call_span));
                 continue;
@@ -379,20 +391,30 @@ pub(super) fn record(
             .param_defaults(declaration.function)
             .cloned()
             .unwrap_or_default();
-        let parameters = (0..)
-            .zip(&declaration.params)
+        // The recompose lambda names its captured receiver `this_<function>`.
+        let receiver = declaration
+            .receiver
+            .map(|ty| (format!("this_{name}"), ty));
+        let parameters = receiver
+            .iter()
+            .chain(&declaration.params)
             .zip(used)
-            .map(|((index, (name, ty)), used)| TrackedParameter {
+            .enumerate()
+            .map(|(frame, ((name, ty), used))| TrackedParameter {
                 name: name.clone(),
                 ty: *ty,
                 used,
-                default: defaults.get(index).copied().flatten(),
-                lambda: lambdas[index],
+                default: defaults.get(frame).copied().flatten(),
+                lambda: lambdas[frame],
             })
             .collect::<Vec<_>>();
         let signature = format!(
-            "{name}({}){}",
-            parameters
+            "{}{name}({}){}",
+            declaration
+                .receiver
+                .map(|receiver| format!("{}.", simple_type_name(receiver)))
+                .unwrap_or_default(),
+            parameters[usize::from(declaration.receiver.is_some())..]
                 .iter()
                 .map(|parameter| {
                     // The frontend's type for a composable `() -> Unit` value.
@@ -408,12 +430,13 @@ pub(super) fn record(
         );
         // `parameterNameInformation`: the source parameters' names, which the runtime's tooling
         // maps the tracked slots back to.
-        let names = if parameters.is_empty() {
+        let declared = &parameters[usize::from(declaration.receiver.is_some())..];
+        let names = if declared.is_empty() {
             String::new()
         } else {
             format!(
                 "N({})",
-                parameters
+                declared
                     .iter()
                     .map(|parameter| parameter.name.as_str())
                     .collect::<Vec<_>>()
@@ -477,6 +500,7 @@ pub(super) fn record(
             declaration_line: positions.line(span.lo) + 1,
             closing_line: positions.line(body_span.hi.saturating_sub(1)) + 1,
             parameters,
+            receiver: declaration.receiver.is_some(),
             calls: sites,
             lifting: (lifting, declaration.source_order),
         });
@@ -719,17 +743,19 @@ fn unsupported_declaration(
     declaration: &crate::ir::IrPackageFunction,
     lambdas: &[bool],
 ) -> Option<&'static str> {
-    if declaration.receiver.is_some() || declaration.context_count != 0 {
-        Some("a composable function with a receiver")
+    if declaration.context_count != 0 {
+        Some("a composable function with a context parameter")
     } else if declaration.vararg_index.is_some() {
         Some("a composable function with a vararg parameter")
-    } else if declaration.params.len() > SLOTS_PER_INT {
+    } else if declaration.params.len() + usize::from(declaration.receiver.is_some()) > SLOTS_PER_INT
+    {
         Some("a composable function with more than ten parameters")
     } else if declaration
         .params
         .iter()
         .zip(lambdas)
         .any(|((_, ty), &lambda)| !lambda && !is_known_stable(*ty))
+        || declaration.receiver.is_some_and(|ty| !is_known_stable(ty))
     {
         Some("a composable function parameter whose stability kotlinc infers")
     } else if !matches!(declaration.ret.kind(), TyKind::Unit) {
@@ -1002,7 +1028,7 @@ impl BodyScope<'_> {
     ) -> Option<(ComposableCallSite, String)> {
         let found = &self.calls[&call];
         let declined = match found.origin {
-            CalleeOrigin::File => None,
+            CalleeOrigin::File => self.unsupported_file_call(ir, call),
             CalleeOrigin::Module => Some("a call to a composable function from another file"),
             CalleeOrigin::Library(target) => self.unsupported_library_call(ir, call, target),
         };
@@ -1020,8 +1046,19 @@ impl BodyScope<'_> {
             });
             return None;
         };
-        let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
+        let IrExpr::Call {
+            callee,
+            args,
+            dispatch_receiver,
+            ..
+        } = &ir.exprs[call as usize]
+        else {
             unreachable!("a composable call is a call");
+        };
+        // A library extension's receiver is its dispatch receiver, the first tracked value.
+        let receiver = match (found.origin, dispatch_receiver) {
+            (CalleeOrigin::Library(_), &Some(receiver)) => Some(receiver),
+            _ => None,
         };
         // A library callee takes no function value, so only the file's own callee is passed one.
         let function = (found.origin == CalleeOrigin::File).then(|| {
@@ -1031,8 +1068,20 @@ impl BodyScope<'_> {
         });
         let omitted = omitted_parameters(callee);
         let mut supplied = supplied_arguments(callee, args).peekable();
-        let arguments = (0..(args.len() + omitted.len()) as u32)
-            .map(|parameter| {
+        let arguments = receiver
+            .into_iter()
+            .map(|receiver| {
+                if matches!(ir.exprs[receiver as usize], IrExpr::Lambda { .. })
+                    || values.reads_captured_local(ir, receiver)
+                {
+                    return None;
+                }
+                Some(match argument_state(ir, receiver, values.count())? {
+                    ArgumentState::Forwarded(_) if !values.forwards() => ArgumentState::Uncertain,
+                    state => state,
+                })
+            })
+            .chain((0..(args.len() + omitted.len()) as u32).map(|parameter| {
                 if omitted.contains(&parameter) {
                     return Some(ArgumentState::Omitted);
                 }
@@ -1055,7 +1104,7 @@ impl BodyScope<'_> {
                     ArgumentState::Forwarded(_) if !values.forwards() => ArgumentState::Uncertain,
                     state => state,
                 })
-            })
+            }))
             .collect::<Option<Vec<_>>>();
         let Some(arguments) = arguments else {
             rejections.push(PluginRejection {
@@ -1080,9 +1129,28 @@ impl BodyScope<'_> {
                 call,
                 arguments,
                 library_mask,
+                receiver: receiver.is_some(),
             },
             call_location(self.positions, found.own_span.unwrap_or(call_span)),
         ))
+    }
+
+    /// What a call to a composable function of the file does that the pass does not cover yet.
+    fn unsupported_file_call(&self, ir: &IrFile, call: ExprId) -> Option<&'static str> {
+        let IrExpr::Call {
+            callee,
+            dispatch_receiver,
+            ..
+        } = &ir.exprs[call as usize]
+        else {
+            unreachable!("a composable call is a call");
+        };
+        let function = callee.source_function()?;
+        (dispatch_receiver.is_some()
+            || ir.package_functions.iter().any(|declaration| {
+                declaration.function == function && declaration.receiver.is_some()
+            }))
+        .then_some("a call to a composable function of the file with a receiver")
     }
 
     /// What a call to the library composable `target` does that the pass does not cover yet.
@@ -1116,9 +1184,9 @@ impl BodyScope<'_> {
         };
         if shape.inline {
             Some("a call to an inline library composable function")
-        } else if shape.receiver
-            || dispatch_receiver.is_some()
+        } else if shape.context_parameters
             || extension_receiver_parameter.is_some()
+            || dispatch_receiver.is_some() != shape.extension
         {
             Some("a call to a library composable function with a receiver")
         } else if params
