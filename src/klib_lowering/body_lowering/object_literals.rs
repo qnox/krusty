@@ -141,6 +141,13 @@ impl<'a> BodyLowering<'a> {
         declared.enclosure = Some(crate::ir::IrEnclosure::Function(self.function.function));
         declared.is_source_declared = true;
         declared.is_anonymous_object = true;
+        declared.site_name =
+            self.linker
+                .site_container()
+                .map(|container| crate::ir::IrSiteClassName {
+                    container,
+                    name: class.name.as_str().into(),
+                });
         declared.is_local_class = true;
         declared.superclass = superclass;
         declared.interfaces = interfaces.into();
@@ -425,7 +432,8 @@ impl<'a> BodyLowering<'a> {
             .copied()
             .find(|ty| ty.non_null().kotlin_class_internal() == Some(superclass))
             .ok_or_else(|| mismatch("an object literal delegates to a class it does not extend"))?;
-        let operands = self.constructor_operands(access, 0, ty)?;
+        let operands =
+            self.constructor_operands(access, 0, ty, super::ConstructorRole::Delegation)?;
         if operands.declaration.classifier != superclass || operands.local_access.is_some() {
             return Err(mismatch(
                 "an object literal delegates to another class than its superclass",
@@ -696,7 +704,14 @@ impl<'a> BodyLowering<'a> {
                         self.record_property_override(&name, &getter, fun, owner, supertypes, ret)?;
                     self.ir.classes[class_id as usize]
                         .properties
-                        .push(property_declaration(&name, ret, fun, setter, dispatched));
+                        .push(property_declaration(
+                            &name,
+                            property.base.flags,
+                            ret,
+                            fun,
+                            setter,
+                            dispatched,
+                        )?);
                 }
                 _ => {}
             }
@@ -1052,17 +1067,27 @@ struct MemberFrame<'a> {
     null_proven: HashSet<super::safe_calls::NullProvenRead>,
 }
 
-/// An object literal's property. The object is final, so the property dispatches only when it
-/// overrides a property of a supertype the unit does not materialize; an accessor of a class it
-/// materializes is overridden as that class's method.
+/// An object literal property, with the modality its serialized declaration flags state: only an
+/// `open` or `abstract` one (an `override` not marked `final` included) dispatches, and only when it
+/// overrides a property of a supertype the unit does not materialize; an accessor of a class the
+/// unit materializes is overridden as that class's method, so the property itself stays final.
 fn property_declaration(
     name: &str,
+    flags: u64,
     ty: Ty,
     getter: FunId,
     setter: Option<FunId>,
-    overrides: bool,
-) -> IrProperty {
-    IrProperty {
+    dispatched: bool,
+) -> Lowered<IrProperty> {
+    use crate::metadata::semantic::KotlinModality;
+    let modality = match crate::metadata::semantic::declaration_modality(flags) {
+        KotlinModality::Sealed => return Err(mismatch("an object literal property is sealed")),
+        _ if !dispatched => crate::ir::IrPropertyModality::Final,
+        KotlinModality::Final => crate::ir::IrPropertyModality::Final,
+        KotlinModality::Open => crate::ir::IrPropertyModality::Open,
+        KotlinModality::Abstract => crate::ir::IrPropertyModality::Abstract,
+    };
+    Ok(IrProperty {
         name: name.to_owned(),
         origin: crate::ir::IrPropertyOrigin::Declaration,
         diagnostic_span: None,
@@ -1081,13 +1106,9 @@ fn property_declaration(
         storage_ty: None,
         backing_field: None,
         is_var: setter.is_some(),
-        is_open: overrides,
+        is_open: modality != crate::ir::IrPropertyModality::Final,
         modifiers: crate::ir::IrPropertyModifiers {
-            modality: if overrides {
-                crate::ir::IrPropertyModality::Open
-            } else {
-                crate::ir::IrPropertyModality::Final
-            },
+            modality,
             declared_getter: true,
             ..crate::ir::IrPropertyModifiers::default()
         },
@@ -1099,5 +1120,5 @@ fn property_declaration(
         setter,
         needs_access_bridge: false,
         accessor_annotations: Default::default(),
-    }
+    })
 }
