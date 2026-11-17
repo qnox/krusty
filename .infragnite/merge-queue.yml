@@ -1,0 +1,23 @@
+# Settings the merge queue reads from this branch.
+#
+# Autoheal: when a run fails only because a box case listed as an expected failure (or as not
+# applicable) now passes, the queue removes that entry from the list the failing lane read, commits
+# it on the PR and tests the PR again. Recipes only ever delete lines, so the lists only shrink.
+autoheal:
+  recipes:
+    # One row of a lane's "outcome changed" block, bound to that block: the lookbehind reads the
+    # lane from the block's own `FAILED <lane box expectations>` header (only rows of that block
+    # may follow it), and the lookahead finds the same lane's `disagrees with` line without
+    # crossing into another report, then takes the list path that lane printed for its version.
+    - name: stale-expected-failures
+      uses: remove-lines
+      match: '(?<=^FAILED <(?<lane>[a-z0-9-]+) box expectations>: \d+ file\(s\) outcome changed:\n(?:  [^\n]*\n)*)^  (?<entry>\S+): expected fail, got pass$(?=(?:(?!^FAILED )[\s\S])*?^\k<lane> box conformance disagrees with \S*?/(?<list>tests/box_expected_failures/\k<lane>/[0-9][^/\s]*\.txt) and )'
+      file: '{list}'
+      line: '{entry}'
+      paths: ['tests/box_expected_failures/*/*.txt']
+    - name: stale-not-applicable
+      uses: remove-lines
+      match: '(?<=^FAILED <(?<lane>[a-z0-9-]+) box expectations>: \d+ file\(s\) outcome changed:\n(?:  [^\n]*\n)*)^  (?<entry>\S+): expected not-applicable, got pass$(?=(?:(?!^FAILED )[\s\S])*?^\k<lane> box conformance disagrees with \S+ and \S*?/(?<list>tests/box_expected_not_applicable/\k<lane>/[0-9][^/\s]*\.txt);)'
+      file: '{list}'
+      line: '{entry}'
+      paths: ['tests/box_expected_not_applicable/*/*.txt']
