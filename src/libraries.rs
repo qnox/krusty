@@ -1752,6 +1752,7 @@ impl FunctionInfo {
         member.call_sig = self.call_sig.clone();
         member.context_count = self.context_count;
         member.contract = self.callable.contract.clone();
+        member.equality_bound = self.callable.equality_bound;
         member.implicit_classifier_callable = self.implicit_classifier_callable;
         member.plugin_expression = self.callable.plugin_expression;
         member.external_identity = self.callable.external_identity;
