@@ -165,8 +165,7 @@ fn signature(
 ) -> Option<(String, String)> {
     match function.target {
         ResolvedFunctionOverrideTarget::External(target) => {
-            // A dependency declaration this file never references has no frozen header here.
-            let callable = facts.callables.callable(target)?;
+            let callable = facts.callables.member_header(target)?;
             // A declaration with no classfile method of its own (a big-arity `FunctionN.invoke`)
             // is realized through another member, which this check does not name.
             if callable.descriptor.is_empty() {
