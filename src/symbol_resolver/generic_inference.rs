@@ -17,7 +17,6 @@ mod postponed_result;
 mod receiver_constraints;
 pub(crate) use receiver_constraints::unify_receiver_from_symbols;
 
-pub(crate) use bound_relations::complete_bound_supertype_bindings;
 use bound_relations::complete_dependent_bound_bindings;
 pub(crate) use bound_relations::{
     complete_dependency_instantiated_bound_bindings,
@@ -984,8 +983,11 @@ pub(crate) fn merge_generic_bindings_from(
     // `R := Nothing?` under `C : R`; the solution is `R = C?`). Here, at the common merge funnel,
     // so every selection, realization, and lambda-expectation path sees the same completed map.
     complete_bottom_constraint_bindings(signature, bindings, explicit_type_arguments);
-    complete_dependent_bound_bindings(signature, bindings, explicit_type_arguments);
+    // An applied supertype fixes a formal exactly (`C : Poly<T>` with `C = TaskContainer` makes
+    // `T = Task`); a bare formal bound (`U : T`) only offers its own actual as a stand-in, so the
+    // exact relation runs first.
     resolve_bound_violating_bindings(source, signature, bindings, explicit_type_arguments);
+    complete_dependent_bound_bindings(signature, bindings, explicit_type_arguments);
 }
 
 /// Merge constraints contributed by an expected call result. These are upper bounds: they can fill
