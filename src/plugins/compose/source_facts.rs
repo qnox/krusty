@@ -1593,30 +1593,66 @@ mod composer_frame_tests {
 
     #[test]
     fn the_composer_and_its_words_are_the_frame() {
-        assert!(takes_composer_frame(&[composer(), Ty::Int], false));
-        assert!(takes_composer_frame(&[composer(), Ty::Int, Ty::Int], true));
+        assert!(takes_composer_frame(&[composer(), Ty::Int], 3, false));
+        assert!(takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int],
+            3,
+            true
+        ));
     }
 
     #[test]
     fn a_missing_or_extra_word_is_not() {
-        assert!(!takes_composer_frame(&[composer(), Ty::Int], true));
+        assert!(!takes_composer_frame(&[composer(), Ty::Int], 3, true));
         assert!(!takes_composer_frame(
             &[composer(), Ty::Int, Ty::Int],
+            3,
             false
         ));
-        assert!(!takes_composer_frame(&[], false));
+        assert!(!takes_composer_frame(&[], 3, false));
+    }
+
+    #[test]
+    fn a_changed_word_follows_every_ten_parameters() {
+        assert!(takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int],
+            11,
+            false
+        ));
+        assert!(!takes_composer_frame(&[composer(), Ty::Int], 11, false));
+        assert!(takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int, Ty::Int],
+            12,
+            true
+        ));
+        // One `$default` word covers 31 parameters.
+        assert!(!takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int, Ty::Int, Ty::Int],
+            32,
+            true
+        ));
     }
 
     #[test]
     fn a_wrong_role_is_not() {
-        assert!(!takes_composer_frame(&[Ty::Long, Ty::Int, Ty::Int], true));
         assert!(!takes_composer_frame(
-            &[composer(), Ty::Long, Ty::Int],
+            &[Ty::Long, Ty::Int, Ty::Int],
+            3,
             true
         ));
-        assert!(!takes_composer_frame(&[Ty::Int, composer(), Ty::Int], true));
+        assert!(!takes_composer_frame(
+            &[composer(), Ty::Long, Ty::Int],
+            3,
+            true
+        ));
+        assert!(!takes_composer_frame(
+            &[Ty::Int, composer(), Ty::Int],
+            3,
+            true
+        ));
         assert!(!takes_composer_frame(
             &[Ty::String, Ty::Long, Ty::Int],
+            3,
             true
         ));
     }
