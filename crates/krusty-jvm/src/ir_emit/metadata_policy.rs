@@ -11,17 +11,6 @@ pub struct KotlinMetadata {
     pub d2: Vec<String>,
 }
 
-pub(super) fn is_continuation_class(class: &krusty::ir::IrClass) -> bool {
-    class.superclass_matches("kotlin/coroutines/jvm/internal/ContinuationImpl")
-        || class.superclass_matches("kotlin/coroutines/jvm/internal/RestrictedContinuationImpl")
-}
-
-pub(super) fn is_coroutine_state_machine(class: &krusty::ir::IrClass) -> bool {
-    is_continuation_class(class)
-        || class.superclass_matches("kotlin/coroutines/jvm/internal/SuspendLambda")
-        || class.superclass_matches("kotlin/coroutines/jvm/internal/RestrictedSuspendLambda")
-}
-
 /// `ProtoBuf.Visibility` numbers kotlinc writes for a synthetic class.
 pub(super) const SYNTHETIC_INTERNAL: i32 = 0;
 pub(super) const SYNTHETIC_PROTECTED: i32 = 2;
