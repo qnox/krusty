@@ -1553,8 +1553,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(());
                 }
                 // A property declared in another file of the module has no layout here; its
-                // declaring file exports the entry points of one shared plan.
-                if self.file.is_imported_property(target) {
+                // declaring file exports the entry points of one shared plan. A copy of its
+                // class this file realizes keeps the property's layout, and its own storage.
+                if self.file.is_imported_property(target)
+                    && !self.has_property_layout_at(id, target)
+                {
                     return self.module_property_write(target, *dispatch_receiver, *value);
                 }
                 match self.checked_property_at(id, target) {
@@ -2273,7 +2276,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         None,
                     );
                 }
-                if self.file.is_imported_property(target) {
+                if self.file.is_imported_property(target)
+                    && !self.has_property_layout_at(id, target)
+                {
                     return self.module_property_read(target, *dispatch_receiver);
                 }
                 match self.checked_property_at(id, target) {
