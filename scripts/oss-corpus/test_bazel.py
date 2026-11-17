@@ -18,6 +18,8 @@ import bazel_compare  # noqa: E402
 import summarize  # noqa: E402
 
 BIN = 'bazel-out/k8-fastbuild/bin'
+TOOL_BIN = 'bazel-out/k8-opt-exec/bin'
+OUT = 'k8-fastbuild/bin'
 SUMMARY_ROW = '| p |  | 2 | 0 | ok | 2 / 5 | 3 / 10 (30.0%) |'
 
 
@@ -29,10 +31,10 @@ def jar(path, entries):
             z.writestr(name, data)
 
 
-def spawn(label, mnemonic, inputs=(), walltime='2.500s', exit_code=0):
+def spawn(label, mnemonic, inputs=(), walltime='2.500s', exit_code=0, bin=BIN):
     package, name = label[2:].split(':')
     entry = dict(targetLabel=label, mnemonic=mnemonic, walltime=walltime,
-                 listedOutputs=[f'{BIN}/{package}/{name}.jar', f'{BIN}/{package}/{name}.abi.jar'],
+                 listedOutputs=[f'{bin}/{package}/{name}.jar', f'{bin}/{package}/{name}.abi.jar'],
                  inputs=[dict(path=p) for p in inputs])
     if exit_code:
         entry['exitCode'] = exit_code
@@ -47,23 +49,27 @@ def write_log(path, entries):
 class Snapshot(unittest.TestCase):
     def test_lists_the_compile_actions_and_copies_the_jars_that_exist(self):
         with tempfile.TemporaryDirectory() as work:
-            checkout = Path(work, 'src')
-            jar(checkout / BIN / 'a/a.jar', {'A.class': b'a'})
-            jar(checkout / BIN / 'b/b.jar', {'B.class': b'b'})
+            # The execution root, which the checkout's convenience symlinks need not point at.
+            execroot = Path(work, 'execroot')
+            jar(execroot / BIN / 'a/a.jar', {'A.class': b'a'})
+            jar(execroot / TOOL_BIN / 'a/a.jar', {'A.class': b'tool'})
+            jar(execroot / BIN / 'b/b.jar', {'B.class': b'b'})
             write_log(f'{work}/exec.json', [
                 spawn('//a:a', 'KrustyCompile', walltime='1.250s'),
+                spawn('//a:a', 'KrustyCompile', walltime='1.500s', bin=TOOL_BIN),
                 spawn('//b:b', 'JvmCompile', inputs=['b/B.java', 'lib.jar']),
                 spawn('//c:c', 'KrustyCompile', exit_code=1),
                 dict(targetLabel='//a:a', mnemonic='Javac', listedOutputs=['x.jar']),
             ])
-            bazel_compare.snapshot(f'{work}/exec.json', str(checkout), f'{work}/m.tsv', f'{work}/out')
+            bazel_compare.snapshot(f'{work}/exec.json', str(execroot), f'{work}/m.tsv', f'{work}/out')
             self.assertEqual(Path(work, 'm.tsv').read_text().splitlines(), [
                 f'//a:a\t{BIN}/a/a.jar\tKrustyCompile\t1.25\t0\t',
+                f'//a:a [for tool]\t{TOOL_BIN}/a/a.jar\tKrustyCompile\t1.5\t0\t',
                 f'//b:b\t{BIN}/b/b.jar\tJvmCompile\t2.5\t0\tJava sources',
                 f'//c:c\t{BIN}/c/c.jar\tKrustyCompile\t2.5\t1\t',
             ])
             copied = sorted(str(p.relative_to(f'{work}/out')) for p in Path(work, 'out').rglob('*') if p.is_file())
-            self.assertEqual(copied, ['a/a.jar', 'b/b.jar'])
+            self.assertEqual(copied, ['k8-fastbuild/bin/a/a.jar', 'k8-fastbuild/bin/b/b.jar', 'k8-opt-exec/bin/a/a.jar'])
 
     def test_a_held_back_action_names_the_integration_condition_it_meets(self):
         self.assertEqual(bazel_compare.held_back(['x/A.kt', 'x/B.java']), 'Java sources')
@@ -97,14 +103,14 @@ class Compare(unittest.TestCase):
             for label in labels:
                 package, target = label[2:].split(':')
                 if label != '//empty:empty':
-                    jar(out / 'kotlinc' / package / f'{target}.jar',
+                    jar(out / 'kotlinc' / OUT / package / f'{target}.jar',
                         {f'{target}/A.class': b'same', f'{target}/B.class': b'kotlinc', 'META-INF/MANIFEST.MF': b'x'})
                 else:
-                    jar(out / 'kotlinc' / package / f'{target}.jar', {'META-INF/MANIFEST.MF': b'x'})
-            jar(out / 'krusty/ok/ok.jar', {'ok/A.class': b'same', 'ok/B.class': b'kotlinc', 'META-INF/MANIFEST.MF': b'y'})
-            jar(out / 'krusty/diff/diff.jar', {'diff/A.class': b'same', 'diff/B.class': b'krusty', 'diff/C.class': b'c'})
-            jar(out / 'krusty/java/java.jar', {'java/A.class': b'same', 'java/B.class': b'kotlinc'})
-            jar(out / 'krusty/empty/empty.jar', {'META-INF/MANIFEST.MF': b'x'})
+                    jar(out / 'kotlinc' / OUT / package / f'{target}.jar', {'META-INF/MANIFEST.MF': b'x'})
+            jar(out / 'krusty' / OUT / 'ok/ok.jar', {'ok/A.class': b'same', 'ok/B.class': b'kotlinc', 'META-INF/MANIFEST.MF': b'y'})
+            jar(out / 'krusty' / OUT / 'diff/diff.jar', {'diff/A.class': b'same', 'diff/B.class': b'krusty', 'diff/C.class': b'c'})
+            jar(out / 'krusty' / OUT / 'java/java.jar', {'java/A.class': b'same', 'java/B.class': b'kotlinc'})
+            jar(out / 'krusty' / OUT / 'empty/empty.jar', {'META-INF/MANIFEST.MF': b'x'})
             (logs / f'{name}.krusty.log').write_text(
                 'INFO: Analyzed 6 targets\n'
                 f'ERROR: {checkout}/fail/BUILD.bazel:1:12: compile //fail:fail with krusty (kt: 1) failed: '
@@ -123,7 +129,7 @@ class Compare(unittest.TestCase):
 
         def row(label, built, fallback, error, identical, only_kotlinc, only_krusty, krusty_seconds):
             package, target = label[2:].split(':')
-            return dict(task=label, dir=f'{package}/{target}.jar', built=built, fallback=fallback, error=error,
+            return dict(task=label, dir=f'{OUT}/{package}/{target}.jar', built=built, fallback=fallback, error=error,
                         classes=2, identical=identical, only_kotlinc=only_kotlinc, only_krusty=only_krusty,
                         seconds=dict(kotlinc=3.0, krusty=krusty_seconds), verify=None)
         self.assertEqual(data['rows'], [
@@ -133,7 +139,7 @@ class Compare(unittest.TestCase):
             row('//ok:ok', True, None, None, 2, 0, 0, 1.0),
             row('//skip:skip', False, None, 'not run: a target it depends on failed', 0, None, None, None),
         ])
-        self.assertEqual(data['no_reference_classes'], [dict(task='//empty:empty', dir='empty/empty.jar', krusty_classes=0)])
+        self.assertEqual(data['no_reference_classes'], [dict(task='//empty:empty', dir=f'{OUT}/empty/empty.jar', krusty_classes=0)])
         self.assertEqual({k: data[k] for k in ('name', 'reference_exit', 'verify_exit', 'compilations', 'built',
                                                'classes', 'identical', 'hotspots', 'tests')},
                          dict(name='p', reference_exit=0, verify_exit=None, compilations=5, built=2, classes=10,
@@ -146,13 +152,28 @@ class Compare(unittest.TestCase):
         report = summarize.report([data], {}, {}, None)
         self.assertIn(SUMMARY_ROW, report.splitlines())
 
+    def test_a_failed_tool_action_is_told_apart_from_the_same_targets_library_action(self):
+        with tempfile.TemporaryDirectory() as work:
+            log = Path(work, 'krusty.log')
+            log.write_text(
+                'ERROR: /c/a/BUILD.bazel:1:12: compile //a:a with krusty (kt: 1) [for tool] failed: (Exit 1): krusty.bin '
+                'failed: error executing KrustyCompile command\n'
+                "a/A.kt:1:1: error: unresolved reference 'tool'\n"
+                'ERROR: /c/a/BUILD.bazel:1:12: compile //a:a with krusty (kt: 1) failed: (Exit 1): krusty.bin failed: '
+                'error executing KrustyCompile command\n'
+                "a/A.kt:2:1: error: unresolved reference 'library'\n")
+            self.assertEqual(bazel_compare.failures(str(log), '/c'), {
+                '//a:a [for tool]': "a/A.kt:1:1: error: unresolved reference 'tool'",
+                '//a:a': "a/A.kt:2:1: error: unresolved reference 'library'",
+            })
+
     def test_a_krusty_build_that_ran_no_compile_says_why_once(self):
         with tempfile.TemporaryDirectory() as work:
             name = 'p'
             logs, out = Path(work, 'logs'), Path(work, 'out', name)
             Path(work, 'src', name).mkdir(parents=True)
             manifest(logs / f'{name}.kotlinc.compilations.tsv', [('//a:a', f'{BIN}/a/a.jar', 'JvmCompile', 1.0, 0, '')])
-            jar(out / 'kotlinc/a/a.jar', {'A.class': b'a'})
+            jar(out / 'kotlinc' / OUT / 'a/a.jar', {'A.class': b'a'})
             (logs / f'{name}.krusty.log').write_text(
                 'ERROR: Error computing the main repository mapping: KRUSTY_BINARY does not exist: /x\n')
             rows, _ = bazel_compare.compare(work, name)
@@ -171,6 +192,9 @@ with open(os.environ['FAKE_BAZEL_CALLS'], 'a') as f:
     f.write(' '.join(a for a in args if not a.startswith('--output_user_root')) + '\n')
 startup = [a for a in args if a.startswith('--output_user_root') or a.startswith('--host_jvm_args')]
 command = args[len(startup)]
+if command == 'info':
+    print(os.getcwd())
+    sys.exit(0)
 if command != 'build' or '--nobuild' in args:
     sys.exit(0)
 log = next(a.split('=', 1)[1] for a in args if a.startswith('--execution_log_json_file='))
@@ -238,6 +262,7 @@ class Runner(unittest.TestCase):
                         '{mode}.exec.json --execution_log_sort=false -- //a:a //b:b')
             self.assertEqual(calls.read_text().splitlines(), [
                 f'--host_jvm_args=-Xmx6g build {common} --nobuild -- //a:a //b:b',
+                f'--host_jvm_args=-Xmx6g info {common} execution_root',
                 '--host_jvm_args=-Xmx6g clean',
                 '--host_jvm_args=-Xmx6g shutdown',
                 f'--host_jvm_args=-Xmx6g build {common} ' + measured.format(mode='p.kotlinc'),

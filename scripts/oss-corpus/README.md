@@ -153,9 +153,10 @@ exactly, and its target set is the Kotlin-only targets whose closures are smalle
 
 A warm-up (`build --nobuild`) fetches every repository; each measured build starts from `bazel clean`
 and a stopped server, without a disk cache and with downloads disabled, under `measure.py`. Its
-execution log lists every compile action, from which `bazel_compare.py` copies the jars out and
-writes `compare.json` in the Gradle shape: one compilation per target, named by its label, its class
-entries compared byte for byte. There is no verify build, test build or sampled profile.
+execution log lists every compile action, from which `bazel_compare.py` copies the jars out of the
+execution root and writes `compare.json` in the Gradle shape: one compilation per compile action,
+named by its target's label (with ` [for tool]` for a target also built for the execution platform,
+as Bazel's progress messages say), its class entries compared byte for byte. There is no verify build, test build or sampled profile.
 
 Run one project locally with:
 

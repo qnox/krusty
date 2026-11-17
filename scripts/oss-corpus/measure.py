@@ -58,8 +58,9 @@ def kind(pid):
         return None
     line = ' '.join(argv)
     # kotlinc's compile process: Gradle's Kotlin daemon, or the worker of intellij-community's own
-    # Bazel builder (`jvm-builder`), which compiles its Kotlin with the embedded compiler.
-    if 'KotlinCompileDaemon' in line or 'jvm-builder' in line:
+    # Bazel builder (`jvm-inc-builder_deploy.jar`), which compiles its Kotlin with the embedded
+    # compiler (and its Java with javac, in the same process).
+    if 'KotlinCompileDaemon' in line or 'jvm-inc-builder' in line:
         return 'kotlin_daemon'
     # The Bazel integration runs a copy of the binary named `krusty.bin`.
     if os.path.basename(argv[0]) in ('krusty', 'krusty.bin'):

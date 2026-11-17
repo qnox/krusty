@@ -19,7 +19,8 @@
 # measured build then starts from `bazel clean`, without a disk cache and with downloads disabled, so
 # neither reuses the other's actions nor pays for the network. Each writes its execution log, from
 # which `bazel_compare.py snapshot` lists the compile actions (`<name>.<mode>.compilations.tsv`) and
-# copies their jars to out/<name>/<mode>. `bazel_compare.py compare` writes out/<name>/compare.json in
+# copies their jars out of the execution root (`bazel info execution_root`, which the project's own
+# convenience symlinks need not name `bazel-out`) to out/<name>/<mode>. `bazel_compare.py compare` writes out/<name>/compare.json in
 # the shape `compare.py` writes for a Gradle project; there is no verify or test build.
 set -euo pipefail
 
@@ -104,13 +105,14 @@ build() {
   ) >>"$logs/$name.$mode.log" 2>&1 || code=$?
   echo "$name $mode exit $code seconds $(($(date +%s) - start))" >>"$logs/STATUS"
   status=$code
-  python3 "$here/bazel_compare.py" snapshot "$logs/$name.$mode.exec.json" "$checkout" \
+  python3 "$here/bazel_compare.py" snapshot "$logs/$name.$mode.exec.json" "$execroot" \
     "$logs/$name.$mode.compilations.tsv" "$work/out/$name/$mode"
   rm -f "$logs/$name.$mode.exec.json"
 }
 
 rm -f "$logs/$name".*.log
 bazel build "${common[@]}" --nobuild -- "${targets[@]}" >"$logs/$name.warmup.log" 2>&1
+execroot=$(bazel info "${common[@]}" execution_root 2>>"$logs/$name.warmup.log")
 build kotlinc
 reference=$status
 build krusty --repo_env=KRUSTY_BINARY="$krusty"
