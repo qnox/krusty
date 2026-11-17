@@ -52,6 +52,7 @@ pub enum InvokeSelection {
     Inapplicable(DiagnosticId),
 }
 mod classifier_headers;
+mod compact_declaration;
 mod declaration_metadata;
 mod serialization_records;
 pub use declaration_metadata::{NoArgSuperConstructor, PropertyAccessor};
