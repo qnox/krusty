@@ -825,6 +825,16 @@ fn wasm_a_declined_required_stdlib_template_rejects_the_caller() {
     }
 }
 
+/// PLATFORM-SPECIFIC: guard Wasm's capability check over the shared portable program.
+/// Keep the original failure-message branch together with every factory reference:
+/// the whole program must compile and answer `OK`.
+#[test]
+fn unsigned_factory_references_compile_with_the_whole_content_to_string_branch() {
+    const SOURCE: &str = include_str!("box_regressions/unsignedArrayFactoryReferences.kt");
+    expect_reference_box(SOURCE, "unsignedArrayFactoryReferences");
+    expect_wasm_box(SOURCE, "unsignedArrayFactoryReferences");
+}
+
 /// Run `src` directly against both Wasm targets' KLIBs and runtimes; every target must answer `OK`.
 /// Skips only where a directly invoked lane cannot run; target-owned harness passes require it.
 fn expect_wasm_box(src: &str, stem: &str) {
@@ -937,6 +947,26 @@ fn wasm_source_library_superclasses_keep_their_layout_and_dispatch() {
             lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
             Outcome::Pass,
             "source superclass layout and inherited dispatch on {}",
+            target.name()
+        );
+    }
+}
+
+#[test]
+fn wasm_source_library_inherits_unboxed_function_parameter_adapters() {
+    let source = include_str!("box_regressions/multimodule/sourceLibraryUnboxedFunctionBridge.kt");
+    let stem = "sourceLibraryUnboxedFunctionBridge";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole unboxed function bridge module graph");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "source layout preserves exact function parameter adapters on {}",
             target.name()
         );
     }
@@ -1595,6 +1625,9 @@ mod default_identity_hash;
 
 #[path = "wasm_type_of.rs"]
 mod type_of;
+
+#[path = "wasm_char_sequence_appends.rs"]
+mod char_sequence_appends;
 
 #[test]
 fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {

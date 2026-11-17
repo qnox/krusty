@@ -192,6 +192,9 @@ pub struct HeaderSyntaxArena {
     /// The `<…>` lists a qualified classifier type wrote on its segments before the last one
     /// (`TypeRef::qualifier_arguments`), by compact type.
     qualifier_arguments: crate::fx_hash::HashMap<HeaderTypeId, crate::ast::QualifierArgumentLists>,
+    /// The `<…>` list each classifier occurrence wrote on its own (last) segment, keyed by source
+    /// and the occurrence's span (`File::type_argument_list_spans`).
+    type_argument_lists: crate::fx_hash::HashMap<(SourceFileId, Span), Span>,
     classifier_types: Vec<HeaderClassifierType>,
     type_operands: Vec<HeaderTypeId>,
     path_segments: Vec<LookupNameId>,
@@ -341,6 +344,24 @@ impl HeaderSyntaxArena {
                 .insert(id, ty.qualifier_arguments.clone());
         }
         id
+    }
+
+    /// Retain the parser's own-segment type-argument list spans of one source file.
+    pub(super) fn capture_type_argument_lists(
+        &mut self,
+        source: SourceFileId,
+        lists: &crate::fx_hash::HashMap<Span, Span>,
+    ) {
+        self.type_argument_lists.extend(
+            lists
+                .iter()
+                .map(|(reference, list)| ((source, *reference), *list)),
+        );
+    }
+
+    /// The `<…>` list written on the own segment of the classifier occurrence at `reference`.
+    pub(crate) fn type_argument_list(&self, source: SourceFileId, reference: Span) -> Option<Span> {
+        self.type_argument_lists.get(&(source, reference)).copied()
     }
 
     /// Consume the parser's temporary alias-rewrite sidecar for the compact types added since
@@ -2106,6 +2127,7 @@ pub fn extract_file_header_syntax(
             kind: HeaderDeclarationKind::TypeAlias {
                 type_parameters,
                 target,
+                declaration: alias.declaration_span,
             },
         });
     }
@@ -2255,7 +2277,12 @@ pub fn extract_file_header_syntax(
             );
             headers.insert_declaration(HeaderDeclaration {
                 declaration: constructor,
-                name_span: None,
+                // An implicit primary constructor has no syntax of its own; its class names it.
+                name_span: Some(
+                    class
+                        .primary_constructor_signature_span
+                        .unwrap_or(class.name_span),
+                ),
                 annotations,
                 annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
                 kind: HeaderDeclarationKind::Constructor {
@@ -2332,7 +2359,7 @@ pub fn extract_file_header_syntax(
             let annotations = annotation_types(headers, names, &constructor.annotations);
             headers.insert_declaration(HeaderDeclaration {
                 declaration: constructor_id,
-                name_span: None,
+                name_span: Some(constructor.signature_span),
                 annotations,
                 annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
                 kind: HeaderDeclarationKind::Constructor {
@@ -2968,6 +2995,8 @@ impl HeaderInventoryBuilder {
             &mut self.lookup_names,
             &mut self.syntax,
         );
+        self.syntax
+            .capture_type_argument_lists(source, &file.type_argument_list_spans);
         self.syntax.capture_source_spellings(
             first_source_type,
             &file.alias_spellings,

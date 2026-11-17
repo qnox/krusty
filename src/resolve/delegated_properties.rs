@@ -183,7 +183,7 @@ impl DelegateConventionSite {
             match &self.dispatch_diagnostic_name {
                 Some(DelegateDispatchDiagnosticName::Source(name)) => return name.to_string(),
                 Some(DelegateDispatchDiagnosticName::Anonymous) => {
-                    return "<anonymous>".to_string()
+                    return "<anonymous>".to_string();
                 }
                 None => panic!("a delegate dispatch diagnostic must retain its source kind"),
             }
@@ -1570,12 +1570,15 @@ impl Checker<'_> {
                     // The DECLARED value parameters, un-erased: the current-module declaration's own
                     // signature where there is one, otherwise the callable's generic signature. Never
                     // `physical_params`, which is already a target's erasure of this.
+                    // Capture discovery rechecks the file with no resolved index. The declared
+                    // shape lives on that index; the candidate's generic signature is what this
+                    // pass can see. A missing shape while the index is present stays the invariant.
                     let declared_params = match selected.stable_declaration {
-                        Some(declaration) => self
+                        Some(declaration) if self.resolved_index.is_some() => self
                             .stable_callable_declared_shape(declaration)
                             .map(|(_, parameters, _)| parameters)
                             .expect("a selected source delegate convention must retain its shape"),
-                        None => selected.declared_params.clone(),
+                        _ => selected.declared_params.clone(),
                     };
                     return DelegateOperatorSelection::Selected(Box::new(
                         DelegateGetValueTarget::MemberExtension {
@@ -1643,11 +1646,13 @@ impl Checker<'_> {
             }
         };
         let (selected, ret, applied_receiver) = selected;
+        // Same scratch-pass rule as the member-extension arm above: no resolved index means
+        // the candidate's own signature, not a lookup that cannot succeed.
         let (declared_receiver, declared_params, declared_ret) = match selected.stable_declaration {
-            Some(declaration) => self
+            Some(declaration) if self.resolved_index.is_some() => self
                 .stable_callable_declared_shape(declaration)
                 .expect("a selected source delegate convention must retain its shape"),
-            None => {
+            _ => {
                 let receiver = match selected.semantic_receiver() {
                     Some(receiver) => receiver,
                     None => delegate_ty,

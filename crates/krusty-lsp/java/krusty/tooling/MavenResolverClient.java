@@ -62,6 +62,7 @@ public final class MavenResolverClient {
     private MavenResolverClient() {}
 
     public static void main(String[] args) throws Exception {
+        Protocol.capture();
         BufferedReader input = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         String line;
         while ((line = input.readLine()) != null) {

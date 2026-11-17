@@ -12,6 +12,16 @@ use crate::types::{ty_subst_keep_unbound, Ty};
 /// Clone `root` and every reachable expression, preserving sparse semantic/source facts. Returns
 /// the new root and the complete old-to-new identity map.
 pub fn clone_expression_dag(ir: &mut IrFile, root: ExprId) -> (ExprId, HashMap<ExprId, ExprId>) {
+    let (roots, cloned) = clone_expression_dags(ir, &[root]);
+    (roots[0], cloned)
+}
+
+/// [`clone_expression_dag`] for several roots that may share expressions: a node reachable from
+/// more than one root is copied once, so the copies share it as the originals do.
+pub fn clone_expression_dags(
+    ir: &mut IrFile,
+    roots: &[ExprId],
+) -> (Vec<ExprId>, HashMap<ExprId, ExprId>) {
     fn clone_one(ir: &mut IrFile, source: ExprId, cloned: &mut HashMap<ExprId, ExprId>) -> ExprId {
         if let Some(&existing) = cloned.get(&source) {
             return existing;
@@ -30,8 +40,11 @@ pub fn clone_expression_dag(ir: &mut IrFile, root: ExprId) -> (ExprId, HashMap<E
     }
 
     let mut cloned = HashMap::default();
-    let root = clone_one(ir, root, &mut cloned);
-    (root, cloned)
+    let roots = roots
+        .iter()
+        .map(|&root| clone_one(ir, root, &mut cloned))
+        .collect();
+    (roots, cloned)
 }
 
 /// Clone `root` as kotlinc's IR `deepCopy` copies a declaration body before lambdas are lowered:

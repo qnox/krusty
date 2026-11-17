@@ -7,7 +7,7 @@
 //! class's struct extends. A constant is allocated with them filled before any constructor runs,
 //! and their reads load them. `valueOf`'s failure throws the runtime `IllegalArgumentException`.
 
-use krusty::backend::enums::BaseMember;
+use krusty::backend::enums::{BaseMember, StaticMember};
 use krusty::ir::ClassId;
 use krusty::libraries::RuntimeExceptionKind;
 
@@ -30,6 +30,34 @@ impl Body<'_> {
                 "an enum constant built without its own allocation (`{name}`)"
             ));
         }
+        Ok(())
+    }
+
+    /// `values()` or `valueOf` of an enum another file declares, called through the entry that
+    /// file exports: they read the constants its storage holds. `name` is `valueOf`'s argument.
+    pub(super) fn dependency_enum_member(
+        &mut self,
+        classifier: krusty::types::TypeName,
+        member: StaticMember,
+        name: Option<u32>,
+    ) -> Result<(), Unsupported> {
+        let entry = self
+            .calls
+            .instance(
+                &krusty::backend::instance_links::InstanceEntry::EnumMember { classifier, member },
+            )
+            .ok_or_else(|| {
+                // Boundary conversion for a diagnostic.
+                format!(
+                    "the {} of an enum another file declares (`{}`)",
+                    member.source_name(),
+                    classifier.render().replace('/', ".")
+                )
+            })?;
+        if let Some(name) = name {
+            self.value(name, Ty::String)?;
+        }
+        self.code.call(entry);
         Ok(())
     }
 

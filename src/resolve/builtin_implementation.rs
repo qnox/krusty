@@ -1,8 +1,8 @@
 //! Builtin implementations selected for external members used by a checked source unit.
 
 use crate::fir::{BuiltinImplementation, ExternalCallableId};
-use crate::symbol_resolver::builtin_implementation_facts;
-use crate::types::SemanticCallableOwner;
+use crate::symbol_resolver::{builtin_implementation_facts, represented_implementation_facts};
+use crate::types::{SemanticCallableOwner, TypeName};
 
 use super::selected_external_members::SelectedExternal;
 use super::Checker;
@@ -219,6 +219,17 @@ fn realized_member_facts(
     identity: ExternalCallableId,
     realization: crate::libraries::ExternalCallableRealization,
 ) -> Result<Option<Box<[BuiltinImplementation]>>, ExternalCallableId> {
+    Ok(realized_member(source, identity, realization)?
+        .map(|(owner, name)| builtin_implementation_facts(source, owner, &name, identity)))
+}
+
+/// The declaring classifier and property-or-function name of the member `identity`; `None` for a
+/// declaration that is not a member.
+fn realized_member(
+    source: &dyn crate::symbol_source::SymbolSource,
+    identity: ExternalCallableId,
+    realization: crate::libraries::ExternalCallableRealization,
+) -> Result<Option<(TypeName, String)>, ExternalCallableId> {
     if realization.callable.external_identity != Some(identity) {
         return Err(identity);
     }
@@ -238,7 +249,53 @@ fn realized_member_facts(
         }
         None => realization.callable.name,
     };
-    Ok(Some(builtin_implementation_facts(
-        source, owner, &name, identity,
-    )))
+    Ok(Some((owner, name)))
+}
+
+/// The overrides of a target's `represented` classes, which the checker adds to a selected
+/// member's builtin implementations at the handoff: only the target knows which builtin classes
+/// it carries in a representation of its own.
+#[derive(Clone, Copy)]
+pub(crate) struct RepresentedOverrides<'a> {
+    source: &'a dyn crate::symbol_source::SymbolSource,
+    represented: &'a [TypeName],
+}
+
+impl<'a> RepresentedOverrides<'a> {
+    pub(crate) fn new(
+        source: &'a dyn crate::symbol_source::SymbolSource,
+        represented: &'a [TypeName],
+    ) -> Self {
+        Self {
+            source,
+            represented,
+        }
+    }
+
+    /// `facts`, the builtin implementations selected for `identity`, with the overrides of the
+    /// represented classes below the member's owner. Completion is idempotent: an override
+    /// already present is not added again, so a fact completes to the same value whichever path
+    /// recorded it.
+    pub(crate) fn complete(
+        &self,
+        identity: ExternalCallableId,
+        facts: &[BuiltinImplementation],
+    ) -> Result<Box<[BuiltinImplementation]>, ExternalCallableId> {
+        if self.represented.is_empty() {
+            return Ok(facts.into());
+        }
+        let realization = self.source.external_callable(identity).ok_or(identity)?;
+        let Some((owner, name)) = realized_member(self.source, identity, realization)? else {
+            return Ok(facts.into());
+        };
+        let mut implementations = facts.to_vec();
+        for fact in
+            represented_implementation_facts(self.source, self.represented, owner, &name, identity)
+        {
+            if !implementations.contains(&fact) {
+                implementations.push(fact);
+            }
+        }
+        Ok(implementations.into_boxed_slice())
+    }
 }

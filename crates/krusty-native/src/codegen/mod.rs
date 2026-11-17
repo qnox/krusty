@@ -622,6 +622,14 @@ impl Backend for CraneliftBackend {
                 krusty::backend::instance_links::InstanceEntry::ConstructorDefaults { .. } => {
                     "a constructor's default-argument entry".to_owned()
                 }
+                krusty::backend::instance_links::InstanceEntry::EnumMember {
+                    classifier,
+                    member,
+                } => format!(
+                    "the {} of an enum (`{}`)",
+                    member.source_name(),
+                    classifier.render().replace('/', ".")
+                ),
                 krusty::backend::instance_links::InstanceEntry::EnumConstant(constant) => {
                     format!(
                         "an enum constant (`{}.{}`)",

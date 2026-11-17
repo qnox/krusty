@@ -177,6 +177,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         referenced_module_classifiers: _,
         classifier_hierarchies: _,
         inherited_defaults: _,
+        function_slot_families: _,
         custom_serializer_constructions: _,
         type_use_serializer_constructions: _,
         property_overrides: _,
