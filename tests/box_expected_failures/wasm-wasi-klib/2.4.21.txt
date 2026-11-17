@@ -2694,7 +2694,6 @@ reflection/typeOf/typeAliasedType.kt
 reflection/typeOf/typeOfCapturedStar.kt
 regressions/Kt1619Test.kt
 regressions/Kt2495Test.kt
-regressions/collectionSizeInInlineBody.kt
 regressions/collectionSizeOrDefault.kt
 regressions/directInvokeDestructuring.kt
 regressions/directInvokeNameBasedDestructuring.kt
