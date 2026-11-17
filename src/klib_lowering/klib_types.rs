@@ -10,8 +10,8 @@ use crate::types::{Ty, TypeName};
 
 pub(super) use semantic_types::{
     annotation_classifier, closure_type_arity, function_invocation_arity,
-    is_function_classifier_member, reference_invocation_arity, suspend_function_invocation_arity,
-    KlibTypeParameters,
+    is_function_classifier_member, package_name, reference_invocation_arity,
+    suspend_function_invocation_arity, KlibTypeParameters,
 };
 
 pub(super) fn semantic_type(
@@ -47,11 +47,6 @@ pub(super) fn member_owner(
     member: &KlibPublicIdSignature,
 ) -> Result<TypeName, KlibBodyDeclineReason> {
     semantic_types::member_owner(member).map_err(Into::into)
-}
-
-/// The package name-tree node whose segments are `package`; [`TypeName::ROOT`] for none.
-pub(super) fn package_name(package: &[String]) -> Result<TypeName, KlibBodyDeclineReason> {
-    semantic_types::package_name(package).map_err(Into::into)
 }
 
 #[cfg(test)]

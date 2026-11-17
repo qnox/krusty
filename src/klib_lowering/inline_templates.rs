@@ -444,6 +444,20 @@ impl TemplateCalls<'_> {
 }
 
 impl CallLinker for TemplateCalls<'_> {
+    fn sam_declaration(
+        &self,
+        classifier: &KlibPublicIdSignature,
+    ) -> Result<crate::ir::CheckedKlibSamDeclaration, KlibBodyDeclineReason> {
+        self.callees
+            .dependency_facts
+            .sam_declarations()
+            .get(&(self.module.to_owned(), classifier.clone()))
+            .cloned()
+            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a SAM conversion without a checked declaration",
+            ))
+    }
+
     fn site_container(&self) -> Option<crate::ir::IrSiteClassContainer> {
         super::site_containers::site_container(self.bodies, self.identity)
     }
@@ -581,20 +595,6 @@ impl CallLinker for TemplateCalls<'_> {
             result,
             formal: *formal,
         }))
-    }
-
-    fn sam_declaration(
-        &self,
-        classifier: &KlibPublicIdSignature,
-    ) -> Result<crate::ir::CheckedKlibSamDeclaration, KlibBodyDeclineReason> {
-        self.callees
-            .dependency_facts
-            .sam_declarations()
-            .get(&(self.module.to_owned(), classifier.clone()))
-            .cloned()
-            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
-                "a SAM conversion without a checked declaration",
-            ))
     }
 
     /// A template is expanded into a source file, whose read of the constant reaches the enum

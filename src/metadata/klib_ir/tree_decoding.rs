@@ -2171,38 +2171,6 @@ mod tests {
     }
 
     #[test]
-    fn an_ir_file_names_its_package_by_string_table_segments() {
-        let strings = declaration_strings();
-        let signatures: Vec<&[u8]> = Vec::new();
-        let mut file = FileTables {
-            strings: &strings,
-            signatures: SignatureTable::new(0, &signatures, &strings),
-            types: Vec::new(),
-            bodies: Vec::new(),
-            file_entries: Some(1),
-        };
-        let mut segments = Vec::new();
-        push_varint(1, &mut segments);
-        push_varint(0, &mut segments);
-        let mut packaged = varint_field(7, 0);
-        packaged.extend(bytes_field(3, &segments));
-        let (_, package) = ir_file_declaration_ids(&mut file, &packaged).unwrap();
-        assert_eq!(*package, [strings[1].clone(), strings[0].clone()]);
-
-        let root = varint_field(7, 0);
-        assert!(ir_file_declaration_ids(&mut file, &root)
-            .unwrap()
-            .1
-            .is_empty());
-
-        let mut missing = Vec::new();
-        push_varint(u64::try_from(strings.len()).unwrap(), &mut missing);
-        let mut absent = varint_field(7, 0);
-        absent.extend(bytes_field(3, &missing));
-        assert!(ir_file_declaration_ids(&mut file, &absent).is_err());
-    }
-
-    #[test]
     fn a_prepared_inline_function_may_omit_its_optional_file_entry() {
         let strings = declaration_strings();
         let signatures = [

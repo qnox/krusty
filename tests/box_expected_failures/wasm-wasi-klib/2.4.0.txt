@@ -2547,7 +2547,6 @@ regressions/Kt1619Test.kt
 regressions/Kt2495Test.kt
 regressions/collectionSizeOrDefault.kt
 regressions/directInvokeDestructuring.kt
-regressions/floatingRangeContainsMixedWidths.kt
 regressions/inlineCallsInInitializerLambda.kt
 regressions/kt15196.kt
 regressions/kt1800.kt

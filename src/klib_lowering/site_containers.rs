@@ -16,9 +16,9 @@ pub(super) fn site_container(
         // A file-local identity is a top-level function of its file.
         KlibDeclarationSignature::FileLocal { file, .. } => {
             let package = bodies.module_file_package(&identity.module, *file)?;
-            return super::klib_types::package_name(package)
-                .ok()
-                .map(IrSiteClassContainer::Package);
+            return Some(IrSiteClassContainer::Package(
+                super::klib_types::package_name(package),
+            ));
         }
     };
     // A public identity's declaration path is its enclosing classifiers, then its own name.
@@ -27,8 +27,8 @@ pub(super) fn site_container(
             .ok()
             .map(IrSiteClassContainer::Classifier)
     } else {
-        super::klib_types::package_name(declared.package().segments())
-            .ok()
-            .map(IrSiteClassContainer::Package)
+        Some(IrSiteClassContainer::Package(
+            super::klib_types::package_name(declared.package().segments()),
+        ))
     }
 }

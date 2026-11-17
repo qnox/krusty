@@ -130,19 +130,19 @@ pub(super) struct UninterceptedSuspensionCall {
 
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
 pub(super) trait CallLinker {
-    /// Whether this exact provider-assigned dependency callable is declared `suspend`. A selected
-    /// suspend call in a KLIB body keeps its source result type in common IR; the common coroutine
-    /// preparation later supplies the target continuation ABI.
-    fn is_suspend_callable(&self, _target: crate::fir::ExternalCallableId) -> bool {
-        false
-    }
-
     /// Read the checked declaration selected for this serialized SAM target, without lookup.
     fn sam_declaration(
         &self,
         _classifier: &KlibPublicIdSignature,
     ) -> Lowered<crate::ir::CheckedKlibSamDeclaration> {
         unsupported("a SAM conversion without a checked declaration")
+    }
+
+    /// Whether this exact provider-assigned dependency callable is declared `suspend`. A selected
+    /// suspend call in a KLIB body keeps its source result type in common IR; the common coroutine
+    /// preparation later supplies the target continuation ABI.
+    fn is_suspend_callable(&self, _target: crate::fir::ExternalCallableId) -> bool {
+        false
     }
 
     /// The same authenticated primitive call shape that dependency planning treats as a leaf.

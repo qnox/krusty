@@ -81,11 +81,8 @@ pub enum IrSamPlacement {
     /// Code of the file being lowered, inlined copies included: the classifier owning the
     /// expression ([`super::IrFile::expression_owners`]), or else this file's package.
     ThisFile,
-    /// A dependency's code at the level of a file declaring `package`, a package name-tree node
-    /// ([`TypeName::ROOT`] for the root package).
-    DependencyFile { package: TypeName },
-    /// A dependency's code in a member of its classifier `owner`.
-    DependencyMember { owner: TypeName },
+    /// A dependency's code in the declaration container that names its local classifiers.
+    Dependency(super::IrSiteClassContainer),
     /// A dependency's code in a member of a class private to its file, which the dependency does
     /// not name to this compilation.
     UnnamedDependencyClass,
