@@ -180,6 +180,14 @@ impl Backend for WasmBackend {
         lower::is_direct_operation(operation)
     }
 
+    /// An array classifier's `storage` property is this target's own array storage.
+    fn realizes_dependency_getter(
+        &self,
+        signature: krusty::backend::DependencyGetterSignature<'_>,
+    ) -> bool {
+        lower::realizes_storage_getter(signature)
+    }
+
     fn emitted_constructor_initializer(
         &self,
         state: &mut Self::State,

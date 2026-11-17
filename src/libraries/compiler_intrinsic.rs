@@ -109,6 +109,10 @@ pub enum CompilerIntrinsic {
     /// element store for the same reason as [`Self::ArrayGet`].
     ArraySet,
     ArraySize,
+    /// The Wasm stdlib's `wasm_array_copy<T>(destination, destinationIndex, source, sourceIndex,
+    /// length)`, an `@ExcludedFromCodegen` declaration kotlinc lowers to `array.copy` over the
+    /// two storage arrays.
+    ArrayStorageCopy,
     CharCode,
     StringLength,
     /// `String.get(Int): Char`, the index operator on a string.
@@ -165,6 +169,19 @@ pub enum CompilerIntrinsic {
     CoroutineContext,
     CoroutineSuspended,
     SuspendCoroutineUninterceptedOrReturn,
+    /// A target stdlib's `startCoroutineUninterceptedOrReturnIntrinsicN(f, inputs.., completion)`:
+    /// the suspend function value `f` invoked with its inputs and `completion` as its
+    /// continuation. Its stdlib body only says the compiler implements it.
+    StartCoroutineUninterceptedOrReturn,
+    /// Native's `kotlin.native.internal.getContinuation<T>()`, an external typed intrinsic: the
+    /// enclosing suspend body's own continuation. A KLIB body reaches it where kotlinc's
+    /// pre-serialization inliner expanded `suspendCoroutineUninterceptedOrReturn`.
+    CurrentContinuation,
+    /// Native's `kotlin.native.internal.returnIfSuspended<T>(argument)`, an external suspend typed
+    /// intrinsic: the enclosing suspend body suspends when `argument` is `COROUTINE_SUSPENDED`
+    /// and otherwise goes on with `argument` as its `T`. It is the suspension point of an expanded
+    /// `suspendCoroutineUninterceptedOrReturn`, whose block computed `argument`.
+    ReturnIfSuspended,
     EnumValues,
     EnumValueOf,
     /// The zero-argument `kotlin.enums.enumEntries<T>()`. Its stdlib body only throws; the selected
@@ -246,6 +263,9 @@ pub enum CompilerIntrinsic {
     },
     /// A fully normalized `Result` helper reached from an expanded library inline body.
     ResultFailure(ResultFailureIntrinsic),
+    /// The `exception` property getter on the compiler-builtin `Result.Failure` carrier. The
+    /// target owns that carrier's storage and reads it through its runtime ABI.
+    ResultFailureException,
     /// `next()` declared by a Kotlin primitive iterator (`kotlin.collections.IntIterator.next`).
     /// A target may call the iterator's unboxed element operation instead of the boxed
     /// `Iterator<T>.next` bridge (kotlinc's `IteratorNext` intrinsic); outside that target rule the
