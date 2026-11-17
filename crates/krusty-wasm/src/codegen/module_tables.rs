@@ -22,7 +22,7 @@ use krusty::types::TypeName;
 
 use super::super::encode::{Module, SubType};
 use super::super::objects::{ObjectRoot, REFERENCE};
-use super::lower::{carrier, Unsupported};
+use super::lower::{carrier, parameter_carrier_of, Unsupported};
 
 /// One class's table type and the function type of each of its slots, `None` for an untyped one.
 #[derive(Clone, Debug, PartialEq)]
@@ -36,13 +36,55 @@ pub(super) struct ModuleTable {
 #[derive(Default)]
 pub(super) struct ModuleTables {
     tables: HashMap<TypeName, Result<ModuleTable, Unsupported>>,
+    published: HashMap<TypeName, Result<ModuleTable, Unsupported>>,
     dependencies: HashMap<TypeName, ModuleTable>,
 }
 
 impl ModuleTables {
     /// Begin a new plan, forgetting the previous plan's tables but not the dependency classes'.
-    pub(super) fn enter_plan(&mut self) {
+    ///
+    /// The plan's dependency classes bind current-provider names to layouts selected by exact
+    /// frozen class identities; provider-local names never outlive the plan. A dependency class
+    /// no producer has laid out yet takes the program's one table type
+    /// ([`Self::dependency`]).
+    pub(super) fn enter_plan(
+        &mut self,
+        classes: &krusty::backend::class_tables::module_classes::ModuleClasses,
+        classifiers: &dyn krusty::backend::BackendClassifierSource,
+        layouts: &super::laid_out_classes::LaidOutClasses,
+    ) {
         self.tables.clear();
+        self.published.clear();
+        for (name, _) in classes.iter() {
+            if !classes.is_dependency_class(name) {
+                continue;
+            }
+            let Some(identity) = classifiers
+                .classifier(name)
+                .and_then(|fact| fact.klib_identity.clone())
+            else {
+                self.published.insert(
+                    name,
+                    Err("a dependency class without its selected declaration identity".into()),
+                );
+                continue;
+            };
+            match layouts.published_layout(&identity) {
+                Ok(Some(layout)) => {
+                    self.published.insert(
+                        name,
+                        Ok(ModuleTable {
+                            table_type: layout.table_type,
+                            slot_types: layout.slot_types.clone(),
+                        }),
+                    );
+                }
+                Err(reason) => {
+                    self.published.insert(name, Err(reason));
+                }
+                Ok(None) => {}
+            }
+        }
     }
 
     /// The table type of the dependency class `class`, carried with `slot_types`: the one an
@@ -89,11 +131,56 @@ impl ModuleTables {
         }
         let planned = plan.table(class)?;
         let table = match planned {
-            Ok(planned) => self.build(plan, class, planned, module, objects),
+            Ok(planned) => {
+                let published = self.published.get(&class).cloned();
+                match published {
+                    Some(Ok(table)) => {
+                        self.validate_published(plan, planned, table, module, objects)
+                    }
+                    Some(Err(reason)) => Err(reason),
+                    None => self.build(plan, class, planned, module, objects),
+                }
+            }
             Err(reason) => Err(reason.to_owned()),
         };
         self.tables.insert(class, table.clone());
         Some(table)
+    }
+
+    /// Preserve the producer's nominal type, checking every consumer-known physical frame.
+    fn validate_published(
+        &self,
+        plan: &ModuleSlotPlan,
+        planned: &krusty::backend::class_tables::module_slots::PlannedTable,
+        table: ModuleTable,
+        module: &mut Module,
+        objects: &ObjectRoot,
+    ) -> Result<ModuleTable, Unsupported> {
+        if planned.len() as usize != table.slot_types.len() {
+            return Err("a published class table with a different physical slot count".into());
+        }
+        for slot in 0..planned.len() {
+            let expected = match plan
+                .slot_signature(planned, slot)
+                .ok_or("a published slot without its selected member signature")?
+            {
+                PlannedSignature::Untyped => continue,
+                PlannedSignature::Any(member) => objects.any_slot_types[member.slot() as usize],
+                PlannedSignature::Member { parameters, result } => {
+                    let mut params = vec![REFERENCE];
+                    for &parameter in parameters {
+                        params.push(carrier(parameter)?.ok_or("a `Unit` parameter")?);
+                    }
+                    module.func_type(params, carrier(result)?.into_iter().collect())
+                }
+            };
+            if table.slot_types[slot as usize] != Some(expected) {
+                return Err(
+                    "a selected member frame differing from its published physical slot".into(),
+                );
+            }
+        }
+        Ok(table)
     }
 
     fn build(
@@ -124,7 +211,7 @@ impl ModuleTables {
                 PlannedSignature::Member { parameters, result } => {
                     let mut params = vec![REFERENCE];
                     for &parameter in parameters {
-                        params.push(carrier(parameter)?.ok_or("a `Unit` parameter")?);
+                        params.push(parameter_carrier_of(parameter)?.ok_or("a `Unit` parameter")?);
                     }
                     Some(module.func_type(params, carrier(result)?.into_iter().collect()))
                 }
@@ -153,7 +240,7 @@ impl ModuleTables {
                 supertype: Some(
                     parent
                         .as_ref()
-                        .map_or(objects.any_table, |parent| parent.table_type),
+                        .map_or(objects.function_table, |parent| parent.table_type),
                 ),
                 open: true,
             })

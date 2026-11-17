@@ -1,8 +1,7 @@
 //! Lowering of frontend-selected functional-interface conversions.
 
 use crate::fir::FirSamConversion;
-use crate::ir::{ExprId, IrExpr, IrFunction, IrSamTarget};
-use crate::types::Ty;
+use crate::ir::{ExprId, IrExpr, IrSamTarget};
 
 pub(super) fn ir_sam_method(method: crate::fir::FirSamMethod) -> crate::ir::IrSamMethod {
     match method {
@@ -93,176 +92,53 @@ impl BodyLowering<'_> {
         conversion: &FirSamConversion,
         function: ExprId,
     ) -> Option<ExprId> {
-        // Only a Kotlin fun interface promises FunctionAdapter equality for a callable reference.
-        // A Java SAM keeps the ordinary indy conversion kotlinc emits.
-        let function_adapter = conversion.kotlin_interface
-            && matches!(self.ir.expr(function), IrExpr::CallableReference(_));
-        let arity = u8::try_from(conversion.parameters.len()).ok()?;
-        // The captured value keeps its own function arity. A non-suspend value adapted to a
-        // suspend method is `FunctionN`; the implementation still receives the continuation.
-        let captured_suspend = conversion.suspend && conversion.source_suspend;
-        let function_type = Ty::fun_with_shape(
-            conversion
+        let target = IrSamTarget {
+            classifier: conversion.classifier,
+            method: conversion.method.to_string(),
+            method_target: ir_sam_method(conversion.method_target),
+            parameters: conversion
                 .parameters
                 .iter()
                 .map(|parameter| parameter.get())
                 .collect(),
-            conversion.result.get(),
-            conversion.context_count as usize,
-            conversion.has_receiver,
-            captured_suspend,
-        );
-        // Common IR keeps the checked function's logical parameter types. A target that needs an
-        // erased adapter for a contravariant capture realizes that physical boundary later.
-        let parameters = conversion
-            .parameters
-            .iter()
-            .map(|parameter| parameter.get())
-            .collect::<Vec<_>>();
-        let void_method =
-            !conversion.suspend && conversion.declared_result.get() == crate::types::Ty::Unit;
-        let callee = self.ir.add_expr(IrExpr::GetValue(0));
-        let arguments = parameters
-            .iter()
-            .enumerate()
-            .map(|(parameter, _)| {
-                self.ir.add_expr(IrExpr::GetValue(
-                    u32::try_from(parameter + 1).expect("too many SAM parameters"),
-                ))
-            })
-            .collect::<Vec<_>>();
-        let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
-            func: callee,
-            args: arguments,
-            params: parameters.clone(),
-            ret: conversion.result.get(),
-        });
-        // The captured suspend value takes this adapter's continuation as its last argument.
-        // A non-suspend value adapted to a suspend method does not: that call stays `FunctionN`.
-        if captured_suspend {
-            self.ir
-                .suspend_calls
-                .insert(invoke, conversion.result.get());
-        }
-        let body = if void_method {
-            let done = self.ir.add_expr(IrExpr::Return(None));
-            self.ir.add_expr(IrExpr::Block {
-                stmts: vec![invoke, done],
-                value: None,
-            })
-        } else {
-            self.callable_reference_adapter_body(
-                invoke,
-                conversion.result.get(),
-                conversion.result.get(),
-            )
+            contravariant_parameters: conversion.contravariant_parameters.to_vec(),
+            result: conversion.result.get(),
+            declared_parameters: conversion
+                .declared_parameters
+                .iter()
+                .map(|parameter| parameter.get())
+                .collect(),
+            declared_result: conversion.declared_result.get(),
+            context_count: conversion.context_count,
+            has_receiver: conversion.has_receiver,
+            suspend: conversion.suspend,
+            source_suspend: conversion.source_suspend,
+            overridden_results: conversion
+                .overridden_results
+                .iter()
+                .map(|result| result.get())
+                .collect(),
+            function_adapter: false,
+            wraps_function_value: true,
+            nullable: conversion.nullable,
+            kotlin_interface: conversion.kotlin_interface,
+            parameter_identities: conversion.parameter_identities.to_vec(),
+            type_parameters: conversion
+                .type_parameters
+                .iter()
+                .map(crate::ir::IrSamTypeParameter::lowered)
+                .collect(),
         };
-        let mut implementation_parameters = Vec::with_capacity(parameters.len() + 1);
-        implementation_parameters.push(function_type);
-        implementation_parameters.extend(parameters);
-        let implementation = self.ir.add_fun(IrFunction {
-            name: format!(
-                "$fir_sam_delegate_{}_{}",
-                self.body.owner().raw(),
-                self.ir.functions.len()
-            ),
-            params: implementation_parameters,
-            ret: if void_method {
-                crate::types::Ty::Unit
-            } else {
-                crate::types::stored_value_ty(conversion.result.get())
-            },
-            body: Some(body),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        let mut parameter_identities = Vec::with_capacity(conversion.parameters.len() + 1);
-        parameter_identities.push(crate::ir::IrParameterIdentity::generated(
-            crate::ir::IrGeneratedParameterRole::SamAdapterCapture { ordinal: 0 },
-            None,
-        ));
-        parameter_identities.extend(conversion.parameters.iter().enumerate().map(
-            |(ordinal, _)| {
-                crate::ir::IrParameterIdentity::generated(
-                    crate::ir::IrGeneratedParameterRole::SamAdapterValue {
-                        ordinal: u32::try_from(ordinal).expect("too many SAM parameters"),
-                    },
-                    None,
-                )
-            },
-        ));
-        self.ir.fn_params.insert(
-            implementation,
-            crate::ir::FnParamInfo::identities(parameter_identities),
+        let name = format!(
+            "$fir_sam_delegate_{}_{}",
+            self.body.owner().raw(),
+            self.ir.functions.len()
         );
-        if let Some(line) = self.ir.source_line(function) {
-            self.ir.function_position_mut(implementation).decl_line = Some(line);
-        }
+        let (implementation, expression) =
+            self.ir.sam_function_value_adapter(target, function, name)?;
         self.record_sam_adapter_origin(implementation);
         self.place_sam_adapter_in_lifting_sequence(implementation);
-        self.ir
-            .set_method_visibility(implementation, crate::types::Visibility::Private);
-        self.ir.lambda_own_params_from.insert(implementation, 1);
-        self.ir.lambda_sam_signature.insert(
-            implementation,
-            (
-                conversion
-                    .declared_parameters
-                    .iter()
-                    .map(|parameter| parameter.get())
-                    .collect(),
-                conversion.declared_result.get(),
-            ),
-        );
-        if conversion.suspend {
-            self.ir.suspend_funs.push(implementation);
-        }
-        Some(
-            self.ir.add_expr(IrExpr::Lambda {
-                impl_fn: implementation,
-                arity,
-                captures: vec![function],
-                sam: Some(Box::new(IrSamTarget {
-                    classifier: conversion.classifier,
-                    method: conversion.method.to_string(),
-                    method_target: ir_sam_method(conversion.method_target),
-                    parameters: conversion
-                        .parameters
-                        .iter()
-                        .map(|parameter| parameter.get())
-                        .collect(),
-                    contravariant_parameters: conversion.contravariant_parameters.to_vec(),
-                    result: conversion.result.get(),
-                    declared_parameters: conversion
-                        .declared_parameters
-                        .iter()
-                        .map(|parameter| parameter.get())
-                        .collect(),
-                    declared_result: conversion.declared_result.get(),
-                    context_count: conversion.context_count,
-                    has_receiver: conversion.has_receiver,
-                    suspend: conversion.suspend,
-                    source_suspend: conversion.source_suspend,
-                    overridden_results: conversion
-                        .overridden_results
-                        .iter()
-                        .map(|result| result.get())
-                        .collect(),
-                    function_adapter,
-                    wraps_function_value: !function_adapter,
-                    nullable: conversion.nullable,
-                    kotlin_interface: conversion.kotlin_interface,
-                    parameter_identities: conversion.parameter_identities.to_vec(),
-                    type_parameters: conversion
-                        .type_parameters
-                        .iter()
-                        .map(crate::ir::IrSamTypeParameter::lowered)
-                        .collect(),
-                })),
-                inline_body: None,
-            }),
-        )
+        Some(expression)
     }
 
     /// Name the adapter as the next `$lambda$N` of the enclosing callable. kotlinc counts it in

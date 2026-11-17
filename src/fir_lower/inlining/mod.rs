@@ -977,6 +977,7 @@ impl BodyLowering<'_> {
                 inline_callee: frame.callee,
                 inline_callee_source_name: &callee,
                 crossinline_operands: &crossinline_operands,
+                parent: None,
             },
         ) {
             *malformed_anonymous = Some(failure);
@@ -2105,6 +2106,7 @@ fn specialize_checked_operation(
         | IrCheckedOperation::RangeLoop { counter, .. } => specialize_ty(counter, bindings),
         IrCheckedOperation::IllegalProgressionStep { .. }
         | IrCheckedOperation::AtomicField { .. }
+        | IrCheckedOperation::AtomicArrayElement { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => {}
         IrCheckedOperation::PropertyReference {
             target,

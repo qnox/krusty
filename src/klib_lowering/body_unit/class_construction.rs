@@ -20,7 +20,7 @@ impl<'u, 's> Linker<'u, 's> {
             self.sources.callees,
         )?
         else {
-            return Ok(());
+            return self.materialize_primary_delegation(ir, identity, selected);
         };
         let classifier = plan.storage.declaration.classifier;
         // Each secondary constructor of a class without a primary one initializes the class this
@@ -33,7 +33,7 @@ impl<'u, 's> Linker<'u, 's> {
                 "different dependency identities claim the same materialized classifier".to_owned(),
             ));
         }
-        let header = super::super::function_lowering::initializer_header(&plan)?;
+        let header = super::super::function_lowering::initializer_header(&plan.header)?;
         let self_type = super::super::klib_types::semantic_type(
             plan.header.arena,
             &plan.header.types,
@@ -44,9 +44,15 @@ impl<'u, 's> Linker<'u, 's> {
                 .expect("the plan authenticated its receiver")
                 .ty,
         )?;
+        let retained_initializer = plan
+            .superclass
+            .as_ref()
+            .filter(|call| call.materialized)
+            .and_then(|call| self.sources.externals.get(&call.constructor))
+            .and_then(|external| external.constructor_initializer_target());
         // A materialized superclass is materialized first, from its own admitted initialization.
         let superclass = match &plan.superclass {
-            Some(call) if call.materialized => {
+            Some(call) if call.materialized && retained_initializer.is_none() => {
                 let selected = match self.sources.callees.get(&call.constructor) {
                     Some(KlibCalleeFact::Selected(callables)) => callables[0],
                     _ => {
@@ -105,9 +111,31 @@ impl<'u, 's> Linker<'u, 's> {
         } else {
             let delegate = secondary_delegation(ir, &plan, superclass)?;
             let secondaries = &mut ir.classes[class as usize].secondary_ctors;
-            secondaries.push(materialized_secondary(&plan, &header, delegate, initialize));
+            secondaries.push(materialized_secondary(
+                &plan.header,
+                &header,
+                delegate,
+                initialize,
+            ));
             Some(secondaries.len() - 1)
         };
+        if let Some(target) = retained_initializer {
+            let target = crate::ir::IrExternalConstructorTarget::unresolved(target);
+            match secondary {
+                Some(ordinal) => {
+                    ir.external_secondary_super_constructors.insert(
+                        (
+                            classifier,
+                            u32::try_from(ordinal).expect("a constructor ordinal fits u32"),
+                        ),
+                        target,
+                    );
+                }
+                None => {
+                    ir.external_super_constructors.insert(classifier, target);
+                }
+            }
+        }
         self.classes.insert(identity.clone(), class);
         self.constructors.insert(
             identity.clone(),
@@ -118,6 +146,7 @@ impl<'u, 's> Linker<'u, 's> {
         );
         let member = super::MemberClass {
             class,
+            declaring: &plan.header.class.base.symbol,
             fields: plan.field_declarations.clone(),
             properties: super::super::class_storage::backed_properties(&plan.header.class.members),
             contract: plan.header.contract,
@@ -135,9 +164,138 @@ impl<'u, 's> Linker<'u, 's> {
             statements: &[],
             header,
             function,
-            initialization: Some((class, plan)),
+            initialization: Some((class, super::PendingInitialization::Class(Box::new(plan)))),
             value_member: Some(member),
             local_body: None,
+            static_initialization: None,
+        });
+        Ok(())
+    }
+
+    /// A secondary constructor delegating to its class's primary constructor: the primary
+    /// constructor materializes the class, and the class gains a secondary constructor that
+    /// delegates to it with the delegation's arguments, then runs a private function holding the
+    /// secondary constructor's own statements. A class whose primary initialization is not
+    /// admitted keeps its target boundary.
+    fn materialize_primary_delegation(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        selected: KlibBodyCallable<'s>,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        let Some(delegation) = super::super::class_initialization::primary_delegation(
+            selected,
+            self.sources.bodies,
+            self.sources.callees,
+        )?
+        else {
+            return Ok(());
+        };
+        self.materialize_class(ir, &delegation.primary, delegation.primary_selected)?;
+        let class = *self.classes.get(&delegation.primary).ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "an admitted primary constructor materialized no class".to_owned(),
+            )
+        })?;
+        let fields = delegation
+            .header
+            .class
+            .members
+            .iter()
+            .filter_map(super::super::class_storage::member_field)
+            .collect::<Vec<_>>();
+        if fields.len() != ir.classes[class as usize].fields.len() {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a secondary constructor's class declares other fields than its materialized class"
+                    .to_owned(),
+            ));
+        }
+        let classifier = delegation.header.contract.classifier;
+        let header = super::super::function_lowering::initializer_header(&delegation.header)?;
+        let function = declare_function(ir, &header);
+        ir.functions[function as usize].is_static = false;
+        ir.functions[function as usize].dispatch_receiver = Some(classifier);
+        ir.set_method_visibility(function, crate::types::Visibility::Private);
+        let method = u32::try_from(ir.classes[class as usize].methods.len())
+            .expect("a method index fits u32");
+        ir.classes[class as usize].methods.push(function);
+        ir.note_class_method(class, function);
+        let self_type = ir.declared_class_self_type(classifier).ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "a materialized class has no declared self type".to_owned(),
+            )
+        })?;
+        let receiver = ir.add_expr(IrExpr::GetValue(0));
+        ir.set_logical_type(receiver, self_type);
+        let args = header
+            .params()
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                let value = ir.add_expr(IrExpr::GetValue(
+                    u32::try_from(index + 1).expect("a value index fits u32"),
+                ));
+                ir.set_logical_type(value, *ty);
+                Some(value)
+            })
+            .collect();
+        let run = ir.add_expr(IrExpr::MethodCall {
+            class,
+            index: method,
+            receiver,
+            args,
+        });
+        ir.set_logical_type(run, Ty::Unit);
+        let delegate = crate::ir::CtorDelegateTarget::This {
+            target_params: ir.classes[class as usize]
+                .ctor_args
+                .iter()
+                .map(|parameter| parameter.ty)
+                .collect(),
+            target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+            default_masks: Vec::new(),
+        };
+        let secondaries = &mut ir.classes[class as usize].secondary_ctors;
+        secondaries.push(materialized_secondary(
+            &delegation.header,
+            &header,
+            delegate,
+            run,
+        ));
+        let secondary = secondaries.len() - 1;
+        self.classes.insert(identity.clone(), class);
+        self.constructors.insert(
+            identity.clone(),
+            super::MaterializedConstructor {
+                initializer: function,
+                secondary: Some(secondary),
+            },
+        );
+        self.pending.push_back(PendingBody {
+            identity: identity.clone(),
+            arena: delegation.header.arena,
+            symbol: &delegation.header.function.base.symbol,
+            statements: delegation.statements,
+            header,
+            function,
+            initialization: Some((
+                class,
+                super::PendingInitialization::PrimaryDelegation {
+                    secondary,
+                    arguments: delegation.arguments,
+                },
+            )),
+            value_member: Some(super::MemberClass {
+                class,
+                declaring: &delegation.header.class.base.symbol,
+                fields,
+                properties: super::super::class_storage::backed_properties(
+                    &delegation.header.class.members,
+                ),
+                contract: delegation.header.contract,
+            }),
+            local_body: None,
+            static_initialization: None,
         });
         Ok(())
     }
@@ -155,10 +313,7 @@ impl<'u, 's> Linker<'u, 's> {
         let mut class = IrClass::synthetic(classifier);
         class.is_source_declared = true;
         class.supertypes.clone_from(&plan.supertypes);
-        class.is_open =
-            plan.header.contract.modality != crate::metadata::semantic::KotlinModality::Final;
-        class.is_abstract =
-            plan.header.contract.modality == crate::metadata::semantic::KotlinModality::Abstract;
+        set_materialized_modality(&mut class, plan.header.contract.modality);
         if let Some(call) = &plan.superclass {
             class.superclass = call.owner;
             class.super_ctor_params.clone_from(&call.params);
@@ -264,6 +419,7 @@ impl<'u, 's> Linker<'u, 's> {
         if let Some(&class) = self.classes.get(&identity) {
             return Ok(super::MemberClass {
                 class,
+                declaring: &header.class.base.symbol,
                 fields: vec![field],
                 properties: super::super::class_storage::backed_properties(&header.class.members),
                 contract,
@@ -294,6 +450,7 @@ impl<'u, 's> Linker<'u, 's> {
         self.classes.insert(identity, class);
         Ok(super::MemberClass {
             class,
+            declaring: &header.class.base.symbol,
             fields: vec![field],
             properties: super::super::class_storage::backed_properties(&header.class.members),
             contract,
@@ -301,39 +458,47 @@ impl<'u, 's> Linker<'u, 's> {
     }
 
     /// The class a member of the final ordinary class `header` declares belongs to: the class
-    /// its primary constructor materializes, which created every instance the member is called on.
+    /// the constructors that initialize it materialize, which created every instance the member
+    /// is called on.
     fn materialize_ordinary_member_class(
         &mut self,
         ir: &mut IrFile,
         header: &super::super::class_headers::ClassMemberHeader<'s, 's>,
     ) -> Result<super::MemberClass<'s>, KlibBodyDeclineReason> {
         let contract = header.contract;
-        let primary = contract.primary_constructor.as_ref().ok_or(
-            KlibBodyDeclineReason::UnsupportedDeclaration(
-                "a class member without a primary constructor",
-            ),
-        )?;
-        let identity = KlibDependencyCallable {
-            module: contract.module.clone(),
-            declaration: KlibDeclarationSignature::Public(primary.clone()),
-        };
-        let constructor = match self.sources.callees.get(&identity) {
-            Some(KlibCalleeFact::Selected(callables)) => callables[0],
-            _ => {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "a class member's primary constructor has no unique provider declaration"
-                        .to_owned(),
-                ))
-            }
-        };
-        self.materialize_class(ir, &identity, constructor)?;
-        let class =
-            *self
-                .classes
-                .get(&identity)
-                .ok_or(KlibBodyDeclineReason::UnsupportedDeclaration(
+        let constructors = super::super::class_initialization::initializing_constructors(
+            contract,
+            self.sources.bodies,
+        )
+        .filter(|constructors| !constructors.is_empty())
+        .ok_or(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "a class member without public initializing constructors",
+        ))?;
+        let mut class = None;
+        for identity in &constructors {
+            let constructor = match self.sources.callees.get(identity) {
+                Some(KlibCalleeFact::Selected(callables)) => callables[0],
+                _ => {
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "a class member's constructor has no unique provider declaration"
+                            .to_owned(),
+                    ))
+                }
+            };
+            self.materialize_class(ir, identity, constructor)?;
+            let materialized = *self.classes.get(identity).ok_or(
+                KlibBodyDeclineReason::UnsupportedDeclaration(
                     "a member of a class without ordinary initialization",
-                ))?;
+                ),
+            )?;
+            if class.is_some_and(|class| class != materialized) {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a class's constructors materialize different classes".to_owned(),
+                ));
+            }
+            class = Some(materialized);
+        }
+        let class = class.expect("a class has an initializing constructor");
         let fields = header
             .class
             .members
@@ -347,6 +512,7 @@ impl<'u, 's> Linker<'u, 's> {
         }
         Ok(super::MemberClass {
             class,
+            declaring: &header.class.base.symbol,
             fields,
             properties: super::super::class_storage::backed_properties(&header.class.members),
             contract,
@@ -531,7 +697,7 @@ fn secondary_delegation(
 /// initializer effects. It is a realization of a library declaration, which publishes its own
 /// Kotlin metadata, so it records none here.
 fn materialized_secondary(
-    plan: &super::super::class_initialization::ClassInitialization<'_, '_>,
+    declaration: &super::super::class_headers::ClassMemberHeader<'_, '_>,
     header: &super::super::function_lowering::FunctionHeader,
     delegate: crate::ir::CtorDelegateTarget,
     initialize: crate::ir::ExprId,
@@ -543,8 +709,7 @@ fn materialized_secondary(
         lines: crate::ir::IrSecondaryCtorLines::default(),
         prefix_params: Vec::new(),
         declared_spellings: Default::default(),
-        named_params: plan
-            .header
+        named_params: declaration
             .function
             .regular_parameters
             .iter()
@@ -587,5 +752,59 @@ pub(crate) fn superclass_constructor_ordinal(
                 )
             }),
         _ => Ok(0),
+    }
+}
+
+fn set_materialized_modality(
+    class: &mut IrClass,
+    modality: crate::metadata::semantic::KotlinModality,
+) {
+    class.is_open = modality != crate::metadata::semantic::KotlinModality::Final;
+    class.is_abstract = modality.is_abstract();
+    class.is_sealed = modality == crate::metadata::semantic::KotlinModality::Sealed;
+}
+
+#[cfg(test)]
+mod modality_tests {
+    use super::*;
+
+    #[test]
+    fn sealed_materialization_retains_initializer_inventory_without_allocation() {
+        let identity = KlibDependencyCallable {
+            module: "producer".into(),
+            declaration: KlibDeclarationSignature::Public(KlibPublicIdSignature::classifier(
+                crate::types::type_name("sample/Sealed"),
+            )),
+        };
+        let mut unit = DependencyBodyUnit::default();
+        let mut class = IrClass::synthetic(crate::types::type_name("sample/Sealed"));
+        set_materialized_modality(
+            &mut class,
+            crate::metadata::semantic::KotlinModality::Sealed,
+        );
+        assert!(class.is_sealed);
+        unit.ir.classes.push(class);
+        unit.classes.insert(identity.clone(), 0);
+        unit.constructors.insert(
+            identity.clone(),
+            MaterializedConstructor {
+                initializer: 0,
+                secondary: None,
+            },
+        );
+        assert_eq!(
+            unit.initializing_constructors()
+                .map(|(identity, _)| identity)
+                .collect::<Vec<_>>(),
+            vec![&identity]
+        );
+        assert!(unit.allocating_constructors().next().is_none());
+        unit.ir.classes[0].is_abstract = false;
+        assert!(unit.allocating_constructors().next().is_none());
+        set_materialized_modality(
+            &mut unit.ir.classes[0],
+            crate::metadata::semantic::KotlinModality::Open,
+        );
+        assert_eq!(unit.allocating_constructors().count(), 1);
     }
 }

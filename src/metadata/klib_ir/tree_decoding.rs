@@ -53,11 +53,15 @@ pub struct KlibIrDeclarationTree {
 #[derive(Debug, Default)]
 pub struct KlibIrModuleTrees {
     trees: Vec<KlibIrDeclarationTree>,
+    /// The serialized file each tree of [`Self::trees`] is a top-level declaration of, by tree
+    /// index: the file a file-local signature of that file names.
+    files: Vec<u32>,
     functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
     /// File-local functions, meaningful only inside this library.
     local_functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
     /// File-local classes, meaningful only inside this library.
     local_classes: HashMap<KlibIrSignature, (usize, KlibIrClassId)>,
+    classes: super::class_index::KlibIrClassIndex,
 }
 
 impl KlibIrModuleTrees {
@@ -91,15 +95,39 @@ impl KlibIrModuleTrees {
     }
 
     /// The top-level function private to its file that a body of this module calls under the
-    /// file-local `signature`: the declaration of its own tree, not a member or a local function.
+    /// file-local `signature`: the declaration of its own tree, or an accessor of the top-level
+    /// property its tree declares, not a member or a local function.
     pub fn file_private_function(
         &self,
         signature: &KlibIrSignature,
     ) -> Option<(&KlibIrArena, &KlibIrFunction)> {
         let (tree, function) = *self.local_functions.get(signature)?;
         let tree = &self.trees[tree];
-        (tree.declaration == KlibIrMember::Function(function))
+        tree.declaration
+            .declares_top_level(function)
             .then(|| (&tree.arena, tree.arena.function(function)))
+    }
+
+    /// The serialized file whose top-level declaration, or top-level property accessor, is the
+    /// function this module serializes under `signature`. `None` for a member, a local function
+    /// or a signature the module does not serialize.
+    pub(crate) fn top_level_file(&self, signature: &KlibIrSignature) -> Option<u32> {
+        let functions = match signature {
+            KlibIrSignature::FileLocal { .. } => &self.local_functions,
+            KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_) => &self.functions,
+        };
+        let (tree, function) = *functions.get(signature)?;
+        self.trees[tree]
+            .declaration
+            .declares_top_level(function)
+            .then(|| self.files[tree])
+    }
+
+    /// Every tree with the serialized file it is a top-level declaration of, in serialized order.
+    pub(crate) fn trees_with_files(
+        &self,
+    ) -> impl Iterator<Item = (u32, &KlibIrDeclarationTree)> + '_ {
+        self.files.iter().copied().zip(&self.trees)
     }
 
     /// The file-local class this library serializes under `signature`.
@@ -110,6 +138,71 @@ impl KlibIrModuleTrees {
         let (tree, class) = *self.local_classes.get(signature)?;
         let arena = &self.trees[tree].arena;
         Some((arena, arena.class(class)))
+    }
+
+    /// Every file-local class this library serializes, with the arena that owns it.
+    pub(crate) fn local_classes(
+        &self,
+    ) -> impl Iterator<Item = (&KlibIrArena, &super::tree::KlibIrClass)> {
+        self.local_classes.values().map(|&(tree, class)| {
+            let arena = &self.trees[tree].arena;
+            (arena, arena.class(class))
+        })
+    }
+
+    /// Every class serialized under `signature`, including enum-entry classes and the classes
+    /// nested in them.
+    pub(crate) fn classes_with_signature(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> impl Iterator<Item = (&KlibIrArena, &KlibIrClass)> {
+        self.classes
+            .with_signature(signature)
+            .iter()
+            .map(|at| self.class_at(*at))
+    }
+
+    /// Every class that directly declares a function, constructor or property accessor under
+    /// `signature`, with that function.
+    pub(crate) fn classes_declaring_function(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> impl Iterator<Item = (&KlibIrArena, &KlibIrClass, &KlibIrFunction)> {
+        self.classes
+            .declaring_function(signature)
+            .iter()
+            .map(|&(at, function)| {
+                let (arena, class) = self.class_at(at);
+                (arena, class, arena.function(function))
+            })
+    }
+
+    /// Every class that directly declares the enum entry `signature`.
+    pub(crate) fn classes_declaring_enum_entry(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> impl Iterator<Item = (&KlibIrArena, &KlibIrClass)> {
+        self.classes
+            .declaring_enum_entry(signature)
+            .iter()
+            .map(|at| self.class_at(*at))
+    }
+
+    /// Every public class, outside enum entries, whose paths are `member`'s owner path
+    /// ([`KlibPublicIdSignature::owner_path`]).
+    pub(crate) fn classes_owning_member(
+        &self,
+        member: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> impl Iterator<Item = (&KlibIrArena, &KlibIrClass)> {
+        self.classes
+            .owning_member(member)
+            .iter()
+            .map(|at| self.class_at(*at))
+    }
+
+    fn class_at(&self, at: super::class_index::ClassAt) -> (&KlibIrArena, &KlibIrClass) {
+        let arena = &self.trees[at.tree].arena;
+        (arena, arena.class(at.class))
     }
 
     pub fn function_count(&self) -> usize {
@@ -138,10 +231,12 @@ impl KlibIrModuleTrees {
     #[cfg(test)]
     pub(crate) fn from_trees(trees: Vec<KlibIrDeclarationTree>) -> Result<Self, KlibIrDecodeError> {
         let mut module = Self {
+            files: vec![0; trees.len()],
             trees,
             ..Self::default()
         };
         module.index()?;
+        module.classes = super::class_index::KlibIrClassIndex::of(&module.trees);
         Ok(module)
     }
 
@@ -402,12 +497,16 @@ fn read_declaration_trees_from(
                 arena: decoder.arena,
                 declaration,
             });
+            module
+                .files
+                .push(u32::try_from(index).expect("file count fits u32"));
         }
     }
     module.index()?;
     for (tree, function, identity) in prepared_roots {
         module.remap_prepared_root(tree, function, identity)?;
     }
+    module.classes = super::class_index::KlibIrClassIndex::of(&module.trees);
     Ok(module)
 }
 

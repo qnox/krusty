@@ -17,6 +17,11 @@
 use crate::kt_string::KtString;
 use crate::types::{Ty, TypeName, TypeNameList};
 
+mod checked_klib_facts;
+pub(crate) use checked_klib_facts::{CheckedKlibDependencyFacts, CheckedKlibTypeFacts};
+mod checked_member_call_edge;
+pub(crate) use checked_member_call_edge::CheckedMemberCallEdge;
+
 pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
@@ -107,6 +112,7 @@ pub mod referenced_classifiers;
 mod references;
 mod reified_markers;
 mod reified_templates;
+mod sam_function_value_adapter;
 mod sam_target;
 mod type_tests;
 pub(crate) use type_tests::admits_null_at_runtime;
@@ -1373,6 +1379,10 @@ pub struct IrSpecializedAnonymousClass {
     /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
     /// it, and so does an object nested in the copy that is specialized later.
     pub crossinline_operands: Vec<Option<u32>>,
+    /// The call-site copy whose body regenerated this copy, when the object is nested in another
+    /// regenerated anonymous object. A target names it under that copy rather than as another
+    /// expansion of the inline call.
+    pub parent: Option<ClassId>,
     /// Source function → the function on this copy. Accessor functions materialized after the
     /// copy are added here before bridges and metadata read the copy.
     pub method_clones: crate::fx_hash::HashMap<FunId, FunId>,
@@ -1388,6 +1398,11 @@ pub struct IrSpecializedAnonymousClass {
     /// the copy's methods. `field_count` still counts them on the declaration, so later fields
     /// appended to the declaration stay past that prefix.
     pub omitted_capture_fields: u32,
+    /// For each constructor parameter of the copy, the declaration's parameter it was copied from,
+    /// or `None` for a value the copy keeps in place of an inlined lambda. Constructor code the
+    /// copy takes from the declaration once lowering has realized it (the superclass constructor
+    /// call and the initializer) reads its parameters through this.
+    pub constructor_parameters: Vec<Option<u32>>,
     /// Property reads and writes in the inlined caller whose receiver is this copy's construction.
     /// Accessor functions are not available when the construction is retargeted, so the read is
     /// rebound once the copy's properties exist.
@@ -1492,6 +1507,11 @@ pub struct IrFile {
     pub classifier_hierarchies: crate::fx_hash::HashMap<TypeName, Vec<IrAppliedClassifier>>,
     /// The interface defaults each source classifier inherits without overriding, as override
     /// resolution selected them; a target backend realizes each record without selecting one.
+    /// The function names of each source classifier that keep more than one member slot, as
+    /// override resolution grouped them. A target whose realization can merge two slots checks
+    /// these records; it never compares the declarations again.
+    pub function_slot_families:
+        crate::fx_hash::HashMap<TypeName, Vec<crate::fir::ResolvedFunctionSlotFamily>>,
     pub inherited_defaults:
         crate::fx_hash::HashMap<TypeName, Vec<crate::fir::ResolvedInheritedDefault>>,
     /// The frontend-selected custom serializer construction of each source classifier whose
@@ -2866,7 +2886,7 @@ mod external_overrides;
 mod generated_members;
 pub use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
-pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
+pub use debug_locals::{IrCatchBinding, IrCatchName, IrLambdaForm, IrLambdaOrigin};
 pub use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
 pub use generated_members::{IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember};
 pub use generated_members::{
@@ -2874,14 +2894,13 @@ pub use generated_members::{
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
 };
 mod checked_operation;
-pub use checked_operation::IrCheckedOperation;
+pub use checked_operation::{IrCheckedOperation, IrModulePropertyReference};
 mod exported_entries;
 mod function_parameters;
 pub use function_parameters::*;
 mod traversal;
 pub use traversal::*;
 pub mod clone;
-pub use clone::clone_expression_dag;
 #[cfg(test)]
 pub(crate) use clone::make_expression_children_unique;
 pub use clone::make_expression_children_unique_tracked;
@@ -2889,6 +2908,7 @@ pub(crate) use clone::{
     clone_class_method, clone_expression_with_own_lambdas, clone_function_implementation,
     clone_with_operands,
 };
+pub use clone::{clone_expression_dag, clone_expression_dags};
 mod semantic_validation;
 pub use semantic_validation::{
     IncompleteIrFact, InvalidIrContract, NullableSamContractViolation, UndeterminedIrType,

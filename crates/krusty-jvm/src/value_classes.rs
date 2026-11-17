@@ -36,6 +36,7 @@ mod lambda_slots;
 mod mangled_calls;
 mod member_names;
 mod module_members;
+mod module_static_calls;
 mod operand_nullness;
 mod override_calls;
 mod parameter_guards;
@@ -728,6 +729,13 @@ pub(crate) fn lower_value_classes(
     // Keep their declaration identities so return adaptation follows that realized ABI instead of the
     // boxed-instance convention used by synthesized wrapper members.
     let mut lowered_value_members = HashSet::default();
+    // A value class's `companion { }` block members are already statics without a carrier; their
+    // names, bodies and returns follow the same realized ABI as the lowered members.
+    let block_members: HashSet<u32> = vc_methods
+        .iter()
+        .copied()
+        .filter(|&function| ir.companion_blocks.is_function(function))
+        .collect();
     // Functions whose physical name the mangling below changed, by stable identity.
     let mut renamed_functions = HashSet::default();
     // kotlinc names a property accessor's extension receiver after the property, not after the
@@ -788,7 +796,9 @@ pub(crate) fn lower_value_classes(
             let mangled = if realized_members.accessors.contains_key(&(fid as u32)) {
                 // Already named from its declared accessor signature, before it gained the carrier.
                 source_name.clone()
-            } else if lower_value_member {
+            } else if lower_value_member || block_members.contains(&(fid as u32)) {
+                // A block member takes the same `-impl` name as an instance member realized over
+                // the carrier, without gaining the carrier.
                 vc_member_impl_name(
                     &source_name,
                     &orig_params[fid],
@@ -939,7 +949,8 @@ pub(crate) fn lower_value_classes(
     for function in lowered_value_members.iter().copied() {
         super::method_parameters::prepend_value_class_receiver(ir, function, "arg0");
     }
-    let static_members = realized_members.static_members(&lowered_value_members);
+    let mut static_members = realized_members.static_members(&lowered_value_members);
+    static_members.extend(block_members.iter().copied());
     // `(class, method-index)` → the value class a member's RETURN keeps BOXED. A user value-class member
     // runs on / returns the boxed object (the erasure loop above left its VC return un-erased), so its
     // `MethodCall` result is a boxed `X` — a following unboxed-slot use (`val b: X = x.inc()`) must unbox.
@@ -1128,92 +1139,7 @@ pub(crate) fn lower_value_classes(
                 }
             }
         }
-        let mut module_physical_parameters = Vec::new();
-        for (index, e) in ir.exprs.iter_mut().enumerate() {
-            let IrExpr::Call { callee, .. } = e else {
-                continue;
-            };
-            let (name, params, ret, module_target, module_default_call, semantic_default) =
-                match &mut **callee {
-                    Callee::CrossFile {
-                        name,
-                        params,
-                        ret,
-                        module_target,
-                        module_default_call,
-                        ..
-                    } => (
-                        name,
-                        params,
-                        ret,
-                        *module_target,
-                        *module_default_call,
-                        false,
-                    ),
-                    Callee::ModuleWithDefaults {
-                        target,
-                        default_provider,
-                        name,
-                        params,
-                        ret,
-                        dispatch_receiver_ty,
-                        ..
-                    } => {
-                        if let Some(receiver) = dispatch_receiver_ty {
-                            *receiver = erase(receiver, &under);
-                        }
-                        let provider = default_calls::module_provider(*target, *default_provider);
-                        (name, params, ret, Some(provider), true, true)
-                    }
-                    _ => continue,
-                };
-            let record_physical = if let Some(callable) =
-                module_target.and_then(|target| ir.referenced_module_callables.get(&target))
-            {
-                let (mangled, value_class_bounds) = member_names::module_call_jvm_name(
-                    member_names::ModuleCallSignature {
-                        name,
-                        parameters: &callable.parameters,
-                        type_parameters: &callable.type_parameters,
-                        result: &callable.result,
-                        suspend: callable.flags.has(krusty::fir::DeclarationFlags::SUSPEND),
-                    },
-                    member_names::ModuleCallOwner {
-                        value_class_member: callable
-                            .owner
-                            .is_some_and(|owner| module_value_classes.contains_key(&owner)),
-                        file: callable.owner.is_none(),
-                        module_default_call,
-                        semantic_default,
-                    },
-                    &callable_under,
-                );
-                *name = mangled;
-                for (parameter, bound) in value_class_bounds {
-                    if let Some(slot) = params.get_mut(parameter) {
-                        *slot = bound;
-                    }
-                }
-                ir.declaration_argument_boundaries
-                    .contains_key(&(index as ExprId))
-            } else {
-                if !private_accessor_calls::keeps_name(&ir.private_property_accessor_calls, index) {
-                    *name = vc_mangle(name, params, ret, &callable_under, true, false);
-                }
-                false
-            };
-            for parameter in params.iter_mut() {
-                *parameter = erase(parameter, &under);
-            }
-            *ret = erase(ret, &under);
-            if record_physical {
-                module_physical_parameters.push((index as ExprId, params.clone()));
-            }
-        }
-        for (call, parameters) in module_physical_parameters {
-            ir.physical_call_parameters
-                .insert(call, parameters.into_boxed_slice());
-        }
+        module_static_calls::realize(ir, module_value_classes, &callable_under, &under);
     }
     function_references::realize(ir, &callable_under, &renamed_functions);
     synth_members::record_renamed_functions(ir, &realized_members, &renamed_functions);
@@ -2067,9 +1993,10 @@ pub(crate) fn lower_value_classes(
                     _ => None,
                 }
             }
-            // Checked same-module property reads may already be realized as a selected virtual call.
-            // Once a computed value-class accessor becomes static `getX-impl(U)`, preserve that
-            // selected declaration while adapting its dispatch receiver to parameter zero.
+            // A selected member of this file's or a sibling file's value class becomes its static
+            // `-impl` (a computed accessor's `getX-impl(U)` too), the dispatch receiver moving to
+            // parameter zero. A dependency's value-class member falls through: its `toString` and
+            // `hashCode` are the arms below, which call the classpath `-impl` over the carrier.
             IrExpr::Call {
                 callee: call_callee,
                 dispatch_receiver: Some(receiver),
@@ -2081,7 +2008,8 @@ pub(crate) fn lower_value_classes(
                 module_target,
                 ..
             } = &**call_callee
-                && (under.contains_key(owner)) =>
+                && under.contains_key(owner)
+                && (cls_by_name.contains_key(owner) || sibling_member_impls.contains_key(&id)) =>
             {
                 match cls_by_name.get(owner) {
                     Some(class) => {

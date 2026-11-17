@@ -2,6 +2,10 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
+mod dependency_identities;
+
+use dependency_identities::{DependencyIdentities, FunctionStore as PublishedFunction, Store};
+
 use super::classifier_signatures::{sign_package_classes, SignedClassifier};
 use super::declaration_signatures::{
     sign_package_function, sign_package_property, KlibLibraryError, SignedFunction, SignedProperty,
@@ -99,6 +103,8 @@ pub(super) struct PackageInventory {
     /// under a public identity even when it is file-private, because the runtime implements it by
     /// name; a body of its own file calls it by that identity. It names nothing in its package.
     private_externals: Vec<(TypeName, SignedFunction)>,
+    /// The exact-identity index of the finished inventory, built on the first dependency lookup.
+    dependency_identities: std::cell::OnceCell<DependencyIdentities>,
 }
 
 /// Exact prepared-inline declarations selected by metadata, grouped by declaring module.
@@ -182,6 +188,7 @@ impl PackageInventory {
             namespaces: HashSet::default(),
             intrinsics: KlibIntrinsicFacts::default(),
             private_externals: Vec::new(),
+            dependency_identities: std::cell::OnceCell::new(),
         };
         // A type alias's qualified identity omits its declaring archive. When an ordinary
         // dependency and an exact friend both publish the same identity, keep the friend-owned
@@ -608,89 +615,53 @@ impl PackageInventory {
         else {
             return None;
         };
-        self.functions
-            .iter()
-            .find_map(|(&package, functions)| {
-                functions
-                    .iter()
-                    .find(|function| {
-                        function.module.as_deref() == Some(identity.module.as_str())
-                            && &function.signature == signature
-                    })
-                    .map(|function| {
-                        (
-                            crate::libraries::CallablePlacement::Package(package),
-                            function,
-                        )
-                    })
-            })
-            .or_else(|| {
-                self.private_externals
-                    .iter()
-                    .find_map(|(package, function)| {
-                        (function.module.as_deref() == Some(identity.module.as_str())
-                            && &function.signature == signature)
-                            .then_some((
-                                crate::libraries::CallablePlacement::Package(*package),
-                                function,
-                            ))
-                    })
-            })
-            .or_else(|| {
-                self.companion_functions
-                    .iter()
-                    .find_map(|(&classifier, extensions)| {
-                        extensions
-                            .iter()
-                            .find(|extension| {
-                                extension.signed.module.as_deref() == Some(identity.module.as_str())
-                                    && &extension.signed.signature == signature
-                            })
-                            .map(|extension| (extension.placement(classifier), &extension.signed))
-                    })
-            })
-            .or_else(|| {
-                self.classifiers.iter().find_map(|(&classifier, signed)| {
-                    signed
-                        .functions
-                        .iter()
-                        .find(|function| {
-                            function.module.as_deref() == Some(identity.module.as_str())
-                                && &function.signature == signature
-                        })
-                        .map(|function| {
-                            (
-                                crate::libraries::CallablePlacement::Member {
-                                    owner: classifier,
-                                    owner_is_interface: signed.shape.is_interface(),
-                                },
-                                function,
-                            )
-                        })
-                        .or_else(|| {
-                            signed
-                                .associated_functions
-                                .iter()
-                                .find(|function| {
-                                    function.module.as_deref() == Some(identity.module.as_str())
-                                        && &function.signature == signature
-                                })
-                                .map(|function| {
-                                    (
-                                        crate::libraries::CallablePlacement::Associated {
-                                            classifier,
-                                            declaration_owner:
-                                                crate::types::SemanticCallableOwner::Classifier(
-                                                    classifier,
-                                                ),
-                                            access_owner: Some(classifier),
-                                        },
-                                        function,
-                                    )
-                                })
-                        })
-                })
-            })
+        Some(
+            match self
+                .dependency_identities()
+                .function(&identity.module, signature)?
+            {
+                PublishedFunction::Shared(Store::Package { package, index }) => (
+                    crate::libraries::CallablePlacement::Package(package),
+                    &self.functions[&package][index],
+                ),
+                PublishedFunction::PrivateExternal { index } => {
+                    let (package, function) = &self.private_externals[index];
+                    (
+                        crate::libraries::CallablePlacement::Package(*package),
+                        function,
+                    )
+                }
+                PublishedFunction::Shared(Store::Companion { classifier, index }) => {
+                    let extension = &self.companion_functions[&classifier][index];
+                    (extension.placement(classifier), &extension.signed)
+                }
+                PublishedFunction::Shared(Store::Member { classifier, index }) => {
+                    let signed = &self.classifiers[&classifier];
+                    (
+                        crate::libraries::CallablePlacement::Member {
+                            owner: classifier,
+                            owner_is_interface: signed.shape.is_interface(),
+                        },
+                        &signed.functions[index],
+                    )
+                }
+                PublishedFunction::Shared(Store::Associated { classifier, index }) => (
+                    crate::libraries::CallablePlacement::Associated {
+                        classifier,
+                        declaration_owner: crate::types::SemanticCallableOwner::Classifier(
+                            classifier,
+                        ),
+                        access_owner: Some(classifier),
+                    },
+                    &self.classifiers[&classifier].associated_functions[index],
+                ),
+            },
+        )
+    }
+
+    fn dependency_identities(&self) -> &DependencyIdentities {
+        self.dependency_identities
+            .get_or_init(|| DependencyIdentities::of(self))
     }
 
     /// The class contract of `classifier`, the class a singleton edge dispatches to.
@@ -719,31 +690,18 @@ impl PackageInventory {
         &self,
         identity: &crate::libraries::KlibDependencyCallable,
     ) -> Option<(TypeName, &SignedClassifier)> {
-        self.classifiers.iter().find_map(|(&owner, class)| {
-            if class.module.as_deref() != Some(identity.module.as_str()) {
-                return None;
+        let identities = self.dependency_identities();
+        let owner = match &identity.declaration {
+            crate::libraries::KlibDeclarationSignature::Public(signature) => {
+                identities.function_owner(&identity.module, signature)
             }
-            let declares = match &identity.declaration {
-                crate::libraries::KlibDeclarationSignature::Public(signature) => {
-                    class
-                        .functions
-                        .iter()
-                        .any(|function| &function.signature == signature)
-                        || class
-                            .constructors
-                            .iter()
-                            .any(|constructor| &constructor.signature == signature)
-                }
-                crate::libraries::KlibDeclarationSignature::Accessor(accessor) => {
-                    class.properties.iter().any(|property| {
-                        &property.getter == accessor || property.setter.as_ref() == Some(accessor)
-                    })
-                }
-                // A file-private function is top-level; no class declares one.
-                crate::libraries::KlibDeclarationSignature::FileLocal { .. } => false,
-            };
-            declares.then_some((owner, class))
-        })
+            crate::libraries::KlibDeclarationSignature::Accessor(accessor) => {
+                identities.accessor_owner(&identity.module, accessor)
+            }
+            // A file-private function is top-level; no class declares one.
+            crate::libraries::KlibDeclarationSignature::FileLocal { .. } => None,
+        }?;
+        Some((owner, &self.classifiers[&owner]))
     }
 
     /// The constructor serialized under exactly `identity`, with the class that declares it.
@@ -759,16 +717,11 @@ impl PackageInventory {
         else {
             return None;
         };
-        self.classifiers
-            .iter()
-            .filter(|(_, signed)| signed.module.as_deref() == Some(identity.module.as_str()))
-            .find_map(|(&classifier, signed)| {
-                signed
-                    .constructors
-                    .iter()
-                    .find(|constructor| &constructor.signature == signature)
-                    .map(|constructor| (classifier, signed, constructor))
-            })
+        let (classifier, position) = self
+            .dependency_identities()
+            .constructor(&identity.module, signature)?;
+        let signed = &self.classifiers[&classifier];
+        Some((classifier, signed, &signed.constructors[position]))
     }
 
     /// The property whose getter or setter is serialized under exactly `identity`, at its
@@ -785,66 +738,41 @@ impl PackageInventory {
         else {
             return None;
         };
-        let declares = |property: &&SignedProperty| {
-            property.module.as_deref() == Some(identity.module.as_str())
-                && (&property.getter == accessor || property.setter.as_ref() == Some(accessor))
-        };
-        self.properties
-            .iter()
-            .find_map(|(&package, properties)| {
-                properties.iter().find(declares).map(|property| {
+        Some(
+            match self
+                .dependency_identities()
+                .property(&identity.module, accessor)?
+            {
+                Store::Package { package, index } => (
+                    crate::libraries::CallablePlacement::Package(package),
+                    &self.properties[&package][index],
+                    None,
+                ),
+                Store::Companion { classifier, index } => {
+                    let extension = &self.companion_properties[&classifier][index];
+                    (extension.placement(classifier), &extension.signed, None)
+                }
+                Store::Member { classifier, index } => {
+                    let signed = &self.classifiers[&classifier];
                     (
-                        crate::libraries::CallablePlacement::Package(package),
-                        property,
-                        None,
+                        crate::libraries::CallablePlacement::Member {
+                            owner: classifier,
+                            owner_is_interface: signed.shape.is_interface(),
+                        },
+                        &signed.properties[index],
+                        Some(signed),
                     )
-                })
-            })
-            .or_else(|| {
-                self.companion_properties
-                    .iter()
-                    .find_map(|(&classifier, extensions)| {
-                        extensions
-                            .iter()
-                            .find(|extension| declares(&&extension.signed))
-                            .map(|extension| {
-                                (extension.placement(classifier), &extension.signed, None)
-                            })
-                    })
-            })
-            .or_else(|| {
-                self.classifiers.iter().find_map(|(&classifier, signed)| {
-                    signed
-                        .properties
-                        .iter()
-                        .find(declares)
-                        .map(|property| {
-                            (
-                                crate::libraries::CallablePlacement::Member {
-                                    owner: classifier,
-                                    owner_is_interface: signed.shape.is_interface(),
-                                },
-                                property,
-                                Some(signed),
-                            )
-                        })
-                        .or_else(|| {
-                            signed
-                                .associated_properties
-                                .iter()
-                                .find(declares)
-                                .map(|property| {
-                                    (
-                                        super::classifier_records::block_member_placement(
-                                            classifier,
-                                        ),
-                                        property,
-                                        Some(signed),
-                                    )
-                                })
-                        })
-                })
-            })
+                }
+                Store::Associated { classifier, index } => {
+                    let signed = &self.classifiers[&classifier];
+                    (
+                        super::classifier_records::block_member_placement(classifier),
+                        &signed.associated_properties[index],
+                        Some(signed),
+                    )
+                }
+            },
+        )
     }
 
     /// The top-level properties `package` declares under `name`, in library order.

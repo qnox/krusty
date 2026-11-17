@@ -11,6 +11,7 @@ mod deprecation;
 mod diagnostic_rendering;
 mod intersection;
 pub use intersection::declaration_approximation;
+pub(crate) use intersection::{same_component_set, same_structure};
 mod overridden_declaration;
 mod qualified_name;
 mod semantic_call_role;
@@ -47,7 +48,7 @@ pub use equality_mode::EqualityMode;
 
 pub(crate) use substitute::{
     declares_formal, ty_canonicalize_params, ty_map_symbols, ty_rename_params,
-    ty_subst_alias_expansion, ty_subst_formals, ty_subst_keep_unbound,
+    ty_replace_formals_along, ty_subst_alias_expansion, ty_subst_formals, ty_subst_keep_unbound,
     ty_subst_keep_unbound_closed, ty_subst_supertype_template, ty_with_param_bounds,
     ty_with_transitive_param_bounds, TyParamBindings,
 };
@@ -64,7 +65,6 @@ pub(crate) use raw_erasure::{formal_erasures, raw_member_type, DeclaredFormals};
 mod thin_handles;
 mod ty_kind;
 mod ty_table;
-pub(crate) use primitive_arrays::array_declaration_name;
 pub use primitive_arrays::{prim_array_element, prim_array_name, primitive_array_creator_element};
 pub(crate) use spelling::type_name_from_multifile_facade;
 pub use spelling::{existing_type_name, existing_type_name_child, type_name, type_name_from};

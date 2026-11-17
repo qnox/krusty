@@ -730,6 +730,26 @@ fn record_class_function_exports(
         let Some(chain) = metadata_class_chain(package, name, &decoded.classes)? else {
             continue;
         };
+        let (own, enclosing) = chain
+            .split_last()
+            .ok_or_else(|| format!("class {name} has no metadata class chain"))?;
+        let class_id = ir
+            .class_id_by_name(source.fq_name_id())
+            .ok_or_else(|| format!("class {name} has no checked IR declaration"))?;
+        exports.record_classifier(
+            class_id,
+            crate::libraries::KlibClassIdentity {
+                module: module_name.to_owned(),
+                signature: crate::metadata::id_signature::metadata_class_signature(
+                    MetadataContainer {
+                        package,
+                        classes: enclosing,
+                        native_interop_library: false,
+                    },
+                    *own,
+                ),
+            },
+        );
         let container = MetadataContainer {
             package,
             classes: &chain,
@@ -784,16 +804,18 @@ fn record_class_function_exports(
             if source.type_params.is_empty() && source.captured_type_params.is_empty() {
                 declarations.record(function, signature.clone(), receiver);
             }
-            if source.is_interface && !declaration.is_static {
-                exports.record_interface_member(
-                    function,
-                    crate::libraries::KlibDependencyCallable {
-                        module: module_name.to_owned(),
-                        declaration: crate::libraries::KlibDeclarationSignature::Public(
-                            signature.clone(),
-                        ),
-                    },
-                );
+            if !declaration.is_static {
+                let identity = crate::libraries::KlibDependencyCallable {
+                    module: module_name.to_owned(),
+                    declaration: crate::libraries::KlibDeclarationSignature::Public(
+                        signature.clone(),
+                    ),
+                };
+                if source.is_interface {
+                    exports.record_interface_member(function, identity);
+                } else {
+                    exports.record_member_declaration(function, identity);
+                }
             }
             if !crate::backend::has_standalone_dependency_code(ir, function) {
                 continue;
@@ -833,7 +855,8 @@ fn record_class_function_exports(
 /// and publishes no constructor. A generic class's entry takes its constructor's declared
 /// parameter types, which a KLIB target realizes as it realizes the class's own storage; an inner
 /// class's entry takes its enclosing instance first, as its constructor does. A class capturing
-/// type parameters of an enclosing declaration has no entry yet.
+/// type parameters of an enclosing declaration has no entry yet. Abstract and sealed classes
+/// retain initializer declarations for checked superclass delegation, without allocation exports.
 fn record_constructor_exports(
     ir: &IrFile,
     module_name: &str,
@@ -854,12 +877,9 @@ fn record_constructor_exports(
         ));
     }
     if source.is_interface
-        || source.is_abstract
-        || source.is_sealed
         || source.is_object
         || source.is_companion
         || source.is_enum
-        || source.is_value
         || source.is_annotation
         || !source.captured_type_params.is_empty()
     {
@@ -888,13 +908,18 @@ fn record_constructor_exports(
         let class = ir
             .class_id_by_name(source.fq_name_id())
             .ok_or_else(|| format!("class {} has no IR identity", source.fq_name()))?;
-        exports.record_constructor(
-            crate::backend::ExportedConstructor { class, secondary },
-            crate::libraries::KlibDependencyCallable {
-                module: module_name.to_owned(),
-                declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
-            },
-        );
+        let constructor = crate::backend::ExportedConstructor { class, secondary };
+        let identity = crate::libraries::KlibDependencyCallable {
+            module: module_name.to_owned(),
+            declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
+        };
+        if source.is_abstract || source.is_sealed {
+            exports
+                .record_constructor_declaration(constructor, identity)
+                .map_err(str::to_owned)?;
+        } else {
+            exports.record_constructor(constructor, identity);
+        }
     }
     Ok(())
 }
@@ -963,6 +988,26 @@ fn record_class_property_exports(
                     {
                         Some((Some(*property), Some(*getter), *setter, false))
                     }
+                    (
+                        PropertyOrigin::CompanionBlock(index),
+                        crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+                            getter,
+                            setter,
+                            receiver: None,
+                            context_parameters,
+                            delegate: None,
+                        },
+                    ) if context_parameters.is_empty()
+                        && ir
+                            .companion_blocks
+                            .properties_of(name)
+                            .nth(*index)
+                            .is_some_and(|property| {
+                                property.getter == Some(*getter) && property.setter == *setter
+                            }) =>
+                    {
+                        Some((Some(*property), Some(*getter), *setter, false))
+                    }
                     _ => None,
                 });
         let first = selected.next();
@@ -1005,7 +1050,14 @@ fn record_class_property_exports(
                         property.source_order,
                     )
                 }
-                PropertyOrigin::Constant(_) | PropertyOrigin::CompanionBlock(_) => continue,
+                PropertyOrigin::Constant(_) => continue,
+                PropertyOrigin::CompanionBlock(_) => {
+                    return Err(format!(
+                        "{}.{} has no exact checked companion-block accessor layout",
+                        source.fq_name(),
+                        declaration.name,
+                    ));
+                }
             };
             let owner = ir
                 .class_id_by_name(name)
@@ -1231,12 +1283,28 @@ fn unsupported_class_construct(ir: &IrFile, class: &IrClass) -> Option<&'static 
     if ir
         .companion_blocks
         .properties_of(class.fq_name_id())
-        .next()
-        .is_some()
+        .any(|property| !companion_accessor_bodies(ir, property))
     {
         return Some("companion blocks");
     }
     None
+}
+
+/// Accessor-only block properties use the ordinary class metadata and exact receiver-less
+/// accessor export protocol. Stored properties still need their class initialization/storage
+/// publication; accepting their metadata alone would silently lose executable behavior.
+fn companion_accessor_bodies(ir: &IrFile, property: &crate::ir::IrCompanionBlockProperty) -> bool {
+    property.storage.is_none()
+        && property.getter.is_some()
+        && (!property.is_var || property.setter.is_some())
+        && property
+            .getter
+            .into_iter()
+            .chain(property.setter)
+            .all(|function| {
+                let function = &ir.functions[function as usize];
+                function.dispatch_receiver.is_none() && function.body.is_some()
+            })
 }
 
 /// The value a class `const val`'s static storage is initialized with.

@@ -19,6 +19,7 @@
 use krusty::fx_hash::{HashMap, HashSet};
 
 mod absent_arguments;
+mod accessor_property_entries;
 pub(super) mod any_members;
 mod array_lists;
 mod arrays;
@@ -51,10 +52,12 @@ use tests::lower_alone;
 
 pub(super) use exceptions::runtime_lays_out;
 pub(super) use scalar_instructions::is_scalar_operation;
+pub(super) use scalar_value_classes::runtime_value_declaration;
 pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
+        || intrinsic_operations::member_operation(operation).is_some()
         || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == krusty::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == krusty::backend::BackendCompilerIntrinsic::ThrowableCause
@@ -167,6 +170,8 @@ pub(super) fn lower_file(
         Ok(module.global(value))
     })?;
     let member_property_definitions = property_registry.prepare_member_properties(ir, module)?;
+    let accessor_property_definitions =
+        property_registry.prepare_accessor_properties(ir, module)?;
     let mut signatures = Vec::with_capacity(ir.functions.len());
     for (id, function) in ir.functions.iter().enumerate() {
         if ir.inline_only_fns.contains(&(id as FunId)) {
@@ -201,7 +206,14 @@ pub(super) fn lower_file(
         runtime
             .callable_references
             .begin_file(module_name, ir, dependency_exports)?;
-    let call_targets = callable_registry.file_calls(ir, callables, module_facts, module)?;
+    let call_targets = callable_registry.file_calls(
+        ir,
+        callables,
+        module_facts,
+        classifiers,
+        laid_out_classes,
+        module,
+    )?;
     let inert_singleton_bindings = krusty::backend::inert_staged_singleton_bindings(
         ir,
         |expression| {
@@ -272,6 +284,7 @@ pub(super) fn lower_file(
         functions: &indices,
         globals: &globals,
         classes: classes.as_ref(),
+        laid_out_classes,
         calls: &call_targets,
         callables,
         inert_singleton_bindings: &inert_singleton_bindings,
@@ -373,12 +386,10 @@ pub(super) fn lower_file(
             module,
             runtime,
         )?;
-        for (name, record) in classes.records(module, ir, &indices, &signatures) {
-            laid_out_classes.insert(name, record);
-        }
     } else if !member_property_definitions.is_empty() {
         return Err("a member property definition without its class layout".to_string());
     }
+    accessor_property_entries::define(&context, &accessor_property_definitions, module)?;
     let initializer = if ir.statics.iter().any(|property| property.init.is_some()) {
         let index = module.declare();
         let ty = module.func_type(Vec::new(), Vec::new());
@@ -406,12 +417,24 @@ pub(super) fn lower_file(
     } else {
         None
     };
+    if let Some(classes) = &classes {
+        for (name, record) in classes.records(
+            module,
+            ir,
+            &indices,
+            &signatures,
+            dependency_exports,
+            callables,
+        )? {
+            laid_out_classes.insert(name, record);
+        }
+    }
     callable_registry.publish(ir, dependency_exports, &indices)?;
     let mut reach = reach.into_inner();
     if let Some(classes) = &classes {
         for class in 0..ir.classes.len() {
             for member in AnyMember::ALL {
-                if !classes.realizes(class as ClassId, member) {
+                if classes.has_bodiless_instances(class as ClassId, member) {
                     reach.bodiless_class(member);
                 }
             }
@@ -479,6 +502,7 @@ struct FileContext<'a> {
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
+    laid_out_classes: &'a LaidOutClasses,
     calls: &'a FileCallTargets,
     /// Provider facts frozen for exactly the dependency identities this file calls.
     callables: &'a CheckedBackendCallables,
@@ -490,6 +514,17 @@ struct FileContext<'a> {
     reach: &'a std::cell::RefCell<FileReach>,
     /// Local delegated-property accessors and the one object each property's convention receives.
     delegates: &'a local_delegates::Prepared,
+}
+
+/// The wasm value a parameter of type `ty` is passed as. A `Nothing` parameter holds no value any
+/// caller supplies, yet keeps its slot, so an implementation such as `contains(element: Nothing)`
+/// takes the operands its interface member passes: a reference, as an erased type parameter's is.
+/// A `Unit` parameter still has none.
+pub(super) fn parameter_carrier_of(ty: Ty) -> Result<Option<ValType>, Unsupported> {
+    if ty == Ty::Nothing {
+        return Ok(Some(REFERENCE));
+    }
+    carrier(ty)
 }
 
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
@@ -748,6 +783,7 @@ struct Body<'a> {
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
+    laid_out_classes: &'a LaidOutClasses,
     /// Exact source/dependency call targets registered before this body is emitted.
     calls: &'a FileCallTargets,
     /// Provider facts frozen for exactly the dependency identities this file calls.
@@ -822,6 +858,7 @@ impl<'a> Body<'a> {
             functions: context.functions,
             globals: context.globals,
             classes: context.classes,
+            laid_out_classes: context.laid_out_classes,
             calls: context.calls,
             callables: context.callables,
             inert_singleton_bindings: context.inert_singleton_bindings,
@@ -959,19 +996,17 @@ impl<'a> Body<'a> {
     fn value(&mut self, id: u32, target: Ty) -> Result<(), Unsupported> {
         let source_ty = self.type_of(id)?;
         self.expression(id)?;
-        // A statement-shaped operand may return/throw before its enclosing value use resumes.
-        // Its Unit annotation must stay Unit; only the common completion proof removes the
-        // impossible conversion. Live Unit operands still fail below rather than invent a value.
-        if source_ty == Some(Ty::Unit) && carrier(target)?.is_some() && self.diverges(id) {
+        // An operand may return, throw or enter a loop it never leaves before its enclosing value
+        // use resumes, whatever type it is annotated with: an inlined `Nothing` body keeps its
+        // caller's `Int`, and a statement-shaped one stays `Unit`. Only the common completion
+        // proof removes the impossible conversion; `unreachable` discards whatever the operand
+        // left and restores stack polymorphism. An inlined generic result may retain `Nothing`
+        // yet complete normally, so a live operand still converts or fails below.
+        if self.diverges(id) {
             self.code.unreachable();
             return Ok(());
         }
         let Some(source) = source_ty else {
-            // Restore stack polymorphism after structured control only when completion proves
-            // divergence: an inlined generic result may retain Nothing but complete normally.
-            if self.diverges(id) {
-                self.code.unreachable();
-            }
             return Ok(());
         };
         if source == Ty::Unit && carrier(target)?.is_some() {
@@ -1059,7 +1094,10 @@ impl<'a> Body<'a> {
                 return Err("a shared cell read as a value".to_string());
             }
             IrExpr::GetValue(slot) => {
-                if let Some(&(local, declared)) = self.values.get(&slot) {
+                if let Some(&(_, Ty::Nothing)) = self.values.get(&slot) {
+                    // A `Nothing` parameter holds no value: no call reaches a read of it.
+                    self.code.unreachable();
+                } else if let Some(&(local, declared)) = self.values.get(&slot) {
                     self.code.local_get(local);
                     // A smart cast reads the slot at a narrower type: `Int` out of an `Int?`
                     // local holding a box.
@@ -1395,6 +1433,32 @@ impl<'a> Body<'a> {
                 self.throwable_field_read(field, dispatch_receiver, &args, *ret)?;
             }
             IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                params,
+                ret,
+                defaults,
+                extension_receiver_parameter,
+                ..
+            } = &**call_callee
+                && let Some(operation) = self
+                    .callables
+                    .callable(*target)
+                    .and_then(|fact| fact.compiler_operation())
+                    .and_then(intrinsic_operations::member_operation) =>
+            {
+                intrinsic_operations::string_get_frame(
+                    params,
+                    *ret,
+                    defaults,
+                    *extension_receiver_parameter,
+                )?;
+                self.intrinsic(operation, dispatch_receiver, &args)?;
+            }
+            IrExpr::Call {
                 dispatch_receiver: Some(receiver),
                 args,
                 ..
@@ -1460,7 +1524,7 @@ impl<'a> Body<'a> {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
                 type_operand,
-            } if self.class_of_type(type_operand).is_some()
+            } if self.class_structure(type_operand)?.is_some()
                 || self.interface_of_type(type_operand).is_some() =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
@@ -1645,6 +1709,19 @@ impl<'a> Body<'a> {
                     })?;
                 self.code.call(entry);
             }
+            // So are `values()` and `valueOf`, which read those constants.
+            IrExpr::EnumValues { classifier } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::Values,
+                None,
+            )?,
+            IrExpr::EnumValueOf {
+                classifier, arg, ..
+            } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::ValueOf,
+                Some(arg),
+            )?,
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
                 ty,
@@ -1838,10 +1915,10 @@ impl<'a> Body<'a> {
                 ..
             } => {
                 self.function_value(
+                    id,
                     impl_fn,
                     &captures,
                     function_values::FunctionEquality::Identity,
-                    self.type_of(id)?,
                     sam.as_deref(),
                 )?;
             }
@@ -1860,6 +1937,12 @@ impl<'a> Body<'a> {
             IrExpr::LocalDelegateAccess(access) => self.local_delegate_access(access)?,
             IrExpr::LocalPropertyReference(reference) => {
                 self.local_property_reference(&reference)?
+            }
+            IrExpr::Checked(ref operation)
+                if let Some(reference) = operation.module_property_reference()
+                    && reference.delegated =>
+            {
+                self.delegated_property_reference(reference.property)?
             }
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
@@ -2050,12 +2133,22 @@ impl<'a> Body<'a> {
         let null_guard = matches!(op, IrBinOp::Eq | IrBinOp::Ne)
             && (matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null))
                 || matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null)));
+        // The `Unit` value is the runtime singleton object, so an identity test against it
+        // materializes that reference instead of treating the operand as carrier-less.
+        let identity_operand = |ty: Ty| -> Result<bool, Unsupported> {
+            Ok(ty == Ty::Unit || matches!(carrier(ty)?, Some(ValType::Ref { .. })))
+        };
         if (matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) || null_guard)
-            && matches!(carrier(left)?, Some(ValType::Ref { .. }))
-            && matches!(carrier(right)?, Some(ValType::Ref { .. }))
+            && identity_operand(left)?
+            && identity_operand(right)?
         {
-            self.expression(lhs)?;
-            self.expression(rhs)?;
+            for (operand, ty) in [(lhs, left), (rhs, right)] {
+                self.expression(operand)?;
+                if ty == Ty::Unit {
+                    let unit = self.runtime.unit_object(self.module);
+                    self.code.global_get(unit);
+                }
+            }
             self.code.ref_eq();
             if matches!(op, IrBinOp::Ne | IrBinOp::RefNe) {
                 self.code.op(EQZ32);
@@ -2368,6 +2461,7 @@ fn checked_operation_name(operation: &krusty::ir::IrCheckedOperation) -> &'stati
         IrCheckedOperation::ComparableRangeContains { .. } => "ComparableRangeContains",
         IrCheckedOperation::IllegalProgressionStep { .. } => "IllegalProgressionStep",
         IrCheckedOperation::AtomicField { .. } => "AtomicField",
+        IrCheckedOperation::AtomicArrayElement { .. } => "AtomicArrayElement",
         IrCheckedOperation::RangeLoop { .. } => "RangeLoop",
         IrCheckedOperation::PropertyReference { .. } => "PropertyReference",
     }
@@ -2424,11 +2518,21 @@ mod tests {
             &module_facts,
             &krusty::libraries::EmptySymbolSource,
         );
+        lower_with_classifiers(ir, properties, started, &module_facts, &classifiers)
+    }
+
+    pub(super) fn lower_with_classifiers(
+        ir: &IrFile,
+        properties: &RealizedProperties,
+        started: &mut super::super::Started,
+        module_facts: &krusty::backend::BackendModuleFacts,
+        classifiers: &dyn krusty::backend::BackendClassifierSource,
+    ) -> Result<LoweredFile, Unsupported> {
         lower_file(
             FileInput {
-                module_facts: &module_facts,
+                module_facts,
                 array_range_checks: super::super::super::array_access::default_range_checks(),
-                classifiers: &classifiers,
+                classifiers,
                 ir,
                 properties,
                 callables: &CheckedBackendCallables::default(),

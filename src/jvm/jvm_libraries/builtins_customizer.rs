@@ -32,12 +32,6 @@ impl JvmBuiltInsCustomizer {
     ) -> Option<LibraryType> {
         let mut classifier = if internal.matches("kotlin/Cloneable") {
             base.unwrap_or_else(Self::cloneable_classifier)
-        } else if Ty::obj_name(internal).is_array() {
-            base.unwrap_or_else(|| {
-                let mut classifier = LibraryType::declaration_header();
-                classifier.declaration_name = crate::types::array_declaration_name(internal);
-                classifier
-            })
         } else {
             base?
         };

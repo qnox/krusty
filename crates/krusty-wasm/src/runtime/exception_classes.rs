@@ -22,7 +22,7 @@ impl Runtime {
         let structure = self.exceptions.ensure_class(module, source, identity)?;
         for (class, structure) in self.exceptions.declared_classes() {
             let names = member_class_names(class);
-            let to_string = self.throwable_to_string(module, class, &names);
+            let to_string = self.throwable_to_string(module, &names);
             let mut init = Code::default();
             for function in [
                 self.objects.identity_equals,

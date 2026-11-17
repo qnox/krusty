@@ -10,6 +10,7 @@ mod call_arg_mapping_failure;
 mod call_realization;
 mod call_sig;
 mod callable_scope_rung;
+mod class_identity;
 mod class_name_property;
 mod classifier_callables;
 mod classifier_declaration;
@@ -63,6 +64,7 @@ pub use call_realization::{
 };
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
+pub use class_identity::KlibClassIdentity;
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
     ConstructorCallConstraints,
@@ -1408,6 +1410,10 @@ pub struct FunctionInfo {
     /// Provider-owned override-slot identity for declarations whose platform compatibility differs
     /// from their source-language signature. This is distinct from the physical emit handle.
     pub(crate) provider_override_slot: Option<ProviderOverrideSlot>,
+    /// The declaring language has no extension receivers (Java), so its provider publishes that
+    /// this member overrides an inherited Kotlin extension by taking the receiver as its first
+    /// parameter, as kotlinc's Java override checker matches them.
+    pub(crate) receiver_as_first_parameter: bool,
     /// Provider-normalized receiver-less declaration in a classifier's static namespace. The
     /// checker uses this only as source call shape; target realization remains on the callable.
     pub classifier_static: bool,
@@ -1692,6 +1698,7 @@ impl FunctionInfo {
             kind,
             source_inputs: None,
             provider_override_slot: None,
+            receiver_as_first_parameter: false,
             classifier_static: false,
             associated_classifier: None,
             associated_access_owner: None,
@@ -2178,6 +2185,8 @@ impl ResolvedSymbols {
 /// knowing the target ABI.
 #[derive(Clone)]
 pub struct LibraryType {
+    /// Exact KLIB declaration identity, published by the selected classifier provider.
+    pub klib_identity: Option<KlibClassIdentity>,
     /// Authenticated platform-runtime storage, independently of any selected constructor.
     pub runtime_exception: Option<RuntimeExceptionLayout>,
     /// Exact lexical declaration ownership, independent of captured outer instances. `None` is
@@ -2409,6 +2418,7 @@ impl LibraryType {
     /// query whose answer could disagree with the record.
     pub fn declaration_header() -> Self {
         Self {
+            klib_identity: None,
             runtime_exception: None,
             declaration_name: None,
             // The header commits existence only; the provider's full record supplies the real
@@ -2767,6 +2777,7 @@ mod tests {
 
     fn ty_with<F: FnOnce(&mut super::LibraryType)>(f: F) -> super::LibraryType {
         let mut t = super::LibraryType {
+            klib_identity: None,
             runtime_exception: None,
             declaration_name: None,
             is_kotlin: true,

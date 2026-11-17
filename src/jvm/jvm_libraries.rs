@@ -98,13 +98,6 @@ use crate::types::{
 
 use java_operator_convention::java_method_has_operator_convention;
 
-fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
-    class
-        .inner_class_self()
-        .map(|entry| entry.access)
-        .unwrap_or(class.access)
-}
-
 /// The JVM platform's contribution to Kotlin's default imports. The language-level `kotlin.*` set is
 /// composed with this list in the import-level builder and in the seed filter, so neither list is duplicated.
 const PLATFORM_DEFAULT_IMPORT_PACKAGES: &[&str] = &["java.lang", "kotlin.jvm"];
@@ -1854,8 +1847,9 @@ impl JvmLibraries {
             // correct: nothing decodes there, so `kotlin/String` keeps the JVM class's supertypes
             // rather than being left with none (it would otherwise lose `CharSequence`, `Comparable`
             // and `Any`, and every subtype test against them would start failing).
-            let kotlin_scope_is_authoritative = is_mapped_builtin
-                && self.cp.builtin_is_interface_name(internal_name).is_some()
+            let builtin_declaration_decoded =
+                is_mapped_builtin && self.cp.builtin_is_interface_name(internal_name).is_some();
+            let kotlin_scope_is_authoritative = builtin_declaration_decoded
                 // Scope provenance belongs to the central Kotlin↔JVM mapping. Keeping the policy
                 // there avoids a classpath-origin branch (and a second collection/String name list)
                 // in this loader; this site only combines that semantic policy with the runtime
@@ -1868,10 +1862,7 @@ impl JvmLibraries {
             // erased Java `next(): Any!` compete with the Kotlin declaration.
             let kotlin_supertypes_are_authoritative = metadata_class_signature.is_some();
             let mut supertypes = TypeNameList::new();
-            if kotlin_scope_is_authoritative {
-                // Nothing from the Java class: `java/io/Serializable`, the one JVM supertype kotlinc
-                // keeps on a mapped builtin, comes from `JvmBuiltInsCustomizer`, JDK or not.
-            } else if let Some((_, _, declared)) = &metadata_class_signature {
+            if let Some((_, _, declared)) = &metadata_class_signature {
                 // A function-type supertype (`KProperty0<V> : () -> V`) is an edge to the function
                 // classifier it instantiates, which declares the inherited `invoke`.
                 for supertype in declared {
@@ -1882,6 +1873,13 @@ impl JvmLibraries {
                         supertypes.push_name(name);
                     }
                 }
+            } else if builtin_declaration_decoded {
+                // A decoded builtin declaration states the mapped classifier's whole Kotlin
+                // supertype list, even where its members still join the JVM class's. The JVM
+                // class's own interfaces (`java.lang.Integer : Constable, ConstantDesc`,
+                // `java.lang.Enum : Constable`) are realization details kotlinc never publishes.
+                // `java/io/Serializable`, the one JVM supertype kotlinc keeps on a mapped builtin,
+                // comes from `JvmBuiltInsCustomizer`, JDK or not.
             } else {
                 for s in ci.interfaces.iter_ids() {
                     supertypes.push_name(s);
@@ -2352,6 +2350,7 @@ impl JvmLibraries {
             let own_type_parameter_count = application_header.own_count;
             let type_parameters = application_header.parameters;
             Some(LibraryType {
+                klib_identity: None,
                 runtime_exception: None,
                 declaration_name: if ci.this_class == internal_name {
                     classifier_facts::classifier_declaration_name(&ci)
@@ -2360,20 +2359,7 @@ impl JvmLibraries {
                 },
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
-                access: if let Some(visibility) = ci.meta.class_visibility {
-                    visibility.into()
-                } else {
-                    let access = effective_class_access(&ci);
-                    if access & 0x0001 != 0 {
-                        crate::libraries::ClassifierAccess::Public
-                    } else if access & 0x0004 != 0 {
-                        crate::libraries::ClassifierAccess::Protected
-                    } else if access & 0x0002 != 0 {
-                        crate::libraries::ClassifierAccess::Private
-                    } else {
-                        crate::libraries::ClassifierAccess::PackagePrivate
-                    }
-                },
+                access: classifier_facts::classifier_access(&ci),
                 source_file: None,
                 stable_declaration: None,
                 is_nested: ci.inner_class_self().is_some(),

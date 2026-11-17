@@ -19,7 +19,9 @@
 //! each a typed function reference, and the interface table and the class's type information
 //! record after `kotlin.Any`'s three
 //! (`super::super::objects::slot_field`). It is declared a subtype of its superclass's table, or of
-//! `$AnyTable` for a root class. A slot a table does not type is `funcref` and null. A class that
+//! `$FunctionTable` for a root class. That common prefix adds the erased function-value entry;
+//! ordinary classes leave it null, while classes implementing `FunctionN` carry a checked bridge
+//! there. A slot a table does not type is `funcref` and null. A class that
 //! inherits `kotlin.Any`'s own `hashCode` gets its identity hash; one that inherits `toString` gets
 //! `kotlin.Enum`'s, its `name`, `kotlin.Throwable`'s for a class extending a runtime exception, or
 //! otherwise `kotlin.Any`'s default rendering. Both defaults print the name Kotlin gives the source
@@ -50,7 +52,7 @@ use krusty::backend::class_tables::module_classes::ModuleClasses;
 use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
 use krusty::backend::class_tables::{
     self, AnyMember, LaidOutSuperclass, NumberedClassTables, Representation, Slot, SlotKey,
-    ANY_SLOTS,
+    ANY_SLOTS, FUNCTION_SLOT,
 };
 use krusty::backend::local_properties::RealizedLocalPropertyAccess;
 use krusty::backend::BackendClassifierSource;
@@ -66,10 +68,13 @@ use super::super::identity::PREFIX_FIELDS;
 use super::super::interface_dispatch::{ClassRef, MemberRef};
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
 use super::super::runtime::Runtime;
-use super::laid_out_classes::{DependencyImplementation, LaidOutClass, LaidOutClasses, Placed};
+use super::laid_out_classes::{
+    DependencyImplementation, FunctionBridgeEntry, LaidOutClass, LaidOutClasses, Placed,
+};
 use super::lower::{carrier, cell_reference, parameter_carrier, Unsupported, STRING};
 
 mod constructor_prefix;
+mod published_slots;
 pub(super) use constructor_prefix::enclosing_field;
 
 #[cfg(test)]
@@ -139,20 +144,28 @@ pub(super) struct Accessor {
 /// A representation bridge a table slot holds (see [`Slot::Bridge`] and [`Slot::AccessorBridge`]):
 /// `class` is the class that introduced it, whose table type every receiver reaching the bridge
 /// has.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct OverrideBridge {
     pub(super) class: ClassId,
     pub(super) member: BridgedMember,
 }
 
 /// The member a bridge wears the base's signature of, and where it forwards.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum BridgedMember {
     /// A method: the base method `declared`, forwarded through `target_slot` (see
     /// [`Slot::Bridge`]) to `target`.
     Method {
         declared: FunId,
         target_slot: Option<u32>,
+        target: FunId,
+    },
+    /// A method of a base no file declares, wearing the carriers the base declares (see
+    /// [`Slot::DeclaredBridge`]).
+    DeclaredMethod {
+        parameters: Box<[Ty]>,
+        result: Ty,
+        target_slot: u32,
         target: FunId,
     },
     /// A property accessor: the property type as the base declares it and as the implementation
@@ -163,12 +176,29 @@ pub(super) enum BridgedMember {
         setter: bool,
         target_slot: u32,
     },
+    /// The erased `FunctionN.invoke` entry, forwarded through the concrete member slot.
+    Function {
+        arity: usize,
+        target_slot: u32,
+        target: FunId,
+    },
 }
 
 impl BridgedMember {
     /// The bridge `entry` stands for, or `None` for an entry that is not one this form carries.
     fn of(entry: &Slot) -> Option<Self> {
-        match *entry {
+        match entry.clone() {
+            Slot::DeclaredBridge {
+                parameters,
+                result,
+                target_slot,
+                target,
+            } => Some(Self::DeclaredMethod {
+                parameters,
+                result,
+                target_slot,
+                target,
+            }),
             Slot::Bridge {
                 declared,
                 target_slot,
@@ -189,6 +219,15 @@ impl BridgedMember {
                 implemented,
                 setter,
                 target_slot,
+            }),
+            Slot::FunctionBridge {
+                arity,
+                target_slot,
+                target,
+            } => Some(Self::Function {
+                arity,
+                target_slot,
+                target,
             }),
             _ => None,
         }
@@ -256,6 +295,9 @@ pub(super) struct FileClasses {
     /// How each class implements each member of a dependency's interface, as interface recording
     /// found it.
     pub(super) dependency_implementations: Vec<Vec<(MemberRef, DependencyImplementation)>>,
+    /// Checked callable arities, independent of whether their method adapters were emitted.
+    pub(super) function_arities: Vec<Vec<usize>>,
+    pub(super) suspend_function_arities: Vec<Vec<usize>>,
     /// Why a class with no instances of its own cannot be extended by a later file: what its
     /// table or interface entries needed that this form does not provide.
     pub(super) refusals: Vec<Option<Unsupported>>,
@@ -277,10 +319,12 @@ impl FileClasses {
         PREFIX_FIELDS + self.base_fields(class) + self.tables.table(class).first_field + index
     }
 
-    /// Whether the table of `class`, a class with instances of its own, has a body for `member`:
-    /// `false` where the slot traps.
-    pub(super) fn realizes(&self, class: ClassId, member: AnyMember) -> bool {
-        self.realized[class as usize][member.slot() as usize]
+    /// Whether instances of `class` can reach a slot with no body. A declaration-only layout
+    /// has no runtime dispatch record: its entries can be inherited, but are not objects a call
+    /// can receive. Each concrete subclass is checked through its own record and entries.
+    pub(super) fn has_bodiless_instances(&self, class: ClassId, member: AnyMember) -> bool {
+        self.forms[class as usize].record.is_some()
+            && !self.realized[class as usize][member.slot() as usize]
     }
 
     /// How many fields of `class`'s struct, after the identity prefix, a base outside this file
@@ -324,6 +368,69 @@ impl FileClasses {
             .find_map(|superclass| superclass.methods.get(&callable).copied())
     }
 
+    /// The exact erased function entry a producer table defines or inherits.
+    fn function_bridge(
+        &self,
+        class: ClassId,
+        module: &mut Module,
+    ) -> Result<Option<FunctionBridgeEntry>, Unsupported> {
+        let Some(entry) = self.tables.table(class).vtable.get(FUNCTION_SLOT as usize) else {
+            return Ok(None);
+        };
+        let bridge = match entry {
+            Slot::FunctionBridge { arity, .. } => {
+                let function = self.entries[class as usize]
+                    .get(FUNCTION_SLOT as usize)
+                    .copied()
+                    .flatten()
+                    .ok_or("a function bridge slot with no defined adapter")?;
+                let expected = module.func_type(vec![REFERENCE; *arity + 1], vec![REFERENCE]);
+                let signature = module
+                    .defined_function_type(function)
+                    .ok_or("a function bridge whose adapter has no defined body")?;
+                if signature != expected {
+                    return Err("a function bridge body with a mismatched erased signature".into());
+                }
+                FunctionBridgeEntry {
+                    arity: *arity,
+                    function,
+                    signature,
+                }
+            }
+            Slot::Inherited { slot } if *slot == FUNCTION_SLOT => {
+                let inherited = self
+                    .laid_out_superclass(class)
+                    .and_then(|superclass| superclass.function_bridge);
+                let function = self.entries[class as usize]
+                    .get(FUNCTION_SLOT as usize)
+                    .copied()
+                    .flatten();
+                match (inherited, function) {
+                    // The superclass adapts no function type, so neither does this class.
+                    (None, None) => return Ok(None),
+                    (Some(inherited), Some(function)) if inherited.function == function => {
+                        inherited
+                    }
+                    _ => {
+                        return Err(
+                            "an inherited function slot differing from its producer adapter".into(),
+                        )
+                    }
+                }
+            }
+            _ => return Ok(None),
+        };
+        let expected = module.func_type(vec![REFERENCE; bridge.arity + 1], vec![REFERENCE]);
+        if bridge.signature != expected
+            || module.defined_function_type(bridge.function) != Some(bridge.signature)
+        {
+            return Err(
+                "an inherited function adapter with a mismatched physical signature".into(),
+            );
+        }
+        Ok(Some(bridge))
+    }
+
     /// What a later file extending each class of this file reads of it. `functions` and
     /// `signatures` are the file's function indices and types, by `FunId`.
     pub(super) fn records(
@@ -332,7 +439,9 @@ impl FileClasses {
         ir: &IrFile,
         functions: &[Option<u32>],
         signatures: &[Option<u32>],
-    ) -> Vec<(TypeName, LaidOutClass)> {
+        exports: &krusty::backend::DependencyExportSignatures,
+        frozen: &krusty::backend::CheckedBackendCallables,
+    ) -> Result<Vec<(TypeName, LaidOutClass)>, Unsupported> {
         let callables: HashMap<FunId, CallableId> = ir
             .checked_callable_functions
             .iter()
@@ -388,6 +497,17 @@ impl FileClasses {
                 params.extend(secondary.params.iter().copied());
                 constructors.push(Some((function, params)));
             }
+            let mut constructor_identities = vec![None; constructors.len()];
+            for (exported, identity) in exports.constructor_declarations() {
+                if exported.class != id {
+                    continue;
+                }
+                let ordinal = exported.secondary.map_or(0, |secondary| secondary + 1);
+                let Some(slot) = constructor_identities.get_mut(ordinal) else {
+                    continue;
+                };
+                *slot = Some(identity.clone());
+            }
             let mut activation = self
                 .laid_out_superclass(id)
                 .map(|superclass| superclass.activation.clone())
@@ -429,14 +549,37 @@ impl FileClasses {
             records.push((
                 class.fq_name,
                 LaidOutClass {
+                    class_identity: exports.classifier(id).cloned(),
                     structure,
                     table_type,
+                    declaration_slots: published_slots::record(
+                        table,
+                        self.laid_out_superclass(id),
+                        exports,
+                        frozen,
+                    )?,
                     fields,
                     base: self.bases[id as usize],
                     slot_types: self.slot_types[id as usize].clone(),
                     entries: self.entries[id as usize].clone(),
+                    function_bridge: self.function_bridge(id, module)?,
                     ancestors: self.ancestors[id as usize].clone(),
                     constructors,
+                    constructor_entries: std::iter::once(self.forms[id as usize].constructor)
+                        .chain(
+                            self.forms[id as usize]
+                                .secondaries
+                                .iter()
+                                .copied()
+                                .map(Some),
+                        )
+                        .map(|entry| entry.map(|function| {
+                            module.defined_function_type(function)
+                                .map(|signature| (function, signature))
+                                .ok_or_else(|| "a published constructor without its defined physical frame".to_string())
+                        }).transpose())
+                        .collect::<Result<Vec<_>, Unsupported>>()?,
+                    constructor_identities,
                     methods,
                     activation,
                     table: LaidOutSuperclass {
@@ -448,11 +591,13 @@ impl FileClasses {
                     interface_bodies: self.interface_bodies[id as usize].clone(),
                     dependency_implementations: self.dependency_implementations[id as usize]
                         .clone(),
+                    function_arities: self.function_arities[id as usize].clone(),
+                    suspend_function_arities: self.suspend_function_arities[id as usize].clone(),
                     refusal: self.refusals[id as usize].clone(),
                 },
             ));
         }
-        records
+        Ok(records)
     }
 
     /// The checked property the realized member access `operation` reads or writes.
@@ -503,6 +648,21 @@ pub(super) fn method_type(
     Ok(module.func_type(params, results))
 }
 
+/// The function type of a method of a base no file declares, as its carriers are recorded: an
+/// object receiver, then each operand.
+fn declared_method_type(
+    module: &mut Module,
+    parameters: &[Ty],
+    result: Ty,
+) -> Result<u32, Unsupported> {
+    let mut params = vec![REFERENCE];
+    for parameter in parameters {
+        params.push(carrier(*parameter)?.ok_or_else(|| "a `Unit` parameter".to_string())?);
+    }
+    let results = carrier(result)?.into_iter().collect();
+    Ok(module.func_type(params, results))
+}
+
 /// The function type of an accessor of a property of type `ty`, as a class table carries it: the
 /// receiver, then the value a setter takes; a getter answers the value.
 fn accessor_type(module: &mut Module, ty: Ty, setter: bool) -> Result<u32, Unsupported> {
@@ -520,8 +680,32 @@ fn accessor_type(module: &mut Module, ty: Ty, setter: bool) -> Result<u32, Unsup
 pub(super) fn module_plan(
     classes: &ModuleClasses,
     classifiers: &dyn BackendClassifierSource,
+    declarations: &krusty::backend::CheckedBackendCallables,
+    published: &LaidOutClasses,
 ) -> ModuleSlotPlan {
-    ModuleSlotPlan::build(classes, &WasmRepresentation { classifiers })
+    ModuleSlotPlan::build_with_published_slots(
+        classes,
+        &WasmRepresentation { classifiers },
+        declarations,
+        &|name| {
+            let Some(identity) = classifiers
+                .classifier(name)
+                .and_then(|fact| fact.klib_identity.clone())
+            else {
+                return Ok(None);
+            };
+            Ok(published.published_layout(&identity)?.map(|layout| {
+                krusty::backend::class_tables::module_slots::PublishedClassSlots {
+                    count: layout
+                        .slot_types
+                        .len()
+                        .try_into()
+                        .expect("too many class slots"),
+                    declarations: layout.declaration_slots.clone(),
+                }
+            }))
+        },
+    )
 }
 
 /// Reject, by name, a class this form does not lay out.
@@ -544,16 +728,106 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     // Stored by-value captures use the same checked pre-super field transport.
     } else if !constructor_prefix::supported(ir, id) {
         "a class capturing its surroundings"
-    } else if class
-        .supertypes
-        .iter()
-        .any(|supertype| supertype.non_null().is_fun())
-    {
-        "a class implementing a function type"
     } else {
         return Ok(());
     };
     Err(format!("{construct} (`{name}`)"))
+}
+
+/// A function invocation override is accepted only when its frozen owner role, source arity,
+/// suspend bit, and semantic role all agree. Both arrow and nominal supertypes use this predicate.
+fn has_checked_function_invoke(
+    ir: &IrFile,
+    classifiers: &dyn BackendClassifierSource,
+    id: ClassId,
+    expected_owner: Option<TypeName>,
+    arity: usize,
+    suspend: bool,
+) -> bool {
+    let class = &ir.classes[id as usize];
+    let Ok(arity) = u8::try_from(arity) else {
+        return false;
+    };
+    let expected_role = if suspend {
+        krusty::types::ClassifierRole::SuspendFunctionOfArity(arity)
+    } else {
+        krusty::types::ClassifierRole::FunctionOfArity(arity)
+    };
+    ir.function_overrides
+        .get(&class.fq_name_id())
+        .into_iter()
+        .flatten()
+        .any(|edge| {
+            expected_owner.is_none_or(|owner| edge.overridden_owner == owner)
+                && classifiers
+                    .classifier(edge.overridden_owner)
+                    .is_some_and(|fact| fact.role == Some(expected_role))
+                && edge.overridden_is_interface
+                && matches!(
+                    edge.overridden,
+                    krusty::fir::ResolvedFunctionOverrideTarget::External(_)
+                )
+                && edge.overridden_semantic_role
+                    == Some(krusty::types::SemanticCallRole::KotlinFunctionInvoke)
+                && edge.declared_parameters.len() == usize::from(arity)
+                && edge.suspend == suspend
+        })
+}
+
+/// Require a checked invocation edge for every function-type supertype, whichever spelling the
+/// source used. The checked edge authenticates the implementation; the frozen classifier role
+/// authenticates the function family and its source arity.
+fn check_function_invocation_support(
+    ir: &IrFile,
+    classifiers: &dyn BackendClassifierSource,
+    id: ClassId,
+) -> Result<(), Unsupported> {
+    let class = &ir.classes[id as usize];
+    // An interface has no instances to invoke: a class implementing it is the one that must
+    // carry the checked invocation, and it is checked as that class's own supertype.
+    if class.is_interface {
+        return Ok(());
+    }
+    for supertype in &class.supertypes {
+        if let krusty::types::TyKind::Fun(signature) = supertype.non_null().kind() {
+            if !has_checked_function_invoke(
+                ir,
+                classifiers,
+                id,
+                None,
+                signature.params.len(),
+                signature.suspend,
+            ) {
+                return Err(format!(
+                    "a class implementing a function type without its checked invocation (`{}`)",
+                    class.fq_name()
+                ));
+            }
+            continue;
+        }
+        let Some(owner) = supertype.non_null().obj_internal() else {
+            continue;
+        };
+        let Some(fact) = classifiers.classifier(owner) else {
+            continue;
+        };
+        let (arity, suspend) = match fact.role {
+            Some(krusty::types::ClassifierRole::FunctionOfArity(arity)) => {
+                (usize::from(arity), false)
+            }
+            Some(krusty::types::ClassifierRole::SuspendFunctionOfArity(arity)) => {
+                (usize::from(arity), true)
+            }
+            _ => continue,
+        };
+        if !has_checked_function_invoke(ir, classifiers, id, Some(owner), arity, suspend) {
+            return Err(format!(
+                "a function classifier supertype without its checked invocation (`{}`)",
+                class.fq_name()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Reject a class overriding a runtime exception's property. Its message and cause are fields the
@@ -612,6 +886,7 @@ pub(super) fn declare(
     } = beyond;
     for class in 0..ir.classes.len() {
         check_supported(ir, class as ClassId)?;
+        check_function_invocation_support(ir, classifiers, class as ClassId)?;
         check_exception_storage(ir, classifiers, class as ClassId)?;
     }
     let tables = class_tables::build_numbered(
@@ -727,7 +1002,7 @@ pub(super) fn declare(
                                 parent.table_type.expect("a superclass has a table type")
                             }
                             (None, Some(superclass)) => superclass.table_type,
-                            (None, None) => objects.any_table,
+                            (None, None) => objects.function_table,
                         }),
                         open: true,
                     })
@@ -803,7 +1078,12 @@ pub(super) fn declare(
                 bridges: &mut bridges,
             },
         );
-        let instantiable = !(class.is_abstract || class.is_sealed);
+        // A materialized value-class storage layout is not an object this target constructs
+        // when the checked declaration is carried by a runtime scalar/array representation.
+        // That representation supplies its own Any members; the unused shell must not publish
+        // instances whose ordinary class table lacks those bodies.
+        let instantiable = !(class.is_abstract || class.is_sealed)
+            && super::lower::runtime_value_declaration(class.fq_name, classifiers)?.is_none();
         let functions_here = match resolved {
             Ok(functions_here) => functions_here,
             // A class with no instances of its own needs its entries only for a later file
@@ -874,6 +1154,8 @@ pub(super) fn declare(
         ancestors: ancestry,
         interface_bodies: vec![HashMap::default(); classes],
         dependency_implementations: vec![Vec::new(); classes],
+        function_arities: vec![Vec::new(); classes],
+        suspend_function_arities: vec![Vec::new(); classes],
         refusals,
     })
 }
@@ -922,9 +1204,44 @@ impl TableEntries<'_> {
         let table = tables.table(id);
         let mut resolved = Vec::with_capacity(table.vtable.len());
         for (slot, entry) in table.vtable.iter().enumerate() {
-            let Some(ty) = slot_types[id as usize][slot] else {
-                resolved.push(None);
-                continue;
+            let ty = match slot_types[id as usize][slot] {
+                Some(ty) => ty,
+                None => match entry {
+                    Slot::FunctionBridge { arity, .. } => {
+                        runtime.function_shape(module, *arity).invoke
+                    }
+                    Slot::Inherited { slot } if *slot == FUNCTION_SLOT => {
+                        let inherited = laid_out.and_then(|superclass| superclass.function_bridge);
+                        let function = laid_out.and_then(|superclass| {
+                            superclass.entries.get(*slot as usize).copied().flatten()
+                        });
+                        match (inherited, function) {
+                            // A superclass that adapts no function type leaves the reserved slot
+                            // empty, as the class that declares none does.
+                            (None, None) => resolved.push(None),
+                            (Some(inherited), Some(function))
+                                if inherited.function == function
+                                    && runtime.function_shape(module, inherited.arity).invoke
+                                        == inherited.signature
+                                    && module.defined_function_type(function)
+                                        == Some(inherited.signature) =>
+                            {
+                                resolved.push(Some(function));
+                            }
+                            _ => {
+                                return Err(
+                                    "an inherited function slot without its defined producer adapter"
+                                        .into(),
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    _ => {
+                        resolved.push(None);
+                        continue;
+                    }
+                },
             };
             let function = match entry {
                 Slot::AnyMember(member) => {
@@ -953,7 +1270,10 @@ impl TableEntries<'_> {
                     };
                     accessor_function(module, accessors, accessor, ty)
                 }
-                Slot::Bridge { .. } | Slot::AccessorBridge { .. } | Slot::FunctionBridge { .. } => {
+                Slot::Bridge { .. }
+                | Slot::DeclaredBridge { .. }
+                | Slot::AccessorBridge { .. }
+                | Slot::FunctionBridge { .. } => {
                     let member = BridgedMember::of(entry).ok_or_else(|| {
                         format!(
                             "an override carried differently from the member it overrides (`{}`)",
@@ -1022,11 +1342,11 @@ fn inherited_any_member(
         (AnyMember::ToString, OwnedBase::Enum) => runtime.object_strings.enum_name,
         (AnyMember::ToString, OwnedBase::None) => {
             let names = source_class_names(ir, class)?;
-            runtime.identity_to_string(module, ir.classes[class as usize].fq_name_id(), &names)
+            runtime.identity_to_string(module, &names)
         }
         (AnyMember::ToString, OwnedBase::Exception(_)) => {
             let names = source_class_names(ir, class)?;
-            runtime.throwable_to_string(module, ir.classes[class as usize].fq_name_id(), &names)
+            runtime.throwable_to_string(module, &names)
         }
     })
 }
@@ -1165,6 +1485,9 @@ fn slot_types<'r>(
                     None => None,
                 },
                 Slot::Bridge { declared, .. } => Some(method_type(module, ir, *declared)?),
+                Slot::DeclaredBridge {
+                    parameters, result, ..
+                } => Some(declared_method_type(module, parameters, *result)?),
                 Slot::AccessorBridge {
                     declared, setter, ..
                 } => Some(accessor_type(module, *declared, *setter)?),

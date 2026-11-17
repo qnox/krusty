@@ -7,7 +7,9 @@
 //! each would pass by accident if the value were simply carried as the signed number — and each was
 //! why the whole family was declined until it could be answered.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
+use super::common::{
+    expect_box_ok_with_stdlib, expect_native_box, expect_native_decline, kotlinc_box_result,
+};
 
 #[test]
 fn an_unsigned_value_renders_as_the_value_and_not_as_its_bits() {
@@ -416,4 +418,27 @@ fn a_float_converted_to_an_unsigned_type_is_declined() {
         "FloatToUnsigned",
         "toUInt",
     );
+}
+
+/// An unsigned array renders as the value class it is, `UIntArray(storage=[…])`: the storage is
+/// the signed array it wraps, so an element past the signed maximum renders as its negative bits.
+/// `equals` is that storage's identity, so an array equals itself and a second array with the same
+/// elements does not.
+///
+/// `hashCode` is checked only for stability. kotlinc hashes the signed storage by contents
+/// (`java.util.Arrays.hashCode`). A hash that equals itself cannot show a different number, so
+/// this check does not claim that parity.
+///
+/// The program is the shared box fixture, which every conformance lane also runs. kotlinc answers
+/// it, then krusty's JVM, and the Native driver reads that same source.
+#[test]
+fn an_unsigned_array_renders_as_a_value_class_over_its_signed_storage() {
+    let source = include_str!("box_regressions/unsignedArraySignedStorage.kt");
+    assert_eq!(
+        kotlinc_box_result(source),
+        "OK",
+        "UnsignedArraySignedStorage: kotlinc"
+    );
+    expect_box_ok_with_stdlib(source, "UnsignedArraySignedStorage");
+    expect_native_box(source, "UnsignedArraySignedStorage", "OK");
 }

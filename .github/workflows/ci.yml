@@ -265,9 +265,9 @@ jobs:
         with:
           path: target/cache/box-corpus
           # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
-          # corpus, the bytecode corpora, and the test-generator sources that select each target's
+          # corpus, the diagnostics test data, the bytecode corpora, and the test-generator sources that select each target's
           # cases. A key hit is never re-saved, so the key changes whenever those inputs do.
-          key: box-cli-and-generator-corpus-v3-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
+          key: box-cli-diagnostics-and-generator-corpus-v4-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit
         if: steps.box-corpus.outputs.cache-hit == 'true'
@@ -553,7 +553,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus
-          key: box-cli-and-generator-corpus-v3-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
+          key: box-cli-diagnostics-and-generator-corpus-v4-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit
         if: steps.box-corpus.outputs.cache-hit == 'true'
@@ -773,9 +773,9 @@ jobs:
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
           # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
-          # corpus, the bytecode corpora, and the test-generator sources that select each target's
+          # corpus, the diagnostics test data, the bytecode corpora, and the test-generator sources that select each target's
           # cases. A key hit is never re-saved, so the key changes whenever those inputs do.
-          key: box-cli-and-generator-corpus-v3-${{ matrix.version }}-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
+          key: box-cli-diagnostics-and-generator-corpus-v4-${{ matrix.version }}-${{ hashFiles('kotlin-versions', 'scripts/box_selection.py', 'tests/box_selection_sources.txt') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit (${{ matrix.version }})
         if: steps.box-corpus.outputs.cache-hit == 'true'
@@ -965,6 +965,7 @@ jobs:
           path: '*-byte-equality.txt'
           if-no-files-found: error
       - name: run non-box conformance ${{ matrix.version }}
+        id: non_box
         if: matrix.target == 'jvm'
         env:
           # Required serialization/reference CLI toolchains can be cold. Keep the local
@@ -981,6 +982,19 @@ jobs:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: "1"
         run: just conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
+      # kotlinc's diagnostics test data, scored by false accepts against
+      # tests/diagnostics_false_accepts. Its kotlinc results are box reference compiles, restored
+      # with the box references and saved with them after the JVM steps that fill that cache.
+      # This job runs only on merge-queue branches and dispatched master runs, like the other lanes.
+      # It runs after non-box conformance, and also when that step failed, so neither lane's
+      # failure hides the other's result.
+      - name: run diagnostics conformance ${{ matrix.version }}
+        if: >-
+          (success() || steps.non_box.outcome == 'failure')
+          && matrix.target == 'jvm' && matrix.version == needs.build-tool-bins.outputs.max
+        env:
+          KRUSTY_DIAGNOSTICS_TIMEOUT_SECONDS: "10800"
+        run: just diagnostics-conformance "$PWD/conformance-bin" "${{ matrix.version }}"
       # Entries no run read for a week (removed or edited cases, an old salt) go before saving, so
       # the cache follows the suite instead of growing with every input it ever compiled. Entries
       # a cut-short run never reached stay until they have gone a week unread.
@@ -1611,6 +1625,9 @@ jobs:
     runs-on: [self-hosted, rust-4c-8gb]
     # Shorter than either lock's TTL; only dead jobs' locks may be taken over.
     timeout-minutes: 25
+    # The publishing secrets live in this environment, which only master may deploy to, so a
+    # branch that edits this workflow cannot read them.
+    environment: release
     permissions:
       contents: write
       # Dispatches the pages workflow, which regenerates the Bazel registry.
@@ -1619,16 +1636,21 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      # No persisted token: the Gradle builds below run third-party code next to the signing key.
+      # Only the steps that push get the token.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The commit history only: the build number counts commits and lint reads their
           # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
           fetch-depth: 0
           filter: tree:0
+          persist-credentials: false
       # Every validated master ancestor publishes. Only retries of this exact commit wait on
       # this lock; slow immutable package publication cannot hold the global latest/badge lock.
       - name: take the commit publication lock
         id: lock
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           lock=$(scripts/release-publisher.sh acquire)
@@ -1735,6 +1757,8 @@ jobs:
         if: steps.tip.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          # bind-tag pushes the immutable tag; the checkout no longer authenticates Git.
+          RELEASE_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.v.outputs.tag }}
           VER: ${{ steps.v.outputs.ver }}
@@ -1848,6 +1872,8 @@ jobs:
       - name: take the latest promotion lock
         if: steps.tip.outputs.publish == 'true'
         id: latest_lock
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           lock=$(scripts/release-publisher.sh acquire-latest)
@@ -1860,6 +1886,8 @@ jobs:
       # SHA may retry; an older publisher can never overwrite it after the lock is released.
       - name: record the promoted commit
         if: steps.latest.outputs.promote == 'true'
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
         run: scripts/release-publisher.sh record
       - name: promote the GitHub release
         if: steps.latest.outputs.promote == 'true'
@@ -1870,7 +1898,11 @@ jobs:
         run: gh release edit "$TAG" --latest
       - name: drop the latest promotion lock
         if: always() && steps.latest_lock.outputs.lock != ''
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
         run: scripts/release-publisher.sh release-latest "${{ steps.latest_lock.outputs.lock }}"
       - name: drop the release lock
         if: always() && steps.lock.outputs.lock != ''
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
         run: scripts/release-publisher.sh release "${{ steps.lock.outputs.lock }}"

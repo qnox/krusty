@@ -39,13 +39,15 @@ impl DependencyInlineTemplates for KlibInlineTemplates {
             self.platform.as_ref(),
             bodies.bodies(),
             [selected],
+            // A template reads only the checked type hierarchy, never builtin implementations.
+            &[],
         )
         .ok()?;
         let callees = TemplateCallees {
             declarations: bodies.bodies(),
             references: bodies.references(),
             source: self.platform.as_ref(),
-            type_hierarchy: checked.type_hierarchy.as_ref()?,
+            type_hierarchy: checked.type_hierarchy()?,
         };
         let Some(template) =
             lower_inline_template(ir, &realization, bodies.inline_bodies(), callees)

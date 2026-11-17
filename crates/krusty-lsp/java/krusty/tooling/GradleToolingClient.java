@@ -24,6 +24,7 @@ public final class GradleToolingClient {
     private GradleToolingClient() {}
 
     public static void main(String[] args) throws Exception {
+        Protocol.capture();
         Runtime.getRuntime().addShutdownHook(new Thread(GradleToolingClient::closeAll));
         BufferedReader input = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         String line;
