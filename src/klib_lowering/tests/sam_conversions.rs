@@ -361,16 +361,37 @@ fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frame
         .unwrap_or_else(|decline| panic!("raw selected SAM {name}: {decline}"));
         let retained =
             crate::backend::CheckedBackendCallables::freeze(raw.ir(), &libraries).unwrap();
+        let emitted_calls = crate::ir::emitted_body_roots(raw.ir())
+            .into_iter()
+            .flat_map(|root| crate::ir::value_namespace_expressions(raw.ir(), root))
+            .filter_map(|expression| match raw.ir().expr(expression) {
+                IrExpr::Call { callee, .. } => match &**callee {
+                    Callee::External { target, .. } => Some(*target),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<crate::fx_hash::HashSet<_>>();
         for (identity, member) in &represented_members {
-            assert_eq!(
-                retained
-                    .callable(member.target())
-                    .unwrap()
-                    .dependency_callable
-                    .as_ref(),
-                Some(identity)
-            );
             assert!(checked.member_edges().contains_key(identity));
+            assert!(raw.callable_functions().all(|(body, _)| body != identity));
+            if emitted_calls.contains(&member.target()) {
+                let fact = retained
+                    .callable(member.target())
+                    .expect("an emitted member call retains its exact declaration");
+                assert_eq!(fact.dependency_callable.as_ref(), Some(identity));
+                if supported_operations.contains_key(identity) {
+                    let operation = callees
+                        .target_intrinsic(
+                            identity,
+                            libraries.declaration_bodies(),
+                            &supports_sam_ir_operation,
+                        )
+                        .expect("the emitted operation has one authenticated header")
+                        .expect("the selected target supports this operation");
+                    assert_eq!(fact.compiler_operation(), Some(operation));
+                }
+            }
         }
         assert_sam_result_types(raw.ir(), callable.ret());
         if wraps_function_value {
