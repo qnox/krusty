@@ -98,6 +98,11 @@ pub struct FileLanguagePolicy {
     /// `equals` of a data or value class is bound to its own class, so an equality that holds
     /// proves the other operand has that class.
     pub structural_equality_bound: bool,
+    /// The release declares `CompanionBlocks` apart from `CompanionExtensions`: a `companion { … }`
+    /// block member of an interface is a static of that interface, so an initialized `private`
+    /// block property is an ordinary private static. A release that only has the combined
+    /// `CompanionBlocksAndExtensions` treats it as an abstract interface member instead.
+    pub interface_companion_block_members_are_static: bool,
     /// `+CustomEqualsInValueClasses`: permit the typed `equals(Self)` convention in a value class
     /// whose selected representation is inline rather than full/boxed.
     pub custom_equals_in_value_classes: bool,

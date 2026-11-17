@@ -79,6 +79,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
             .table()
             .get("StrictEqualsForStructuralClasses")
             .is_some();
+    file.language.interface_companion_block_members_are_static =
+        features.table().get("CompanionBlocks").is_some();
     file.language
         .forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
         features.has("ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds");
