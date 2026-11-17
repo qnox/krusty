@@ -53,6 +53,39 @@ tasks.test {
     }
 }
 
+// The Kotlin Gradle plugin compiles a project through the jar this build produces. Gradle's own
+// API carries an older kotlin-stdlib that would shadow the release under test on the unit tests'
+// classpath, so this suite has a classpath of its own. `check` runs it after `test`.
+testing {
+    suites {
+        register<JvmTestSuite>("kotlinGradlePluginTest") {
+            useJUnitJupiter()
+            dependencies {
+                implementation(gradleTestKit())
+            }
+            targets.all {
+                testTask.configure {
+                    val binary = providers.gradleProperty("krusty.binary").orElse(providers.environmentVariable("KRUSTY_BIN"))
+                    inputs.property("krustyBinary", binary.orElse(""))
+                    systemProperty("krusty.kotlinVersion", kotlinVersion.get())
+                    val jar = tasks.jar.flatMap { it.archiveFile }
+                    inputs.file(jar)
+                    val testKit = layout.buildDirectory.dir("testkit")
+                    doFirst {
+                        systemProperty("krusty.testKitDir", testKit.get().asFile.absolutePath)
+                        systemProperty("krusty.buildToolsJar", jar.get().asFile.absolutePath)
+                        systemProperty("krusty.binary", binary.orNull ?: throw GradleException("set -Pkrusty.binary or KRUSTY_BIN"))
+                    }
+                }
+            }
+        }
+    }
+}
+
+tasks.check {
+    dependsOn(testing.suites.named("kotlinGradlePluginTest"))
+}
+
 sourceSets.main {
     resources.srcDir(versionResource)
 }
