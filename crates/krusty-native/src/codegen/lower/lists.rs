@@ -211,6 +211,12 @@ fn list_symbol(
             vec![any(), any()],
             Ty::Boolean,
         ),
+        ("listIterator", [], ret) if reads && ret.is_reference() => {
+            ("kt_list_iterator", vec![any()], any())
+        }
+        ("listIterator", [Ty::Int], ret) if reads && ret.is_reference() => {
+            ("kt_list_iterator_at", vec![any(), Ty::Int], any())
+        }
         // The mutating half, declared on the MUTABLE face (or by `ArrayList` itself). A read-only
         // face never declares one, so a same-shaped member of anything else stays its own.
         ("add", [element], Ty::Boolean) if mutates && element.is_reference() => {
@@ -252,6 +258,29 @@ fn list_symbol(
             vec![any(), any()],
             Ty::Boolean,
         ),
+        _ => return None,
+    })
+}
+
+/// The runtime function for one member `ListIterator` declares over a list's iterator: the steps
+/// back and the positions on either side of the cursor. `hasNext` and `next` are every iterator's
+/// and the walk answers them.
+fn list_iterator_symbol(
+    declaration: classifier_shapes::CollectionDeclaration,
+    signature: super::super::super::intrinsics::FunctionSignature<'_>,
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    if !declaration.reads(&[CollectionKind::ListIterator]) {
+        return None;
+    }
+    Some(match (signature.name, signature.params, signature.ret) {
+        ("hasPrevious", [], Ty::Boolean) => {
+            ("kt_list_iterator_has_previous", vec![any()], Ty::Boolean)
+        }
+        ("previous", [], ret) if ret.is_reference() => {
+            ("kt_list_iterator_previous", vec![any()], any())
+        }
+        ("nextIndex", [], Ty::Int) => ("kt_list_iterator_next_index", vec![any()], Ty::Int),
+        ("previousIndex", [], Ty::Int) => ("kt_list_iterator_previous_index", vec![any()], Ty::Int),
         _ => return None,
     })
 }
@@ -755,6 +784,15 @@ impl BodyLowering<'_, '_, '_> {
         // receiver no class of the file can be. See [`FileLowering::implements_collection_of`].
         if self.file.implements_collection_of(ty) {
             return None;
+        }
+        if self.file.iteration_shape_of(ty)
+            == Some(super::super::super::intrinsics::CollectionShape::Iterator)
+        {
+            let owner = signature.owner.semantic_classifier()?;
+            let declaration =
+                classifier_shapes::collection_declaration(self.file.classifiers, owner)?;
+            let (symbol, carried, answer) = list_iterator_symbol(declaration, signature)?;
+            return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));
         }
         let (symbol, carried, answer) =
             collection_runtime_member(self.file, ty, signature, physical)?;
@@ -1307,6 +1345,48 @@ mod tests {
         // `Collection` is the only declaration a `Collection`-typed receiver can select.
         assert!(collection_symbol(face(CollectionKind::List, false), size).is_none());
         assert!(collection_symbol(array_list, size).is_none());
+    }
+
+    /// `listIterator` is a query of a list, and the steps back are `ListIterator`'s own: an
+    /// `Iterator` declares no `previous`, and a step with another shape is not this table's.
+    #[test]
+    fn list_iterator_members_match_their_declaration() {
+        let element = Ty::ty_param("E", any());
+        let iterator = Ty::obj_args("kotlin/collections/ListIterator", &[element]);
+        let list = face(CollectionKind::List, false);
+        let at_params = [Ty::Int];
+        let at = signature(
+            "kotlin/collections/List",
+            "listIterator",
+            &at_params,
+            iterator,
+        );
+        let first = signature("kotlin/collections/List", "listIterator", &[], iterator);
+        let by_text_params = [Ty::String];
+        let by_text = signature(
+            "kotlin/collections/List",
+            "listIterator",
+            &by_text_params,
+            iterator,
+        );
+        assert!(list_symbol(list, first, &[]).is_some());
+        assert!(list_symbol(list, at, &[Ty::Int]).is_some());
+        assert!(list_symbol(list, by_text, &[Ty::String]).is_none());
+        assert!(list_symbol(face(CollectionKind::Set, false), at, &[Ty::Int]).is_none());
+
+        let steps = face(CollectionKind::ListIterator, false);
+        let previous = signature("kotlin/collections/ListIterator", "previous", &[], element);
+        let next_index = signature("kotlin/collections/ListIterator", "nextIndex", &[], Ty::Int);
+        let long_index = signature(
+            "kotlin/collections/ListIterator",
+            "nextIndex",
+            &[],
+            Ty::Long,
+        );
+        assert!(list_iterator_symbol(steps, previous).is_some());
+        assert!(list_iterator_symbol(steps, next_index).is_some());
+        assert!(list_iterator_symbol(steps, long_index).is_none());
+        assert!(list_iterator_symbol(face(CollectionKind::Iterator, false), previous).is_none());
     }
 
     #[test]

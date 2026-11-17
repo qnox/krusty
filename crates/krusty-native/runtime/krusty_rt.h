@@ -478,6 +478,8 @@ KRef kt_mutable_list_new(void);
 KRef kt_mutable_list_with_capacity(kt_int capacity);
 /* A growable list holding a COPY of an array's elements. */
 KRef kt_mutable_list_of(KRef elements);
+/* `ArrayList(elements)`: a growable list holding a copy of any collection's elements. */
+KRef kt_mutable_list_copy_of(KRef elements);
 kt_boolean kt_mutable_list_add(KRef self, KRef value);
 void kt_mutable_list_add_at(KRef self, kt_int index, KRef value);
 /* Answers the element that was there, as Kotlin's `set` does. */
@@ -494,6 +496,12 @@ void kt_mutable_list_plus_assign(KRef self, KRef value);
 void kt_mutable_list_add_all(KRef self, KRef elements);
 kt_boolean kt_list_iterator_has_next(KRef iterator);
 KRef kt_list_iterator_next(KRef iterator);
+/* `ListIterator`'s members over a list's iterator. `kt_list_iterator_at` is `listIterator(index)`. */
+KRef kt_list_iterator_at(KRef list, kt_int index);
+kt_boolean kt_list_iterator_has_previous(KRef iterator);
+KRef kt_list_iterator_previous(KRef iterator);
+kt_int kt_list_iterator_next_index(KRef iterator);
+kt_int kt_list_iterator_previous_index(KRef iterator);
 
 /* Iteration through a receiver the generator could only type by the INTERFACE, where either of the
    two iterable things this runtime has may turn up. The descriptor decides which, and `next`
