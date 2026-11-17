@@ -474,6 +474,7 @@ fn specialized_class(
         .zip(cloned_methods)
         .collect::<Vec<_>>();
     copy_override_edges(ir, source_name, placeholder, &methods)?;
+    copy_super_constructor_selections(ir, source_name, placeholder);
     remap_owned_class(ir, &owned, source, class_id, internal, placeholder);
     // Declaration-cloned expressions keep the inline function's source identity, so their lines
     // stay on the copy's primary file. The caller's lambda, spliced later, has no such frame and
@@ -797,6 +798,36 @@ fn copy_capture_edges(ir: &mut crate::ir::IrFile, source: ClassId, target: Class
     }
     if let Some(order) = ir.class_capture_order.get(&source).cloned() {
         ir.class_capture_order.insert(target, order);
+    }
+}
+
+/// The copy delegates to the superclass constructor the class it copies selected, with the same
+/// omitted arguments: its `super(…)` call is the copied class's own.
+fn copy_super_constructor_selections(
+    ir: &mut crate::ir::IrFile,
+    source_name: TypeName,
+    target_name: TypeName,
+) {
+    if let Some(target) = ir.external_super_constructors.get(&source_name).cloned() {
+        ir.external_super_constructors.insert(target_name, target);
+    }
+    let secondary = ir
+        .external_secondary_super_constructors
+        .iter()
+        .filter(|((class, _), _)| *class == source_name)
+        .map(|((_, ordinal), target)| (*ordinal, target.clone()))
+        .collect::<Vec<_>>();
+    for (ordinal, target) in secondary {
+        ir.external_secondary_super_constructors
+            .insert((target_name, ordinal), target);
+    }
+    if let Some(defaults) = ir
+        .super_constructor_default_arguments
+        .get(&source_name)
+        .cloned()
+    {
+        ir.super_constructor_default_arguments
+            .insert(target_name, defaults);
     }
 }
 

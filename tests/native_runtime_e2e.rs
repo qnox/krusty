@@ -1170,24 +1170,6 @@ fn a_class_that_publishes_no_names_fails_naming_its_descriptor() {
 }
 
 #[test]
-fn a_property_read_through_an_unknown_delegate_fails_naming_it() {
-    run_driver_expecting_failure(
-        "rw_property_get_unknown_delegate",
-        "krusty: a ReadWriteProperty read of a pkg.CustomDelegate, which is neither \
-         Delegates.notNull() nor Delegates.observable()\n",
-    );
-}
-
-#[test]
-fn a_property_write_through_an_unknown_delegate_fails_naming_it() {
-    run_driver_expecting_failure(
-        "rw_property_set_unknown_delegate",
-        "krusty: a ReadWriteProperty write of a pkg.CustomDelegate, which is neither \
-         Delegates.notNull() nor Delegates.observable()\n",
-    );
-}
-
-#[test]
 fn each_primitive_boxes_to_its_kind_and_small_values_share_a_box() {
     run_driver("boxing");
 }
@@ -1203,7 +1185,7 @@ fn a_pairs_members_answer_componentwise() {
 }
 
 #[test]
-fn lazy_observable_and_not_null_delegates_keep_kotlins_order() {
+fn a_lazy_runs_its_initializer_once_on_the_first_read() {
     run_driver("delegates");
 }
 

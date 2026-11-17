@@ -587,6 +587,7 @@ impl FileClasses {
                         interfaces: self.tables.interface_tables.implemented[id as usize].clone(),
                         interface_entries: self.tables.interface_tables.members[id as usize]
                             .clone(),
+                        members: self.tables.members[id as usize].clone(),
                     },
                     interface_bodies: self.interface_bodies[id as usize].clone(),
                     dependency_implementations: self.dependency_implementations[id as usize]
