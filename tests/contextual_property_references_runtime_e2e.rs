@@ -38,19 +38,33 @@ fn kotlinc_release_box_result(source: &str) -> String {
     result
 }
 
+fn expect_same_as_kotlinc_release(source: &str, stem: &str) {
+    let reference = kotlinc_release_box_result(source);
+    assert_eq!(
+        reference, "OK",
+        "{stem}: kotlinc {RELEASE} fixture must succeed"
+    );
+    let jdk = common::jdk_modules();
+    let krusty = common::expect_box_run(source, stem, &[release_stdlib()], Some(jdk.as_path()));
+    assert_eq!(
+        krusty, reference,
+        "{stem}: krusty and kotlinc results differ"
+    );
+}
+
 /// Top-level, member and extension properties, read-only and mutable, bound and unbound: krusty's
 /// whole result equals kotlinc 2.5.0-RC's, and both are `OK`.
 #[test]
 fn property_references_bind_their_context_arguments() {
     let source = include_str!("box_regressions/contextParameters/contextualPropertyReferences.kt");
-    let reference = kotlinc_release_box_result(source);
-    assert_eq!(reference, "OK", "kotlinc {RELEASE} fixture must succeed");
-    let jdk = common::jdk_modules();
-    let krusty = common::expect_box_run(
-        source,
-        "ContextualPropertyReferences",
-        &[release_stdlib()],
-        Some(jdk.as_path()),
-    );
-    assert_eq!(krusty, reference, "krusty and kotlinc results differ");
+    expect_same_as_kotlinc_release(source, "ContextualPropertyReferences");
+}
+
+/// An inline getter is spliced into the carrier's own `get`, which reads its context arguments
+/// from `boundContextArguments` ahead of the receiver.
+#[test]
+fn inline_getters_of_contextual_properties_read_their_bound_contexts() {
+    let source =
+        include_str!("box_regressions/contextParameters/contextualInlinePropertyReferences.kt");
+    expect_same_as_kotlinc_release(source, "ContextualInlinePropertyReferences");
 }
