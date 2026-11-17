@@ -106,6 +106,11 @@ jobs:
     runs-on: ubuntu-latest
     # Two measured builds, each followed by a test build of up to an hour, after a warm-up.
     timeout-minutes: 360
+    # Bitwarden resolves its SDK from GitHub Packages, which answers 401 without a token even for a
+    # public package; its settings script reads the token from GITHUB_TOKEN.
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -131,6 +136,9 @@ jobs:
       - name: build and test ${{ matrix.project }} with kotlinc and with krusty
         env:
           CORPUS_PERF: perf
+          # A read-only token: the workflow's own, or CORPUS_PACKAGES_TOKEN (read:packages only) when
+          # the workflow's token cannot read another owner's package.
+          GITHUB_TOKEN: ${{ secrets.CORPUS_PACKAGES_TOKEN || github.token }}
         run: |
           set -euo pipefail
           chmod +x corpus-tools/krusty corpus-tools/inferno/bin/*
