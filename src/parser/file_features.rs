@@ -61,6 +61,13 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.custom_equals_in_value_classes = features.has("CustomEqualsInValueClasses");
     file.normalize_nan_in_const_context = features.has("NormalizeNaNValuesInConstContext");
     file.intrinsic_const_evaluation = features.has("IntrinsicConstEvaluation");
+    // kotlinc binds the generated structural `equals` under `StrictEquals` from the release that
+    // introduced strict equality for structural classes; 2.4 leaves it unbound.
+    file.structural_equality_bound = features.has("StrictEquals")
+        && features
+            .table()
+            .get("StrictEqualsForStructuralClasses")
+            .is_some();
     file.forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
         features.has("ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds");
     // 2.5.0-RC renamed the feature and moved its since-version from 2.5 to 2.6. A release

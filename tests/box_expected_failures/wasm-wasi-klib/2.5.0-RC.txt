@@ -3104,8 +3104,6 @@ storeStackBeforeInline/simple.kt
 storeStackBeforeInline/unreachableMarker.kt
 storeStackBeforeInline/withLambda.kt
 strictEquals/crossModuleInheritance.kt
-strictEquals/dataClass.kt
-strictEquals/dataObject.kt
 strictEquals/delegated.kt
 stringTrim/stringTrim.kt
 strings/MultiDollarInterpolation.kt

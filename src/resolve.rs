@@ -40115,6 +40115,9 @@ impl<'a> Checker<'a> {
         let bound = self.equality_bound_for_receiver(receiver_ty)?;
         let path = self.expr_access_path(operand)?;
         let declared = self.stable_path_ty(scope, &path, self.span(operand))?;
+        // A null receiver equals a null operand: a nullable receiver proves only the nullable bound.
+        let nullable = receiver_ty.is_nullable() && declared.is_nullable();
+        let bound = if nullable { Ty::nullable(bound) } else { bound };
         self.receiver_is_assignable(bound, declared)
             .then_some((path, bound))
     }
@@ -40169,14 +40172,10 @@ impl<'a> Checker<'a> {
                     if let Some(safe_call) = safe_call {
                         self.null_check_narrowings(scope, safe_call, &mut out, declined);
                     }
-                    // When equality is known to hold, the compiler-known bound on either selected
-                    // `equals` receiver proves the opposite stable operand has that classifier.
-                    // Keep both directions: `typed == erased` and `erased == typed` select the
-                    // receiver differently but establish the same data-flow fact.
+                    // When equality is known to hold, the compiler-known bound on the selected
+                    // `equals` proves the argument has that classifier. `a == b` selects `a`'s
+                    // `equals`, so `erased == typed` selects `Any.equals` and proves nothing.
                     if let Some(narrowing) = self.equality_bound_narrowing(scope, lhs, rhs) {
-                        out.push(narrowing);
-                    }
-                    if let Some(narrowing) = self.equality_bound_narrowing(scope, rhs, lhs) {
                         out.push(narrowing);
                     }
                 }

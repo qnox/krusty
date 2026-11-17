@@ -2786,7 +2786,11 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     .with_is_override(true)
                                     .with_is_final(true),
                                 annotations: Vec::new(),
-                                equality_bound: None,
+                                // Under `StrictEquals` kotlinc binds the generated `equals` to its
+                                // own class and records that bound in the class metadata.
+                                equality_bound: (name == "equals"
+                                    && file.structural_equality_bound)
+                                    .then(|| Ty::obj_name(internal)),
                                 vararg_index: None,
                                 required: parameter_count,
                                 param_defaults: vec![false; parameter_count].into(),

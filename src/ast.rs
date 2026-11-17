@@ -2009,6 +2009,10 @@ pub struct File {
     /// `+IntrinsicConstEvaluation`: a constant context (an annotation argument, a `const val`)
     /// also evaluates the intrinsic-const reads it otherwise rejects, such as an entry's `name`.
     pub intrinsic_const_evaluation: bool,
+    /// `+StrictEquals` on a release with strict equality for structural classes: the generated
+    /// `equals` of a data or value class is bound to its own class, so an equality that holds
+    /// proves the other operand has that class.
+    pub structural_equality_bound: bool,
     /// `+CustomEqualsInValueClasses`: permit the typed `equals(Self)` convention in a value class
     /// whose selected representation is inline rather than full/boxed.
     pub custom_equals_in_value_classes: bool,
