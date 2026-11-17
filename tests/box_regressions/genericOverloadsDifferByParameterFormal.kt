@@ -27,10 +27,24 @@ fun <T : Any> viaCompanion(): Box<Failure, T> = Box(Failure(1))
 
 fun <T : Any> viaMember(): Box<Failure, T> = Factory().create(Failure(2))
 
+// A formal only another formal's bound mentions still takes part in the comparison: both overloads
+// share the invariant `Holder<U>` bound, and `Marker` makes the first one stricter.
+interface Marker
+
+open class Holder<U>
+
+class Both : Holder<String>(), Marker
+
+fun <U, T> pick(x: T): String where T : Holder<U>, T : Marker = "marked"
+
+@JvmName("pickPlain")
+fun <U, T : Holder<U>> pick(x: T): String = "plain"
+
 fun box(): String {
     val companion = viaCompanion<String>().value
     if (companion !is Failure || companion.code != 1) return "companion invoke: $companion"
     val member = viaMember<String>().value
     if (member !is Failure || member.code != 2) return "member: $member"
+    if (pick(Both()) != "marked") return "bound transitive: ${pick(Both())}"
     return "OK"
 }
