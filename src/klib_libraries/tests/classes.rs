@@ -1254,6 +1254,14 @@ fn only_a_value_class_component_keeps_its_stability_for_another_module() {
         PropertyReadStability::Unstable
     );
     assert_eq!(
+        stability("p/Hidden", "value"),
+        PropertyReadStability::ValueClassComponentOfOtherModule
+    );
+    assert_eq!(
+        stability("p/Hidden", "other"),
+        PropertyReadStability::Unstable
+    );
+    assert_eq!(
         stability("p/Plain", "value"),
         PropertyReadStability::Unstable
     );
