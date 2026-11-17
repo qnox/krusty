@@ -134,9 +134,6 @@ pub(super) enum ArgumentState {
     Omitted,
 }
 
-/// The most value parameters one `$changed` int tracks; a function with more takes several.
-const SLOTS_PER_INT: usize = 10;
-
 /// Why a construct is outside what krusty's Compose pass compiles yet.
 fn unsupported(what: &str) -> String {
     format!(
@@ -547,8 +544,11 @@ pub(super) fn record(
         .chain(composable_lambdas.iter().flat_map(|lambda| &lambda.calls));
     for site in sites {
         if let Some(CalleeOrigin::Library(target)) = calls.get(&site.call).map(|call| call.origin) {
-            let mut appended = vec![Ty::nullable(super::runtime::composer()), Ty::Int];
-            // The `$default` mask of a declaration with defaults follows its `$changed`.
+            let mut appended = vec![Ty::nullable(super::runtime::composer())];
+            appended.extend(
+                (0..super::restart_groups::changed_ints(site.arguments.len())).map(|_| Ty::Int),
+            );
+            // The `$default` mask of a declaration with defaults follows its `$changed` ints.
             if site.library_mask {
                 appended.push(Ty::Int);
             }
@@ -719,8 +719,6 @@ fn unsupported_declaration(
         Some("a composable function with a receiver")
     } else if declaration.vararg_index.is_some() {
         Some("a composable function with a vararg parameter")
-    } else if declaration.params.len() > SLOTS_PER_INT {
-        Some("a composable function with more than ten parameters")
     } else if declaration
         .params
         .iter()
@@ -1107,8 +1105,6 @@ impl BodyScope<'_> {
             .any(|param| matches!(param.kind(), TyKind::Fun(_)))
         {
             Some("a call to a library composable function with a function-typed parameter")
-        } else if params.len() > 10 {
-            Some("a call to a library composable function with more than ten parameters")
         } else if !matches!(ret.kind(), TyKind::Unit) {
             Some("a call to a library composable function with a result")
         } else {
@@ -1310,6 +1306,10 @@ fn is_composable_lambda(ir: &IrFile, function: FunId, index: usize, composable: 
 /// evaluates in a defaults group of its own.
 fn unsupported_defaults(ir: &IrFile, function: FunId) -> Option<&'static str> {
     let defaults = ir.param_defaults(function)?;
+    // One `$default` int holds a bit per parameter.
+    if defaults.len() > 31 {
+        return Some("a composable function with default arguments and more than 31 parameters");
+    }
     (ir.param_defaults_stub_only(function)
         || defaults
             .iter()

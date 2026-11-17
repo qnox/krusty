@@ -46,7 +46,7 @@
 
 use crate::ir::{
     Callee, ExprId, FunId, IrBinOp, IrConst, IrEnclosure, IrExpr, IrFile, IrFunction,
-    IrNodePosition, IrParameterIdentity, IrTypeOp,
+    IrNodePosition, IrParameterIdentity, IrShortCircuitKind, IrTypeOp,
 };
 use crate::types::{EqualityMode, Ty};
 
@@ -58,6 +58,9 @@ use super::source_facts::{
 
 /// Bits per parameter slot of a `$changed` int, after its low "force" bit.
 const BITS_PER_SLOT: u32 = 3;
+
+/// The most value parameters one `$changed` int tracks; a function with more takes several.
+pub(super) const SLOTS_PER_INT: usize = 10;
 
 /// `ParamState`: what a caller knows of an argument, in a slot's two low bits.
 const SAME: i32 = 0b001;
@@ -76,9 +79,13 @@ fn bits_for_slot(bits: i32, slot: u32) -> i32 {
 #[derive(Clone, Copy)]
 struct Slots {
     composer: u32,
+    /// The first `$changed`; the `changed_ints` of them follow one another.
     changed: u32,
+    changed_ints: u32,
     /// `$default`, when a parameter has a default value.
     default: Option<u32>,
+    /// The first `$dirty`, when the body reads a parameter: every `$changed` int has one then, and
+    /// they follow one another in the order of their ints.
     dirty: Option<u32>,
 }
 
@@ -89,6 +96,7 @@ impl Slots {
         Self {
             composer: captures,
             changed: captures + 1,
+            changed_ints: 1,
             default: None,
             dirty: None,
         }
@@ -96,11 +104,13 @@ impl Slots {
 
     fn of(facts: &RestartableFunction) -> Self {
         let parameters = facts.parameters.len() as u32;
-        let default = has_defaults(facts).then_some(parameters + 2);
-        let next = parameters + 2 + u32::from(default.is_some());
+        let changed_ints = changed_ints(facts.parameters.len());
+        let default = has_defaults(facts).then_some(parameters + 1 + changed_ints);
+        let next = parameters + 1 + changed_ints + u32::from(default.is_some());
         Self {
             composer: parameters,
             changed: parameters + 1,
+            changed_ints,
             default,
             dirty: facts
                 .parameters
@@ -110,14 +120,39 @@ impl Slots {
         }
     }
 
-    /// The bit set the body decides on: `$dirty` when there is one.
-    fn decided(self) -> u32 {
-        self.dirty.unwrap_or(self.changed)
+    /// The `$changed` holding parameter slots `int * 10` on.
+    fn changed_int(self, int: u32) -> u32 {
+        self.changed + int
+    }
+
+    /// The `$dirty` of `$changed` int `int`.
+    fn dirty_int(self, int: u32) -> Option<u32> {
+        self.dirty.map(|dirty| dirty + int)
+    }
+
+    /// The bit set the body decides int `int` on: its `$dirty` when there is one.
+    fn decided(self, int: u32) -> u32 {
+        self.dirty_int(int).unwrap_or_else(|| self.changed_int(int))
     }
 
     /// The values the generated ones move the body's locals past.
     fn generated(self) -> u32 {
-        2 + u32::from(self.default.is_some()) + u32::from(self.dirty.is_some())
+        1 + self.changed_ints
+            + u32::from(self.default.is_some())
+            + self.dirty.map_or(0, |_| self.changed_ints)
+    }
+}
+
+/// How many `$changed` ints a function of `parameters` value parameters takes.
+pub(super) fn changed_ints(parameters: usize) -> u32 {
+    parameters.div_ceil(SLOTS_PER_INT).max(1) as u32
+}
+
+/// The name of `$changed` or `$dirty` int `int`: kotlinc numbers every one but the first.
+fn int_name(base: &str, int: u32) -> String {
+    match int {
+        0 => base.to_string(),
+        _ => format!("{base}{int}"),
     }
 }
 
@@ -200,13 +235,14 @@ fn add_composer_parameters(ir: &mut IrFile, facts: &RestartableFunction) {
     let slots = Slots::of(facts);
     let source_parameters = facts.parameters.len();
     let declaration = &mut ir.functions[function as usize];
-    let generated = 2 + usize::from(slots.default.is_some());
+    let generated = 1 + slots.changed_ints as usize + usize::from(slots.default.is_some());
     for (index, parameter) in facts.parameters.iter().enumerate() {
         declaration.params[index] = physical_type(parameter);
     }
+    declaration.params.push(Ty::nullable(runtime::composer()));
     declaration
         .params
-        .extend([Ty::nullable(runtime::composer()), Ty::Int]);
+        .extend((0..slots.changed_ints).map(|_| Ty::Int));
     declaration.params.extend(slots.default.map(|_| Ty::Int));
     declaration
         .param_checks
@@ -221,10 +257,13 @@ fn add_composer_parameters(ir: &mut IrFile, facts: &RestartableFunction) {
     let body = declaration.body.expect("a restartable function has a body");
     crate::ir::shift_value_indices(ir, body, slots.composer, slots.generated());
     let parameters = ir.fn_params.entry(function).or_default();
-    parameters.identities.extend([
-        IrParameterIdentity::producer_value("$composer"),
-        IrParameterIdentity::producer_value("$changed"),
-    ]);
+    parameters
+        .identities
+        .push(IrParameterIdentity::producer_value("$composer"));
+    parameters.identities.extend(
+        (0..slots.changed_ints)
+            .map(|int| IrParameterIdentity::producer_value(int_name("$changed", int))),
+    );
     if slots.default.is_some() {
         parameters.identities.push(IrParameterIdentity::generated(
             crate::ir::IrGeneratedParameterRole::DefaultMask,
@@ -240,7 +279,8 @@ fn add_composer_parameters(ir: &mut IrFile, facts: &RestartableFunction) {
             nullable[index] = true;
         }
     }
-    nullable.extend([true, false]);
+    nullable.push(true);
+    nullable.extend((0..slots.changed_ints).map(|_| false));
     nullable.extend(slots.default.map(|_| false));
     ir.plugin_extended_signatures.insert(function);
 }
@@ -439,8 +479,13 @@ fn traced(
 ) -> ExprId {
     if let Some(trace) = trace {
         let key = ir.add_expr(IrExpr::Const(IrConst::Int(key)));
-        let changed = ir.add_expr(IrExpr::GetValue(slots.decided()));
-        let unused = ir.add_expr(IrExpr::Const(IrConst::Int(-1)));
+        let changed = ir.add_expr(IrExpr::GetValue(slots.decided(0)));
+        // The event records the states of the first two ints, and `-1` where there is no second.
+        let unused = if slots.changed_ints > 1 {
+            ir.add_expr(IrExpr::GetValue(slots.decided(1)))
+        } else {
+            ir.add_expr(IrExpr::Const(IrConst::Int(-1)))
+        };
         let text = ir.add_expr(IrExpr::Const(IrConst::String(trace.into())));
         let event = runtime::call(
             ir,
@@ -487,14 +532,18 @@ fn pass_composer(
     let arguments = arguments.as_slice();
     if let IrExpr::InvokeFunction { .. } = ir.exprs[call as usize] {
         let composer = ir.add_expr(IrExpr::GetValue(caller.composer));
-        let changed = changed_argument(ir, caller, arguments);
+        let changed = changed_arguments(ir, caller, arguments);
         ir.mark_positionless(composer);
-        ir.mark_positionless(changed);
+        for &int in &changed {
+            ir.mark_positionless(int);
+        }
         let IrExpr::InvokeFunction { args, params, .. } = &mut ir.exprs[call as usize] else {
             unreachable!("an invoke is still an invoke");
         };
-        args.extend([composer, changed]);
-        params.extend([runtime::composer(), Ty::Int]);
+        args.push(composer);
+        args.extend(&changed);
+        params.push(runtime::composer());
+        params.extend(changed.iter().map(|_| Ty::Int));
         return;
     }
     let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
@@ -522,10 +571,13 @@ fn pass_composer(
             }
         }
         let composer = ir.add_expr(IrExpr::GetValue(caller.composer));
-        let changed = changed_argument(ir, caller, arguments);
+        let changed = changed_arguments(ir, caller, arguments);
         ir.mark_positionless(composer);
-        ir.mark_positionless(changed);
-        physical.extend([composer, changed]);
+        for &int in &changed {
+            ir.mark_positionless(int);
+        }
+        physical.push(composer);
+        physical.extend(changed);
         if library_mask {
             let mask = ir.add_expr(IrExpr::Const(IrConst::Int(omitted)));
             ir.mark_positionless(mask);
@@ -563,11 +615,14 @@ fn pass_composer(
         }
     }
     let composer = ir.add_expr(IrExpr::GetValue(caller.composer));
-    let changed = changed_argument(ir, caller, arguments);
+    let changed = changed_arguments(ir, caller, arguments);
     // kotlinc builds these arguments without offsets, so the call's line begins at its dispatch.
     ir.mark_positionless(composer);
-    ir.mark_positionless(changed);
-    physical.extend([composer, changed]);
+    for &int in &changed {
+        ir.mark_positionless(int);
+    }
+    physical.push(composer);
+    physical.extend(changed);
     if shape.defaults {
         let mask = ir.add_expr(IrExpr::Const(IrConst::Int(omitted)));
         ir.mark_positionless(mask);
@@ -596,8 +651,21 @@ fn placeholder(ty: Ty) -> IrConst {
     }
 }
 
-/// `buildChangedArgumentForCall`: a constant holding each static argument's state, or'ed with the
-/// caller's own `$dirty` bits for each parameter it passes on, moved to the callee's slot.
+/// `buildChangedArgumentForCall`: the `$changed` ints of a call, one for each ten arguments.
+fn changed_arguments(ir: &mut IrFile, caller: Slots, arguments: &[ArgumentState]) -> Vec<ExprId> {
+    (0..changed_ints(arguments.len()))
+        .map(|int| {
+            let first = int as usize * SLOTS_PER_INT;
+            let covered = &arguments[first.min(arguments.len())..];
+            let covered = &covered[..covered.len().min(SLOTS_PER_INT)];
+            changed_argument(ir, caller, covered)
+        })
+        .collect()
+}
+
+/// A constant holding each static argument's state, or'ed with the caller's own `$dirty` bits for
+/// each parameter it passes on, moved to the callee's slot, for the arguments of one `$changed`
+/// int.
 fn changed_argument(ir: &mut IrFile, caller: Slots, arguments: &[ArgumentState]) -> ExprId {
     let mut constant = 0;
     let mut forwarded = Vec::new();
@@ -607,8 +675,9 @@ fn changed_argument(ir: &mut IrFile, caller: Slots, arguments: &[ArgumentState])
             ArgumentState::Uncertain | ArgumentState::Omitted => {}
             ArgumentState::Forwarded(parent) => {
                 let dirty = caller
-                    .dirty
+                    .dirty_int(parent / SLOTS_PER_INT as u32)
                     .expect("a caller that passes on a parameter reads it");
+                let parent = parent % SLOTS_PER_INT as u32;
                 let mask = ir.add_expr(IrExpr::Const(IrConst::Int(bits_for_slot(SLOT_MASK, slot))));
                 let bits = ir.add_expr(IrExpr::GetValue(dirty));
                 let shifted = match slot.cmp(&parent) {
@@ -670,26 +739,33 @@ fn dirty_preamble(
     slots: Slots,
     statements: &mut Vec<ExprId>,
 ) {
-    let Some(dirty) = slots.dirty else {
-        return;
-    };
-    let changed = ir.add_expr(IrExpr::GetValue(slots.changed));
-    let declaration = ir.add_expr(IrExpr::Variable {
-        index: dirty,
-        ty: Ty::Int,
-        init: Some(changed),
-        named: true,
-    });
-    ir.value_names.insert(declaration, "$dirty".to_string());
-    statements.push(declaration);
-    for (slot, parameter) in (0u32..).zip(&facts.parameters) {
+    for int in 0..slots.changed_ints {
+        let Some(dirty) = slots.dirty_int(int) else {
+            continue;
+        };
+        let changed = ir.add_expr(IrExpr::GetValue(slots.changed_int(int)));
+        let declaration = ir.add_expr(IrExpr::Variable {
+            index: dirty,
+            ty: Ty::Int,
+            init: Some(changed),
+            named: true,
+        });
+        ir.value_names.insert(declaration, int_name("$dirty", int));
+        statements.push(declaration);
+    }
+    for (index, parameter) in (0u32..).zip(&facts.parameters) {
         if !parameter.used {
             continue;
         }
-        let isolated = and_constant(ir, slots.changed, bits_for_slot(STATIC, slot));
+        let int = index / SLOTS_PER_INT as u32;
+        let slot = index % SLOTS_PER_INT as u32;
+        let dirty = slots
+            .dirty_int(int)
+            .expect("a body that reads a parameter has a `$dirty` for each int");
+        let isolated = and_constant(ir, slots.changed_int(int), bits_for_slot(STATIC, slot));
         let uncertain = int_comparison(ir, IrBinOp::Eq, isolated, 0);
         let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
-        let value = ir.add_expr(IrExpr::GetValue(slot));
+        let value = ir.add_expr(IrExpr::GetValue(index));
         let changed = if parameter.lambda {
             &runtime.changed_instance
         } else {
@@ -706,7 +782,7 @@ fn dirty_preamble(
         let compare = match (parameter.default, slots.default) {
             // A constant default is static: an omitted argument needs no comparison.
             (Some(_), Some(default)) => {
-                let omitted = is_omitted(ir, default, slot);
+                let omitted = is_omitted(ir, default, index);
                 let static_bits =
                     ir.add_expr(IrExpr::Const(IrConst::Int(bits_for_slot(STATIC, slot))));
                 let defaulted = or_into(ir, dirty, static_bits);
@@ -788,12 +864,31 @@ fn has_differences(ir: &mut IrFile, facts: &RestartableFunction, slots: Slots) -
         let changed = ir.add_expr(IrExpr::GetValue(slots.changed));
         return int_comparison(ir, IrBinOp::Ne, changed, 0);
     }
-    let read = (0u32..)
-        .zip(&facts.parameters)
-        .filter(|(_, parameter)| parameter.used)
-        .fold(0, |mask, (slot, _)| mask | bits_for_slot(SAME, slot));
-    let decided = and_constant(ir, slots.decided(), read | 1);
-    int_comparison(ir, IrBinOp::Ne, decided, read)
+    let mut differences = Vec::new();
+    for (int, parameters) in (0u32..).zip(facts.parameters.chunks(SLOTS_PER_INT)) {
+        let read = (0u32..)
+            .zip(parameters)
+            .filter(|(_, parameter)| parameter.used)
+            .fold(0, |mask, (slot, _)| mask | bits_for_slot(SAME, slot));
+        let decided = and_constant(ir, slots.decided(int), read | 1);
+        differences.push(int_comparison(ir, IrBinOp::Ne, decided, read));
+    }
+    let mut differences = differences.into_iter();
+    let first = differences
+        .next()
+        .expect("the first int always has a difference test");
+    differences.fold(first, |left, right| short_circuit_or(ir, left, right))
+}
+
+/// `left || right`
+fn short_circuit_or(ir: &mut IrFile, left: ExprId, right: ExprId) -> ExprId {
+    let yes = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+    let or = ir.add_expr(IrExpr::When {
+        branches: vec![(Some(left), yes), (None, right)],
+    });
+    ir.whens.exhaustive.insert(or, Ty::Boolean);
+    ir.short_circuits.insert(or, IrShortCircuitKind::Or);
+    or
 }
 
 fn restart_group(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableFunction) {
@@ -827,7 +922,7 @@ fn restart_group(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableF
     // `$composer.shouldExecute(<differences>, $dirty and 1)`
     let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
     let any_changed = has_differences(ir, facts, slots);
-    let force = and_constant(ir, slots.decided(), 1);
+    let force = and_constant(ir, slots.decided(0), 1);
     let execute = runtime::call(
         ir,
         &runtime.should_execute,
@@ -941,18 +1036,31 @@ fn recompose_lambda(
     // `$composer` and `$force`.
     let parameters = facts.parameters.len() as u32;
     let defaults = slots.default.is_some();
-    let captured = parameters + 1 + u32::from(defaults);
+    let ints = slots.changed_ints;
+    let captured = parameters + ints + u32::from(defaults);
     let mut args = (0..parameters)
         .map(|value| ir.add_expr(IrExpr::GetValue(value)))
         .collect::<Vec<_>>();
-    let changed = ir.add_expr(IrExpr::GetValue(parameters));
-    let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-    let forced = or(ir, changed, one);
-    let flags = runtime::call(ir, &runtime.update_changed_flags, None, vec![forced]);
     let composer = ir.add_expr(IrExpr::GetValue(captured));
-    args.extend([composer, flags]);
+    args.push(composer);
+    // The first int forces the recomposition; the others pass on as they are.
+    for int in 0..ints {
+        let changed = ir.add_expr(IrExpr::GetValue(parameters + int));
+        let state = if int == 0 {
+            let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+            or(ir, changed, one)
+        } else {
+            changed
+        };
+        args.push(runtime::call(
+            ir,
+            &runtime.update_changed_flags,
+            None,
+            vec![state],
+        ));
+    }
     if defaults {
-        args.push(ir.add_expr(IrExpr::GetValue(parameters + 1)));
+        args.push(ir.add_expr(IrExpr::GetValue(parameters + ints)));
     }
     let restart = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::Local(function)),
@@ -972,7 +1080,7 @@ fn recompose_lambda(
         .iter()
         .map(physical_type)
         .collect::<Vec<_>>();
-    params.push(Ty::Int);
+    params.extend((0..ints).map(|_| Ty::Int));
     params.extend(slots.default.map(|_| Ty::Int));
     params.extend([runtime::composer(), Ty::Int]);
     let param_checks = vec![None; params.len()];
@@ -998,7 +1106,7 @@ fn recompose_lambda(
                 .parameters
                 .iter()
                 .map(|parameter| parameter.name.clone())
-                .chain(["$changed".to_string()])
+                .chain((0..ints).map(|int| int_name("$changed", int)))
                 .chain(defaults.then(|| "$default".to_string())),
         )
         .map(|(ordinal, name)| IrParameterIdentity::captured_value(Some(name), ordinal, capture))
@@ -1014,7 +1122,7 @@ fn recompose_lambda(
         debug: crate::ir::IrGeneratedDeclarationDebug::LocalsOnly,
     });
     let captures = (0..parameters)
-        .chain([slots.changed])
+        .chain((0..ints).map(|int| slots.changed_int(int)))
         .chain(slots.default)
         .map(|value| ir.add_expr(IrExpr::GetValue(value)))
         .collect();
