@@ -10,32 +10,6 @@ const LIBRARY: &str = include_str!("../../../tests/fixtures/klib_selected_sam/Li
 const NATIVE_LIBRARY: &str = include_str!("../../../tests/fixtures/klib_native_sam/Library.kt");
 const NATIVE_OTHER: &str = include_str!("../../../tests/fixtures/klib_native_sam/Other.kt");
 
-/// The externals production registers for the checked closure's target-realized members, such
-/// as `String.plus` called inside a converted lambda: each frozen member edge links its exact
-/// provider declaration at the receiver instead of lowering the member's library body.
-pub(super) fn checked_member_externals(
-    libraries: &KlibLibraries,
-    checked: &crate::ir::CheckedKlibDependencyFacts,
-) -> crate::fx_hash::HashMap<
-    crate::libraries::KlibDependencyCallable,
-    super::super::EmittedDependencyCallable,
-> {
-    checked
-        .member_edges()
-        .keys()
-        .map(|identity| {
-            let (external, realization) = libraries
-                .external_callable_by_dependency(identity)
-                .expect("a frozen member edge has an exact provider declaration");
-            assert_eq!(realization.dependency_callable.as_ref(), Some(identity));
-            (
-                identity.clone(),
-                super::super::EmittedDependencyCallable::target_member(external),
-            )
-        })
-        .collect()
-}
-
 fn assert_sam_frames(ir: &IrFile, method: crate::fir::ExternalCallableId, count: usize) {
     let targets = ir
         .exprs
@@ -184,6 +158,77 @@ pub(super) fn wasm_library(
     Some((work, libraries))
 }
 
+/// Resolve only the exact member identities the checker already authorized, preserving the
+/// declaration snapshots while the callee facts borrow their headers, as body emission does.
+pub(super) fn checked_member_declarations(
+    libraries: &KlibLibraries,
+    checked: &crate::ir::CheckedKlibDependencyFacts,
+) -> Vec<(
+    crate::fir::ExternalCallableId,
+    crate::libraries::ExternalCallableRealization,
+)> {
+    checked
+        .member_edges()
+        .keys()
+        .map(|identity| {
+            let (target, declaration) = libraries
+                .external_callable_by_dependency(identity)
+                .expect("a frozen member edge retains its exact provider declaration");
+            assert_eq!(declaration.dependency_callable.as_ref(), Some(identity));
+            (target, declaration)
+        })
+        .collect()
+}
+
+// A narrow common-IR test target: Wasm realizes primitive operators directly and owns String's
+// representation. These are target capabilities, not selections of producer/member spellings.
+pub(super) fn supports_sam_ir_operation(operation: crate::libraries::CompilerIntrinsic) -> bool {
+    crate::ir::IrBinOp::of_primitive_operator(operation).is_some()
+}
+
+pub(super) fn represents_sam_ir_classifier(classifier: crate::types::TypeName) -> bool {
+    classifier == crate::types::wk::string()
+}
+
+/// The same authenticated leaf classifications used by production dependency-body planning.
+/// A selected header alone never makes a call a target leaf; the target capability and, for a
+/// represented member, the checker's actual call edge must authorize that realization.
+pub(super) fn checked_member_leaves(
+    libraries: &KlibLibraries,
+    callees: &KlibCalleeFacts<'_>,
+    declarations: &[(
+        crate::fir::ExternalCallableId,
+        crate::libraries::ExternalCallableRealization,
+    )],
+    supports: &dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
+    represents: &dyn Fn(crate::types::TypeName) -> bool,
+) -> crate::fx_hash::HashMap<
+    crate::libraries::KlibDependencyCallable,
+    super::super::EmittedDependencyCallable,
+> {
+    declarations
+        .iter()
+        .filter_map(|(target, declaration)| {
+            let identity = declaration.dependency_callable.as_ref().unwrap();
+            let leaf = if let Some(operation) = callees
+                .target_intrinsic(identity, libraries.declaration_bodies(), supports)
+                .expect("a target leaf authenticates its exact producer header")
+            {
+                super::super::EmittedDependencyCallable::target_realization(*target, operation)
+            } else if callees
+                .target_member(identity, represents)
+                .expect("a target member has one checked declaration")
+                && callees.member_edge(identity).is_some()
+            {
+                super::super::EmittedDependencyCallable::target_member(*target)
+            } else {
+                return None;
+            };
+            Some((identity.clone(), leaf))
+        })
+        .collect()
+}
+
 #[test]
 fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frames() {
     let Some((work, libraries)) = wasm_library(LIBRARY, "selected_sam") else {
@@ -248,17 +293,63 @@ fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frame
             frozen.target.method_target,
             crate::ir::IrSamMethod::External(method)
         );
-        let callees = KlibCalleeFacts::new([callable]).with_checked_dependency_facts(&checked);
-        let externals = checked_member_externals(&libraries, &checked);
+        let member_snapshots = checked_member_declarations(&libraries, &checked);
+        let callees = KlibCalleeFacts::with_reference_declarations(
+            [callable],
+            member_snapshots.iter().filter_map(|(target, declaration)| {
+                declaration
+                    .klib_body_callable()
+                    .map(|callable| (*target, callable))
+            }),
+        )
+        .with_checked_dependency_facts(&checked);
+        let externals = checked_member_leaves(
+            &libraries,
+            &callees,
+            &member_snapshots,
+            &supports_sam_ir_operation,
+            &represents_sam_ir_classifier,
+        );
+        assert!(checked_member_leaves(
+            &libraries,
+            &callees,
+            &member_snapshots,
+            &|_| false,
+            &|_| false,
+        )
+        .is_empty());
+        let represented_members = checked_member_leaves(
+            &libraries,
+            &callees,
+            &member_snapshots,
+            &|_| false,
+            &represents_sam_ir_classifier,
+        );
+        assert!(!represented_members.is_empty());
+        assert_eq!(represented_members.len(), externals.len());
         let mut raw = DependencyBodyUnit::default();
-        raw.lower_function_with_intrinsics_and_externals(
+        raw.lower_function_with_declarations(
             callable,
             libraries.declaration_bodies(),
             &callees,
             libraries.intrinsic_facts(),
             &externals,
+            &libraries,
         )
         .unwrap_or_else(|decline| panic!("raw selected SAM {name}: {decline}"));
+        let retained =
+            crate::backend::CheckedBackendCallables::freeze(raw.ir(), &libraries).unwrap();
+        for (identity, member) in &represented_members {
+            assert_eq!(
+                retained
+                    .callable(member.target())
+                    .unwrap()
+                    .dependency_callable
+                    .as_ref(),
+                Some(identity)
+            );
+            assert!(checked.member_edges().contains_key(identity));
+        }
         assert_sam_result_types(raw.ir(), callable.ret());
         if wraps_function_value {
             assert_function_value_sam_frame(raw.ir(), method);
@@ -334,8 +425,23 @@ fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frame
     assert!(libraries
         .classifier(type_name("fixture/HiddenWithSam"))
         .is_none());
-    let callees = KlibCalleeFacts::new([callable]).with_checked_dependency_facts(&checked);
-    let externals = checked_member_externals(&libraries, &checked);
+    let member_snapshots = checked_member_declarations(&libraries, &checked);
+    let callees = KlibCalleeFacts::with_reference_declarations(
+        [callable],
+        member_snapshots.iter().filter_map(|(target, declaration)| {
+            declaration
+                .klib_body_callable()
+                .map(|callable| (*target, callable))
+        }),
+    )
+    .with_checked_dependency_facts(&checked);
+    let externals = checked_member_leaves(
+        &libraries,
+        &callees,
+        &member_snapshots,
+        &supports_sam_ir_operation,
+        &represents_sam_ir_classifier,
+    );
     let mut raw = DependencyBodyUnit::default();
     // As dependency body emission does, the provider resolves the declarations the private
     // class's members override, which its body never calls.
