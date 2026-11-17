@@ -5251,18 +5251,9 @@ impl<'a> Emitter<'a> {
             });
         let declaration_ty = *physical.unwrap_or(operation.ty);
         if let Some(realization) = self.property_realizations.get(operation.expression) {
-            let access = match realization {
-                crate::property_realizations::PropertyRealization::Physical(access) => {
-                    Some(access.clone())
-                }
-                crate::property_realizations::PropertyRealization::Local(target) => self
-                    .local_property_read_access(
-                        *target,
-                        selected.map(|(name, _)| name.as_str()),
-                        operation.interface,
-                        receiver_class,
-                    ),
-            };
+            let selected_accessor = selected.map(|(name, _)| name.as_str());
+            let access =
+                self.realized_property_read_access(&operation, realization, selected_accessor);
             if let Some(mut access) = access {
                 self.retarget_explicit_backing_read(&operation, &mut access);
                 return self.emit_realized_property_read(&operation, access, code);
@@ -5356,14 +5347,7 @@ impl<'a> Emitter<'a> {
         let access = self
             .property_realizations
             .get(operation.expression)
-            .map(|realization| match realization {
-                crate::property_realizations::PropertyRealization::Physical(access) => {
-                    access.clone()
-                }
-                crate::property_realizations::PropertyRealization::Local(target) => self
-                    .local_property_write_access(*target, receiver_class)
-                    .expect("a realized local member property write has exact JVM access"),
-            })
+            .map(|realization| self.realized_property_write_access(&operation, realization))
             .or_else(|| {
                 self.ir
                     .property_external_accessors
