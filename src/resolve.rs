@@ -28800,6 +28800,26 @@ impl<'a> Checker<'a> {
         if let Some(narrowed) = self.actual_this_narrow(scope) {
             if let Some(current) = receivers.iter_mut().find(|receiver| receiver.current) {
                 current.ty = narrowed;
+                // An `is B` proof on a receiver of an incomparable declared class keeps both: bare
+                // members of the declaration and of `B` stay visible (`check(this is B); field = x`).
+                let context = crate::assignable::TyCtx::new();
+                let declared = current.declared_ty;
+                let comparable = narrowed.non_null() == Ty::Nothing
+                    || crate::assignable::is_subtype(
+                        &context,
+                        self,
+                        declared.non_null(),
+                        narrowed.non_null(),
+                    )
+                    || crate::assignable::is_subtype(
+                        &context,
+                        self,
+                        narrowed.non_null(),
+                        declared.non_null(),
+                    );
+                if !comparable {
+                    current.ty = Ty::intersection(&[declared.non_null(), narrowed]);
+                }
             }
         }
         receivers
