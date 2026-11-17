@@ -1,7 +1,7 @@
 //! A `callsInPlace` contract declared by a class or object member of a compiled dependency is
 //! applied at the call site like one declared by a top-level function: a deferred local assigned
 //! inside the in-place lambda is definitely initialized afterwards. The dependency is built by the
-//! reference kotlinc, and both compilers must accept the consumer.
+//! reference kotlinc, and both compilers must accept the consumer and run it to `OK`.
 
 use super::common;
 
@@ -51,11 +51,16 @@ fun box(): String = if (fromObject() == 3 && fromInstance() == 4) "OK" else "FAI
 
 #[test]
 fn a_dependency_members_calls_in_place_contract_initializes_deferred_locals() {
-    let library = common::kotlinc_lib_out(&[("Neutral.kt", LIBRARY)])
+    let library = common::kotlinc_lib_out(&[("Lib.kt", LIBRARY)])
         .expect("reference kotlinc builds the contract dependency");
-    common::ModuleClassPair::compile_with_classpath(
-        &[("Consumer.kt", CONSUMER)],
-        &[library],
-        "ConsumerKt",
+    assert_eq!(
+        common::kotlinc_box_result_with_classpath(CONSUMER, std::slice::from_ref(&library)),
+        "OK",
+        "kotlinc's own result"
+    );
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(LIBRARY, CONSUMER).as_deref(),
+        Some("OK"),
+        "krusty's result against the same dependency"
     );
 }
