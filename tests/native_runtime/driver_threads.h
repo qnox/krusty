@@ -103,14 +103,27 @@ __asm__(".text\n"
 typedef struct DriverThread {
     void *stack;
     uint32_t exited;
+    void (*routine)(void *);
+    void *argument;
 } DriverThread;
+
+/* The helper owns the complete raw OS-thread routine, so it can declare its true lifetime.
+   Existing driver routines and callback algorithms are called unchanged between these edges. */
+static void driver_thread_routine(void *argument) {
+    DriverThread *thread = (DriverThread *)argument;
+    KThread *lifetime = kt_thread_lifetime_begin();
+    thread->routine(thread->argument);
+    kt_thread_lifetime_end(lifetime);
+}
 
 static inline void driver_thread_start(DriverThread *thread, void (*routine)(void *),
                                        void *argument) {
     thread->stack = kt_map(DRIVER_STACK_BYTES);
+    thread->routine = routine;
+    thread->argument = argument;
     __atomic_store_n(&thread->exited, 1, __ATOMIC_RELEASE);
     long started = driver_clone(DRIVER_CLONE_FLAGS, (char *)thread->stack + DRIVER_STACK_BYTES,
-                                &thread->exited, routine, argument);
+                                &thread->exited, driver_thread_routine, thread);
     if (started <= 0) {
         KT_SYS_FAIL("clone failed\n");
     }

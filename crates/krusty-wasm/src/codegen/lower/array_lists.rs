@@ -103,9 +103,11 @@ impl Body<'_> {
                 self.code.call(new);
             }
             [elements] => {
-                self.code.i32_const(0).call(new);
+                // `addAll` answers whether the list changed; the construction is the list.
+                let list = self.local(REFERENCE);
+                self.code.i32_const(0).call(new).local_tee(list);
                 self.value(*elements, fact.params[0])?;
-                self.code.call(add_all).drop_();
+                self.code.call(add_all).drop_().local_get(list);
             }
             _ => return Err("an ArrayList constructor the runtime does not realize".into()),
         }

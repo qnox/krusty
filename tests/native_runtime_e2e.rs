@@ -824,6 +824,37 @@ fn a_collection_started_during_a_collection_fails() {
     );
 }
 
+// PLATFORM-SPECIFIC: explicit Native embedding lifetimes and their GC roots.
+#[test]
+fn registered_os_thread_object_slots_survive_callbacks_and_end_with_the_thread() {
+    run_driver_everywhere("thread_object_lifetimes");
+}
+
+// PLATFORM-SPECIFIC: exact misuse diagnostics for the embedding lifetime ABI.
+#[test]
+fn a_foreign_host_cannot_nest_os_thread_lifetimes() {
+    run_driver_everywhere_expecting_failure(
+        "thread_lifetime_nested",
+        "krusty: the OS thread already has a runtime lifetime\n",
+    );
+}
+
+#[test]
+fn an_embedding_lifetime_end_must_be_balanced() {
+    run_driver_everywhere_expecting_failure(
+        "thread_lifetime_unbalanced",
+        "krusty: ending a thread lifetime outside its inactive owner\n",
+    );
+}
+
+#[test]
+fn an_unregistered_callback_cannot_request_persistent_object_slots() {
+    run_driver_everywhere_expecting_failure(
+        "thread_object_unregistered",
+        "krusty: object slots require an active registered OS-thread lifetime\n",
+    );
+}
+
 #[test]
 fn threads_started_by_foreign_code_share_the_heap_through_collections() {
     run_driver_everywhere("threads_share_the_heap");
@@ -1139,24 +1170,6 @@ fn a_class_that_publishes_no_names_fails_naming_its_descriptor() {
 }
 
 #[test]
-fn a_property_read_through_an_unknown_delegate_fails_naming_it() {
-    run_driver_expecting_failure(
-        "rw_property_get_unknown_delegate",
-        "krusty: a ReadWriteProperty read of a pkg.CustomDelegate, which is neither \
-         Delegates.notNull() nor Delegates.observable()\n",
-    );
-}
-
-#[test]
-fn a_property_write_through_an_unknown_delegate_fails_naming_it() {
-    run_driver_expecting_failure(
-        "rw_property_set_unknown_delegate",
-        "krusty: a ReadWriteProperty write of a pkg.CustomDelegate, which is neither \
-         Delegates.notNull() nor Delegates.observable()\n",
-    );
-}
-
-#[test]
 fn each_primitive_boxes_to_its_kind_and_small_values_share_a_box() {
     run_driver("boxing");
 }
@@ -1172,7 +1185,7 @@ fn a_pairs_members_answer_componentwise() {
 }
 
 #[test]
-fn lazy_observable_and_not_null_delegates_keep_kotlins_order() {
+fn a_lazy_runs_its_initializer_once_on_the_first_read() {
     run_driver("delegates");
 }
 

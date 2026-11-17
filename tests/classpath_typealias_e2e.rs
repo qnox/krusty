@@ -125,6 +125,33 @@ fn classpath_typealias_visibility_is_enforced() {
 }
 
 #[test]
+fn same_name_star_classes_are_ambiguous_without_an_unresolved_reference() {
+    let Some(dependency) = common::compile_libs_ref(
+        "same_name_star_class_ambiguity",
+        &[
+            ("Left.kt", "package left\nclass Choice<T>\n"),
+            ("Right.kt", "package right\nclass Choice<T>\n"),
+        ],
+    ) else {
+        return;
+    };
+    let source = "import left.*\n\
+        import right.*\n\
+        class Token\n\
+        fun use(value: Choice<Token>): Token = Token()\n";
+    let sources = [("Main.kt", source)];
+    let result = common::compiler_diagnostics(&sources, &[dependency]);
+    common::expect_identical_rejection(&result, "same-name star classes");
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stderr)
+            .iter()
+            .map(|error| format!("{}:{}: {}", error.line, error.column, error.message))
+            .collect::<Vec<_>>(),
+        ["4:16: overload resolution ambiguity between candidates:"],
+    );
+}
+
+#[test]
 fn same_target_star_aliases_with_different_templates_are_ambiguous() {
     let Some(dependency) = common::compile_libs_ref(
         "same_target_star_alias_ambiguity",

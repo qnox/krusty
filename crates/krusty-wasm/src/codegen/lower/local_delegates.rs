@@ -7,30 +7,30 @@
 
 use krusty::fir::LocalDelegatedPropertyId;
 use krusty::fx_hash::HashMap;
-use krusty::ir::{IrExpr, IrFile, IrLocalDelegateAccess, IrLocalPropertyReference};
+use krusty::ir::{IrExpr, IrFile, IrLocalDelegateAccess, IrLocalPropertyReference, PropertyId};
 
 use super::super::super::encode::{
     BlockType, CompositeType, FieldType, Function, Module, StorageType, SubType, ValType,
 };
 use super::super::super::runtime::Runtime;
-use super::{carrier, parameter_value_carrier, Body, FileContext, Unsupported};
+use super::{carrier, parameter_carrier_of, Body, FileContext, Unsupported};
 
 /// Accessors reserved for one file, and the object each local delegated property is.
 pub(super) struct Prepared {
     helpers: HashMap<(u32, bool), u32>,
     property_type: Option<u32>,
     property_objects: HashMap<LocalDelegatedPropertyId, u32>,
+    /// One object per delegated member property, the value `getValue` receives.
+    delegated_properties: HashMap<PropertyId, u32>,
 }
 
 /// Reserve an accessor function per plan and one global per property object.
 pub(super) fn prepare(ir: &IrFile, module: &mut Module, runtime: &Runtime) -> Prepared {
     let mut property_objects = HashMap::default();
+    let mut delegated_properties = HashMap::default();
     let mut property_type = None;
-    for expression in &ir.exprs {
-        let IrExpr::LocalPropertyReference(reference) = expression else {
-            continue;
-        };
-        let struct_type = *property_type.get_or_insert_with(|| {
+    let mut property_struct = |module: &mut Module| {
+        *property_type.get_or_insert_with(|| {
             module.subtype(SubType {
                 composite: CompositeType::Struct(vec![FieldType {
                     storage: StorageType::Val(runtime.string_type()),
@@ -39,11 +39,33 @@ pub(super) fn prepare(ir: &IrFile, module: &mut Module, runtime: &Runtime) -> Pr
                 supertype: None,
                 open: false,
             })
-        });
+        })
+    };
+    for expression in &ir.exprs {
+        let IrExpr::LocalPropertyReference(reference) = expression else {
+            continue;
+        };
+        let struct_type = property_struct(module);
         property_objects
             .entry(reference.declaration)
             .or_insert_with(|| module.global(ValType::nullable(struct_type)));
     }
+    for expression in &ir.exprs {
+        let IrExpr::Checked(operation) = expression else {
+            continue;
+        };
+        let Some(reference) = operation.module_property_reference() else {
+            continue;
+        };
+        if !reference.delegated {
+            continue;
+        }
+        let struct_type = property_struct(module);
+        delegated_properties
+            .entry(reference.property)
+            .or_insert_with(|| module.global(ValType::nullable(struct_type)));
+    }
+    drop(property_struct);
     let mut helpers = HashMap::default();
     for (plan, declaration) in ir.local_delegate_plans.iter().enumerate() {
         let plan = plan as u32;
@@ -56,6 +78,7 @@ pub(super) fn prepare(ir: &IrFile, module: &mut Module, runtime: &Runtime) -> Pr
         helpers,
         property_type,
         property_objects,
+        delegated_properties,
     }
 }
 
@@ -77,7 +100,7 @@ pub(super) fn define(
                 .parameters
                 .iter()
                 .map(|ty| {
-                    parameter_value_carrier(*ty)?.ok_or_else(|| "a `Unit` parameter".to_string())
+                    parameter_carrier_of(*ty)?.ok_or_else(|| "a `Unit` parameter".to_string())
                 })
                 .collect::<Result<Vec<_>, Unsupported>>()?;
             let results = carrier(accessor.result)?.into_iter().collect::<Vec<_>>();
@@ -156,6 +179,29 @@ impl Body<'_> {
         Ok(())
     }
 
+    pub(super) fn delegated_property_reference(
+        &mut self,
+        property: PropertyId,
+    ) -> Result<(), Unsupported> {
+        let name = self
+            .ir
+            .checked_properties
+            .get(&property)
+            .map(|property| property.name.as_str())
+            .ok_or_else(|| "a delegated property reference without its declaration".to_string())?;
+        let global = *self
+            .delegates
+            .delegated_properties
+            .get(&property)
+            .ok_or_else(|| "a delegated property reference without its object".to_string())?;
+        let struct_type = self
+            .delegates
+            .property_type
+            .ok_or_else(|| "a delegated property reference without its type".to_string())?;
+        self.property_reference_object(name, global, struct_type);
+        Ok(())
+    }
+
     pub(super) fn local_property_reference(
         &mut self,
         reference: &IrLocalPropertyReference,
@@ -169,7 +215,12 @@ impl Body<'_> {
             .delegates
             .property_type
             .ok_or_else(|| "a local property reference without its type".to_string())?;
-        let units = reference.name.encode_utf16().collect::<Vec<_>>();
+        self.property_reference_object(&reference.name, global, struct_type);
+        Ok(())
+    }
+
+    fn property_reference_object(&mut self, name: &str, global: u32, struct_type: u32) {
+        let units = name.encode_utf16().collect::<Vec<_>>();
         self.code
             .global_get(global)
             .ref_is_null()
@@ -181,6 +232,5 @@ impl Body<'_> {
             .global_set(global)
             .end()
             .global_get(global);
-        Ok(())
     }
 }

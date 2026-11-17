@@ -1054,6 +1054,7 @@ impl JvmBackend {
         if crate::declaration_collisions::validate(
             &ir,
             &pass_facts.override_results,
+            &callables,
             &pass_facts.property_reference_realizations.delegated_arrays,
             diags,
         )
