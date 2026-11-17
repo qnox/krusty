@@ -28,13 +28,13 @@ fn declaration_errors_do_not_suppress_an_independent_following_body_error() {
                 "Declarations.kt:4:1: function 'missing' must have a body.",
                 "Declarations.kt:5:1: function 'generic' must have a body.",
                 "Declarations.kt:6:1: function 'extension' must have a body.",
-                "Declarations.kt:8:32: initializer type mismatch: expected 'String', actual 'Int'.",
+                "Declarations.kt:8:30: initializer type mismatch: expected 'String', actual 'Int'.",
             ],
         ),
         (
             error_first,
             [
-                "Declarations.kt:1:32: initializer type mismatch: expected 'String', actual 'Int'.",
+                "Declarations.kt:1:30: initializer type mismatch: expected 'String', actual 'Int'.",
                 "Declarations.kt:5:1: function 'missing' must have a body.",
                 "Declarations.kt:6:1: function 'generic' must have a body.",
                 "Declarations.kt:7:1: function 'extension' must have a body.",
