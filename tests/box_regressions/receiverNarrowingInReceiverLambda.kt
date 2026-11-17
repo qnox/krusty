@@ -7,35 +7,41 @@ class Plain : Dialect {
     override val name = "plain"
 }
 
-class Box(val items: List<String>)
+class Items(val first: String, val second: String) {
+    val size: Int get() = 2
+    fun decorate(suffix: String): String = first + suffix + second + suffix
+    fun firstOrNull(): String? = if (first.length == 0) null else first
+}
 
-fun Dialect.viaRun(value: List<String>): String =
-    if (this is Pg) value.run { map { it + "!" }.joinToString() + size } else "none"
+class Box(val items: Items)
 
-fun Dialect.viaSafeRun(value: List<String>?): String =
-    if (this is Pg) value?.takeIf { it.isNotEmpty() }?.run { map { it + "?" }.joinToString() } ?: "empty" else "none"
+fun Dialect.viaRun(value: Items): String =
+    if (this is Pg) value.run { decorate("!") + size } else "none"
+
+fun Dialect.viaSafeRun(value: Items?): String =
+    if (this is Pg) value?.run { decorate("?") } ?: "empty" else "none"
 
 fun Dialect.viaWith(box: Box): String = when (this) {
-    is Pg -> with(box) { items.map { it.uppercase() }.joinToString() }
+    is Pg -> with(box) { items.decorate("#") }
     else -> "none"
 }
 
-fun Dialect.outerLabeled(value: List<String>): String =
-    if (this is Pg) value.run { this@outerLabeled.pgOnly() + first() } else "none"
+fun Dialect.outerLabeled(value: Items): String =
+    if (this is Pg) value.run { this@outerLabeled.pgOnly() + first } else "none"
 
-fun Dialect.afterGuard(value: List<String>): String = when {
-    this is Pg && value.isNotEmpty() -> value.apply { size }.joinToString()
+fun Dialect.afterGuard(value: Items): String = when {
+    this is Pg && value.size > 0 -> value.apply { size }.first
     else -> "none"
 }
 
 fun box(): String {
     val pg = Pg()
     val plain = Plain()
-    if (pg.viaRun(listOf("a", "b")) != "a!, b!2") return "run"
-    if (plain.viaRun(listOf("a")) != "none") return "run plain"
-    if (pg.viaSafeRun(listOf("a")) != "a?" || pg.viaSafeRun(emptyList()) != "empty") return "safe run"
-    if (pg.viaWith(Box(listOf("x", "y"))) != "X, Y" || plain.viaWith(Box(listOf("x"))) != "none") return "with"
-    if (pg.outerLabeled(listOf("a", "b")) != "Pa") return "labeled"
-    if (pg.afterGuard(listOf("q")) != "q") return "guard"
+    if (pg.viaRun(Items("a", "b")) != "a!b!2") return "run"
+    if (plain.viaRun(Items("a", "b")) != "none") return "run plain"
+    if (pg.viaSafeRun(Items("a", "b")) != "a?b?" || pg.viaSafeRun(null) != "empty") return "safe run"
+    if (pg.viaWith(Box(Items("x", "y"))) != "x#y#" || plain.viaWith(Box(Items("x", "y"))) != "none") return "with"
+    if (pg.outerLabeled(Items("a", "b")) != "Pa") return "labeled"
+    if (pg.afterGuard(Items("q", "r")) != "q") return "guard"
     return "OK"
 }
