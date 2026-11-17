@@ -200,7 +200,7 @@ through lambda parameters, an explicit applier target, a call argument the pass 
 `@ReadOnlyComposable`, `@ExplicitGroupsComposable`), a call to a composable of another file of
 the module, a call to a library composable that takes a receiver, declares default arguments, a
 function-typed parameter other than `@Composable () -> Unit` or more than ten parameters, returns a result or is `inline`, a composable
-lambda that captures a local value or a composable lambda parameter, holds
+lambda that captures a composable lambda parameter or passes a captured local to a composable call, holds
 another lambda or is empty, a composable
 whose lambda numbering another lambda or overload shares, and a class whose stability its file
 does not decide. Every other public or internal class gets kotlinc's `$stable` field and
