@@ -2807,7 +2807,6 @@ reified/parameterSwap.kt
 reified/reifiedIntersectionType.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/safecast.kt
-reified/sameIndexRecursive.kt
 reified/spreads.kt
 reified/vararg.kt
 reified/varargs.kt
