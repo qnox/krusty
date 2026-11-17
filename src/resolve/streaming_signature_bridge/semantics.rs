@@ -796,15 +796,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         self.open_nested_result_variables(scope, ty)
     }
 
-    fn enter_declaration(&self, declaration: crate::fir::DeclarationId) {
-        self.declarations_in_evaluation
-            .borrow_mut()
-            .push(declaration);
-    }
-
-    fn leave_declaration(&self, declaration: crate::fir::DeclarationId) {
-        let left = self.declarations_in_evaluation.borrow_mut().pop();
-        debug_assert_eq!(left, Some(declaration));
+    fn evaluation_stack(&self) -> Option<&crate::fir::EvaluationStack> {
+        Some(&self.declarations_in_evaluation)
     }
 
     fn enter_scoped_receiver(
@@ -1529,7 +1522,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // functions at this same receiver rung. The property declaration and the `invoke`
             // convention are both selected by the shared resolver; SigExpr only composes them.
             if let Some(callee) =
-                self.selected_invoke_callee_property_type(scope, receiver, spelling, demand)?
+                self.selected_member_property_type(scope, receiver, spelling, None, true, demand)?
             {
                 if let Ok(result) = self.invoke_result(scope, origin, callee, arguments, demand) {
                     return Ok(result);
@@ -3529,6 +3522,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             receiver.get(),
             spelling,
             Some(origin),
+            false,
             demand,
         )? {
             return Ok(result);
@@ -3888,6 +3882,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     receiver.get(),
                     spelling,
                     None,
+                    false,
                     demand,
                 )? {
                     if let Ok(result) = self.invoke_result(scope, origin, callee, arguments, demand)

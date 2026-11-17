@@ -102,7 +102,7 @@ struct ProductionSignatureSemantics<'a> {
     /// The declarations whose context parameter types are being resolved, innermost last.
     context_headers_in_resolution: RefCell<Vec<crate::fir::DeclarationId>>,
     /// The declarations whose signatures the solver is evaluating, innermost last.
-    declarations_in_evaluation: RefCell<Vec<crate::fir::DeclarationId>>,
+    declarations_in_evaluation: crate::fir::EvaluationStack,
     scoped_frames: semantics::scoped_constraint_frames::ScopedConstraintFrames,
     stable_functions: stable_function_index::StableFunctionIndex,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
@@ -2017,16 +2017,27 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let (class_super, interface_supers) = self.direct_super_receivers(scope, super_spelling)?;
         if let Some(receiver) = class_super {
-            if let Some(result) =
-                self.selected_member_property_type(scope, receiver, member_spelling, None, demand)?
-            {
+            if let Some(result) = self.selected_member_property_type(
+                scope,
+                receiver,
+                member_spelling,
+                None,
+                false,
+                demand,
+            )? {
                 return Ok(result);
             }
         }
         let mut selected = None;
         for receiver in interface_supers {
-            let Some(result) =
-                self.selected_member_property_type(scope, receiver, member_spelling, None, demand)?
+            let Some(result) = self.selected_member_property_type(
+                scope,
+                receiver,
+                member_spelling,
+                None,
+                false,
+                demand,
+            )?
             else {
                 continue;
             };

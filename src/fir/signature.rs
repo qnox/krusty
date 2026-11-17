@@ -1008,10 +1008,30 @@ pub trait SignatureSemantics:
 
     fn missing_signature_diagnostic(&self, declaration: DeclarationId) -> DiagnosticId;
 
-    /// See [`SignatureConstraintEvaluator::enter_declaration`].
-    fn enter_declaration(&self, _declaration: DeclarationId) {}
+    /// The declarations whose signatures are being evaluated, when selection needs to know them.
+    fn evaluation_stack(&self) -> Option<&EvaluationStack> {
+        None
+    }
+}
 
-    fn leave_declaration(&self, _declaration: DeclarationId) {}
+/// The declarations the solver is evaluating, innermost last: its cycle stack made visible to
+/// semantic selection, so a candidate whose type is still being inferred can be told apart from
+/// one that is unavailable.
+#[derive(Default)]
+pub struct EvaluationStack(std::cell::RefCell<Vec<DeclarationId>>);
+
+impl EvaluationStack {
+    fn push(&self, declaration: DeclarationId) {
+        self.0.borrow_mut().push(declaration);
+    }
+
+    fn pop(&self) {
+        self.0.borrow_mut().pop();
+    }
+
+    pub fn contains(&self, declaration: DeclarationId) -> bool {
+        self.0.borrow().contains(&declaration)
+    }
 }
 
 mod delegate_site;
