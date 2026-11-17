@@ -29,7 +29,7 @@ pub(super) struct CaptureField {
 }
 
 /// An object literal's delegation to a superclass constructor: the operands evaluated where the
-/// object is constructed, the constructor's parameters and the constructor itself.
+/// object is constructed, the constructor's declared parameters and the constructor itself.
 struct SuperclassForwards {
     operands: Vec<(ExprId, Ty)>,
     params: Vec<Ty>,
@@ -141,6 +141,13 @@ impl<'a> BodyLowering<'a> {
         declared.enclosure = Some(crate::ir::IrEnclosure::Function(self.function.function));
         declared.is_source_declared = true;
         declared.is_anonymous_object = true;
+        declared.site_name =
+            self.linker
+                .site_container()
+                .map(|container| crate::ir::IrSiteClassName {
+                    container,
+                    name: class.name.as_str().into(),
+                });
         declared.is_local_class = true;
         declared.superclass = superclass;
         declared.interfaces = interfaces.into();
@@ -367,7 +374,8 @@ impl<'a> BodyLowering<'a> {
             .copied()
             .find(|ty| ty.non_null().kotlin_class_internal() == Some(superclass))
             .ok_or_else(|| mismatch("an object literal delegates to a class it does not extend"))?;
-        let operands = self.constructor_operands(access, 0, ty)?;
+        let operands =
+            self.constructor_operands(access, 0, ty, super::ConstructorRole::Delegation)?;
         if operands.declaration.classifier != superclass || operands.local_access.is_some() {
             return Err(mismatch(
                 "an object literal delegates to another class than its superclass",
@@ -410,7 +418,10 @@ impl<'a> BodyLowering<'a> {
             .zip(operands.params.iter().copied());
         Ok(SuperclassForwards {
             operands: pairs.collect(),
-            params: operands.params,
+            // The superclass constructor's own declared frame, as a source class records it: a
+            // backend couples it to the constructor's physical frame, while each operand above is
+            // carried at its type in this object's instantiation.
+            params: operands.declaration.declared_parameters().to_vec(),
             target: IrConstructorTarget {
                 ordinal,
                 access: crate::ir::IrConstructorAccess::Unrestricted,
@@ -633,7 +644,13 @@ impl<'a> BodyLowering<'a> {
                     };
                     self.ir.classes[class_id as usize]
                         .properties
-                        .push(property_declaration(&name, ret, fun, setter));
+                        .push(property_declaration(
+                            &name,
+                            property.base.flags,
+                            ret,
+                            fun,
+                            setter,
+                        )?);
                     self.record_property_override(&name, &getter, fun, owner, supertypes, ret)?;
                 }
                 _ => {}
@@ -937,11 +954,26 @@ struct MemberFrame<'a> {
     compiler_aliases: HashMap<KlibIrSymbol, crate::metadata::klib_ir::tree::KlibIrExprId>,
     returnable_targets: Vec<KlibIrSymbol>,
     returnable_frames: Vec<super::compiler_blocks::ReturnableFrame>,
-    null_proven: HashSet<KlibIrSymbol>,
+    null_proven: HashSet<super::safe_calls::NullProvenRead>,
 }
 
-fn property_declaration(name: &str, ty: Ty, getter: FunId, setter: Option<FunId>) -> IrProperty {
-    IrProperty {
+/// An object literal property, with the modality its serialized declaration flags state: only an
+/// `open` or `abstract` one (an `override` not marked `final` included) dispatches.
+fn property_declaration(
+    name: &str,
+    flags: u64,
+    ty: Ty,
+    getter: FunId,
+    setter: Option<FunId>,
+) -> Lowered<IrProperty> {
+    use crate::metadata::semantic::KotlinModality;
+    let modality = match crate::metadata::semantic::declaration_modality(flags) {
+        KotlinModality::Final => crate::ir::IrPropertyModality::Final,
+        KotlinModality::Open => crate::ir::IrPropertyModality::Open,
+        KotlinModality::Abstract => crate::ir::IrPropertyModality::Abstract,
+        KotlinModality::Sealed => return Err(mismatch("an object literal property is sealed")),
+    };
+    Ok(IrProperty {
         name: name.to_owned(),
         origin: crate::ir::IrPropertyOrigin::Declaration,
         diagnostic_span: None,
@@ -960,9 +992,9 @@ fn property_declaration(name: &str, ty: Ty, getter: FunId, setter: Option<FunId>
         storage_ty: None,
         backing_field: None,
         is_var: setter.is_some(),
-        is_open: true,
+        is_open: modality != crate::ir::IrPropertyModality::Final,
         modifiers: crate::ir::IrPropertyModifiers {
-            modality: crate::ir::IrPropertyModality::Open,
+            modality,
             declared_getter: true,
             ..crate::ir::IrPropertyModifiers::default()
         },
@@ -974,5 +1006,5 @@ fn property_declaration(name: &str, ty: Ty, getter: FunId, setter: Option<FunId>
         setter,
         needs_access_bridge: false,
         accessor_annotations: Default::default(),
-    }
+    })
 }

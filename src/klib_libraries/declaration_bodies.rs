@@ -206,6 +206,16 @@ impl std::fmt::Display for KlibDeclarationBodiesError {
 
 impl std::error::Error for KlibDeclarationBodiesError {}
 
+/// Distinct inventories from one authenticated emitted-body traversal. Declaration roots never
+/// become executable call obligations merely by sharing this walk with callable symbols.
+#[derive(Default)]
+struct EmittedBodyInventory<'a> {
+    callables: Vec<&'a KlibIrSymbol>,
+    objects: Vec<&'a KlibIrSymbol>,
+    public_hierarchy_roots: Vec<TypeName>,
+    sam_declarations: Vec<&'a KlibIrSymbol>,
+}
+
 impl KlibDeclarationBodies {
     /// Exactly one raw class header in this module with the requested function/constructor or
     /// accessor as a direct member. An accessor is found only in the slot of its `role`, or, for a
@@ -590,6 +600,12 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_class(signature)
     }
 
+    /// The package segments of the serialized file `file` of `module`.
+    pub(crate) fn module_file_package(&self, module: &str, file: u32) -> Option<&[String]> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].file_package(file)
+    }
+
     /// The file-local function `module` itself serializes under `signature`.
     pub(crate) fn module_local_function<'a>(
         &'a self,
@@ -895,6 +911,11 @@ impl KlibDeclarationBodies {
         found.unwrap_or(LocatedMember::Missing)
     }
 
+    /// The class that directly declares the exact linked member `identity`, function or accessor.
+    pub(crate) fn member_owner(&self, identity: &KlibDependencyCallable) -> LocatedMember<'_> {
+        self.function_owner(&identity.module, &ir_signature(&identity.declaration))
+    }
+
     /// Whether the exact serialized declaration intentionally carries an executable body.
     pub(crate) fn function_has_body(&self, identity: &KlibDependencyCallable) -> Option<bool> {
         self.function(identity)
@@ -951,22 +972,7 @@ impl KlibDeclarationBodies {
             .libraries
             .iter()
             .flat_map(|library| library.local_classes())
-            .flat_map(|(arena, class)| {
-                class
-                    .supertypes
-                    .iter()
-                    .filter_map(|&supertype| match arena.ty(supertype) {
-                        KlibIrType::Simple { classifier, .. }
-                            if classifier.kind == KlibIrSymbolKind::Class =>
-                        {
-                            match &classifier.signature {
-                                KlibIrSignature::Public(signature) => Some(signature),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    })
-            })
+            .flat_map(|(arena, class)| public_supertypes(arena, class))
             .collect::<Vec<_>>();
         // Stable across processes: ordered by the serialized identity, not by interning order.
         supertypes.sort_by(|left, right| {
@@ -1010,37 +1016,7 @@ impl KlibDeclarationBodies {
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibDependencyCallable> {
-        let Some((trees, arena, function)) = self.function_with_trees(identity) else {
-            return Vec::new();
-        };
-        let mut symbols = arena.emitted_callable_symbols(function, forms);
-        // A top-level function first runs its file's initialization, which evaluates the
-        // initializers of that file's properties that run code. A constant calls nothing.
-        if let Some(file) = self.top_level_file(identity) {
-            for initializer in self.module_file_initializers(&identity.module, file, false) {
-                symbols.extend(
-                    initializer
-                        .arena
-                        .emitted_callable_symbols_from(vec![initializer.initializer], forms),
-                );
-            }
-        }
-        // A file-local class the body constructs, an object literal's among them, is
-        // materialized with the body, every member included, since dispatch can run any of them.
-        // A private class of the same file is its own declaration tree, so its members are read
-        // in the arena that serializes the class.
-        let mut classes = crate::fx_hash::HashSet::default();
-        let mut next = 0;
-        while let Some(symbol) = symbols.get(next).copied() {
-            next += 1;
-            if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
-                if classes.insert(&class.base.symbol) {
-                    let mut roots = class_arena.class_member_roots(class);
-                    roots.extend(class_arena.class_superclass_delegations(class));
-                    symbols.extend(class_arena.emitted_callable_symbols_from(roots, forms));
-                }
-            }
-        }
+        let symbols = self.emitted_body_symbols(identity, forms).callables;
         symbols
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
@@ -1051,6 +1027,123 @@ impl KlibDeclarationBodies {
                 },
             )
             .collect()
+    }
+
+    /// The public objects whose values the emitted body of `identity` reads, through the
+    /// closures `forms` lowers with it and the members of the file-local classes it constructs.
+    pub(crate) fn emitted_body_objects(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<KlibPublicIdSignature> {
+        let objects = self.emitted_body_symbols(identity, forms).objects;
+        let mut seen = crate::fx_hash::HashSet::default();
+        objects
+            .into_iter()
+            .filter_map(|symbol| match &symbol.signature {
+                KlibIrSignature::Public(signature) => Some(signature.clone()),
+                _ => None,
+            })
+            .filter(|signature| seen.insert(signature.clone()))
+            .collect()
+    }
+
+    /// Public functional interfaces named by emitted SAM conversions, from the same roots as calls.
+    pub(crate) fn emitted_body_sam_classifiers(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<(KlibPublicIdSignature, TypeName)> {
+        self.emitted_body_symbols(identity, forms)
+            .sam_declarations
+            .into_iter()
+            .filter_map(|symbol| match &symbol.signature {
+                KlibIrSignature::Public(signature) => {
+                    class_identity(&symbol.signature).map(|name| (signature.clone(), name))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Public hierarchy roots of the private classes the emitted body constructs. These are
+    /// declaration facts, not executable callees: a private constructor is intentionally absent
+    /// from the public callable inventory even when its class is materialized with this body.
+    pub(crate) fn emitted_body_classifiers(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<TypeName> {
+        self.emitted_body_symbols(identity, forms)
+            .public_hierarchy_roots
+    }
+
+    /// Callable, object and hierarchy inventories cover exactly the same emitted roots: the
+    /// selected body, its file initialization, and the local classes those roots construct.
+    fn emitted_body_symbols<'a>(
+        &'a self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> EmittedBodyInventory<'a> {
+        let Some((trees, arena, function)) = self.function_with_trees(identity) else {
+            return EmittedBodyInventory::default();
+        };
+        let mut symbols = arena.emitted_callable_symbols(function, forms);
+        let mut objects = arena.emitted_object_symbols(function, forms);
+        let mut sams = arena.emitted_sam_classifiers(function, forms);
+        // Constructor initialization uses these same serialized roots in
+        // `constructor_initializer_callables`, even when its fields call no declaration.
+        if function.constructor {
+            if let Some((arena, class)) =
+                self.module_class_declaring(&identity.module, &ir_signature(&identity.declaration))
+            {
+                sams.extend(
+                    arena.emitted_sam_classifiers_from(arena.class_initializer_roots(class), forms),
+                );
+            }
+        }
+        let mut classifiers = Vec::new();
+        if let Some(file) = self.top_level_file(identity) {
+            for initializer in self.module_file_initializers(&identity.module, file, false) {
+                let roots = vec![initializer.initializer];
+                symbols.extend(
+                    initializer
+                        .arena
+                        .emitted_callable_symbols_from(roots.clone(), forms),
+                );
+                objects.extend(
+                    initializer
+                        .arena
+                        .emitted_object_symbols_from(roots.clone(), forms),
+                );
+                sams.extend(initializer.arena.emitted_sam_classifiers_from(roots, forms));
+            }
+        }
+        // A constructed local class is materialized with every member and its superclass
+        // delegation, in the arena that serializes that class.
+        let mut classes = crate::fx_hash::HashSet::default();
+        let mut next = 0;
+        while let Some(symbol) = symbols.get(next).copied() {
+            next += 1;
+            if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
+                if classes.insert(&class.base.symbol) {
+                    classifiers.extend(public_supertypes(class_arena, class).filter_map(
+                        |signature| class_identity(&KlibIrSignature::Public(signature.clone())),
+                    ));
+                    let mut roots = class_arena.class_member_roots(class);
+                    roots.extend(class_arena.class_superclass_delegations(class));
+                    symbols.extend(class_arena.emitted_callable_symbols_from(roots.clone(), forms));
+                    objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
+                    sams.extend(class_arena.emitted_sam_classifiers_from(roots, forms));
+                }
+            }
+        }
+        EmittedBodyInventory {
+            callables: symbols,
+            objects,
+            public_hierarchy_roots: classifiers,
+            sam_declarations: sams,
+        }
     }
 
     /// Declaration facts of the class whose exact reached constructor is `identity`. Field and
@@ -1263,6 +1356,23 @@ fn inert_initializer(
         arena.expr(initializer).kind,
         crate::metadata::klib_ir::tree::KlibIrExprKind::Const(_)
     )
+}
+
+fn public_supertypes<'a>(
+    arena: &'a KlibIrArena,
+    class: &'a KlibIrClass,
+) -> impl Iterator<Item = &'a KlibPublicIdSignature> {
+    class.supertypes.iter().filter_map(|&supertype| {
+        let KlibIrType::Simple { classifier, .. } = arena.ty(supertype) else {
+            return None;
+        };
+        match &classifier.signature {
+            KlibIrSignature::Public(signature) if classifier.kind == KlibIrSymbolKind::Class => {
+                Some(signature)
+            }
+            _ => None,
+        }
+    })
 }
 
 fn class_identity(signature: &KlibIrSignature) -> Option<TypeName> {

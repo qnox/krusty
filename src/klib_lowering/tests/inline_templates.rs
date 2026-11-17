@@ -27,12 +27,12 @@ fn template(
     libraries: &KlibLibraries,
     selected: &ExternalCallableRealization,
 ) -> Result<KlibInlineTemplate, crate::klib_lowering::KlibBodyDecline> {
-    let hierarchy = checked_template_hierarchy(libraries, selected);
+    let hierarchy = checked_template_facts(libraries, selected);
     let callees = TemplateCallees {
         declarations: libraries.declaration_bodies(),
         references: libraries.reference_bindings(),
         source: libraries,
-        type_hierarchy: &hierarchy,
+        dependency_facts: &hierarchy,
     };
     lower_inline_template(ir, selected, libraries.inline_declaration_bodies(), callees)
         .expect("a KLIB function")
@@ -72,6 +72,57 @@ fn default_null_checks_lower_branch_local_returns_in_prepared_inline_blocks() {
         );
         validated(&ir);
     }
+}
+
+#[test]
+fn selected_suspend_inline_template_keeps_its_unintercepted_suspension_block() {
+    // The Wasm stdlib's `suspendCoroutine` suspends through `suspendCoroutineUninterceptedOrReturn`.
+    let Some(stdlib) =
+        crate::toolchain::kotlin_stdlib_klib(crate::compilation_target::CompilationTarget::WasmJs)
+    else {
+        assert!(
+            std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
+            "the exact Wasm stdlib is required"
+        );
+        return;
+    };
+    let libraries =
+        KlibLibraries::open(&[crate::klib_libraries::KlibLibraryInput::platform_stdlib(
+            stdlib,
+            crate::klib_libraries::KlibStdlibSemantics::Wasm,
+        )])
+        .expect("open the Wasm stdlib");
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/coroutines")),
+        "suspendCoroutine",
+    );
+    let selected = symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| function.callable.suspend && function.callable.inline.must_inline())
+        .collect::<Vec<_>>();
+    let [selected] = selected.as_slice() else {
+        panic!("expected one selected suspend inline `suspendCoroutine`");
+    };
+    let target = selected
+        .callable
+        .external_identity
+        .expect("a KLIB suspend function carries its provider identity");
+    let selected = libraries
+        .external_callable(target)
+        .expect("the provider realizes the selected identity");
+    let mut ir = IrFile::default();
+
+    let template = template(&mut ir, &libraries, &selected)
+        .unwrap_or_else(|decline| panic!("suspendCoroutine: {decline}"));
+
+    assert!(ir.inline_only_fns.contains(&template.function));
+    assert!(!ir.intrinsic_suspension_points.is_empty());
+    assert!(ir.intrinsic_suspension_points.keys().all(
+        |expression| matches!(ir.expr(*expression), IrExpr::InvokeFunction { func, .. }
+            if matches!(ir.expr(*func), IrExpr::Lambda { inline_body: Some(_), .. }))
+    ));
 }
 
 #[test]
@@ -604,6 +655,7 @@ fn a_dependency_property_read_reads_the_provider_property() {
                     arguments,
                     parameters,
                     result,
+                    substitutions: _,
                     source_receiver,
                 } => Some((
                     *target,

@@ -10,7 +10,13 @@ use crate::ir::{ExprId, IrExpr};
 #[derive(Clone, Copy)]
 pub(in super::super) enum LambdaParameterBinding<'callee> {
     /// Named parameters become locals holding their arguments; `callee` opens the inline frame.
-    Declared { callee: Option<&'callee str> },
+    /// `specialization` binds the formals of the inline callee whose body declares the lambda:
+    /// a lambda that callee's own body passes, as `suspendCoroutine` captures its `block`, types
+    /// its parameters with them, and its locals take them at this expansion's type arguments.
+    Declared {
+        callee: Option<&'callee str>,
+        specialization: Option<&'callee crate::fx_hash::HashMap<String, crate::types::Ty>>,
+    },
     /// Parameters directly reuse value slots supplied by their arguments.
     Remapped,
 }
