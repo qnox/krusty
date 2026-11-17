@@ -133,8 +133,10 @@ pub(crate) fn generic_signature_strictly_more_constrained(
     strict
 }
 
-/// `signature` restricted to the formals some receiver or value parameter mentions, ordered by the
-/// first parameter position that mentions each (ties by declaration order).
+/// `signature` restricted to the formals its receiver or value parameters mention, ordered by the
+/// first parameter position that mentions each (ties by declaration order), followed by the formals
+/// those formals' bounds reach in turn. A bound's formal keeps a slot, so the same `C<U>` bound on
+/// two overloads canonicalizes to the same shape; a formal only the result mentions has none.
 fn parameter_formals_in_mention_order(signature: &GenericSig) -> GenericSig {
     let positions = signature
         .receiver
@@ -142,7 +144,7 @@ fn parameter_formals_in_mention_order(signature: &GenericSig) -> GenericSig {
         .chain(&signature.params)
         .copied()
         .collect::<Vec<_>>();
-    let mut mentioned = (0..signature.formals.len())
+    let mut direct = (0..signature.formals.len())
         .filter_map(|ordinal| {
             positions
                 .iter()
@@ -150,15 +152,29 @@ fn parameter_formals_in_mention_order(signature: &GenericSig) -> GenericSig {
                 .map(|first| (first, ordinal))
         })
         .collect::<Vec<_>>();
-    mentioned.sort_unstable();
+    direct.sort_unstable();
+    let mut slots = direct
+        .into_iter()
+        .map(|(_, ordinal)| ordinal)
+        .collect::<Vec<_>>();
+    let mut next = 0;
+    while let Some(&ordinal) = slots.get(next) {
+        next += 1;
+        for bound in signature.formal_bounds.get(ordinal).into_iter().flatten() {
+            for (reached, formal) in signature.formals.iter().enumerate() {
+                if !slots.contains(&reached)
+                    && crate::types::ty_mentions_param(*bound, std::slice::from_ref(formal))
+                {
+                    slots.push(reached);
+                }
+            }
+        }
+    }
     GenericSig {
-        formals: mentioned
+        formals: slots.iter().map(|&i| signature.formals[i]).collect(),
+        formal_bounds: slots
             .iter()
-            .map(|&(_, i)| signature.formals[i])
-            .collect(),
-        formal_bounds: mentioned
-            .iter()
-            .map(|&(_, i)| signature.formal_bounds.get(i).cloned().unwrap_or_default())
+            .map(|&i| signature.formal_bounds.get(i).cloned().unwrap_or_default())
             .collect(),
         ..signature.clone()
     }
