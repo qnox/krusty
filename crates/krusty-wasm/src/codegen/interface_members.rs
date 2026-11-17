@@ -52,8 +52,7 @@ pub(super) type Signature = (Vec<ValType>, Vec<ValType>);
 pub(super) fn member_signature(params: &[Ty], result: Ty) -> Result<Signature, Unsupported> {
     let mut carriers = vec![REFERENCE];
     for param in params {
-        carriers
-            .push(parameter_carrier_of(*param)?.ok_or_else(|| "a `Unit` parameter".to_string())?);
+        carriers.push(parameter_carrier_of(*param)?);
     }
     Ok((carriers, carrier(result)?.into_iter().collect()))
 }

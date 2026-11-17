@@ -187,7 +187,7 @@ impl Body<'_> {
             if let Some(element) = element {
                 self.pass_shared_capture(*arg, element)?;
             } else {
-                self.value(*arg, param)?;
+                self.argument(*arg, param)?;
             }
         }
         self.code.call(constructor).local_get(object);
@@ -228,7 +228,7 @@ impl Body<'_> {
                 ));
             }
             for (argument, parameter) in args.iter().zip(parameters.iter()) {
-                self.value(*argument, *parameter)?;
+                self.argument(*argument, *parameter)?;
             }
             self.code.call(function);
             Ok(())
@@ -491,7 +491,7 @@ impl Body<'_> {
         for (parameter, (&arg, &param)) in args.iter().zip(params).enumerate() {
             match function {
                 Some(function) => self.function_argument(function, parameter as u32, arg)?,
-                None => self.value(arg, param)?,
+                None => self.argument(arg, param)?,
             }
         }
         self.code.local_get(this);
@@ -539,7 +539,7 @@ impl Body<'_> {
         self.value(receiver, Ty::obj_name(owner))?;
         self.code.local_tee(this);
         for (&arg, &param) in args.iter().zip(params) {
-            self.value(arg, param)?;
+            self.argument(arg, param)?;
         }
         self.code.local_get(this);
         self.table_of_object();
@@ -687,7 +687,7 @@ impl Body<'_> {
         }
         self.value(receiver, any())?;
         for (arg, param) in args.iter().zip(&call.params) {
-            self.value(*arg, *param)?;
+            self.argument(*arg, *param)?;
         }
         let stub = self
             .runtime
@@ -719,7 +719,7 @@ impl Body<'_> {
         self.value(receiver, any())?;
         self.code.local_tee(this);
         for (arg, param) in args.iter().zip(&params) {
-            self.value(*arg, *param)?;
+            self.argument(*arg, *param)?;
         }
         self.code.local_get(this);
         self.table_of_object();
@@ -787,7 +787,7 @@ impl Body<'_> {
             .ok_or("a `super` call to a function of no function type")?;
         let mut expected = vec![REFERENCE];
         for param in params {
-            expected.push(super::parameter_carrier_of(*param)?.ok_or("a `Unit` parameter")?);
+            expected.push(super::parameter_carrier_of(*param)?);
         }
         if params.len() != args.len()
             || carried != expected
@@ -799,7 +799,7 @@ impl Body<'_> {
         }
         self.value(receiver, any())?;
         for (&arg, param) in args.iter().zip(params) {
-            self.value(arg, *param)?;
+            self.argument(arg, *param)?;
         }
         self.code.call(function);
         Ok(())
@@ -1974,7 +1974,7 @@ impl Body<'_> {
                 .local_get(u32::try_from(parameter).expect("too many parameters"));
         }
         for (arg, param) in args.iter().zip(&params[forwarded..]) {
-            self.value(*arg, *param)?;
+            self.argument(*arg, *param)?;
         }
         self.code.call(constructor);
         Ok(())

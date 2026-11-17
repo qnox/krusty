@@ -160,7 +160,7 @@ impl Body<'_> {
         };
         self.value(receiver, Ty::obj("kotlin/collections/ArrayList"))?;
         for (&arg, &param) in args.iter().zip(fact.params.as_slice()) {
-            self.value(arg, param)?;
+            self.argument(arg, param)?;
         }
         self.code.call(function);
         Ok(())
