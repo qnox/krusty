@@ -14,7 +14,7 @@ pub(super) enum EntriesList {
     /// The target's own list ([`IrExpr::EnumEntriesList`]), built by the initializer.
     Runtime,
     /// A call of the stdlib's `enumEntries(Array)`, made by the getter on its first read.
-    Factory(crate::fir::EnumEntriesFactory),
+    Factory(super::EntriesFactory),
 }
 
 /// Build the slots, initializer, `values()`, `valueOf` and `entries` of the enum `class`.
@@ -127,17 +127,18 @@ fn entries_getter(
     function(ir, name, Vec::new(), entries_ty, body)
 }
 
-/// `enumEntries<E>(values)`: the selected stdlib declaration, applied to the enum.
+/// `enumEntries<E>(values)`: the selected stdlib declaration, applied to the enum, or this unit's
+/// own function lowering its body.
 fn factory_call(
     ir: &mut IrFile,
-    factory: crate::fir::EnumEntriesFactory,
+    factory: super::EntriesFactory,
     classifier: TypeName,
     values: ExprId,
 ) -> ExprId {
     let enum_ty = Ty::obj_name(classifier);
     let entries_ty = entries_type(classifier);
-    let call = ir.add_expr(IrExpr::Call {
-        callee: Box::new(Callee::External {
+    let callee = match factory {
+        super::EntriesFactory::Selected(factory) => Callee::External {
             target: factory.function,
             default_provider: None,
             params: vec![array_type(classifier)],
@@ -154,7 +155,11 @@ fn factory_call(
             }],
             defaults: Vec::new(),
             extension_receiver_parameter: None,
-        }),
+        },
+        super::EntriesFactory::Own(function) => Callee::Local(function),
+    };
+    let call = ir.add_expr(IrExpr::Call {
+        callee: Box::new(callee),
         dispatch_receiver: None,
         args: vec![values],
     });

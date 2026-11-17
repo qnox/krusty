@@ -236,10 +236,20 @@ pub(super) fn prepare_common_ir(
     }
     crate::backend::counted_loops::realize(&mut file.ir, preparation.counted_loops);
     crate::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
+    let entries_factory = runtime.enum_entries_factory.map(|factory| {
+        let identity = provider
+            .external_callable(factory.function)
+            .and_then(|realization| realization.dependency_callable);
+        crate::backend::enums::EntriesFactory::bind(
+            factory,
+            identity.as_ref(),
+            &file.dependency_exports,
+        )
+    });
     crate::backend::enums::realize(
         &mut file.ir,
         preparation.enums,
-        runtime.enum_entries_factory,
+        entries_factory,
         &mut file.dependency_exports,
     )
     .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
