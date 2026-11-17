@@ -1,7 +1,7 @@
 //! The selected declaration of a functional interface used by serialized dependency bodies.
 
 use super::IrSamTarget;
-use crate::libraries::LibraryType;
+use crate::libraries::{KlibDependencyCallable, LibraryType};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::types::Ty;
 use std::sync::Arc;
@@ -16,8 +16,11 @@ pub(crate) type ApplySamDeclaration = fn(&LibraryType, &IrSamTarget, Ty) -> Opti
 pub(crate) struct CheckedKlibSamDeclaration {
     pub(crate) classifier: Arc<LibraryType>,
     pub(crate) target: IrSamTarget,
-    /// The checker's application of the declaration, frozen with it so target-neutral lowering
-    /// instantiates the declaration without depending on the resolver.
+    /// The declarations a lambda converted to this interface may name as the one it overrides:
+    /// the selected method and the methods of its dispatch frames.
+    pub(crate) overridable: Box<[KlibDependencyCallable]>,
+    /// The checker's application of the declaration, so lowering instantiates it without
+    /// depending on the resolver or selecting anything again.
     pub(crate) apply: ApplySamDeclaration,
 }
 
@@ -34,6 +37,7 @@ impl std::fmt::Debug for CheckedKlibSamDeclaration {
             .debug_struct("CheckedKlibSamDeclaration")
             .field("identity", &self.classifier.klib_identity)
             .field("target", &self.target)
+            .field("overridable", &self.overridable)
             .finish()
     }
 }
