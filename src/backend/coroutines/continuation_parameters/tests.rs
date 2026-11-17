@@ -179,6 +179,30 @@ fn a_body_that_suspends_is_declined_before_any_signature_changes() {
     assert!(ir.suspend_declared_sigs.is_empty());
 }
 
+/// An inline-only suspend function that suspends, such as a KLIB inline template, runs only inlined
+/// into its callers: it takes the continuation-passing signature but needs no state machine, so a
+/// file without a selected coroutine runtime is not declined for it.
+#[test]
+fn an_inline_only_body_that_suspends_needs_no_state_machine() {
+    let mut ir = IrFile::default();
+    let callee = ir.add_fun(function(Vec::new(), Ty::Int, None));
+    let call = ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::Local(callee)),
+        dispatch_receiver: None,
+        args: Vec::new(),
+    });
+    let template = ir.add_fun(function(Vec::new(), Ty::Int, Some(call)));
+    ir.suspend_funs.extend([callee, template]);
+    ir.inline_only_fns.insert(template);
+
+    assert_eq!(add_continuation_parameters(&mut ir), Ok(()));
+    assert!(ir.classes.is_empty());
+    assert_eq!(
+        ir.functions[template as usize].params,
+        [Ty::obj_args_name(wk::continuation(), &[Ty::Int])]
+    );
+}
+
 /// Whether the expression graph under `root` has no cycle.
 fn acyclic(ir: &IrFile, root: ExprId) -> bool {
     fn visit(
