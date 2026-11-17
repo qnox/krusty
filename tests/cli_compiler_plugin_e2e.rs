@@ -551,7 +551,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "@Composable fun Greeting(names: List<String>) {}\n",
         &[],
         "3:13: error: krusty's Compose compiler plugin does not support a composable function \
-         parameter whose stability kotlinc infers yet",
+         parameter whose stability is decided when it runs yet",
     );
     assert_compose_rejects(
         "compose-local-argument",
