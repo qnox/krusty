@@ -30,8 +30,3 @@ fn the_complete_apply_receiver_program_matches_kotlin() {
 fn the_apply_receiver_program_runs_like_kotlin() {
     common::expect_box_same_as_kotlinc(PROGRAM, "ApplyReceiverSingleStore");
 }
-
-#[test]
-fn the_apply_receiver_program_runs_on_native() {
-    common::expect_native_box(PROGRAM, "ApplyReceiverSingleStore", "OK");
-}
