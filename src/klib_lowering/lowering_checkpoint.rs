@@ -35,8 +35,8 @@ impl LoweringCheckpoint {
     pub(super) fn restore(self, ir: &mut IrFile) -> FunId {
         let first = ExprId::try_from(self.expressions).expect("an expression id fits u32");
         ir.exprs.truncate(self.expressions);
-        ir.statics.truncate(self.statics);
         crate::ir::truncate_expression_facts(ir, first);
+        ir.statics.truncate(self.statics);
         ir.callable_reference_adapter_results
             .retain(|body, result| *body < first && *result < first);
         // The exhaustive classifier above prunes inherited and operation-owned expression facts.
@@ -51,15 +51,9 @@ impl LoweringCheckpoint {
             class.methods.truncate(methods);
             class.secondary_ctors.truncate(secondaries);
         }
-        // An object literal's naming provenance is keyed by its class id, which a later class may
-        // reuse; a stale entry would also count toward the next anonymous ordinal.
-        let first_class = crate::ir::ClassId::try_from(self.classes).expect("a class id fits u32");
-        ir.local_class_name_provenance
-            .retain(|class, _| *class < first_class);
         for class in removed {
             ir.function_overrides.remove(&class);
             ir.property_overrides.remove(&class);
-            ir.classifier_hierarchies.remove(&class);
         }
         ir.restore_declared_class_self_type_owners(&self.class_self_types);
         ir.class_method_owners

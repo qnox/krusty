@@ -30,6 +30,14 @@ fn wasm_official_dependency_class_members_lower_from_their_bodies() {
     );
 }
 
+#[test]
+fn wasm_official_dependency_nested_classes_lower_from_their_bodies() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyNestedClasses.kt"),
+        "DependencyNestedClasses",
+    );
+}
+
 /// A final class's secondary constructors delegate to its primary one: each construction lowers
 /// from the official producer's bodies, the delegated initialization first.
 #[test]
@@ -37,14 +45,6 @@ fn wasm_official_dependency_secondary_constructors_delegate_to_the_primary() {
     run_against_official_producer(
         include_str!("box_regressions/multimodule/dependencySecondaryConstructors.kt"),
         "DependencySecondaryConstructors",
-    );
-}
-
-#[test]
-fn wasm_official_dependency_nested_classes_lower_from_their_bodies() {
-    run_against_official_producer(
-        include_str!("box_regressions/multimodule/dependencyNestedClasses.kt"),
-        "DependencyNestedClasses",
     );
 }
 

@@ -169,6 +169,10 @@ pub enum CompilerIntrinsic {
     CoroutineContext,
     CoroutineSuspended,
     SuspendCoroutineUninterceptedOrReturn,
+    /// A target stdlib's `startCoroutineUninterceptedOrReturnIntrinsicN(f, inputs.., completion)`:
+    /// the suspend function value `f` invoked with its inputs and `completion` as its
+    /// continuation. Its stdlib body only says the compiler implements it.
+    StartCoroutineUninterceptedOrReturn,
     EnumValues,
     EnumValueOf,
     /// The zero-argument `kotlin.enums.enumEntries<T>()`. Its stdlib body only throws; the selected

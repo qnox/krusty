@@ -13,7 +13,7 @@ use super::super::super::encode::{
     BlockType, CompositeType, FieldType, Function, Module, StorageType, SubType, ValType,
 };
 use super::super::super::runtime::Runtime;
-use super::{carrier, parameter_value_carrier, Body, FileContext, Unsupported};
+use super::{carrier, Body, FileContext, Unsupported};
 
 /// Accessors reserved for one file, and the object each local delegated property is.
 pub(super) struct Prepared {
@@ -100,7 +100,8 @@ pub(super) fn define(
                 .parameters
                 .iter()
                 .map(|ty| {
-                    parameter_value_carrier(*ty)?.ok_or_else(|| "a `Unit` parameter".to_string())
+                    super::parameter_carrier_of(*ty)?
+                        .ok_or_else(|| "a `Unit` parameter".to_string())
                 })
                 .collect::<Result<Vec<_>, Unsupported>>()?;
             let results = carrier(accessor.result)?.into_iter().collect::<Vec<_>>();

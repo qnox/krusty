@@ -141,6 +141,13 @@ impl<'a> BodyLowering<'a> {
         declared.enclosure = Some(crate::ir::IrEnclosure::Function(self.function.function));
         declared.is_source_declared = true;
         declared.is_anonymous_object = true;
+        declared.site_name =
+            self.linker
+                .site_container()
+                .map(|container| crate::ir::IrSiteClassName {
+                    container,
+                    name: class.name.as_str().into(),
+                });
         declared.is_local_class = true;
         declared.superclass = superclass;
         declared.interfaces = interfaces.into();

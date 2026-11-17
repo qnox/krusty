@@ -2,11 +2,17 @@ use super::*;
 
 fn runtime() -> crate::ir::IrCoroutineRuntime {
     use crate::fir::{ExternalCallableId, ExternalPropertyId};
-    use crate::types::type_name;
 
     crate::ir::IrCoroutineRuntime {
         suspended: ExternalPropertyId::from_raw(0),
-        get_or_throw: ExternalCallableId::from_raw(0),
+        throw_on_failure: ExternalCallableId::from_raw(0),
+        throw_on_failure_receiver: Ty::obj_args_name(
+            crate::types::type_name("kotlin/Result"),
+            &[Ty::nullable(Ty::obj_name(crate::types::wk::any()))],
+        ),
+        create_failure: ExternalCallableId::from_raw(3),
+        result_constructor: ExternalCallableId::from_raw(4),
+        result_value: ExternalPropertyId::from_raw(2),
         resume_with: ExternalCallableId::from_raw(1),
         resume_with_declared_parameter: Ty::Unit,
         resume_with_declared_result: Ty::Unit,
@@ -14,9 +20,6 @@ fn runtime() -> crate::ir::IrCoroutineRuntime {
         context_getter: ExternalCallableId::from_raw(2),
         context_ty: Ty::obj_name(crate::types::wk::any()),
         context_receiver_ty: Ty::obj_name(crate::types::wk::any()),
-        result_success: ExternalCallableId::from_raw(3),
-        result_companion: type_name("kotlin/Result/Companion"),
-        result_failure: ExternalCallableId::from_raw(4),
     }
 }
 

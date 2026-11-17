@@ -8,7 +8,7 @@
 //! classifiers and have no name of this shape; [`source_class_names`] gives every source classifier
 //! of a file the name Kotlin's IR gives it.
 
-use crate::ir::{ClassId, IrFile, IrLocalClassOwner};
+use crate::ir::{ClassId, IrFile, IrLocalClassOwner, IrSiteClassContainer, IrSiteClassName};
 use crate::libraries::ClassifierDeclarationKey;
 use crate::types::{ClassifierDeclarationName, TypeName};
 
@@ -58,7 +58,8 @@ pub fn member_class_names(name: TypeName) -> ClassNames {
 /// object's own segment is [`ANONYMOUS_OBJECT_NAME`].
 ///
 /// The names are read from the declaration-owned naming provenance a local classifier records (its
-/// lexical owner and its source segment), never from its physical identity. `None` for a
+/// lexical owner and its source segment), or, for one a serialized body declares, from its
+/// recorded declaration site; never from its physical identity. `None` for a
 /// classifier the compiler generated, and for one nested in an enum entry body, whose segment
 /// Kotlin does not spell from source.
 pub fn source_class_names(ir: &IrFile, class: ClassId) -> Option<ClassNames> {
@@ -68,7 +69,7 @@ pub fn source_class_names(ir: &IrFile, class: ClassId) -> Option<ClassNames> {
     }
     let Some(provenance) = ir.local_class_name_provenance.get(&class) else {
         if declaration.is_local_class || declaration.is_anonymous_object {
-            return None;
+            return declaration.site_name.as_ref().map(site_class_names);
         }
         // A member classifier. An owner this file declares with naming provenance of its own is
         // local, and then so would this classifier be: it has no member name.
@@ -105,6 +106,24 @@ pub fn source_class_names(ir: &IrFile, class: ClassId) -> Option<ClassNames> {
         qualified,
         simple: own.to_string(),
     })
+}
+
+/// The names of a local classifier a serialized body declares: its container's qualified name,
+/// then its own serialized name.
+fn site_class_names(site: &IrSiteClassName) -> ClassNames {
+    let mut qualified = match site.container {
+        // Boundary conversion: the package path is spelled with `/` in the name tree.
+        IrSiteClassContainer::Package(package) => package.render().replace('/', "."),
+        IrSiteClassContainer::Classifier(owner) => member_class_names(owner).qualified,
+    };
+    if !qualified.is_empty() {
+        qualified.push('.');
+    }
+    qualified.push_str(&site.name);
+    ClassNames {
+        qualified,
+        simple: site.name.to_string(),
+    }
 }
 
 /// What Kotlin reflection names one classifier.

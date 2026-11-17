@@ -475,8 +475,14 @@ impl DependencyBodyUnit {
         declarations: &'a dyn crate::symbol_source::SymbolSource,
     ) -> Result<FunId, KlibBodyDecline> {
         if let Some(function) = self.functions.get(callable.identity()).copied() {
-            // A member installed with its class was authenticated with the class.
-            if self.installs_member(callable.identity()) {
+            // A member installed with its class was authenticated with the class, as was the
+            // box construction of a value class materialized with its class.
+            let value_construction = callable.kind()
+                == crate::libraries::ExternalCallableKind::Constructor
+                && callable
+                    .class_contract()
+                    .is_some_and(|class| class.is_value);
+            if self.installs_member(callable.identity()) || value_construction {
                 return Ok(function);
             }
             // Declared before, perhaps from its header alone as another body's callee: the
@@ -1253,6 +1259,36 @@ impl<'s> CallLinker for Linker<'_, 's> {
         signature: &KlibIrSignature,
     ) -> Result<Option<TypeName>, KlibBodyDeclineReason> {
         super::same_library_class::classifier(self.sources.bodies, &self.active_module, signature)
+    }
+
+    fn site_container(&self) -> Option<crate::ir::IrSiteClassContainer> {
+        use crate::ir::IrSiteClassContainer;
+        use crate::libraries::KlibDeclarationSignature;
+
+        let declared = match &self.active_identity.declaration {
+            KlibDeclarationSignature::Public(signature) => signature,
+            KlibDeclarationSignature::Accessor(accessor) => accessor.property(),
+            // A file-local identity is a top-level function of its file.
+            KlibDeclarationSignature::FileLocal { file, .. } => {
+                let package = self
+                    .sources
+                    .bodies
+                    .module_file_package(&self.active_module, *file)?;
+                return Some(IrSiteClassContainer::Package(
+                    super::klib_types::package_name(package),
+                ));
+            }
+        };
+        // A public identity's declaration path is its enclosing classifiers, then its own name.
+        if declared.declaration().segments().len() > 1 {
+            super::klib_types::member_owner(declared)
+                .ok()
+                .map(IrSiteClassContainer::Classifier)
+        } else {
+            Some(IrSiteClassContainer::Package(
+                super::klib_types::package_name(declared.package().segments()),
+            ))
+        }
     }
 
     fn links_privately(&self, callee: &KlibIrSignature) -> bool {
@@ -2368,6 +2404,39 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         block_statements(function)?;
         let header = body_header(selected, arena, function, self.sources.bodies)?;
+        self.declare_with_header(ir, identity, selected, arena, function, header)
+    }
+
+    /// Declare a declaration no provider records, whose formals `types` already binds.
+    fn declare_with_types(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        selected: Option<KlibBodyCallable<'s>>,
+        arena: &'s KlibIrArena,
+        function: &'s KlibIrFunction,
+        types: super::klib_types::KlibTypeParameters,
+    ) -> Result<FunId, KlibBodyDeclineReason> {
+        block_statements(function)?;
+        let header = super::function_lowering::raw_function_header_with_class(
+            selected,
+            HeaderPurpose::Body(None),
+            arena,
+            function,
+            types,
+        )?;
+        self.declare_with_header(ir, identity, selected, arena, function, header)
+    }
+
+    fn declare_with_header(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        selected: Option<KlibBodyCallable<'s>>,
+        arena: &'s KlibIrArena,
+        function: &'s KlibIrFunction,
+        header: super::function_lowering::FunctionHeader,
+    ) -> Result<FunId, KlibBodyDeclineReason> {
         let value_member = match (header.value_receiver(), selected) {
             // A builtin type's member reads its receiver as the value the target carries.
             (Some(_), Some(selected))
@@ -2790,16 +2859,16 @@ impl Linker<'_, '_> {
             .bodies
             .function(&identity)
             .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
-        if !declaration.type_parameters.is_empty() {
-            return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                "a call of a generic declaration",
-            ));
-        }
+        // A generic one binds the formals its own identity mints, as a provider's record binds a
+        // published declaration's.
+        let (types, type_parameters, type_parameter_bounds) =
+            super::function_lowering::file_private_formals(&identity, arena, declaration)
+                .map_err(callee_declined)?;
         self.private_members.insert(identity.clone());
         let function = match self.functions.get(&identity) {
             Some(function) => *function,
             None => self
-                .declare(ir, &identity, None, arena, declaration)
+                .declare_with_types(ir, &identity, None, arena, declaration, types)
                 .map_err(callee_declined)?,
         };
         let parameter_defaults = parameter_defaults(declaration);
@@ -2811,8 +2880,8 @@ impl Linker<'_, '_> {
             ret: declared.ret,
             context_count: ir.declared_parameters(function).context_count,
             singleton_dispatch: None,
-            type_parameters: Vec::new(),
-            type_parameter_bounds: Some(Vec::new()),
+            type_parameters,
+            type_parameter_bounds: Some(type_parameter_bounds),
             class_type_parameters: Vec::new(),
             parameter_defaults,
             edge: super::CallEdge::default(),

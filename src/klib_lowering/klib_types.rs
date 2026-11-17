@@ -40,6 +40,11 @@ impl KlibTypeParameters {
         self.bindings.insert(symbol.clone(), semantic).is_none()
     }
 
+    /// Whether the serialized type parameter `symbol` is bound.
+    pub(super) fn binds(&self, symbol: &KlibIrSymbol) -> bool {
+        self.bindings.contains_key(symbol)
+    }
+
     pub(super) fn record_bounds(&mut self, formal: Ty, bounds: Vec<Ty>) -> bool {
         let TyKind::TyParam(identity, _) = formal.kind() else {
             return false;
@@ -371,6 +376,13 @@ pub(super) fn member_owner(
         KlibBodyDeclineReason::UnsupportedType("a member without a declaration path"),
     )?;
     declaration_name(member.package().segments(), class)
+}
+
+/// Intern a package identity one signature segment at a time.
+pub(super) fn package_name(package: &[String]) -> TypeName {
+    package.iter().fold(TypeName::ROOT, |parent, segment| {
+        type_name_child(parent, segment)
+    })
 }
 
 fn declaration_name(

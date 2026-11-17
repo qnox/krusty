@@ -253,6 +253,9 @@ pub(super) fn emit_dependencies<B: Backend>(
             !support_state
                 .materialized_classes
                 .contains_key(&object.classifier)
+                && !support_state
+                    .materializing_classes
+                    .contains_key(&object.classifier)
         })
         .collect::<Vec<_>>();
     let mut artifacts = Vec::new();
@@ -278,10 +281,15 @@ pub(super) fn emit_dependencies<B: Backend>(
         ) else {
             return Vec::new();
         };
-        // An enum or object an earlier unit materialized keeps its one set of constants, or its
-        // one instance, there; this unit reads them through that unit's exports.
+        // An enum or object an earlier unit materialized, or one an enclosing unit is
+        // materializing, keeps its one set of constants, or its one instance, there; this unit
+        // reads them through that unit's exports.
         let mut unit = DependencyBodyUnit::reading_realized_classes(
-            support_state.materialized_classes.keys().copied(),
+            support_state
+                .materialized_classes
+                .keys()
+                .chain(support_state.materializing_classes.keys())
+                .copied(),
         )
         .presetting_constant_statics(backend.presets_constant_top_level_initializers());
         let capabilities = DependencyLeafCapabilities {
@@ -559,10 +567,27 @@ pub(super) fn emit_dependencies<B: Backend>(
                     return Vec::new();
                 }
             };
-            published.push((
-                identity.clone(),
-                PublishedDependency::Body(singleton_dispatch),
-            ));
+            // A value class's box construction is a function of the unit exported under its
+            // primary constructor's identity: later units allocate a box through it, as they
+            // allocate an ordinary class through its constructor's export.
+            let role = if realization.kind == crate::libraries::ExternalCallableKind::Constructor {
+                if singleton_dispatch.is_some()
+                    || !realization
+                        .klib_body_class_contract
+                        .as_ref()
+                        .is_some_and(|contract| contract.is_value)
+                {
+                    diags.error(
+                        Span::new(0, 0),
+                        "internal error: a constructor emitted as a unit function is not a value class's box construction",
+                    );
+                    return Vec::new();
+                }
+                PublishedDependency::AllocatingConstructor
+            } else {
+                PublishedDependency::Body(singleton_dispatch)
+            };
+            published.push((identity.clone(), role));
         }
         for (identity, _) in &constructors {
             let Some((_, realization)) = platform.external_callable_by_dependency(identity) else {

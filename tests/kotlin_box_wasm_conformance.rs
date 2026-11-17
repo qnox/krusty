@@ -825,6 +825,16 @@ fn wasm_a_declined_required_stdlib_template_rejects_the_caller() {
     }
 }
 
+/// PLATFORM-SPECIFIC: guard Wasm's capability check over the shared portable program.
+/// Keep the original failure-message branch together with every factory reference:
+/// the whole program must compile and answer `OK`.
+#[test]
+fn unsigned_factory_references_compile_with_the_whole_content_to_string_branch() {
+    const SOURCE: &str = include_str!("box_regressions/unsignedArrayFactoryReferences.kt");
+    expect_reference_box(SOURCE, "unsignedArrayFactoryReferences");
+    expect_wasm_box(SOURCE, "unsignedArrayFactoryReferences");
+}
+
 /// Run `src` directly against both Wasm targets' KLIBs and runtimes; every target must answer `OK`.
 /// Skips only where a directly invoked lane cannot run; target-owned harness passes require it.
 fn expect_wasm_box(src: &str, stem: &str) {

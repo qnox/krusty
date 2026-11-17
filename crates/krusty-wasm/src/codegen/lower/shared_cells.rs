@@ -44,7 +44,7 @@ pub(in crate::codegen) fn parameter_carrier(
         .ok_or("a shared capture parameter outside its function")?;
     match ir.shared_capture_parameters.get(&(function, parameter)) {
         Some(&elem) => Ok(Some(ValType::nullable(cell_type(module, elem)?))),
-        None => parameter_value_carrier(*declared),
+        None => parameter_carrier_of(*declared),
     }
 }
 
@@ -98,24 +98,49 @@ impl Body<'_> {
         index: u32,
         init: u32,
     ) -> Result<(), Unsupported> {
-        let IrExpr::RefNew { elem, init } = self.ir.expr(init).clone() else {
+        let IrExpr::RefNew { elem, .. } = self.ir.expr(init).clone() else {
             return Err("a shared cell declared without its cell".to_string());
         };
-        let cell = self.cell_type(elem)?;
+        let cell = self.new_cell(init)?;
         let local = self.local(ValType::nullable(cell));
-        match init {
-            Some(value) => {
-                self.value(value, elem)?;
-                self.code.struct_new(cell);
-            }
-            None => {
-                self.code.struct_new_default(cell);
-            }
-        }
         self.code.local_set(local);
         self.values.insert(index, (local, elem));
         self.cells.insert(index, cell);
         Ok(())
+    }
+
+    /// Push the cell the [`IrExpr::RefNew`] `cell` creates, returning its struct type.
+    fn new_cell(&mut self, cell: u32) -> Result<u32, Unsupported> {
+        let IrExpr::RefNew { elem, init } = self.ir.expr(cell).clone() else {
+            return Err("a shared cell without its cell".to_string());
+        };
+        let structure = self.cell_type(elem)?;
+        match init {
+            Some(value) => {
+                self.value(value, elem)?;
+                self.code.struct_new(structure);
+            }
+            None => {
+                self.code.struct_new_default(structure);
+            }
+        }
+        Ok(structure)
+    }
+
+    /// Push the holder a shared-capture field of element `element` stores: a cell `value`
+    /// creates, or one it reaches through another holder.
+    pub(super) fn shared_field_value(
+        &mut self,
+        value: u32,
+        element: Ty,
+    ) -> Result<(), Unsupported> {
+        match self.ir.expr(value) {
+            IrExpr::RefNew { elem, .. } if *elem == element => self.new_cell(value).map(|_| ()),
+            IrExpr::RefNew { .. } => {
+                Err("a shared cell stored at another element type".to_string())
+            }
+            _ => self.cell_holder(value, element).map(|_| ()),
+        }
     }
 
     /// `holder.element`.
