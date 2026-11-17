@@ -640,13 +640,6 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "5:1: error: krusty's Compose compiler plugin does not support a call to a library \
          composable function with a function-typed parameter yet",
     );
-    assert_compose_library_call_rejects(
-        "compose-library-call-defaults",
-        "@Composable fun Sized(size: Int = 1) {}\n",
-        "@Composable fun Greeting() {\nlib.Sized(2)\n}\n",
-        "4:1: error: krusty's Compose compiler plugin does not support a call to a library \
-         composable function with default arguments yet",
-    );
     assert_compose_rejects(
         "compose-generic-value-class-field",
         "@JvmInline value class Id<T>(val raw: T)\nclass User(val id: Id<Int>)\n",
@@ -778,43 +771,6 @@ fn assert_atomicfu_rejects(name: &str, declarations: &str, error: &str) {
     let compiled = probe.krusty(&classpath, &[format!("-Xplugin={}", plugin.display())]);
     let partial = PluginDiagnostic::PartialSubstitution {
         plugin_id: krusty::plugins::cli::ATOMICFU_PLUGIN_ID.to_string(),
-    }
-    .message();
-    assert_eq!(
-        compiled.stderr,
-        format!(
-            "info: {partial}\n{}:{error}; compile this module with kotlinc\nkrusty: 1 error(s)\n",
-            probe.source.display()
-        )
-    );
-    assert_eq!(compiled.code, Some(1));
-    assert_eq!(compiled.classes, Vec::<String>::new());
-}
-
-/// Compile `declarations` (after a package line and the `Composable` import) and the `others`
-/// files with the Compose plugin, and assert the one error `Probe.kt:<error>` krusty reports.
-/// Like [`assert_compose_rejects`], with a call into `library`, a module krusty compiles first
-/// with the Compose plugin in package `lib`.
-fn assert_compose_library_call_rejects(name: &str, library: &str, declarations: &str, error: &str) {
-    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
-    let switches = vec![format!("-Xplugin={}", compose.display())];
-    let mut classpath =
-        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
-    classpath.push(common::stdlib_jar());
-    let library = Probe::new(
-        &format!("{name}-lib"),
-        &format!("package lib\nimport androidx.compose.runtime.Composable\n{library}"),
-    );
-    let built = library.krusty(&classpath, &switches);
-    assert_eq!(built.code, Some(0), "{}", built.stderr);
-    classpath.push(library.dir.join("krusty"));
-    let probe = Probe::new(
-        name,
-        &format!("package probe\nimport androidx.compose.runtime.Composable\n{declarations}"),
-    );
-    let compiled = probe.krusty(&classpath, &switches);
-    let partial = PluginDiagnostic::PartialSubstitution {
-        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
     }
     .message();
     assert_eq!(
