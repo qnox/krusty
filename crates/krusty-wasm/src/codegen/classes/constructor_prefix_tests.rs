@@ -909,7 +909,7 @@ fn non_enclosing_receiver_profiles_remain_unsupported() {
 }
 
 #[test]
-fn proven_context_and_lambda_receivers_are_ordinary_references() {
+fn proven_context_lambda_and_callable_receivers_are_ordinary_references() {
     let (original, class, parameter) = stored_enclosing_receiver();
     let declared = original.classes[class as usize].ctor_args[parameter as usize].ty;
     let identity = ClassCaptureIdentity::Receiver(0);
@@ -986,7 +986,29 @@ fn proven_context_and_lambda_receivers_are_ordinary_references() {
             owner: krusty::fir::CapturedCallableOwner::Declaration,
         },
     );
-    assert_eq!(check_supported(&callable, class), expected);
+    assert_eq!(check_supported(&callable, class), Ok(()));
+
+    // A support unit's class has no checked identity on the parameter or in the registry.
+    let mut unchecked = copy_transport(&callable);
+    unchecked.classes[class as usize].ctor_args[parameter as usize].capture_identity = None;
+    unchecked
+        .class_capture_identities
+        .remove(&(class, parameter));
+    assert_eq!(check_supported(&unchecked, class), Ok(()));
+
+    let mut unregistered = copy_transport(&callable);
+    unregistered
+        .class_capture_identities
+        .remove(&(class, parameter));
+    assert_eq!(check_supported(&unregistered, class), expected);
+
+    let mut scalar = copy_transport(&callable);
+    let field = scalar.classes[class as usize].ctor_args[parameter as usize]
+        .field_index
+        .unwrap();
+    scalar.classes[class as usize].ctor_args[parameter as usize].ty = Ty::Unit;
+    scalar.classes[class as usize].fields[field as usize].ty = Ty::Unit;
+    assert_eq!(check_supported(&scalar, class), expected);
 }
 
 #[test]
