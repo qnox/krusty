@@ -2758,6 +2758,7 @@ impl JvmLibraries {
                         .copied()
                         .chain(std::iter::once(receiver))
                         .collect();
+                    getter.declared_params = Some(getter.params.clone().into_boxed_slice());
                     getter.source_receiver = Some(receiver);
                     getter.context_count = context_count;
                     getter.generic_sig = property_signature.cloned().map(Box::new);
@@ -2903,6 +2904,7 @@ impl JvmLibraries {
                 getter.physical_name =
                     (getter_physical_name != getter_source_name).then_some(getter_physical_name);
                 getter.params = semantic_context.clone();
+                getter.declared_params = Some(getter.params.clone().into_boxed_slice());
                 // The property declaration's generic signature owns classifier parameters too
                 // (`Base<T>.value: T?`). `specialize_property` reads that relation from the getter,
                 // just as it does for member-extension properties; omitting it here turned an

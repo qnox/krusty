@@ -2178,7 +2178,7 @@ pub(crate) fn lower_value_classes(
                     fq[*class as usize],
                     fid,
                     args.clone(),
-                    None,
+                    Some(declared_params[fid as usize].clone().into_boxed_slice()),
                 ))
             }
             // `x.getV()` getter: identity on an unboxed value, `unbox-impl()` on a boxed one.
