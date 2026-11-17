@@ -39898,7 +39898,7 @@ impl<'a> Checker<'a> {
                     } else {
                         self.null_branch_narrowings(scope, operand, &mut out);
                     }
-                } else if (op == BinOp::Eq) != for_else {
+                } else if matches!(op, BinOp::Eq | BinOp::RefEq) != for_else {
                     // `x?.p == v` holds only when every `?.` held, as long as `v` cannot be null:
                     // the safe-call chain's receivers are non-null where the equality is known.
                     let never_null = |expression: ExprId| {
