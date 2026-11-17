@@ -81,7 +81,9 @@ displays the same Markdown report.
 
 Setup fails fast: a failed fetch, a checkout that is not the pinned commit, a patch that does not
 apply, or a Kotlin version pin that does not match exactly one assignment (`pin.py`) stops the run
-before either build. `test_compare.py`, `test_setup.py`, `test_summarize.py`, `test_workflow.py`,
+before either build. A reference build that fails is still compared as far as it got, and then
+fails the project's job: every listed project must build with kotlinc, so a failure there is fixed
+with a patch or a pin, never left to shrink what the corpus measures. `test_compare.py`, `test_setup.py`, `test_summarize.py`, `test_workflow.py`,
 `test_measure.py`, `test_hotspots.py` and `test_testruns.py` cover the comparison, the test runs,
 the output inventory, the pin rewrite, the setup failures, the report artifacts, the build
 measurement and the stack folding.
