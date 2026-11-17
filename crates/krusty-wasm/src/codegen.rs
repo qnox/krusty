@@ -495,6 +495,26 @@ mod tests {
         compile_program_with_provider(target, entry, sources, Box::new(EmptySymbolSource))
     }
 
+    /// [`compile_program`] against the exact target stdlib, which declares the runtime
+    /// exceptions a checked cast throws.
+    fn compile_program_with_stdlib(
+        target: WasmTarget,
+        entry: Entry,
+        sources: &[&str],
+    ) -> (Vec<Artifact>, Vec<String>) {
+        use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+        let path = krusty::toolchain::kotlin_stdlib_klib(
+            krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
+        )
+        .expect("the exact target stdlib must be provisioned");
+        let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+            path,
+            KlibStdlibSemantics::Wasm,
+        )])
+        .unwrap();
+        compile_program_with_provider(target, entry, sources, Box::new(libraries))
+    }
+
     fn compile_program_with_provider(
         target: WasmTarget,
         entry: Entry,
@@ -644,7 +664,8 @@ mod tests {
             krusty::conformance::TestTarget::WasmJs,
         );
         for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile(target, &source);
+            let (outputs, diagnostics) =
+                compile_program_with_stdlib(target, Entry::Box, &[&source]);
             assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
             assert!(!outputs.is_empty(), "{target:?}");
         }
@@ -833,7 +854,7 @@ mod tests {
     fn a_class_implementing_an_interface_of_another_file_is_dispatched_and_tested() {
         // Backend contract: interface members are numbered per module, not per file.
         for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile_program(
+            let (outputs, diagnostics) = compile_program_with_stdlib(
                 target,
                 Entry::Box,
                 &[
@@ -854,7 +875,7 @@ mod tests {
     #[test]
     fn an_interface_member_with_two_implementations_compiles_to_one_module() {
         for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile_program(
+            let (outputs, diagnostics) = compile_program_with_stdlib(
                 target,
                 Entry::Box,
                 &[
@@ -929,11 +950,14 @@ mod tests {
     #[test]
     fn a_class_compiles_to_one_module_on_both_targets() {
         for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile(
+            let (outputs, diagnostics) = compile_program_with_stdlib(
                 target,
-                "open class Box(val value: String) { open fun get() = value }\n\
+                Entry::Box,
+                &[
+                    "open class Box(val value: String) { open fun get() = value }\n\
                  class Wrapped(value: String) : Box(value) { override fun get() = value }\n\
                  fun box(): String = (Wrapped(\"OK\") as Box).get()",
+                ],
             );
             assert_eq!(diagnostics, Vec::<String>::new());
             assert_eq!(outputs.len(), 2);
