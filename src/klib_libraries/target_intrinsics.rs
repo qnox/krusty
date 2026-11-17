@@ -716,81 +716,14 @@ pub(super) fn authenticate(
     {
         return None;
     }
-    // Only `wasm_array_copy` is generic: its one type parameter is the GC array type both
-    // operands share.
+    // Past the continuation intrinsics above, only `wasm_array_copy` is generic: its one type
+    // parameter is the GC array type both operands share.
     match (platform?, declaration.formals.is_empty()) {
         (TargetIntrinsicPlatform::Native, true) => native(placement, declaration),
         (TargetIntrinsicPlatform::Wasm, true) => wasm(placement, declaration),
         (TargetIntrinsicPlatform::Wasm, false) => wasm_array_copy(placement, declaration),
         (TargetIntrinsicPlatform::Native, false) => None,
     }
-}
-
-fn is_nullable_any(ty: &KotlinType) -> bool {
-    matches!(
-        ty,
-        KotlinType::Class {
-            internal,
-            args,
-            nullable: true,
-            shape: KotlinFunctionTypeShape {
-                receiver: false,
-                context_count: 0,
-                suspend: false,
-            },
-        } if internal == "kotlin/Any" && args.is_empty()
-    )
-}
-
-/// `wasm_array_copy<T>(destination: T, destinationIndex: Int, source: T, sourceIndex: Int,
-/// length: Int)` in `kotlin.wasm.internal`. It is `@ExcludedFromCodegen`: kotlinc binds the
-/// declaration by this name and lowers its call to `array.copy` over the two GC arrays, whose
-/// type is the call's type argument.
-fn wasm_array_copy(
-    placement: crate::libraries::CallablePlacement,
-    declaration: &KotlinFunction,
-) -> Option<KlibIntrinsicShape> {
-    let [element] = declaration.formals.as_slice() else {
-        return None;
-    };
-    let [destination, destination_index, source, source_index, length] =
-        declaration.params.as_slice()
-    else {
-        return None;
-    };
-    let is_element = |ty: &KotlinType| matches!(ty, KotlinType::Param { id, nullable: false, .. } if *id == element.id);
-    let excluded = declaration
-        .annotation_applications
-        .iter()
-        .filter(|annotation| {
-            annotation.identity == type_name("kotlin/wasm/internal/ExcludedFromCodegen")
-        })
-        .count();
-    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"))
-        && declaration.name == "wasm_array_copy"
-        && excluded == 1
-        && declaration.receiver.is_none()
-        && !element.reified
-        && element.bounds.iter().all(is_nullable_any)
-        && is_element(destination)
-        && is_element(source)
-        && [destination_index, source_index, length]
-            .into_iter()
-            .all(|index| semantic_type(index) == Some(Ty::Int))
-        && exact_type(&declaration.ret, "kotlin/Unit"))
-    .then(|| {
-        let array = Ty::ty_param(
-            &element.name,
-            Ty::nullable(Ty::obj_name(crate::types::wk::any())),
-        );
-        KlibIntrinsicShape {
-            operation: CompilerIntrinsic::ArrayStorageCopy,
-            kind: ExternalCallableKind::TopLevel,
-            receiver: None,
-            params: vec![array, Ty::Int, array, Ty::Int, Ty::Int],
-            ret: Ty::Unit,
-        }
-    })
 }
 
 /// Native's two continuation intrinsics in `kotlin.native.internal`, which kotlinc's
@@ -879,6 +812,73 @@ fn native_continuation(
         receiver: None,
         params,
         ret,
+    })
+}
+
+fn is_nullable_any(ty: &KotlinType) -> bool {
+    matches!(
+        ty,
+        KotlinType::Class {
+            internal,
+            args,
+            nullable: true,
+            shape: KotlinFunctionTypeShape {
+                receiver: false,
+                context_count: 0,
+                suspend: false,
+            },
+        } if internal == "kotlin/Any" && args.is_empty()
+    )
+}
+
+/// `wasm_array_copy<T>(destination: T, destinationIndex: Int, source: T, sourceIndex: Int,
+/// length: Int)` in `kotlin.wasm.internal`. It is `@ExcludedFromCodegen`: kotlinc binds the
+/// declaration by this name and lowers its call to `array.copy` over the two GC arrays, whose
+/// type is the call's type argument.
+fn wasm_array_copy(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let [element] = declaration.formals.as_slice() else {
+        return None;
+    };
+    let [destination, destination_index, source, source_index, length] =
+        declaration.params.as_slice()
+    else {
+        return None;
+    };
+    let is_element = |ty: &KotlinType| matches!(ty, KotlinType::Param { id, nullable: false, .. } if *id == element.id);
+    let excluded = declaration
+        .annotation_applications
+        .iter()
+        .filter(|annotation| {
+            annotation.identity == type_name("kotlin/wasm/internal/ExcludedFromCodegen")
+        })
+        .count();
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"))
+        && declaration.name == "wasm_array_copy"
+        && excluded == 1
+        && declaration.receiver.is_none()
+        && !element.reified
+        && element.bounds.iter().all(is_nullable_any)
+        && is_element(destination)
+        && is_element(source)
+        && [destination_index, source_index, length]
+            .into_iter()
+            .all(|index| semantic_type(index) == Some(Ty::Int))
+        && exact_type(&declaration.ret, "kotlin/Unit"))
+    .then(|| {
+        let array = Ty::ty_param(
+            &element.name,
+            Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+        );
+        KlibIntrinsicShape {
+            operation: CompilerIntrinsic::ArrayStorageCopy,
+            kind: ExternalCallableKind::TopLevel,
+            receiver: None,
+            params: vec![array, Ty::Int, array, Ty::Int, Ty::Int],
+            ret: Ty::Unit,
+        }
     })
 }
 
