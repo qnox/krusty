@@ -158,13 +158,12 @@ impl JvmLibraries {
             // with its composer and `$changed`, has those extras as a synthetic tail: the
             // declaration's own parameters are the callable's physical ones, as for a top-level
             // function, and the descriptor still spells the whole entry.
-            let source_len = mf.generic_sig.as_ref().map(|signature| {
-                signature
-                    .parameters_with_receiver(mf.context_count())
-                    .len()
-            });
-            let synthetic_tail = !mf.is_suspend()
-                && source_len.is_some_and(|source| source < physical_params.len());
+            let source_len = mf
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.parameters_with_receiver(mf.context_count()).len());
+            let synthetic_tail =
+                !mf.is_suspend() && source_len.is_some_and(|source| source < physical_params.len());
             if let (true, Some(source)) = (synthetic_tail, source_len) {
                 physical_params.truncate(source);
             }

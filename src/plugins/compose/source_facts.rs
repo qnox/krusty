@@ -392,9 +392,7 @@ pub(super) fn record(
             .cloned()
             .unwrap_or_default();
         // The recompose lambda names its captured receiver `this_<function>`.
-        let receiver = declaration
-            .receiver
-            .map(|ty| (format!("this_{name}"), ty));
+        let receiver = declaration.receiver.map(|ty| (format!("this_{name}"), ty));
         let parameters = receiver
             .iter()
             .chain(&declaration.params)
