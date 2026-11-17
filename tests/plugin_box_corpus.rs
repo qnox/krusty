@@ -293,6 +293,21 @@ fn run_corpus(corpus: &PluginCorpus) {
             "blessing is refused under CI"
         );
         let dir = boxes_dir(corpus);
+        // Blessing records what passes now; a case that was included and no longer passes is a
+        // regression to fix, never one to drop from the list.
+        let included_before = box_ratchet::load_path(
+            &box_ratchet::read_path_in(&dir, INCLUDED, LANE, version),
+            false,
+        );
+        let regressed: Vec<&String> = included_before
+            .iter()
+            .filter(|key| !passing.contains(*key))
+            .collect();
+        assert!(
+            regressed.is_empty(),
+            "{} corpus: included cases no longer pass, so blessing is refused: {regressed:?}",
+            corpus.plugin
+        );
         for (name, paths, what) in [
             (INCLUDED, &passing, "pass and are part of the corpus"),
             (NOT_APPLICABLE, &not_applicable, "be not-applicable"),
