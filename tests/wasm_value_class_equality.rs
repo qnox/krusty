@@ -86,3 +86,45 @@ fn unsigned_storage_read_sign_extends() {
         "UnsignedToSignedNarrowing",
     );
 }
+
+/// PLATFORM-SPECIFIC: both Wasm hosts execute the same whole portable graph, including when
+/// the checked type-test file is emitted before the class declarations and when it is last.
+#[test]
+fn cross_file_nominal_box_tests_share_the_planned_class_identity_in_both_file_orders() {
+    for (source, stem, expected_files) in [
+        (
+            include_str!("box_regressions/multimodule/crossFileNominalBoxTests.kt"),
+            "CrossFileNominalBoxTests",
+            3,
+        ),
+        (
+            include_str!("box_regressions/multimodule/dependencyInterfaceAppliedAbi.kt"),
+            "DependencyInterfaceAppliedAbiNominalBoxes",
+            2,
+        ),
+    ] {
+        crate::box_reference_classes::checked_box(source, stem)
+            .expect("the complete nominal-box program passes the official JVM oracle");
+        for target in WasmTarget::ALL {
+            let lane = WasmLane { target };
+            assert!(focused_wasm_lane_available(&lane, stem));
+            let prepared = krusty::conformance::prepare_test_source(source, lane.test_target());
+            let modules =
+                krusty::conformance::split_modules(&prepared).expect("the whole file graph");
+            let mut units = krusty::conformance::module_units(&modules);
+            let consumer = units.last_mut().expect("the complete consumer module");
+            assert_eq!(consumer.files.len(), expected_files);
+            for reverse in [false, true] {
+                if reverse {
+                    units.last_mut().unwrap().files.reverse();
+                }
+                assert_eq!(
+                    lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+                    Outcome::Pass,
+                    "{stem} on {} with reverse={reverse}",
+                    target.name(),
+                );
+            }
+        }
+    }
+}
