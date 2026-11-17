@@ -41,6 +41,22 @@ fn scalar_representation(
     })
 }
 
+/// The authenticated declaration when construction uses this target's runtime representation,
+/// rather than a materialized class's ordinary object/table. Layout and reachability use this
+/// same decision so a storage-only dependency class cannot contribute impossible instances.
+pub(in super::super) fn runtime_value_declaration(
+    classifier: TypeName,
+    classifiers: &dyn krusty::backend::BackendClassifierSource,
+) -> Result<Option<DeclaredValueClass>, Unsupported> {
+    let Some(declaration) = classifiers
+        .classifier(classifier)
+        .and_then(|fact| fact.value_declaration.clone())
+    else {
+        return Ok(None);
+    };
+    Ok(scalar_representation(classifier, &declaration)?.map(|_| declaration))
+}
+
 impl Body<'_> {
     /// The provider's declaration of `classifier` when it is a value class this target carries as
     /// its underlying scalar.
@@ -48,14 +64,7 @@ impl Body<'_> {
         &self,
         classifier: TypeName,
     ) -> Result<Option<DeclaredValueClass>, Unsupported> {
-        let Some(declaration) = self
-            .classifiers
-            .classifier(classifier)
-            .and_then(|fact| fact.value_declaration.clone())
-        else {
-            return Ok(None);
-        };
-        Ok(scalar_representation(classifier, &declaration)?.map(|_| declaration))
+        runtime_value_declaration(classifier, self.classifiers)
     }
 
     /// `V(value)` for a library value class `internal` carried as its underlying scalar: the

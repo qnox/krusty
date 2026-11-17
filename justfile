@@ -185,6 +185,12 @@ test-fast:
     export KRUSTY_TEST_EXCLUDE="conformance"
     ./run-tests.sh
 
+# Pre-push smoke check (scripts/smoke.sh): attribution and outcome lists, rustfmt and the baselines,
+# lib tests, the changed e2e modules, and a sampled box slice plus the owned regressions on JVM,
+# Native, wasm-js and wasm-wasi. BASE is the PR's base: master, or the parent PR's branch.
+smoke BASE="origin/master":
+    bash scripts/smoke.sh "{{BASE}}"
+
 # Run ONLY the Kotlin box/codegen conformance suite, plain (no coverage instrumentation) — the
 # "conformance without coverage" half of the pre-push gate. Provisions kotlinc + corpus via the
 # harness. The suite is internally rayon-parallel, so it uses all cores on its own.

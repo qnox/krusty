@@ -346,19 +346,18 @@ impl SymbolResolver<'_> {
     }
 }
 
-/// Keep one completion per classifier. Two providers that normalize to the same classifier but
-/// disagree about its alias template leave no template: applying either one would hide the clash.
+/// Keep one completion per selected declaration. One declaration reached through several providers
+/// is one candidate; two typealiases, or an alias and its own target, are distinct declarations
+/// even when they expand to the same classifier, so a use of their name is ambiguous.
 fn record_completed_path(
     completed: &mut Vec<CompletedClassifierPath>,
     path: CompletedClassifierPath,
 ) {
-    if let Some(existing) = completed.iter_mut().find(|candidate| {
+    if completed.iter().any(|candidate| {
         candidate.selected.classifier == path.selected.classifier
             && candidate.classifier_segment == path.classifier_segment
+            && candidate.selected.alias == path.selected.alias
     }) {
-        if existing.selected.alias != path.selected.alias {
-            existing.selected.alias = None;
-        }
         return;
     }
     completed.push(path);

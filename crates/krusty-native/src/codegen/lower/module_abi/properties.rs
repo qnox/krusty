@@ -2,7 +2,7 @@
 //!
 //! The plan is keyed by the checked [`PropertyId`]. Its ABI is two hidden entry points named from
 //! that identity: a getter, and a setter for a `var`. A member takes its receiver first, carried
-//! as the declaring classifier; a package property takes none. The value is carried at the
+//! as the declaring classifier; a package property and a companion-block property take none. The value is carried at the
 //! property's declared type, so a generic property is its erased declaration type at the boundary
 //! and a value-class property its projected value, the same in both files.
 //!
@@ -11,7 +11,9 @@
 //! dispatch slot of an `open` member — converted between what that realization carries and the
 //! declared type. A package property's entry point runs the file's once-only initializer first: a
 //! read observes the initialized value, and a write is not overwritten by a later initializer. A
-//! using file evaluates the receiver and then the assigned value before it calls.
+//! companion-block property belongs to its class, not to the file, so its entry points run only the
+//! local access, which initializes what the class needs. A using file evaluates the receiver and
+//! then the assigned value before it calls.
 
 use super::super::*;
 use krusty::fir::{DeclarationFlags, PropertyId};
@@ -23,9 +25,12 @@ struct PropertyDeclaration {
     property: PropertyId,
     ty: Ty,
     owner: Option<Owner>,
-    /// An extension receiver, a context parameter, or a companion-block association: a property
-    /// whose accessors take more than a dispatch receiver.
+    /// An extension receiver or a context parameter: a property whose accessors take more than a
+    /// dispatch receiver.
     receiver_parameters: bool,
+    /// A property of its owner's `companion { }` block: a static of the owner, read and written
+    /// with no receiver.
+    companion_block: bool,
     flags: DeclarationFlags,
     visibility: krusty::types::Visibility,
 }
@@ -51,6 +56,8 @@ pub(in super::super) enum PropertyPlacement {
     Package,
     /// A member: the receiver is an instance of `owner`.
     Member { owner: TypeName },
+    /// A property of a classifier's `companion { }` block: no receiver, and no file initializer.
+    CompanionBlock,
 }
 
 /// The one ABI both files use for a module property.
@@ -66,7 +73,7 @@ pub(in super::super) struct PropertyAbi {
 impl PropertyAbi {
     fn receiver(&self) -> Option<Ty> {
         match self.placement {
-            PropertyPlacement::Package => None,
+            PropertyPlacement::Package | PropertyPlacement::CompanionBlock => None,
             PropertyPlacement::Member { owner } => Some(Ty::obj_name(owner)),
         }
     }
@@ -113,6 +120,7 @@ fn plan(declaration: &PropertyDeclaration) -> Result<PropertyAbi, Unsupported> {
         return Err("a private property of another file".into());
     }
     let placement = match declaration.owner {
+        _ if declaration.companion_block => PropertyPlacement::CompanionBlock,
         None => PropertyPlacement::Package,
         Some(owner) => match owner.kind {
             // The declaring file's entry point reads through the receiver's interface table,
@@ -184,13 +192,19 @@ impl FileLowering<'_> {
                 Ok(Owner { classifier, kind })
             })
             .transpose()?;
+        // A block property's recorded receiver is its declaring classifier: the coordinate that
+        // associates it with the class, which its accessors do not take.
+        let companion_block = matches!(
+            record.placement,
+            krusty::ir::IrStaticPlacement::CompanionBlock { .. }
+        );
         let declaration = PropertyDeclaration {
             property: *target,
             ty: record.ty,
             owner,
-            receiver_parameters: record.extension_receiver.is_some()
-                || !record.context_parameters.is_empty()
-                || !matches!(record.placement, krusty::ir::IrStaticPlacement::Package),
+            receiver_parameters: (record.extension_receiver.is_some() && !companion_block)
+                || !record.context_parameters.is_empty(),
+            companion_block,
             flags: record.flags,
             visibility: record.visibility,
         };
@@ -238,12 +252,13 @@ impl FileLowering<'_> {
             }) => !context_parameters.is_empty(),
             Some(IrLocalPropertyLayout::MemberExtension { .. }) => true,
             Some(IrLocalPropertyLayout::TopLevelStorage { .. }) | None => false,
-        } || checked.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER);
+        };
         Some(PropertyDeclaration {
             property,
             ty: checked.ty,
             owner,
             receiver_parameters,
+            companion_block: checked.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER),
             flags: checked.flags,
             visibility: checked.visibility,
         })
@@ -295,6 +310,15 @@ impl FileLowering<'_> {
                 ),
             ) => Ok(LocalRealization::Package),
             (
+                PropertyPlacement::CompanionBlock,
+                Some(
+                    IrLocalPropertyLayout::TopLevelStorage {
+                        qualifier: None, ..
+                    }
+                    | IrLocalPropertyLayout::TopLevelAccessor { receiver: None, .. },
+                ),
+            ) => Ok(LocalRealization::CompanionBlock),
+            (
                 PropertyPlacement::Member { owner },
                 Some(IrLocalPropertyLayout::Member {
                     class,
@@ -339,6 +363,7 @@ impl FileLowering<'_> {
                     }
                     body.top_level_read_typed(&target)?
                 }
+                LocalRealization::CompanionBlock => body.top_level_read_typed(&target)?,
                 LocalRealization::Member {
                     class,
                     index,
@@ -392,6 +417,13 @@ impl FileLowering<'_> {
                     };
                     body.top_level_write_value(&target, value)?;
                 }
+                LocalRealization::CompanionBlock => {
+                    let stored = body.top_level_written_ty(&target)?;
+                    let Some(value) = body.convert(params[0], Some(ty), stored)? else {
+                        return Err(format!("a `Unit` value assigned to `{name}`").into());
+                    };
+                    body.top_level_write_value(&target, value)?;
+                }
                 LocalRealization::Member {
                     value_class: true, ..
                 } => {
@@ -422,6 +454,8 @@ impl FileLowering<'_> {
 #[derive(Clone, Copy)]
 enum LocalRealization {
     Package,
+    /// A companion-block property: the file's own access, with no file initializer first.
+    CompanionBlock,
     Member {
         class: ClassId,
         index: usize,

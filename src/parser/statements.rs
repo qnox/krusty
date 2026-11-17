@@ -240,11 +240,12 @@ impl Parser<'_> {
                     .shadow_with_classifier(classifier);
                 stmt
             }
-            // Full-form destructuring (`+NameBasedDestructuring`): `(val a, val b) = e` /
-            // `[val a, val b] = e`, where each component carries its OWN `val`/`var` (unlike the
-            // leading-keyword short form `val (a, b) = e`). Paren form is name-based (binds by
-            // property name); bracket form is positional (`componentN`). Disambiguated from a plain
-            // parenthesized-expression statement by the `val`/`var` right after the opener.
+            // Full-form destructuring: `(val a, val b) = e` / `[val a, val b] = e`, where each
+            // component carries its OWN `val`/`var` (unlike the leading-keyword short form
+            // `val (a, b) = e`). Paren form is name-based (binds by property name); bracket form is
+            // positional (`componentN`). Disambiguated from a plain parenthesized-expression
+            // statement by the `val`/`var` right after the opener. Recognized even when
+            // `NameBasedDestructuring` is disabled, so that case is a language-version diagnostic.
             _ if self.at_full_form_destructure() => self.parse_full_form_destructure(start),
             _ => {
                 let e = self.parse_expr();

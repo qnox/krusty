@@ -25,6 +25,9 @@ pub struct SecondaryCtor {
     /// is what a diagnostic about the declaration itself points at; [`Self::span`] deliberately
     /// starts at the keyword and cannot stand in for it.
     pub declaration_span: Span,
+    /// Source range from the `constructor` keyword through the parameter list's `)`: the
+    /// constructor's signature, which a conflict diagnostic points at.
+    pub signature_span: Span,
     /// 1-based source line of the `constructor` keyword. The parser leaves this 0 and the same
     /// post-pass that fills `ClassDecl::decl_line` rewrites it; 0 = unknown (no debug table).
     pub decl_line: u32,
