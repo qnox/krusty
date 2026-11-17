@@ -113,6 +113,7 @@ impl BodyLowering<'_, '_, '_> {
             // A declaration's result, at the type the declaration gives it.
             IrExpr::Call { callee, .. } => match &**callee {
                 Callee::Local(function)
+                | Callee::ClassStatic { function, .. }
                 | Callee::LocalWithDefaults { function, .. }
                 | Callee::ClassStaticWithDefaults { function, .. } => {
                     ir.functions[*function as usize].ret
