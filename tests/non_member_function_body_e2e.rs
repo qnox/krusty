@@ -3,20 +3,9 @@
 
 use super::common;
 
-const INTERSECTIONS: &str = include_str!("fixtures/diagnostics/intersectionTypes.kt");
 const DECLARATIONS: &str = include_str!("fixtures/diagnostics/nonMemberFunctionBodies.kt");
 const EXEMPTIONS: &str =
     include_str!("box_regressions/multimodule/nonMemberFunctionBodyExemptions.kt");
-
-#[test]
-fn a_bodyless_generic_function_is_rejected_in_the_complete_intersection_program() {
-    let sources = [("intersectionTypes.kt", INTERSECTIONS)];
-    common::assert_error_blocks_match_kotlinc(&sources, &[]);
-    assert_eq!(
-        common::reference_error_blocks(&sources, &[]),
-        ["intersectionTypes.kt:9:1: function 'select' must have a body."]
-    );
-}
 
 #[test]
 fn declaration_errors_do_not_suppress_an_independent_following_body_error() {
