@@ -3,15 +3,29 @@
 use super::IrSamTarget;
 use crate::libraries::LibraryType;
 use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::types::Ty;
 use std::sync::Arc;
 
 pub(crate) type KlibSamKey = (String, KlibPublicIdSignature);
+
+/// Instantiates a frozen declaration at one applied type of its classifier.
+pub(crate) type ApplySamDeclaration = fn(&LibraryType, &IrSamTarget, Ty) -> Option<IrSamTarget>;
 
 /// The classifier and abstract-method contract are frozen together before backend entry.
 #[derive(Clone)]
 pub(crate) struct CheckedKlibSamDeclaration {
     pub(crate) classifier: Arc<LibraryType>,
     pub(crate) target: IrSamTarget,
+    /// The checker's application of the declaration, frozen with it so target-neutral lowering
+    /// instantiates the declaration without depending on the resolver.
+    pub(crate) apply: ApplySamDeclaration,
+}
+
+impl CheckedKlibSamDeclaration {
+    /// The declaration's method contract at `applied`, an application of its classifier.
+    pub(crate) fn applied(&self, applied: Ty) -> Option<IrSamTarget> {
+        (self.apply)(&self.classifier, &self.target, applied)
+    }
 }
 
 impl std::fmt::Debug for CheckedKlibSamDeclaration {

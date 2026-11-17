@@ -670,6 +670,17 @@ pub(super) fn publish_referenced(
             crate::fir::ResolvedFunctionOverrideTarget::External(_) => None,
         }
     }));
+    // A member of a slot a target compares by the header its declaring file realizes.
+    callables.extend(
+        ir.function_slot_families
+            .values()
+            .flatten()
+            .flat_map(|family| family.slots.iter().flatten())
+            .filter_map(|function| match function.target {
+                crate::fir::ResolvedFunctionOverrideTarget::Module(target) => Some(target),
+                crate::fir::ResolvedFunctionOverrideTarget::External(_) => None,
+            }),
+    );
     properties.extend(ir.property_overrides.values().flatten().filter_map(|edge| {
         match edge.overridden {
             crate::fir::ResolvedPropertyOverrideTarget::Module(target) => Some(target),
