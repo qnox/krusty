@@ -1738,8 +1738,6 @@ ranges/contains/evaluationOrderForUntilReversed.kt
 ranges/contains/generated/arrayIndices.kt
 ranges/contains/generated/charDownTo.kt
 ranges/contains/generated/collectionIndices.kt
-ranges/contains/generated/doubleRangeTo.kt
-ranges/contains/generated/floatRangeTo.kt
 ranges/contains/generated/intDownTo.kt
 ranges/contains/generated/longDownTo.kt
 ranges/contains/generated/uintDownTo.kt
@@ -1842,13 +1840,11 @@ ranges/forInCharSequenceLengthIncreasedInLoopBody.kt
 ranges/forInCharSequenceWithCustomIterator.kt
 ranges/forInCharSequenceWithMultipleGetFunctions.kt
 ranges/forInCustomIterable.kt
-ranges/forInDoubleRangeWithCustomIterator.kt
 ranges/forInDownTo/forIntInDownTo.kt
 ranges/forInDownTo/forIntInDownToWithNonConstBounds.kt
 ranges/forInDownTo/forIntInNonOptimizedDownTo.kt
 ranges/forInDownTo/forLongInDownTo.kt
 ranges/forInDownTo/forNullableIntInDownTo.kt
-ranges/forInFloatRangeWithCustomIterator.kt
 ranges/forInIndices/forInArrayListIndices.kt
 ranges/forInIndices/forInCollectionImplicitReceiverIndices.kt
 ranges/forInIndices/forInCollectionIndices.kt
@@ -1937,7 +1933,6 @@ ranges/literal/simpleRangeWithNonConstantEnds.kt
 ranges/literal/simpleSteppedDownTo.kt
 ranges/literal/simpleSteppedRange.kt
 ranges/multiAssignmentIterationOverIntRange.kt
-ranges/safeCallRangeTo.kt
 ranges/stepped/expression/downTo/emptyProgression.kt
 ranges/stepped/expression/downTo/illegalStepNegative.kt
 ranges/stepped/expression/downTo/illegalStepNonConst.kt
@@ -2523,7 +2518,6 @@ regressions/collectionSizeInInlineBody.kt
 regressions/collectionSizeOrDefault.kt
 regressions/directInvokeDestructuring.kt
 regressions/directInvokeNameBasedDestructuring.kt
-regressions/floatingRangeContainsMixedWidths.kt
 regressions/generic.kt
 regressions/inlineCallsInInitializerLambda.kt
 regressions/kt15196.kt
