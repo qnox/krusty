@@ -1235,7 +1235,11 @@ impl Body<'_> {
     /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
     fn library_interface_test(&mut self, interface: TypeName, nullable: bool) {
         let subtypes = self.classifiers.builtin_subtypes(interface);
-        self.runtime.builtin_instances(interface, subtypes);
+        let string_builder = self
+            .classifiers
+            .is_subclassifier(krusty::types::wk::string_builder(), interface);
+        self.runtime
+            .builtin_instances(interface, subtypes, string_builder);
         self.interface_test(interface, nullable);
     }
 
