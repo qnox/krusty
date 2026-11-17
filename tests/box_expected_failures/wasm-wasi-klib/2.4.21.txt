@@ -83,7 +83,6 @@ associatedObjects/findAssociatedObject.kt
 associatedObjects/findAssociatedObjectAndDCE.kt
 associatedObjects/findAssociatedObjectLazyness.kt
 basics/canonical_name.kt
-basics/cast_null.kt
 basics/const_infinity.kt
 basics/expression_as_statement.kt
 basics/k42000_1.kt
@@ -318,12 +317,8 @@ callableReference/starProjectionCallableReference.kt
 casts/asForConstants.kt
 casts/asToNothing.kt
 casts/asUnit.kt
-casts/castGenericNull.kt
 casts/functions/asFunKBig.kt
-casts/functions/asFunKSmall.kt
 casts/functions/reifiedAsFunKBig.kt
-casts/functions/reifiedAsFunKSmall.kt
-casts/kt50577.kt
 casts/kt53677.kt
 casts/kt65197.kt
 casts/kt68509.kt
@@ -336,7 +331,6 @@ casts/mutableCollections/reifiedAsWithMutable.kt
 casts/mutableCollections/reifiedIsWithMutable.kt
 casts/mutableCollections/reifiedSafeAsWithMutable.kt
 casts/mutableCollections/safeAsWithMutable.kt
-casts/mutableCollections/weirdMutableCasts.kt
 casts/nullableSafeCastToTypeParameterWithInterfaceUpperBound.kt
 casts/wasmCastMessages.kt
 classDelegation/multipleModules.kt
@@ -1259,8 +1253,6 @@ functions/localFunctions/callInlineLocalInLambda.kt
 functions/localFunctions/definedWithinLambda.kt
 functions/localFunctions/definedWithinLambdaInnerUsage1.kt
 functions/localFunctions/definedWithinLambdaInnerUsage2.kt
-ieee754/asComparableToDouble.kt
-ieee754/comparableTypeCast.kt
 ieee754/equalsNaN_properIeeeComparisons.kt
 ieee754/equalsNullableDouble_properIeeeComparisons.kt
 ieee754/equalsNullableFloat_properIeeeComparisons.kt
