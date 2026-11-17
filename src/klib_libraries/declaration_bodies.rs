@@ -600,6 +600,12 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_class(signature)
     }
 
+    /// The package segments of the serialized file `file` of `module`.
+    pub(crate) fn module_file_package(&self, module: &str, file: u32) -> Option<&[String]> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].file_package(file)
+    }
+
     /// The file-local function `module` itself serializes under `signature`.
     pub(crate) fn module_local_function<'a>(
         &'a self,
@@ -696,13 +702,6 @@ impl KlibDeclarationBodies {
                 KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_) => false,
             }
         })
-    }
-
-    /// The package the serialized file `file` of `module` declares, as its segments; empty for
-    /// the root package.
-    pub(crate) fn module_file_package(&self, module: &str, file: u32) -> Option<&[String]> {
-        let &library = self.modules.get(module)?;
-        self.libraries[library].file_package(file)
     }
 
     /// The serialized file of `identity` when it is a top-level function or a top-level property

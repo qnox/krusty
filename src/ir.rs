@@ -66,6 +66,9 @@ mod emitted_body_roots;
 mod enums;
 mod expect_actualization;
 mod expression_copy;
+pub(crate) use expression_copy::{
+    rebind_declaration_argument_boundaries, truncate_expression_facts,
+};
 mod expression_provenance;
 pub use emitted_body_roots::{emitted_body_roots, emitted_declaration_roots, EmittedDeclaration};
 pub mod field_flags;
@@ -89,6 +92,7 @@ mod lifting_sequences;
 mod local_class_names;
 mod local_delegates;
 mod loop_exits;
+mod site_class_names;
 pub use local_delegates::IrLocalDelegateAccess;
 pub use local_delegates::{IrInlineDeclaration, IrLocalDelegateAccessorPlan, IrLocalDelegatePlan};
 mod declared_parameters;
@@ -208,6 +212,7 @@ pub use references::{
 pub use sam_target::{
     IrSamMethod, IrSamMethodFrame, IrSamPlacement, IrSamTarget, IrSamTypeParameter,
 };
+pub use site_class_names::{IrSiteClassContainer, IrSiteClassName};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
@@ -966,6 +971,9 @@ pub struct IrClass {
     pub is_compiler_generated: bool,
     /// A source anonymous-object declaration.
     pub is_anonymous_object: bool,
+    /// The declaration site of a local classifier lowered from a serialized body, which has no
+    /// source naming provenance.
+    pub site_name: Option<IrSiteClassName>,
     /// The executable scope a local, anonymous or generated class is declared in, recorded as an
     /// exact identity so a backend realizes enclosure metadata without parsing generated names.
     pub enclosure: Option<IrEnclosure>,
@@ -2291,6 +2299,11 @@ pub struct IrFile {
     /// return, before CPS erasure to `Object`), recorded from the checked FIR call target: the
     /// cross-unit complement of `suspend_funs`, for a callee in ANOTHER file or a dependency.
     pub suspend_calls: crate::fx_hash::HashMap<u32, Ty>,
+    /// A dependency suspend call after CPS rewriting → the exact checked source call application
+    /// before its physical continuation parameter and `Any?` result were added. The selected
+    /// declaration and substitutions remain available for provider authentication while targets
+    /// separately consume the transformed `Callee::External` as the physical call ABI.
+    pub suspend_call_declarations: crate::fx_hash::HashMap<ExprId, Callee>,
     /// Each suspend literal an emitted inline call binds to an inline parameter → where its body
     /// runs: in the caller's frame, in an object the callee constructs, or nowhere. Decided before
     /// coroutine lowering, from the callee's compiled body where the callee is spliced from one.
@@ -2911,7 +2924,7 @@ pub(crate) use clone::make_expression_children_unique;
 pub use clone::make_expression_children_unique_tracked;
 pub(crate) use clone::{
     clone_class_method, clone_expression_with_own_lambdas, clone_function_implementation,
-    clone_with_operands,
+    clone_with_operands, relocate_with_operands,
 };
 pub use clone::{clone_expression_dag, clone_expression_dags};
 mod semantic_validation;

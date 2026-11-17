@@ -130,11 +130,6 @@ pub(in super::super) fn closure_header(
     enclosing: &FunctionHeader,
     captures: &[CaptureParameter],
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
-    if function.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0 {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "a suspend closure",
-        ));
-    }
     let mut header = raw_function_header_with_class(
         None,
         HeaderPurpose::Body(None),

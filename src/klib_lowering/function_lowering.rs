@@ -30,6 +30,7 @@ pub(super) use class_initializers::{
 };
 mod declared_type_parameters;
 pub(super) use closure_headers::{closure_header, CaptureParameter};
+pub(super) use declared_type_parameters::file_private_formals;
 mod reference_headers;
 pub(super) use reference_headers::reference_header;
 pub(super) mod vararg_parameters;
@@ -202,6 +203,7 @@ pub(super) fn prepared_inline_header(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
+    validate_selected_function_modifiers(Some(selected), function)?;
     if function.base.symbol.kind != KlibIrSymbolKind::Function {
         return Err(mismatch(
             "the serialized declaration's symbol is not a function".to_owned(),
@@ -558,9 +560,21 @@ pub(super) fn raw_function_header_with_class(
             "a constructor",
         ));
     }
+    validate_selected_function_modifiers(selected, function)?;
+    let type_parameters =
+        declared_type_parameters::bind(selected, arena, function, class_parameters)?;
+    header(selected, purpose, type_parameters, arena, function)
+}
+
+/// Authenticate serialized function flags against the exact selected declaration for both raw
+/// bodies and prepared inline copies. Prepared suspend templates use the latter path too.
+fn validate_selected_function_modifiers(
+    selected: Option<KlibBodyCallable<'_>>,
+    function: &KlibIrFunction,
+) -> Result<(), KlibBodyDeclineReason> {
     if let Some(modifiers) = selected.and_then(KlibBodyCallable::declaration_modifiers) {
-        // Serialized FunctionFlags reuse the function declaration prefix. Accessor metadata has
-        // a different inline/external layout and has already been normalized by its provider.
+        // Serialized FunctionFlags reuse the function declaration prefix; accessor metadata has a
+        // different layout and has already been normalized by its provider.
         use crate::metadata::function_flags;
         let flags = function.base.flags;
         if modifiers.is_inline != (flags & function_flags::IS_INLINE != 0)
@@ -574,9 +588,7 @@ pub(super) fn raw_function_header_with_class(
             ));
         }
     }
-    let type_parameters =
-        declared_type_parameters::bind(selected, arena, function, class_parameters)?;
-    header(selected, purpose, type_parameters, arena, function)
+    Ok(())
 }
 
 fn header(
@@ -926,7 +938,7 @@ fn serialized_identity(
 }
 
 /// The origin a producer records for a property accessor it generates.
-const DEFAULT_PROPERTY_ACCESSOR: &str = "DEFAULT_PROPERTY_ACCESSOR";
+pub(super) const DEFAULT_PROPERTY_ACCESSOR: &str = "DEFAULT_PROPERTY_ACCESSOR";
 
 /// The parameter identities of `selected`, after checking that it describes the serialized
 /// declaration: the same name, parameter list, parameter types and identities, and result.

@@ -12,7 +12,9 @@ pub(super) fn realize(
     let accesses = krusty::backend::local_properties::realize(ir)?;
     let suspend_lambda_bodies = suspend_lambda_body_expressions(ir);
     for access in accesses {
-        let Some(layout) = ir.local_property_layouts.get(&access.target).cloned() else {
+        // The layout at the operation's dispatch class: a call-site copy of an inline object owns
+        // its storage, accessors and bridges, exactly as common realization projected them.
+        let Some(layout) = ir.property_layout_at(access.operation, access.target)? else {
             return Err(access.target);
         };
         if access.read {

@@ -13,7 +13,7 @@
 //! for where the code holding the conversion stands ([`sam_class_name`]). A reference to a property
 //! is not given a name here: it prints the property instead.
 
-use krusty::backend::class_names::member_class_names;
+use krusty::backend::class_names::{member_class_names, site_container_name};
 use krusty::backend::BackendClassifierSource;
 use krusty::ir::{ExprId, IrCallableReferenceTarget, IrExpr, IrFile, IrSamPlacement};
 use krusty::types::{FnSig, Ty, TyKind};
@@ -73,8 +73,7 @@ pub(super) fn sam_class_name(ir: &IrFile, expression: ExprId) -> Option<String> 
             Some(&owner) => member_classifier_name(ir, owner)?,
             None => ir.package.clone().unwrap_or_default(),
         },
-        IrSamPlacement::DependencyFile { package } => package.render().replace('/', "."),
-        IrSamPlacement::DependencyMember { owner } => member_class_names(owner).qualified,
+        IrSamPlacement::Dependency(container) => site_container_name(ir, container)?,
         IrSamPlacement::UnnamedDependencyClass => return None,
     };
     if !name.is_empty() {

@@ -40,9 +40,10 @@ pub(crate) fn emitted_closure_function(
     }
     // A lambda converted to a functional interface has the interface's class type, and
     // implements the interface method its reference overrides rather than a function invocation.
-    let arity = super::klib_types::closure_type_arity(arena, expression.ty?);
+    let shape = super::klib_types::closure_type_arity(arena, expression.ty?);
+    let suspend = shape.is_some_and(|(_, suspend)| suspend);
     let (function, origin) = match &expression.kind {
-        KlibIrExprKind::FunctionExpression { function, origin } if arity.is_some() => {
+        KlibIrExprKind::FunctionExpression { function, origin } if shape.is_some() => {
             (*function, origin)
         }
         KlibIrExprKind::RichFunctionReference {
@@ -56,9 +57,14 @@ pub(crate) fn emitted_closure_function(
             };
             // A function-typed reference overrides its function class's invocation at the type's
             // arity. A lambda converted to an interface overrides a member of no function class.
-            let implements = match arity {
-                Some(arity) => {
-                    super::klib_types::function_invocation_arity(signature) == Some(arity)
+            let implements = match shape {
+                Some((arity, suspend)) => {
+                    let invocation = if suspend {
+                        super::klib_types::suspend_function_invocation_arity(signature)
+                    } else {
+                        super::klib_types::function_invocation_arity(signature)
+                    };
+                    invocation == Some(arity)
                 }
                 None => !super::klib_types::is_function_classifier_member(signature),
             };
@@ -71,8 +77,9 @@ pub(crate) fn emitted_closure_function(
     };
     source_form(origin.as_deref())?;
     let declaration = arena.function(function);
+    // A suspend closure is a suspend function exactly when its type is a suspend function type.
     (!declaration.constructor
-        && declaration.base.flags & crate::metadata::function_flags::IS_SUSPEND == 0
+        && (declaration.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0) == suspend
         && matches!(declaration.body, Some(KlibIrBody::Block(_))))
     .then_some(function)
 }

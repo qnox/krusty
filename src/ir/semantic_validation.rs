@@ -218,12 +218,14 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
         IrCheckedOperation::ExternalPropertyRead {
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         }
         | IrCheckedOperation::ExternalPropertyWrite {
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         } => {
@@ -231,6 +233,9 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
             reject("external property result", *result)?;
             if let Some(receiver) = source_receiver {
                 reject("external property receiver", *receiver)?;
+            }
+            for substitution in substitutions {
+                validate_substitution(substitution)?;
             }
             Ok(())
         }
