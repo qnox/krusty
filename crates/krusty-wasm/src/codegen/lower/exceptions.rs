@@ -272,14 +272,25 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// The struct a caught exception class's instances are: this file's class, or the runtime
-    /// exception class.
+    /// The struct a caught exception class's instances are: the runtime's own class for a
+    /// declaration the runtime lays out, otherwise the class this file or an earlier unit laid out.
     fn exception_structure(&mut self, identity: TypeName) -> Result<u32, Unsupported> {
-        if let Some(class) = self.classes.and(self.ir.class_id_by_name(identity)) {
-            return Ok(self.file_classes()?.structure(class));
+        if self
+            .classifiers
+            .classifier(identity)
+            .is_some_and(|fact| fact.runtime_exception.is_some())
+        {
+            return self
+                .runtime
+                .exception_class(self.module, self.classifiers, identity);
         }
-        self.runtime
-            .exception_class(self.module, self.classifiers, identity)
+        self.class_structure(Ty::obj_name(identity))?
+            .ok_or_else(|| {
+                format!(
+                    "a catch of `{}`, which no unit lays out",
+                    describe(Ty::obj_name(identity))
+                )
+            })
     }
 
     pub(super) fn throw_value(&mut self, operand: u32) -> Result<(), Unsupported> {
