@@ -311,6 +311,7 @@ fn publish_foreign_accessor_layouts(
 pub(super) fn finalize_properties(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
+    templates: &mut super::dependency_templates::DependencyTemplateCache,
 ) -> Result<(), FirFileLoweringFailure> {
     let mut properties = ir
         .checked_properties
@@ -376,6 +377,7 @@ pub(super) fn finalize_properties(
             Some(class) if extension_receiver.is_some() => materialize_member_extension_property(
                 index,
                 PropertyMaterialization {
+                    templates: &mut *templates,
                     source_order,
                     property_id,
                     property,
@@ -390,6 +392,7 @@ pub(super) fn finalize_properties(
             Some(class_id) => materialize_member_property(
                 index,
                 MemberProperty {
+                    templates: &mut *templates,
                     anchor,
                     source_order,
                     property_id,
@@ -404,6 +407,7 @@ pub(super) fn finalize_properties(
             None => materialize_top_level_property(
                 index,
                 PropertyMaterialization {
+                    templates: &mut *templates,
                     source_order,
                     property_id,
                     property,
@@ -514,7 +518,9 @@ pub(super) fn apply_property_decl_line(
 }
 
 /// A checked property together with the source position its realization keeps.
-struct PropertyMaterialization {
+struct PropertyMaterialization<'a> {
+    /// The inline dependency templates a delegated accessor's convention expands from.
+    templates: &'a mut super::dependency_templates::DependencyTemplateCache,
     source_order: u32,
     property_id: crate::fir::PropertyId,
     property: IrCheckedProperty,
@@ -523,7 +529,7 @@ struct PropertyMaterialization {
 
 fn materialize_member_extension_property(
     index: &ResolvedModuleIndex,
-    materialization: PropertyMaterialization,
+    materialization: PropertyMaterialization<'_>,
     class_id: crate::ir::ClassId,
     receiver: Ty,
     ir: &mut IrFile,
@@ -531,6 +537,7 @@ fn materialize_member_extension_property(
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
     let PropertyMaterialization {
+        templates,
         source_order,
         property_id,
         property,
@@ -540,6 +547,7 @@ fn materialize_member_extension_property(
         return super::delegated_properties::materialize_member_extension_delegate(
             index,
             super::delegated_properties::DelegatedDeclaration {
+                templates,
                 source_order,
                 property_id,
                 property,
@@ -704,12 +712,13 @@ fn materialize_member_extension_property(
 
 fn materialize_top_level_property(
     index: &ResolvedModuleIndex,
-    materialization: PropertyMaterialization,
+    materialization: PropertyMaterialization<'_>,
     extension_receiver: Option<Ty>,
     ir: &mut IrFile,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
 ) -> Result<(), FirFileLoweringFailure> {
     let PropertyMaterialization {
+        templates,
         source_order,
         property_id,
         property,
@@ -718,6 +727,7 @@ fn materialize_top_level_property(
     if property.delegate.is_some() || property.delegate_plan.is_some() {
         return super::delegated_properties::materialize_top_level_delegate(
             super::delegated_properties::DelegatedDeclaration {
+                templates,
                 source_order,
                 property_id,
                 property,
@@ -1038,7 +1048,9 @@ pub(super) fn stamp_generated_property_nodes(
 }
 
 /// One checked class member property, with where it sits in its class.
-struct MemberProperty {
+struct MemberProperty<'a> {
+    /// The inline dependency templates a delegated accessor's convention expands from.
+    templates: &'a mut super::dependency_templates::DependencyTemplateCache,
     anchor: crate::fir::StableDeclarationAnchor,
     source_order: u32,
     property_id: crate::fir::PropertyId,
@@ -1091,12 +1103,13 @@ fn attach_declared_accessor_annotations(ir: &mut IrFile) {
 
 fn materialize_member_property(
     index: &ResolvedModuleIndex,
-    member: MemberProperty,
+    member: MemberProperty<'_>,
     ir: &mut IrFile,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
     let MemberProperty {
+        templates,
         anchor,
         source_order,
         property_id,
@@ -1124,6 +1137,7 @@ fn materialize_member_property(
         return super::delegated_properties::materialize_member_delegate(
             index,
             super::delegated_properties::DelegatedDeclaration {
+                templates,
                 source_order,
                 property_id,
                 property,
