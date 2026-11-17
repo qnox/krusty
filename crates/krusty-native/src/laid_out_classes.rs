@@ -135,6 +135,14 @@ pub(crate) enum DependencyImplementation {
     },
 }
 
+/// The symbols of the entry point boxing a value class's value and of the one reading it back,
+/// which the declaring file defines (see `codegen::lower::module_abi::value_boxes`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ValueBoxEntries {
+    pub(crate) box_symbol: String,
+    pub(crate) unbox_symbol: String,
+}
+
 /// The classes laid out so far in the current source module, and the dependency classes support
 /// units materialized for the whole program, by identity.
 #[derive(Debug, Default)]
@@ -147,6 +155,10 @@ pub(crate) struct LaidOutClasses {
     /// Conflicting producers poison the identity instead of letting a later file pick one.
     published_layouts:
         HashMap<krusty::backend::KlibClassIdentity, Option<PublishedNativeClassLayout>>,
+    /// The box entries a source producer defined for each exported value class, by exact
+    /// identity, so another source module boxes one without its layout. Conflicting producers
+    /// poison the identity, as for descriptors.
+    published_value_boxes: HashMap<krusty::backend::KlibClassIdentity, Option<ValueBoxEntries>>,
     classes: HashMap<TypeName, LaidOutClass>,
     /// The exact KLIB layouts currently rebound to this module's TypeNames and interface numbers.
     /// These views are disposable; only `published_layouts` survives a module transition.
@@ -346,6 +358,30 @@ impl LaidOutClasses {
         }
     }
 
+    pub(crate) fn publish_value_boxes(
+        &mut self,
+        identity: krusty::backend::KlibClassIdentity,
+        entries: ValueBoxEntries,
+    ) {
+        self.published_value_boxes
+            .entry(identity)
+            .and_modify(|known| *known = None)
+            .or_insert(Some(entries));
+    }
+
+    /// The box entries the source producer of the value class `identity` defined, or `None` when
+    /// no file of this program declares it.
+    pub(crate) fn published_value_boxes(
+        &self,
+        identity: &krusty::backend::KlibClassIdentity,
+    ) -> Result<Option<&ValueBoxEntries>, String> {
+        match self.published_value_boxes.get(identity) {
+            None => Ok(None),
+            Some(Some(entries)) => Ok(Some(entries)),
+            Some(None) => Err("a KLIB value class with conflicting Native box definitions".into()),
+        }
+    }
+
     pub(crate) fn published_descriptor(
         &self,
         identity: &krusty::libraries::KlibClassIdentity,
@@ -376,6 +412,25 @@ impl LaidOutClasses {
             Some(None) => {
                 Err("a KLIB classifier with conflicting Native layout definitions".into())
             }
+        }
+    }
+
+    /// The linkable initializer entry an emitted object published for exactly `constructor` of
+    /// `class`. Only a physically defined layout answers; a conflicting one never does.
+    pub(crate) fn published_constructor(
+        &self,
+        class: &krusty::backend::KlibClassIdentity,
+        constructor: &krusty::backend::KlibDependencyCallable,
+    ) -> Option<&Signature> {
+        match self
+            .published_layout(class)
+            .ok()
+            .flatten()?
+            .constructors
+            .get(constructor)?
+        {
+            ObjectFunction::Linked { signature, .. } => Some(signature),
+            ObjectFunction::Local(_) => None,
         }
     }
 
@@ -528,6 +583,64 @@ mod descriptor_tests {
     }
 
     #[test]
+    fn only_a_linked_published_constructor_entry_acknowledges_an_initializer() {
+        use krusty::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
+        let class = identity("producer");
+        // Distinct exact declarations; only their identity matters to the registry.
+        let constructor = |name: &str| KlibDependencyCallable {
+            module: "producer".into(),
+            declaration: KlibDeclarationSignature::Public(metadata_class_signature(
+                MetadataContainer {
+                    package: &["sample".into()],
+                    classes: &[],
+                    native_interop_library: false,
+                },
+                MetadataClass {
+                    name,
+                    type_params: &[],
+                    expect: false,
+                },
+            )),
+        };
+        let mut entry = Signature::new(CallConv::SystemV);
+        entry.params.push(cranelift_codegen::ir::AbiParam::new(
+            cranelift_codegen::ir::types::I64,
+        ));
+        let mut layout = published_layout(class.clone(), "kt_type_sample_Owner");
+        layout.constructors.insert(
+            constructor("linked"),
+            ObjectFunction::Linked {
+                symbol: "kt_sample_Owner__super_0".into(),
+                signature: entry.clone(),
+            },
+        );
+        layout.constructors.insert(
+            constructor("local"),
+            ObjectFunction::Local("kt_sample_Owner__super_1".into()),
+        );
+        let mut layouts = LaidOutClasses::default();
+        assert!(layouts
+            .published_constructor(&class, &constructor("linked"))
+            .is_none());
+        layouts.publish_layout(layout.clone());
+        assert_eq!(
+            layouts.published_constructor(&class, &constructor("linked")),
+            Some(&entry)
+        );
+        assert!(layouts
+            .published_constructor(&class, &constructor("local"))
+            .is_none());
+        assert!(layouts
+            .published_constructor(&class, &constructor("absent"))
+            .is_none());
+        // A conflicting producer poisons the identity, and with it every entry it published.
+        layouts.publish_layout(layout);
+        assert!(layouts
+            .published_constructor(&class, &constructor("linked"))
+            .is_none());
+    }
+
+    #[test]
     fn conflicting_native_layout_definitions_remain_unusable() {
         let identity = identity("producer");
         let mut layouts = LaidOutClasses::default();
@@ -537,6 +650,28 @@ mod descriptor_tests {
             layouts.published_layout(&identity),
             Err(reason) if reason == "a KLIB classifier with conflicting Native layout definitions"
         ));
+    }
+
+    #[test]
+    fn published_value_boxes_survive_modules_and_conflicts_poison_the_identity() {
+        let entries = |name: &str| ValueBoxEntries {
+            box_symbol: format!("{name}_box"),
+            unbox_symbol: format!("{name}_unbox"),
+        };
+        let mut layouts = LaidOutClasses::default();
+        layouts.enter_source_module("producer", false);
+        layouts.publish_value_boxes(identity("first"), entries("first"));
+        layouts.enter_source_module("consumer", false);
+        assert_eq!(
+            layouts.published_value_boxes(&identity("first")),
+            Ok(Some(&entries("first")))
+        );
+        assert_eq!(layouts.published_value_boxes(&identity("second")), Ok(None));
+        layouts.publish_value_boxes(identity("first"), entries("other"));
+        assert_eq!(
+            layouts.published_value_boxes(&identity("first")),
+            Err("a KLIB value class with conflicting Native box definitions".to_owned())
+        );
     }
 
     #[test]
