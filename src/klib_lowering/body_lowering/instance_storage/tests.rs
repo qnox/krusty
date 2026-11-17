@@ -29,6 +29,7 @@ impl CallLinker for NoCalls {
         &mut self,
         _: &mut IrFile,
         _: &KlibPublicIdSignature,
+        _: super::super::ConstructorRole,
     ) -> Lowered<LinkedConstructor> {
         panic!("no construction")
     }

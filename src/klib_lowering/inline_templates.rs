@@ -633,6 +633,7 @@ impl CallLinker for TemplateCalls<'_> {
         &mut self,
         _ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
+        _role: super::body_lowering::ConstructorRole,
     ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
         let identity = self.identity(callee)?;
         let declined = |reason| {

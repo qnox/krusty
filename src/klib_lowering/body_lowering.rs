@@ -255,11 +255,13 @@ pub(super) trait CallLinker {
         unsupported("a callable reference without an exact provider declaration")
     }
 
-    /// The dependency constructor a constructor call of the public declaration `callee` invokes.
+    /// The dependency constructor a constructor call of the public declaration `callee` invokes:
+    /// one allocating its class, or a subclass delegating to it.
     fn link_constructor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
+        role: ConstructorRole,
     ) -> Lowered<LinkedConstructor>;
 
     /// The classifier a file-local signature names in the library of the body being lowered.
@@ -386,6 +388,15 @@ pub(super) trait CallLinker {
         let _ = name;
         unsupported("an object literal supertype")
     }
+}
+
+/// What a constructor call does with the constructor it names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ConstructorRole {
+    /// Allocates an instance of the constructor's class.
+    Allocation,
+    /// Initializes a subclass instance another constructor allocated.
+    Delegation,
 }
 
 /// The dependency constructor a constructor call invokes: the provider's identity, the class it

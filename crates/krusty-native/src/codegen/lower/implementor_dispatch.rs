@@ -427,9 +427,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// Dispatch one dependency interface member by the exact override edge each implementor
-    /// published. An implementor without that edge leaves the call to the paths that already
-    /// know the member; this does not recover an implementation by its name. A member the runtime
-    /// also answers is left there too.
+    /// published. An implementor without that edge in this file is reached through the member's
+    /// link stub; with no stub, the call is left to the paths that already know the member. This
+    /// does not recover an implementation by its name. A member the runtime also answers is left
+    /// there too.
     ///
     /// `stub` is the member's KLIB identity and the parameters a call applies to it. An object
     /// another file or module made, which none of these classes is, reaches the member through its
@@ -446,11 +447,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return None;
         }
         let declared = self.file.implementors_of(internal);
+        if declared.is_empty() {
+            return None;
+        }
         let implementors: Vec<ImplementorArm> = declared
             .iter()
             .filter_map(|&class| self.external_override_slot(class, target, signature.params))
             .collect();
-        if implementors.is_empty() || implementors.len() != declared.len() {
+        // A class whose implementation it inherits from a superclass another unit laid out has
+        // no arm of its own; the interface stub its table holds by the member's identity is the
+        // only path that reaches it.
+        if stub.is_none() && implementors.len() != declared.len() {
             return None;
         }
         let stub = match stub

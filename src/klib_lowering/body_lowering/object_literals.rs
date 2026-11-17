@@ -374,7 +374,8 @@ impl<'a> BodyLowering<'a> {
             .copied()
             .find(|ty| ty.non_null().kotlin_class_internal() == Some(superclass))
             .ok_or_else(|| mismatch("an object literal delegates to a class it does not extend"))?;
-        let operands = self.constructor_operands(access, 0, ty)?;
+        let operands =
+            self.constructor_operands(access, 0, ty, super::ConstructorRole::Delegation)?;
         if operands.declaration.classifier != superclass || operands.local_access.is_some() {
             return Err(mismatch(
                 "an object literal delegates to another class than its superclass",

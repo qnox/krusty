@@ -138,8 +138,9 @@ pub(super) fn declarations(
         }
         // A top-level function private to its file, or a member of a class private to its
         // library, has no provider declaration either; only a body of its own module calls it, and
-        // it is emitted with that body.
-        if bodies.is_library_private(&identity) {
+        // it is emitted with that body. One an earlier unit already emitted is that unit's export
+        // instead, an exact external edge which keeps its declaration authentication below.
+        if bodies.is_library_private(&identity) && !externals.contains_key(&identity) {
             state.pending.extend(
                 bodies
                     .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)

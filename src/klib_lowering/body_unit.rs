@@ -12,8 +12,8 @@ use crate::fx_hash::{HashMap, HashSet};
 use std::collections::VecDeque;
 
 use super::body_lowering::{
-    constant_value, publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor,
-    LinkedAccessorTarget, LinkedCallableReference, LinkedCallee, LinkedConstructor,
+    constant_value, publish_parameter_defaults, BodyLowering, CallLinker, ConstructorRole,
+    LinkedAccessor, LinkedAccessorTarget, LinkedCallableReference, LinkedCallee, LinkedConstructor,
     LoweredFunction, StaticField,
 };
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
@@ -1386,6 +1386,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         &mut self,
         ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
+        role: ConstructorRole,
     ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
         let identity = self.callee_identity(callee)?;
         let (_, function) = self.sources.bodies.function(&identity).ok_or_else(|| {
@@ -1401,17 +1402,15 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 "a constructor call selected a non-constructor provider declaration".to_owned(),
             ));
         }
-        if self
-            .sources
-            .externals
-            .get(&identity)
-            .is_some_and(|external| {
-                matches!(
-                    external.realization,
-                    DependencyExternalRealization::ConstructorInitializer
-                )
-            })
-        {
+        // An earlier unit's retained initializer runs on an instance a subclass allocated; it
+        // never allocates its own class.
+        let retained_initializer = self.sources.externals.get(&identity).filter(|external| {
+            matches!(
+                external.realization,
+                DependencyExternalRealization::ConstructorInitializer
+            )
+        });
+        if retained_initializer.is_some() && role == ConstructorRole::Allocation {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "an initializer-only dependency does not permit class allocation".to_owned(),
             ));
@@ -1424,6 +1423,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
             // exact provider evidence this unit cannot realize construction; that is not a
             // missing declaration and must not invent a constructor handle.
             .ok_or_else(|| KlibBodyDeclineReason::UnsupportedCallee(Box::new(callee.clone())))?;
+        if let Some(initializer) = retained_initializer {
+            return Ok(LinkedConstructor {
+                target: initializer.target(),
+                declaration,
+            });
+        }
         let external = self
             .sources
             .externals
@@ -1690,7 +1695,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             }
             None => return Err(KlibBodyDeclineReason::Unjoined),
         };
-        let mut linked = super::accessor_calls::authenticate(selected, self.sources.bodies)?
+        let mut linked = super::accessor_calls::authenticate_export(selected, self.sources.bodies)?
             .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
                 "a dependency property accessor without an exact accessor contract",
             ))?;
@@ -1868,15 +1873,14 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 Some(self.sources.bodies),
             )
             .map_err(callee_declined)?;
-            // A member of a generic class realized outside this unit, by the target or by its
-            // provider, is read at its class's type arguments, which the call binds from its
-            // dispatch receiver.
+            // A member of a generic class realized outside this unit, by the target, by its
+            // provider, or by an earlier unit's export, is read at its class's type arguments,
+            // which the call binds from its dispatch receiver.
             let class = match selected {
                 Some(selected)
-                    if matches!(purpose, HeaderPurpose::External)
-                        && selected
-                            .class_contract()
-                            .is_some_and(|class| !class.parameters.formals.is_empty()) =>
+                    if selected
+                        .class_contract()
+                        .is_some_and(|class| !class.parameters.formals.is_empty()) =>
                 {
                     Some(
                         super::class_headers::authenticate(selected, self.sources.bodies)

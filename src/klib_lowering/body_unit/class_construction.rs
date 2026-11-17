@@ -188,6 +188,12 @@ impl<'u, 's> Linker<'u, 's> {
                 self.declare_dispatched(ir, member.clone(), plan.header.arena, function)?;
             }
         }
+        let storage_accessors = if existing.is_none() {
+            plan.storage_accessors.clone()
+        } else {
+            Vec::new()
+        };
+        let (contract, arena) = (plan.header.contract, plan.header.arena);
         // The initialization reads the class's private members as its members do.
         self.pending.push_back(PendingBody {
             identity: identity.clone(),
@@ -201,6 +207,43 @@ impl<'u, 's> Linker<'u, 's> {
             local_body: None,
             static_initialization: None,
         });
+        for function in storage_accessors {
+            self.declare_storage_accessor(ir, &contract.module, arena, function)?;
+        }
+        Ok(())
+    }
+
+    /// Declare a default accessor of storage the class being materialized owns, as a call of it
+    /// would: a later unit calls its export rather than materializing the class again.
+    fn declare_storage_accessor(
+        &mut self,
+        ir: &mut IrFile,
+        module: &str,
+        arena: &'s KlibIrArena,
+        function: &'s KlibIrFunction,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        let signature = crate::klib_libraries::member_signature(&function.base.symbol.signature)
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "a storage accessor is not a member".to_owned(),
+                )
+            })?;
+        let KlibCalleeOrigin::Exact(identity) =
+            self.sources.bodies.linked_origin(module, &signature)
+        else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a storage accessor has no exact producer".to_owned(),
+            ));
+        };
+        let selected = match self.sources.callees.get(&identity) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            _ => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a storage accessor has no unique provider declaration".to_owned(),
+                ))
+            }
+        };
+        self.declare(ir, &identity, Some(selected), arena, function)?;
         Ok(())
     }
 

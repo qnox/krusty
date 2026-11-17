@@ -591,6 +591,21 @@ impl Backend for CraneliftBackend {
         vec![(format!("{object_stem}.o"), lowered.object)]
     }
 
+    fn emitted_constructor_initializer(
+        &self,
+        state: &mut Self::State,
+        declaration: &krusty::backend::ConstructorInitializerDeclaration,
+    ) -> bool {
+        // The entry takes the allocated object, then the declared frame, and returns nothing.
+        state
+            .laid_out
+            .published_constructor(&declaration.class, &declaration.constructor)
+            .is_some_and(|signature| {
+                signature.params.len() == declaration.parameters.len() + 1
+                    && signature.returns.is_empty()
+            })
+    }
+
     fn check_module(&self, state: &Self::State, diags: &mut DiagSink) {
         // A file that declined may be the one that would have defined the link; its own
         // diagnostic already explains why the module is not emitted.
