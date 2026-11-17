@@ -46,8 +46,19 @@ if [ ! -d "$checkout/.git" ]; then
 fi
 
 if [ -z "${KRUSTY_BINARY:-}" ]; then
-  (cd "$repo_root" && cargo build --profile gate -p krusty-cli --bin krusty)
-  KRUSTY_BINARY=$repo_root/target/gate/krusty
+  # The executable Cargo reports building, wherever its target directory is configured to be.
+  KRUSTY_BINARY=$(cd "$repo_root" && cargo build --profile gate -p krusty-cli --bin krusty \
+    --message-format=json-render-diagnostics |
+    python3 -c 'import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("reason") == "compiler-artifact" and message.get("executable") \
+            and message["target"]["name"] == "krusty":
+        print(message["executable"])')
+  if [ ! -x "$KRUSTY_BINARY" ]; then
+    echo "cargo reported no krusty executable" >&2
+    exit 1
+  fi
 fi
 if [ -z "${KRUSTY_PLUGIN_REPOSITORY:-}" ]; then
   KRUSTY_PLUGIN_VERSION=$(cd "$repo_root" && just version)

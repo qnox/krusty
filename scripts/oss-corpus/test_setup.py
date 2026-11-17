@@ -223,6 +223,22 @@ class Repro(unittest.TestCase):
     """`repro.sh` compiles one compilation the way the verify build does and prints its errors."""
 
     def test_one_compilation_is_verified_and_its_errors_printed(self):
+        self.run_repro(dict(KRUSTY_BINARY='/k/krusty'), '/k/krusty')
+
+    def test_the_default_build_uses_the_executable_cargo_reports(self):
+        # Cargo's target directory is configurable; the binary is wherever Cargo says it wrote it.
+        with tempfile.TemporaryDirectory() as tools:
+            built = f'{tools}/elsewhere/gate/krusty'
+            write(built, '#!/bin/sh\n')
+            os.chmod(built, 0o755)
+            write(f'{tools}/cargo', '#!/bin/sh\n'
+                                    'echo \'{"reason":"compiler-artifact","target":{"name":"krusty-cli"},"executable":null}\'\n'
+                                    f'echo \'{{"reason":"compiler-artifact","target":{{"name":"krusty"}},"executable":"{built}"}}\'\n'
+                                    'echo \'{"reason":"build-finished","success":true}\'\n')
+            os.chmod(f'{tools}/cargo', 0o755)
+            self.run_repro(dict(PATH=f"{tools}:{os.environ['PATH']}"), built)
+
+    def run_repro(self, extra_env, binary):
         with tempfile.TemporaryDirectory() as work:
             repo = f'{work}/upstream'
             # Records the arguments, and writes the record krusty's verify compile would.
@@ -242,11 +258,12 @@ class Repro(unittest.TestCase):
                                     text=True).stdout.strip()
             write(f'{work}/projects.tsv', f'p\tfile://{repo}\t{commit}\t.\t21\t-\n')
             env = dict(os.environ, CORPUS_PROJECTS=f'{work}/projects.tsv', ARGS_SEEN=f'{work}/args',
-                       KRUSTY_BINARY='/k/krusty', KRUSTY_PLUGIN_REPOSITORY='/k/repository',
-                       KRUSTY_PLUGIN_VERSION='0')
+                       KRUSTY_PLUGIN_REPOSITORY='/k/repository', KRUSTY_PLUGIN_VERSION='0')
+            env.pop('KRUSTY_BINARY', None)
+            env.update(extra_env)
             result = subprocess.run(['bash', os.path.join(HERE, 'repro.sh'), 'p', ':a:compileKotlin',
                                      f'{work}/repro'], env=env, capture_output=True, text=True)
             args = read(f'{work}/args')
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(result.stdout, ':a:compileKotlin: failed\n  a/A.kt:1:1: error: boom\n')
-        self.assertIn('-Pkrusty.binary=/k/krusty krustyVerify -x krustyVerify :a:compileKotlinKrustyVerify', args)
+        self.assertIn(f'-Pkrusty.binary={binary} krustyVerify -x krustyVerify :a:compileKotlinKrustyVerify', args)
