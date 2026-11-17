@@ -942,14 +942,10 @@ impl BodyLowering<'_> {
                 }
             }
         };
-        // Without class bindings the shape is already at the call's type arguments, which may
-        // name the caller's own type parameters; erasing them would lose the call's types.
+        // The shape is already at the call's type arguments, which may name the caller's own type
+        // parameters; only the class's type parameters are the receiver's to bind.
         let substitute = |declared: Ty| {
-            if bindings.is_empty() {
-                declared
-            } else {
-                declared.substitute_erased(&bindings)
-            }
+            crate::types::ty_subst_formals(declared, callee.class_type_parameters, &bindings)
         };
         // A result read through a projected receiver argument (`Array<out T>.get`) is that
         // projection's read type, as a source call's result is; a nullable result reads its
@@ -1070,13 +1066,15 @@ impl BodyLowering<'_> {
                 let value = self.semantic(argument)?;
                 bindings.insert(*parameter, bound(parameter, value));
             }
+            // A member of a generic class keeps naming its class's type parameters, which
+            // [`Self::call_operands`] binds from the dispatch receiver's type.
+            let formals = linked.type_parameters.clone();
+            let substitute = |ty: Ty| crate::types::ty_subst_formals(ty, &formals, &bindings);
             for param in &mut linked.params {
-                *param = param.substitute_erased(&bindings);
+                *param = substitute(*param);
             }
-            linked.ret = linked.ret.substitute_erased(&bindings);
-            linked.receiver = linked
-                .receiver
-                .map(|receiver| receiver.substitute_erased(&bindings));
+            linked.ret = substitute(linked.ret);
+            linked.receiver = linked.receiver.map(substitute);
             return Ok(linked);
         }
         let Callee::External {

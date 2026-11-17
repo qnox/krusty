@@ -201,6 +201,7 @@ impl<'s> Linker<'_, 's> {
                     function,
                     class: prepared.key.clone(),
                     setter: member.setter,
+                    formals: member.formals.clone(),
                 },
             );
             self.pending.push_back(PendingBody {
@@ -352,7 +353,7 @@ impl<'s> Linker<'_, 's> {
             .collect();
         Ok(super::super::same_library_class::linked_member(
             class,
-            registered.function,
+            (registered.function, &registered.formals),
             ir,
             defaults,
         ))

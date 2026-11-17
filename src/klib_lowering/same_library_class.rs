@@ -132,6 +132,8 @@ pub(super) struct PreparedMember<'a> {
     pub(super) visibility: Visibility,
     /// Whether the function is its property's setter.
     pub(super) setter: bool,
+    /// The function's own type parameters and their declared bounds, which a call binds.
+    pub(super) formals: Vec<(crate::types::TyParamName, Vec<Ty>)>,
 }
 
 /// An overridden member, joined by its checked dependency identity.
@@ -601,7 +603,7 @@ fn applied_local_supertype(
 /// The call shape of a member already declared for `class`.
 pub(super) fn linked_member(
     class: &MaterializedLocalClass,
-    function: crate::ir::FunId,
+    (function, formals): (crate::ir::FunId, &[(crate::types::TyParamName, Vec<Ty>)]),
     ir: &crate::ir::IrFile,
     defaults: Vec<bool>,
 ) -> super::body_lowering::LinkedCallee {
@@ -613,8 +615,8 @@ pub(super) fn linked_member(
         ret: declared.ret,
         context_count: 0,
         singleton_dispatch: None,
-        type_parameters: Vec::new(),
-        type_parameter_bounds: Some(Vec::new()),
+        type_parameters: formals.iter().map(|(name, _)| *name).collect(),
+        type_parameter_bounds: Some(formals.iter().map(|(_, bounds)| bounds.clone()).collect()),
         class_type_parameters: class.class_type_parameters.clone(),
         parameter_defaults: defaults,
         edge: super::CallEdge::default(),
@@ -1271,11 +1273,13 @@ fn prepare_member<'a>(
         }
         None => return Err(unsupported("a member of a non-public class without a body")),
     };
+    let header = local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?;
     Ok(PreparedMember {
         signature: function.base.symbol.signature.clone(),
         symbol: &function.base.symbol,
         statements,
-        header: local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?,
+        formals: header.own_formals(function),
+        header,
         overrides: member_overrides(function, scope)?,
         visibility: declaration_visibility(function.base.flags),
         setter,
