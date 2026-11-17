@@ -10,6 +10,11 @@ while IFS= read -r variable; do
   unset "$variable"
 done < <(git rev-parse --local-env-vars)
 
+# The caller's own Git configuration entries are not the publisher's.
+while IFS= read -r variable; do
+  unset "$variable"
+done < <(compgen -e | grep '^GIT_CONFIG_' || true)
+
 export GIT_AUTHOR_NAME='Fixture Caller'
 export GIT_AUTHOR_EMAIL='caller@example.invalid'
 export GIT_COMMITTER_NAME='Fixture Caller'
@@ -41,7 +46,7 @@ cat > "$tree/tools/krusty-gradle/gradlew" <<GRADLEW
 #!/usr/bin/env bash
 set -euo pipefail
 echo "\$*" >> "$fixture/builds"
-env | grep '^MAVEN_CENTRAL_' >> "$fixture/gradle-env" || true
+env | grep -E '^(MAVEN_CENTRAL_|RELEASE_TOKEN=|GIT_CONFIG_)' >> "$fixture/gradle-env" || true
 if [[ -e "$fixture/build-fails" ]]; then echo "Gradle failed" >&2; exit 7; fi
 root="$tree/tools/krusty-gradle/build/release-repository/dev/krustythecompiler"
 rm -rf "$tree/tools/krusty-gradle/build"
@@ -135,6 +140,24 @@ for arg in args:
         finish(0, json.dumps({"deploymentState": lines[0], "errors": {"pom": ["PRIVATE_RESPONSE_DETAIL"]}}), elapsed=seconds)
 raise SystemExit("unexpected mock request")
 CURL
+# git records the configuration each push runs with, then does the push. Every other Git command
+# must run without it.
+real_git=$(command -v git)
+cat > "$fixture/bin/git" <<GIT
+#!/usr/bin/env bash
+case " \$* " in
+  *' push '*) env | grep '^GIT_CONFIG_' | LC_ALL=C sort >> "$fixture/push-env" || true ;;
+  *) env | grep -E '^(GIT_CONFIG_|RELEASE_TOKEN=)' >> "$fixture/other-git-env" || true ;;
+esac
+exec "$real_git" "\$@"
+GIT
+# base64 records the token a child would inherit while the header is encoded, then encodes.
+real_base64=$(command -v base64)
+cat > "$fixture/bin/base64" <<BASE64
+#!/usr/bin/env bash
+env | grep '^RELEASE_TOKEN=' >> "$fixture/encoder-env" || true
+exec "$real_base64" "\$@"
+BASE64
 # The clock moves only when the script sleeps.
 cat > "$fixture/bin/date" <<DATE
 #!/usr/bin/env bash
@@ -165,7 +188,7 @@ run_case() {
   if grep -Ev '^\[release\] stage=[a-z-]+ version=1[.]2[.]3 source=([0-9a-f]{40}|unavailable) elapsed_seconds=[0-9]+([.][0-9]+)? outcome=(start|done|failed|http) exit=[0-9]+( http_status=[0-9]{3})?$' "$fixture/progress"; then
     fail "$name: malformed progress record"
   fi
-  if sed '/^::add-mask::/d' "$fixture/out" "$fixture/err" | grep -Eq 'dep-[0-9]|PRIVATE_|user:token|dXNlcjp0b2tlbg=='; then
+  if sed '/^::add-mask::/d' "$fixture/out" "$fixture/err" | grep -Eq 'dep-[0-9]|PRIVATE_|user:token|dXNlcjp0b2tlbg==|release-token|eC1hY2Nlc3MtdG9rZW4'; then
     fail "$name: private request or response detail leaked"
   fi
   if [[ $actual_status != "$status" || $(cat "$fixture/out") != "$stdout" || $(cat "$fixture/messages") != "$stderr" ]]; then
@@ -184,7 +207,7 @@ recorded() {
 }
 # A new release: nothing published, no recorded deployment, a fresh clock and call log.
 reset() {
-  rm -f "$fixture"/{builds,gradle-env,auth-header,auth-mode,bundle,unsigned,curl-fails,http-code,build-fails,curl.log,states-*,status-seconds}
+  rm -f "$fixture"/{builds,gradle-env,push-env,other-git-env,encoder-env,auth-header,auth-mode,bundle,unsigned,curl-fails,http-code,build-fails,curl.log,states-*,status-seconds}
   git -C "$tree" remote set-url origin "$fixture/remote.git"
   git -C "$fixture/remote.git" update-ref -d "$ref" 2>/dev/null || true
   echo false > "$fixture/published-krusty-gradle-plugin"
@@ -268,6 +291,7 @@ check 'accepted: exact stage progress' "$(cat "$fixture/progress")" "$(
 )"
 check 'accepted: builds' "$(cat "$fixture/builds")" "$gradle_tasks"
 check 'accepted: Portal token kept from the build' "$(count "$fixture/gradle-env")" 0
+check 'accepted: unauthenticated record push' "$(count "$fixture/push-env")" 0
 check 'accepted: recorded' "$(recorded)" 'central deployment dep-1 of krusty-gradle-plugin 1.2.3'
 check 'accepted: record identity' "$(git -C "$fixture/remote.git" log -1 --format='%an <%ae> / %cn <%ce>' "$ref")" \
   'Source Author <source@example.invalid> / Source Author <source@example.invalid>'
@@ -280,6 +304,60 @@ check 'accepted: bundle' "$(cat "$fixture/bundle")" "$(for f in \
   krusty-gradle-plugin/1.2.3/krusty-gradle-plugin-1.2.3.pom; do
   printf 'dev/krustythecompiler/%s\n' "$f" "$f.asc" "$f.md5"
 done)"
+
+# The release job's checkout persists no credentials: the push that records the deployment
+# carries the release token, and neither the Gradle build nor any other Git command sees it.
+reset
+echo 0 > "$fixture/uploads"
+echo PUBLISHING > "$fixture/states-dep-1"
+case_env=(RELEASE_TOKEN=release-token)
+run_case 'release token' 0 $'uploaded deployment\ndeployment is PUBLISHING' 'Gradle output'
+case_env=()
+check 'release token: recorded' "$(recorded)" 'central deployment dep-1 of krusty-gradle-plugin 1.2.3'
+check 'release token: push configuration' "$(cat "$fixture/push-env")" "$(printf '%s\n' \
+  'GIT_CONFIG_COUNT=1' \
+  'GIT_CONFIG_KEY_0=http.https://github.com/.extraheader' \
+  "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic $(printf x-access-token:release-token | base64 -w0)")"
+check 'release token: kept from the build' "$(count "$fixture/gradle-env")" 0
+check 'release token: kept from other Git commands' "$(count "$fixture/other-git-env")" 0
+check 'release token: kept from the header encoding' "$(count "$fixture/encoder-env")" 0
+# Configuration the job already passes to Git stays in force beside the header.
+reset
+echo 0 > "$fixture/uploads"
+echo PUBLISHING > "$fixture/states-dep-1"
+case_env=(RELEASE_TOKEN=release-token GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.negotiate GIT_CONFIG_VALUE_0=false)
+run_case 'release token beside inherited configuration' 0 $'uploaded deployment\ndeployment is PUBLISHING' 'Gradle output'
+case_env=()
+check 'release token beside inherited configuration: push configuration' "$(cat "$fixture/push-env")" "$(printf '%s\n' \
+  'GIT_CONFIG_COUNT=2' \
+  'GIT_CONFIG_KEY_0=push.negotiate' \
+  'GIT_CONFIG_KEY_1=http.https://github.com/.extraheader' \
+  'GIT_CONFIG_VALUE_0=false' \
+  "GIT_CONFIG_VALUE_1=AUTHORIZATION: basic $(printf x-access-token:release-token | base64 -w0)")"
+
+# A count Git cannot extend stops the step before the build and the upload, which could not be
+# recorded. A count with leading zeroes is the same count.
+for invalid in 'not a count:x1:GIT_CONFIG_COUNT must be a decimal count' \
+  'overflowing count:2147483647:GIT_CONFIG_COUNT cannot append another entry' \
+  'oversized count:99999999999:GIT_CONFIG_COUNT cannot append another entry'; do
+  IFS=: read -r name value message <<<"$invalid"
+  reset
+  echo 0 > "$fixture/uploads"
+  case_env=(RELEASE_TOKEN=release-token "GIT_CONFIG_COUNT=$value")
+  run_case "$name" 2 '' "$message"
+  case_env=()
+  check "$name: builds" "$(count "$fixture/builds")" 0
+  check "$name: requests" "$(count "$fixture/curl.log")" 0
+  check "$name: recorded" "$(recorded)" none
+done
+reset
+echo 0 > "$fixture/uploads"
+echo PUBLISHING > "$fixture/states-dep-1"
+case_env=(RELEASE_TOKEN=release-token GIT_CONFIG_COUNT=0001 GIT_CONFIG_KEY_0=push.negotiate GIT_CONFIG_VALUE_0=false)
+run_case 'zero-padded count' 0 $'uploaded deployment\ndeployment is PUBLISHING' 'Gradle output'
+case_env=()
+check 'zero-padded count: push configuration' "$(grep -c '^GIT_CONFIG_KEY_1=http.https://github.com/.extraheader$' "$fixture/push-env")" 1
+check 'zero-padded count: push count' "$(grep -c '^GIT_CONFIG_COUNT=2$' "$fixture/push-env")" 1
 
 # The Plugin Portal step then fails while Central is still PUBLISHING, and the release is rerun:
 # the recorded deployment is followed, not uploaded again.
@@ -399,4 +477,4 @@ if [[ $failures -ne 0 ]]; then
   echo "$failures Maven Central publishing check(s) failed" >&2
   exit 1
 fi
-echo "Maven Central publishing: 19 cases passed"
+echo "Maven Central publishing: 25 cases passed"
