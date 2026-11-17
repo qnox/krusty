@@ -585,6 +585,19 @@ fn native_cross_module_superclasses_keep_selected_constructor_and_generic_method
     );
 }
 
+#[test]
+fn native_cross_module_superclass_publishes_the_bridges_its_function_supertype_needs() {
+    let source = include_str!("box_regressions/multimodule/sourceLibraryUnboxedFunctionBridge.kt");
+    let stem = "sourceLibraryUnboxedFunctionBridge";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete source superclass module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "a library class's vtable bridges must be linkable by a subclass in another module"
+    );
+}
+
 /// One module of two files: the superclass's secondary constructor is reached from the other file.
 #[test]
 fn native_cross_file_superclasses_keep_selected_secondary_constructor() {
