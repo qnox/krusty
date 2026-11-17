@@ -135,6 +135,14 @@ pub(crate) enum DependencyImplementation {
     },
 }
 
+/// The symbols of the entry point boxing a value class's value and of the one reading it back,
+/// which the declaring file defines (see `codegen::lower::module_abi::value_boxes`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ValueBoxEntries {
+    pub(crate) box_symbol: String,
+    pub(crate) unbox_symbol: String,
+}
+
 /// The classes laid out so far in the current source module, and the dependency classes support
 /// units materialized for the whole program, by identity.
 #[derive(Debug, Default)]
@@ -147,6 +155,10 @@ pub(crate) struct LaidOutClasses {
     /// Conflicting producers poison the identity instead of letting a later file pick one.
     published_layouts:
         HashMap<krusty::backend::KlibClassIdentity, Option<PublishedNativeClassLayout>>,
+    /// The box entries a source producer defined for each exported value class, by exact
+    /// identity, so another source module boxes one without its layout. Conflicting producers
+    /// poison the identity, as for descriptors.
+    published_value_boxes: HashMap<krusty::backend::KlibClassIdentity, Option<ValueBoxEntries>>,
     classes: HashMap<TypeName, LaidOutClass>,
     /// The exact KLIB layouts currently rebound to this module's TypeNames and interface numbers.
     /// These views are disposable; only `published_layouts` survives a module transition.
@@ -341,6 +353,30 @@ impl LaidOutClasses {
         }
     }
 
+    pub(crate) fn publish_value_boxes(
+        &mut self,
+        identity: krusty::backend::KlibClassIdentity,
+        entries: ValueBoxEntries,
+    ) {
+        self.published_value_boxes
+            .entry(identity)
+            .and_modify(|known| *known = None)
+            .or_insert(Some(entries));
+    }
+
+    /// The box entries the source producer of the value class `identity` defined, or `None` when
+    /// no file of this program declares it.
+    pub(crate) fn published_value_boxes(
+        &self,
+        identity: &krusty::backend::KlibClassIdentity,
+    ) -> Result<Option<&ValueBoxEntries>, String> {
+        match self.published_value_boxes.get(identity) {
+            None => Ok(None),
+            Some(Some(entries)) => Ok(Some(entries)),
+            Some(None) => Err("a KLIB value class with conflicting Native box definitions".into()),
+        }
+    }
+
     pub(crate) fn published_descriptor(
         &self,
         identity: &krusty::libraries::KlibClassIdentity,
@@ -532,6 +568,28 @@ mod descriptor_tests {
             layouts.published_layout(&identity),
             Err(reason) if reason == "a KLIB classifier with conflicting Native layout definitions"
         ));
+    }
+
+    #[test]
+    fn published_value_boxes_survive_modules_and_conflicts_poison_the_identity() {
+        let entries = |name: &str| ValueBoxEntries {
+            box_symbol: format!("{name}_box"),
+            unbox_symbol: format!("{name}_unbox"),
+        };
+        let mut layouts = LaidOutClasses::default();
+        layouts.enter_source_module("producer", false);
+        layouts.publish_value_boxes(identity("first"), entries("first"));
+        layouts.enter_source_module("consumer", false);
+        assert_eq!(
+            layouts.published_value_boxes(&identity("first")),
+            Ok(Some(&entries("first")))
+        );
+        assert_eq!(layouts.published_value_boxes(&identity("second")), Ok(None));
+        layouts.publish_value_boxes(identity("first"), entries("other"));
+        assert_eq!(
+            layouts.published_value_boxes(&identity("first")),
+            Err("a KLIB value class with conflicting Native box definitions".to_owned())
+        );
     }
 
     #[test]
