@@ -79,7 +79,9 @@ use krusty::ir::{
 use krusty::types::{Ty, TypeName};
 
 use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
-use super::super::laid_out_classes::{LaidOutClass, LaidOutClasses, ObjectFunction};
+use super::super::laid_out_classes::{
+    LaidOutClass, LaidOutClasses, ObjectFunction, ValueBoxEntries,
+};
 use super::super::symbols::Symbols;
 use super::{Entry, BOX_RESULT_FRAME, PROGRAM_ENTRY};
 use crate::NativeTarget;
@@ -156,6 +158,9 @@ pub struct Lowered {
     pub laid_out: Vec<(TypeName, LaidOutClass)>,
     /// Actual externally linkable descriptor definitions, signed by their producer class records.
     pub class_descriptors: Vec<(krusty::backend::KlibClassIdentity, String)>,
+    /// The box and unbox entry points this object defines for its exported value classes, by
+    /// the class's exact KLIB identity: how another source module boxes one.
+    pub value_boxes: Vec<(krusty::backend::KlibClassIdentity, ValueBoxEntries)>,
 }
 
 /// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
@@ -338,6 +343,7 @@ pub fn lower_file(
         extended,
         exported,
         class_descriptors: Vec::new(),
+        value_boxes: Vec::new(),
         extension_entries: HashMap::default(),
         extension_tables: HashMap::default(),
         published_dependency_bridges: HashMap::default(),
@@ -437,6 +443,7 @@ pub fn lower_file(
 
     let records = lowering.laid_out_records()?;
     let class_descriptors = std::mem::take(&mut lowering.class_descriptors);
+    let value_boxes = std::mem::take(&mut lowering.value_boxes);
     let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
     let mut product = module.finish();
     for data in comdat_objects {
@@ -460,6 +467,7 @@ pub fn lower_file(
         abi,
         laid_out: records,
         class_descriptors,
+        value_boxes,
     })
 }
 
@@ -539,6 +547,7 @@ struct FileLowering<'a> {
     /// The classes earlier files of the source module laid out.
     laid_out: &'a LaidOutClasses,
     class_descriptors: Vec<(krusty::backend::KlibClassIdentity, String)>,
+    value_boxes: Vec<(krusty::backend::KlibClassIdentity, ValueBoxEntries)>,
     /// The classes of this file another file of the module extends.
     extended: krusty::fx_hash::HashSet<krusty::ir::ClassId>,
     /// The classes of `extended` and their superclasses here, whose table entries another file
@@ -2134,6 +2143,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 self.throwable_field_read(symbol, *receiver)
             }
+            // A getter the provider realizes as an exact operation reads as its call does.
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    result,
+                    ..
+                } = &**checked_op
+                    && let Some(getter) = self.operation_getter(*target) =>
+            {
+                self.realized_operation_call(id, getter, Some(*receiver), &[], None, *result)
+                    .expect("the guard selected a getter with an exact operation")
+            }
             // `array.size` read through its getter, as an expanded library body reads it.
             IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::ExternalPropertyRead {
@@ -2367,6 +2389,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             {
                 self.statement(id)?;
                 Ok(None)
+            }
+            IrExpr::Checked(ref checked_op)
+                if let Some(read) = self.dependency_interface_getter(checked_op) =>
+            {
+                read
             }
             other => Err(self.describe_declined(&other).into()),
         }
