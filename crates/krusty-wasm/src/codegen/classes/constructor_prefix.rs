@@ -99,12 +99,6 @@ fn captured_receiver(ir: &IrFile, argument: &IrCtorArg, receiver: &IrCapturedRec
     }
 }
 
-// A captured receiver stored as a reference holds an object, never a scalar this target carries
-// by value.
-fn object_reference(ty: Ty) -> bool {
-    matches!(ty.kind(), TyKind::Obj(_, _)) && !crate::boxes::is_boxed_scalar(ty)
-}
-
 // The parameter's declared type is the entry its rung recorded at `index`. Its closure identity is
 // the receiver id, not a lexical value or an enclosing class.
 fn context_parameter(argument: &IrCtorArg, types: &[Ty], index: u32) -> bool {
@@ -122,7 +116,7 @@ fn receiver_lambda(argument: &IrCtorArg) -> bool {
     matches!(
         argument.capture_identity,
         Some(ClassCaptureIdentity::Receiver(_))
-    ) && object_reference(argument.ty)
+    ) && matches!(argument.ty.kind(), TyKind::Obj(_, _))
 }
 
 // An extension receiver (`this@f`) is the object the named callable received. A checked source
@@ -132,7 +126,7 @@ fn callable_receiver(argument: &IrCtorArg) -> bool {
     matches!(
         argument.capture_identity,
         None | Some(ClassCaptureIdentity::Receiver(_))
-    ) && object_reference(argument.ty)
+    ) && matches!(argument.ty.kind(), TyKind::Obj(_, _))
 }
 
 // A source enclosing receiver is an ordinary reference only after its selected declaration,
