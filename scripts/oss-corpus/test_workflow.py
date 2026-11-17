@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute the corpus summary step and check its generated reports."""
+"""Execute the corpus summary step and check its generated reports, and the project job's JDKs."""
 import json
 import os
 from pathlib import Path
@@ -41,6 +41,14 @@ class Workflow(unittest.TestCase):
             self.assertEqual([value["name"] for value in document["projects"]], ["Alpha", "zeta"])
             for actual, original in zip(document["projects"], reversed(inputs)):
                 self.assertEqual({key: actual[key] for key in original}, original)
+
+    def test_project_builds_get_the_jdks_kotlins_toolchains_ask_for(self):
+        workflow = (ROOT / ".github/workflows/oss-corpus.yml").read_text()
+        job = workflow.split("\n  project:\n", 1)[1].split("\n  summary:\n", 1)[0]
+        versions = job.split("java-version: |\n", 1)[1].split("\n      - ", 1)[0].split()
+        for version in ("8", "11", "17"):
+            self.assertIn(version, versions)
+        self.assertEqual(versions[-1], "21")
 
 
 if __name__ == "__main__":

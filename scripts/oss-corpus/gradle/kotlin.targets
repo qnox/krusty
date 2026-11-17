@@ -1,0 +1,7 @@
+# The JVM standard library with its tests and the whole JVM compiler (its CLI, frontends, IR and JVM
+# backend), with every compile they depend on; the standard library's JVM tests run on the classes
+# each build wrote.
+:kotlin-stdlib:compileKotlinJvm
+:kotlin-stdlib:compileTestKotlinJvm
+:compiler:cli-jvm:compileKotlin
+:kotlin-stdlib:jvmTest
