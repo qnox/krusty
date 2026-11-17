@@ -973,6 +973,34 @@ impl Checker<'_> {
             if propagated.contains_key(formal.as_str()) {
                 continue;
             }
+            // The variable may be narrowed to the intersection only when nothing else constrains
+            // it: a nested or invariant mention (`Cell<R>`), a function input, or a result that
+            // is not the bare variable keeps the solution the shared constraints produced.
+            let result_is_formal =
+                signature.ret.non_null().ty_param_name() == Some(formal.as_str());
+            let only_result_positions = signature.params.iter().all(|&declared| {
+                if !crate::types::ty_mentions_param(declared, std::slice::from_ref(formal)) {
+                    return true;
+                }
+                if declared.non_null().ty_param_name() == Some(formal.as_str()) {
+                    return true;
+                }
+                match declared.kind() {
+                    TyKind::Fun(function) => {
+                        function.ret.non_null().ty_param_name() == Some(formal.as_str())
+                            && function.params.iter().all(|&input| {
+                                !crate::types::ty_mentions_param(
+                                    input,
+                                    std::slice::from_ref(formal),
+                                )
+                            })
+                    }
+                    _ => false,
+                }
+            });
+            if !result_is_formal || !only_result_positions {
+                continue;
+            }
             let lambda_arguments = slots
                 .argument_bindings
                 .iter()
