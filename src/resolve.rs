@@ -208,6 +208,7 @@ mod if_expression;
 mod implicit_receiver_calls;
 mod implicit_rungs;
 mod inline_access;
+mod inline_parameter_usage;
 mod inner_constructor_calls;
 mod member_call_bindings;
 mod member_slot_calls;
@@ -30396,6 +30397,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         allow_lambda_mutation: false,
         public_api_inline_depth: 0,
         public_inline_access_calls: HashSet::default(),
+        reported_inline_parameter_usages: HashSet::default(),
         argument_lambda_inlining: HashMap::default(),
         symbolic_signature_inference: false,
         postponed_call_constraints: Vec::new(),
@@ -33042,6 +33044,8 @@ struct Checker<'a> {
     public_api_inline_depth: u32,
     /// Calls already reported for that rule. Inference may check one call twice.
     public_inline_access_calls: HashSet<ExprId>,
+    /// Inline-parameter reads already reported. A body may be checked more than once.
+    reported_inline_parameter_usages: HashSet<ExprId>,
     /// Per lambda argument, whether the selected parameter inlines it into the caller's frame: the
     /// callee is inline and the parameter is neither `crossinline` nor `noinline`. A lambda absent
     /// here was taken by no selected parameter, so its body runs in a frame of its own. Recorded where an argument

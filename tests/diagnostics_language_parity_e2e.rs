@@ -236,3 +236,43 @@ fn a_script_return_is_prohibited_in_its_result_position_like_kotlinc() {
         &[],
     );
 }
+
+/// An inline function's inlinable parameter may only be invoked or passed on to an inline
+/// parameter of another inline function. Every other read is `USAGE_IS_NOT_INLINABLE`: an
+/// argument of a non-inline function or of a `noinline` parameter, the receiver of a safe call,
+/// `!!` or an extension call, and a value stored in a local. A `noinline` parameter is an
+/// ordinary value, and a contract only names the parameter.
+#[test]
+fn an_inline_parameter_is_only_invoked_or_inlined_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "InlineParameterUsage.kt",
+            "fun plain(f: (Int) -> Unit): (Int) -> Int = { it }\n\
+             inline fun inlined(f: (Int) -> Unit): (Int) -> Int = { it }\n\
+             inline fun takesNoinline(noinline f: (Int) -> Unit) = f\n\
+             inline fun ((Int) -> Unit).extension() {}\n\
+             inline fun use(s: (Int) -> Unit, noinline n: ((Int) -> Unit)?, noinline k: (Int) -> Unit) {\n\
+             \x20   plain(s)\n\
+             \x20   inlined(s)\n\
+             \x20   takesNoinline(s)\n\
+             \x20   s(1)\n\
+             \x20   s.invoke(2)\n\
+             \x20   s?.invoke(3)\n\
+             \x20   s!!.invoke(4)\n\
+             \x20   s.extension()\n\
+             \x20   val t = s\n\
+             \x20   plain(k)\n\
+             \x20   plain(n ?: {})\n\
+             \x20   run { s(5) }\n\
+             \x20   listOf(1).forEach(s)\n\
+             \x20   if (t != k) println(t)\n\
+             }\n\
+             @OptIn(kotlin.contracts.ExperimentalContracts::class)\n\
+             inline fun once(s: () -> Unit) {\n\
+             \x20   kotlin.contracts.contract { callsInPlace(s, kotlin.contracts.InvocationKind.EXACTLY_ONCE) }\n\
+             \x20   s()\n\
+             }\n",
+        )],
+        &[],
+    );
+}
