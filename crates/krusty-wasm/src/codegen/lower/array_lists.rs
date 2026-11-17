@@ -94,7 +94,11 @@ impl Body<'_> {
         }
         self.record_collection_arguments()?;
         let new = self.runtime.array_lists.new;
-        let add_all = self.runtime.array_lists.add_all;
+        let add_all = self
+            .runtime
+            .array_lists
+            .member(crate::array_lists::ListOperation::AddAll)?
+            .function;
         match args {
             [] => {
                 self.code.i32_const(10).call(new);
@@ -134,7 +138,8 @@ impl Body<'_> {
             return Err("an ArrayList call disagreeing with its member".into());
         }
         let operation = crate::array_lists::list_operation(&fact.name, &fact.params)?;
-        let function = self.runtime.array_lists.member(operation).function;
+        self.record_collection_arguments()?;
+        let function = self.runtime.array_lists.member(operation)?.function;
         self.value(receiver, Ty::obj("kotlin/collections/ArrayList"))?;
         for (&arg, &param) in args.iter().zip(fact.params.as_slice()) {
             self.value(arg, param)?;
@@ -193,9 +198,10 @@ impl Body<'_> {
 
 impl Body<'_> {
     /// Record the checked collection members the runtime list reads a collection argument
-    /// through (`crate::collection_arguments`), with what the list and the builtin classes run for
-    /// each. Every runtime list comes from a construction, so recording there covers every list.
-    fn record_collection_arguments(&mut self) -> Result<(), Unsupported> {
+    /// through (`crate::collection_arguments`), which defines the list operations reading one,
+    /// then what the list and the builtin classes run for each member. Anything reaching a
+    /// runtime list's member records them first.
+    pub(super) fn record_collection_arguments(&mut self) -> Result<(), Unsupported> {
         if self.runtime.collection_arguments.has_members() {
             return Ok(());
         }
@@ -203,32 +209,58 @@ impl Body<'_> {
             "a runtime `ArrayList` without the checked collection members it reads an argument \
              through",
         )?;
-        let members = crate::collection_arguments::CollectionMembers {
-            iterator: self.collection_member(protocol.iterator, (1, 1))?,
-            has_next: self.collection_member(protocol.has_next, (1, 1))?,
-            next: self.collection_member(protocol.next, (1, 1))?,
-            contains: self.collection_member(protocol.contains, (2, 1))?,
-        };
-        self.runtime.collection_arguments.record(members);
+        let targets = [
+            (protocol.iterator, (1, 1)),
+            (protocol.has_next, (1, 1)),
+            (protocol.next, (1, 1)),
+            (protocol.contains, (2, 1)),
+        ];
+        let mut facts = Vec::with_capacity(targets.len());
+        let mut members = Vec::with_capacity(targets.len());
+        for (target, arity) in targets {
+            let (fact, identity, member) = self.collection_member(target, arity)?;
+            facts.push((fact, identity));
+            members.push(member);
+        }
+        self.runtime.record_collection_members(
+            self.module,
+            crate::collection_arguments::CollectionMembers {
+                iterator: members[0],
+                has_next: members[1],
+                next: members[2],
+                contains: members[3],
+            },
+        );
+        let role = super::library_members::MemberRole::Function;
+        for (fact, identity) in facts {
+            let name = fact.name.clone();
+            self.library_member_of(&fact, identity, role, &name)?;
+        }
         Ok(())
     }
 
     /// The library member `target`, carried as `arity` wasm parameters (the receiver first) and
-    /// results, as the runtime list calls it.
+    /// results, as the runtime list calls it, with its declaration and KLIB identity.
     fn collection_member(
         &mut self,
         target: ExternalCallableId,
         (params, results): (usize, usize),
-    ) -> Result<crate::interface_dispatch::MemberRef, Unsupported> {
+    ) -> Result<
+        (
+            BackendCallableFact,
+            Vec<u8>,
+            crate::interface_dispatch::MemberRef,
+        ),
+        Unsupported,
+    > {
         let fact = self
             .callables
             .callable(target)
             .ok_or("a collection member without its declaration")?
             .clone();
         let role = super::library_members::MemberRole::Function;
-        let (carried_params, carried_results) =
-            super::library_members::library_member_signature(&fact, role)?;
-        if carried_params.len() != params || carried_results.len() != results {
+        let signature = super::library_members::library_member_signature(&fact, role)?;
+        if signature.0.len() != params || signature.1.len() != results {
             return Err(format!(
                 "the collection member `{}`, carried otherwise than the runtime list reads it",
                 fact.name
@@ -236,7 +268,13 @@ impl Body<'_> {
         }
         let identity = super::library_members::library_member_identity(&fact, role)
             .ok_or("a collection member without its identity")?;
-        let name = fact.name.clone();
-        self.library_member_of(&fact, identity, role, &name)
+        let owner = super::library_members::library_member_owner(&fact)
+            .ok_or("a collection member without its classifier")?;
+        let member =
+            self.runtime
+                .objects
+                .interfaces
+                .library(self.module, owner, &identity, signature)?;
+        Ok((fact, identity, member))
     }
 }

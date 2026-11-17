@@ -380,6 +380,16 @@ impl Body<'_> {
         role: MemberRole,
         name: &str,
     ) -> Result<crate::interface_dispatch::MemberRef, Unsupported> {
+        // The runtime list's operations reading a collection argument exist once the members they
+        // read it through are recorded.
+        if fact.builtin_implementations.iter().any(|implementation| {
+            implementation
+                .receiver
+                .obj_internal()
+                .is_some_and(crate::array_lists::lays_out)
+        }) {
+            self.record_collection_arguments()?;
+        }
         let signature = library_member_signature(fact, role)?;
         let owner = library_member_owner(fact).ok_or("a library member without its classifier")?;
         let member = self.runtime.objects.interfaces.library(

@@ -409,9 +409,6 @@ impl Backend for WasmBackend {
         };
         started
             .runtime
-            .define_collection_arguments(&mut started.module);
-        started
-            .runtime
             .objects
             .finalize_interfaces(&mut started.module);
         let start = started.module.declare();

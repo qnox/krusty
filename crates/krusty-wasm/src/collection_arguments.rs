@@ -7,8 +7,10 @@
 //! run. Those are the checked members the handoff froze
 //! (`krusty::backend::CheckedBackendCallables::collection_protocol`), called through their
 //! interface stubs, which the runtime list and every class implementing them answer. A runtime
-//! list is read directly.
+//! list is read directly. The operations reading an argument exist once those members are
+//! recorded, which the code generator does before anything reaches a runtime list's member.
 
+use super::array_lists::BulkOperations;
 use super::encode::ValType;
 use super::encode::{BlockType, Code, Function, HeapType, Module};
 use super::interface_dispatch::MemberRef;
@@ -24,7 +26,7 @@ pub(super) struct CollectionMembers {
     pub(super) contains: MemberRef,
 }
 
-/// The members the module records once something constructs a runtime list.
+/// The members the module records once something reaches a runtime list.
 #[derive(Default)]
 pub(super) struct CollectionArguments {
     members: Option<CollectionMembers>,
@@ -35,102 +37,116 @@ impl CollectionArguments {
     pub(super) fn has_members(&self) -> bool {
         self.members.is_some()
     }
-
-    pub(super) fn record(&mut self, members: CollectionMembers) {
-        self.members.get_or_insert(members);
-    }
 }
 
 impl Runtime {
-    /// Define the list's `elements_of` and `argument_contains`. Every runtime list comes from a
-    /// construction, which records the members first; a module constructing none reads no
-    /// argument, and both functions trap.
-    pub(super) fn define_collection_arguments(&mut self, module: &mut Module) {
+    /// Record the checked members a collection argument is read through, and define the list
+    /// operations reading one (`crate::array_lists::BulkOperations`) over them.
+    pub(super) fn record_collection_members(
+        &mut self,
+        module: &mut Module,
+        members: CollectionMembers,
+    ) {
+        if self.collection_arguments.members.is_some() {
+            return;
+        }
+        self.collection_arguments.members = Some(members);
+        let bulk = BulkOperations {
+            add_all: module.declare(),
+            contains_all: module.declare(),
+            remove_all: module.declare(),
+            retain_all: module.declare(),
+            elements_of: module.declare(),
+            argument_contains: module.declare(),
+        };
+        self.define_elements_of(module, members, bulk.elements_of);
+        self.define_argument_contains(module, members, bulk.argument_contains);
         let lists = &self.array_lists;
-        let list = HeapType::Concrete(lists.list);
-        let (new, add, contains) = (lists.new, lists.add, lists.contains);
-        let (elements_of, argument_contains) = (lists.elements_of, lists.argument_contains);
-        let members = self.collection_arguments.members;
-        let stubs = members.map(|members| {
-            let interfaces = &mut self.objects.interfaces;
-            (
-                interfaces.stub(module, members.iterator),
-                interfaces.stub(module, members.has_next),
-                interfaces.stub(module, members.next),
-                interfaces.stub(module, members.contains),
-            )
-        });
+        lists.define_add_all(module, &bulk);
+        lists.define_contains_all(module, &bulk);
+        lists.define_remove_where(module, &bulk, true);
+        lists.define_remove_where(module, &bulk, false);
+        self.array_lists.bulk = Some(bulk);
+    }
 
-        // `elements_of(collection)`: a runtime list as it is, any other collection copied into a
-        // new list in the order its iterator answers.
+    /// `elements_of(collection)`: a runtime list as it is, any other collection copied into a new
+    /// list in the order its iterator answers.
+    fn define_elements_of(
+        &mut self,
+        module: &mut Module,
+        members: CollectionMembers,
+        function: u32,
+    ) {
+        let interfaces = &mut self.objects.interfaces;
+        let iterate = interfaces.stub(module, members.iterator);
+        let has_next = interfaces.stub(module, members.has_next);
+        let next = interfaces.stub(module, members.next);
+        let lists = &self.array_lists;
         let (collection, copy, iterator) = (0, 1, 2);
         let mut code = Code::default();
         code.local_get(collection)
-            .ref_test(false, list)
+            .ref_test(false, HeapType::Concrete(lists.list))
             .if_(BlockType::Empty)
             .local_get(collection)
             .return_()
-            .end();
-        match stubs {
-            Some((iterate, has_next, next, _)) => {
-                code.i32_const(10)
-                    .call(new)
-                    .local_set(copy)
-                    .local_get(collection)
-                    .call(iterate)
-                    .local_set(iterator)
-                    .block(BlockType::Empty)
-                    .loop_(BlockType::Empty)
-                    .local_get(iterator)
-                    .call(has_next)
-                    .op(EQZ32)
-                    .br_if(1)
-                    .local_get(copy)
-                    .local_get(iterator)
-                    .call(next)
-                    .call(add)
-                    .drop_()
-                    .br(0)
-                    .end()
-                    .end()
-                    .local_get(copy);
-            }
-            None => {
-                code.unreachable();
-            }
-        }
+            .end()
+            .i32_const(10)
+            .call(lists.new)
+            .local_set(copy)
+            .local_get(collection)
+            .call(iterate)
+            .local_set(iterator)
+            .block(BlockType::Empty)
+            .loop_(BlockType::Empty)
+            .local_get(iterator)
+            .call(has_next)
+            .op(EQZ32)
+            .br_if(1)
+            .local_get(copy)
+            .local_get(iterator)
+            .call(next)
+            .call(lists.add)
+            .drop_()
+            .br(0)
+            .end()
+            .end()
+            .local_get(copy);
         let ty = module.func_type(vec![REFERENCE], vec![REFERENCE]);
         module.define(
-            elements_of,
+            function,
             Function {
                 ty,
                 locals: vec![REFERENCE, REFERENCE],
                 code,
             },
         );
+    }
 
-        // `argument_contains(collection, element)`: the collection's own `contains`.
+    /// `argument_contains(collection, element)`: the collection's own `contains`.
+    fn define_argument_contains(
+        &mut self,
+        module: &mut Module,
+        members: CollectionMembers,
+        function: u32,
+    ) {
+        let contains = self.objects.interfaces.stub(module, members.contains);
+        let lists = &self.array_lists;
         let (collection, element) = (0, 1);
         let mut code = Code::default();
         code.local_get(collection)
-            .ref_test(false, list)
+            .ref_test(false, HeapType::Concrete(lists.list))
             .if_(BlockType::Empty)
             .local_get(collection)
             .local_get(element)
-            .call(contains)
+            .call(lists.contains)
             .return_()
-            .end();
-        match stubs {
-            Some((_, _, _, contains)) => {
-                code.local_get(collection).local_get(element).call(contains);
-            }
-            None => {
-                code.unreachable();
-            }
-        }
+            .end()
+            .local_get(collection)
+            .local_get(element)
+            .call(contains);
         let ty = module.func_type(vec![REFERENCE, REFERENCE], vec![ValType::I32]);
         module.define(
-            argument_contains,
+            function,
             Function {
                 ty,
                 locals: Vec::new(),
