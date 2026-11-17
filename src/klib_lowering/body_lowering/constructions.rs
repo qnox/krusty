@@ -104,26 +104,24 @@ impl BodyLowering<'_> {
                 self.semantic(argument)
             })
             .collect::<Lowered<Vec<_>>>()?;
-        let (declaration, external_target, local_access, materialized_target) = match &access
-            .symbol
-            .signature
-        {
-            KlibIrSignature::Public(callee)
-                if !self.linker.links_privately(&access.symbol.signature) =>
-            {
-                let linked = self.linker.link_constructor(self.ir, callee)?;
-                (
-                    linked.declaration,
-                    Some(linked.target),
-                    None,
-                    linked.materialized,
-                )
-            }
-            signature => {
-                let linked = self.linker.link_local_constructor(self.ir, signature)?;
-                (linked.declaration, None, Some(linked.access), None)
-            }
-        };
+        let (declaration, external_target, local_access, materialized_target) =
+            match &access.symbol.signature {
+                KlibIrSignature::Public(callee)
+                    if !self.linker.links_privately(&access.symbol.signature) =>
+                {
+                    let linked = self.linker.link_constructor(self.ir, callee)?;
+                    (
+                        linked.declaration,
+                        Some(linked.target),
+                        None,
+                        linked.materialized,
+                    )
+                }
+                signature => {
+                    let linked = self.linker.link_local_constructor(self.ir, signature)?;
+                    (linked.declaration, None, Some(linked.access), None)
+                }
+            };
         let params = declaration.instantiate(&type_arguments, ty, |argument, bound| {
             self.linker
                 .constructor_bound(self.header.type_parameters(), argument, bound)
