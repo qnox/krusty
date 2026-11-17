@@ -522,6 +522,7 @@ impl CallLinker for TemplateCalls<'_> {
         Ok(LinkedConstructor {
             target,
             declaration,
+            materialized: None,
         })
     }
 
@@ -685,6 +686,7 @@ impl CallLinker for TemplateCalls<'_> {
                 ret: realization.callable.ret,
                 context_count: realization.callable.context_count,
                 class_type_parameters: class_type_parameters.unwrap_or_default(),
+                type_parameters: Vec::new(),
             }
         })
         .map_err(declined)

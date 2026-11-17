@@ -1256,7 +1256,6 @@ inlineClasses/propertyDelegation/kt27070Generic.kt
 inlineClasses/removeInInlineCollectionOfInlineClassAsInt.kt
 inlineClasses/result/directCall1.kt
 inlineClasses/result/doubleOverride.kt
-inlineClasses/result/extensionOverride.kt
 inlineClasses/result/inlineMethodOnResult.kt
 inlineClasses/result/lambdaTakesResultThroughBridge.kt
 inlineClasses/resultInlining.kt

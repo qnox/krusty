@@ -72,5 +72,6 @@ pub(super) fn authenticate(
         ret,
         context_count,
         class_type_parameters: class.formals,
+        type_parameters: Vec::new(),
     }))
 }

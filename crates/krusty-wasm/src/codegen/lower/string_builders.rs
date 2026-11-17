@@ -42,6 +42,8 @@ enum Appended {
     Char,
     /// A `CharSequence?`, appended as the string it renders, or as `"null"`.
     CharSequence,
+    /// An `Any?`, appended as its `toString()`, or as `"null"`.
+    Any,
 }
 
 /// One member of `StringBuilder` the runtime realizes.
@@ -62,6 +64,7 @@ fn appended(param: Ty) -> Option<Appended> {
     }
     match param.kind() {
         TyKind::Nullable(inner) if is_char_sequence(inner) => Some(Appended::CharSequence),
+        TyKind::Nullable(inner) if is_any(inner) => Some(Appended::Any),
         _ => None,
     }
 }
@@ -79,6 +82,11 @@ fn member(fact: &BackendCallableFact) -> Option<Member> {
         ("get", [Ty::Int]) if fact.ret == Ty::Char => Some(Member::Get),
         _ => None,
     }
+}
+
+/// Whether `ty` is the non-null `Any`.
+fn is_any(ty: Ty) -> bool {
+    matches!(ty.kind(), TyKind::Obj(name, _) if name == krusty::types::wk::any())
 }
 
 fn builder_type() -> Ty {
@@ -172,6 +180,12 @@ impl Body<'_> {
             (Member::Append(Appended::Char), [value]) => {
                 self.value(*value, Ty::Char)?;
                 self.code.call(append_char);
+            }
+            (Member::Append(Appended::Any), [value]) => {
+                // `append(value: Any?)` appends `value.toString()`, or `"null"`.
+                self.value(*value, fact.params[0])?;
+                self.stacked_string_of(fact.params[0])?;
+                self.code.call(append_string);
             }
             (Member::Append(Appended::CharSequence), [value]) => {
                 let append = self.char_sequence_append()?;

@@ -85,6 +85,9 @@ impl Linker<'_, '_> {
             ret: declared.ret,
             context_count: ir.declared_parameters(function).context_count,
             class_type_parameters: Vec::new(),
+            type_parameters: selected
+                .and_then(|selected| selected.generic_signature())
+                .map_or_else(Vec::new, |signature| signature.formals.clone()),
         }))
     }
 

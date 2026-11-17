@@ -69,6 +69,54 @@ fn wasm_official_dependency_body_member_forms_lower_from_their_bodies() {
     );
 }
 
+/// A library body calls a member an abstract class inherits from several interfaces without a
+/// body; the most specific inherited declaration, by its typed result, is the one it calls.
+#[test]
+fn wasm_official_dependency_inherited_abstract_members_select_the_most_specific() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyInheritedAbstractMembers.kt"),
+        "DependencyInheritedAbstractMembers",
+    );
+}
+
+/// A library body reads a generic extension property at the receiver's type argument.
+#[test]
+fn wasm_official_dependency_generic_extension_properties_bind_their_type_parameters() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyGenericExtensionProperties.kt"),
+        "DependencyGenericExtensionProperties",
+    );
+}
+
+/// A library body appends an `Any?` to a `StringBuilder` by its `toString()`.
+#[test]
+fn wasm_official_dependency_string_builder_appends_any_value() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyStringBuilderAppendAny.kt"),
+        "DependencyStringBuilderAppendAny",
+    );
+}
+
+/// A library body constructs a generic class through the secondary constructor it selected,
+/// although the call's instantiated parameter types differ from the declared ones.
+#[test]
+fn wasm_official_dependency_generic_secondary_construction_runs_the_selected_constructor() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyGenericSecondaryConstruction.kt"),
+        "DependencyGenericSecondaryConstruction",
+    );
+}
+
+/// An interface member a class reaches only through a supertype is implemented by the member
+/// its superclass inherits, for public classes and for classes private to the library.
+#[test]
+fn wasm_official_dependency_inherited_members_implement_indirect_interfaces() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyInheritedInterfaceImplementations.kt"),
+        "DependencyInheritedInterfaceImplementations",
+    );
+}
+
 /// Run the shared two-module program through the product producer, then compile its consumer
 /// against the library the exact official Wasm compiler produces and run it, on every target.
 fn run_against_official_producer(source: &str, name: &str) {

@@ -354,6 +354,10 @@ pub(super) trait CallLinker {
 pub(super) struct LinkedConstructor {
     pub(super) target: crate::fir::ExternalCallableId,
     pub(super) declaration: super::constructor_calls::ConstructorDeclaration,
+    /// The constructor's place in the class this unit materialized for it, which a
+    /// construction runs by identity: a parameter list instantiated at the call's type
+    /// arguments is not one. `None` when the class is realized elsewhere.
+    pub(super) materialized: Option<crate::ir::IrConstructorTarget>,
 }
 
 /// The dependency property a call of one of its accessors reads or writes, as a source access of
@@ -369,6 +373,9 @@ pub(super) struct LinkedAccessor {
     pub(super) context_count: usize,
     /// As [`LinkedCallee::class_type_parameters`].
     pub(super) class_type_parameters: Vec<String>,
+    /// As [`LinkedCallee::type_parameters`]: the property's own, which a generic extension
+    /// property declares (`val <T> List<T>.lastIndex`).
+    pub(super) type_parameters: Vec<crate::types::TyParamName>,
 }
 
 /// The value of a serialized constant typed `ty`, and the type the lowered constant has: `null`

@@ -834,14 +834,14 @@ impl BodyLowering<'_> {
         access: &KlibIrMemberAccess,
         ty: Ty,
     ) -> Lowered<ExprId> {
-        if !access.type_arguments.is_empty() {
-            return unsupported("an access of a generic property");
-        }
         let signature = crate::libraries::KlibDeclarationSignature::Accessor(accessor.clone());
-        if let Some(primitive) = self.linker.common_primitive(&signature)? {
-            return self.primitive_call(primitive, access, ty);
+        if access.type_arguments.is_empty() {
+            if let Some(primitive) = self.linker.common_primitive(&signature)? {
+                return self.primitive_call(primitive, access, ty);
+            }
         }
         let linked = self.linker.link_accessor(self.ir, accessor)?;
+        let linked = self.substituted_accessor(linked, access)?;
         let CallOperands {
             receiver,
             args: arguments,
@@ -895,6 +895,56 @@ impl BodyLowering<'_> {
                 source_receiver,
             }
         }))))
+    }
+
+    /// `linked` at the call's type arguments: a generic extension property of this unit binds its
+    /// own type parameters as a call of a generic function of this unit does, reading the
+    /// receiver and arguments at the substituted types and coercing the declared result.
+    fn substituted_accessor(
+        &self,
+        mut linked: LinkedAccessor,
+        access: &KlibIrMemberAccess,
+    ) -> Lowered<LinkedAccessor> {
+        if access.type_arguments.is_empty() {
+            return Ok(linked);
+        }
+        if linked.type_parameters.is_empty() {
+            return unsupported("an access of a generic property");
+        }
+        if access.type_arguments.len() != linked.type_parameters.len() {
+            return Err(mismatch(
+                "a property access passes another number of type arguments than it declares",
+            ));
+        }
+        if !matches!(linked.target, LinkedAccessorTarget::Local(_)) {
+            return unsupported("an access of a generic dependency property");
+        }
+        let bindings =
+            self.local_type_bindings(&linked.type_parameters, access, |_, value| value)?;
+        substitute_local_signature(
+            (&mut linked.receiver, &mut linked.params, &mut linked.ret),
+            &bindings,
+        );
+        Ok(linked)
+    }
+
+    /// The type each of `parameters`, a declaration of this unit, is bound to by the call or
+    /// access `access`, through `bound` (the captured projection a parameter binds, if any).
+    fn local_type_bindings(
+        &self,
+        parameters: &[crate::types::TyParamName],
+        access: &KlibIrMemberAccess,
+        bound: impl Fn(&crate::types::TyParamName, Ty) -> Ty,
+    ) -> Lowered<crate::fx_hash::HashMap<crate::types::TyParamName, Ty>> {
+        let mut bindings = crate::fx_hash::HashMap::default();
+        for (parameter, argument) in parameters.iter().zip(&access.type_arguments) {
+            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call that leaves a type argument unset",
+            ))?;
+            let value = self.semantic(argument)?;
+            bindings.insert(*parameter, bound(parameter, value));
+        }
+        Ok(bindings)
     }
 
     /// A call's dispatch receiver and arguments, each read at the callee's declared type, after
@@ -1062,21 +1112,11 @@ impl BodyLowering<'_> {
             // lowers a source call of a module generic function: the arguments are read at the
             // substituted parameters and the declared result is coerced to the substituted one,
             // with no substitutions recorded on the call.
-            let mut bindings = crate::fx_hash::HashMap::default();
-            for (parameter, argument) in linked.type_parameters.iter().zip(&access.type_arguments) {
-                let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
-                    "a call that leaves a type argument unset",
-                ))?;
-                let value = self.semantic(argument)?;
-                bindings.insert(*parameter, bound(parameter, value));
-            }
-            for param in &mut linked.params {
-                *param = param.substitute_erased(&bindings);
-            }
-            linked.ret = linked.ret.substitute_erased(&bindings);
-            linked.receiver = linked
-                .receiver
-                .map(|receiver| receiver.substitute_erased(&bindings));
+            let bindings = self.local_type_bindings(&linked.type_parameters, access, bound)?;
+            substitute_local_signature(
+                (&mut linked.receiver, &mut linked.params, &mut linked.ret),
+                &bindings,
+            );
             return Ok(linked);
         }
         let Callee::External {
@@ -1361,4 +1401,18 @@ fn argument_expectation(
     let mut approximated = bindings.clone();
     approximated.extend(approximations);
     declared.substitute_erased(&approximated)
+}
+
+/// Read a declaration of this unit at `bindings`, as checked FIR lowering reads a source call of
+/// a module generic function: its receiver, parameters and result are substituted, and the call
+/// records no substitutions of its own.
+fn substitute_local_signature(
+    (receiver, params, ret): (&mut Option<Ty>, &mut [Ty], &mut Ty),
+    bindings: &crate::fx_hash::HashMap<crate::types::TyParamName, Ty>,
+) {
+    for param in params.iter_mut() {
+        *param = param.substitute_erased(bindings);
+    }
+    *ret = ret.substitute_erased(bindings);
+    *receiver = receiver.map(|receiver| receiver.substitute_erased(bindings));
 }

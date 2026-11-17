@@ -1426,12 +1426,22 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 ))
             }
         };
-        if !allocating {
+        let materialized = if allocating {
+            None
+        } else {
             self.materialize_class(ir, &identity, selected)?;
-        }
+            self.constructors.get(&identity).map(|constructor| {
+                let ordinal = constructor.secondary.map_or(0, |index| index + 1);
+                crate::ir::IrConstructorTarget {
+                    ordinal: u32::try_from(ordinal).expect("a constructor ordinal fits u32"),
+                    access: crate::ir::IrConstructorAccess::Unrestricted,
+                }
+            })
+        };
         Ok(LinkedConstructor {
             target,
             declaration,
+            materialized,
         })
     }
 
@@ -1619,6 +1629,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 ret: linked.ret,
                 context_count: linked.context_count,
                 class_type_parameters: linked.class_type_parameters,
+                type_parameters: Vec::new(),
             });
         }
         // An accessor with a body of a class the unit materializes is emitted here, as the class's
@@ -1638,6 +1649,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 ret: linked.ret,
                 context_count: linked.context_count,
                 class_type_parameters: linked.class_type_parameters,
+                type_parameters: Vec::new(),
             });
         }
         // An accessor of a top-level property is a function of this unit, unless an earlier unit
@@ -2042,6 +2054,7 @@ impl<'s> Linker<'_, 's> {
             ret: linked.ret,
             context_count: linked.context_count,
             class_type_parameters: linked.class_type_parameters,
+            type_parameters: Vec::new(),
         }))
     }
 
