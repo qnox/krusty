@@ -15,10 +15,11 @@ which is why `just fmt` and `just fmt-check` also pass `tests/*_e2e.rs` to rustf
 
 ## Compiler/plugin model reuse across worktrees
 
-`krusty-plugin-ir` records the workspace's existing `KRUSTY_BUILD_CHECKOUT` input in Rust dep-info.
-Its `shared_checkout` integration test builds two copies of the real model crate against one Cargo
-target, proves each consumer sees its own model API, and checks unchanged-checkout artifact reuse.
-The nested Cargo fixtures are dependency-free, offline and unoptimized; they do not inherit the
+`krusty-plugin-api` records the workspace's existing `KRUSTY_BUILD_CHECKOUT` input in Rust dep-info.
+Its `shared_checkout` integration test builds two copies of the real API crate (with the
+`krusty-names` crate it depends on) against one Cargo target, proves each consumer sees its own API,
+and checks unchanged-checkout artifact reuse. The nested Cargo fixtures build offline and
+unoptimized; they do not inherit the
 parent compiler's coverage flags or wrappers. Keep the shared target intact when reproducing this
 case: cleaning it hides the ownership defect.
 
