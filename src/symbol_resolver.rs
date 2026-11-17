@@ -92,7 +92,7 @@ pub(crate) use generic_inference::*;
 pub(crate) use hierarchy_projection::{
     applied_hierarchy, apply_subtype_arguments_from_supertype, classifier_bindings,
     classifier_companion_instance, classifier_value_receiver, direct_supertypes,
-    inherited_classifier_shape, member_scope_receiver, supports_member_lookup, with_implicit_any,
+    inherited_classifier_shape, member_scope_receiver, supports_member_lookup,
     ClassifierCompanionInstance, SupertypeProjectionCache,
 };
 use hierarchy_projection::{

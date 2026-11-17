@@ -36,6 +36,7 @@ mod abstract_obligations;
 mod argument_parameter_mapping;
 mod builtin_implementation;
 mod char_sequence_protocol;
+pub(crate) mod collection_protocol;
 mod coroutine_runtime;
 mod selected_external_members;
 use argument_parameter_mapping::{
@@ -42067,7 +42068,7 @@ impl<'a> Checker<'a> {
                 // call-facing view filters them. Properties and property overrides are checked by
                 // their own declaration path; this loop owns functions only.
                 let receiver = scope.this_ty().unwrap_or(Ty::obj_name(internal));
-                let direct_supertypes = crate::symbol_resolver::with_implicit_any(
+                let direct_supertypes = crate::assignable::with_implicit_any(
                     internal,
                     <Self as crate::assignable::TypeOracle>::direct_supertypes(self, receiver),
                 );

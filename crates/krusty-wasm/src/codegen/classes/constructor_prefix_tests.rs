@@ -890,7 +890,7 @@ fn non_enclosing_receiver_profiles_remain_unsupported() {
         IrCapturedReceiver::Lambda(None),
         IrCapturedReceiver::Callable {
             label: "callable".into(),
-            owner: krusty::fir::CapturedCallableOwner::Declaration,
+            owner: krusty::fir::CapturedCallableOwner::LocalFunction,
         },
         IrCapturedReceiver::Context {
             kind: krusty::types::CapturedContextKind::LegacyReceiver,
@@ -978,6 +978,8 @@ fn proven_context_lambda_and_callable_receivers_are_ordinary_references() {
     scalar.classes[class as usize].fields[field as usize].ty = Ty::Unit;
     assert_eq!(check_supported(&scalar, class), expected);
 
+    // The extension receiver of the capturing declaration itself is that declaration's own
+    // object parameter, with or without a receiver identity; a local function's is not.
     let mut callable = copy_transport(&original);
     install(
         &mut callable,
