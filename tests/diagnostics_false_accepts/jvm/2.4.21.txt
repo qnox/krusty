@@ -1302,7 +1302,6 @@ compiler/testData/diagnostics/tests/samConversions/GenericSubstitution.kt
 compiler/testData/diagnostics/tests/samConversions/GenericSubstitutionKT.kt
 compiler/testData/diagnostics/tests/samConversions/OverloadPriority.kt
 compiler/testData/diagnostics/tests/samConversions/samConversionWithJavaFlexibleType.kt
-compiler/testData/diagnostics/tests/samConversions/starProjectedTypesAndExplicitLambdaParameters.kt
 compiler/testData/diagnostics/tests/scopes/classHeader/companionObjectSuperConstructorArguments.kt
 compiler/testData/diagnostics/tests/scopes/classHeader/delegation.kt
 compiler/testData/diagnostics/tests/scopes/classHeader/objectSuperConstructorArguments.kt
