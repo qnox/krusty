@@ -1068,25 +1068,24 @@ struct MemberFrame<'a> {
 }
 
 /// An object literal property, with the modality its serialized declaration flags state: only an
-/// `open` or `abstract` one (an `override` not marked `final` included) dispatches. The object is
-/// final, so an open property dispatches only when it `overrides` a property of a supertype the
-/// unit does not materialize; an accessor of a class it materializes is overridden as that
-/// class's method.
+/// `open` or `abstract` one (an `override` not marked `final` included) dispatches, and only when it
+/// overrides a property of a supertype the unit does not materialize; an accessor of a class the
+/// unit materializes is overridden as that class's method, so the property itself stays final.
 fn property_declaration(
     name: &str,
     flags: u64,
     ty: Ty,
     getter: FunId,
     setter: Option<FunId>,
-    overrides: bool,
+    dispatched: bool,
 ) -> Lowered<IrProperty> {
     use crate::metadata::semantic::KotlinModality;
     let modality = match crate::metadata::semantic::declaration_modality(flags) {
+        KotlinModality::Sealed => return Err(mismatch("an object literal property is sealed")),
+        _ if !dispatched => crate::ir::IrPropertyModality::Final,
         KotlinModality::Final => crate::ir::IrPropertyModality::Final,
-        KotlinModality::Open if !overrides => crate::ir::IrPropertyModality::Final,
         KotlinModality::Open => crate::ir::IrPropertyModality::Open,
         KotlinModality::Abstract => crate::ir::IrPropertyModality::Abstract,
-        KotlinModality::Sealed => return Err(mismatch("an object literal property is sealed")),
     };
     Ok(IrProperty {
         name: name.to_owned(),

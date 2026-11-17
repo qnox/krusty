@@ -764,7 +764,6 @@ coroutines/unitTypeReturn/suspendReturn.kt
 coroutines/unitTypeReturn/unitSafeCall.kt
 coroutines/unsafeTransform.kt
 coroutines/varSpilling/fakeInlinerVariables.kt
-coroutines/varSpilling/kt19475.kt
 coroutines/varSpilling/kt64139.kt
 coroutines/varSpilling/kt75926.kt
 coroutines/varSpilling/kt79276.kt
