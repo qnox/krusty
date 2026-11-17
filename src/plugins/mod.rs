@@ -27,7 +27,6 @@ mod plugin_release;
 pub use plugin_release::PluginRelease;
 pub mod registry;
 pub mod runtime_declarations;
-pub mod sam_with_receiver;
 pub mod serialization;
 
 use crate::fx_hash::HashMap;
