@@ -666,6 +666,32 @@ impl BodyLowering<'_> {
         // A capture temporary initialized from one of these is the lambda, even though the
         // invocation still reads the temporary.
         let mut substituted_inline_lambdas = HashSet::default();
+        // The substituted lambdas a `crossinline` parameter received. Their bodies keep that
+        // origin once spliced: kotlinc exports such a body's private access wherever it runs.
+        let crossinline_operands = {
+            let dispatch = usize::from(
+                self.ir
+                    .functions
+                    .get(function as usize)?
+                    .dispatch_receiver
+                    .is_some(),
+            );
+            let modifiers = self
+                .ir
+                .fn_params
+                .get(&function)
+                .map(|info| info.inline_modifiers.clone())
+                .unwrap_or_default();
+            (0..operands.len())
+                .map(|operand| {
+                    operand.checked_sub(dispatch).is_some_and(|parameter| {
+                        modifiers.get(parameter)
+                            == Some(&crate::types::InlineParameterModifier::Crossinline)
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut crossinline_literals = HashSet::default();
 
         // Clone order, not map order: rewriting the copies allocates locals and records returns,
         // and both orders reach the emitted code.
@@ -736,8 +762,8 @@ impl BodyLowering<'_> {
                 }
                 continue;
             }
-            if let IrExpr::GetValue(parameter) = self.ir.expr(source) {
-                if let Some(Some(lambda)) = inline_lambdas.get(*parameter as usize) {
+            if let IrExpr::GetValue(parameter) = *self.ir.expr(source) {
+                if let Some(Some(lambda)) = inline_lambdas.get(parameter as usize) {
                     let lambda = *lambda;
                     self.ir.exprs[copy as usize] = self.ir.expr(lambda).clone();
                     // The parameter read's end line is the callee's `block(this)`. The splice's
@@ -761,6 +787,9 @@ impl BodyLowering<'_> {
                         }
                     }
                     substituted_inline_lambdas.insert(copy);
+                    if crossinline_operands.get(parameter as usize) == Some(&true) {
+                        crossinline_literals.insert(copy);
+                    }
                     self.ir.unmark_inline_copy(copy);
                     self.ir.binding_read_stability.remove(&copy);
                     if let Some(ty) = self.ir.logical_type(lambda) {
@@ -934,6 +963,10 @@ impl BodyLowering<'_> {
         }
         let mut directly_spliced_implementations = HashSet::default();
         for invocation in inline_invocations {
+            let crossinline = matches!(
+                self.ir.expr(invocation),
+                IrExpr::InvokeFunction { func, .. } if crossinline_literals.contains(func)
+            );
             let consumed = match self.ir.expr(invocation) {
                 IrExpr::InvokeFunction { func, .. } => match self.ir.expr(*func) {
                     IrExpr::Lambda { impl_fn, .. } => Some((
@@ -953,6 +986,14 @@ impl BodyLowering<'_> {
                 },
             )
             .expect("the complete declared-lambda splice list was preflighted before commit");
+            if crossinline {
+                if let IrExpr::Block {
+                    value: Some(body), ..
+                } = *self.ir.expr(invocation)
+                {
+                    self.ir.mark_crossinline_body(body);
+                }
+            }
             if let Some((implementation, body, inline_only)) = consumed {
                 // Body suppression is a commit action, not part of the splice. Restore it after
                 // each successful splice so a later decline leaves the original call executable.
