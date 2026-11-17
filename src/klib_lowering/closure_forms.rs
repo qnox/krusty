@@ -37,7 +37,7 @@ pub(crate) fn emitted_closure_function(
     ) {
         return None;
     }
-    let arity = super::klib_types::closure_type_arity(arena, expression.ty?)?;
+    let (arity, suspend) = super::klib_types::closure_type_arity(arena, expression.ty?)?;
     let (function, origin) = match &expression.kind {
         KlibIrExprKind::FunctionExpression { function, origin } => (*function, origin),
         KlibIrExprKind::RichFunctionReference {
@@ -49,9 +49,12 @@ pub(crate) fn emitted_closure_function(
             let KlibIrSignature::Public(signature) = &overridden.signature else {
                 return None;
             };
-            if overridden.kind != KlibIrSymbolKind::Function
-                || super::klib_types::function_invocation_arity(signature) != Some(arity)
-            {
+            let invocation = if suspend {
+                super::klib_types::suspend_function_invocation_arity(signature)
+            } else {
+                super::klib_types::function_invocation_arity(signature)
+            };
+            if overridden.kind != KlibIrSymbolKind::Function || invocation != Some(arity) {
                 return None;
             }
             (*invoke, origin)
@@ -60,8 +63,9 @@ pub(crate) fn emitted_closure_function(
     };
     source_form(origin.as_deref())?;
     let declaration = arena.function(function);
+    // A suspend closure is a suspend function exactly when its type is a suspend function type.
     (!declaration.constructor
-        && declaration.base.flags & crate::metadata::function_flags::IS_SUSPEND == 0
+        && (declaration.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0) == suspend
         && matches!(declaration.body, Some(KlibIrBody::Block(_))))
     .then_some(function)
 }

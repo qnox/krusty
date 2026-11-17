@@ -515,3 +515,46 @@ fn wasm_klibs_authenticate_the_mixed_closed_range_contains_overloads() {
         }
     }
 }
+
+#[test]
+fn only_the_selected_wasm_stdlib_realizes_its_coroutine_start_intrinsics() {
+    let target = crate::compilation_target::CompilationTarget::WasmJs;
+    let Some(libraries) = target_stdlib(target) else {
+        return;
+    };
+    let path = crate::toolchain::kotlin_stdlib_klib(target)
+        .expect("target_stdlib already required this archive");
+    let untrusted =
+        super::super::KlibLibraries::open(&[super::super::KlibLibraryInput::dependency(path)])
+            .expect("the identical ordinary dependency declarations are signable");
+    for (provider, trusted) in [(&libraries, true), (&untrusted, false)] {
+        let package = type_name("kotlin/wasm/internal");
+        let realizations: Vec<_> = (0..3)
+            .map(|arity| {
+                let name = format!("startCoroutineUninterceptedOrReturnIntrinsic{arity}");
+                provider
+                    .inventory
+                    .functions(package, &name)
+                    .map(|signed| {
+                        super::super::lookup::published_function(
+                            &provider.identities,
+                            signed,
+                            crate::libraries::CallablePlacement::Package(package),
+                            &crate::libraries::EnclosingBounds::default(),
+                        )
+                        .callable
+                        .compiler_intrinsic
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(
+            realizations,
+            vec![
+                vec![trusted.then_some(CompilerIntrinsic::StartCoroutineUninterceptedOrReturn)];
+                3
+            ],
+            "trusted={trusted}"
+        );
+    }
+}
