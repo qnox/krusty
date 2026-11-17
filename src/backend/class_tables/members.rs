@@ -66,22 +66,26 @@ pub fn local_property_target(
     owner: ClassId,
     property: usize,
 ) -> Option<ResolvedPropertyOverrideTarget> {
-    if let Some(target) = ir
-        .local_property_layouts
-        .iter()
-        .find_map(|(identity, layout)| match layout {
-            crate::ir::IrLocalPropertyLayout::Member {
+    // The copy retains the declaration's PropertyId; the common projection authenticates its
+    // source chain and property ordinal, then supplies this copy's storage/accessor coordinate.
+    if let Some(target) = ir.local_property_layouts.keys().find_map(|identity| {
+        match ir
+            .property_layout_for_class(*identity, owner)
+            .ok()
+            .flatten()
+        {
+            Some(crate::ir::IrLocalPropertyLayout::Member {
                 class,
                 property: index,
                 ..
-            } if *class == owner
-                && usize::try_from(*index).expect("a property index fits usize") == property =>
+            }) if class == owner
+                && usize::try_from(index).expect("a property index fits usize") == property =>
             {
                 Some(ResolvedPropertyOverrideTarget::Module(*identity))
             }
             _ => None,
-        })
-    {
+        }
+    }) {
         return Some(target);
     }
 
@@ -131,12 +135,21 @@ pub(crate) fn property_accessor_key(
     };
     for (identity, layout) in &ir.local_property_layouts {
         let accessors = match layout {
-            crate::ir::IrLocalPropertyLayout::Member {
-                class,
-                getter,
-                setter,
-                ..
-            } if *class == owner => Some((*getter, *setter)),
+            crate::ir::IrLocalPropertyLayout::Member { .. } => {
+                match ir
+                    .property_layout_for_class(*identity, owner)
+                    .ok()
+                    .flatten()
+                {
+                    Some(crate::ir::IrLocalPropertyLayout::Member {
+                        class,
+                        getter,
+                        setter,
+                        ..
+                    }) if class == owner => Some((getter, setter)),
+                    _ => None,
+                }
+            }
             crate::ir::IrLocalPropertyLayout::MemberExtension {
                 owner,
                 getter,
@@ -357,10 +370,10 @@ pub(crate) fn overridden_properties(
         let implemented_here = edge.implementation_getter.is_some()
             || edge.implementation_setter.is_some()
             || match edge.implementation {
-                ResolvedPropertyOverrideTarget::Module(property) => ir
-                    .checked_properties
-                    .get(&property)
-                    .is_some_and(|property| property.class == Some(id)),
+                ResolvedPropertyOverrideTarget::Module(property) => matches!(
+                    ir.property_layout_for_class(property, id).ok().flatten(),
+                    Some(crate::ir::IrLocalPropertyLayout::Member { class, .. }) if class == id
+                ),
                 ResolvedPropertyOverrideTarget::External(_) => false,
             };
         if !implemented_here {
