@@ -81,7 +81,7 @@ pub(crate) fn rename(
 }
 
 /// The continuation classes of `copy`'s methods, in the order of the methods they re-enter.
-fn copy_continuations(
+pub(crate) fn copy_continuations(
     ir: &krusty::ir::IrFile,
     copy: krusty::ir::ClassId,
 ) -> Vec<(krusty::ir::ClassId, krusty::ir::FunId)> {
