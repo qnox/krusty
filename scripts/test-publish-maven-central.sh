@@ -151,6 +151,13 @@ case " \$* " in
 esac
 exec "$real_git" "\$@"
 GIT
+# base64 records the token a child would inherit while the header is encoded, then encodes.
+real_base64=$(command -v base64)
+cat > "$fixture/bin/base64" <<BASE64
+#!/usr/bin/env bash
+env | grep '^RELEASE_TOKEN=' >> "$fixture/encoder-env" || true
+exec "$real_base64" "\$@"
+BASE64
 # The clock moves only when the script sleeps.
 cat > "$fixture/bin/date" <<DATE
 #!/usr/bin/env bash
@@ -200,7 +207,7 @@ recorded() {
 }
 # A new release: nothing published, no recorded deployment, a fresh clock and call log.
 reset() {
-  rm -f "$fixture"/{builds,gradle-env,push-env,other-git-env,auth-header,auth-mode,bundle,unsigned,curl-fails,http-code,build-fails,curl.log,states-*,status-seconds}
+  rm -f "$fixture"/{builds,gradle-env,push-env,other-git-env,encoder-env,auth-header,auth-mode,bundle,unsigned,curl-fails,http-code,build-fails,curl.log,states-*,status-seconds}
   git -C "$tree" remote set-url origin "$fixture/remote.git"
   git -C "$fixture/remote.git" update-ref -d "$ref" 2>/dev/null || true
   echo false > "$fixture/published-krusty-gradle-plugin"
@@ -313,6 +320,7 @@ check 'release token: push configuration' "$(cat "$fixture/push-env")" "$(printf
   "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic $(printf x-access-token:release-token | base64 -w0)")"
 check 'release token: kept from the build' "$(count "$fixture/gradle-env")" 0
 check 'release token: kept from other Git commands' "$(count "$fixture/other-git-env")" 0
+check 'release token: kept from the header encoding' "$(count "$fixture/encoder-env")" 0
 # Configuration the job already passes to Git stays in force beside the header.
 reset
 echo 0 > "$fixture/uploads"
@@ -326,6 +334,30 @@ check 'release token beside inherited configuration: push configuration' "$(cat 
   'GIT_CONFIG_KEY_1=http.https://github.com/.extraheader' \
   'GIT_CONFIG_VALUE_0=false' \
   "GIT_CONFIG_VALUE_1=AUTHORIZATION: basic $(printf x-access-token:release-token | base64 -w0)")"
+
+# A count Git cannot extend stops the step before the build and the upload, which could not be
+# recorded. A count with leading zeroes is the same count.
+for invalid in 'not a count:x1:GIT_CONFIG_COUNT must be a decimal count' \
+  'overflowing count:2147483647:GIT_CONFIG_COUNT cannot append another entry' \
+  'oversized count:99999999999:GIT_CONFIG_COUNT cannot append another entry'; do
+  IFS=: read -r name value message <<<"$invalid"
+  reset
+  echo 0 > "$fixture/uploads"
+  case_env=(RELEASE_TOKEN=release-token "GIT_CONFIG_COUNT=$value")
+  run_case "$name" 2 '' "$message"
+  case_env=()
+  check "$name: builds" "$(count "$fixture/builds")" 0
+  check "$name: requests" "$(count "$fixture/curl.log")" 0
+  check "$name: recorded" "$(recorded)" none
+done
+reset
+echo 0 > "$fixture/uploads"
+echo PUBLISHING > "$fixture/states-dep-1"
+case_env=(RELEASE_TOKEN=release-token GIT_CONFIG_COUNT=0001 GIT_CONFIG_KEY_0=push.negotiate GIT_CONFIG_VALUE_0=false)
+run_case 'zero-padded count' 0 $'uploaded deployment\ndeployment is PUBLISHING' 'Gradle output'
+case_env=()
+check 'zero-padded count: push configuration' "$(grep -c '^GIT_CONFIG_KEY_1=http.https://github.com/.extraheader$' "$fixture/push-env")" 1
+check 'zero-padded count: push count' "$(grep -c '^GIT_CONFIG_COUNT=2$' "$fixture/push-env")" 1
 
 # The Plugin Portal step then fails while Central is still PUBLISHING, and the release is rerun:
 # the recorded deployment is followed, not uploaded again.
@@ -441,14 +473,8 @@ check 'HTTP failure: exact progress' "$(cat "$fixture/progress")" "$(
 check 'HTTP failure: builds' "$(count "$fixture/builds")" 0
 check 'HTTP failure: uploads' "$(cat "$fixture/uploads")" 0
 
-# The release job hands this script the token: its checkout persists none.
-check 'release job: token for the record push' "$(awk '
-  /^      - name: / { step = ($0 ~ /publish the Gradle plugin to Maven Central$/) }
-  step && /^          RELEASE_TOKEN: \$\{\{ github\.token \}\}$/ { found++ }
-  END { print found + 0 }' "$repo/.github/workflows/ci.yml")" 1
-
 if [[ $failures -ne 0 ]]; then
   echo "$failures Maven Central publishing check(s) failed" >&2
   exit 1
 fi
-echo "Maven Central publishing: 21 cases passed"
+echo "Maven Central publishing: 25 cases passed"

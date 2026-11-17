@@ -34,10 +34,28 @@ version=$1
 : "${MAVEN_CENTRAL_USERNAME:?}" "${MAVEN_CENTRAL_PASSWORD:?}" "${ORG_GRADLE_PROJECT_signingInMemoryKey:?}"
 
 # Only the journal push below is authenticated. The token leaves the environment here, before
-# the Gradle build or any other child starts.
+# any child starts, the encoding of the header included. The entry it will take in Git's
+# configuration is settled now too: a count Git cannot extend must stop the step before the
+# upload, not after it.
 push_header=
+push_entry=
 if [[ -n ${RELEASE_TOKEN:-} ]]; then
-  push_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$RELEASE_TOKEN" | base64 -w0)"
+  push_token=$RELEASE_TOKEN
+  unset RELEASE_TOKEN
+  push_entry=${GIT_CONFIG_COUNT:-0}
+  if ! [[ $push_entry =~ ^[0-9]+$ ]]; then
+    echo "GIT_CONFIG_COUNT must be a decimal count" >&2
+    exit 2
+  fi
+  # Normalize leading zeroes before arithmetic and leave room in Git's count for one entry.
+  push_entry=${push_entry#"${push_entry%%[!0]*}"}
+  push_entry=${push_entry:-0}
+  if ((${#push_entry} > 10)) || { ((${#push_entry} == 10)) && [[ $push_entry > 2147483646 ]]; }; then
+    echo "GIT_CONFIG_COUNT cannot append another entry" >&2
+    exit 2
+  fi
+  push_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$push_token" | base64 -w0)"
+  unset push_token
 fi
 unset RELEASE_TOKEN
 
@@ -172,9 +190,8 @@ record_deployment() {
     # The header actions/checkout would have persisted, in this one command's environment: a
     # command line is readable by every process on the machine.
     if [[ -n $push_header ]]; then
-      entry=$((10#${GIT_CONFIG_COUNT:-0}))
-      export GIT_CONFIG_COUNT=$((entry + 1)) "GIT_CONFIG_KEY_$entry=http.https://github.com/.extraheader" \
-        "GIT_CONFIG_VALUE_$entry=$push_header"
+      export GIT_CONFIG_COUNT=$((push_entry + 1)) "GIT_CONFIG_KEY_$push_entry=http.https://github.com/.extraheader" \
+        "GIT_CONFIG_VALUE_$push_entry=$push_header"
     fi
     git -C "$repo" push --quiet --force-with-lease="$deployment_ref:$recorded" "$remote" "$commit:$deployment_ref" 2>/dev/null
   )
