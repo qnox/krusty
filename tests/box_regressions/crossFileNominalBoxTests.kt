@@ -1,4 +1,3 @@
-// MODULE: main
 // FILE: Checks.kt
 package nominal
 
