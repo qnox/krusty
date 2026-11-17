@@ -869,6 +869,45 @@ fn a_library_composable_lambda_parameter_aligns_with_its_method() {
     assert_eq!(compiled.code, Some(1));
 }
 
+/// A composable lambda parameter passed on to a library composable needs the applier scheme of the
+/// library's parameter, which the pass does not infer: the call is declined, whole, against a library
+/// the reference compiler and its plugin compiled.
+#[test]
+fn forwarding_a_composable_lambda_parameter_to_a_producer_library_is_declined() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let producer = Probe::new(
+        "compose-forwarding-lib",
+        "package lib\nimport androidx.compose.runtime.Composable\n\
+         @Composable fun Frame(content: @Composable () -> Unit) { content() }\n",
+    );
+    producer.kotlinc_classes(&classpath, &switches);
+    classpath.push(producer.dir.join("kotlinc"));
+    let probe = Probe::new(
+        "compose-forwarding",
+        "package probe\nimport androidx.compose.runtime.Composable\nimport lib.Frame\n\
+         @Composable fun Wrapper(content: @Composable () -> Unit) {\nFrame(content)\n}\n",
+    );
+    let compiled = probe.krusty(&classpath, &switches);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+    }
+    .message();
+    assert_eq!(
+        compiled.stderr,
+        format!(
+            "info: {partial}\n{}:5:1: error: krusty's Compose compiler plugin does not support a \
+             composable lambda parameter passed to a library composable yet; compile this module \
+             with kotlinc\nkrusty: 1 error(s)\n",
+            probe.source.display()
+        )
+    );
+    assert_eq!(compiled.code, Some(1));
+}
+
 /// The widths around the Compose compiler's changed-word boundaries (nine and ten parameters, and
 /// the last width with a `Function` class of its own) of a `@Composable` function type, taken from
 /// a library the reference compiler and its plugin compiled.
