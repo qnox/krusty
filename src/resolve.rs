@@ -27207,7 +27207,7 @@ fun use() {
             applied_common_supertype(&checker.fed_source(), &checker, Ty::obj("A"), Ty::obj("B")),
             Some(Ty::obj_args(
                 "Base",
-                &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
+                &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
             ))
         );
         assert_no_diags(&probe_diagnostics);

@@ -18,8 +18,9 @@
 //! - Mixed in and out projections join at the star.
 //!
 //! The element join is the caller's: it is the same common-supertype operation one level down,
-//! with that caller's recursion guard. When it declines, the argument falls back to an
-//! out-projection of the parameter's star bound.
+//! with that caller's recursion guard. When it declines, the join is recursive (`Enum<A>` and
+//! `Enum<B>` lead back to the join of `A` and `B`) and the argument is a star, as kotlinc cuts it:
+//! two enum classes join at `Enum<*>`.
 
 use crate::assignable::TypeOracle;
 use crate::symbol_source::SymbolSource;
@@ -94,7 +95,33 @@ pub(crate) fn join_classifier_applications(
             &arguments,
             &bounds,
             element_join,
-        )?;
+        )?
+        .unwrap_or_else(|| {
+            // The join of these arguments is the one in progress: a recursive bound
+            // (`E : Enum<E>`) leads `Enum<A>` and `Enum<B>` back to the join of `A` and `B`.
+            // kotlinc cuts that recursion at a star, whose readable bound is the declared one
+            // read through the arguments joined so far and a star for this and every later
+            // parameter, exactly as a written `Enum<*>` reads.
+            let unbounded_star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
+            let applied = classifier
+                .type_params()
+                .iter()
+                .enumerate()
+                .map(|(position, formal)| {
+                    (
+                        crate::types::TyParamName::new(formal),
+                        joined_arguments
+                            .get(position)
+                            .copied()
+                            .unwrap_or(unbounded_star),
+                    )
+                })
+                .collect::<GSigBinds>();
+            Ty::star_projection(crate::types::ty_subst_applied_arguments(
+                declared_bound,
+                &applied,
+            ))
+        });
         let formal = &classifier.type_params()[index];
         for (bindings, argument) in formals.iter_mut().zip(&arguments) {
             bindings.insert(
@@ -108,14 +135,16 @@ pub(crate) fn join_classifier_applications(
 }
 
 /// Join one parameter's arguments. `bounds` is the parameter's declared bound as each application
-/// substitutes it; their join, the star bound, is computed only when the result needs it.
+/// substitutes it; their join, the star bound, is computed only when the result needs it. `None`
+/// means the readable arguments' element join is already in progress, so the argument is a star
+/// the caller bounds.
 fn join_arguments(
     oracle: &dyn TypeOracle,
     declaration_variance: TypeVariance,
     arguments: &[Ty],
     bounds: &[Ty],
     element_join: &mut dyn FnMut(&[Ty]) -> Option<Ty>,
-) -> Result<Ty, ClassifierJoinFailure> {
+) -> Result<Option<Ty>, ClassifierJoinFailure> {
     let star_bound = |element_join: &mut dyn FnMut(&[Ty]) -> Option<Ty>| {
         element_join(bounds).ok_or(ClassifierJoinFailure::Declined)
     };
@@ -123,16 +152,16 @@ fn join_arguments(
         return Err(ClassifierJoinFailure::UnknownShape);
     };
     if rest.iter().all(|argument| *argument == first) {
-        return Ok(first);
+        return Ok(Some(first));
     }
     if let Some(platform) = platform_flexible_join(arguments) {
-        return Ok(platform);
+        return Ok(Some(platform));
     }
     if arguments
         .iter()
         .any(|argument| argument.is_star_projection())
     {
-        return Ok(Ty::star_projection(star_bound(element_join)?));
+        return Ok(Some(Ty::star_projection(star_bound(element_join)?)));
     }
     let projection = |argument: Ty| match argument.kind() {
         TyKind::InProjection(inner) => (true, false, inner),
@@ -151,11 +180,13 @@ fn join_arguments(
     let readable = projected.iter().all(|(_, out, _)| *out);
     let writable = projected.iter().all(|(in_, _, _)| *in_);
     if declaration_variance != TypeVariance::In && readable {
-        return Ok(match (declaration_variance, element_join(&inners)) {
-            (TypeVariance::Out, Some(joined)) => joined,
-            (_, Some(joined)) => Ty::out_projection(joined),
-            (_, None) => Ty::out_projection(star_bound(element_join)?),
-        });
+        return Ok(element_join(&inners).map(|joined| {
+            if declaration_variance == TypeVariance::Out {
+                joined
+            } else {
+                Ty::out_projection(joined)
+            }
+        }));
     }
     if declaration_variance != TypeVariance::Out && writable {
         // An argument with a distinct subtype among the others adds nothing to the meet.
@@ -181,18 +212,18 @@ fn join_arguments(
             [single] => *single,
             parts => {
                 if parts.iter().copied().any(builtin_scalar) {
-                    return Ok(Ty::star_projection(star_bound(element_join)?));
+                    return Ok(Some(Ty::star_projection(star_bound(element_join)?)));
                 }
                 Ty::intersection(parts)
             }
         };
-        return Ok(if declaration_variance == TypeVariance::In {
+        return Ok(Some(if declaration_variance == TypeVariance::In {
             meet
         } else {
             Ty::in_projection(meet)
-        });
+        }));
     }
-    Ok(Ty::out_projection(star_bound(element_join)?))
+    Ok(Some(Ty::out_projection(star_bound(element_join)?)))
 }
 
 /// The platform form when the arguments differ only by one top-level platform wrapper.
@@ -248,6 +279,7 @@ mod tests {
             types.first().copied()
         })
         .expect("joined argument")
+        .expect("no join in progress")
     }
 
     #[test]
@@ -310,6 +342,18 @@ mod tests {
             join(TypeVariance::In, &[Ty::Int, Ty::obj("sample/B")], bound),
             Ty::star_projection(bound)
         );
+    }
+
+    #[test]
+    fn a_readable_join_already_in_progress_is_left_to_the_caller_as_a_star() {
+        let arguments = [Ty::obj("sample/A"), Ty::obj("sample/B")];
+        let bounds = vec![Ty::obj("sample/Top"); arguments.len()];
+        for variance in [TypeVariance::Invariant, TypeVariance::Out] {
+            assert_eq!(
+                join_arguments(&NoSubtypes, variance, &arguments, &bounds, &mut |_| None),
+                Ok(None)
+            );
+        }
     }
 
     #[test]
