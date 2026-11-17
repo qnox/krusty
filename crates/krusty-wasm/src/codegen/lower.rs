@@ -1210,13 +1210,13 @@ impl<'a> Body<'a> {
                     self.statement(statement)?;
                 }
                 // The block's value is delivered at the type the block completes with, which an
-                // inline body's erased generic result is narrower than at its call.
+                // inline body's erased generic result is narrower than at its call, and a block
+                // typed apart from its value (`fun f(): Any = g()` over a `Unit` call) leaves its
+                // value converted to the block's own type.
                 if let Some(value) = value {
-                    // A block typed apart from its value (`fun f(): Any = g()` over a `Unit` call)
-                    // leaves its value converted to the block's own type.
                     match self.completing_type(id)? {
-                        Some(ty) if carrier(ty)?.is_some() => self.value(value, ty)?,
-                        _ => self.expression(value)?,
+                        Some(ty) => self.value(value, ty)?,
+                        None => self.expression(value)?,
                     }
                 }
             }
