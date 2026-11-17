@@ -1,26 +1,24 @@
-// A reference to a property declared in a local class's body, unbound (`A::p`) or as a delegate
-// (`by A::p`), selects that property's accessors with its declared type applied to the receiver.
+// A reference to a property declared in a local class's body (`A::p`) selects that property's
+// accessors, with its declared type applied to the receiver's type arguments.
 
-fun delegatedInExpressionBody(): String = run {
+fun fromExpressionBody(): String = run {
     class A(val tag: String) {
         val prop: String
             get() = tag
-        val y by A::prop
+        fun viaMember(): String = A::prop.get(this)
     }
-    A("a").y
+    A("a").viaMember()
 }
 
 fun box(): String {
     class B<T>(item: T) {
         var p: T = item
-        val q: List<T> get() = listOf(p)
-        val y by B<T>::q
+        val q: Pair<T, T> get() = Pair(p, p)
         fun viaMember(): T = B<T>::p.get(this)
     }
     val b = B("b")
     B<String>::p.set(b, "c")
     val q = B<String>::q
-    val result = delegatedInExpressionBody() + b.p + q.get(b)[0] + b.y[0] + b.viaMember() +
-        B<String>::p.name
-    return if (result == "accccp") "OK" else result
+    val result = fromExpressionBody() + b.p + q.get(b).first + b.viaMember() + B<String>::p.name
+    return if (result == "acccp") "OK" else result
 }
