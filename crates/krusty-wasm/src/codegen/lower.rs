@@ -892,9 +892,8 @@ impl<'a> Body<'a> {
     fn function_body(&mut self, root: u32, ret: Ty) -> Result<(), Unsupported> {
         // A body whose value completes returns it by leaving it on the stack; one whose every
         // path returns leaves the end unreachable, which `unreachable` states for the validator.
-        // A `Unit` value completes too: `fun f(): Any = g()` returns the `Unit` instance.
         let falls_through = match self.type_of(root)? {
-            Some(ty) => ty == Ty::Unit || carrier(ty)?.is_some(),
+            Some(ty) => carrier(ty)?.is_some(),
             None => false,
         };
         match carrier(ret)? {
