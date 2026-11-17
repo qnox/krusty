@@ -345,7 +345,7 @@ impl BodyLowering<'_> {
 impl BodyLowering<'_> {
     /// Expand a delegate convention that selected an inline dependency function from its
     /// template, as a source call of that function is expanded.
-    fn dependency_delegate_call(
+    pub(super) fn dependency_delegate_call(
         &mut self,
         target: crate::fir::ExternalCallableId,
         template: super::DependencyInlineTemplate,
