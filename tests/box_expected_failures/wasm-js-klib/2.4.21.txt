@@ -825,7 +825,6 @@ coroutines/kt30858.kt
 coroutines/kt31784.kt
 coroutines/kt41394.kt
 coroutines/kt42028.kt
-coroutines/kt42554.kt
 coroutines/kt44221.kt
 coroutines/kt44710.kt
 coroutines/kt44781.kt
@@ -877,7 +876,6 @@ coroutines/multipleInvokeCallsInsideInlineLambda1.kt
 coroutines/multipleInvokeCallsInsideInlineLambda2.kt
 coroutines/multipleInvokeCallsInsideInlineLambda3.kt
 coroutines/nestedTryCatch.kt
-coroutines/nonLocalReturn.kt
 coroutines/nonLocalReturnFromInlineLambda.kt
 coroutines/nonLocalReturnFromInlineLambdaDeep.kt
 coroutines/nullableSuspendFunctionType.kt
