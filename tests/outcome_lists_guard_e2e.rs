@@ -701,7 +701,10 @@ fn an_included_inventory_for_a_newly_supported_release_is_exempt() {
     let repo = Repo::new("included-new-release");
     repo.write(INCLUDED, "a/one.kt\nb/two.kt\n");
     let base = repo.commit();
-    repo.write("src/plugins/demo/boxes/included/jvm/2.5.0.txt", "a/one.kt\n");
+    repo.write(
+        "src/plugins/demo/boxes/included/jvm/2.5.0.txt",
+        "a/one.kt\n",
+    );
     let head = repo.commit();
 
     let output = repo.check(&base, &head);
