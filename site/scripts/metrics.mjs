@@ -223,6 +223,7 @@ function corpusRun(dir, id) {
   return {
     measured,
     projects,
+    roots: corpusRoots(summary.projects),
     // Listed projects the run has no result for: their job failed before it compared anything.
     // Null when the run's project list was not read.
     noResult: listed ? [...listed.keys()].filter((name) => !projects.some((p) => p.name === name)) : null,
@@ -245,6 +246,17 @@ export function corpusHistory(runs) {
     }));
 }
 
+/**
+ * The failed tasks of a run's krusty builds that kept compilations from running, across its
+ * projects, most compilations first. A project measured before the corpus traced them has none.
+ */
+export function corpusRoots(records) {
+  return records
+    .flatMap((p) => (Array.isArray(p.roots) ? p.roots : []).map((r) => ({ project: p.name, task: r.task, error: r.error ?? null, blocked: r.blocked })))
+    .filter((r) => Number.isInteger(r.blocked) && r.blocked > 0)
+    .sort((a, b) => b.blocked - a.blocked || a.project.toLowerCase().localeCompare(b.project.toLowerCase()) || a.task.localeCompare(b.task));
+}
+
 function corpus(dir) {
   const runsDir = join(dir, "corpus", "runs");
   if (!existsSync(runsDir)) return null;
@@ -262,6 +274,7 @@ function corpus(dir) {
     projects,
     noResult: latest.noResult,
     listed: latest.listed,
+    roots: latest.roots,
     total: { compilations: sum(projects, "compilations"), built: sum(projects, "built"), classes: sum(projects, "classes"), identical: sum(projects, "identical") },
     history: corpusHistory(runs),
   };

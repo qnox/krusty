@@ -677,6 +677,22 @@ fn an_inherited_default_of_an_alias_actualized_expect_interface_dispatches_throu
     );
 }
 
+/// A class extending an `expect` class that an `actual typealias` actualizes to `Any` overrides
+/// `toString`, and another member of it calls `toString` on an `Any`. The override edge and the
+/// call select the same `Any.toString`, so both record the same builtin implementation facts.
+#[test]
+fn an_override_of_an_any_member_through_an_alias_actualized_expect_base_records_consistent_facts() {
+    let (common, platform) = include_str!(
+        "box_regressions/multimodule/multimoduleOverriddenAnyMemberOnAliasActualizedBase.kt"
+    )
+    .split_once("// MODULE: main()()(common)")
+    .expect("the regression is a common/main module pair");
+    run_source_set_same_as_kotlinc(
+        &format!("// LANGUAGE: +MultiPlatformProjects\n{common}"),
+        &format!("// LANGUAGE: +MultiPlatformProjects\n{platform}"),
+    );
+}
+
 #[test]
 fn an_inherited_java_default_of_an_alias_actualized_expect_interface_dispatches_through_the_actual()
 {
