@@ -119,8 +119,10 @@ These projects carry a patch for that bump:
 A project too large to build whole on one runner names a target set in `gradle/<name>.targets`: Gradle
 task paths, one per line. `corpusCompile` then builds only the listed tasks that are not tests, the
 compiles picked are those the build runs for them (the targets and every compile they depend on),
-and `corpusTest` runs only the listed test tasks. `kotlin` lists its JVM standard library and its whole JVM compiler
-(`:compiler:cli-jvm`), and runs the standard library's JVM tests.
+and `corpusTest` runs only the listed test tasks. `kotlin` lists its JVM standard library and the Compose compiler
+plugin (`compiler-hosted`, a kotlinc plugin built on the compiler's FIR and IR APIs), each with its
+tests' compile, and its whole JVM compiler (`:compiler:cli-jvm`), and runs the standard library's
+JVM tests.
 
 Every Gradle build is offered each JDK the runner installed (`JAVA_HOME_<version>_X64`) as a Java
 toolchain (`toolchains.sh`), since Gradle does not look there by itself. `kotlin` compiles its modules
