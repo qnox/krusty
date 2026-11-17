@@ -277,6 +277,7 @@ pub(super) fn apply(
             }
         }
         "-Xreport-all-warnings" => opts.report_all_warnings = flag,
+        "-Xallow-no-source-files" => opts.allow_no_source_files = flag,
         "-Xmetadata-version" => match parse_metadata_level(text) {
             Some(version) => opts.metadata_version = Some(version),
             None => opts.errors.push(format!(

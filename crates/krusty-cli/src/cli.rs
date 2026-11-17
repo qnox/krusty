@@ -193,6 +193,9 @@ pub struct Options {
     /// `-Xreport-all-warnings`: a failed compilation reports its warnings beside its errors. Without
     /// it, kotlinc reports only the errors of a compilation that fails.
     pub report_all_warnings: bool,
+    /// `-Xallow-no-source-files`: a command line with no sources compiles an empty module, writing
+    /// only its `.kotlin_module`, instead of failing.
+    pub allow_no_source_files: bool,
 }
 
 impl Default for Options {
@@ -249,6 +252,7 @@ impl Default for Options {
             opt_in: Vec::new(),
             suppress_version_warnings: false,
             report_all_warnings: false,
+            allow_no_source_files: false,
         }
     }
 }

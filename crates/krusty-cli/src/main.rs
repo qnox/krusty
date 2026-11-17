@@ -126,7 +126,7 @@ fn main() {
         std::process::exit(2);
     }
     eprint!("{}", parse_report(&opts));
-    if opts.sources.is_empty() {
+    if opts.sources.is_empty() && !opts.allow_no_source_files {
         eprintln!("krusty: no source files. Use -help for usage.");
         std::process::exit(2);
     }
