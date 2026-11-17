@@ -1727,3 +1727,5 @@ fn a_declined_secondary_constructor_leaves_its_materialized_class_as_it_was() {
     assert_eq!(unit_inventory(&unit), before);
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+mod hierarchy_publication;
