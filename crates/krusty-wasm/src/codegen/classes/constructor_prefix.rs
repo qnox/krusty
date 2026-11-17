@@ -95,7 +95,7 @@ fn captured_receiver(ir: &IrFile, argument: &IrCtorArg, receiver: &IrCapturedRec
             context_parameter(argument, types, *index)
         }
         IrCapturedReceiver::Lambda(_) => receiver_lambda(argument),
-        IrCapturedReceiver::Callable { .. } => false,
+        IrCapturedReceiver::Callable { .. } => callable_receiver(argument),
     }
 }
 
@@ -111,12 +111,21 @@ fn context_parameter(argument: &IrCtorArg, types: &[Ty], index: u32) -> bool {
         )
 }
 
-// A receiver lambda's value is the object the checker selected. Extension-callable receivers are
-// a different profile and stay declined.
+// A receiver lambda's value is the object the checker selected.
 fn receiver_lambda(argument: &IrCtorArg) -> bool {
     matches!(
         argument.capture_identity,
         Some(ClassCaptureIdentity::Receiver(_))
+    ) && matches!(argument.ty.kind(), TyKind::Obj(_, _))
+}
+
+// An extension receiver (`this@f`) is the object the named callable received. A checked source
+// capture proves it with its receiver identity. A class a support unit lowers from a library body
+// has no checked identity at all, which the registry comparison already requires of it.
+fn callable_receiver(argument: &IrCtorArg) -> bool {
+    matches!(
+        argument.capture_identity,
+        None | Some(ClassCaptureIdentity::Receiver(_))
     ) && matches!(argument.ty.kind(), TyKind::Obj(_, _))
 }
 
