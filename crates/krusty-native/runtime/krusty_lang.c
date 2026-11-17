@@ -625,6 +625,10 @@ KRef kt_result_failure_new(KRef exception) {
     return (KRef)failure;
 }
 
+KRef kt_result_failure_exception(KRef failure) {
+    return ((const KResultFailure *)failure)->exception;
+}
+
 /* A `Result` where a position holds it as `Any` or a type parameter: a box of its own type around
    the value, so `is Result` and its `toString` answer as the class's. */
 typedef struct KResultBox {

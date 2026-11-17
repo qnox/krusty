@@ -77,10 +77,9 @@ fn closure_site(file: &FileLowering<'_>, expr: &IrExpr) -> Option<Result<Site, U
             identity: None,
             receiver_capture: None,
         })),
+        // A suspend reference's adapter is a suspend function like a suspend lambda's body: its
+        // frame ends in the continuation, which `declare_lambdas` authenticates the same way.
         IrExpr::CallableReference(reference) => Some((|| {
-            if reference.declaration_suspend {
-                return Err("a suspend callable reference".into());
-            }
             Ok(Site {
                 impl_fn: reference.adapter,
                 // The adapter's frame is the referenced declaration's captures, then the bound
