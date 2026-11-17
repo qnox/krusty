@@ -766,7 +766,7 @@ fn dirty_preamble(
         let uncertain = int_comparison(ir, IrBinOp::Eq, isolated, 0);
         let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
         let value = ir.add_expr(IrExpr::GetValue(index));
-        let changed = if parameter.lambda {
+        let changed = if parameter.lambda || parameter.unstable {
             &runtime.changed_instance
         } else {
             runtime.changed_for(parameter.ty)
