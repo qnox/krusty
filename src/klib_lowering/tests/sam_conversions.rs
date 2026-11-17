@@ -6,6 +6,32 @@ use crate::klib_libraries::{KlibLibraryInput, KlibStdlibSemantics};
 
 const LIBRARY: &str = include_str!("../../../tests/fixtures/klib_selected_sam/Library.kt");
 
+/// The externals production registers for the checked closure's target-realized members, such
+/// as `String.plus` called inside a converted lambda: each frozen member edge links its exact
+/// provider declaration at the receiver instead of lowering the member's library body.
+pub(super) fn checked_member_externals(
+    libraries: &KlibLibraries,
+    checked: &crate::ir::CheckedKlibDependencyFacts,
+) -> crate::fx_hash::HashMap<
+    crate::libraries::KlibDependencyCallable,
+    super::super::EmittedDependencyCallable,
+> {
+    checked
+        .member_edges()
+        .keys()
+        .map(|identity| {
+            let (external, realization) = libraries
+                .external_callable_by_dependency(identity)
+                .expect("a frozen member edge has an exact provider declaration");
+            assert_eq!(realization.dependency_callable.as_ref(), Some(identity));
+            (
+                identity.clone(),
+                super::super::EmittedDependencyCallable::target_member(external),
+            )
+        })
+        .collect()
+}
+
 fn assert_sam_frames(ir: &IrFile, method: crate::fir::ExternalCallableId, count: usize) {
     let targets = ir
         .exprs
@@ -160,12 +186,14 @@ fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frame
             crate::ir::IrSamMethod::External(method)
         );
         let callees = KlibCalleeFacts::new([callable]).with_checked_dependency_facts(&checked);
+        let externals = checked_member_externals(&libraries, &checked);
         let mut raw = DependencyBodyUnit::default();
-        raw.lower_function_with_intrinsics(
+        raw.lower_function_with_intrinsics_and_externals(
             callable,
             libraries.declaration_bodies(),
             &callees,
             libraries.intrinsic_facts(),
+            &externals,
         )
         .unwrap_or_else(|decline| panic!("raw selected SAM {name}: {decline}"));
         // One direct conversion and the otherwise unreferenced private file initializer.

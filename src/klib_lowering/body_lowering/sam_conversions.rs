@@ -24,12 +24,7 @@ impl BodyLowering<'_> {
             return unsupported("a SAM conversion to a non-public classifier");
         };
         let declaration = self.linker.sam_declaration(signature)?;
-        let mut target = crate::symbol_resolver::apply_sam_declaration(
-            &declaration.classifier,
-            &declaration.target,
-            target_type.non_null(),
-        )
-        .ok_or_else(|| {
+        let mut target = declaration.applied(target_type.non_null()).ok_or_else(|| {
             mismatch("a SAM conversion differs from its checked classifier application")
         })?;
         let source = self.semantic(
@@ -92,7 +87,10 @@ impl BodyLowering<'_> {
                     unreachable!()
                 };
                 *sam = Some(Box::new(target));
-                return Ok(value);
+                // A converted lambda has the interface's type, not its function type: a use
+                // that expects the interface (a field initializer, an argument) must not see
+                // an implicit conversion.
+                return Ok(self.typed(value, ty));
             }
         }
         let name = format!(
