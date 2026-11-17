@@ -92,5 +92,5 @@ fun box(): String {
     return "OK"
 }
 "####;
-    common::expect_box_ok_with_stdlib(SOURCE, "generic_overloads_any_bound_jvm_name");
+    common::expect_box_same_as_kotlinc(SOURCE, "generic_overloads_any_bound_jvm_name");
 }
