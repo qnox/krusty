@@ -22,6 +22,7 @@ mod callable_references;
 mod char_sequence_appends;
 mod class_tokens;
 mod codegen;
+mod collection_arguments;
 mod encode;
 mod exception_transport;
 mod function_value_names;

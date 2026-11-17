@@ -193,3 +193,16 @@ fn write_qualified(
     }
     Ok(())
 }
+
+impl From<crate::metadata::klib_ir::semantic_types::KlibTypeError> for KlibBodyDeclineReason {
+    fn from(error: crate::metadata::klib_ir::semantic_types::KlibTypeError) -> Self {
+        match error {
+            crate::metadata::klib_ir::semantic_types::KlibTypeError::UnsupportedType(detail) => {
+                Self::UnsupportedType(detail)
+            }
+            crate::metadata::klib_ir::semantic_types::KlibTypeError::SignatureMismatch(detail) => {
+                Self::SignatureMismatch(detail)
+            }
+        }
+    }
+}
