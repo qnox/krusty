@@ -52,7 +52,6 @@ impl LoweringCheckpoint {
             class.secondary_ctors.truncate(secondaries);
         }
         for class in removed {
-            ir.classifier_hierarchies.remove(&class);
             ir.function_overrides.remove(&class);
             ir.property_overrides.remove(&class);
         }
