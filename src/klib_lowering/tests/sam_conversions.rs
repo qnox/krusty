@@ -123,7 +123,7 @@ pub(super) fn wasm_library(
     );
     let libraries = KlibLibraries::open(&[
         KlibLibraryInput::platform_stdlib(stdlib, KlibStdlibSemantics::Wasm),
-        KlibLibraryInput::dependency(library),
+        KlibLibraryInput::dependency(library.clone()),
     ])
     .expect("read complete official selected-SAM artifact");
     Some((work, libraries))
@@ -266,7 +266,7 @@ fn native_converted_lambdas_freeze_and_lower_the_same_checked_declaration() {
             root.join("klib/common/stdlib"),
             KlibStdlibSemantics::Native,
         ),
-        KlibLibraryInput::dependency(library),
+        KlibLibraryInput::dependency(library.clone()),
     ])
     .expect("read official Native SAM declarations");
     let classifier = libraries
@@ -386,7 +386,10 @@ fn native_converted_lambdas_freeze_and_lower_the_same_checked_declaration() {
             other_identity.signature.clone(),
         ))
         .expect("the unrelated lambda freezes its own interface's declaration");
-    assert_eq!(other_frozen.overridable.as_ref(), [other_apply]);
+    assert_eq!(
+        other_frozen.overridable.as_ref(),
+        std::slice::from_ref(&other_apply)
+    );
     let other_callees =
         KlibCalleeFacts::new([other_callable]).with_checked_dependency_facts(&other_checked);
     let mut other_raw = DependencyBodyUnit::default();
@@ -418,5 +421,77 @@ fn native_converted_lambdas_freeze_and_lower_the_same_checked_declaration() {
         )
     );
     super::demo_package::assert_unit_is_empty(&relabeled);
+
+    // The producer's own `make` body with one serialized fact rewritten: its `Action` lambda
+    // names the unrelated `Other.apply` as the method it overrides. The `Action` target and its
+    // checked facts stay valid, so only the overridden-symbol comparison can refuse it.
+    let mut trees = crate::metadata::klib_ir::read_declaration_trees(
+        &crate::klib::KlibArchive::open(&library).expect("the producer library opens"),
+    )
+    .expect("the producer IR decodes")
+    .into_trees();
+    let converted = |tree: &crate::metadata::klib_ir::KlibIrDeclarationTree, name: &str| {
+        let KlibIrMember::Function(function) = tree.declaration else {
+            return None;
+        };
+        if tree.arena.function(function).name != name {
+            return None;
+        }
+        (0..tree.arena.expr_count())
+            .map(|index| tree.arena.expr_id(index))
+            .find(|&id| {
+                matches!(
+                    tree.arena.expr(id).kind,
+                    KlibIrExprKind::RichFunctionReference { .. }
+                )
+            })
+    };
+    let other_override = trees
+        .iter()
+        .find_map(|tree| {
+            let id = converted(tree, "other")?;
+            let KlibIrExprKind::RichFunctionReference { overridden, .. } =
+                &tree.arena.expr(id).kind
+            else {
+                unreachable!("the reference was found by its kind")
+            };
+            Some(overridden.clone())
+        })
+        .expect("the unrelated lambda names `Other.apply`");
+    assert_eq!(
+        other_override.signature,
+        KlibIrSignature::Public(match &other_apply.declaration {
+            KlibDeclarationSignature::Public(signature) => signature.clone(),
+            other => panic!("a public method: {other:?}"),
+        })
+    );
+    let (index, reference) = trees
+        .iter()
+        .enumerate()
+        .find_map(|(index, tree)| Some((index, converted(tree, "make")?)))
+        .expect("`make` converts one lambda");
+    let KlibIrExprKind::RichFunctionReference { overridden, .. } =
+        &mut trees[index].arena.expr_mut(reference).kind
+    else {
+        unreachable!("the reference was found by its kind")
+    };
+    *overridden = other_override;
+    let rewritten = KlibDeclarationBodies::from_libraries(vec![(
+        callable.identity().module.clone(),
+        crate::metadata::klib_ir::KlibIrModuleTrees::from_trees(trees)
+            .expect("the rewritten trees index"),
+    )])
+    .expect("the rewritten module joins");
+    let mut wrong = DependencyBodyUnit::default();
+    let refusal = wrong
+        .lower_function_with_intrinsics(callable, &rewritten, &callees, libraries.intrinsic_facts())
+        .expect_err("`Other.apply` never stands for the checked `Action.apply`");
+    assert_eq!(
+        refusal.reason(),
+        &KlibBodyDeclineReason::SignatureMismatch(
+            "a converted lambda overrides another method than its checked SAM method".to_owned()
+        )
+    );
+    super::demo_package::assert_unit_is_empty(&wrong);
     std::fs::remove_dir_all(work).unwrap();
 }
