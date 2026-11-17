@@ -22120,6 +22120,7 @@ fun after(): Int = 2
                     "()V",
                 );
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    companion_extensions: crate::libraries::Callables::None,
                     builtin_classifier: false,
                     classifier_name: None,
                     classifier_declaration: None,
@@ -22152,6 +22153,7 @@ fun after(): Int = 2
             };
             let classifier = internal.and_then(import_classifier);
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_declaration: classifier
                     .as_ref()
@@ -24127,6 +24129,7 @@ fun box(): String {
                     | "JavaState"
             ) {
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    companion_extensions: crate::libraries::Callables::None,
                     builtin_classifier: false,
                     classifier_name: None,
                     classifier_declaration: None,
@@ -24170,6 +24173,7 @@ fun box(): String {
                     info
                 };
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    companion_extensions: crate::libraries::Callables::None,
                     builtin_classifier: false,
                     classifier_name: None,
                     classifier_declaration: None,
@@ -24341,6 +24345,7 @@ fun box(): String {
                 ..Default::default()
             };
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_name: None,
                 classifier_declaration: None,

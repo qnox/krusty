@@ -554,6 +554,42 @@ impl SymbolResolver<'_> {
     }
 }
 
+impl SymbolResolver<'_> {
+    /// The written `companion fun/val C.name` declarations of `classifier` that this file's scope
+    /// brings in: those of the nearest scope level (an explicit import of the name, the current
+    /// package, or a star import) that offers one for `classifier`.
+    pub(super) fn scoped_companion_extensions(
+        &self,
+        classifier: TypeName,
+        name: &str,
+    ) -> (Vec<FunctionInfo>, Vec<PropertyInfo>) {
+        let Some(scope) = self.fn_scope else {
+            return Default::default();
+        };
+        declaration_levels_in_function_scope(&self.src, name, scope)
+            .into_iter()
+            .map(|level| {
+                let functions = level
+                    .symbols
+                    .iter()
+                    .flat_map(|record| record.companion_extensions.functions())
+                    .filter(|function| function.associated_classifier == Some(classifier))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let properties = level
+                    .symbols
+                    .iter()
+                    .flat_map(|record| record.companion_extensions.properties())
+                    .filter(|property| property.associated_classifier == Some(classifier))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (functions, properties)
+            })
+            .find(|(functions, properties)| !functions.is_empty() || !properties.is_empty())
+            .unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,6 +678,7 @@ mod tests {
         };
         let record = |owners: &[&str]| {
             Rc::new(ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_name: None,
                 classifier_declaration: None,

@@ -4,8 +4,9 @@
 //!
 //! Such a declaration is named through a classifier coordinate and has no value operand. Providers
 //! publish it in the classifier's namespace as a receiver-less candidate carrying
-//! `associated_classifier`; these queries collect those candidates for the two ways Kotlin names
-//! them. A qualified `C.name` sees only `C`'s own declarations, while the static scope opened by a
+//! `associated_classifier`. A dependency's written `companion fun/val C.name` is published with its
+//! package instead and joins them once this file's scope brings that name in. These queries
+//! collect those candidates for the two ways Kotlin names them. A qualified `C.name` sees only `C`'s own declarations, while the static scope opened by a
 //! class body or a companion-associated declaration also sees those of `C`'s supertypes, the nearer
 //! classifier shadowing the farther one through each candidate's `receiver_rank`.
 
@@ -37,15 +38,29 @@ impl SymbolResolver<'_> {
         name: &str,
         available: impl Fn(&PropertyInfo) -> bool,
     ) -> Option<PropertyInfo> {
-        self.src
-            .symbols(SymbolNamespace::Classifier(internal), name)
+        self.associated_property_declarations(internal, name)
+            .into_iter()
+            .find(|property| available(property))
+    }
+
+    /// The properties associated with `classifier` under `name`: those its namespace publishes,
+    /// then the written `companion val C.name` declarations this file's scope brings in.
+    fn associated_property_declarations(
+        &self,
+        classifier: TypeName,
+        name: &str,
+    ) -> Vec<PropertyInfo> {
+        let mut properties = self
+            .src
+            .symbols(SymbolNamespace::Classifier(classifier), name)
             .callables
             .properties()
             .iter()
-            .find(|property| {
-                property.associated_classifier == Some(internal) && available(property)
-            })
+            .filter(|property| property.associated_classifier == Some(classifier))
             .cloned()
+            .collect::<Vec<_>>();
+        properties.extend(self.scoped_companion_extensions(classifier, name).1);
+        properties
     }
 
     /// Provider-normalized classifier property visible from this resolver's lexical access site.
@@ -166,14 +181,17 @@ impl SymbolResolver<'_> {
         classifier: TypeName,
         name: &str,
     ) -> Vec<FunctionInfo> {
-        self.src
+        let mut functions = self
+            .src
             .symbols(SymbolNamespace::Classifier(classifier), name)
             .callables
             .functions()
             .iter()
             .filter(|function| function.associated_classifier == Some(classifier))
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        functions.extend(self.scoped_companion_extensions(classifier, name).0);
+        functions
     }
 
     pub(crate) fn associated_function_accessible(&self, function: &FunctionInfo) -> bool {
@@ -206,14 +224,9 @@ impl SymbolResolver<'_> {
         {
             return Vec::new();
         }
-        self.src
-            .symbols(SymbolNamespace::Classifier(classifier), name)
-            .callables
-            .properties()
-            .iter()
-            .filter(|property| property.associated_classifier == Some(classifier))
+        self.associated_property_declarations(classifier, name)
+            .into_iter()
             .filter(|property| self.associated_property_accessible(property))
-            .cloned()
             .map(|mut property| {
                 property.receiver_rank = rank;
                 property

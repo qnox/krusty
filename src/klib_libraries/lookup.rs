@@ -15,6 +15,7 @@ use crate::libraries::{
     PropertyAccessorNames, PropertyInfo, PropertySet, ResolvedSymbols,
 };
 use crate::symbol_source::SymbolNamespace;
+use crate::types::TypeName;
 
 /// The records of one namespace, by declaration name.
 type NamespaceRecords = HashMap<Box<str>, Rc<ResolvedSymbols>>;
@@ -125,6 +126,12 @@ pub(super) fn declared_symbols(
             associated_callables(inventory, identities, owner, name)
         }
     };
+    let companion_extensions = match namespace {
+        SymbolNamespace::Package(package) => {
+            package_companion_extensions(inventory, identities, package, name)
+        }
+        SymbolNamespace::Classifier(_) => Callables::None,
+    };
     ResolvedSymbols {
         classifier_name,
         classifier_declaration,
@@ -136,8 +143,49 @@ pub(super) fn declared_symbols(
                 overloads: properties,
             },
         ),
+        companion_extensions,
         importable_declaration: false,
     }
+}
+
+/// The written `companion fun/val C.name` declarations `package` declares under `name`, each a
+/// receiver-less candidate named through its classifier.
+fn package_companion_extensions(
+    inventory: &PackageInventory,
+    identities: &ExternalIdentities,
+    package: TypeName,
+    name: &str,
+) -> Callables {
+    let functions = inventory
+        .companion_functions(package, name)
+        .map(|(classifier, extension)| {
+            published_function(
+                identities,
+                &extension.signed,
+                extension.placement(classifier),
+                &Default::default(),
+            )
+        })
+        .collect();
+    let properties = inventory
+        .companion_properties(package, name)
+        .map(|(classifier, extension)| {
+            published_property(
+                identities,
+                &extension.signed,
+                extension.placement(classifier),
+                &Default::default(),
+            )
+        })
+        .collect();
+    Callables::from_parts(
+        FunctionSet {
+            overloads: functions,
+        },
+        PropertySet {
+            overloads: properties,
+        },
+    )
 }
 
 /// The synthetic classifier record is the language's declaration source for its member `invoke`.

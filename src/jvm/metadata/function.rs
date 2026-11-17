@@ -76,6 +76,7 @@ impl MfnFlags {
     const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 10;
     const IS_SYNTHESIZED: u16 = 1 << 11;
     const ANNOTATIONS_ON_REALIZATION: u16 = 1 << 12;
+    const IS_COMPANION_EXTENSION: u16 = 1 << 13;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -134,6 +135,10 @@ impl MfnFlags {
     #[inline]
     pub const fn with_is_companion_block_member(self, on: bool) -> Self {
         self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
+    }
+    #[inline]
+    pub const fn with_is_companion_extension(self, on: bool) -> Self {
+        self.with(Self::IS_COMPANION_EXTENSION, on)
     }
     #[inline]
     pub const fn with_is_synthesized(self, on: bool) -> Self {
@@ -297,6 +302,12 @@ impl MetaFn {
     #[inline]
     pub fn is_companion_block_member(&self) -> bool {
         self.flags.has(MfnFlags::IS_COMPANION_BLOCK_MEMBER)
+    }
+    /// A written `companion fun C.name`: a static of its package facade with no receiver parameter,
+    /// named through `receiver_class` (`C`) with no value operand.
+    #[inline]
+    pub fn is_companion_extension(&self) -> bool {
+        self.flags.has(MfnFlags::IS_COMPANION_EXTENSION)
     }
     /// Kotlin metadata's exact `Function.flags.MEMBER_KIND == SYNTHESIZED` declaration fact.
     #[inline]
