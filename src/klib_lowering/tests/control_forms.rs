@@ -1348,11 +1348,11 @@ fn stdlib_star_projected_smart_cast_lowers_as_a_cast() {
         .unwrap_or_else(|decline| panic!("{decline}"));
     validated(unit.ir());
     assert_eq!(unit.ir().functions[function as usize].ret, Ty::Int);
-    // `size` is read at the receiver cast to `Collection<out Any?>`, the serialized `Collection<*>`.
+    // `size` is read at the receiver cast to the serialized `Collection<*>`.
     let ir = unit.ir();
     let collection = Ty::obj_args_name(
         crate::types::type_name("kotlin/collections/Collection"),
-        &[Ty::out_projection(Ty::nullable(Ty::obj_name(
+        &[Ty::star_projection(Ty::nullable(Ty::obj_name(
             crate::types::wk::any(),
         )))],
     );

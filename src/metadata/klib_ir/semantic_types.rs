@@ -3,8 +3,9 @@
 //! A KLIB names a classifier by its exact public signature. That structural package/declaration
 //! path is interned directly as the classifier's Kotlin identity, without rendering a qualified
 //! spelling and parsing it back: a body's types and its selected declaration's types are one
-//! model. A type argument converts as the provider converts a metadata type argument (a star is
-//! the out-projection of `Any?`), and a `kotlin.FunctionN` type with its arguments is the function
+//! model. A type argument converts as the provider converts a metadata type argument (a star keeps
+//! its star-projection identity, with an `Any?` placeholder refined at the declaring classifier),
+//! and a `kotlin.FunctionN` type with its arguments is the function
 //! type it denotes, a receiver function type when `@ExtensionFunctionType` marks it. A type
 //! parameter is the semantic type parameter the declaration's provider record states for it
 //! ([`KlibTypeParameters`]); a body whose declaration binds none of its type parameters declines
@@ -247,7 +248,7 @@ fn type_argument<E: From<KlibTypeError>>(
     local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, E>,
 ) -> Result<Ty, E> {
     Ok(match argument {
-        KlibIrTypeArgument::Star => Ty::out_projection(Ty::nullable(Ty::obj_name(wk::any()))),
+        KlibIrTypeArgument::Star => Ty::star_projection(Ty::nullable(Ty::obj_name(wk::any()))),
         KlibIrTypeArgument::Type { variance, ty } => {
             let ty = semantic_type_in(arena, parameters, ty, local_class)?;
             match variance {
@@ -394,6 +395,69 @@ fn mismatch<E: From<KlibTypeError>>(detail: &str) -> E {
 mod tests {
     use super::*;
     use crate::metadata::klib_ir::KlibIrSignature;
+
+    #[test]
+    fn serialized_star_and_explicit_out_agree_with_their_selected_metadata_headers() {
+        use crate::metadata::semantic::{semantic_ty, KotlinType};
+        let mut arena = KlibIrArena::default();
+        let application = |arena: &mut KlibIrArena, argument| {
+            arena.push_type(KlibIrType::Simple {
+                classifier: KlibIrSymbol {
+                    kind: KlibIrSymbolKind::Class,
+                    signature: KlibIrSignature::Public(KlibPublicIdSignature::classifier(
+                        crate::types::type_name("sample/Box"),
+                    )),
+                },
+                nullability: KlibIrNullability::NotSpecified,
+                arguments: vec![argument],
+                annotations: Vec::new(),
+                abbreviation: None,
+            })
+        };
+        let star = application(&mut arena, KlibIrTypeArgument::Star);
+        let any = arena.push_type(KlibIrType::Simple {
+            classifier: KlibIrSymbol {
+                kind: KlibIrSymbolKind::Class,
+                signature: KlibIrSignature::Public(KlibPublicIdSignature::classifier(wk::any())),
+            },
+            nullability: KlibIrNullability::MarkedNullable,
+            arguments: Vec::new(),
+            annotations: Vec::new(),
+            abbreviation: None,
+        });
+        let explicit_out = application(
+            &mut arena,
+            KlibIrTypeArgument::Type {
+                variance: KlibIrVariance::Out,
+                ty: any,
+            },
+        );
+        let metadata = |argument| KotlinType::Class {
+            internal: "sample/Box".to_owned(),
+            args: vec![argument],
+            nullable: false,
+            shape: Default::default(),
+        };
+        let selected_star = semantic_ty(&metadata(KotlinType::Star), &HashMap::default());
+        let selected_out = semantic_ty(
+            &metadata(KotlinType::OutProjection(Box::new(KotlinType::Class {
+                internal: "kotlin/Any".to_owned(),
+                args: Vec::new(),
+                nullable: true,
+                shape: Default::default(),
+            }))),
+            &HashMap::default(),
+        );
+        let parameters = KlibTypeParameters::default();
+        // Raw and prepared function headers require exact agreement with the selected metadata;
+        // neither boundary may erase the distinction to make the header compare successfully.
+        assert_eq!(semantic_type(&arena, &parameters, star), Ok(selected_star));
+        assert_eq!(
+            semantic_type(&arena, &parameters, explicit_out),
+            Ok(selected_out)
+        );
+        assert_ne!(selected_star, selected_out);
+    }
 
     /// `T & Any` as kotlinc serializes it: the type parameter `T` marked definitely non-null.
     fn definitely_non_null(bound: Ty) -> Ty {
