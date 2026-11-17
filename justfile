@@ -496,7 +496,11 @@ box-corpus VERSION=`just max-version`:
     done
     echo "$box"
 
-# Provision a compiler plugin's upstream box corpus: the `upstream` directories its descriptor
+# The compiler plugins whose descriptor names an upstream box corpus, one per line.
+plugin-corpora:
+    @grep -l '^upstream' src/plugins/*/boxes/corpus.txt | sed 's|src/plugins/\([^/]*\)/boxes/corpus.txt|\1|'
+
+# Provision a compiler plugin's upstream box corpus: the `upstream` and `support` paths its descriptor
 # (src/plugins/<name>/boxes/corpus.txt) names, from JetBrains/kotlin at the matching tag —
 # blobless+sparse, idempotent. These are the reference suites our own plugin conformance tests mirror
 # (and must meet-or-exceed). Prints the checkout root; each `upstream` path is below it.
@@ -507,11 +511,11 @@ plugin-corpus PLUGIN VERSION=`just max-version`:
     ver="{{VERSION}}"
     descriptor="$(ls src/plugins/"$plugin"/boxes/corpus.txt 2>/dev/null || true)"
     [ -n "$descriptor" ] || { echo "no plugin corpus descriptor for $plugin" >&2; exit 1; }
-    mapfile -t upstream < <(sed -n 's/^upstream[[:space:]]*=[[:space:]]*//p' "$descriptor")
+    mapfile -t upstream < <(sed -n 's/^\(upstream\|support\)[[:space:]]*=[[:space:]]*//p' "$descriptor")
     [ "${#upstream[@]}" -gt 0 ] || { echo "plugin $plugin names no upstream corpus" >&2; exit 1; }
     root="$PWD/target/cache/plugin-corpus/$plugin/$ver"
     complete=1
-    for dir in "${upstream[@]}"; do [ -d "$root/$dir" ] || complete=0; done
+    for dir in "${upstream[@]}"; do [ -e "$root/$dir" ] || complete=0; done
     if [ "$complete" = 1 ]; then echo "$root"; exit 0; fi
     echo "cloning the $plugin box corpus (v${ver})…" >&2
     rm -rf "$root"
@@ -519,9 +523,10 @@ plugin-corpus PLUGIN VERSION=`just max-version`:
     git clone --depth 1 --filter=blob:none --sparse --branch "v${ver}" \
         https://github.com/JetBrains/kotlin.git "$root" >&2 \
         || { echo "failed to clone JetBrains/kotlin v${ver}" >&2; rm -rf "$root"; exit 1; }
-    git -C "$root" sparse-checkout set "${upstream[@]}" >&2
+    # Non-cone patterns: an `upstream` entry is a directory but a `support` entry is one file.
+    git -C "$root" sparse-checkout set --no-cone "${upstream[@]/#//}" >&2
     for dir in "${upstream[@]}"; do
-        [ -d "$root/$dir" ] || { echo "$plugin corpus directory missing after sparse checkout: $dir" >&2; exit 1; }
+        [ -e "$root/$dir" ] || { echo "$plugin corpus path missing after sparse checkout: $dir" >&2; exit 1; }
     done
     echo "$root"
 

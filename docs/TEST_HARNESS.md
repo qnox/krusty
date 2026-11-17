@@ -450,9 +450,22 @@ upstream `JetBrains/kotlin` `testData` directories, and the inclusive Kotlin rel
 corpus covers; the module documentation lists the format. A case whose compiler is outside the
 bracket fails closed instead of compiling without the plugin.
 
-`just plugin-corpus <plugin> [version]` provisions the descriptor's `upstream` directories under
-`target/cache/plugin-corpus/<plugin>/<version>/` and prints that root. A new plugin registers by
-adding its descriptor to `DESCRIPTORS` in `src/conformance/plugin_corpus.rs`.
+`just plugin-corpus <plugin> [version]` provisions the descriptor's `upstream` and `support` paths
+under `target/cache/plugin-corpus/<plugin>/<version>/` and prints that root. A new plugin registers
+by adding its descriptor to `DESCRIPTORS` in `src/conformance/plugin_corpus.rs`.
+
+A descriptor that names a `directive` and an `upstream` directory is run by
+`plugin_box_corpus::plugin_box_corpora_match_their_inventories` in the conformance binary, one path
+for every plugin: each upstream case compiles with the descriptor's directive and `support` sources
+against its runtime jars and Java `stubs`. The reference compiler runs the case first, and a case it
+cannot pass under that runtime is not applicable (`expected_not_applicable/jvm/<version>.txt`).
+A corpus starts clean: only the cases krusty passes are listed in `included/jvm/<version>.txt` and
+each must keep passing, while a case that does not pass yet is not included and joins the list in
+the change that makes it pass. A case that passes without being included fails the run, so the
+list only catches up. Both lists sit beside the descriptor (`src/plugins/<name>/boxes/`) and follow
+the same release-inheritance rule as the box inventories.
+Regenerate a plugin's lists with
+`KRUSTY_BLESS_BOX_EXPECTATIONS=1 ./run-tests.sh --test conformance plugin_box_corpora_match`.
 
 ## CLI Corpus Ratchet
 
