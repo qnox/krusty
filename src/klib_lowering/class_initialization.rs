@@ -813,8 +813,9 @@ fn dispatched_members(
 }
 
 /// The declarations an admitted class initialization names without emitting their bodies: the
-/// ones its overrides override, which their override edges name, and the constructor of a
-/// superclass the target lays out, which the target builds. They are declaration evidence only.
+/// ones its overrides override and the interface members it implements with an inherited body,
+/// which their override edges name, and the constructor of a superclass the target lays out,
+/// which the target builds. They are declaration evidence only.
 pub(super) fn constructor_declaration_evidence(
     selected: KlibBodyCallable<'_>,
     bodies: &KlibDeclarationBodies,
@@ -861,5 +862,20 @@ fn overridden_declarations(
                 .map_err(mismatch)?,
         );
     }
+    // An interface member the class reaches only through its supertypes is implemented by the
+    // inherited body, and its edge names the interface declaration as an override's does:
+    // `AbstractList` implements `List.contains` with `AbstractCollection.contains`.
+    let inherited = bodies
+        .inherited_implementations(
+            &plan.header.contract.module,
+            plan.header.arena,
+            plan.header.class,
+        )
+        .map_err(mismatch)?;
+    declarations.extend(
+        inherited
+            .into_iter()
+            .flat_map(|(_, implemented)| implemented),
+    );
     Ok(declarations)
 }

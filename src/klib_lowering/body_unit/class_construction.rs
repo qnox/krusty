@@ -744,9 +744,13 @@ impl<'u, 's> Linker<'u, 's> {
             };
             let name = ir.functions[method as usize].name.clone();
             for declared in implemented {
+                // The class's declaration evidence froze each of them.
                 let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(declared)
                 else {
-                    continue;
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "an inherited implementation's declaration has no unique provider"
+                            .to_owned(),
+                    ));
                 };
                 let overridden_declaration = callables[0];
                 if !overridden_declaration
@@ -760,9 +764,12 @@ impl<'u, 's> Linker<'u, 's> {
                 else {
                     continue;
                 };
-                let Some(target) = self.sources.callees.reference_target(declared) else {
-                    continue;
-                };
+                let target = self.sources.callees.reference_target(declared).ok_or(
+                    KlibBodyDeclineReason::SignatureMismatch(
+                        "an inherited implementation's declaration has no frozen declaration"
+                            .to_owned(),
+                    ),
+                )?;
                 let overridden = crate::fir::ResolvedFunctionOverrideTarget::External(target);
                 let records = ir.function_overrides.entry(owner).or_default();
                 if records.iter().any(|edge| edge.overridden == overridden) {
