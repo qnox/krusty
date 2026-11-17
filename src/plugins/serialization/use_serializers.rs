@@ -9,8 +9,7 @@
 //! constructs it. A serializer the type itself names, and an explicit `@Contextual` property, keep
 //! precedence.
 
-use crate::ir::{AnnoValue, IrFile};
-use crate::spelling::{Spelled, TypeUseAnnotation};
+use crate::ir::{AnnoValue, IrFile, Spelled, TypeUseAnnotation};
 use crate::types::{
     type_name, AnnotationSemanticFacts, AnnotationValue, ResolvedAnnotation, Ty, TypeName,
 };
