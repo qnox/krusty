@@ -70,15 +70,14 @@ fn lower_factory(
                 .constructors
                 .iter()
                 .map(|constructor| {
-                    libraries
-                        .external_callable(constructor.external_identity.unwrap())
-                        .unwrap()
+                    let target = constructor.external_identity.unwrap();
+                    (target, libraries.external_callable(target).unwrap())
                 })
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
     let callables = std::iter::once(root)
-        .chain(constructors.iter().map(|constructor| {
+        .chain(constructors.iter().map(|(_, constructor)| {
             assert!(constructor.callable.params.is_empty());
             constructor.klib_body_callable().unwrap()
         }))
@@ -92,12 +91,21 @@ fn lower_factory(
     .unwrap_or_else(|identity| panic!("{name}: no checked facts for {identity:?}"));
     let callees = crate::klib_lowering::KlibCalleeFacts::new(callables.iter().copied())
         .with_checked_dependency_facts(&checked);
+    let externals = constructors
+        .iter()
+        .map(|(target, constructor)| {
+            (
+                constructor.klib_body_callable().unwrap().identity().clone(),
+                crate::klib_lowering::EmittedDependencyCallable::constructor(*target),
+            )
+        })
+        .collect::<ProducedExternals>();
     unit.lower_function_with_declarations(
         root,
         libraries.declaration_bodies(),
         &callees,
         libraries.intrinsic_facts(),
-        &Default::default(),
+        &externals,
         libraries,
     )
     .unwrap_or_else(|decline| panic!("{name}: {decline}"));
