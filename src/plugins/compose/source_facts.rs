@@ -197,6 +197,7 @@ pub(super) fn record(
             .any(|&(target, _)| annotation.internal == crate::types::type_name(target))
     }) {
         rejections.push(PluginRejection {
+            refusal: true,
             span: crate::diag::Span::new(0, 0),
             message: unsupported("a file-level applier target"),
         });
@@ -269,6 +270,7 @@ pub(super) fn record(
             })
         {
             rejections.push(PluginRejection {
+                refusal: true,
                 span,
                 message: unsupported(what),
             });
@@ -281,6 +283,7 @@ pub(super) fn record(
                 .flatten()
         }) else {
             rejections.push(PluginRejection {
+                refusal: true,
                 span,
                 message: unsupported("a composable function without a block body"),
             });
@@ -294,6 +297,7 @@ pub(super) fn record(
             source.expression_span(ir, value)
         }) else {
             rejections.push(PluginRejection {
+                refusal: true,
                 span,
                 message: unsupported("a composable function whose body has no source position"),
             });
@@ -337,6 +341,7 @@ pub(super) fn record(
             .flatten()
         {
             rejections.push(PluginRejection {
+                refusal: true,
                 span,
                 message: unsupported(what),
             });
@@ -357,6 +362,7 @@ pub(super) fn record(
             .collect::<Vec<_>>();
         if ir.lifts_other_than(&lifting, &relocated) {
             rejections.push(PluginRejection {
+refusal: true,
                 span,
                 message: unsupported(
                     "a composable function whose lambda numbering another lambda or overload shares",
@@ -367,6 +373,7 @@ pub(super) fn record(
         }
         if let Some(what) = unsupported_lambda_use(ir, body.block, &direct, &lambdas) {
             rejections.push(PluginRejection {
+                refusal: true,
                 span,
                 message: unsupported(what),
             });
@@ -379,6 +386,7 @@ pub(super) fn record(
             if let Some(index) = invoked(call) {
                 let Some(call_span) = source.expression_span(ir, call) else {
                     rejections.push(PluginRejection {
+                        refusal: true,
                         span,
                         message: unsupported("a composable call without a source position"),
                     });
@@ -587,6 +595,7 @@ pub(super) fn record(
             }
         }
         Err(recursive) => rejections.push(PluginRejection {
+            refusal: true,
             span: ir
                 .package_functions
                 .iter()
@@ -606,6 +615,7 @@ pub(super) fn record(
     {
         if !handled.contains(&function) {
             rejections.push(PluginRejection {
+                refusal: true,
                 span: crate::diag::Span::new(0, 0),
                 message: unsupported(&format!(
                     "the composable member or local function `{}`",
@@ -625,6 +635,7 @@ pub(super) fn record(
     // A lambda's body is lowered twice, once for its inline form, so a call in it is met twice.
     stray.dedup();
     rejections.extend(stray.into_iter().map(|span| PluginRejection {
+        refusal: true,
         span,
         message: unsupported("a composable call outside the statements of a composable body"),
     }));
@@ -692,6 +703,7 @@ pub(super) fn record(
                     declaration.signature_span
                 });
             rejections.push(PluginRejection {
+                refusal: true,
                 span,
                 message: format!(
                     "krusty's Compose compiler plugin cannot compile this module: {missing}"
@@ -709,6 +721,7 @@ pub(super) fn class_rejection(
 ) -> PluginRejection {
     let start = crate::plugins::line_start(source.text, class.decl_line);
     PluginRejection {
+        refusal: true,
         span: crate::diag::Span::new(start, start),
         message: unsupported(what),
     }
@@ -1352,6 +1365,7 @@ impl BodyScope<'_> {
         };
         if let Some(what) = declined {
             rejections.push(PluginRejection {
+                refusal: true,
                 span: found.span.unwrap_or(span),
                 message: unsupported(what),
             });
@@ -1359,6 +1373,7 @@ impl BodyScope<'_> {
         }
         let Some(call_span) = found.span else {
             rejections.push(PluginRejection {
+                refusal: true,
                 span,
                 message: unsupported("a composable call without a source position"),
             });
@@ -1435,6 +1450,7 @@ impl BodyScope<'_> {
             .collect::<Option<Vec<_>>>();
         let Some(arguments) = arguments else {
             rejections.push(PluginRejection {
+                refusal: true,
                 span: call_span,
                 message: unsupported(
                     "a composable call argument that is not a constant, a parameter, or \
@@ -1561,6 +1577,7 @@ impl BodyScope<'_> {
             .unwrap_or(crate::diag::Span::new(0, 0));
         let mut reject = |what: &str| {
             rejections.push(PluginRejection {
+                refusal: true,
                 span,
                 message: unsupported(what),
             });
@@ -2014,6 +2031,7 @@ fn reject_composable_types(
     names.sort();
     names.dedup();
     rejections.extend(names.into_iter().map(|name| PluginRejection {
+        refusal: true,
         span: crate::diag::Span::new(0, 0),
         message: unsupported(&format!("the composable function type in `{name}`")),
     }));

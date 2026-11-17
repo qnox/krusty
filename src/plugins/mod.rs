@@ -1000,6 +1000,9 @@ pub struct DependencyCallableShape {
 pub struct PluginRejection {
     pub span: crate::diag::Span,
     pub message: String,
+    /// The plugin does not implement the construct yet, so kotlinc compiles source it rejects. False
+    /// when the source is invalid under the plugin's own rules, which kotlinc's plugin reports too.
+    pub refusal: bool,
 }
 
 /// Run each native plugin's [`IrPlugin::record_source_facts`] over a file at the handoff.
