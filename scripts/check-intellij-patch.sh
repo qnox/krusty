@@ -3,7 +3,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-revision=3f14adc599ef
+revision=1608e029bb2c308b5c5f81a91a3e3d55830eb804
 patch="$root/tools/krusty-bazel/intellij/0001-krusty-backend.patch"
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
@@ -29,3 +29,5 @@ grep -Fxq '        not plugins.stubs_phase and' "$compile"
 grep -Fxq '        not plugins.compile_phase.classpath' "$compile"
 grep -Fxq '            mnemonic = "KrustyCompile",' "$compile"
 grep -Fxq '            mnemonic = "JvmCompile",' "$compile"
+grep -Fxq '        args.add("--kotlinc-arg", "-Xkotlin-reference-version=" + KRUSTY_KOTLIN_VERSION)' "$compile"
+grep -Fxq '    kotlin_version = _KOTLIN_VERSION,' "$scratch/build/jvm-rules/MODULE.bazel"
