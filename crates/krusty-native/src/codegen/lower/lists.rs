@@ -285,8 +285,8 @@ fn list_iterator_symbol(
     })
 }
 
-/// The runtime function for one list or collection member, selected by the receiver's collection
-/// kind and the declaration's physical parameters.
+/// The runtime function for one list, collection or list-iterator member, selected by the
+/// receiver's collection kind and the declaration's physical parameters.
 ///
 /// `ArrayList.contains` is declared on `AbstractMutableList`. The receiver is still the runtime's
 /// list, so the operation is that list's, not a member the owner alone names.
@@ -296,6 +296,14 @@ pub(super) fn collection_runtime_member(
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
     physical: &[Ty],
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    // A list's iterator, held as a `ListIterator`: its steps back are the runtime's too.
+    if file.iteration_shape_of(ty)
+        == Some(super::super::super::intrinsics::CollectionShape::Iterator)
+    {
+        let owner = signature.owner.semantic_classifier()?;
+        let declaration = classifier_shapes::collection_declaration(file.classifiers, owner)?;
+        return list_iterator_symbol(declaration, signature);
+    }
     let list = is_list(file, ty);
     if !(list || is_collection(file, ty)) {
         return None;
@@ -784,15 +792,6 @@ impl BodyLowering<'_, '_, '_> {
         // receiver no class of the file can be. See [`FileLowering::implements_collection_of`].
         if self.file.implements_collection_of(ty) {
             return None;
-        }
-        if self.file.iteration_shape_of(ty)
-            == Some(super::super::super::intrinsics::CollectionShape::Iterator)
-        {
-            let owner = signature.owner.semantic_classifier()?;
-            let declaration =
-                classifier_shapes::collection_declaration(self.file.classifiers, owner)?;
-            let (symbol, carried, answer) = list_iterator_symbol(declaration, signature)?;
-            return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));
         }
         let (symbol, carried, answer) =
             collection_runtime_member(self.file, ty, signature, physical)?;
