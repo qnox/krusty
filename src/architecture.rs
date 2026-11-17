@@ -1074,6 +1074,9 @@ mod tests {
                 &path,
                 &[
                     "fir",
+                    // The IR-only expansion of an inline body at a use, which dependency-body
+                    // lowering shares; it reads and writes common IR only.
+                    "inline_expansion",
                     "ir",
                     "kt_string",
                     // Which enclosing callable is a lambda, so a nested one takes that lambda's
