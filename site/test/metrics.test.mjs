@@ -204,7 +204,8 @@ test("the newest corpus run is compared with the run before it", () => {
       project("gone"),
     ]),
     ...corpusRun(CORPUS_RUN, [
-      project("p", { built: 2, identical: 5, rows: rows([true, false, true, false]) }),
+      // m4 is a compilation the previous run did not list; krusty builds it.
+      project("p", { built: 3, compilations: 5, identical: 5, rows: rows([true, false, true, false, true]) }),
       project("same", { rows: rows([true, true, false, false]) }),
       project("fresh"),
     ]),
@@ -216,8 +217,8 @@ test("the newest corpus run is compared with the run before it", () => {
       projects: [
         { name: "fresh", status: "new", built: [null, 2], compilations: 4, identical: [null, 3], classes: 10, lost: [], gained: [] },
         { name: "gone", status: "not measured", built: [2, null], compilations: 4, identical: [3, null], classes: 10, lost: [], gained: [] },
-        { name: "p", status: "changed", built: [2, 2], compilations: 4, identical: [3, 5], classes: 10,
-          lost: [{ task: ":m1:compileKotlin", reason: "e: M1.kt:1:1 boom" }], gained: [":m2:compileKotlin"] },
+        { name: "p", status: "changed", built: [2, 3], compilations: 5, identical: [3, 5], classes: 10,
+          lost: [{ task: ":m1:compileKotlin", reason: "e: M1.kt:1:1 boom" }], gained: [":m2:compileKotlin", ":m4:compileKotlin"] },
       ],
     });
     // The page's data carries no per-compilation rows beyond the changes.

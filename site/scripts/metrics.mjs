@@ -265,7 +265,8 @@ const missReason = (row) => row.error ?? (row.fallback ? `left to kotlinc: ${row
 /**
  * What changed from one corpus run to the next: every project measured by either run whose
  * compilations built, identical classes or built compilations changed, with the compilations
- * krusty no longer builds (and why) and the ones it now builds. A project only one run measured is
+ * krusty no longer builds (and why) and the ones it now builds, also a compilation the previous run
+ * did not list. A project only one run measured is
  * `new` or `not measured`.
  */
 export function corpusChanges(previous, latest) {
@@ -279,7 +280,7 @@ export function corpusChanges(previous, latest) {
     const was = new Map((q?.rows ?? []).filter((r) => typeof r.task === "string").map((r) => [r.task, r.built]));
     const rows = (p?.rows ?? []).filter((r) => typeof r.task === "string");
     const lost = q && p ? rows.filter((r) => !r.built && was.get(r.task)).map((r) => ({ task: r.task, reason: missReason(r) })) : [];
-    const gained = q && p ? rows.filter((r) => r.built && was.has(r.task) && !was.get(r.task)).map((r) => r.task) : [];
+    const gained = q && p ? rows.filter((r) => r.built && !was.get(r.task)).map((r) => r.task) : [];
     const same = q && p && q.built === p.built && q.identical === p.identical && q.compilations === p.compilations && q.classes === p.classes;
     if (same && lost.length === 0 && gained.length === 0) continue;
     const latestOf = p ?? q;
