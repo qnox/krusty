@@ -919,7 +919,6 @@ delegatedProperty/delegateToAnother/kt79979_memberExtension.kt
 delegatedProperty/delegateToAnother/memberExtensionWithBoundReceiver.kt
 delegatedProperty/delegateToAnother/memberExtensionWithBoundReceiverSameType.kt
 delegatedProperty/delegatedOverride.kt
-delegatedProperty/functionRefDelefate.kt
 delegatedProperty/genericDelegateUncheckedCast1.kt
 delegatedProperty/kt37204.kt
 delegatedProperty/kt45431.kt
@@ -944,7 +943,6 @@ delegatedProperty/provideDelegate/genericDelegateWithNoAdditionalInfo.kt
 delegatedProperty/provideDelegate/genericProvideDelegateOnNumberLiteral.kt
 delegatedProperty/provideDelegate/inClass.kt
 delegatedProperty/provideDelegate/inlineProvideDelegate.kt
-delegatedProperty/provideDelegate/kt18902.kt
 delegatedProperty/provideDelegate/local.kt
 delegatedProperty/provideDelegate/localCaptured.kt
 delegatedProperty/provideDelegate/localDifferentReceivers.kt
