@@ -68,6 +68,7 @@ KT_MARKER_TYPE(kt_type_comparable, "kotlin.", "Comparable")
    `kt_type_string` would have been sound while a string was the only text this runtime made, and
    stopped being sound the moment there was a builder. */
 KT_MARKER_TYPE(kt_type_char_sequence, "kotlin.", "CharSequence")
+KT_MARKER_TYPE(kt_type_appendable, "kotlin.text.", "Appendable")
 
 /* `kotlin.Function` and each arity of it. A function value is an object of a type of its own —
    the generator emits one per lambda and per callable reference — so an `is` against a function
@@ -154,6 +155,8 @@ static const KType *const kt_number_interfaces[] = {&kt_type_number, &kt_type_co
 static const KType *const kt_comparable_interfaces[] = {&kt_type_comparable};
 static const KType *const kt_text_interfaces[] = {&kt_type_comparable, &kt_type_char_sequence};
 static const KType *const kt_char_sequence_interfaces[] = {&kt_type_char_sequence};
+static const KType *const kt_string_builder_interfaces[] = {&kt_type_char_sequence,
+                                                            &kt_type_appendable};
 
 #define KT_TYPE_WITH(identifier, package, simple, size, count, offsets, ifaces)                    \
     const KType identifier = {KT_NAMED(package, simple),                                           \
@@ -1242,8 +1245,8 @@ const KType kt_type_string_builder = {KT_NAMED("kotlin.text.", "StringBuilder"),
                                       .super = &kt_type_any,
                                       .vtable = kt_string_builder_vtable,
                                       .vtable_length = 3,
-                                      .interfaces = kt_char_sequence_interfaces,
-                                      .interface_count = 1};
+                                      .interfaces = kt_string_builder_interfaces,
+                                      .interface_count = 2};
 
 static const char *kt_text_of(KRef self, kt_int *byte_length) {
     /* A `CharSequence` the PROGRAM implements holds no bytes to point at: its text exists only as
