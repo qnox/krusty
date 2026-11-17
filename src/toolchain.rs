@@ -507,6 +507,28 @@ pub fn jvm_classpath_jars_for(src: &str) -> Vec<PathBuf> {
     jars
 }
 
+fn plugin_runtime_jars() -> &'static std::sync::Mutex<std::collections::BTreeSet<PathBuf>> {
+    static JARS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    JARS.get_or_init(Default::default)
+}
+
+fn note_plugin_runtime_jar(jar: &Path) {
+    plugin_runtime_jars()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(jar.to_path_buf());
+}
+
+/// Whether `jar` is a plugin corpus's runtime jar that [`classpath_jars_for`] handed out. Such a
+/// jar links against the corpus's own stubs, so a runner must load both through one loader.
+pub fn is_plugin_runtime_jar(jar: &Path) -> bool {
+    plugin_runtime_jars()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(jar)
+}
+
 /// The set of `-classpath` jars a box test needs, formed from its directives — mirroring kotlinc's
 /// `JvmEnvironmentConfigurator`: stdlib + kotlin-test + annotations are always present (kotlinc only
 /// drops stdlib under `-no-stdlib`); `WITH_REFLECT` adds kotlin-reflect; `STDLIB_JDK8` adds
@@ -572,7 +594,11 @@ fn classpath_jars_uncached(src: &str) -> Vec<PathBuf> {
         }
     }
     for corpus in crate::conformance::plugin_corpus::enabled_by(src) {
-        jars.extend(corpus.runtime_jars().into_iter().flatten());
+        let runtime = corpus.runtime_jars().into_iter().flatten();
+        for jar in runtime {
+            note_plugin_runtime_jar(&jar);
+            jars.push(jar);
+        }
     }
     if extra.coroutines {
         // Coroutines aren't in the dist; fetch the runtime jar from Maven.
