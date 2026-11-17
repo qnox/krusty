@@ -29,6 +29,9 @@ pub struct CallSite<'a> {
     pub caller: Option<crate::ir::IrEnclosure>,
     pub caller_is_default: bool,
     pub caller_source_name: &'a str,
+    /// The container whose code the call is: an anonymous object the call regenerates is named
+    /// as one the caller declares itself. `None` when the caller's container is unknown.
+    pub caller_site: Option<crate::ir::IrSiteClassContainer>,
     pub inline_callee: crate::ir::IrInlineCallee,
     pub inline_callee_source_name: &'a str,
     /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
@@ -393,6 +396,10 @@ fn specialized_class(
     let mut copy = ir.classes[source as usize].clone();
     copy.fq_name = placeholder;
     copy.is_source_declared = false;
+    copy.site_name = expansion
+        .site
+        .caller_site
+        .map(crate::ir::IrSiteClassName::anonymous_object);
     copy.enclosure = expansion.site.caller.or(copy.enclosure);
     copy.methods = cloned_methods.clone();
     for supertype in &mut copy.supertypes {
@@ -457,6 +464,7 @@ fn specialized_class(
         .zip(cloned_methods)
         .collect::<Vec<_>>();
     copy_override_edges(ir, source_name, placeholder, &methods)?;
+    copy_super_constructor_selections(ir, source_name, placeholder);
     remap_owned_class(ir, &owned, source, class_id, internal, placeholder);
     // Declaration-cloned expressions keep the inline function's source identity, so their lines
     // stay on the copy's primary file. The caller's lambda, spliced later, has no such frame and
@@ -783,6 +791,36 @@ fn copy_capture_edges(ir: &mut crate::ir::IrFile, source: ClassId, target: Class
     }
 }
 
+/// The copy delegates to the superclass constructor the class it copies selected, with the same
+/// omitted arguments: its `super(…)` call is the copied class's own.
+fn copy_super_constructor_selections(
+    ir: &mut crate::ir::IrFile,
+    source_name: TypeName,
+    target_name: TypeName,
+) {
+    if let Some(target) = ir.external_super_constructors.get(&source_name).cloned() {
+        ir.external_super_constructors.insert(target_name, target);
+    }
+    let secondary = ir
+        .external_secondary_super_constructors
+        .iter()
+        .filter(|((class, _), _)| *class == source_name)
+        .map(|((_, ordinal), target)| (*ordinal, target.clone()))
+        .collect::<Vec<_>>();
+    for (ordinal, target) in secondary {
+        ir.external_secondary_super_constructors
+            .insert((target_name, ordinal), target);
+    }
+    if let Some(defaults) = ir
+        .super_constructor_default_arguments
+        .get(&source_name)
+        .cloned()
+    {
+        ir.super_constructor_default_arguments
+            .insert(target_name, defaults);
+    }
+}
+
 fn copy_override_edges(
     ir: &mut crate::ir::IrFile,
     source_name: TypeName,
@@ -1013,6 +1051,8 @@ fn publish_one_copy(
         caller: spec.caller,
         caller_is_default: spec.caller_is_default,
         caller_source_name: &spec.caller_source_name,
+        // An object regenerated inside this copy is declared by the copy's own code.
+        caller_site: Some(crate::ir::IrSiteClassContainer::Class(copy_id)),
         inline_callee: spec.inline_callee,
         inline_callee_source_name: &spec.inline_callee_source_name,
         crossinline_operands: &spec.crossinline_operands,

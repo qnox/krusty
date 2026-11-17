@@ -370,7 +370,9 @@ pub fn lower_file(
         unwalkable_collections: krusty::fx_hash::HashSet::default(),
         walkable_classes: krusty::fx_hash::HashMap::default(),
         declares_its_own_comparable: declares_its_own_comparable(ir),
-        implemented_dependencies: implemented_dependencies(ir),
+        implemented_dependencies: implemented_dependencies(ir, |owner| {
+            laid_out.get(owner).is_some()
+        }),
         module_name,
         unit_kind,
         dependency_signatures,
@@ -479,6 +481,14 @@ fn extended_elsewhere(
     for (id, class) in ir.classes.iter().enumerate() {
         if class.is_interface || ir.local_class_name_provenance.contains_key(&(id as u32)) {
             continue;
+        }
+        // A local class of a later file, which no header names, may extend any class open to
+        // extension, so every such class is laid out for one.
+        if (class.is_open || class.is_abstract)
+            && !class.is_local_class
+            && !class.is_anonymous_object
+        {
+            extended.insert(id as krusty::ir::ClassId);
         }
         if support && !classes.is_dependency_class(class.fq_name) {
             continue;
@@ -2127,6 +2137,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 self.throwable_field_read(symbol, *receiver)
             }
+            // A getter the provider realizes as an exact operation reads as its call does.
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    result,
+                    ..
+                } = &**checked_op
+                    && let Some(getter) = self.operation_getter(*target) =>
+            {
+                self.realized_operation_call(id, getter, Some(*receiver), &[], None, *result)
+                    .expect("the guard selected a getter with an exact operation")
+            }
             // `array.size` read through its getter, as an expanded library body reads it.
             IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::ExternalPropertyRead {
@@ -2362,6 +2385,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             {
                 self.statement(id)?;
                 Ok(None)
+            }
+            IrExpr::Checked(ref checked_op)
+                if let Some(read) = self.dependency_interface_getter(checked_op) =>
+            {
+                read
             }
             other => Err(self.describe_declined(&other).into()),
         }

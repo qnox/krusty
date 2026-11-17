@@ -1135,6 +1135,9 @@ pub(super) fn delegated_call_with_dispatch(
                 dispatch_receiver: Some(dispatch_receiver),
                 args: arguments,
             });
+            // The convention call is checked at the selected call-site result, as an ordinary
+            // checked call is.
+            ir.set_logical_type_if_absent(expression, result.get());
             if let Some(declared_receiver) = declared_receiver {
                 ir.ext_call_source_receiver
                     .insert(expression, declared_receiver.get());

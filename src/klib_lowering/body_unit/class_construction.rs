@@ -22,6 +22,38 @@ impl<'u, 's> Linker<'u, 's> {
         else {
             return self.materialize_primary_delegation(ir, identity, selected);
         };
+        self.materialize_plan(ir, identity, plan)
+    }
+
+    /// Materialize the object `class` with its instance, created by its private primary
+    /// constructor, which `identity` names. The unit publishes the object's instance as the
+    /// object's own file would.
+    pub(super) fn materialize_object(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        class: &'s crate::libraries::KlibBodyClassContract,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        if self.classes.contains_key(identity) {
+            return Ok(());
+        }
+        let Some(plan) = super::super::class_initialization::object_plan(
+            class,
+            self.sources.bodies,
+            self.sources.callees,
+        )?
+        else {
+            return Ok(());
+        };
+        self.materialize_plan(ir, identity, plan)
+    }
+
+    fn materialize_plan(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        plan: super::super::class_initialization::ClassInitialization<'s, 's>,
+    ) -> Result<(), KlibBodyDeclineReason> {
         let classifier = plan.storage.declaration.classifier;
         // Each secondary constructor of a class without a primary one initializes the class this
         // unit already materialized for another of them.
@@ -156,6 +188,12 @@ impl<'u, 's> Linker<'u, 's> {
                 self.declare_dispatched(ir, member.clone(), plan.header.arena, function)?;
             }
         }
+        let storage_accessors = if existing.is_none() {
+            plan.storage_accessors.clone()
+        } else {
+            Vec::new()
+        };
+        let (contract, arena) = (plan.header.contract, plan.header.arena);
         // The initialization reads the class's private members as its members do.
         self.pending.push_back(PendingBody {
             identity: identity.clone(),
@@ -169,6 +207,45 @@ impl<'u, 's> Linker<'u, 's> {
             local_body: None,
             static_initialization: None,
         });
+        for function in storage_accessors {
+            self.declare_storage_accessor(ir, &contract.module, arena, function)?;
+        }
+        Ok(())
+    }
+
+    /// Declare a default accessor of storage the class being materialized owns, as a call of it
+    /// would: a later unit calls its export rather than materializing the class again.
+    fn declare_storage_accessor(
+        &mut self,
+        ir: &mut IrFile,
+        module: &str,
+        arena: &'s KlibIrArena,
+        function: &'s KlibIrFunction,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        let signature = crate::klib_libraries::member_signature(&function.base.symbol.signature)
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "a storage accessor is not a member".to_owned(),
+                )
+            })?;
+        let KlibCalleeOrigin::Exact(identity) =
+            self.sources.bodies.linked_origin(module, &signature)
+        else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a storage accessor has no exact producer".to_owned(),
+            ));
+        };
+        // An accessor the program's closure never selected has no caller to export it to.
+        let selected = match self.sources.callees.get(&identity) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            None => return Ok(()),
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a storage accessor has no unique provider declaration".to_owned(),
+                ))
+            }
+        };
+        self.declare(ir, &identity, Some(selected), arena, function)?;
         Ok(())
     }
 
@@ -312,6 +389,7 @@ impl<'u, 's> Linker<'u, 's> {
         let classifier = plan.storage.declaration.classifier;
         let mut class = IrClass::synthetic(classifier);
         class.is_source_declared = true;
+        class.is_object = plan.header.contract.kind == crate::libraries::TypeKind::Object;
         class.supertypes.clone_from(&plan.supertypes);
         set_materialized_modality(&mut class, plan.header.contract.modality);
         if let Some(call) = &plan.superclass {
@@ -446,15 +524,109 @@ impl<'u, 's> Linker<'u, 's> {
             0,
         )];
         class.ctor_param_count = 1;
+        // A box's construction stores its value, which the value was validated as when it was
+        // made: the class runs no initialization of its own.
+        class.ctor_args = vec![IrCtorArg {
+            name: Some(class.fields[0].name.clone()),
+            context_kind: crate::types::ContextParameterKind::None,
+            ty: stored.ty,
+            declared_ty: Some(stored.ty),
+            is_field: true,
+            field_index: Some(0),
+            has_default: false,
+            is_vararg: false,
+            type_param: None,
+            check: None,
+            anonymous_super_forward: None,
+            capture: None,
+            provenance: IrCtorParameterProvenance::Value,
+            capture_identity: None,
+        }];
+        let self_type = super::super::klib_types::semantic_type(
+            header.arena,
+            &header.types,
+            header
+                .class
+                .this_receiver
+                .as_ref()
+                .ok_or_else(|| {
+                    KlibBodyDeclineReason::SignatureMismatch(
+                        "a value class header has no receiver".to_owned(),
+                    )
+                })?
+                .ty,
+        )?;
         let class = ir.add_class(class);
+        ir.record_declared_class_self_type(classifier, self_type);
         self.classes.insert(identity, class);
-        Ok(super::MemberClass {
+        let member = super::MemberClass {
             class,
             declaring: &header.class.base.symbol,
             fields: vec![field],
             properties: super::super::class_storage::backed_properties(&header.class.members),
             contract,
-        })
+        };
+        // A boxed instance dispatches to the class's overrides, as an ordinary class's does: each
+        // one the program's closure selected, with every declaration it overrides. An override
+        // left out keeps its slot unrealized, which a call reaching it declines on.
+        for function in value_class_overrides(&header) {
+            if self.selects_override(&contract.module, function) {
+                self.declare_dispatched(ir, member.clone(), header.arena, function)?;
+            }
+        }
+        // The unit materializing a value class owns its box construction, exported under the
+        // primary constructor's identity: a later unit, or a body common preparation adds to this
+        // one, constructs a box through that export instead of materializing the class again.
+        if let Some(primary) = &contract.primary_constructor {
+            let constructor = KlibDependencyCallable {
+                module: contract.module.clone(),
+                declaration: KlibDeclarationSignature::Public(primary.clone()),
+            };
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                self.functions.entry(constructor)
+            {
+                let entry = ir
+                    .add_construction_entry(class, None)
+                    .map(|entry| entry.function)
+                    .ok_or(KlibBodyDeclineReason::SignatureMismatch(
+                        "a value class box without its checked self type".to_owned(),
+                    ))?;
+                slot.insert(entry);
+            }
+        }
+        Ok(member)
+    }
+
+    /// The entry constructing a box of the value class whose primary constructor `selected` is.
+    /// A box runs no initialization: the class this materializes stores the constructor's value,
+    /// and the entry is exported under the constructor's identity as a function of the unit.
+    pub(super) fn materialize_value_constructor(
+        &mut self,
+        ir: &mut IrFile,
+        selected: KlibBodyCallable<'s>,
+    ) -> Result<FunId, KlibBodyDeclineReason> {
+        let member = self.materialize_member_class(ir, selected)?;
+        let primary = member
+            .contract
+            .primary_constructor
+            .as_ref()
+            .map(|primary| KlibDeclarationSignature::Public(primary.clone()));
+        if primary.as_ref() != Some(&selected.identity().declaration) {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a value class construction other than through its primary constructor".to_owned(),
+            ));
+        }
+        if let Some(&entry) = self.functions.get(selected.identity()) {
+            return Ok(entry);
+        }
+        let entry = ir
+            .add_construction_entry(member.class, None)
+            .map(|entry| entry.function)
+            .ok_or(KlibBodyDeclineReason::SignatureMismatch(
+                "a value class box without its checked self type".to_owned(),
+            ))?;
+        self.functions.insert(selected.identity().clone(), entry);
+        Ok(entry)
     }
 
     /// The class a member of the final ordinary class `header` declares belongs to: the class
@@ -466,6 +638,54 @@ impl<'u, 's> Linker<'u, 's> {
         header: &super::super::class_headers::ClassMemberHeader<'s, 's>,
     ) -> Result<super::MemberClass<'s>, KlibBodyDeclineReason> {
         let contract = header.contract;
+        let class = if contract.kind == crate::libraries::TypeKind::Object {
+            // An object's instance is the one its own private constructor created.
+            let primary = contract.primary_constructor.as_ref().ok_or(
+                KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "an object member without a primary constructor",
+                ),
+            )?;
+            let identity = KlibDependencyCallable {
+                module: contract.module.clone(),
+                declaration: KlibDeclarationSignature::Public(primary.clone()),
+            };
+            self.materialize_object(ir, &identity, contract)?;
+            *self
+                .classes
+                .get(&identity)
+                .ok_or(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "a member of an object without ordinary initialization",
+                ))?
+        } else {
+            self.materialize_initializing_constructors(ir, contract)?
+        };
+        let fields = header
+            .class
+            .members
+            .iter()
+            .filter_map(super::super::class_storage::member_field)
+            .collect::<Vec<_>>();
+        if fields.len() != ir.classes[class as usize].fields.len() {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a class member's declared fields disagree with its materialized class".to_owned(),
+            ));
+        }
+        Ok(super::MemberClass {
+            class,
+            declaring: &header.class.base.symbol,
+            fields,
+            properties: super::super::class_storage::backed_properties(&header.class.members),
+            contract,
+        })
+    }
+
+    /// The class every public initializing constructor of the ordinary class `contract`
+    /// materializes.
+    fn materialize_initializing_constructors(
+        &mut self,
+        ir: &mut IrFile,
+        contract: &'s crate::libraries::KlibBodyClassContract,
+    ) -> Result<crate::ir::ClassId, KlibBodyDeclineReason> {
         let constructors = super::super::class_initialization::initializing_constructors(
             contract,
             self.sources.bodies,
@@ -498,25 +718,39 @@ impl<'u, 's> Linker<'u, 's> {
             }
             class = Some(materialized);
         }
-        let class = class.expect("a class has an initializing constructor");
-        let fields = header
-            .class
-            .members
-            .iter()
-            .filter_map(super::super::class_storage::member_field)
-            .collect::<Vec<_>>();
-        if fields.len() != ir.classes[class as usize].fields.len() {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "a class member's declared fields disagree with its materialized class".to_owned(),
-            ));
-        }
-        Ok(super::MemberClass {
-            class,
-            declaring: &header.class.base.symbol,
-            fields,
-            properties: super::super::class_storage::backed_properties(&header.class.members),
-            contract,
-        })
+        Ok(class.expect("a class has an initializing constructor"))
+    }
+
+    /// Whether the program's closure selected the override `function` of a class of `module` and
+    /// every declaration it overrides, each by one exact provider declaration.
+    fn selects_override(&self, module: &str, function: &KlibIrFunction) -> bool {
+        let selected = |identity: &KlibDependencyCallable| {
+            matches!(
+                self.sources.callees.get(identity),
+                Some(KlibCalleeFact::Selected(_))
+            ) && self.sources.callees.reference_target(identity).is_some()
+        };
+        let Some(signature) =
+            crate::klib_libraries::member_signature(&function.base.symbol.signature)
+        else {
+            return false;
+        };
+        let KlibCalleeOrigin::Exact(identity) =
+            self.sources.bodies.linked_origin(module, &signature)
+        else {
+            return false;
+        };
+        selected(&identity)
+            && function.overridden.iter().all(|symbol| {
+                crate::klib_libraries::member_signature(&symbol.signature)
+                    .and_then(|signature| {
+                        self.sources
+                            .bodies
+                            .overridden_declarations(module, &signature)
+                            .ok()
+                    })
+                    .is_some_and(|declarations| declarations.iter().all(selected))
+            })
     }
 
     /// Declare `function`, a member dispatch on an instance of the materialized class `member`
@@ -660,6 +894,33 @@ impl<'u, 's> Linker<'u, 's> {
         }
         Ok(())
     }
+}
+
+/// The members of the value class `header` with bodies that override another declaration: the
+/// ones dispatch reaches on a boxed instance of the class.
+fn value_class_overrides<'s>(
+    header: &super::super::class_headers::ClassMemberHeader<'s, 's>,
+) -> Vec<&'s KlibIrFunction> {
+    let arena = header.arena;
+    header
+        .class
+        .members
+        .iter()
+        .flat_map(|member| match member {
+            crate::metadata::klib_ir::tree::KlibIrMember::Function(function) => vec![*function],
+            crate::metadata::klib_ir::tree::KlibIrMember::Property(property) => {
+                [property.getter, property.setter]
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            }
+            _ => Vec::new(),
+        })
+        .map(|function| arena.function(function))
+        .filter(|function| {
+            !function.constructor && function.body.is_some() && !function.overridden.is_empty()
+        })
+        .collect()
 }
 
 /// The constructor a secondary constructor of a class without a primary one delegates to: its

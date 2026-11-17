@@ -189,4 +189,16 @@ impl InheritedFacts for IrModuleConstructions {
         } = self;
         selected.inherit(source, target);
     }
+
+    fn relocate(&mut self, source: super::ExprId, target: super::ExprId) {
+        let Self {
+            selected,
+            records: _,
+        } = self;
+        selected.relocate(source, target);
+    }
+
+    fn truncate_from(&mut self, first: super::ExprId) {
+        self.selected.truncate_from(first);
+    }
 }

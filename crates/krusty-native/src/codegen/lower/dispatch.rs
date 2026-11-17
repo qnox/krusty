@@ -273,6 +273,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 owner.render().replace('/', ".")
             )
         })?;
+        // A member the class's table does not dispatch is a direct call, as in a call through the
+        // class itself.
+        if self.file.model.is_direct(function)
+            || !self.file.ir.classes[class as usize]
+                .methods
+                .contains(&function)
+        {
+            return self.direct_method_call(function, receiver, args);
+        }
         let key = super::super::super::classes::function_key(self.file.ir, class, function);
         let Some(slot) = self.file.model.slot(class, &key) else {
             return Err(declined!(

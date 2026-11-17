@@ -112,6 +112,13 @@ impl Split<'_> {
                 init: Some(init), ..
             } => init,
             IrExpr::SetValue { value, .. } => value,
+            // A captured `var`'s write: its holder is an already-evaluated lexical capture, which
+            // reads the same cell before and after the suspension.
+            IrExpr::RefSet { holder, value, .. }
+                if matches!(ir.exprs[holder as usize], IrExpr::GetValue(_)) =>
+            {
+                value
+            }
             IrExpr::Return(Some(value)) => value,
             _ => stmt,
         };
@@ -134,9 +141,17 @@ impl Split<'_> {
             return Ok(1);
         }
         match &ir.exprs[stmt as usize] {
-            IrExpr::Block { stmts, value: None } => stmts
-                .iter()
-                .try_fold(0, |total, &child| Ok(total + self.count(ir, child)?)),
+            IrExpr::Block { stmts, value } => {
+                let mut total = stmts.iter().try_fold(0, |total, &child| {
+                    Ok::<u32, ReentryDecline>(total + self.count(ir, child)?)
+                })?;
+                if let Some(value) = value {
+                    // This block is itself in statement position. Its terminal expression still
+                    // runs, but the surrounding statement discards the block's value.
+                    total += self.count(ir, *value)?;
+                }
+                Ok(total)
+            }
             IrExpr::When { branches } => {
                 let mut total = 0;
                 for &(condition, body) in branches {
@@ -155,7 +170,10 @@ impl Split<'_> {
                 }
                 self.count(ir, *body)
             }
-            _ => Err(ReentryDecline::UnsupportedSuspension),
+            other => {
+                crate::trace_compiler!("suspend", "a suspension in statement {stmt}: {other:?}");
+                Err(ReentryDecline::UnsupportedSuspension)
+            }
         }
     }
 
@@ -190,7 +208,12 @@ impl Split<'_> {
             return self.suspension(ir, leaf);
         }
         match ir.exprs[stmt as usize].clone() {
-            IrExpr::Block { stmts, value: None } => {
+            IrExpr::Block { mut stmts, value } => {
+                // The block is being rewritten as a statement: evaluate its terminal value in
+                // order, then discard it just as the source statement context does.
+                if let Some(value) = value {
+                    stmts.push(value);
+                }
                 let stmts = self.list(ir, &stmts)?;
                 Ok(ir.add_expr(IrExpr::Block { stmts, value: None }))
             }

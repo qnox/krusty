@@ -109,8 +109,19 @@ impl Body<'_> {
         value: u32,
     ) -> Result<(), Unsupported> {
         let structure = self.object(receiver, class)?;
-        let ty = self.ir.classes[class as usize].fields[index as usize].ty;
-        self.value(value, ty)?;
+        // A shared-capture field stores the holder, never the element it holds.
+        match self
+            .ir
+            .shared_class_capture_fields
+            .get(&(class, index))
+            .copied()
+        {
+            Some(element) => self.shared_field_value(value, element)?,
+            None => {
+                let ty = self.ir.classes[class as usize].fields[index as usize].ty;
+                self.value(value, ty)?;
+            }
+        }
         let field = self.file_classes()?.field(class, index);
         self.code.struct_set(structure, field);
         Ok(())
@@ -300,6 +311,11 @@ impl Body<'_> {
         &mut self,
         classifier: krusty::types::TypeName,
     ) -> Result<(), Unsupported> {
+        if classifier == krusty::types::wk::unit() {
+            let instance = self.runtime.unit_object(self.module);
+            self.code.global_get(instance);
+            return Ok(());
+        }
         if self.ir.class_id_by_name(classifier).is_none() {
             if let Some(entry) =
                 self.calls

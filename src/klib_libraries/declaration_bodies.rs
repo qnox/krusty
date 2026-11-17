@@ -590,6 +590,12 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_class(signature)
     }
 
+    /// The package segments of the serialized file `file` of `module`.
+    pub(crate) fn module_file_package(&self, module: &str, file: u32) -> Option<&[String]> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].file_package(file)
+    }
+
     /// The file-local function `module` itself serializes under `signature`.
     pub(crate) fn module_local_function<'a>(
         &'a self,
@@ -895,6 +901,11 @@ impl KlibDeclarationBodies {
         found.unwrap_or(LocatedMember::Missing)
     }
 
+    /// The class that directly declares the exact linked member `identity`, function or accessor.
+    pub(crate) fn member_owner(&self, identity: &KlibDependencyCallable) -> LocatedMember<'_> {
+        self.function_owner(&identity.module, &ir_signature(&identity.declaration))
+    }
+
     /// Whether the exact serialized declaration intentionally carries an executable body.
     pub(crate) fn function_has_body(&self, identity: &KlibDependencyCallable) -> Option<bool> {
         self.function(identity)
@@ -1010,37 +1021,7 @@ impl KlibDeclarationBodies {
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibDependencyCallable> {
-        let Some((trees, arena, function)) = self.function_with_trees(identity) else {
-            return Vec::new();
-        };
-        let mut symbols = arena.emitted_callable_symbols(function, forms);
-        // A top-level function first runs its file's initialization, which evaluates the
-        // initializers of that file's properties that run code. A constant calls nothing.
-        if let Some(file) = self.top_level_file(identity) {
-            for initializer in self.module_file_initializers(&identity.module, file, false) {
-                symbols.extend(
-                    initializer
-                        .arena
-                        .emitted_callable_symbols_from(vec![initializer.initializer], forms),
-                );
-            }
-        }
-        // A file-local class the body constructs, an object literal's among them, is
-        // materialized with the body, every member included, since dispatch can run any of them.
-        // A private class of the same file is its own declaration tree, so its members are read
-        // in the arena that serializes the class.
-        let mut classes = crate::fx_hash::HashSet::default();
-        let mut next = 0;
-        while let Some(symbol) = symbols.get(next).copied() {
-            next += 1;
-            if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
-                if classes.insert(&class.base.symbol) {
-                    let mut roots = class_arena.class_member_roots(class);
-                    roots.extend(class_arena.class_superclass_delegations(class));
-                    symbols.extend(class_arena.emitted_callable_symbols_from(roots, forms));
-                }
-            }
-        }
+        let (symbols, _) = self.emitted_body_symbols(identity, forms);
         symbols
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
@@ -1051,6 +1032,66 @@ impl KlibDeclarationBodies {
                 },
             )
             .collect()
+    }
+
+    /// The public objects whose values the emitted body of `identity` reads, through the
+    /// closures `forms` lowers with it and the members of the file-local classes it constructs.
+    pub(crate) fn emitted_body_objects(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<KlibPublicIdSignature> {
+        let (_, objects) = self.emitted_body_symbols(identity, forms);
+        let mut seen = crate::fx_hash::HashSet::default();
+        objects
+            .into_iter()
+            .filter_map(|symbol| match &symbol.signature {
+                KlibIrSignature::Public(signature) => Some(signature.clone()),
+                _ => None,
+            })
+            .filter(|signature| seen.insert(signature.clone()))
+            .collect()
+    }
+
+    /// Callable and object admission must cover exactly the same emitted roots: the selected
+    /// body, its file initialization, and the local classes those roots construct.
+    fn emitted_body_symbols<'a>(
+        &'a self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> (Vec<&'a KlibIrSymbol>, Vec<&'a KlibIrSymbol>) {
+        let Some((trees, arena, function)) = self.function_with_trees(identity) else {
+            return (Vec::new(), Vec::new());
+        };
+        let mut symbols = arena.emitted_callable_symbols(function, forms);
+        let mut objects = arena.emitted_object_symbols(function, forms);
+        if let Some(file) = self.top_level_file(identity) {
+            for initializer in self.module_file_initializers(&identity.module, file, false) {
+                let roots = vec![initializer.initializer];
+                symbols.extend(
+                    initializer
+                        .arena
+                        .emitted_callable_symbols_from(roots.clone(), forms),
+                );
+                objects.extend(initializer.arena.emitted_object_symbols_from(roots, forms));
+            }
+        }
+        // A constructed local class is materialized with every member and its superclass
+        // delegation, in the arena that serializes that class.
+        let mut classes = crate::fx_hash::HashSet::default();
+        let mut next = 0;
+        while let Some(symbol) = symbols.get(next).copied() {
+            next += 1;
+            if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
+                if classes.insert(&class.base.symbol) {
+                    let mut roots = class_arena.class_member_roots(class);
+                    roots.extend(class_arena.class_superclass_delegations(class));
+                    symbols.extend(class_arena.emitted_callable_symbols_from(roots.clone(), forms));
+                    objects.extend(class_arena.emitted_object_symbols_from(roots, forms));
+                }
+            }
+        }
+        (symbols, objects)
     }
 
     /// Declaration facts of the class whose exact reached constructor is `identity`. Field and

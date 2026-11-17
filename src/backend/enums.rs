@@ -119,8 +119,7 @@ pub fn publish_constants(ir: &mut IrFile, exports: &mut super::DependencyExportS
                 name: name.clone(),
             });
             ir.set_logical_type(value, result);
-            let entry = super::construction_entries::entry(
-                ir,
+            let entry = ir.add_generated_entry(
                 &format!("<enum constant {name}>$get"),
                 Vec::new(),
                 result,

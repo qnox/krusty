@@ -226,8 +226,10 @@ fn delegate_parameter(
         }).count() == 1
 }
 
-/// Every shared-capture field of `id` is one capture parameter of its constructor prefix,
-/// stored at that field, with the field's declared type equal to the recorded element.
+/// Every shared-capture field of `id` holds the recorded element and is one capture parameter of
+/// its constructor prefix, stored at that field. A class that is not a closure (a state machine's
+/// frame) may instead fill such a field itself, or store into it the holder one of its ordinary
+/// constructor parameters passes.
 fn shared_fields_are_captures(ir: &IrFile, id: ClassId) -> bool {
     let class = &ir.classes[id as usize];
     let prefix = class.constructor_prefix_count as usize;
@@ -235,16 +237,40 @@ fn shared_fields_are_captures(ir: &IrFile, id: ClassId) -> bool {
         .iter()
         .filter(|((owner, _), _)| *owner == id)
         .all(|((_, field), element)| {
-            class.ctor_args.iter().take(prefix).any(|argument| {
-                argument.field_index == Some(*field)
-                    && argument.provenance == IrCtorParameterProvenance::Capture
-                    && argument.is_field
-                    && argument.ty == *element
-                    && class
-                        .fields
-                        .get(*field as usize)
-                        .is_some_and(|storage| storage.ty == *element && storage.is_final())
-            })
+            let mut stores = class
+                .ctor_args
+                .iter()
+                .filter(|argument| argument.field_index == Some(*field));
+            let frame_field = prefix == 0
+                && class
+                    .fields
+                    .get(*field as usize)
+                    .is_some_and(|storage| storage.ty == *element)
+                && !class
+                    .pre_super_param_fields
+                    .iter()
+                    .any(|(_, target)| target == field)
+                && match (stores.next(), stores.next()) {
+                    (None, _) => true,
+                    (Some(argument), None) => {
+                        argument.provenance == IrCtorParameterProvenance::Value
+                            && argument.is_field
+                            && argument.capture.is_none()
+                            && argument.ty == *element
+                    }
+                    (Some(_), Some(_)) => false,
+                };
+            frame_field
+                || class.ctor_args.iter().take(prefix).any(|argument| {
+                    argument.field_index == Some(*field)
+                        && argument.provenance == IrCtorParameterProvenance::Capture
+                        && argument.is_field
+                        && argument.ty == *element
+                        && class
+                            .fields
+                            .get(*field as usize)
+                            .is_some_and(|storage| storage.ty == *element && storage.is_final())
+                })
         })
 }
 
