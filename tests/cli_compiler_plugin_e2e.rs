@@ -554,6 +554,13 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          type in `keep` yet",
     );
     assert_compose_rejects(
+        "compose-ten-argument-function-type",
+        "fun keep(content: @Composable (Int, Int, Int, Int, Int, Int, Int, Int, Int, Int) -> Unit) {}\n",
+        &[],
+        "1:1: error: krusty's Compose compiler plugin does not support the composable function \
+         type in `keep` yet",
+    );
+    assert_compose_rejects(
         "compose-suspend-function-type",
         "fun keep(content: @Composable suspend () -> Unit) {}\n",
         &[],

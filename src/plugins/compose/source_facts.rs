@@ -1024,6 +1024,7 @@ fn composable_lambda_parameter(
                 ty.kind(),
                 TyKind::Fun(signature)
                     if matches!(signature.ret.kind(), TyKind::Unit)
+                        && signature.params.len() < SLOTS_PER_INT
                         && signature.context_count == 0
                         && !signature.suspend
             )
@@ -1474,8 +1475,9 @@ fn push_body_children(ir: &IrFile, expression: ExprId, pending: &mut Vec<ExprId>
 }
 
 /// The values the `invoke` of parameter `index` of `function` takes before the composer, the
-/// receiver counted, when it is declared a composable function type returning `Unit`, the
-/// composable function types whose calling convention the transform implements.
+/// receiver counted, when it is declared a composable function type returning `Unit` and taking
+/// fewer than ten values, the composable function types whose calling convention the transform
+/// implements: ten or more need a second `$changed` word.
 fn composable_arity(
     ir: &IrFile,
     function: FunId,
@@ -1493,6 +1495,7 @@ fn composable_arity(
     (matches!(signature.ret.kind(), TyKind::Unit)
         && signature.context_count == 0
         && !signature.suspend
+        && signature.params.len() < SLOTS_PER_INT
         && matches!(
             spelled.annotations.as_slice(),
             [crate::ir::TypeUseAnnotation::Checked(checked)] if checked.annotation == composable
