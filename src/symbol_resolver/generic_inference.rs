@@ -11,7 +11,9 @@ mod call_site_variables;
 mod classifier_application_join;
 pub(crate) use classifier_application_join::join_classifier_applications;
 mod common_supertype;
-pub(crate) use common_supertype::{common_super_types, reified_runtime_type, ReifiedDeclarations};
+pub(crate) use common_supertype::{
+    common_super_types, published_declaration_type, reified_runtime_type, ReifiedDeclarations,
+};
 mod conditional_result;
 mod postponed_result;
 mod receiver_constraints;
