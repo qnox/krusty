@@ -269,8 +269,7 @@ pub(super) fn record(
             continue;
         };
         // An extension receiver is the first value of the frame, ahead of the declared parameters.
-        let lambdas = std::iter::repeat(false)
-            .take(usize::from(declaration.receiver.is_some()))
+        let lambdas = std::iter::repeat_n(false, usize::from(declaration.receiver.is_some()))
             .chain(lambdas)
             .collect::<Vec<_>>();
         let parameter_count = lambdas.len() as u32;
