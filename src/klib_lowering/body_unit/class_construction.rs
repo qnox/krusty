@@ -5,6 +5,36 @@ use crate::fx_hash::HashSet;
 use crate::ir::{IrClass, IrCtorArg, IrCtorParameterProvenance, IrExpr, IrField};
 
 impl<'u, 's> Linker<'u, 's> {
+    /// Materialize the class the constructor `identity` constructs, unless the target allocates
+    /// it, and name the constructor this unit realizes for it: the primary, or the ordinal of its
+    /// secondary. A construction the target answers, or one an earlier unit realizes, has none.
+    pub(super) fn materialize_constructed_class(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        allocating: bool,
+    ) -> Result<Option<crate::ir::IrConstructorTarget>, KlibBodyDeclineReason> {
+        let selected = match self.sources.callees.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            _ => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an authenticated constructor lost its provider declaration".to_owned(),
+                ))
+            }
+        };
+        if allocating {
+            return Ok(None);
+        }
+        self.materialize_class(ir, identity, selected)?;
+        Ok(self.constructors.get(identity).map(|constructor| {
+            let ordinal = constructor.secondary.map_or(0, |index| index + 1);
+            crate::ir::IrConstructorTarget {
+                ordinal: u32::try_from(ordinal).expect("a constructor ordinal fits u32"),
+                access: crate::ir::IrConstructorAccess::Unrestricted,
+            }
+        }))
+    }
+
     pub(super) fn materialize_class(
         &mut self,
         ir: &mut IrFile,

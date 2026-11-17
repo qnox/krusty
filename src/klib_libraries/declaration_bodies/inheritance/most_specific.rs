@@ -8,7 +8,8 @@
 //! hierarchy that reaches it, and the comparison is the one subtyping relation, with each
 //! classifier's declaration-site variance and the results' use-site projections.
 //! `Reader<List<E>>.read(): List<E>?` is less specific than `Strict<E>.read(): List<E>`, and
-//! `Cov<String>` is more specific than `Cov<CharSequence>` for `interface Cov<out T>`.
+//! `Cov<String>` is more specific than `Cov<CharSequence>` for `interface Cov<out T>`. A type
+//! parameter's declared bounds take part: `Cov<T>` for `T : Sub` is more specific than `Cov<Base>`.
 
 use crate::assignable::{TyCtx, TypeOracle};
 use crate::fx_hash::HashMap;
@@ -139,9 +140,15 @@ impl SerializedHierarchy {
                 &mut pending,
             )?;
         }
+        // A class's supertypes and the bounds of its type parameters both relate its classifiers
+        // to others: `T : Sub` makes `T` a subtype of whatever `Sub` is.
         while let Some((arena, class)) = pending.pop() {
-            for &supertype in &class.supertypes {
-                hierarchy.reach(bodies, body_module, arena, supertype, &mut pending)?;
+            let bounds = class
+                .type_parameters
+                .iter()
+                .flat_map(|parameter| &parameter.supertypes);
+            for &ty in class.supertypes.iter().chain(bounds) {
+                hierarchy.reach(bodies, body_module, arena, ty, &mut pending)?;
             }
         }
         Some(hierarchy)

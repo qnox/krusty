@@ -1435,7 +1435,6 @@ impl<'s> CallLinker for Linker<'_, 's> {
             // missing declaration and must not invent a constructor handle.
             .ok_or_else(|| KlibBodyDeclineReason::UnsupportedCallee(Box::new(callee.clone())))?;
         if let Some(initializer) = retained_initializer {
-            // An earlier unit realizes its class.
             return Ok(LinkedConstructor {
                 target: initializer.target(),
                 declaration,
@@ -1458,26 +1457,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             external.realization,
             DependencyExternalRealization::AllocatingConstructor
         );
-        let selected = match self.sources.callees.get(&identity) {
-            Some(KlibCalleeFact::Selected(callables)) => callables[0],
-            _ => {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "an authenticated constructor lost its provider declaration".to_owned(),
-                ))
-            }
-        };
-        let materialized = if allocating {
-            None
-        } else {
-            self.materialize_class(ir, &identity, selected)?;
-            self.constructors.get(&identity).map(|constructor| {
-                let ordinal = constructor.secondary.map_or(0, |index| index + 1);
-                crate::ir::IrConstructorTarget {
-                    ordinal: u32::try_from(ordinal).expect("a constructor ordinal fits u32"),
-                    access: crate::ir::IrConstructorAccess::Unrestricted,
-                }
-            })
-        };
+        let materialized = self.materialize_constructed_class(ir, &identity, allocating)?;
         Ok(LinkedConstructor {
             target,
             declaration,
