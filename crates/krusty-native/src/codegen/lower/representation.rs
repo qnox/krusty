@@ -98,7 +98,9 @@ impl BodyLowering<'_, '_, '_> {
         }
         let class = match self.value_class(classifier)? {
             ValueClassHome::Here(class) => class,
-            ValueClassHome::Module => return self.module_box_value(value, classifier),
+            ValueClassHome::Entries(entries) => {
+                return self.entry_box_value(value, classifier, &entries)
+            }
         };
         let (offset, _) = self.file.value_storage(class)?;
         let descriptor = self.file.classes[class as usize].descriptor;
@@ -120,25 +122,46 @@ impl BodyLowering<'_, '_, '_> {
         }
         let class = match self.value_class(classifier)? {
             ValueClassHome::Here(class) => class,
-            ValueClassHome::Module => return self.module_unbox_value(object, classifier),
+            ValueClassHome::Entries(entries) => {
+                return self.entry_unbox_value(object, classifier, &entries)
+            }
         };
         let (offset, ty) = self.file.value_storage(class)?;
         let clif = self.carrier(ty).clif().expect("a value is never `Unit`");
         Ok(self.builder.ins().load(clif, trusted(), object, offset))
     }
 
-    /// Where a boxed value class is laid out: by a class of this file, or by another file of the
-    /// module, which boxes and unboxes it for every other. A value class declared outside the
-    /// module has no layout this program owns, and boxing one declines.
+    /// Where a boxed value class is laid out: by a class of this file, or by another file, which
+    /// boxes and unboxes it for every other — a file of this module, or of an earlier source
+    /// module of the program, which published its entries by the class's exact identity. A value
+    /// class no source of this program declares has no layout the program owns, and boxing one
+    /// declines.
     fn value_class(&self, classifier: TypeName) -> Result<ValueClassHome, Unsupported> {
         if let Some(class) = self.file.ir.class_id_by_name(classifier) {
             return Ok(ValueClassHome::Here(class));
         }
         if self.file.values.is_module_declared(classifier) {
-            return Ok(ValueClassHome::Module);
+            let (box_symbol, unbox_symbol) = super::super::super::symbols::module_value_box_symbols(
+                self.file.module_name,
+                classifier,
+            );
+            return Ok(ValueClassHome::Entries(ValueBoxEntries {
+                box_symbol,
+                unbox_symbol,
+            }));
+        }
+        if let Some(identity) = self
+            .file
+            .classifiers
+            .classifier(classifier)
+            .and_then(|fact| fact.klib_identity.clone())
+        {
+            if let Some(entries) = self.file.laid_out.published_value_boxes(&identity)? {
+                return Ok(ValueClassHome::Entries(entries.clone()));
+            }
         }
         Err(declined!(
-            "a boxed `{}`, a value class this module does not declare",
+            "a boxed `{}`, a value class no source of this program declares",
             classifier.render().replace('/', ".")
         ))
     }
@@ -300,8 +323,9 @@ impl BodyLowering<'_, '_, '_> {
     }
 }
 
-/// The file whose layout a boxed value class has.
+/// The file whose layout a boxed value class has: this one, or another, reached through the box
+/// entries it defines.
 enum ValueClassHome {
     Here(ClassId),
-    Module,
+    Entries(ValueBoxEntries),
 }
