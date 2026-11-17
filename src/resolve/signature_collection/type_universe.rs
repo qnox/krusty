@@ -395,12 +395,13 @@ pub(in crate::resolve) fn source_type_universe(
                 // `Metadata` leaves the default-imported classifier `kotlin.Metadata` visible in a
                 // type position (kotlinc 2.4.21). Only an import that names a classifier is a
                 // classifier root.
-                let explicit_classifiers = crate::resolve::explicit_classifier_imports(
+                let explicit_classifiers = crate::resolve::explicit_classifier_selection(
+                    &source_name,
                     imap.get(&source_name).map(Vec::as_slice),
                     &source,
                 );
                 let explicit_classifier = match explicit_classifiers.as_slice() {
-                    [selected] => Some(*selected),
+                    [selected] => Some(selected),
                     _ => None,
                 };
                 let (full, unresolved, classifier_segment) = if explicit_classifiers.len() > 1 {
@@ -408,8 +409,8 @@ pub(in crate::resolve) fn source_type_universe(
                     // list reports it and a use of the name is ambiguous.
                     file_ambiguous.insert(name.clone());
                     (None, None, None)
-                } else if let Some((_, classifier)) = explicit_classifier {
-                    (Some(classifier), None, Some(0))
+                } else if let Some(selected) = explicit_classifier {
+                    (Some(selected.classifier), None, Some(0))
                 } else if source_name.contains('.') {
                     let root = source_name.split('.').next().unwrap_or_default();
                     match classifier_from_imports(root, &imap, &levels, &source) {
@@ -477,9 +478,8 @@ pub(in crate::resolve) fn source_type_universe(
                 // fully-qualified spelling names the alias directly, and star/default levels are
                 // consulted in precedence order rather than flattened. Whether the template APPLIES
                 // is decided at the use site, against the classifier that actually resolved.
-                let expansion = if let Some((path, _)) = explicit_classifier {
-                    Ok(Some(crate::types::type_name(path))
-                        .and_then(|identity| libraries.type_alias_expansion(identity)))
+                let expansion = if let Some(selected) = explicit_classifier {
+                    Ok(selected.alias.clone())
                 } else if source_name.contains('.') {
                     Ok(Some(super::super::source_package::identity(Some(
                         source_name.as_str(),

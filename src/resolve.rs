@@ -109,6 +109,10 @@ mod class_literal_array_of_nothing;
 mod class_literal_receiver;
 mod class_literal_type_arguments;
 mod class_names_aliases;
+mod explicit_import_selection;
+pub(crate) use explicit_import_selection::explicit_classifier_selection;
+pub use explicit_import_selection::import_map;
+use explicit_import_selection::{classifier_from_imports, imported_classifier_selection};
 mod expression_finalization;
 mod reference_array_spread;
 mod reference_context_arguments;
@@ -4025,29 +4029,6 @@ pub fn builtin_bitwise_ret(recv: Ty, name: &str, n_args: usize) -> Option<Ty> {
     }
 }
 
-/// Map a file's EXPLICIT imports `simple name -> internal names` (e.g. `Calc -> [util/Calc]`). Imports
-/// share syntax but not namespaces, so one visible name can be imported from several owners (a
-/// class and a same-named factory function); every import stays, in source order, and each
-/// namespace selects from the ones that declare something in it. A wildcard import (`a.b.*`) has
-/// no simple name — those are represented by [`import_levels`].
-pub fn import_map(file: &File) -> HashMap<String, Vec<String>> {
-    let mut m: HashMap<String, Vec<String>> = HashMap::default();
-    for import in &file.import_paths {
-        if import.wildcard {
-            continue;
-        }
-        let fq = import.path();
-        if let Some(simple) = import.imported_name() {
-            let internal = fq.replace('.', "/");
-            let paths = m.entry(simple.to_string()).or_default();
-            if !paths.contains(&internal) {
-                paths.push(internal);
-            }
-        }
-    }
-    m
-}
-
 /// Kotlin's common default imports, in source package syntax. Target-specific additions are supplied by
 /// the platform symbol source and composed by [`import_levels`].
 pub const KOTLIN_DEFAULT_IMPORT_PACKAGES: &[&str] = &[
@@ -4102,86 +4083,6 @@ fn import_levels(
         .map(|package| source_package::identity(Some(package)))
         .collect();
     [vec![own], explicit_star, kotlin_defaults, platform]
-}
-
-/// Resolve a name to its fully-qualified internal name against a file's import set — the single
-/// kotlinc-conforming resolver both the signature pass and the [`Checker`] use, so a name resolves
-/// identically wherever it appears. A name is ALWAYS an FQN; an unqualified use forms candidate FQNs
-/// `pkg/name` from the in-scope packages. Precedence (spec § resolution): an explicit non-star import
-/// names the FQN directly (highest); otherwise each precedence level (`levels`, descending) supplies
-/// candidates and the FIRST level with any resolving candidate wins. Two or more DISTINCT resolutions
-/// within one level are AMBIGUOUS — kotlinc rejects a name two star-imports both supply — and resolve
-/// to `None` (a genuinely ambiguous name never appears in a compiling program). A classpath `typealias`
-/// candidate resolves to its target internal. Existence is verified via `resolve_type`.
-fn classifier_from_imports<S: SymbolSource + ?Sized>(
-    name: &str,
-    explicit: &HashMap<String, Vec<String>>,
-    levels: &[crate::symbol_resolver::ClassifierImportLevel],
-    source: &S,
-) -> InheritedNestedClassifier {
-    match imported_classifier_selection(name, explicit, levels, source) {
-        crate::symbol_resolver::CandidateSelectionWithTies::Selected(classifier) => {
-            InheritedNestedClassifier::Found(classifier)
-        }
-        crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(_) => {
-            InheritedNestedClassifier::Ambiguous
-        }
-        crate::symbol_resolver::CandidateSelectionWithTies::None => {
-            InheritedNestedClassifier::NotFound
-        }
-    }
-}
-
-/// The explicit imports of one visible name whose path resolves to a classifier, with that
-/// classifier. Each import path is a distinct declaration: two paths that reach one classifier
-/// (a typealias and its target) stay two candidates, as in `explicit_classifier_candidates`.
-pub(crate) fn explicit_classifier_imports<'a, S: SymbolSource + ?Sized>(
-    paths: Option<&'a [String]>,
-    source: &S,
-) -> Vec<(&'a str, TypeName)> {
-    paths
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|path| Some((path.as_str(), classifier_path(path, source, None).ok()?)))
-        .collect()
-}
-
-/// The classifier the imports bind `name` to: an explicit import, else the nearest import level
-/// that has any candidate, keeping every candidate of an ambiguous level.
-fn imported_classifier_selection<S: SymbolSource + ?Sized>(
-    name: &str,
-    explicit: &HashMap<String, Vec<String>>,
-    levels: &[crate::symbol_resolver::ClassifierImportLevel],
-    source: &S,
-) -> crate::symbol_resolver::CandidateSelectionWithTies<TypeName> {
-    use crate::symbol_resolver::CandidateSelectionWithTies;
-    // Imports share syntax but not namespaces. An explicit import of a callable named `Foo` must
-    // not erase a same-file classifier `Foo`, nor an explicit class import of the same name; only
-    // the imports whose path resolves to a classifier are classifier candidates, and two distinct
-    // classifiers under one name are an ambiguity.
-    let candidates = explicit_classifier_imports(explicit.get(name).map(Vec::as_slice), source);
-    match candidates.as_slice() {
-        [] => {}
-        [(_, classifier)] => return CandidateSelectionWithTies::Selected(*classifier),
-        _ => {
-            return CandidateSelectionWithTies::Ambiguous(
-                candidates
-                    .into_iter()
-                    .map(|(_, classifier)| classifier)
-                    .collect(),
-            )
-        }
-    }
-    for level in levels {
-        let hits =
-            crate::symbol_resolver::classifier_candidates_at_import_level(source, name, level);
-        match hits.as_slice() {
-            [] => continue,
-            [classifier] => return CandidateSelectionWithTies::Selected(*classifier),
-            _ => return CandidateSelectionWithTies::Ambiguous(hits),
-        }
-    }
-    CandidateSelectionWithTies::None
 }
 
 /// Map a single JVM field descriptor to a krusty `Ty` (the v0 supported set).
@@ -22124,157 +22025,6 @@ fun after(): Int = 2
                 "delegated",
             ]
         );
-    }
-
-    struct ClassifierImportSource;
-
-    fn import_test_classifier(alias_target: Option<TypeName>) -> crate::libraries::LibraryType {
-        crate::libraries::LibraryType {
-            is_kotlin: true,
-            alias_target,
-            ..crate::libraries::LibraryType::declaration_header()
-        }
-    }
-
-    fn import_classifier(
-        internal: crate::types::TypeName,
-    ) -> Option<std::sync::Arc<crate::libraries::LibraryType>> {
-        if ["fallback/Thing", "distinct_a/Thing", "distinct_b/Thing"]
-            .iter()
-            .any(|name| internal.matches(name))
-        {
-            Some(std::sync::Arc::new(import_test_classifier(None)))
-        } else if ["alias_a/Thing", "alias_b/Thing"]
-            .iter()
-            .any(|name| internal.matches(name))
-        {
-            Some(std::sync::Arc::new(import_test_classifier(Some(
-                crate::types::type_name("target/Thing"),
-            ))))
-        } else {
-            None
-        }
-    }
-
-    impl crate::symbol_source::SymbolSource for ClassifierImportSource {
-        fn symbols(
-            &self,
-            namespace: crate::symbol_source::SymbolNamespace,
-            name: &str,
-        ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-            if namespace
-                == crate::symbol_source::SymbolNamespace::Package(crate::types::type_name(
-                    "callable",
-                ))
-                && name == "Thing"
-            {
-                let callable = crate::libraries::LibraryCallable::library(
-                    "callable/ThingKt",
-                    "Thing",
-                    Vec::new(),
-                    Ty::Unit,
-                    Ty::Unit,
-                    "()V",
-                );
-                return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
-                    builtin_classifier: false,
-                    classifier_name: None,
-                    classifier_declaration: None,
-                    classifier: None,
-                    callables: crate::libraries::Callables::Functions(
-                        crate::libraries::FunctionSet {
-                            overloads: vec![crate::libraries::FunctionInfo::plain(
-                                crate::libraries::FnKind::TopLevel,
-                                None,
-                                callable,
-                            )],
-                        },
-                    ),
-                    importable_declaration: false,
-                });
-            }
-            // A provider owns the textual index for its declarations. It may intern the identity
-            // after a HIT, but a speculative miss must not pollute the global name tree merely so
-            // `existing_classifier` can find it on a later probe.
-            let internal = match namespace {
-                crate::symbol_source::SymbolNamespace::Package(package)
-                    if name == "Thing"
-                        && ["fallback", "distinct_a", "distinct_b", "alias_a", "alias_b"]
-                            .iter()
-                            .any(|known| package.matches(known)) =>
-                {
-                    Some(crate::types::type_name_child(package, name))
-                }
-                _ => None,
-            };
-            let classifier = internal.and_then(import_classifier);
-            std::rc::Rc::new(crate::libraries::ResolvedSymbols {
-                builtin_classifier: false,
-                classifier_declaration: classifier
-                    .as_ref()
-                    .and(internal)
-                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
-                classifier_name: internal.map(|internal| {
-                    classifier
-                        .as_ref()
-                        .and_then(|classifier| classifier.alias_target)
-                        .unwrap_or(internal)
-                }),
-                classifier,
-                callables: crate::libraries::Callables::None,
-                importable_declaration: false,
-            })
-        }
-    }
-
-    #[test]
-    fn classifier_import_resolution_ignores_callable_only_higher_precedence_candidates() {
-        let resolved = classifier_from_imports(
-            "Thing",
-            &HashMap::default(),
-            &[
-                vec![crate::types::type_name("callable")].into(),
-                vec![crate::types::type_name("fallback")].into(),
-            ],
-            &ClassifierImportSource,
-        );
-        assert_eq!(
-            resolved,
-            InheritedNestedClassifier::Found(crate::types::type_name("fallback/Thing"))
-        );
-    }
-
-    #[test]
-    fn classifier_import_resolution_collapses_aliases_to_the_same_target() {
-        let resolved = classifier_from_imports(
-            "Thing",
-            &HashMap::default(),
-            &[vec![
-                crate::types::type_name("alias_a"),
-                crate::types::type_name("alias_b"),
-            ]
-            .into()],
-            &ClassifierImportSource,
-        );
-        assert_eq!(
-            resolved,
-            InheritedNestedClassifier::Found(crate::types::type_name("target/Thing"))
-        );
-    }
-
-    #[test]
-    fn classifier_import_resolution_rejects_distinct_same_level_candidates() {
-        let resolved = classifier_from_imports(
-            "Thing",
-            &HashMap::default(),
-            &[vec![
-                crate::types::type_name("distinct_a"),
-                crate::types::type_name("distinct_b"),
-            ]
-            .into()],
-            &ClassifierImportSource,
-        );
-        assert_eq!(resolved, InheritedNestedClassifier::Ambiguous);
     }
 
     fn check(src: &str) -> (Vec<String>, Option<TypeInfo>) {
