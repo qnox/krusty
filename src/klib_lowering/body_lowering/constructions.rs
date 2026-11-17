@@ -114,26 +114,24 @@ impl BodyLowering<'_> {
                 self.semantic(argument)
             })
             .collect::<Lowered<Vec<_>>>()?;
-        let (declaration, external_target, local_access, materialized_target) = match &access
-            .symbol
-            .signature
-        {
-            KlibIrSignature::Public(callee)
-                if !self.linker.links_privately(&access.symbol.signature) =>
-            {
-                let linked = self.linker.link_constructor(self.ir, callee)?;
-                (
-                    linked.declaration,
-                    Some(linked.target),
-                    None,
-                    linked.materialized,
-                )
-            }
-            signature => {
-                let linked = self.linker.link_local_constructor(self.ir, signature)?;
-                (linked.declaration, None, Some(linked.access), None)
-            }
-        };
+        let (declaration, external_target, local_access, materialized_target) =
+            match &access.symbol.signature {
+                KlibIrSignature::Public(callee)
+                    if !self.linker.links_privately(&access.symbol.signature) =>
+                {
+                    let linked = self.linker.link_constructor(self.ir, callee)?;
+                    (
+                        linked.declaration,
+                        Some(linked.target),
+                        None,
+                        linked.materialized,
+                    )
+                }
+                signature => {
+                    let linked = self.linker.link_local_constructor(self.ir, signature)?;
+                    (linked.declaration, None, Some(linked.access), None)
+                }
+            };
         // An inner class's type applies its outer class's type arguments after its own; the call
         // passes only its own, and the outer ones are those of the class type it constructs.
         if declaration.enclosing_instance {

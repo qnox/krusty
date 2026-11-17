@@ -1208,7 +1208,8 @@ impl KlibDeclarationBodies {
                     roots.extend(class_arena.class_superclass_delegations(class));
                     symbols.extend(class_arena.emitted_callable_symbols_from(roots.clone(), forms));
                     objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
-                    entries.extend(class_arena.emitted_enum_entry_symbols_from(roots.clone(), forms));
+                    entries
+                        .extend(class_arena.emitted_enum_entry_symbols_from(roots.clone(), forms));
                     sams.extend(class_arena.emitted_sam_classifiers_from(roots, forms));
                 }
             }

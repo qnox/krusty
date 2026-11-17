@@ -2163,7 +2163,9 @@ mod tests {
         let mut absent = bytes_field(1, &declaration_ids);
         absent.extend(varint_field(7, 1));
         assert_eq!(
-            ir_file_declaration_ids(&mut file, &absent).unwrap_err().to_string(),
+            ir_file_declaration_ids(&mut file, &absent)
+                .unwrap_err()
+                .to_string(),
             "invalid KLIB IR files.knf at byte 0: file entry 1 is absent from fileEntries.knf"
         );
     }
@@ -2188,7 +2190,10 @@ mod tests {
         assert_eq!(*package, [strings[1].clone(), strings[0].clone()]);
 
         let root = varint_field(7, 0);
-        assert!(ir_file_declaration_ids(&mut file, &root).unwrap().1.is_empty());
+        assert!(ir_file_declaration_ids(&mut file, &root)
+            .unwrap()
+            .1
+            .is_empty());
 
         let mut missing = Vec::new();
         push_varint(u64::try_from(strings.len()).unwrap(), &mut missing);
