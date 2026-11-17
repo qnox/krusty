@@ -256,7 +256,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/cache/ser-corpus
+            target/cache/plugin-corpus
             target/cache/ksp-corpus
           key: kotlin-test-corpora-${{ steps.max-version.outputs.version }}
       - name: restore box corpus
@@ -422,7 +422,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/cache/ser-corpus
+            target/cache/plugin-corpus
             target/cache/ksp-corpus
           key: ${{ steps.kotlin-corpora.outputs.cache-primary-key }}
       - name: save box corpus
@@ -704,7 +704,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/cache/ser-corpus/${{ matrix.version }}
+            target/cache/plugin-corpus/*/${{ matrix.version }}
             target/cache/ksp-toolchain
             target/cache/krusty-deps
           key: kotlin-conformance-inputs-${{ matrix.version }}
@@ -1050,7 +1050,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/cache/ser-corpus/${{ matrix.version }}
+            target/cache/plugin-corpus/*/${{ matrix.version }}
             target/cache/ksp-toolchain
             target/cache/krusty-deps
           key: ${{ steps.conformance-inputs.outputs.cache-primary-key }}

@@ -467,8 +467,8 @@ pub fn jvm_classpath_jars_for(src: &str) -> Vec<PathBuf> {
 /// The set of `-classpath` jars a box test needs, formed from its directives — mirroring kotlinc's
 /// `JvmEnvironmentConfigurator`: stdlib + kotlin-test + annotations are always present (kotlinc only
 /// drops stdlib under `-no-stdlib`); `WITH_REFLECT` adds kotlin-reflect; `STDLIB_JDK8` adds
-/// kotlin-stdlib-jdk8; `WITH_COROUTINES` adds kotlinx-coroutines-core; `WITH_COMPOSE` adds the Compose
-/// runtime. Missing jars are fetched from Maven Central (Google's Maven repository for Compose).
+/// kotlin-stdlib-jdk8; `WITH_COROUTINES` adds kotlinx-coroutines-core; a plugin corpus's directive (`WITH_COMPOSE`, ...) adds that
+/// plugin's runtime. Missing jars are fetched from Maven Central (Google's Maven repository for Compose).
 /// Memoized per directive-signature — locating jars walks the (huge) gradle/m2 caches,
 /// so this collapses thousands of filesystem walks into at most a handful.
 pub fn classpath_jars_for(src: &str) -> Vec<PathBuf> {
@@ -476,11 +476,15 @@ pub fn classpath_jars_for(src: &str) -> Vec<PathBuf> {
         | (directive(src, "WITH_RUNTIME") as u8) << 1
         | (directive(src, "WITH_REFLECT") as u8) << 2
         | (directive(src, "STDLIB_JDK8") as u8) << 3
-        | (directive(src, "WITH_COROUTINES") as u8) << 4
-        | (directive(src, "WITH_COMPOSE") as u8) << 5
-        | (directive(src, "WITH_ATOMICFU") as u8) << 6;
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<crate::fx_hash::HashMap<u8, Vec<PathBuf>>>> =
-        std::sync::OnceLock::new();
+        | (directive(src, "WITH_COROUTINES") as u8) << 4;
+    // Each plugin corpus whose directive `src` carries contributes its runtime jars.
+    let plugins: Vec<&'static str> = crate::conformance::plugin_corpus::enabled_by(src)
+        .map(|corpus| corpus.plugin.as_str())
+        .collect();
+    let sig = (sig, plugins);
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<crate::fx_hash::HashMap<(u8, Vec<&'static str>), Vec<PathBuf>>>,
+    > = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(crate::fx_hash::HashMap::default()));
     if let Some(v) = cache.lock().unwrap().get(&sig) {
         return v.clone();
@@ -523,11 +527,8 @@ fn classpath_jars_uncached(src: &str) -> Vec<PathBuf> {
             jars.push(j);
         }
     }
-    if extra.compose {
-        jars.extend(compose_runtime_jars().into_iter().flatten());
-    }
-    if extra.atomicfu {
-        jars.extend(atomicfu_runtime_jar());
+    for corpus in crate::conformance::plugin_corpus::enabled_by(src) {
+        jars.extend(corpus.runtime_jars().into_iter().flatten());
     }
     if extra.coroutines {
         // Coroutines aren't in the dist; fetch the runtime jar from Maven.
@@ -552,81 +553,38 @@ pub fn kotlin_test_jar() -> Option<PathBuf> {
     })
 }
 
-/// The pinned kotlinx.serialization runtime version. The compiler plugin ships with the reference
-/// distribution, so the runtime must be a version that plugin emits calls against.
-pub const SERIALIZATION_VERSION: &str = "1.9.0";
-
-/// `kotlinx-serialization-core-jvm`, provisioned like every other pinned dependency.
+/// `kotlinx-serialization-core-jvm`, the runtime the serialization plugin emits calls against, at
+/// the version its corpus descriptor pins.
 ///
 /// Searching the local Gradle/Maven caches for "the newest jar whose name starts with …" cannot be
 /// used here: it sorts names lexicographically (so `1.9` beats `1.10`) and can pair a core jar with a
 /// mismatched json jar. A pinned pair is reproducible and version-consistent.
 pub fn serialization_core_jar() -> Option<PathBuf> {
-    dist_jar("kotlinx-serialization-core-jvm.jar").or_else(|| {
-        ensure_maven(
-            "org.jetbrains.kotlinx",
-            "kotlinx-serialization-core-jvm",
-            SERIALIZATION_VERSION,
-        )
-    })
+    crate::conformance::plugin_corpus::named("serialization").runtime[0].resolve()
 }
 
-/// `kotlinx-serialization-json-jvm`, pinned to [`SERIALIZATION_VERSION`] alongside the core jar.
+/// `kotlinx-serialization-json-jvm`, pinned alongside the core jar by the same descriptor.
 pub fn serialization_json_jar() -> Option<PathBuf> {
-    dist_jar("kotlinx-serialization-json-jvm.jar").or_else(|| {
-        ensure_maven(
-            "org.jetbrains.kotlinx",
-            "kotlinx-serialization-json-jvm",
-            SERIALIZATION_VERSION,
-        )
-    })
+    crate::conformance::plugin_corpus::named("serialization").runtime[1].resolve()
 }
-
-/// The pinned Compose runtime version `// WITH_COMPOSE` cases compile against. The compiler plugin
-/// ships with the reference distribution; this runtime declares every API the plugin calls.
-pub const COMPOSE_RUNTIME_VERSION: &str = "1.12.1";
 
 /// The Compose runtime jars, the runtime's own dependencies included: what a JVM (desktop)
-/// project that applies the Compose compiler plugin compiles and runs against.
+/// project that applies the Compose compiler plugin compiles and runs against. The compiler plugin
+/// ships with the reference distribution; this runtime declares every API the plugin calls.
 pub fn compose_runtime_jars() -> Option<Vec<PathBuf>> {
-    Some(vec![
-        ensure_google_maven(
-            "androidx.compose.runtime",
-            "runtime-desktop",
-            COMPOSE_RUNTIME_VERSION,
-        )?,
-        ensure_google_maven(
-            "androidx.compose.runtime",
-            "runtime-annotation-jvm",
-            COMPOSE_RUNTIME_VERSION,
-        )?,
-        ensure_google_maven("androidx.collection", "collection-jvm", "1.5.0")?,
-        coroutines_jar()?,
-    ])
+    crate::conformance::plugin_corpus::named("compose").runtime_jars()
 }
-
-/// The pinned atomicfu runtime version `// WITH_ATOMICFU` cases compile against: the one
-/// kotlinx.coroutines builds with.
-pub const ATOMICFU_RUNTIME_VERSION: &str = "0.32.1";
 
 /// `atomicfu-jvm`, the runtime the atomicfu compiler plugin lowers away.
 pub fn atomicfu_runtime_jar() -> Option<PathBuf> {
-    ensure_maven(
-        "org.jetbrains.kotlinx",
-        "atomicfu-jvm",
-        ATOMICFU_RUNTIME_VERSION,
-    )
+    crate::conformance::plugin_corpus::named("atomicfu").runtime[0].resolve()
 }
 
 /// The atomicfu compiler plugin of the reference distribution's exact Kotlin version. Unlike the
 /// Compose and serialization plugins, the distribution does not ship it; Maven Central publishes it
 /// with every Kotlin release.
 pub fn atomicfu_compiler_plugin_jar() -> Option<PathBuf> {
-    ensure_maven(
-        "org.jetbrains.kotlin",
-        "kotlin-atomicfu-compiler-plugin-embeddable",
-        &kotlin_version(),
-    )
+    crate::conformance::plugin_corpus::named("atomicfu").plugin_jar()
 }
 
 /// KLIB libraries a box case's directives add for `target`.
@@ -639,9 +597,8 @@ pub fn klib_libraries_for(
     src: &str,
     target: crate::compilation_target::CompilationTarget,
 ) -> Result<Vec<PathBuf>, String> {
-    let extra = crate::conformance::extra_libs(src);
     let mut libraries = Vec::new();
-    if extra.atomicfu {
+    if crate::conformance::plugin_corpus::named("atomicfu").enabled_by(src) {
         match atomicfu_klib(target) {
             Some(library) => libraries.push(library),
             None if matches!(
@@ -659,7 +616,7 @@ pub fn klib_libraries_for(
     Ok(libraries)
 }
 
-/// The atomicfu runtime KLIB for `target`, pinned to [`ATOMICFU_RUNTIME_VERSION`].
+/// The atomicfu runtime KLIB for `target`, pinned to the version of the atomicfu corpus's runtime.
 ///
 /// Native and Wasm `// WITH_ATOMICFU` cases resolve `kotlinx.atomicfu` against this library. The
 /// JVM lane uses [`atomicfu_runtime_jar`] and the compiler plugin instead. Maven drops the
@@ -675,12 +632,9 @@ pub fn atomicfu_klib(target: crate::compilation_target::CompilationTarget) -> Op
         CompilationTarget::WasmWasi => "atomicfu-wasm-wasi".to_string(),
         CompilationTarget::Jvm | CompilationTarget::Js => return None,
     };
-    ensure_maven_artifact(
-        "org.jetbrains.kotlinx",
-        &artifact,
-        ATOMICFU_RUNTIME_VERSION,
-        "klib",
-    )
+    let version =
+        crate::conformance::plugin_corpus::named("atomicfu").runtime_version("atomicfu-jvm")?;
+    ensure_maven_artifact("org.jetbrains.kotlinx", &artifact, version, "klib")
 }
 
 /// Locate the coroutines runtime jar used by classpath suspend tests.
