@@ -584,11 +584,29 @@ impl Backend for CraneliftBackend {
         for (identity, symbol) in lowered.class_descriptors {
             state.laid_out.publish_descriptor(identity, symbol);
         }
+        for (identity, entries) in lowered.value_boxes {
+            state.laid_out.publish_value_boxes(identity, entries);
+        }
         state.abi.extend(lowered.abi);
         for (class, record) in lowered.laid_out {
             state.laid_out.insert(class, record);
         }
         vec![(format!("{object_stem}.o"), lowered.object)]
+    }
+
+    fn emitted_constructor_initializer(
+        &self,
+        state: &mut Self::State,
+        declaration: &krusty::backend::ConstructorInitializerDeclaration,
+    ) -> bool {
+        // The entry takes the allocated object, then the declared frame, and returns nothing.
+        state
+            .laid_out
+            .published_constructor(&declaration.class, &declaration.constructor)
+            .is_some_and(|signature| {
+                signature.params.len() == declaration.parameters.len() + 1
+                    && signature.returns.is_empty()
+            })
     }
 
     fn check_module(&self, state: &Self::State, diags: &mut DiagSink) {

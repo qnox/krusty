@@ -189,6 +189,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         &callees,
         &emitted_roots::OrdinaryRootCapabilities {
             realizes_intrinsic: &target_realizes_intrinsic,
+            realizes_getter: &target_realizes_getter,
             represents_classifier: &target_represents_classifier,
             retains_initializer: &|selected| match support_state.emitted.get(selected.identity()) {
                 Some(PublishedDependency::AllocatingConstructor) => Ok(true),
@@ -1092,6 +1093,17 @@ fn prepare_bodyless_externals(
                     diags.error(
                         Span::new(0, 0),
                         format!("invalid common KLIB primitive: {reason:?}"),
+                    );
+                    return false;
+                }
+            }
+            match capabilities.callees.continuation_intrinsic(&callee) {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(reason) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("invalid KLIB continuation intrinsic: {reason:?}"),
                     );
                     return false;
                 }

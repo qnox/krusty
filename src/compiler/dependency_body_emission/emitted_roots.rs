@@ -138,8 +138,9 @@ pub(super) fn declarations(
         }
         // A top-level function private to its file, or a member of a class private to its
         // library, has no provider declaration either; only a body of its own module calls it, and
-        // it is emitted with that body.
-        if bodies.is_library_private(&identity) {
+        // it is emitted with that body. One an earlier unit already emitted is that unit's export
+        // instead, an exact external edge which keeps its declaration authentication below.
+        if bodies.is_library_private(&identity) && !externals.contains_key(&identity) {
             state.pending.extend(
                 bodies
                     .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
@@ -389,6 +390,7 @@ pub(super) fn declarations(
 
 pub(super) struct OrdinaryRootCapabilities<'a> {
     pub(super) realizes_intrinsic: &'a dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
+    pub(super) realizes_getter: &'a dyn Fn(crate::backend::DependencyGetterSignature<'_>) -> bool,
     pub(super) represents_classifier: &'a dyn Fn(crate::types::TypeName) -> bool,
     pub(super) retains_initializer: &'a dyn Fn(KlibBodyCallable<'_>) -> Result<bool, &'static str>,
 }
@@ -642,6 +644,14 @@ pub(super) fn ordinary_roots<'a>(
             .target_intrinsic(selected.identity(), bodies, target_realizes_intrinsic)
             .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?
             .is_some()
+        {
+            continue;
+        }
+        // A getter the target answers itself (an array's `storage`) is realized at each read,
+        // as the closure leaves it, never lowered from its body.
+        if callees
+            .target_getter(selected.identity(), bodies, capabilities.realizes_getter)
+            .map_err(|reason| format!("an invalid target getter declaration: {reason:?}"))?
         {
             continue;
         }

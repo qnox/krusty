@@ -7,6 +7,10 @@
 //! class's qualified name. Any other file boxes or unboxes through them. Their signatures come from
 //! the class's semantic type, which every file of the module projects alike: the value goes in or
 //! comes out at its carrier, and the box is a reference.
+//!
+//! A later source module of the program boxes the class the same way. The declaring file
+//! publishes the two entry points by the class's exact KLIB identity, beside its descriptor, and
+//! the later module's files find them there by the identity their classifier facts carry.
 
 use super::super::*;
 use krusty::types::TypeName;
@@ -54,40 +58,46 @@ impl FileLowering<'_> {
                 body.terminate();
                 Ok(())
             })?;
+            if let Some(identity) = self.dependency_signatures.classifier(class) {
+                self.value_boxes.push((
+                    identity.clone(),
+                    ValueBoxEntries {
+                        box_symbol,
+                        unbox_symbol,
+                    },
+                ));
+            }
         }
         Ok(())
     }
 }
 
 impl BodyLowering<'_, '_, '_> {
-    /// Box a value of a value class another file of the module declares, through its entry point.
-    pub(in super::super) fn module_box_value(
+    /// Box a value of a value class another file declares, through the entry point it defines.
+    pub(in super::super) fn entry_box_value(
         &mut self,
         value: Value,
         classifier: TypeName,
+        entries: &ValueBoxEntries,
     ) -> Result<Value, Unsupported> {
-        let (symbol, _) = super::super::super::super::symbols::module_value_box_symbols(
-            self.file.module_name,
-            classifier,
-        );
-        let id = self.file.import(&symbol, &[value_ty(classifier)], any())?;
+        let id = self
+            .file
+            .import(&entries.box_symbol, &[value_ty(classifier)], any())?;
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &[value])?;
         Ok(self.builder.inst_results(call)[0])
     }
 
-    /// The value a box of a value class another file of the module declares holds.
-    pub(in super::super) fn module_unbox_value(
+    /// The value a box of a value class another file declares holds, read through the entry
+    /// point that file defines.
+    pub(in super::super) fn entry_unbox_value(
         &mut self,
         object: Value,
         classifier: TypeName,
+        entries: &ValueBoxEntries,
     ) -> Result<Value, Unsupported> {
-        let (_, symbol) = super::super::super::super::symbols::module_value_box_symbols(
-            self.file.module_name,
-            classifier,
-        );
         let value = value_ty(classifier);
-        let id = self.file.import(&symbol, &[any()], value)?;
+        let id = self.file.import(&entries.unbox_symbol, &[any()], value)?;
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &[object])?;
         Ok(self.builder.inst_results(call)[0])

@@ -68,7 +68,9 @@ pub(super) fn ordinary_subtype(
 
 /// Whether `left` and `right` are one type once every projection that only restates its
 /// parameter's declaration-site variance is dropped: `Iterator<out T>` is `Iterator<T>` because
-/// `Iterator` declares its parameter `out`. Without the class model only identity is proven.
+/// `Iterator` declares its parameter `out`. A star in that covariant slot likewise reads its
+/// checked upper bound; invariant and contravariant slots retain the existential projection.
+/// Without the class model only identity is proven.
 pub(super) fn same_type(classes: Option<&dyn TypeOracle>, left: Ty, right: Ty) -> bool {
     left == right
         || classes.is_some_and(|classes| {
@@ -90,7 +92,10 @@ fn without_restated_variance(classes: &dyn TypeOracle, ty: Ty) -> Ty {
                 .map(|(index, &argument)| {
                     let argument =
                         match (argument.kind(), classes.type_param_variance(owner, index)) {
-                            (TyKind::OutProjection(inner), TypeVariance::Out)
+                            (
+                                TyKind::OutProjection(inner) | TyKind::StarProjection(inner),
+                                TypeVariance::Out,
+                            )
                             | (TyKind::InProjection(inner), TypeVariance::In) => inner,
                             _ => argument,
                         };
@@ -106,6 +111,59 @@ fn without_restated_variance(classes: &dyn TypeOracle, ty: Ty) -> Ty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projected_results_read_stars_only_in_authenticated_covariant_slots() {
+        struct Classes(TypeVariance);
+        impl TypeOracle for Classes {
+            fn direct_supertypes(&self, _ty: Ty) -> Vec<Ty> {
+                Vec::new()
+            }
+            fn type_param_variance(&self, _owner: TypeName, _index: usize) -> TypeVariance {
+                self.0
+            }
+        }
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let formal = Ty::ty_param("declaration/T", any);
+        let declared = Ty::obj_args("fixture/Result", &[formal]);
+        let bindings = [(
+            crate::types::TyParamName::from("declaration/T"),
+            Ty::star_projection(any),
+        )]
+        .into_iter()
+        .collect();
+        let projected = declared.substitute_erased(&bindings);
+        assert_eq!(
+            projected,
+            Ty::obj_args("fixture/Result", &[Ty::star_projection(any)])
+        );
+        let readable = Ty::obj_args("fixture/Result", &[any]);
+        for (variance, expected) in [
+            (TypeVariance::Out, true),
+            (TypeVariance::In, false),
+            (TypeVariance::Invariant, false),
+        ] {
+            let classes = Classes(variance);
+            assert_eq!(same_type(Some(&classes), projected, readable), expected);
+            assert_eq!(same_type(Some(&classes), readable, projected), expected);
+            assert!(!same_type(
+                Some(&classes),
+                projected,
+                Ty::obj_args("fixture/Result", &[Ty::String]),
+            ));
+        }
+        assert!(!same_type(None, projected, readable));
+        assert!(!same_type(
+            Some(&Classes(TypeVariance::Out)),
+            projected,
+            any
+        ));
+        assert!(!same_type(
+            Some(&Classes(TypeVariance::Out)),
+            projected,
+            Ty::obj_args("fixture/Other", &[any]),
+        ));
+    }
 
     #[test]
     fn ordinary_subtyping_consumes_the_explicit_applied_hierarchy() {

@@ -241,6 +241,13 @@ fn a_serialized_body_object_is_named_by_its_declaration_site() {
         Some(IrSiteClassContainer::Package(TypeName::ROOT)),
     );
     let unsited = sited("$klib-local$kotlin$1$5", None);
+    // An object regenerated inside that object's code, as an inline call regenerates it, is not
+    // source-declared; its site names it under its container.
+    let regenerated = sited(
+        "specialized-anon#9",
+        Some(IrSiteClassContainer::Class(top_level)),
+    );
+    ir.classes[regenerated as usize].is_source_declared = false;
 
     let names = source_class_names(&ir, top_level).unwrap();
     assert_eq!(
@@ -254,6 +261,10 @@ fn a_serialized_body_object_is_named_by_its_declaration_site() {
     );
     assert_eq!(qualified(&ir, root).as_deref(), Some("<no name provided>"));
     assert!(source_class_names(&ir, unsited).is_none());
+    assert_eq!(
+        qualified(&ir, regenerated).as_deref(),
+        Some("kotlin.coroutines.intrinsics.<no name provided>.<no name provided>")
+    );
 }
 
 #[test]

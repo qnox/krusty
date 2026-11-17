@@ -4,7 +4,7 @@ The `oss corpus` workflow (`.github/workflows/oss-corpus.yml`, nightly on master
 never on pull requests) builds the most-starred Kotlin projects listed in `projects.tsv`, and Now
 in Android as the Android sample, each from a pinned commit with its own Gradle build. A row whose
 last field is `lsp` stays in that project set for the language server (`scripts/parity-scan.py`)
-and is not built here; `intellij-community` and `kotlin` are those rows. The scan reports whether
+and is not built here; `intellij-community` is that row. The scan reports whether
 each module opened completely, how many errors it produced, and how long the server's
 go-to-definition and find-references lookups took. It does not time parsing or type information
 separately from the combined analysis. Each built project runs three builds:
@@ -22,14 +22,16 @@ separately from the combined analysis. Each built project runs three builds:
    reported. The verify build exists for those errors; its classes and cost are not compared.
 
 `corpus.init.gradle` adds the `corpusCompile` task, which depends on every non-Android Kotlin/JVM
-compile task, lists each with its output directory, and records the Gradle and compiler plugins
+compile task (or, for a project with a target set, the ones the set needs: see below), lists each with its output directory, and records the Gradle and compiler plugins
 each project applies. After each build, `outputs.py` moves exactly the directories that build
 listed out of the checkout, wherever a task writes them, after checking that each is owned by one
 task inside the Gradle root; the next build therefore starts without them. `compare.py` compares
 the class files of every compile task the reference build listed, byte for byte, and reports apart
 a listed task kotlinc wrote no class for. A compile task the plugin leaves to kotlinc (an
 unsupported compiler plugin or option) counts as a miss, with the plugin's reason; a compile krusty
-fails counts as a miss with the first error it logged. With `$CORPUS_VERIFY_RECORDS` set,
+fails counts as a miss with the first error it logged. A compile that did not run because a task it
+depends on failed names the failed tasks that stopped it (`blocked_by`), traced through the task
+graph the init script writes to `$CORPUS_TASK_DEPS`. With `$CORPUS_VERIFY_RECORDS` set,
 `corpusCompile` also runs the plugin's verify compile (`<task>KrustyVerify`) of each listed task
 and lists the record each writes; `run.sh` names `krustyVerify`, which turns verify mode on, and
 excludes it, so only the listed compilations are verified rather than every module and variant.
@@ -70,7 +72,8 @@ binary keeps frame pointers), `hotspots.py` folds the krusty processes' call sta
 and the report lists the top ones across the corpus with a link to each project's flame graph.
 
 `summarize.py` turns the per-project results into the run's report: stars, Kotlin and Java lines,
-compilations built, identical classes, the reason for every miss, every error the verify build
+compilations built, identical classes, the failed tasks ranked by how many compilations each kept
+from running, the reason for every miss, every error the verify build
 reported (grouped by cause: the message without its location, with quoted text and numbers masked,
 counted across the corpus and listed in full per project; a project whose verify build recorded
 nothing is reported as unverified, not left out), the projects' tests that pass on krusty's classes,
@@ -81,7 +84,9 @@ displays the same Markdown report.
 
 Setup fails fast: a failed fetch, a checkout that is not the pinned commit, a patch that does not
 apply, or a Kotlin version pin that does not match exactly one assignment (`pin.py`) stops the run
-before either build. `test_compare.py`, `test_setup.py`, `test_summarize.py`, `test_workflow.py`,
+before either build. A reference build that fails is still compared as far as it got, and then
+fails the project's job: every listed project must build with kotlinc, so a failure there is fixed
+with a patch or a pin, never left to shrink what the corpus measures. `test_compare.py`, `test_setup.py`, `test_summarize.py`, `test_workflow.py`,
 `test_measure.py`, `test_hotspots.py` and `test_testruns.py` cover the comparison, the test runs,
 the output inventory, the pin rewrite, the setup failures, the report artifacts, the build
 measurement and the stack folding.
@@ -110,6 +115,23 @@ These projects carry a patch for that bump:
 - `okhttp`: Kotlin 2.4 infers `kotlin-test-junit5` beside the declared `kotlin-test-junit`; the
   inference is turned off.
 - `okhttp` and `okio`: the Burst compiler plugin moves to a release built for Kotlin 2.4.
+- `kotlin`: the build compiles itself with a bootstrap compiler, by default a development build
+  from JetBrains' bootstrap repository. The patch takes the bootstrap from Maven Central instead, at
+  the version the pin (`bootstrap.kotlin.version` in `gradle.properties`) names, and turns Gradle's
+  dependency verification off, since its metadata lists only the default bootstrap's artifacts. The
+  pinned commit is the v2.4.21 tag, whose sources are Kotlin 2.4.
+
+A project too large to build whole on one runner names a target set in `gradle/<name>.targets`: Gradle
+task paths, one per line. `corpusCompile` then builds only the listed tasks that are not tests, the
+compiles picked are those the build runs for them (the targets and every compile they depend on),
+and `corpusTest` runs only the listed test tasks. `kotlin` lists its JVM standard library and the Compose compiler
+plugin (`compiler-hosted`, a kotlinc plugin built on the compiler's FIR and IR APIs), each with its
+tests' compile, and its whole JVM compiler (`:compiler:cli-jvm`), and runs the standard library's
+JVM tests.
+
+Every Gradle build is offered each JDK the runner installed (`JAVA_HOME_<version>_X64`) as a Java
+toolchain (`toolchains.sh`), since Gradle does not look there by itself. `kotlin` compiles its modules
+with JDK 8, 11 and 17 toolchains, and its build logic cannot download one.
 
 Only the main build is measured: buildSrc and included builds are build logic, and the init scripts
 leave them alone. Gradle runs without the configuration cache and isolated projects, since the init

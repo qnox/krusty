@@ -1750,12 +1750,12 @@ impl JvmLibraries {
                 } else if m.is_static() {
                     provider_normalization::publish_classifier_static(&mut companion, member);
                 } else {
-                    // `java.lang.Number.intValue` and the other numeric conversions are Kotlin's
-                    // `Number.toInt` declarations. The realization table records the classfile
-                    // owner (`java/lang/Number`); the requested name may be the Kotlin mapped
-                    // identity (`kotlin/Number`) because class lookup translates it first.
+                    // `java.lang.Number.intValue` is Kotlin's `Number.toInt`. The table records the
+                    // classfile owner (`java/lang/Number`); the requested name may be the Kotlin
+                    // identity (`kotlin/Number`), which class lookup translates first.
                     if let Some(source) =
                         super::mapped_builtin_declarations::source_name_for_realization(
+                            internal_name,
                             ci.this_class,
                             &m.name,
                             &member.descriptor,
@@ -1837,6 +1837,7 @@ impl JvmLibraries {
                 super::mapped_builtin_declarations::overlay_constructor_semantics(
                     &mut constructors,
                     self.cp.builtin_constructors_name(internal_name),
+                    super::jvm_class_map::mapped_builtin_is_one_way(internal_name),
                 );
             }
             // Members and supertypes must switch provenance together. Presence of the decoded
@@ -1847,8 +1848,9 @@ impl JvmLibraries {
             // correct: nothing decodes there, so `kotlin/String` keeps the JVM class's supertypes
             // rather than being left with none (it would otherwise lose `CharSequence`, `Comparable`
             // and `Any`, and every subtype test against them would start failing).
-            let kotlin_scope_is_authoritative = is_mapped_builtin
-                && self.cp.builtin_is_interface_name(internal_name).is_some()
+            let builtin_declaration_decoded =
+                is_mapped_builtin && self.cp.builtin_is_interface_name(internal_name).is_some();
+            let kotlin_scope_is_authoritative = builtin_declaration_decoded
                 // Scope provenance belongs to the central Kotlin↔JVM mapping. Keeping the policy
                 // there avoids a classpath-origin branch (and a second collection/String name list)
                 // in this loader; this site only combines that semantic policy with the runtime
@@ -1861,10 +1863,7 @@ impl JvmLibraries {
             // erased Java `next(): Any!` compete with the Kotlin declaration.
             let kotlin_supertypes_are_authoritative = metadata_class_signature.is_some();
             let mut supertypes = TypeNameList::new();
-            if kotlin_scope_is_authoritative {
-                // Nothing from the Java class: `java/io/Serializable`, the one JVM supertype kotlinc
-                // keeps on a mapped builtin, comes from `JvmBuiltInsCustomizer`, JDK or not.
-            } else if let Some((_, _, declared)) = &metadata_class_signature {
+            if let Some((_, _, declared)) = &metadata_class_signature {
                 // A function-type supertype (`KProperty0<V> : () -> V`) is an edge to the function
                 // classifier it instantiates, which declares the inherited `invoke`.
                 for supertype in declared {
@@ -1875,6 +1874,13 @@ impl JvmLibraries {
                         supertypes.push_name(name);
                     }
                 }
+            } else if builtin_declaration_decoded {
+                // A decoded builtin declaration states the mapped classifier's whole Kotlin
+                // supertype list, even where its members still join the JVM class's. The JVM
+                // class's own interfaces (`java.lang.Integer : Constable, ConstantDesc`,
+                // `java.lang.Enum : Constable`) are realization details kotlinc never publishes.
+                // `java/io/Serializable`, the one JVM supertype kotlinc keeps on a mapped builtin,
+                // comes from `JvmBuiltInsCustomizer`, JDK or not.
             } else {
                 for s in ci.interfaces.iter_ids() {
                     supertypes.push_name(s);
@@ -2300,17 +2306,14 @@ impl JvmLibraries {
                 .filter(|field| field.access & ACC_STATIC != 0)
                 .map(|field| field.name.clone())
                 .collect();
-            let inheritance = crate::libraries::ClassifierInheritance {
-                is_abstract: ci.is_abstract() || ci.is_interface(),
-                is_extensible: !ci.is_final() && !ci.is_interface(),
-                has_no_arg_constructor: constructors.iter().any(|constructor| {
-                    constructor.params.is_empty()
-                        && matches!(
-                            constructor.visibility,
-                            crate::types::Visibility::Public | crate::types::Visibility::Protected
-                        )
-                }),
-            };
+            // A mapped builtin's modality is its Kotlin declaration's: `AtomicInt` is final although
+            // `java.util.concurrent.atomic.AtomicInteger` is not.
+            let builtin_access = self.cp.builtin_classifier_shape_name(internal_name);
+            let class_access = builtin_access
+                .filter(|_| is_mapped_builtin)
+                .map_or(ci.access, |shape| shape.3);
+            let inheritance =
+                builtin_classifier_shapes::classifier_inheritance(class_access, &constructors);
             let members = members
                 .into_iter()
                 .chain(builtin_members)

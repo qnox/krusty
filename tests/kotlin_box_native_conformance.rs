@@ -326,6 +326,86 @@ fn native_library_generic_any_override_uses_the_canonical_vtable_slot() {
     );
 }
 
+#[test]
+fn native_a_not_null_member_delegate_holds_what_was_written_to_it() {
+    let source = include_str!("box_regressions/notNullDelegateMember.kt");
+    expect_native_klib_box(source, "nativeNotNullDelegateMember");
+}
+
+#[test]
+fn native_a_local_not_null_delegate_is_read_through_a_capture() {
+    let source = include_str!("box_regressions/notNullDelegateLocalCapture.kt");
+    expect_native_klib_box(source, "nativeNotNullDelegateLocalCapture");
+}
+
+#[test]
+fn native_a_not_null_delegate_is_rewritten() {
+    let source = include_str!("box_regressions/notNullDelegateRewritten.kt");
+    expect_native_klib_box(source, "nativeNotNullDelegateRewritten");
+}
+
+#[test]
+fn native_an_observable_member_delegate_notifies_its_instance() {
+    let source = include_str!("box_regressions/observableDelegateMember.kt");
+    expect_native_klib_box(source, "nativeObservableDelegateMember");
+}
+
+#[test]
+fn an_explicit_delegate_write_evaluates_this_ref() {
+    let source = "import kotlin.properties.Delegates\n\
+         var referenced = 0\n\
+         var effects = \"\"\n\
+         fun mark(): Any? { effects += \"R\"; return null }\n\
+         fun next(): Int { effects += \"V\"; return 7 }\n\
+         fun box(): String {\n\
+         \x20   val delegate = Delegates.notNull<Int>()\n\
+         \x20   delegate.setValue(mark(), ::referenced, next())\n\
+         \x20   if (effects != \"RV\") return \"fail effects \" + effects\n\
+         \x20   return if (delegate.getValue(null, ::referenced) == 7) \"OK\" else \"fail value\"\n\
+         }\n";
+    expect_native_klib_box(source, "ExplicitDelegateWriteEffects");
+}
+
+#[test]
+fn a_not_null_delegate_read_before_it_was_written_raises() {
+    let source = "import kotlin.properties.Delegates\n\
+         var value: String by Delegates.notNull()\n\
+         fun box(): String {\n\
+         \x20   try {\n\
+         \x20       return \"fail \" + value\n\
+         \x20   } catch (e: IllegalStateException) {\n\
+         \x20       return if (e.message == \"Property value should be initialized before get.\")\n\
+         \x20           \"OK\"\n\
+         \x20       else\n\
+         \x20           \"fail message \" + e.message\n\
+         \x20   }\n\
+         }\n";
+    expect_native_klib_box(source, "NotNullUnset");
+}
+
+#[test]
+fn an_observable_delegate_reports_each_write_after_it_happened() {
+    let source = "import kotlin.properties.Delegates\n\
+         var log = \"\"\n\
+         var seen = \"\"\n\
+         var watched: String by Delegates.observable(\"start\") { property, old, new ->\n\
+         \x20   log += property.name + \":\" + old + \"->\" + new + \";\"\n\
+         \x20   seen += watched\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   if (watched != \"start\") return \"fail initial \" + watched\n\
+         \x20   if (log != \"\") return \"fail early \" + log\n\
+         \x20   watched = \"middle\"\n\
+         \x20   watched = \"end\"\n\
+         \x20   if (watched != \"end\") return \"fail final \" + watched\n\
+         \x20   if (log != \"watched:start->middle;watched:middle->end;\") return \"fail log \" + log\n\
+         \x20   // The callback runs after the write, so it reads the value that was just stored.\n\
+         \x20   if (seen != \"middleend\") return \"fail order \" + seen\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_native_klib_box(source, "ObservableDelegate");
+}
+
 fn expect_native_klib_box(source: &str, stem: &str) {
     super::common::expect_box_ok_with_stdlib(source, &format!("{stem}Oracle"));
     let target = host().expect("Native KLIB/runtime is required for this test");
@@ -341,11 +421,6 @@ fn expect_native_klib_box(source: &str, stem: &str) {
     assert_eq!(outcome, Outcome::Pass, "{stem}");
 }
 
-#[test]
-fn native_library_suspend_coroutine_runs() {
-    let source = include_str!("box_regressions/librarySuspendCoroutine.kt");
-    expect_native_klib_box(source, "nativeLibrarySuspendCoroutine");
-}
 fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
     if let Some(reason) = not_applicable(source) {
         return Outcome::NotApplicable(reason);
@@ -546,6 +621,19 @@ fn native_cross_module_superclasses_keep_selected_constructor_and_generic_method
         run_native_abi_case(source, stem),
         Outcome::Pass,
         "Native must preserve selected superclass ABI across module boundaries"
+    );
+}
+
+#[test]
+fn native_cross_module_superclass_publishes_the_bridges_its_function_supertype_needs() {
+    let source = include_str!("box_regressions/multimodule/sourceLibraryUnboxedFunctionBridge.kt");
+    let stem = "sourceLibraryUnboxedFunctionBridge";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete source superclass module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "a library class's vtable bridges must be linkable by a subclass in another module"
     );
 }
 

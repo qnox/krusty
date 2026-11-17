@@ -19,8 +19,10 @@
 use krusty::fx_hash::{HashMap, HashSet};
 
 mod absent_arguments;
+mod accessor_property_entries;
 pub(super) mod any_members;
 mod array_lists;
+mod array_storage;
 mod arrays;
 mod boxing;
 mod callable_reference_identity;
@@ -49,6 +51,7 @@ mod type_of;
 #[cfg(test)]
 use tests::lower_alone;
 
+pub(super) use array_storage::realizes_storage_getter;
 pub(super) use exceptions::runtime_lays_out;
 pub(super) use scalar_instructions::is_scalar_operation;
 pub(super) use scalar_value_classes::runtime_value_declaration;
@@ -63,6 +66,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
+        || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageCopy
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
         || operation
@@ -171,6 +175,8 @@ pub(super) fn lower_file(
         Ok(module.global(value))
     })?;
     let member_property_definitions = property_registry.prepare_member_properties(ir, module)?;
+    let accessor_property_definitions =
+        property_registry.prepare_accessor_properties(ir, module)?;
     let mut signatures = Vec::with_capacity(ir.functions.len());
     for (id, function) in ir.functions.iter().enumerate() {
         if ir.inline_only_fns.contains(&(id as FunId)) {
@@ -248,6 +254,7 @@ pub(super) fn lower_file(
                 classifiers,
                 plan,
                 laid_out: laid_out_classes,
+                callables,
             },
         )?;
         super::interface_members::record(
@@ -388,6 +395,7 @@ pub(super) fn lower_file(
     } else if !member_property_definitions.is_empty() {
         return Err("a member property definition without its class layout".to_string());
     }
+    accessor_property_entries::define(&context, &accessor_property_definitions, module)?;
     let initializer = if ir.statics.iter().any(|property| property.init.is_some()) {
         let index = module.declare();
         let ty = module.func_type(Vec::new(), Vec::new());
@@ -1369,6 +1377,22 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::External {
+                target,
+                substitutions,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.is_array_storage_copy(*target) =>
+            {
+                self.array_storage_copy(*target, substitutions, &args)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
             } if let Callee::External {
@@ -1556,7 +1580,8 @@ impl<'a> Body<'a> {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
                 type_operand,
-            } if self.class_structure(type_operand)?.is_some()
+            } if type_operand.non_null().is_array()
+                || self.class_structure(type_operand)?.is_some()
                 || self.interface_of_type(type_operand).is_some() =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
@@ -1782,7 +1807,22 @@ impl<'a> Body<'a> {
                 } = &**checked_op
                     && context_arguments.is_empty() =>
             {
-                self.property_read(*target, *dispatch_receiver)?
+                self.property_read(Some(id), *target, *dispatch_receiver)?
+            }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && let Some(element) = self.array_storage_property(*target) =>
+            {
+                self.array_storage_read(element, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } =
@@ -1912,7 +1952,7 @@ impl<'a> Body<'a> {
                 } = &**checked_op
                     && context_arguments.is_empty() =>
             {
-                self.property_write(*target, *dispatch_receiver, *value)?
+                self.property_write(Some(id), *target, *dispatch_receiver, *value)?
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -2164,21 +2204,22 @@ impl<'a> Body<'a> {
         let null_guard = matches!(op, IrBinOp::Eq | IrBinOp::Ne)
             && (matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null))
                 || matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null)));
-        let reference_or_unit =
-            |ty| Ok::<_, Unsupported>(matches!(carrier(ty)?, None | Some(ValType::Ref { .. })));
-        if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe)
-            && reference_or_unit(left)?
-            && reference_or_unit(right)?
+        // The `Unit` value is the runtime singleton object, so an identity test against it
+        // materializes that reference instead of treating the operand as carrier-less.
+        let identity_operand = |ty: Ty| -> Result<bool, Unsupported> {
+            Ok(ty == Ty::Unit || matches!(carrier(ty)?, Some(ValType::Ref { .. })))
+        };
+        if (matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) || null_guard)
+            && identity_operand(left)?
+            && identity_operand(right)?
         {
-            // Identity over objects, `Unit`'s instance among them, is the one equality rule.
-            return self.equality(op, EqualityMode::Structural, lhs, rhs);
-        }
-        if null_guard
-            && matches!(carrier(left)?, Some(ValType::Ref { .. }))
-            && matches!(carrier(right)?, Some(ValType::Ref { .. }))
-        {
-            self.expression(lhs)?;
-            self.expression(rhs)?;
+            for (operand, ty) in [(lhs, left), (rhs, right)] {
+                self.expression(operand)?;
+                if ty == Ty::Unit {
+                    let unit = self.runtime.unit_object(self.module);
+                    self.code.global_get(unit);
+                }
+            }
             self.code.ref_eq();
             if matches!(op, IrBinOp::Ne | IrBinOp::RefNe) {
                 self.code.op(EQZ32);

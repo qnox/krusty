@@ -22,6 +22,8 @@ mod tests;
 /// locals, and a lambda's captures are rewritten in this frame while its body is not.
 pub(super) struct FrameValues {
     pub(super) slots: HashMap<u32, u32>,
+    /// Each frame value's declared type: what a read of it still means once it reads the field.
+    declared: HashMap<u32, Ty>,
     original_expressions: Vec<ExprId>,
 }
 
@@ -80,7 +82,9 @@ pub(super) fn plan_frame_values(
     }
 
     let mut slots = HashMap::default();
+    let mut declared = HashMap::default();
     for (value, ty) in value_types {
+        declared.insert(value, ty);
         let field = u32::try_from(ir.classes[class as usize].fields.len())
             .expect("a continuation frame has fewer than u32::MAX fields");
         let field_ty = if let Some(&element) = shared_cell_elements.get(&value) {
@@ -100,6 +104,7 @@ pub(super) fn plan_frame_values(
 
     FrameValues {
         slots,
+        declared,
         original_expressions: expressions,
     }
 }
@@ -133,6 +138,9 @@ pub(super) fn realize_frame_values(
                     class,
                     index,
                 };
+                if let Some(&ty) = frame.declared.get(&value) {
+                    ir.set_logical_type_if_absent(expression, ty);
+                }
             }
             IrExpr::SetValue { var, value } => {
                 let Some(&index) = frame.slots.get(&var) else {
@@ -218,13 +226,17 @@ impl ContinuationFields {
         receiver
     }
 
+    /// A read of one of the machine's own fields, typed as the field is declared.
     fn read(&self, ir: &mut IrFile, field: u32) -> ExprId {
         let receiver = self.this(ir);
-        ir.add_expr(IrExpr::GetField {
+        let ty = ir.classes[self.class as usize].fields[field as usize].ty;
+        let read = ir.add_expr(IrExpr::GetField {
             receiver,
             class: self.class,
             index: field,
-        })
+        });
+        ir.set_logical_type(read, ty);
+        read
     }
 
     fn write(&self, ir: &mut IrFile, field: u32, value: ExprId) -> ExprId {
