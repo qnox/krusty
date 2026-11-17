@@ -888,12 +888,17 @@ fn omitted_parameters(callee: &Callee) -> &[u32] {
     }
 }
 
-/// Whether `synthetic`, the parameters a library composable's entry takes after its source
-/// parameters, are what `ComposerParamTransformer` appends: the composer, one `$changed` word,
-/// and, for a declaration with defaults, one `$default` word. The pass passes a library call no
-/// more than ten parameters, which one word of each covers.
-fn takes_composer_frame(synthetic: &[Ty], defaults: bool) -> bool {
-    let words = if defaults { 2 } else { 1 };
+/// Whether `synthetic`, the parameters a library composable's entry takes after its `parameters`
+/// source parameters, are what `ComposerParamTransformer` appends: the composer, a `$changed` word
+/// for every ten parameters and, for a declaration with defaults, a `$default` word. The pass
+/// passes one `$default` word, which covers at most 31 parameters.
+fn takes_composer_frame(synthetic: &[Ty], parameters: usize, defaults: bool) -> bool {
+    let default_words = match (defaults, parameters <= 31) {
+        (false, _) => 0,
+        (true, true) => 1,
+        (true, false) => return false,
+    };
+    let words = super::restart_groups::changed_ints(parameters) as usize + default_words;
     matches!(synthetic, [composer, rest @ ..]
         if composer.obj_internal().is_some_and(|name| name.matches(super::runtime::COMPOSER))
             && rest.len() == words
@@ -1119,7 +1124,7 @@ impl BodyScope<'_> {
             Some("a call to a library composable function with a function-typed parameter")
         } else if !matches!(ret.kind(), TyKind::Unit) {
             Some("a call to a library composable function with a result")
-        } else if !takes_composer_frame(&shape.synthetic_parameters, shape.defaults) {
+        } else if !takes_composer_frame(&shape.synthetic_parameters, params.len(), shape.defaults) {
             Some(
                 "a call to a library composable function whose entry does not take the composer, \
                  `$changed` and `$default` parameters",
