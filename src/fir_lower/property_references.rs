@@ -214,6 +214,7 @@ impl BodyLowering<'_> {
                     ),
                     extension_receiver,
                     arguments: &[],
+                    substitutions,
                     write: false,
                 })
                 .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))?
