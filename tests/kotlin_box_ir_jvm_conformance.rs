@@ -854,6 +854,11 @@ fn compose_receiver_lambdas_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_receiver_invoke_trivia_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("receiverInvokeTrivia");
+}
+
+#[test]
 fn compose_library_receiver_lambdas_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("libraryReceiverLambdas");
 }

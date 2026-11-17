@@ -352,8 +352,7 @@ pub(super) fn record(
                         })
                         .and_then(|&receiver| source.expression_span(ir, receiver))
                         .and_then(|receiver| {
-                            let tail = source.text.get(receiver.hi as usize..whole.hi as usize)?;
-                            Some(receiver.hi + tail.find(name.as_str())? as u32)
+                            selector_start(source.text, receiver.hi, whole.hi, name)
                         });
                     crate::diag::Span::new(selector.unwrap_or(whole.lo), whole.hi)
                 });
@@ -1846,5 +1845,50 @@ fn simple_type_name(ty: Ty) -> String {
             .kotlin_class_internal()
             .map(|classifier| classifier.nested_segment_ref().to_string())
             .unwrap_or_default(),
+    }
+}
+
+/// Where the selector `name` of `receiver.name(...)` starts, scanning from the receiver's end over
+/// only what can separate them: whitespace, comments, closing parentheses of a parenthesized
+/// receiver, and the `.` or `?.` operator. Text that is none of these, such as the contents of a
+/// comment, is never mistaken for the selector.
+fn selector_start(text: &str, from: u32, end: u32, name: &str) -> Option<u32> {
+    let text = text.get(..end as usize)?;
+    let mut at = from as usize;
+    loop {
+        let rest = text.get(at..)?;
+        if rest.starts_with(name) {
+            return Some(at as u32);
+        }
+        let skipped = if rest.starts_with("//") {
+            rest.find('\n').unwrap_or(rest.len())
+        } else if rest.starts_with("/*") {
+            let mut depth = 0usize;
+            let mut length = 0usize;
+            let bytes = rest.as_bytes();
+            while length < bytes.len() {
+                if bytes[length..].starts_with(b"/*") {
+                    depth += 1;
+                    length += 2;
+                } else if bytes[length..].starts_with(b"*/") {
+                    depth -= 1;
+                    length += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    length += 1;
+                }
+            }
+            length
+        } else {
+            let character = rest.chars().next()?;
+            if character.is_whitespace() || matches!(character, ')' | '.' | '?') {
+                character.len_utf8()
+            } else {
+                return None;
+            }
+        };
+        at += skipped;
     }
 }
