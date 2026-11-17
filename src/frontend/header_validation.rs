@@ -63,7 +63,7 @@ pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
 
 /// These semantic errors do not invalidate the parsed declaration inventory or suppress body
 /// checking. Report them only after the caller records its parser-failure state.
-pub(super) fn validate_after_parsing(file: &File, diags: &mut DiagSink) {
+pub(super) fn validate_after_parsing(file: &File, parser_error: bool, diags: &mut DiagSink) {
     // The brackets were parsed. Report the language gate only after `parse_error` is captured,
     // so the file's declarations still join the module for every other file.
     for span in file
@@ -87,7 +87,7 @@ pub(super) fn validate_after_parsing(file: &File, diags: &mut DiagSink) {
              guarantees are provided.",
         );
     }
-    if file.is_script {
+    if parser_error || file.is_script {
         return;
     }
     for &declaration in &file.decls {

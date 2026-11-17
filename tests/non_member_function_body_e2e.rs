@@ -53,20 +53,21 @@ fn ordinary_member_and_actualized_expect_bodies_retain_their_declaration_contrac
         krusty::conformance::prepare_test_source(EXEMPTIONS, krusty::conformance::TestTarget::Jvm);
     let modules = krusty::conformance::split_modules(&prepared).expect("whole source-set program");
     let units = krusty::conformance::module_units(&modules);
-    let [common_unit, platform_unit] = units.as_slice() else {
-        panic!("one common and one platform source unit")
+    let [unit] = units.as_slice() else {
+        panic!("one folded common/platform source unit")
     };
-    let files = common_unit
+    assert_eq!(unit.files.len(), 2, "both whole source files are retained");
+    assert_eq!(unit.common_file_count, 1);
+    let files = unit
         .files
         .iter()
-        .chain(&platform_unit.files)
         .map(|(stem, source)| (format!("{stem}.kt"), source.as_str()))
         .collect::<Vec<_>>();
     let sources = files
         .iter()
         .map(|(name, source)| (name.as_str(), *source))
         .collect::<Vec<_>>();
-    let classes = common::classes_against_kotlinc_source_set(&sources, common_unit.files.len());
+    let classes = common::classes_against_kotlinc_source_set(&sources, unit.common_file_count);
     let stdlib = common::stdlib_jar();
     for (compiler, files) in [("kotlinc", &classes.reference), ("krusty", &classes.krusty)] {
         let files = files

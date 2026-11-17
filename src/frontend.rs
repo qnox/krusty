@@ -1340,7 +1340,7 @@ where
                 .iter()
                 .any(|diagnostic| diagnostic.severity == Severity::Error);
         parse_errors.push(parse_error);
-        header_validation::validate_after_parsing(&file, diags);
+        header_validation::validate_after_parsing(&file, parser_error, diags);
         let extracted = pass1_builder.add_source(
             index,
             source,
