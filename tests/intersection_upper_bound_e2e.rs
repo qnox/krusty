@@ -1,27 +1,24 @@
 //! An intersection that inference fixes a bounded type parameter to approximates to that bound
 //! where a declaration publishes it. kotlinc records the variable's upper type on the intersection
 //! when the intersection's own public approximation is not a subtype of it, and every later
-//! approximation reads it: through another generic call, a collection argument, a local inside a
+//! approximation reads it: through another generic call, a classifier argument, a local inside a
 //! lambda, or a private declaration. An unbounded parameter keeps the common supertype.
 use super::common;
 
-const DECLARATIONS: &str = "\
-fun <T : CharSequence> pick(vararg values: T): T = values[0]
-fun <T> any(vararg values: T): T = values[0]
-fun <T : CharSequence> list(vararg values: T): List<T> = values.toList()
-fun <T : Number> first(vararg values: T): T = values[0]
-fun <T> keep(value: T): T = value
-fun picked() = pick(StringBuilder(), \"a\")
-fun unbounded() = any(StringBuilder(), \"a\")
-fun listed() = list(StringBuilder(), \"a\")
-val property = pick(StringBuilder(), \"a\")
-fun kept() = keep(pick(StringBuilder(), \"a\"))
-fun wrapped() = listOf(pick(StringBuilder(), \"a\"))
-fun local() = run { val value = pick(StringBuilder(), \"a\"); value }
-fun number() = first(1, 4.5)
-private fun hidden() = pick(StringBuilder(), \"a\")
-fun hiddenLength() = hidden().length
-";
+const PROGRAM: &str = include_str!("box_regressions/IntersectionUpperBoundPublication.kt");
+
+/// The program's `// FILE:` sections as named sources.
+fn program_files() -> Vec<(&'static str, &'static str)> {
+    PROGRAM
+        .split("// FILE: ")
+        .filter(|section| !section.is_empty())
+        .map(|section| {
+            section
+                .split_once('\n')
+                .expect("a FILE directive names its file on its own line")
+        })
+        .collect()
+}
 
 #[test]
 fn a_bounded_intersection_publishes_the_bound() {
@@ -29,45 +26,39 @@ fn a_bounded_intersection_publishes_the_bound() {
 fun check() {
     val a: Int = picked()
     val b: Int = unbounded()
-    val c: Int = listed()
+    val c: Int = boxedPick()
     val d: Int = property
     val e: Int = kept()
     val f: Int = wrapped()
     val g: Int = local()
-    val h: Int = number()
 }
 ";
-    let sources = [("declarations.kt", DECLARATIONS), ("usage.kt", usage)];
+    let declarations = program_files()
+        .into_iter()
+        .find(|(name, _)| *name == "Declarations.kt")
+        .expect("the program declares its functions in Declarations.kt");
+    let sources = [declarations, ("Usage.kt", usage)];
     common::assert_error_blocks_match_kotlinc(&sources, &[]);
     let mismatch = |line: u32, actual: &str| {
-        format!("usage.kt:{line}:16: initializer type mismatch: expected 'Int', actual '{actual}'.")
+        format!("Usage.kt:{line}:16: initializer type mismatch: expected 'Int', actual '{actual}'.")
     };
     assert_eq!(
         common::reference_error_blocks(&sources, &[]),
         [
-            mismatch(2, "CharSequence"),
+            mismatch(2, "Named"),
             mismatch(3, "Any"),
-            mismatch(4, "List<CharSequence>"),
-            mismatch(5, "CharSequence"),
-            mismatch(6, "CharSequence"),
-            mismatch(7, "List<CharSequence>"),
-            mismatch(8, "CharSequence"),
-            mismatch(9, "Number"),
+            mismatch(4, "Box<Named>"),
+            mismatch(5, "Named"),
+            mismatch(6, "Named"),
+            mismatch(7, "Box<Named>"),
+            mismatch(8, "Named"),
         ]
     );
 }
 
 #[test]
 fn a_published_bound_is_the_declaration_abi() {
-    let usage = "\
-fun box(): String {
-    val text = picked().length + property.length + kept().length + local().length
-    val items = listed().size + wrapped().size + hiddenLength()
-    val sum = number().toInt()
-    return if (text == 0 && items == 3 && sum == 1) \"OK\" else \"fail $text $items $sum\"
-}
-";
-    let sources = [("declarations.kt", DECLARATIONS), ("box.kt", usage)];
+    let sources = program_files();
     assert_eq!(common::kotlinc_box_files_result(&sources, "BoxKt"), "OK");
-    common::expect_box_ok_files_with_stdlib(&sources, "intersection_upper_bound_abi");
+    common::expect_box_ok_files_with_stdlib(&sources, "IntersectionUpperBoundPublication");
 }
