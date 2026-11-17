@@ -195,6 +195,12 @@ impl<'u, 's> Linker<'u, 's> {
                 plan.header.class,
             )?;
         }
+        let storage_accessors = if existing.is_none() {
+            plan.storage_accessors.clone()
+        } else {
+            Vec::new()
+        };
+        let (contract, arena) = (plan.header.contract, plan.header.arena);
         // The initialization reads the class's private members as its members do.
         self.pending.push_back(PendingBody {
             identity: identity.clone(),
@@ -208,6 +214,50 @@ impl<'u, 's> Linker<'u, 's> {
             local_body: None,
             static_initialization: None,
         });
+        for function in storage_accessors {
+            self.declare_storage_accessor(ir, &contract.module, arena, function)?;
+        }
+        Ok(())
+    }
+
+    /// Declare a default accessor of storage the class being materialized owns, as a call of it
+    /// would: a later unit calls its export rather than materializing the class again.
+    fn declare_storage_accessor(
+        &mut self,
+        ir: &mut IrFile,
+        module: &str,
+        arena: &'s KlibIrArena,
+        function: &'s KlibIrFunction,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        let signature = crate::klib_libraries::member_signature(&function.base.symbol.signature)
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "a storage accessor is not a member".to_owned(),
+                )
+            })?;
+        let KlibCalleeOrigin::Exact(identity) =
+            self.sources.bodies.linked_origin(module, &signature)
+        else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a storage accessor has no exact producer".to_owned(),
+            ));
+        };
+        // An accessor the target realizes itself, or an earlier unit already exported, is linked
+        // as that external edge; the class's storage does not re-emit it.
+        if self.sources.externals.contains_key(&identity) {
+            return Ok(());
+        }
+        // An accessor the program's closure never selected has no caller to export it to.
+        let selected = match self.sources.callees.get(&identity) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            None => return Ok(()),
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a storage accessor has no unique provider declaration".to_owned(),
+                ))
+            }
+        };
+        self.declare(ir, &identity, Some(selected), arena, function)?;
         Ok(())
     }
 
@@ -534,6 +584,26 @@ impl<'u, 's> Linker<'u, 's> {
         for function in value_class_overrides(&header) {
             if self.selects_override(&contract.module, function) {
                 self.declare_dispatched(ir, member.clone(), header.arena, function)?;
+            }
+        }
+        // The unit materializing a value class owns its box construction, exported under the
+        // primary constructor's identity: a later unit, or a body common preparation adds to this
+        // one, constructs a box through that export instead of materializing the class again.
+        if let Some(primary) = &contract.primary_constructor {
+            let constructor = KlibDependencyCallable {
+                module: contract.module.clone(),
+                declaration: KlibDeclarationSignature::Public(primary.clone()),
+            };
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                self.functions.entry(constructor)
+            {
+                let entry = ir
+                    .add_construction_entry(class, None)
+                    .map(|entry| entry.function)
+                    .ok_or(KlibBodyDeclineReason::SignatureMismatch(
+                        "a value class box without its checked self type".to_owned(),
+                    ))?;
+                slot.insert(entry);
             }
         }
         Ok(member)
