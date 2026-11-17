@@ -9,7 +9,7 @@
 
 use super::scope::{ContextValue, Ns};
 use super::{
-    arg_assignable_simple, selected_context_values, CheckerScope, ImplicitReceiverSelection, Local,
+    selected_context_values, CheckerScope, ImplicitReceiverSelection, Local,
     MissingContextParameter, ReceiverDeclarationRole, ReceiverFnValueOrigin,
     SelectedContextSources,
 };
@@ -67,8 +67,26 @@ impl super::Checker<'_> {
             if have == want {
                 return true;
             }
+            // A context parameter whose type is a type variable admits a value within the
+            // variable's bound, not merely any reference.
             if let Some(bound) = want.ty_param_bound() {
-                return bound.is_erased_top() || arg_assignable_simple(bound, have);
+                // A bound that mentions one of the call's own type variables (`C : Slot<T>`) is open
+                // here: the value's class is checked against the bound's class, and the call's
+                // inference then relates the arguments. An enclosing declaration's type parameter is
+                // rigid, and stays in the ordinary assignability check below.
+                if bound.mentions_type_variable() {
+                    return match (have.obj_internal(), bound.obj_internal()) {
+                        (Some(h), Some(b)) => self.obj_name_is_subtype(h, b),
+                        _ => false,
+                    };
+                }
+                return bound.is_erased_top()
+                    || crate::assignable::is_assignable(
+                        &crate::assignable::TyCtx::new(),
+                        self,
+                        have,
+                        bound,
+                    );
             }
             match (have.obj_internal(), want.obj_internal()) {
                 (Some(h), Some(w)) => self.obj_name_is_subtype(h, w),
