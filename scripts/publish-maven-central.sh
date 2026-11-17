@@ -20,6 +20,8 @@
 #   ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=... scripts/publish-maven-central.sh VERSION
 #
 # Environment: RELEASE_REMOTE (origin), the remote holding the deployment refs.
+# RELEASE_TOKEN, a token that may push refs/krusty/*: the release job checks out without persisted
+# credentials, so the push that records a deployment carries it. Nothing else sees it.
 # RELEASE_SHA (GITHUB_SHA, then HEAD) identifies the source commit whose author owns the record.
 set -euo pipefail
 shopt -s inherit_errexit
@@ -30,6 +32,14 @@ if [[ $# -ne 1 ]]; then
 fi
 version=$1
 : "${MAVEN_CENTRAL_USERNAME:?}" "${MAVEN_CENTRAL_PASSWORD:?}" "${ORG_GRADLE_PROJECT_signingInMemoryKey:?}"
+
+# Only the journal push below is authenticated. The token leaves the environment here, before
+# the Gradle build or any other child starts.
+push_header=
+if [[ -n ${RELEASE_TOKEN:-} ]]; then
+  push_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$RELEASE_TOKEN" | base64 -w0)"
+fi
+unset RELEASE_TOKEN
 
 api=https://central.sonatype.com/api/v1/publisher
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -158,7 +168,16 @@ record_deployment() {
     GIT_COMMITTER_NAME="$author_name" GIT_COMMITTER_EMAIL="$author_email" \
     git -C "$repo" commit-tree "$(git -C "$repo" hash-object -t tree /dev/null)" \
     -m "central deployment $1 of krusty-gradle-plugin $version")
-  git -C "$repo" push --quiet --force-with-lease="$deployment_ref:$recorded" "$remote" "$commit:$deployment_ref" 2>/dev/null
+  (
+    # The header actions/checkout would have persisted, in this one command's environment: a
+    # command line is readable by every process on the machine.
+    if [[ -n $push_header ]]; then
+      entry=$((10#${GIT_CONFIG_COUNT:-0}))
+      export GIT_CONFIG_COUNT=$((entry + 1)) "GIT_CONFIG_KEY_$entry=http.https://github.com/.extraheader" \
+        "GIT_CONFIG_VALUE_$entry=$push_header"
+    fi
+    git -C "$repo" push --quiet --force-with-lease="$deployment_ref:$recorded" "$remote" "$commit:$deployment_ref" 2>/dev/null
+  )
 }
 
 upload() {

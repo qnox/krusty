@@ -1826,6 +1826,9 @@ jobs:
       - name: publish the Gradle plugin to Maven Central
         if: steps.tip.outputs.publish == 'true'
         env:
+          # Records the upload in refs/krusty/central/<version>; the checkout no longer
+          # authenticates Git. The script keeps it from the Gradle build.
+          RELEASE_TOKEN: ${{ github.token }}
           # A Central Portal user token for the verified dev.krustythecompiler namespace.
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
