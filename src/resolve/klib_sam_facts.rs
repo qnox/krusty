@@ -112,5 +112,9 @@ pub(super) fn freeze(
             })
             .collect(),
     };
-    Some(CheckedKlibSamDeclaration { classifier, target })
+    Some(CheckedKlibSamDeclaration {
+        classifier,
+        target,
+        apply: crate::symbol_resolver::apply_sam_declaration,
+    })
 }

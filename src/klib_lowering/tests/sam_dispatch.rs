@@ -67,12 +67,14 @@ fn official_sam_dispatch_families_preserve_headers_frames_and_copy_without_body_
         )
         .unwrap();
         let callees = KlibCalleeFacts::new([callable]).with_checked_dependency_facts(&checked);
+        let externals = super::sam_conversions::checked_member_externals(&libraries, &checked);
         let mut unit = DependencyBodyUnit::default();
-        unit.lower_function_with_intrinsics(
+        unit.lower_function_with_intrinsics_and_externals(
             callable,
             libraries.declaration_bodies(),
             &callees,
             libraries.intrinsic_facts(),
+            &externals,
         )
         .unwrap();
         let mut ir = unit.into_ir();
@@ -115,7 +117,35 @@ fn official_sam_dispatch_families_preserve_headers_frames_and_copy_without_body_
             assert!(facts.sam_declaration(declaration).is_some());
             assert!(facts.declaration_identity(declaration).is_some());
         }
-        assert!(facts.klib_body_callables().is_empty());
+        // The SAM headers add no body obligation. The only dependency body is the target member
+        // the specialized lambdas call (`Int.plus`), one of the member edges the checker froze.
+        let bodies = facts
+            .klib_body_callables()
+            .into_iter()
+            .map(|callable| callable.identity().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bodies.len(),
+            usize::from(name == "specialized" || inline),
+            "{name}: {bodies:?}"
+        );
+        for body in &bodies {
+            assert!(
+                checked.member_edges().contains_key(body),
+                "{name}: {body:?}"
+            );
+            for &declaration in declarations.iter().chain(&defaults) {
+                assert_ne!(
+                    libraries
+                        .external_callable(declaration)
+                        .unwrap()
+                        .dependency_callable
+                        .as_ref(),
+                    Some(body),
+                    "{name}: a SAM header became a body obligation"
+                );
+            }
+        }
         let copied = crate::ir::clone_expression_with_own_lambdas(&mut ir, expression);
         let IrExpr::Lambda {
             sam: Some(copied_target),
