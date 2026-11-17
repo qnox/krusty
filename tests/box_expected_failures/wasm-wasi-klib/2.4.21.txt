@@ -297,7 +297,6 @@ classes/nestedInitBlocksWithLambda.kt
 classes/overloadUnaryOperator.kt
 closures/anonymousObjectAsLastExpressionInLambda.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
-closures/capturedVarsOptimization/withCoroutines.kt
 closures/closuresAsSingleton.kt
 closures/kt11634_4.kt
 closures/localFunctionInInitBlock.kt
@@ -525,7 +524,6 @@ coroutines/inlineClasses/direct/covariantOverrideSuspendFunWithNullableInlineCla
 coroutines/inlineClasses/direct/covariantOverrideSuspendFunWithNullableInlineClass_NullableInt_null.kt
 coroutines/inlineClasses/direct/covariantOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/direct/covariantOverrideSuspendFun_Int.kt
-coroutines/inlineClasses/direct/createOverride.kt
 coroutines/inlineClasses/direct/defaultStub.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun_Any.kt
@@ -568,7 +566,6 @@ coroutines/inlineClasses/resume/covariantOverrideSuspendFunWithNullableInlineCla
 coroutines/inlineClasses/resume/covariantOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/resume/covariantOverrideSuspendFun_Int.kt
 coroutines/inlineClasses/resume/createMangling.kt
-coroutines/inlineClasses/resume/createOverride.kt
 coroutines/inlineClasses/resume/defaultStub.kt
 coroutines/inlineClasses/resume/genericOverrideSuspendFun.kt
 coroutines/inlineClasses/resume/genericOverrideSuspendFun_Any.kt
@@ -610,7 +607,6 @@ coroutines/inlineClasses/resumeWithException/covariantOverrideSuspendFunWithNull
 coroutines/inlineClasses/resumeWithException/covariantOverrideSuspendFunWithNullableInlineClass_NullableInt.kt
 coroutines/inlineClasses/resumeWithException/covariantOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/resumeWithException/covariantOverrideSuspendFun_Int.kt
-coroutines/inlineClasses/resumeWithException/createOverride.kt
 coroutines/inlineClasses/resumeWithException/genericOverrideSuspendFun.kt
 coroutines/inlineClasses/resumeWithException/genericOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/resumeWithException/genericOverrideSuspendFun_Any_NullableInlineClassUpperBound.kt
@@ -704,8 +700,6 @@ coroutines/suspendFunImportedFromObject.kt
 coroutines/suspendFunctionAsCoroutine/handleException.kt
 coroutines/suspendFunctionAsCoroutine/ifExpressionInsideCoroutine_1_3.kt
 coroutines/suspendFunctionAsCoroutine/inline.kt
-coroutines/suspendFunctionAsCoroutine/inlineTwoReceivers.kt
-coroutines/suspendFunctionAsCoroutine/noinlineTwoReceivers.kt
 coroutines/suspendFunctionAsCoroutine/operators.kt
 coroutines/suspendFunctionAsCoroutine/privateFunctions.kt
 coroutines/suspendFunctionAsCoroutine/superCall.kt

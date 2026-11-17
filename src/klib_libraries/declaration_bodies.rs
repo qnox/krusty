@@ -856,6 +856,19 @@ impl KlibDeclarationBodies {
         found
     }
 
+    /// Whether the one public class `signature` serialized for `module` declares an enum's
+    /// synthetic `entries` body.
+    pub(crate) fn declares_synthetic_enum_entries(
+        &self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> bool {
+        matches!(
+            self.public_class(module, signature),
+            LocatedClass::One(arena, class) if class.declares_synthetic_enum_entries(arena)
+        )
+    }
+
     /// A public classifier serialized by `module` or a library its manifest depends on.
     pub(crate) fn public_class<'a>(
         &'a self,

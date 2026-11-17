@@ -98,6 +98,17 @@ pub enum Contract {
     KotlinWasm,
 }
 
+impl Contract {
+    /// Whether an enum's `entries` is built by calling the selected `enumEntries(Array)`, as the
+    /// synthetic body states, rather than by the runtime's own list.
+    pub fn builds_entries_by_factory(self) -> bool {
+        match self {
+            Self::KotlinNative => false,
+            Self::KotlinWasm => true,
+        }
+    }
+}
+
 /// Build the entry answering each constant of every enum `ir` declares, before [`realize`] rewrites
 /// the entries' reads into reads of the constants' storage. Every enum gets them, whether its
 /// module is a library or the program: another file of the module, as much as another module, may
@@ -219,9 +230,10 @@ pub fn realize(
         .map(|class| ClassId::try_from(class).expect("too many classes"))
         .filter(|&class| is_enum(&ir.classes[class as usize]))
         .collect();
-    let entries_list = match (contract, factory) {
-        (Contract::KotlinNative, _) => Some(initializer::EntriesList::Runtime),
-        (Contract::KotlinWasm, factory) => factory.map(initializer::EntriesList::Factory),
+    let entries_list = if contract.builds_entries_by_factory() {
+        factory.map(initializer::EntriesList::Factory)
+    } else {
+        Some(initializer::EntriesList::Runtime)
     };
     let mut realized: HashMap<TypeName, Realized> = HashMap::default();
     for class in enums {
