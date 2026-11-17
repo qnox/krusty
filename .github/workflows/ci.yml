@@ -122,6 +122,14 @@ jobs:
       - name: validate Gradle wrappers
         id: gradle_wrappers
         run: scripts/check-gradle-wrappers.sh
+      # A tag can be moved to other code after review; a commit cannot. Dependabot advances the pins.
+      - name: actions are pinned to a commit
+        id: action_pins
+        run: |
+          if grep -rnE '^ *(- )?uses: ' .github/workflows | grep -vE 'uses: [^ ]+@[0-9a-f]{40}( |$)'; then
+            echo "pin each action above to a full commit SHA, with its version as a comment" >&2
+            exit 1
+          fi
       - name: outcome manifests only shrink
         id: outcome_lists
         env:
@@ -156,7 +164,8 @@ jobs:
         if: >-
           failure() && startsWith(github.ref, 'refs/heads/mq/')
           && (steps.attribution.outcome == 'failure' || steps.intellij_patch.outcome == 'failure'
-          || steps.gradle_wrappers.outcome == 'failure' || steps.outcome_lists.outcome == 'failure'
+          || steps.gradle_wrappers.outcome == 'failure' || steps.action_pins.outcome == 'failure'
+          || steps.outcome_lists.outcome == 'failure'
           || steps.lint.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1405,7 +1414,7 @@ jobs:
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
     runs-on: [self-hosted, rust-4c-8gb]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The commit history only: the build number counts commits and lint reads their
           # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
@@ -1413,7 +1422,7 @@ jobs:
           filter: tree:0
       - *just-on-path
       - *install-just
-      - uses: actions/setup-java@v6.2.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
           java-version: '17'
@@ -1427,7 +1436,7 @@ jobs:
           set -euo pipefail
           version=$(just version)
           scripts/package-maven-plugin.sh "$version" "$PWD/dist-maven"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: krusty-maven-plugin
           path: |
@@ -1442,7 +1451,7 @@ jobs:
     needs: [build-tool-bins, build-maven-plugin]
     runs-on: [self-hosted, rust-4c-8gb]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The commit history only: the build number counts commits and lint reads their
           # messages, but no step needs old trees or blobs (a clone took 33 s full, 6 s without).
@@ -1450,7 +1459,7 @@ jobs:
           filter: tree:0
       - *just-on-path
       - *install-just
-      - uses: actions/setup-java@v6.2.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
           java-version: '17'
@@ -1459,10 +1468,10 @@ jobs:
       - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
         with:
           maven-version: '3.9.11'
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: krusty-maven-plugin
           path: dist-maven
