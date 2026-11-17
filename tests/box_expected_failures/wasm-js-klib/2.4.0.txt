@@ -1202,7 +1202,6 @@ functions/localFunctions/definedWithinLambda.kt
 functions/localFunctions/definedWithinLambdaInnerUsage1.kt
 functions/localFunctions/definedWithinLambdaInnerUsage2.kt
 ieee754/asComparableToDouble.kt
-ieee754/asComparableToDouble_properIeeeComparisons.kt
 ieee754/comparableTypeCast.kt
 ieee754/equalsNaN_properIeeeComparisons.kt
 ieee754/equalsNullableDouble_properIeeeComparisons.kt
@@ -2100,7 +2099,6 @@ ranges/literal/simpleRangeWithNonConstantEnds.kt
 ranges/literal/simpleSteppedDownTo.kt
 ranges/literal/simpleSteppedRange.kt
 ranges/multiAssignmentIterationOverIntRange.kt
-ranges/safeCallRangeTo.kt
 ranges/stepped/expression/downTo/emptyProgression.kt
 ranges/stepped/expression/downTo/illegalStepNegative.kt
 ranges/stepped/expression/downTo/illegalStepNonConst.kt
