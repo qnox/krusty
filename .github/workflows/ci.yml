@@ -46,12 +46,17 @@ concurrency:
 # copies of the toolchains and Gradle caches (several GB) evicted the master entries that every
 # branch restores, so later runs downloaded the toolchains again.
 jobs:
-  # Asks the runner controller where this run's jobs should run (infragnite/route-runner). In shadow
-  # mode the answer is only logged and recorded beside where each job really ran; every job keeps
-  # its own runs-on. No job waits for this one.
+  # Asks the runner controller where this run's jobs should run (infragnite/route-runner). The jobs
+  # it places read its answer in their runs-on and fall back to their own labels when the answer
+  # has no entry for them. In shadow mode the answer is each job's own labels, and the controller
+  # records its proposal beside where each job really ran. A failure here must not stop the run:
+  # without an answer every job keeps its own labels.
   route:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    continue-on-error: true
+    outputs:
+      runs-on: ${{ steps.route.outputs.runs-on }}
     permissions:
       contents: read
       id-token: write
@@ -73,7 +78,8 @@ jobs:
       - name: select supported Kotlin versions
         id: versions
         run: echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
-      - uses: infragnite/route-runner@2c24bcc9fe2f764ea321e285faeffda8e50f89ea # v1
+      - id: route
+        uses: infragnite/route-runner@9702e0e76140884e89273a8e83057530ca343552 # main
         with:
           workflow: .github/workflows/ci.yml
           asking: route
@@ -82,12 +88,11 @@ jobs:
   # Lint and the own test suites are independent merge gates. Give each its own runner so the clean
   # Clippy build does not sit on the test critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
-  # TEMP (2026-11-07): GHA hosted queue is backed up — temporarily run the heavy ubuntu-latest
-  # jobs on self-hosted rust-4c-8gb too. Revert once the hosted backlog clears; then dual-label +
-  # route enforce can choose GHA vs own. route stays on ubuntu-latest. Fork PRs no longer run CI:
-  # only the queue's own branches do.
+  # Their own labels are self-hosted rust-4c-8gb; the route answer may move them to GitHub's
+  # runners. Fork PRs no longer run CI: only the queue's own branches do.
   lint:
-    runs-on: [self-hosted, rust-4c-8gb]
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['lint'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     permissions:
       contents: read
       # Cancels the rest of a merge queue run after a lint failure.
@@ -168,7 +173,8 @@ jobs:
   plugin-host:
     # GitHub-hosted: these tests ran out of memory on the 8 GB self-hosted runners, and GitHub's
     # Linux runners (16 GB) had free slots.
-    runs-on: [self-hosted, rust-4c-8gb]
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['plugin-host'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -445,7 +451,8 @@ jobs:
           key: ${{ steps.kotlin-toolchain-cli.outputs.cache-primary-key }}
 
   build-tool-bins:
-    runs-on: [self-hosted, rust-4c-8gb]
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['build-tool-bins'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     outputs:
       # Every consumer already waits for this artifact family. Publish the manifest-derived matrix
       # here instead of scheduling a separate ten-second runner solely for these two values.
@@ -517,8 +524,8 @@ jobs:
   # through the checkout path it was built in, which every runner of this pool shares, so it runs on
   # the pool that built it. Coverage runs it instrumented every night (.github/workflows/coverage.yml).
   e2e:
-    needs: build-tool-bins
-    runs-on: [self-hosted, rust-4c-8gb]
+    needs: [route, build-tool-bins]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['e2e'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - *mq-base
@@ -653,7 +660,7 @@ jobs:
 
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    needs: build-tool-bins
+    needs: [route, build-tool-bins]
     strategy:
       fail-fast: false
       matrix:
@@ -665,7 +672,7 @@ jobs:
     # 8s above the JVM deadline. Every target uses the guarded self-hosted pool. Native once reached
     # its suite deadline on these 8 GB runners; sharing decoded KLIB trees (#3274) halved its lane
     # and its peak memory. Separate target rows preserve independent measurements.
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['conformance'][format('{0}|{1}', matrix.version, matrix.target)] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     env:
       KRUSTY_BOX_CASE_TIMEOUT_MS: '8000'
       # Each target row keeps its own kotlinc box reference cache; see its restore step.
@@ -1137,7 +1144,8 @@ jobs:
   build-gradle-plugin:
     # GitHub-hosted: a one- or two-minute producer that the gradle matrix waits for; in the
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
-    runs-on: [self-hosted, rust-4c-8gb]
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['build-gradle-plugin'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1225,12 +1233,12 @@ jobs:
   # Kotlin version, driving the shared krusty binary. Release publishes these bytes unchanged.
   build-tools:
     name: build-tools (${{ matrix.kotlin }})
-    needs: [build-tool-bins]
+    needs: [route, build-tool-bins]
     strategy:
       fail-fast: false
       matrix:
         kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['build-tools'][matrix.kotlin] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1270,7 +1278,7 @@ jobs:
 
   # Execute the exact release bytes against every supported Kotlin Gradle plugin.
   gradle:
-    needs: [build-tool-bins, build-gradle-plugin]
+    needs: [route, build-tool-bins, build-gradle-plugin]
     strategy:
       fail-fast: false
       matrix:
@@ -1290,7 +1298,7 @@ jobs:
           - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true,  suite: boundary }
           - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true,  suite: boundary }
           - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false, suite: boundary }
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['gradle'][format('{0}|{1}|{2}|{3}', matrix.kotlin, matrix.gradle, matrix.ksp, matrix.suite)] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     # A lane takes under 10 minutes; one stuck on its runner (a download that never finished) ran for
     # hours, holding the batch that waits on it.
     timeout-minutes: 30
@@ -1403,7 +1411,8 @@ jobs:
   build-maven-plugin:
     # GitHub-hosted: a one- or two-minute producer that the maven matrix waits for; in the
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
-    runs-on: [self-hosted, rust-4c-8gb]
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['build-maven-plugin'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1439,8 +1448,8 @@ jobs:
   # Run the Maven plugin's verify goal from the packaged release repository against
   # kotlin-maven-plugin builds, with the shared krusty binary.
   maven:
-    needs: [build-tool-bins, build-maven-plugin]
-    runs-on: [self-hosted, rust-4c-8gb]
+    needs: [route, build-tool-bins, build-maven-plugin]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['maven'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1484,12 +1493,12 @@ jobs:
   # Build Kotlin with the Bazel module the release would publish, as a consumer depends on it,
   # with the toolchain's compiler and an override, in action and worker mode.
   bazel:
-    needs: [build-tool-bins]
+    needs: [route, build-tool-bins]
     strategy:
       fail-fast: false
       matrix:
         bazel: [8.4.2, 9.3.1]
-    runs-on: [self-hosted, rust-4c-8gb]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['bazel'][matrix.bazel] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
