@@ -135,3 +135,18 @@ fun both(b: Both) = b.getA()
         ]
     );
 }
+
+#[test]
+fn a_superclass_private_property_leaves_the_java_getter_a_function() {
+    let derived = "\
+public class Derived extends Base { public String getA() { return \"OK\"; } }
+";
+    let source = "\
+open class Base { private val a: String get() = \"base\" }
+fun use(d: Derived): String = d.getA()
+";
+    common::assert_sources_accepted_like_kotlinc(
+        &[("Derived.java", derived), ("test.kt", source)],
+        &[],
+    );
+}

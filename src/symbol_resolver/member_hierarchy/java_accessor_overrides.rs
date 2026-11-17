@@ -9,6 +9,8 @@
 //! methods would be the same property's other accessor ([`PropertyAccessorRole`]). This walk
 //! confirms the property against the supertypes' Kotlin declarations and each accessor against its
 //! applied shape, so an overload such as `String setA(String)` beside `var a: Int` stays a function.
+//! Only an inherited accessor is overridden: a superclass's `private val a` leaves the Java class's
+//! `getA()` an ordinary function.
 
 use crate::libraries::{
     FnKind, FunctionInfo, LibraryType, PropKind, PropertyAccessorRole, PropertyInfo,
@@ -41,6 +43,7 @@ pub(super) fn overrides_kotlin_property_accessor(
                 .filter(|property| {
                     property.kind == PropKind::Member
                         && property.context_count == 0
+                        && super::member_is_inheritable(property.visibility)
                         && declares_kotlin(source, property)
                 })
                 .any(|property| {
@@ -91,7 +94,8 @@ fn declares_counterpart(
 
 /// Whether `function` has the applied shape of `property`'s accessor, so that it overrides that
 /// accessor rather than overloading it: a getter takes nothing and returns a subtype of the
-/// property's type, and a setter takes exactly the property's type and returns `Unit`.
+/// property's type, and a setter takes exactly the property's type and returns `Unit`. A private
+/// setter is not inherited, so nothing overrides it.
 fn accessor_shape_matches(
     source: &dyn SymbolSource,
     function: &FunctionInfo,
@@ -107,6 +111,7 @@ fn accessor_shape_matches(
         return false;
     };
     property.setter.is_some()
+        && super::member_is_inheritable(property.setter_visibility)
         && result == Ty::Unit
         && crate::symbol_resolver::resolution_subtype(source, *parameter, property.ty)
         && crate::symbol_resolver::resolution_subtype(source, property.ty, *parameter)
