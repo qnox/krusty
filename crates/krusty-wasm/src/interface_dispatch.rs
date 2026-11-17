@@ -37,6 +37,13 @@ pub(super) struct MemberRef(u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ClassRef(u32);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InstanceTest {
+    Classifier(TypeName),
+    FunctionInvoke(usize),
+    SuspendFunction(usize),
+}
+
 /// The program's interface members, their implementations and the interfaces' instances.
 #[derive(Default)]
 pub(super) struct InterfaceDispatch {
@@ -47,9 +54,11 @@ pub(super) struct InterfaceDispatch {
     identities: HashMap<Vec<u8>, MemberRef>,
     /// Each member of a library classifier something names, by its KLIB identity.
     library: HashMap<Vec<u8>, MemberRef>,
+    /// Runtime callable protocols, interned by their checked physical arity.
+    function_invokes: HashMap<usize, MemberRef>,
     classes: Vec<ClassRecord>,
     /// The `is` function of each interface something tests, in the order they were asked for.
-    tests: Vec<(TypeName, u32)>,
+    tests: Vec<(InstanceTest, u32)>,
     /// Each runtime representation with no interface table, by its struct, and the interfaces
     /// its values are instances of.
     representations: Vec<(u32, Vec<TypeName>)>,
@@ -70,6 +79,7 @@ struct Member {
     unimplementable: Option<String>,
     /// The library classifier declaring this member, whose every instance must implement it.
     library_owner: Option<TypeName>,
+    protocol_arity: Option<usize>,
 }
 
 struct ClassRecord {
@@ -78,6 +88,8 @@ struct ClassRecord {
     /// The global its dispatch table reads its interface table from.
     itable: u32,
     interfaces: Vec<TypeName>,
+    function_arities: Vec<usize>,
+    suspend_arities: Vec<usize>,
 }
 
 /// How a stub reaches the implementations of its member.
@@ -135,8 +147,43 @@ impl InterfaceDispatch {
             representations: Vec::new(),
             unimplementable: None,
             library_owner: None,
+            protocol_arity: None,
         });
         member
+    }
+
+    /// The common physical callable protocol. Its arguments and result are erased references;
+    /// declaration identities remain separate and are never synthesized from this arity.
+    pub(super) fn function_invoke(&mut self, module: &mut Module, arity: usize) -> MemberRef {
+        if let Some(&member) = self.function_invokes.get(&arity) {
+            return member;
+        }
+        let member = self.unnumbered(module, (vec![REFERENCE; arity + 1], vec![REFERENCE]));
+        self.members[member.0 as usize].protocol_arity = Some(arity);
+        self.function_invokes.insert(arity, member);
+        member
+    }
+
+    /// Membership is authenticated independently of whether an invocation can be emitted.
+    pub(super) fn function_instance_of(&mut self, class: ClassRef, arity: usize, suspend: bool) {
+        let arities = &mut self.classes[class.0 as usize].function_arities;
+        if !arities.contains(&arity) {
+            arities.push(arity);
+        }
+        if suspend {
+            let arities = &mut self.classes[class.0 as usize].suspend_arities;
+            if !arities.contains(&arity) {
+                arities.push(arity);
+            }
+        }
+    }
+
+    pub(super) fn suspend_function_test(&mut self, module: &mut Module, arity: usize) -> u32 {
+        self.instance_test(module, InstanceTest::SuspendFunction(arity))
+    }
+
+    pub(super) fn function_test(&mut self, module: &mut Module, arity: usize) -> u32 {
+        self.instance_test(module, InstanceTest::FunctionInvoke(arity))
     }
 
     /// The member `owner` declares whose KLIB identity is `identity`
@@ -212,6 +259,8 @@ impl InterfaceDispatch {
             ancestors,
             itable,
             interfaces: Vec::new(),
+            function_arities: Vec::new(),
+            suspend_arities: Vec::new(),
         });
         (class, itable)
     }
@@ -285,21 +334,34 @@ impl InterfaceDispatch {
             if let Some(reason) = &member.unimplementable {
                 return Some(reason.clone());
             }
-            let Some(owner) = member.library_owner else {
-                continue;
-            };
             let unimplemented = self.classes.iter().enumerate().any(|(class, record)| {
-                record.interfaces.contains(&owner)
+                let advertised = member.protocol_arity.map_or_else(
+                    || {
+                        member
+                            .library_owner
+                            .is_some_and(|owner| record.interfaces.contains(&owner))
+                    },
+                    |arity| record.function_arities.contains(&arity),
+                );
+                advertised
                     && !member
                         .implementations
                         .iter()
                         .any(|(known, _)| known.0 as usize == class)
             });
             if unimplemented {
-                return Some(format!(
-                    "a call of a `{}` member on an instance that does not implement it",
-                    owner.render()
-                ));
+                return Some(match member.protocol_arity {
+                    Some(arity) => {
+                        format!("a callable of arity {arity} with no emitted invocation")
+                    }
+                    None => format!(
+                        "a call of a `{}` member on an instance that does not implement it",
+                        member
+                            .library_owner
+                            .expect("an advertised library member has an owner")
+                            .render()
+                    ),
+                });
             }
         }
         None
@@ -335,6 +397,10 @@ impl InterfaceDispatch {
 
     /// `(ref null eq) -> i32`: whether a value is an instance of `interface`.
     pub(super) fn test(&mut self, module: &mut Module, interface: TypeName) -> u32 {
+        self.instance_test(module, InstanceTest::Classifier(interface))
+    }
+
+    fn instance_test(&mut self, module: &mut Module, interface: InstanceTest) -> u32 {
         if let Some((_, function)) = self.tests.iter().find(|(known, _)| *known == interface) {
             return *function;
         }
@@ -458,16 +524,21 @@ impl InterfaceDispatch {
 
     /// `ref.test` of every representation and struct implementing `interface`, but a subtype of
     /// a struct already tested.
-    fn test_body(&self, interface: TypeName) -> Code {
+    fn test_body(&self, interface: InstanceTest) -> Code {
         let implementors = self
             .classes
             .iter()
-            .filter(|class| class.interfaces.contains(&interface))
+            .filter(|class| match interface {
+                InstanceTest::Classifier(classifier) => class.interfaces.contains(&classifier),
+                InstanceTest::FunctionInvoke(arity) => class.function_arities.contains(&arity),
+                InstanceTest::SuspendFunction(arity) => class.suspend_arities.contains(&arity),
+            })
             .collect::<Vec<_>>();
         let mut code = Code::default();
         code.i32_const(0);
         for (structure, interfaces) in &self.representations {
-            if interfaces.contains(&interface) {
+            if matches!(interface, InstanceTest::Classifier(classifier) if interfaces.contains(&classifier))
+            {
                 code.local_get(0)
                     .ref_test(false, HeapType::Concrete(*structure))
                     .op(OR32);
@@ -500,6 +571,11 @@ fn forward(code: &mut Code, member: &Member) {
 
 fn stub_body(member: &Member, shape: &Shape, objects: &ObjectRoot) -> Code {
     let mut code = Code::default();
+    if member.protocol_arity.is_some() {
+        // Invocation evaluates every argument before checking the receiver, including when one
+        // implementation lets the dispatch use a direct call and never reads its receiver.
+        code.local_get(0).ref_as_non_null().drop_();
+    }
     // A representation with no interface table answers before the table is read.
     for &(structure, function) in &member.representations {
         code.local_get(0)
@@ -547,4 +623,43 @@ fn stub_body(member: &Member, shape: &Shape, objects: &ObjectRoot) -> Code {
         }
     }
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn callable_protocols_intern_exact_erased_signatures_by_arity() {
+        let mut module = Module::default();
+        let mut dispatch = InterfaceDispatch::default();
+        let one = dispatch.function_invoke(&mut module, 1);
+        assert_eq!(one, dispatch.function_invoke(&mut module, 1));
+        assert_ne!(one, dispatch.function_invoke(&mut module, 0));
+        assert_eq!(
+            module.func_signature(dispatch.ty(one)),
+            Some((vec![REFERENCE; 2], vec![REFERENCE]))
+        );
+    }
+
+    #[test]
+    fn advertised_callable_membership_does_not_depend_on_emitting_its_body() {
+        let mut module = Module::default();
+        let mut dispatch = InterfaceDispatch::default();
+        let (class, _) = dispatch.class(&mut module, 0, vec![1]);
+        dispatch.function_instance_of(class, 1, false);
+        let member = dispatch.function_invoke(&mut module, 1);
+        let test = dispatch.function_test(&mut module, 1);
+        assert_eq!(test, dispatch.function_test(&mut module, 1));
+        assert_eq!(dispatch.classes[class.0 as usize].function_arities, vec![1]);
+        assert_eq!(dispatch.declined(), None);
+        dispatch.stub(&mut module, member);
+        assert_eq!(
+            dispatch.declined(),
+            Some("a callable of arity 1 with no emitted invocation".into())
+        );
+        let function = module.declare();
+        dispatch.implement(class, member, function).unwrap();
+        assert_eq!(dispatch.declined(), None);
+    }
 }

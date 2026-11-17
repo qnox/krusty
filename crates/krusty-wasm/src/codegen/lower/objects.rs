@@ -28,7 +28,9 @@ use super::super::super::objects::{slot_field, REFERENCE};
 use super::super::super::runtime::{Runtime, EQZ32, OR32};
 use super::super::classes::{Accessor, FileClasses};
 use super::super::interface_members::{accessor_types, member_signature};
-use super::super::property_registry::{MemberProperty, MemberPropertyDefinition, TopLevelProperty};
+use super::super::property_registry::{
+    AccessorProperty, MemberProperty, MemberPropertyDefinition, TopLevelProperty,
+};
 use super::{carrier, Body, FileContext, Unsupported, STRING};
 
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
@@ -787,7 +789,7 @@ impl Body<'_> {
             .ok_or("a `super` call to a function of no function type")?;
         let mut expected = vec![REFERENCE];
         for param in params {
-            expected.push(carrier(*param)?.ok_or("a `Unit` parameter")?);
+            expected.push(super::parameter_carrier_of(*param)?.ok_or("a `Unit` parameter")?);
         }
         if params.len() != args.len()
             || carried != expected
@@ -955,6 +957,12 @@ impl Body<'_> {
         receiver: Option<u32>,
     ) -> Result<(), Unsupported> {
         if receiver.is_none() {
+            // Another file's property realized through accessors also has a storage record when
+            // its defining file was lowered first; the accessor entry is its access path.
+            if let Some(entry) = self.module_accessor_property(target) {
+                self.code.call(entry.getter);
+                return Ok(());
+            }
             if let Some(storage) = self.top_level_property(target)? {
                 if !storage.direct_read {
                     return Err("a top-level property read that requires an accessor".to_string());
@@ -1021,6 +1029,14 @@ impl Body<'_> {
         value: u32,
     ) -> Result<(), Unsupported> {
         if receiver.is_none() {
+            if let Some(entry) = self.module_accessor_property(target) {
+                let setter = entry
+                    .setter
+                    .ok_or_else(|| "a read-only cross-file property was written".to_string())?;
+                self.value(value, entry.ty)?;
+                self.code.call(setter);
+                return Ok(());
+            }
             if let Some(storage) = self.top_level_property(target)? {
                 if !storage.mutable {
                     return Err("an assignment to an immutable top-level property".to_string());
@@ -1101,6 +1117,14 @@ impl Body<'_> {
             return Err("a cross-file member property disagrees with its module record".into());
         }
         Ok(Some(entry))
+    }
+
+    /// The entries of a receiver-less property another file realizes through its accessors.
+    fn module_accessor_property(&self, target: PropertyId) -> Option<AccessorProperty> {
+        if self.ir.local_property_layouts.contains_key(&target) {
+            return None;
+        }
+        self.properties.accessor(target)
     }
 
     /// The storage selected for a receiver-less property in this or an earlier source file.
@@ -1230,6 +1254,10 @@ impl Body<'_> {
     /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
     /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
     fn library_interface_test(&mut self, interface: TypeName, nullable: bool) {
+        if let Some(arity) = self.function_arity(Ty::obj_name(interface)) {
+            self.function_type_test(arity, nullable, false);
+            return;
+        }
         let subtypes = self.classifiers.builtin_subtypes(interface);
         self.runtime.builtin_instances(interface, subtypes);
         self.interface_test(interface, nullable);
@@ -1328,6 +1356,10 @@ impl Body<'_> {
     /// Replace the reference on the stack with whether it is an instance of the reference type
     /// `tested` — or null, when `nullable`.
     fn reference_type_test(&mut self, tested: Ty, nullable: bool) -> Result<(), Unsupported> {
+        if let Some(arity) = self.function_arity(tested) {
+            self.function_type_test(arity, nullable, self.is_suspend_function_type(tested));
+            return Ok(());
+        }
         match tested.kind() {
             TyKind::STRING => {
                 self.code.ref_test(nullable, STRING_HEAP);

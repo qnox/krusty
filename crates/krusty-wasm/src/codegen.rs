@@ -162,6 +162,18 @@ impl Backend for WasmBackend {
             || lower::runtime_lays_out(classifier)
     }
 
+    /// The runtime's `StringBuilder` answers the `Appendable` and `CharSequence` members it
+    /// overrides (`crate::builtin_members`).
+    fn dispatched_dependency_classes(&self) -> Vec<krusty::backend::DependencyClassifier> {
+        vec![crate::string_builders::class()]
+    }
+
+    /// The WASI stdlib's `StringBuilder.append(CharSequence?)` copies the sequence's `length`
+    /// indexed `Char`s; the JS one appends its `toString` (`crate::string_builders`).
+    fn appends_char_sequences_by_index(&self) -> bool {
+        self.target == WasmTarget::Wasi
+    }
+
     fn realizes_dependency_intrinsic(
         &self,
         operation: krusty::backend::BackendCompilerIntrinsic,
@@ -518,6 +530,63 @@ mod tests {
         compile_program(target, Entry::Box, &[source])
     }
 
+    /// A class delegated property whose getter is reached from a file that also captures an
+    /// anonymous object. The property reference passed to `getValue` keeps the plan's checked
+    /// type, so wasm can lower the accessor instead of declining the expression.
+    #[test]
+    fn delegate_capture_discovery_box_compiles() {
+        use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+        let source = include_str!("../../../tests/box_regressions/delegateCaptureDiscovery.kt");
+        for target in WasmTarget::ALL {
+            let path = krusty::toolchain::kotlin_stdlib_klib(
+                krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
+            )
+            .expect("the exact target stdlib must be provisioned");
+            let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+                path,
+                KlibStdlibSemantics::Wasm,
+            )])
+            .unwrap();
+            let (artifacts, diagnostics) =
+                compile_program_with_provider(target, Entry::Box, &[source], Box::new(libraries));
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            let directory = std::env::temp_dir().join(format!(
+                "delegate-capture-{}-{}",
+                target.name(),
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&directory).unwrap();
+            for (name, bytes) in &artifacts {
+                std::fs::write(directory.join(name), bytes).unwrap();
+            }
+            let loader = artifacts
+                .iter()
+                .find(|(name, _)| name.ends_with(".mjs"))
+                .expect("wasm loader")
+                .0
+                .as_str();
+            let output = std::process::Command::new("node")
+                .arg("--no-warnings")
+                .arg(directory.join(loader))
+                .output()
+                .expect("node runs the wasm box");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "{target:?} exit {:?}\n{stdout}{stderr}",
+                output.status.code()
+            );
+            assert_eq!(
+                stdout,
+                format!("{}OK", krusty::backend::BOX_RESULT_FRAME),
+                "{target:?} complete framed box result"
+            );
+            assert!(stderr.is_empty(), "{target:?} box stderr: {stderr:?}");
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
+
     /// A file dispatching `toString` on an erased receiver, and another file creating a value
     /// whose `toString` this target has no body for, decline together, whichever file comes first.
     #[test]
@@ -587,7 +656,7 @@ mod tests {
                 diagnostics,
                 vec![format!(
                     "{}a `toString` of `Supplier` reaching a runtime object this target cannot \
-                     print yet",
+                     print; first witness: a lambda converted to `Supplier` yet",
                     super::DECLINE_PREFIX
                 )]
             );
@@ -625,7 +694,7 @@ mod tests {
                 diagnostics,
                 vec![format!(
                     "{}a `toString` of `kotlin.Any` reaching a runtime object this target cannot \
-                     print yet",
+                     print; first witness: a lambda converted to `Supplier` yet",
                     super::DECLINE_PREFIX
                 )]
             );

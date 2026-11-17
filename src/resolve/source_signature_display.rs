@@ -159,6 +159,7 @@ pub(super) fn source_function_conflict_display(
 
 pub(super) fn streamed_function_conflict_display(
     headers: &crate::fir::StreamedHeaderModule,
+    index: &crate::fir::ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
     max_bytes: usize,
 ) -> Option<String> {
@@ -200,7 +201,10 @@ pub(super) fn streamed_function_conflict_display(
         name,
         &parameters,
         header.explicit_result.as_ref(),
-        None,
+        // kotlinc renders a result it inferred as well as one the declaration wrote.
+        index
+            .signature(declaration)
+            .map(|signature| signature.result.get()),
         max_bytes,
     )
 }

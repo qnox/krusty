@@ -40,9 +40,6 @@ pub(super) const ITABLE_FIELD: u32 = 3;
 /// or null for a runtime object no classifier describes.
 pub(super) const TYPE_INFO_FIELD: u32 = ITABLE_FIELD + 1;
 
-/// The fixed erased `FunctionN.invoke` entry, after the common object table prefix.
-pub(super) const FUNCTION_FIELD: u32 = TYPE_INFO_FIELD + 1;
-
 /// The field of `$Enum` holding `kotlin.Enum`'s `name`, after the identity prefix; `ordinal`
 /// follows it.
 pub(super) const ENUM_NAME_FIELD: u32 = super::identity::PREFIX_FIELDS;

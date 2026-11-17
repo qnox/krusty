@@ -3,7 +3,7 @@
 
 use super::{
     ExprId, IrCheckedArgument, IrCheckedConstructorTarget, IrCheckedSubstitution, IrLoopIndex,
-    IrProgressionSource, IrPropertyDispatch, IrRuntimeFunction,
+    IrProgressionSource, IrPropertyDispatch, IrRuntimeFunction, PropertyId,
 };
 use crate::types::Ty;
 
@@ -166,4 +166,30 @@ pub enum IrCheckedOperation {
         /// which is no function value.
         function_type: Option<Ty>,
     },
+}
+
+/// A checked reference to a property of this module. `delegated` distinguishes the metadata
+/// value passed to a delegate from a source-written reflective reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrModulePropertyReference {
+    pub property: PropertyId,
+    pub delegated: bool,
+}
+
+impl IrCheckedOperation {
+    /// Project the selected module property and its reference role at the common IR boundary.
+    /// Other reference targets retain their own realization contracts.
+    pub fn module_property_reference(&self) -> Option<IrModulePropertyReference> {
+        match self {
+            Self::PropertyReference {
+                target: crate::fir::FirPropertyReferenceTarget::Module(property),
+                delegated,
+                ..
+            } => Some(IrModulePropertyReference {
+                property: *property,
+                delegated: *delegated,
+            }),
+            _ => None,
+        }
+    }
 }
