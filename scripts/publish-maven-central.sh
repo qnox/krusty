@@ -20,6 +20,8 @@
 #   ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=... scripts/publish-maven-central.sh VERSION
 #
 # Environment: RELEASE_REMOTE (origin), the remote holding the deployment refs.
+# RELEASE_TOKEN, a token that may push refs/krusty/*: the release job checks out without persisted
+# credentials, so the push that records a deployment carries it. Nothing else sees it.
 # RELEASE_SHA (GITHUB_SHA, then HEAD) identifies the source commit whose author owns the record.
 set -euo pipefail
 shopt -s inherit_errexit
@@ -30,6 +32,32 @@ if [[ $# -ne 1 ]]; then
 fi
 version=$1
 : "${MAVEN_CENTRAL_USERNAME:?}" "${MAVEN_CENTRAL_PASSWORD:?}" "${ORG_GRADLE_PROJECT_signingInMemoryKey:?}"
+
+# Only the journal push below is authenticated. The token leaves the environment here, before
+# any child starts, the encoding of the header included. The entry it will take in Git's
+# configuration is settled now too: a count Git cannot extend must stop the step before the
+# upload, not after it.
+push_header=
+push_entry=
+if [[ -n ${RELEASE_TOKEN:-} ]]; then
+  push_token=$RELEASE_TOKEN
+  unset RELEASE_TOKEN
+  push_entry=${GIT_CONFIG_COUNT:-0}
+  if ! [[ $push_entry =~ ^[0-9]+$ ]]; then
+    echo "GIT_CONFIG_COUNT must be a decimal count" >&2
+    exit 2
+  fi
+  # Normalize leading zeroes before arithmetic and leave room in Git's count for one entry.
+  push_entry=${push_entry#"${push_entry%%[!0]*}"}
+  push_entry=${push_entry:-0}
+  if ((${#push_entry} > 10)) || { ((${#push_entry} == 10)) && [[ $push_entry > 2147483646 ]]; }; then
+    echo "GIT_CONFIG_COUNT cannot append another entry" >&2
+    exit 2
+  fi
+  push_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$push_token" | base64 -w0)"
+  unset push_token
+fi
+unset RELEASE_TOKEN
 
 api=https://central.sonatype.com/api/v1/publisher
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -158,7 +186,15 @@ record_deployment() {
     GIT_COMMITTER_NAME="$author_name" GIT_COMMITTER_EMAIL="$author_email" \
     git -C "$repo" commit-tree "$(git -C "$repo" hash-object -t tree /dev/null)" \
     -m "central deployment $1 of krusty-gradle-plugin $version")
-  git -C "$repo" push --quiet --force-with-lease="$deployment_ref:$recorded" "$remote" "$commit:$deployment_ref" 2>/dev/null
+  (
+    # The header actions/checkout would have persisted, in this one command's environment: a
+    # command line is readable by every process on the machine.
+    if [[ -n $push_header ]]; then
+      export GIT_CONFIG_COUNT=$((push_entry + 1)) "GIT_CONFIG_KEY_$push_entry=http.https://github.com/.extraheader" \
+        "GIT_CONFIG_VALUE_$push_entry=$push_header"
+    fi
+    git -C "$repo" push --quiet --force-with-lease="$deployment_ref:$recorded" "$remote" "$commit:$deployment_ref" 2>/dev/null
+  )
 }
 
 upload() {

@@ -766,6 +766,11 @@ impl<'a> BodyLowering<'a> {
                 origin.as_str(),
                 "INLINE_ARGS_CONTAINER"
                     | "WHEN"
+                    | "PLUSEQ"
+                    | "MINUSEQ"
+                    | "MULTEQ"
+                    | "DIVEQ"
+                    | "PERCEQ"
                     | "POSTFIX_INCR"
                     | "POSTFIX_DECR"
                     | "PREFIX_INCR"
@@ -966,10 +971,7 @@ impl<'a> BodyLowering<'a> {
     /// The direct supertypes recorded for the local or anonymous class lowered in this body that
     /// the non-null `actual` names; `None` when it names no such class.
     fn local_class_supertypes(&self, actual: Ty) -> Option<impl Iterator<Item = Ty> + '_> {
-        let name = actual.non_null().kotlin_class_internal()?;
-        let class = self.ir.classes.iter().find(|class| {
-            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
-        })?;
+        let class = self.local_class(actual)?;
         Some(
             class
                 .supertypes
@@ -989,6 +991,14 @@ impl<'a> BodyLowering<'a> {
             }
             None => self.linker.applied_supertype(sub, owner),
         }
+    }
+
+    /// The anonymous or local class lowered in this body that `ty` names.
+    fn local_class(&self, ty: Ty) -> Option<&crate::ir::IrClass> {
+        let name = ty.non_null().kotlin_class_internal()?;
+        self.ir.classes.iter().find(|class| {
+            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
+        })
     }
 
     /// Whether `supertype` counts as a supertype of `subtype`: one recorded for a local or

@@ -180,7 +180,11 @@ impl BodyLowering<'_> {
     /// arguments. A value of a type parameter narrows to any type: its argument can be any
     /// subtype of its bounds. So does a value of a function type, an interface any class can
     /// implement besides its own supertypes (`this is BaseContinuationImpl` on a
-    /// `suspend () -> T`).
+    /// `suspend () -> T`). A value of an anonymous or local class this body lowered narrows as a
+    /// value of one of its supertypes does: a prepared copy types the object an inlined call
+    /// expanded with the erasure of the inline function's type parameters
+    /// (`Sequence<Any?>` for `Sequence { }`), which the call's result then casts back to its
+    /// declared type (`Sequence<T>`).
     fn narrows(&self, actual: Ty, target: Ty) -> bool {
         if matches!(
             actual.non_null().kind(),
@@ -199,6 +203,12 @@ impl BodyLowering<'_> {
                     || self
                         .linker
                         .is_subtype(parameters, target, Self::star_projected(actual))
+            })
+            || self.local_class(actual).is_some_and(|class| {
+                class
+                    .supertypes
+                    .iter()
+                    .any(|supertype| self.narrows(*supertype, target))
             })
     }
 
