@@ -149,7 +149,11 @@ impl BodyFirChecker<'_> {
             )
         })?;
         let mut substitutions = HashMap::default();
+        let mut approximations = HashMap::default();
         for (ordinal, value) in self.info.materialized_call_type_arguments(expression) {
+            let approximation = self
+                .info
+                .published_call_type_argument_approximation(expression, ordinal);
             let ordinal = u32::try_from(ordinal).map_err(|_| {
                 self.failure(
                     self.file.expr_span(expression),
@@ -183,6 +187,9 @@ impl BodyFirChecker<'_> {
                     )
                 })?;
             substitutions.insert(name.to_owned(), value);
+            if let Some(approximation) = approximation {
+                approximations.insert(name.to_owned(), approximation);
+            }
         }
         if signature.parameters.len() != fallback.len() {
             return Err(self.failure(
@@ -195,11 +202,18 @@ impl BodyFirChecker<'_> {
         // Callable type arguments are recorded separately, so apply those on top. Starting again
         // from the declaration signature here discarded the receiver substitution and forced
         // lowering to reconstruct it from syntax/receiver types.
+        // A slot inferred to an intersection publishes its approximation wherever the declaration
+        // names that slot's type parameter.
         Ok(fallback
             .iter()
             .copied()
-            .map(|parameter| {
-                crate::symbol_resolver::ty_subst_keep_unbound(parameter, &substitutions)
+            .zip(signature.parameters.iter())
+            .map(|(parameter, declared)| {
+                let parameter =
+                    crate::symbol_resolver::ty_subst_keep_unbound(parameter, &substitutions);
+                crate::types::ty_replace_formals_along(declared.get(), parameter, &|name| {
+                    approximations.get(name).copied()
+                })
             })
             .collect())
     }

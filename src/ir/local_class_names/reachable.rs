@@ -237,29 +237,61 @@ impl IrFile {
             })
             .collect::<Vec<_>>();
         for class in copies {
-            remap_class(&mut self.classes[class as usize], names);
-            if let Some(provenance) = self.local_class_name_provenance.get_mut(&class) {
-                local_class_name_provenance(provenance, names);
-            }
-            if let Some(specialized) = self.specialized_anonymous_classes.get_mut(&class) {
-                specialized
-                    .bindings
-                    .values_mut()
-                    .for_each(|value| *value = ty(*value, names));
-                specialized
-                    .reified_bindings
-                    .values_mut()
-                    .for_each(|value| *value = ty(*value, names));
-            }
-            remap_class_value(&mut self.shared_class_capture_fields, class, names);
-            remap_class_value(&mut self.shared_super_capture_parameters, class, names);
-            remap_secondary_capture(self, class, names);
+            remap_copied_class(self, class, names);
         }
         for expression_id in seen {
             remap_expression_facts(self, expression_id, names);
         }
         new_detached
     }
+}
+
+impl IrFile {
+    /// Rename the classifiers `names` regenerated inside the bodies of the call-site copy `class`
+    /// in that copy's own declaration: its fields, properties, override edges, and capture facts. The copy's
+    /// bodies are renamed by [`Self::remap_reachable_classifier_identities`]; its declaration was
+    /// taken before those nested classes were regenerated, so it still names their declarations.
+    pub(crate) fn remap_copied_class_identities(
+        &mut self,
+        class: ClassId,
+        names: &HashMap<TypeName, TypeName>,
+    ) {
+        let names = &IdentityRemap::classifiers(names);
+        if !names.is_identity() {
+            remap_copied_class(self, class, names);
+        }
+    }
+}
+
+fn remap_copied_class(ir: &mut IrFile, class: ClassId, names: &IdentityRemap<'_>) {
+    remap_class(&mut ir.classes[class as usize], names);
+    let class_name = ir.classes[class as usize].fq_name;
+    if let Some(overrides) = ir.property_overrides.get_mut(&class_name) {
+        overrides
+            .iter_mut()
+            .for_each(|edge| property_override(edge, names));
+    }
+    if let Some(overrides) = ir.function_overrides.get_mut(&class_name) {
+        overrides
+            .iter_mut()
+            .for_each(|edge| function_override(edge, names));
+    }
+    if let Some(provenance) = ir.local_class_name_provenance.get_mut(&class) {
+        local_class_name_provenance(provenance, names);
+    }
+    if let Some(specialized) = ir.specialized_anonymous_classes.get_mut(&class) {
+        specialized
+            .bindings
+            .values_mut()
+            .for_each(|value| *value = ty(*value, names));
+        specialized
+            .reified_bindings
+            .values_mut()
+            .for_each(|value| *value = ty(*value, names));
+    }
+    remap_class_value(&mut ir.shared_class_capture_fields, class, names);
+    remap_class_value(&mut ir.shared_super_capture_parameters, class, names);
+    remap_secondary_capture(ir, class, names);
 }
 
 /// Once a copied lambda edge selects an implementation, that implementation body belongs to the
