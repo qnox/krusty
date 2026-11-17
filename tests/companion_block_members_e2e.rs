@@ -1156,3 +1156,99 @@ fn a_block_member_names_its_block_before_the_companion_object() {
     }
     assert_eq!(run(SRC).expect("block first"), "OK");
 }
+
+// PLATFORM-SPECIFIC: JVM member-table and metadata comparisons stay here; their complete
+// portable programs also run through the shared backend/version inventory.
+fn companion_block_source_files(program: &str) -> Vec<(String, String)> {
+    let (files, java) = krusty::conformance::split_files(program).expect("valid companion program");
+    assert!(
+        java.is_empty(),
+        "the companion programs are portable Kotlin"
+    );
+    files
+        .into_iter()
+        .map(|(name, source)| {
+            let body = companion_block_file_body(&name, &source);
+            (name, body)
+        })
+        .collect()
+}
+
+// The canonical splitter retains FILE comments and source-position padding. Keep those wrappers
+// out of the E2E compiler inputs so each original per-file program stays byte for byte unchanged.
+fn companion_block_file_body(name: &str, source: &str) -> String {
+    let source = source
+        .split_once(&format!("// FILE: {name}.kt\n"))
+        .expect("the named canonical file")
+        .1;
+    krusty::conformance::prepare_test_source(source, krusty::conformance::TestTarget::Jvm)
+}
+
+/// A value class's block members are statics of the value class named like its other realized
+/// members: `-impl`, or kotlinc's hash when the signature mentions a value class. Their bodies
+/// erase like any static's, so a block function can return the value class unboxed.
+#[test]
+fn value_class_block_members_take_the_value_class_member_names() {
+    let files = companion_block_source_files(include_str!(
+        "box_regressions/valueClassCompanionBlockMembers.kt"
+    ));
+    let [(_, src)] = files.as_slice() else {
+        panic!("the whole same-file companion program")
+    };
+    let src = src.strip_prefix(LANGUAGE).expect("the companion feature");
+    assert_members_and_metadata_match_kotlinc("ValueClassBlock", src, &["W"]);
+    assert_eq!(run(src).expect("value class block members"), "OK");
+}
+
+#[test]
+fn value_class_block_members_from_another_file_use_their_realized_names() {
+    let sources = companion_block_source_files(include_str!(
+        "box_regressions/valueClassCompanionBlockAcrossFiles.kt"
+    ));
+    common::expect_box_ok_files_with_stdlib(
+        &sources
+            .iter()
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .collect::<Vec<_>>(),
+        "SeparateFileValueClassBlock",
+    );
+}
+
+#[test]
+fn library_value_class_block_members_use_their_realized_names() {
+    let modules = krusty::conformance::split_modules(include_str!(
+        "box_regressions/multimodule/valueClassCompanionBlockLibrary.kt"
+    ))
+    .expect("the whole library/consumer companion program");
+    let [library, main] = modules.as_slice() else {
+        panic!("one library and its consumer")
+    };
+    let [(library_name, library)] = library.files.as_slice() else {
+        panic!("the original Lib.kt")
+    };
+    let [(main_name, main)] = main.files.as_slice() else {
+        panic!("the original Main.kt")
+    };
+    let library = companion_block_file_body(library_name, library);
+    let main = companion_block_file_body(main_name, main);
+    let result =
+        common::expect_box_run_against("value-class-companion-block-library", &library, &main)
+            .expect("reference kotlinc is provisioned");
+    assert_eq!(result, "OK");
+}
+
+/// An ordinary class's block function whose result is a value class, called from another file:
+/// the call names the method its declaration emits.
+#[test]
+fn ordinary_class_block_function_returning_a_value_class_runs_from_another_file() {
+    let sources = companion_block_source_files(include_str!(
+        "box_regressions/ordinaryClassCompanionBlockValueResult.kt"
+    ));
+    common::expect_box_ok_files_with_stdlib(
+        &sources
+            .iter()
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .collect::<Vec<_>>(),
+        "SeparateFileOrdinaryBlockValueResult",
+    );
+}

@@ -11,7 +11,7 @@ use super::{KlibCalleeOrigin, KlibDeclarationBodies};
 use crate::fx_hash::HashSet;
 use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
-use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrClass, KlibIrMember, KlibIrType};
+use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrClass, KlibIrType};
 use crate::metadata::klib_ir::KlibIrSignature;
 
 impl KlibDeclarationBodies {
@@ -65,6 +65,32 @@ impl KlibDeclarationBodies {
             .map_err(|()| "an overridden declaration's class is not unique")?;
         if found.is_empty() {
             return Err("an overridden declaration reaches no serialized declaration");
+        }
+        Ok(found)
+    }
+
+    /// `EmptyList.isEmpty` overrides `List.isEmpty` and, through it, `Collection.isEmpty`.
+    pub(crate) fn overridden_closure(
+        &self,
+        body_module: &str,
+        declaration: &KlibDeclarationSignature,
+    ) -> Result<Vec<KlibDependencyCallable>, &'static str> {
+        let mut found = self.overridden_declarations(body_module, declaration)?;
+        let mut next = 0;
+        while let Some(identity) = found.get(next).cloned() {
+            next += 1;
+            let Some((_, function)) = self.function(&identity) else {
+                continue;
+            };
+            for symbol in &function.overridden {
+                let overridden = member_signature(&symbol.signature)
+                    .ok_or("an override names a declaration that is not a member")?;
+                for overridden in self.overridden_declarations(&identity.module, &overridden)? {
+                    if !found.contains(&overridden) {
+                        found.push(overridden);
+                    }
+                }
+            }
         }
         Ok(found)
     }
@@ -124,22 +150,9 @@ impl KlibDeclarationBodies {
             let Some(&library) = self.modules.get(&module) else {
                 continue;
             };
-            for tree in self.libraries[library].trees() {
-                let mut pending = vec![&tree.declaration];
-                while let Some(declaration) = pending.pop() {
-                    let KlibIrMember::Class(id) = declaration else {
-                        continue;
-                    };
-                    let class = tree.arena.class(*id);
-                    pending.extend(class.members.iter());
-                    let KlibIrSignature::Public(signature) = &class.base.symbol.signature else {
-                        continue;
-                    };
-                    if member.is_member_of(signature)
-                        && found.replace((&tree.arena, class)).is_some()
-                    {
-                        return Err(());
-                    }
+            for class in self.libraries[library].classes_owning_member(member) {
+                if found.replace(class).is_some() {
+                    return Err(());
                 }
             }
         }
