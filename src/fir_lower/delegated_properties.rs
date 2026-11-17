@@ -34,7 +34,9 @@ use super::FirFileLoweringFailure;
 
 /// The checked delegated property a materializer realizes, with the source position and identity
 /// its accessors and reflected reference take.
-pub(super) struct DelegatedDeclaration {
+pub(super) struct DelegatedDeclaration<'a> {
+    /// The inline dependency templates a generated accessor's convention expands from.
+    pub(super) templates: &'a mut super::dependency_templates::DependencyTemplateCache,
     pub(super) source_order: u32,
     pub(super) property_id: crate::fir::PropertyId,
     pub(super) property: IrCheckedProperty,
@@ -42,18 +44,24 @@ pub(super) struct DelegatedDeclaration {
 }
 
 pub(super) fn materialize_top_level_delegate(
-    declaration: DelegatedDeclaration,
+    declaration: DelegatedDeclaration<'_>,
     extension_receiver: Option<Ty>,
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
 ) -> Result<(), FirFileLoweringFailure> {
     let DelegatedDeclaration {
+        templates,
         source_order,
         property_id,
         mut property,
         context_parameters,
     } = declaration;
+    let mut conventions = ConventionLowering {
+        index,
+        templates,
+        property: property.declaration,
+    };
     if !context_parameters.is_empty() {
         return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
             property.declaration,
@@ -92,15 +100,15 @@ pub(super) fn materialize_top_level_delegate(
     let storage_initializer = if let Some(provide) = &plan.provide_delegate {
         let property_reference = reference(ir);
         delegated_call(
-            index,
+            &mut conventions,
             ir,
-            property.declaration,
             provide,
             initializer,
             vec![
                 (owner, Ty::Null),
                 (property_reference, property_reference_ty),
             ],
+            None,
         )?
     } else {
         initializer
@@ -127,15 +135,18 @@ pub(super) fn materialize_top_level_delegate(
     };
     let property_reference = reference(ir);
     let read = delegated_call(
-        index,
+        &mut conventions,
         ir,
-        property.declaration,
         &plan.get_value,
         receiver,
         vec![
             (owner, owner_ty),
             (property_reference, property_reference_ty),
         ],
+        Some(AccessorFrame {
+            dispatch_receiver: false,
+            parameters: u32::from(extension_receiver.is_some()),
+        }),
     )?;
     at_property_line(ir, getter_body, read, property.decl_line);
     let getter = add_accessor_function(
@@ -165,9 +176,8 @@ pub(super) fn materialize_top_level_delegate(
             let property_reference = reference(ir);
             let value = ir.add_expr(IrExpr::GetValue(u32::from(extension_receiver.is_some())));
             let write = delegated_call(
-                index,
+                &mut conventions,
                 ir,
-                property.declaration,
                 set_value,
                 receiver,
                 vec![
@@ -175,6 +185,10 @@ pub(super) fn materialize_top_level_delegate(
                     (property_reference, property_reference_ty),
                     (value, property.ty),
                 ],
+                Some(AccessorFrame {
+                    dispatch_receiver: false,
+                    parameters: u32::from(extension_receiver.is_some()) + 1,
+                }),
             )?;
             Ok(add_accessor_function(
                 ir,
@@ -225,18 +239,24 @@ pub(super) fn materialize_top_level_delegate(
 
 pub(super) fn materialize_member_delegate(
     index: &ResolvedModuleIndex,
-    declaration: DelegatedDeclaration,
+    declaration: DelegatedDeclaration<'_>,
     class_id: crate::ir::ClassId,
     ir: &mut IrFile,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
     let DelegatedDeclaration {
+        templates,
         source_order,
         property_id,
         mut property,
         context_parameters,
     } = declaration;
+    let mut conventions = ConventionLowering {
+        index,
+        templates,
+        property: property.declaration,
+    };
     if !context_parameters.is_empty() {
         return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
             property.declaration,
@@ -297,12 +317,12 @@ pub(super) fn materialize_member_delegate(
         let this_ref = thisref_argument(ir);
         let property_reference = reference(ir);
         delegated_call(
-            index,
+            &mut conventions,
             ir,
-            property.declaration,
             provide,
             initializer,
             vec![this_ref, (property_reference, property_reference_ty)],
+            None,
         )?
     } else {
         initializer
@@ -338,12 +358,15 @@ pub(super) fn materialize_member_delegate(
     let this_ref = thisref_argument(ir);
     let property_reference = reference(ir);
     let read = delegated_call(
-        index,
+        &mut conventions,
         ir,
-        property.declaration,
         &plan.get_value,
         receiver,
         vec![this_ref, (property_reference, property_reference_ty)],
+        Some(AccessorFrame {
+            dispatch_receiver: true,
+            parameters: 0,
+        }),
     )?;
     at_property_line(ir, getter_body, read, property.decl_line);
     let getter = add_accessor_function(
@@ -375,9 +398,8 @@ pub(super) fn materialize_member_delegate(
             let property_reference = reference(ir);
             let value = ir.add_expr(IrExpr::GetValue(1));
             let write = delegated_call(
-                index,
+                &mut conventions,
                 ir,
-                property.declaration,
                 set_value,
                 receiver,
                 vec![
@@ -385,6 +407,10 @@ pub(super) fn materialize_member_delegate(
                     (property_reference, property_reference_ty),
                     (value, property.ty),
                 ],
+                Some(AccessorFrame {
+                    dispatch_receiver: true,
+                    parameters: 1,
+                }),
             )?;
             Ok(add_accessor_function(
                 ir,
@@ -480,7 +506,7 @@ pub(super) fn materialize_member_delegate(
 
 pub(super) fn materialize_member_extension_delegate(
     index: &ResolvedModuleIndex,
-    declaration: DelegatedDeclaration,
+    declaration: DelegatedDeclaration<'_>,
     class_id: crate::ir::ClassId,
     extension_receiver: Ty,
     ir: &mut IrFile,
@@ -488,11 +514,17 @@ pub(super) fn materialize_member_extension_delegate(
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
     let DelegatedDeclaration {
+        templates,
         source_order,
         property_id,
         mut property,
         context_parameters,
     } = declaration;
+    let mut conventions = ConventionLowering {
+        index,
+        templates,
+        property: property.declaration,
+    };
     if !context_parameters.is_empty() || ir.classes[class_id as usize].is_interface {
         return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
             property.declaration,
@@ -544,15 +576,15 @@ pub(super) fn materialize_member_extension_delegate(
         let dispatch = ir.add_expr(IrExpr::GetValue(0));
         let property_reference = reference(ir);
         delegated_call(
-            index,
+            &mut conventions,
             ir,
-            property.declaration,
             provide,
             initializer,
             vec![
                 (dispatch, Ty::obj_name(owner)),
                 (property_reference, property_reference_ty),
             ],
+            None,
         )?
     } else {
         initializer
@@ -588,15 +620,18 @@ pub(super) fn materialize_member_extension_delegate(
     let extension = ir.add_expr(IrExpr::GetValue(1));
     let property_reference = reference(ir);
     let read = delegated_call(
-        index,
+        &mut conventions,
         ir,
-        property.declaration,
         &plan.get_value,
         delegate,
         vec![
             (extension, extension_receiver),
             (property_reference, property_reference_ty),
         ],
+        Some(AccessorFrame {
+            dispatch_receiver: true,
+            parameters: 1,
+        }),
     )?;
     at_property_line(ir, getter_body, read, property.decl_line);
     let getter = add_accessor_function(
@@ -628,9 +663,8 @@ pub(super) fn materialize_member_extension_delegate(
             let property_reference = reference(ir);
             let value = ir.add_expr(IrExpr::GetValue(2));
             let write = delegated_call(
-                index,
+                &mut conventions,
                 ir,
-                property.declaration,
                 set_value,
                 delegate,
                 vec![
@@ -638,6 +672,10 @@ pub(super) fn materialize_member_extension_delegate(
                     (property_reference, property_reference_ty),
                     (value, property.ty),
                 ],
+                Some(AccessorFrame {
+                    dispatch_receiver: true,
+                    parameters: 2,
+                }),
             )?;
             Ok(add_accessor_function(
                 ir,
@@ -831,15 +869,123 @@ fn delegate_storage_read(ir: &mut IrFile, read: IrExpr, storage: Ty) -> ExprId {
     read
 }
 
-fn delegated_call(
-    index: &ResolvedModuleIndex,
-    ir: &mut IrFile,
+/// What lowering a delegated property's convention calls needs beside the file: the index, the
+/// inline dependency templates a generated accessor expands from, and the property the calls
+/// belong to.
+struct ConventionLowering<'a> {
+    index: &'a ResolvedModuleIndex,
+    templates: &'a mut super::dependency_templates::DependencyTemplateCache,
     property: DeclarationId,
+}
+
+/// The value slots of a generated accessor whose body a convention call is: its dispatch receiver,
+/// then its parameters. An inline expansion's temporaries follow them.
+#[derive(Clone, Copy)]
+struct AccessorFrame {
+    dispatch_receiver: bool,
+    parameters: u32,
+}
+
+impl AccessorFrame {
+    fn slots(self) -> u32 {
+        u32::from(self.dispatch_receiver) + self.parameters
+    }
+}
+
+/// A convention call. In a generated accessor (`frame`), a convention that selected an inline
+/// dependency function is expanded from its template, as a source call of that function is.
+fn delegated_call(
+    conventions: &mut ConventionLowering<'_>,
+    ir: &mut IrFile,
     call: &FirDelegateCall,
     receiver: ExprId,
     arguments: Vec<(ExprId, Ty)>,
+    frame: Option<AccessorFrame>,
 ) -> Result<ExprId, FirFileLoweringFailure> {
-    delegated_call_with_dispatch(index, ir, property, call, receiver, None, arguments)
+    if let Some(frame) = frame {
+        if let Some(expanded) =
+            expanded_accessor_convention(conventions, ir, call, receiver, &arguments, frame)?
+        {
+            return Ok(expanded);
+        }
+    }
+    delegated_call_with_dispatch(
+        conventions.index,
+        ir,
+        conventions.property,
+        call,
+        receiver,
+        None,
+        arguments,
+    )
+}
+
+/// Expand a generated accessor's convention from its inline dependency template, or `None` when
+/// the convention stays an ordinary call. The accessor has no checked body of its own, so the
+/// expansion runs in an empty one owned by the property, past the accessor's value slots.
+fn expanded_accessor_convention(
+    conventions: &mut ConventionLowering<'_>,
+    ir: &mut IrFile,
+    call: &FirDelegateCall,
+    receiver: ExprId,
+    arguments: &[(ExprId, Ty)],
+    frame: AccessorFrame,
+) -> Result<Option<ExprId>, FirFileLoweringFailure> {
+    let FirCallTarget::External {
+        declaration: target,
+        inline,
+        ..
+    } = &call.target
+    else {
+        return Ok(None);
+    };
+    let dispatch = match &call.dispatch_receiver {
+        None => None,
+        Some(FirDelegateDispatchReceiver::Scoped {
+            current: true,
+            depth: 0,
+            ..
+        }) if frame.dispatch_receiver => Some(ir.add_expr(IrExpr::GetValue(0))),
+        Some(FirDelegateDispatchReceiver::Singleton { classifier, .. }) => {
+            Some(ir.add_expr(IrExpr::SingletonValue {
+                classifier: *classifier,
+            }))
+        }
+        Some(_) => {
+            return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
+                conventions.property,
+            ))
+        }
+    };
+    let body = crate::fir::FirBody::new(crate::fir::BodyOwnerId::from_raw(
+        conventions.property.raw(),
+    ));
+    let mut lowering = super::BodyLowering::new(
+        &body,
+        conventions.index,
+        ir,
+        frame.dispatch_receiver,
+        super::BodyScopes {
+            capture_slots: HashMap::default(),
+            local_callable_scopes: vec![HashMap::default()],
+            published_local_callables: HashMap::default(),
+        },
+        conventions.templates,
+    );
+    lowering.next_temporary = lowering.next_temporary.max(frame.slots());
+    let template = match lowering.dependency_template_selection(*target, *inline) {
+        super::source_calls::DependencyTemplateSelection::Expand(template) => template,
+        super::source_calls::DependencyTemplateSelection::Missing => {
+            return Err(FirFileLoweringFailure::Body(
+                super::FirLoweringFailure::UnsupportedExternalCall(*target),
+            ))
+        }
+        super::source_calls::DependencyTemplateSelection::Ordinary => return Ok(None),
+    };
+    lowering
+        .dependency_delegate_call(*target, template, call, receiver, dispatch, arguments)
+        .map(Some)
+        .map_err(FirFileLoweringFailure::Body)
 }
 
 pub(super) fn delegated_call_with_dispatch(
