@@ -182,8 +182,8 @@ Plugin CLI free arguments stay rejected in favour of that structured input. Befo
 runs, a `<task>KrustyCheck` task passes the same compiler arguments and plugin request to
 `krusty refusals`, which prints every kotlinc argument krusty does not implement (such as
 `-Xvalidate-bytecode`) and every plugin the compiler's registry refuses (one it neither
-reimplements nor hosts, such as Compose, Parcelize, assignment, or kapt configured by options) and
-exits 1, or exits 0. kapt's stub task (`KaptGenerateStubs`) is a Kotlin compile that writes Java
+reimplements nor hosts, or kapt configured by options) and exits 1, or exits 0. A plugin krusty
+reimplements only partly (Compose, Parcelize, assignment, atomicfu) is not refused here. kapt's stub task (`KaptGenerateStubs`) is a Kotlin compile that writes Java
 stubs, not classes, so it is never replaced; the compile after annotation processing carries only
 kapt's jar, which acts only once its options configure it, and stays with krusty.
 A refused request leaves that one compile to kotlinc: the check logs
@@ -191,6 +191,15 @@ A refused request leaves that one compile to kotlinc: the check logs
 refusals, the replacement is skipped, and the Kotlin task, which otherwise skips itself, runs. The
 `krustyCompile` aggregate depends on the Kotlin tasks, so it reaches whichever compiler runs.
 Every other compile of the build stays with krusty.
+
+A module that applies a partly implemented plugin is tried with krusty first. When every error krusty
+reports is its native plugin pass refusing a construct of valid source that it does not implement yet
+(`DiagnosticKind::PluginRefusal`), krusty exits with status 3 and writes no classes. The replacement
+task records those errors in `build/krusty/<task>/handoff.txt`, logs
+`krusty: task '…' is handed to kotlinc: a krusty compiler plugin does not implement everything the
+module uses` with them, and the Kotlin task, which otherwise skips itself, runs on kotlinc. The status
+alone tells the two apart: any other krusty error exits 1 and fails the build, and `krusty
+verify-compile` records the refusal as unsupported, not failed.
 
 Build correctness rests on these contracts:
 

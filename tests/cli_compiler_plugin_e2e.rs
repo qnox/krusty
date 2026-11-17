@@ -526,6 +526,64 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
     );
 }
 
+/// A build tells a plugin pass's refusal of valid source from a compile error by the exit status
+/// alone: 3 for a refusal (kotlinc compiles the module), 1 for an error. `verify-compile` records the
+/// refusal as unsupported and the error as a failure.
+#[test]
+fn a_plugin_refusal_has_its_own_exit_status_and_verify_records_it_as_unsupported() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let verify = |probe: &Probe| {
+        let record = probe.dir.join("record.json");
+        let reference = probe.dir.join("kotlinc");
+        std::fs::create_dir_all(&reference).expect("reference directory");
+        let output = Command::new(common::krusty_binary())
+            .args(["verify-compile", "--reference"])
+            .arg(&reference)
+            .arg("--record")
+            .arg(&record)
+            .args(["--compilation", ":compileKotlin", "--"])
+            .args(["-cp", &join_classpath(&classpath)])
+            .args(&switches)
+            .arg("-d")
+            .arg(probe.dir.join("verified"))
+            .arg(&probe.source)
+            .output()
+            .expect("run krusty verify-compile");
+        assert_eq!(output.status.code(), Some(0));
+        std::fs::read_to_string(record).expect("the record")
+    };
+    let status = |record: &str| {
+        record
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("\"status\":"))
+            .expect("the record's status")
+            .trim_end_matches(',')
+            .to_string()
+    };
+
+    let refused = Probe::new(
+        "refusal-status",
+        "package probe\nimport androidx.compose.runtime.Composable\n@Composable fun Greeting(names: List<String>) {}\n",
+    );
+    let compiled = refused.krusty(&classpath, &switches);
+    assert_eq!(compiled.code, Some(3), "{}", compiled.stderr);
+    assert_eq!(compiled.classes, Vec::<String>::new());
+    assert_eq!(status(&verify(&refused)), "\"status\": \"unsupported\"");
+
+    let invalid = Probe::new(
+        "error-status",
+        "package probe\nimport androidx.compose.runtime.Composable\n@Composable fun Greeting() {}\nval number: Int = \"text\"\n",
+    );
+    let compiled = invalid.krusty(&classpath, &switches);
+    assert_eq!(compiled.code, Some(1), "{}", compiled.stderr);
+    assert_eq!(status(&verify(&invalid)), "\"status\": \"failed\"");
+}
+
 /// Compiled directly, a Compose module compiles through krusty's partial pass, which rejects each
 /// composable construct it does not cover rather than emit it untransformed.
 #[test]
