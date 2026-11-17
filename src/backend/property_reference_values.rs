@@ -330,6 +330,7 @@ fn read(
                 arguments: Vec::new(),
                 parameters: parameters.iter().map(|parameter| parameter.get()).collect(),
                 result: result.get(),
+                substitutions: reference.substitutions.clone(),
                 source_receiver: receivers
                     .dispatch
                     .and(*receiver)
