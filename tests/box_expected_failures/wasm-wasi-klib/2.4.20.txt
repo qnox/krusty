@@ -381,7 +381,6 @@ controlStructures/forInCharSequenceWithIndex/forInCharSequenceWithIndexNoElement
 controlStructures/forInCharSequenceWithIndex/forInCharSequenceWithIndexNoIndexVarCheckSideEffects.kt
 controlStructures/forInCharSequenceWithIndex/forInStringWithIndexNameBasedDestructuringFullForm.kt
 controlStructures/forInCharSequenceWithIndex/forInStringWithIndexNameBasedDestructuringShortForm.kt
-controlStructures/forInCharSequenceWithIndex/forInStringWithIndexNotDestructured.kt
 controlStructures/forInIterableWithIndex/forInIterableWithIndexCheckSideEffects.kt
 controlStructures/forInIterableWithIndex/forInIterableWithIndexNoElementVarCheckSideEffects.kt
 controlStructures/forInIterableWithIndex/forInIterableWithIndexNoIndexVarCheckSideEffects.kt
@@ -417,8 +416,6 @@ coroutines/asyncIteratorNullMerge_1_3.kt
 coroutines/asyncIteratorToList_1_3.kt
 coroutines/asyncIterator_1_3.kt
 coroutines/await.kt
-coroutines/beginWithException.kt
-coroutines/beginWithExceptionNoHandleException.kt
 coroutines/bridges/interfaceGenericDefault.kt
 coroutines/bridges/interfaceSpecialization.kt
 coroutines/bridges/mapSuspendAbstractClear.kt
@@ -471,7 +468,6 @@ coroutines/coroutineContext1.kt
 coroutines/coroutineContext2.kt
 coroutines/coroutineContextInInlinedLambda.kt
 coroutines/correctOrder1.kt
-coroutines/createCoroutineSafe.kt
 coroutines/defaultParameterLambdaInSuspend.kt
 coroutines/defaultParametersInSuspend.kt
 coroutines/degenerate1.kt
@@ -697,7 +693,6 @@ coroutines/returnsUnit1.kt
 coroutines/simple2.kt
 coroutines/simpleException.kt
 coroutines/simpleWithDefaultValue.kt
-coroutines/simpleWithHandleResult.kt
 coroutines/stackUnwinding/rethrowInFinallyWithSuspension.kt
 coroutines/stopAfter.kt
 coroutines/suspendConversion.kt
@@ -842,7 +837,6 @@ delegation/delegationDifferentModule.kt
 delegation/ifWithCallableReferenceInLazy.kt
 delegation/kt30102_comparable.kt
 delegation/kt44199.kt
-destructuringDeclInLambdaParam/lambdaInLambda.kt
 destructuringDeclInLambdaParam/stdlibUsages.kt
 destructuringDeclInLambdaParam/withIndexed.kt
 devirtualization/anonymousObject.kt
@@ -1285,8 +1279,6 @@ inlineClasses/secondaryConstructorsWithBody.kt
 inlineClasses/smartCastOnThisOfInlineClassTypeGeneric.kt
 inlineClasses/toStringCallingPrivateFunGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/primitive.kt
-inlineClasses/unboxGenericParameter/funInterface/resultAny.kt
-inlineClasses/unboxGenericParameter/funInterface/resultAnyGeneric.kt
 inlineClasses/unboxGenericParameter/genericArrayInlineClassCast.kt
 inlineClasses/unboxGenericParameter/lambda/primitive.kt
 inlineClasses/unboxGenericParameter/objectLiteral/primitive.kt
@@ -2408,7 +2400,6 @@ regressions/multimodule/inlineBuiltString.kt
 regressions/multimodule/inlineTextTrim.kt
 regressions/multimodule/inlineTodoDefaultMessage.kt
 regressions/multimodule/multimoduleDirectCollectionIterator.kt
-regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
 regressions/resolvedCallForGetOperator.kt
 reified/callChain.kt
@@ -2529,7 +2520,6 @@ syntheticAccessors/kt10047.kt
 syntheticAccessors/kt9958.kt
 syntheticAccessors/kt9958Interface.kt
 syntheticAccessors/protectedMemberReferenceAccessor/kt46597_property.kt
-toArray/kt3177-toTypedArray.kt
 traits/kt5393_property.kt
 traits/multiple.kt
 try/catch3.kt
