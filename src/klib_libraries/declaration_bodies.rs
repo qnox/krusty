@@ -206,6 +206,16 @@ impl std::fmt::Display for KlibDeclarationBodiesError {
 
 impl std::error::Error for KlibDeclarationBodiesError {}
 
+/// Distinct inventories from one authenticated emitted-body traversal. Declaration roots never
+/// become executable call obligations merely by sharing this walk with callable symbols.
+#[derive(Default)]
+struct EmittedBodyInventory<'a> {
+    callables: Vec<&'a KlibIrSymbol>,
+    objects: Vec<&'a KlibIrSymbol>,
+    public_hierarchy_roots: Vec<TypeName>,
+    sam_declarations: Vec<&'a KlibIrSymbol>,
+}
+
 impl KlibDeclarationBodies {
     /// Exactly one raw class header in this module with the requested function/constructor or
     /// accessor as a direct member. An accessor is found only in the slot of its `role`, or, for a
@@ -1000,7 +1010,7 @@ impl KlibDeclarationBodies {
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibDependencyCallable> {
-        let (symbols, _, _) = self.emitted_body_symbols(identity, forms);
+        let symbols = self.emitted_body_symbols(identity, forms).callables;
         symbols
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
@@ -1020,7 +1030,7 @@ impl KlibDeclarationBodies {
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibPublicIdSignature> {
-        let (_, objects, _) = self.emitted_body_symbols(identity, forms);
+        let objects = self.emitted_body_symbols(identity, forms).objects;
         let mut seen = crate::fx_hash::HashSet::default();
         objects
             .into_iter()
@@ -1032,6 +1042,24 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
+    /// Public functional interfaces named by emitted SAM conversions, from the same roots as calls.
+    pub(crate) fn emitted_body_sam_classifiers(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<(KlibPublicIdSignature, TypeName)> {
+        self.emitted_body_symbols(identity, forms)
+            .sam_declarations
+            .into_iter()
+            .filter_map(|symbol| match &symbol.signature {
+                KlibIrSignature::Public(signature) => {
+                    class_identity(&symbol.signature).map(|name| (signature.clone(), name))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Public hierarchy roots of the private classes the emitted body constructs. These are
     /// declaration facts, not executable callees: a private constructor is intentionally absent
     /// from the public callable inventory even when its class is materialized with this body.
@@ -1040,7 +1068,8 @@ impl KlibDeclarationBodies {
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<TypeName> {
-        self.emitted_body_symbols(identity, forms).2
+        self.emitted_body_symbols(identity, forms)
+            .public_hierarchy_roots
     }
 
     /// Callable, object and hierarchy inventories cover exactly the same emitted roots: the
@@ -1049,12 +1078,24 @@ impl KlibDeclarationBodies {
         &'a self,
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
-    ) -> (Vec<&'a KlibIrSymbol>, Vec<&'a KlibIrSymbol>, Vec<TypeName>) {
+    ) -> EmittedBodyInventory<'a> {
         let Some((trees, arena, function)) = self.function_with_trees(identity) else {
-            return (Vec::new(), Vec::new(), Vec::new());
+            return EmittedBodyInventory::default();
         };
         let mut symbols = arena.emitted_callable_symbols(function, forms);
         let mut objects = arena.emitted_object_symbols(function, forms);
+        let mut sams = arena.emitted_sam_classifiers(function, forms);
+        // Constructor initialization uses these same serialized roots in
+        // `constructor_initializer_callables`, even when its fields call no declaration.
+        if function.constructor {
+            if let Some((arena, class)) =
+                self.module_class_declaring(&identity.module, &ir_signature(&identity.declaration))
+            {
+                sams.extend(
+                    arena.emitted_sam_classifiers_from(arena.class_initializer_roots(class), forms),
+                );
+            }
+        }
         let mut classifiers = Vec::new();
         if let Some(file) = self.top_level_file(identity) {
             for initializer in self.module_file_initializers(&identity.module, file, false) {
@@ -1064,7 +1105,12 @@ impl KlibDeclarationBodies {
                         .arena
                         .emitted_callable_symbols_from(roots.clone(), forms),
                 );
-                objects.extend(initializer.arena.emitted_object_symbols_from(roots, forms));
+                objects.extend(
+                    initializer
+                        .arena
+                        .emitted_object_symbols_from(roots.clone(), forms),
+                );
+                sams.extend(initializer.arena.emitted_sam_classifiers_from(roots, forms));
             }
         }
         // A constructed local class is materialized with every member and its superclass
@@ -1081,11 +1127,17 @@ impl KlibDeclarationBodies {
                     let mut roots = class_arena.class_member_roots(class);
                     roots.extend(class_arena.class_superclass_delegations(class));
                     symbols.extend(class_arena.emitted_callable_symbols_from(roots.clone(), forms));
-                    objects.extend(class_arena.emitted_object_symbols_from(roots, forms));
+                    objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
+                    sams.extend(class_arena.emitted_sam_classifiers_from(roots, forms));
                 }
             }
         }
-        (symbols, objects, classifiers)
+        EmittedBodyInventory {
+            callables: symbols,
+            objects,
+            public_hierarchy_roots: classifiers,
+            sam_declarations: sams,
+        }
     }
 
     /// Declaration facts of the class whose exact reached constructor is `identity`. Field and

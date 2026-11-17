@@ -29,6 +29,7 @@ pub struct KlibCalleeFacts<'a> {
     target_classifiers: Option<&'a dyn Fn(crate::types::TypeName) -> bool>,
     /// The checked call edge facts of reachable dependency members, by declaration.
     member_edges: HashMap<KlibDependencyCallable, CallEdge>,
+    sam_declarations: HashMap<crate::ir::KlibSamKey, crate::ir::CheckedKlibSamDeclaration>,
     /// The library objects whose values the closed bodies read, by classifier.
     read_objects: HashMap<crate::types::TypeName, crate::libraries::KlibBodyClassContract>,
 }
@@ -70,6 +71,12 @@ impl<'a> KlibCalleeFacts<'a> {
                 .iter()
                 .map(|(id, edge)| (id.clone(), edge.clone())),
         );
+        self.sam_declarations.extend(
+            checked
+                .sam_declarations()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
         if let Some(hierarchy) = checked.type_hierarchy() {
             self.class_type_oracle = Some(hierarchy);
         }
@@ -86,6 +93,15 @@ impl<'a> KlibCalleeFacts<'a> {
             self.member_edges.entry(identity).or_insert(edge);
         }
         self
+    }
+
+    pub(super) fn sam_declaration(
+        &self,
+        module: &str,
+        signature: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> Option<&crate::ir::CheckedKlibSamDeclaration> {
+        self.sam_declarations
+            .get(&(module.to_owned(), signature.clone()))
     }
 
     pub(crate) fn builtin_implementation_facts(
