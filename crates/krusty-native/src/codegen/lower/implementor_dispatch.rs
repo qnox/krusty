@@ -234,6 +234,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 signature.name
             ));
         }
+        if let Some(reason) = self.file.unimplementable_interface_members.get(&identity) {
+            return Err(declined!("{reason}"));
+        }
         Ok((
             self.file.dependency_interface_number(identity),
             declared_member_params,
