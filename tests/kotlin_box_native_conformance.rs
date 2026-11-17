@@ -420,6 +420,7 @@ fn expect_native_klib_box(source: &str, stem: &str) {
     );
     assert_eq!(outcome, Outcome::Pass, "{stem}");
 }
+
 fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
     if let Some(reason) = not_applicable(source) {
         return Outcome::NotApplicable(reason);

@@ -305,7 +305,9 @@ fn bind_class_parameters(
                 "the serialized class upper bounds disagree with its provider",
             ));
         }
-        if !types.record_bounds(parameters.formals[index], parameters.bounds[index].clone()) {
+        if !types.record_bounds(parameters.formals[index], parameters.bounds[index].clone())
+            || !types.record_variance(parameters.formals[index], parameters.variances[index])
+        {
             return Err(mismatch("a class repeats a semantic formal identity"));
         }
     }
