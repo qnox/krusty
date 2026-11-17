@@ -29,9 +29,9 @@ pub(super) struct ModuleEmission<'a> {
     /// The dependency classes whose supertype members the backend dispatches itself
     /// ([`crate::backend::Backend::dispatched_dependency_classes`]).
     pub dispatched_classes: &'a [crate::types::TypeName],
-    /// The backend appends a `CharSequence` to a `StringBuilder` through its `length` and `get`
-    /// ([`crate::backend::Backend::appends_char_sequences_by_index`]).
-    pub char_sequences_by_index: bool,
+    /// The backend's `StringBuilder` reads an appended `CharSequence` through its members
+    /// ([`crate::backend::Backend::reads_char_sequence_members`]).
+    pub reads_char_sequence_members: bool,
     /// The backend's own list reads another collection through its interface members
     /// ([`crate::backend::Backend::reads_collections_through_interfaces`]).
     pub collections_through_interfaces: bool,
@@ -76,7 +76,7 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     };
-    if module.char_sequences_by_index {
+    if module.reads_char_sequence_members {
         if let Some(protocol) = symbols.runtime().char_sequence_protocol {
             if let Err(error) =
                 callables.freeze_char_sequence_protocol(protocol, symbols.semantic_platform())

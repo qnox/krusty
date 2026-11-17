@@ -45,9 +45,9 @@ impl CharSequenceAppends {
         self.by_index
     }
 
-    /// Whether the members an append reads through are recorded.
-    pub(super) fn has_reads(&self) -> bool {
-        self.reads.is_some()
+    /// The members an append reads through, once recorded.
+    pub(super) fn reads(&self) -> Option<SequenceReads> {
+        self.reads
     }
 
     pub(super) fn record_reads(&mut self, reads: SequenceReads) {

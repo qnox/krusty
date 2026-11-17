@@ -79,9 +79,84 @@ fun observed(): String {
 }
 "#;
 
+/// `appendRange` of every value form and range the bounds check rejects. WASI reads a custom
+/// sequence's `length` and then each `value[index]`; JS reads its `length` and then its `toString`.
+const RANGE_PROGRAM: &str = r#"
+class Counted(private val text: String) : CharSequence {
+    private var lengths = 0
+    private var gets = 0
+    private var renders = 0
+    override val length: Int
+        get() {
+            lengths++
+            return text.length
+        }
+    override fun get(index: Int): Char {
+        gets++
+        return text[index]
+    }
+    override fun subSequence(startIndex: Int, endIndex: Int): CharSequence {
+        val range = StringBuilder()
+        for (index in startIndex until endIndex) range.append(text[index])
+        return range
+    }
+    override fun toString(): String {
+        renders++
+        return text
+    }
+    fun reads(): String = "" + lengths + "/" + gets + "/" + renders
+}
+
+fun rejected(value: CharSequence, start: Int, end: Int): String =
+    try {
+        StringBuilder("x").appendRange(value, start, end).toString()
+    } catch (e: IndexOutOfBoundsException) {
+        "IOOBE(" + e.message + ")"
+    } catch (e: IllegalArgumentException) {
+        "IAE(" + e.message + ")"
+    }
+
+fun rejectedChars(value: CharArray, start: Int, end: Int): String =
+    try {
+        StringBuilder("x").appendRange(value, start, end).toString()
+    } catch (e: IndexOutOfBoundsException) {
+        "IOOBE(" + e.message + ")"
+    } catch (e: IllegalArgumentException) {
+        "IAE(" + e.message + ")"
+    }
+
+fun observed(): String {
+    val counted = Counted("wOKw")
+    val builder = StringBuilder("<")
+    val returned = builder.appendRange(counted, 1, 3)
+    builder.appendRange("sSTRs", 1, 4)
+    builder.appendRange(StringBuilder("bBb"), 1, 2)
+    builder.appendRange(charArrayOf('c', 'C', 'H', 'c'), 1, 3)
+    builder.appendRange("", 0, 0)
+    builder.appendRange(counted, 2, 2)
+    return builder.toString() + " same " + (returned === builder) + " reads " + counted.reads() +
+        ", " + rejected("abc", -1, 2) +
+        ", " + rejected("abc", 1, 4) +
+        ", " + rejected("abc", 2, 1) +
+        ", " + rejected(Counted("abc"), 0, 5) +
+        ", " + rejectedChars(charArrayOf('a'), 0, 2) +
+        ", " + rejectedChars(charArrayOf('a', 'b'), 2, 1)
+}
+"#;
+
 #[test]
 fn a_custom_char_sequence_is_appended_as_each_reference_target_appends_it() {
-    let stem = "wasmCharSequenceAppends";
+    observes_as_each_reference_target("wasmCharSequenceAppends", PROGRAM);
+}
+
+#[test]
+fn append_range_checks_and_reads_as_each_reference_target_does() {
+    observes_as_each_reference_target("wasmAppendRanges", RANGE_PROGRAM);
+}
+
+/// Run `program`'s `observed()` under the exact Kotlin/Wasm reference compiler for each target and
+/// require the product program to observe the same text.
+fn observes_as_each_reference_target(stem: &str, program: &str) {
     for (target, compilation_target) in [
         (WasmTarget::Js, CompilationTarget::WasmJs),
         (WasmTarget::Wasi, CompilationTarget::WasmWasi),
@@ -98,7 +173,7 @@ fn a_custom_char_sequence_is_appended_as_each_reference_target_appends_it() {
         let reference_source = work.join(format!("{stem}.kt"));
         std::fs::write(
             &reference_source,
-            format!("{PROGRAM}\nfun main() {{\n    println(observed())\n}}\n"),
+            format!("{program}\nfun main() {{\n    println(observed())\n}}\n"),
         )
         .unwrap();
         let reference = crate::reference_wasm_program::run_wasm_reference_program(
@@ -110,7 +185,7 @@ fn a_custom_char_sequence_is_appended_as_each_reference_target_appends_it() {
         .unwrap_or_else(|error| panic!("{} reference: {error}", target.name()));
         let expected = reference.trim_end();
         let source = format!(
-            "// FILE: {stem}.kt\n{PROGRAM}\nfun box(): String {{\n    val seen = observed()\n    \
+            "// FILE: {stem}.kt\n{program}\nfun box(): String {{\n    val seen = observed()\n    \
              return if (seen == \"{expected}\") \"OK\" else \"FAIL \" + seen\n}}\n"
         );
         let (units, _) = krusty::conformance::split_files(&source)
