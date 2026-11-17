@@ -556,8 +556,9 @@ impl SymbolResolver<'_> {
 
 impl SymbolResolver<'_> {
     /// The written `companion fun/val C.name` declarations of `classifier` that this file's scope
-    /// brings in: those of the nearest scope level (an explicit import of the name, the current
-    /// package, or a star import) that offers one for `classifier`.
+    /// brings in. Every function is stamped with the rung and level that brought it in, so the
+    /// shared overload selector decides by applicability whether a nearer level shadows a farther
+    /// one. A property is the nearest level's, as for a top-level property.
     pub(super) fn scoped_companion_extensions(
         &self,
         classifier: TypeName,
@@ -566,27 +567,34 @@ impl SymbolResolver<'_> {
         let Some(scope) = self.fn_scope else {
             return Default::default();
         };
-        declaration_levels_in_function_scope(&self.src, name, scope)
-            .into_iter()
-            .map(|level| {
-                let functions = level
+        let mut functions = Vec::new();
+        let mut properties = Vec::new();
+        for level in declaration_levels_in_function_scope(&self.src, name, scope) {
+            functions.extend(
+                level
                     .symbols
                     .iter()
                     .flat_map(|record| record.companion_extensions.functions())
                     .filter(|function| function.associated_classifier == Some(classifier))
                     .cloned()
-                    .collect::<Vec<_>>();
-                let properties = level
-                    .symbols
-                    .iter()
-                    .flat_map(|record| record.companion_extensions.properties())
-                    .filter(|property| property.associated_classifier == Some(classifier))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                (functions, properties)
-            })
-            .find(|(functions, properties)| !functions.is_empty() || !properties.is_empty())
-            .unwrap_or_default()
+                    .map(|mut function| {
+                        function.scope_rung = level.kind.callable_scope_rung();
+                        function.scope_rank = level.rank;
+                        function
+                    }),
+            );
+            if properties.is_empty() {
+                properties.extend(
+                    level
+                        .symbols
+                        .iter()
+                        .flat_map(|record| record.companion_extensions.properties())
+                        .filter(|property| property.associated_classifier == Some(classifier))
+                        .cloned(),
+                );
+            }
+        }
+        (functions, properties)
     }
 }
 

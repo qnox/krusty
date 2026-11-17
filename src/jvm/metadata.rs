@@ -1615,15 +1615,7 @@ fn decode_functions(
                 };
                 {
                     let mut pf = parse_function(fbody)?;
-                    // A written `companion fun C.name` records `C` as its receiver and sets the
-                    // static flag, but it is realized as a facade static with no receiver
-                    // parameter and named through `C`. Take the receiver out of the signature
-                    // shape here; it remains only as the classifier the declaration is named
-                    // through.
-                    let companion_receiver = (pf.is_companion && pf.has_receiver).then(|| {
-                        pf.has_receiver = false;
-                        (pf.receiver_body.take(), pf.receiver_type_id.take())
-                    });
+                    let companion_extension = pf.take_companion_extension();
                     let Some(kotlin_name) = d2.get(pf.name_id as usize).cloned() else {
                         continue;
                     };
@@ -1650,10 +1642,7 @@ fn decode_functions(
                             type_context.as_ref(),
                         )
                     };
-                    let receiver_ty = match &companion_receiver {
-                        Some((body, id)) => decode_type(body.as_deref(), *id),
-                        None => decode_type(pf.receiver_body.as_deref(), pf.receiver_type_id),
-                    };
+                    let receiver_ty = decode_type(pf.receiver_body.as_deref(), pf.receiver_type_id);
                     let ret_ty = decode_type(pf.return_body.as_deref(), pf.return_type_id);
                     let receiver_class = receiver_ty.and_then(declared_classifier);
                     let ret_class = ret_ty.and_then(declared_classifier);
@@ -1868,16 +1857,8 @@ fn decode_functions(
                             .with_is_suspend(pf.is_suspend)
                             .with_is_abstract(pf.is_abstract)
                             .with_is_final(pf.is_final)
-                            .with_is_extension(pf.has_receiver)
                             .with_ret_nullable(ret_ty.is_some_and(Ty::is_nullable))
-                            .with_is_operator(pf.is_operator)
-                            .with_is_infix(pf.is_infix)
-                            .with_is_companion_block_member(
-                                pf.is_companion && !pf.has_receiver && companion_receiver.is_none(),
-                            )
-                            .with_is_companion_extension(companion_receiver.is_some())
-                            .with_is_synthesized(pf.is_synthesized)
-                            .with_annotations_on_realization(pf.annotations_on_realization)
+                            .with_declaration_markers(&pf, companion_extension)
                             .with_has_reified_type_params(
                                 pf.type_params.iter().any(|parameter| parameter.reified),
                             ),

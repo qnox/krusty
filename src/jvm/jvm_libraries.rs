@@ -14,6 +14,7 @@ mod collection_canonicalization;
 mod declaration_headers;
 mod declared_members;
 mod facade_package_callables;
+mod package_companion_extensions;
 mod symbol_source;
 use classpath_annotation_classes::{
     annotation_element_defaults, classpath_annotation_targets, java_annotation_parameter_list,
@@ -3572,27 +3573,8 @@ impl JvmLibraries {
             self.merge_top_level_field_property(name, field, &mut props);
         }
         let hidden = self.withhold_hidden_declarations(package, name, &mut props);
-        // A package's written `companion fun/val C.name` is named only through `C`, so it is kept
-        // out of the package's callables and published as its own facet.
-        let (companion_functions, overloads): (Vec<_>, Vec<_>) = overloads
-            .into_iter()
-            .partition(|function| package.is_some() && function.associated_classifier.is_some());
-        let (companion_properties, props): (Vec<_>, Vec<_>) = props
-            .into_iter()
-            .partition(|property| package.is_some() && property.companion_associated);
-        let companion_extensions = self.register_external_callables(
-            Callables::from_parts(
-                FunctionSet {
-                    overloads: companion_functions,
-                },
-                PropertySet {
-                    overloads: companion_properties,
-                },
-            ),
-            package.map(SemanticCallableOwner::Package),
-        );
-        let platform_callables =
-            Callables::from_parts(FunctionSet { overloads }, PropertySet { overloads: props });
+        let (platform_callables, companion_extensions) =
+            self.split_companion_extensions(package, overloads, props);
         // Language builtin classifiers exist independently of whether the target classpath contains
         // stdlib. Federate that classifier source with the platform record here; platform metadata wins
         // when present, while callables remain exclusively metadata/platform declarations.
