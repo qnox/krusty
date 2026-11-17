@@ -408,6 +408,12 @@ fn collect_type_parameters(ty: Ty, output: &mut Vec<crate::types::TyParamName>) 
     }
 }
 
+/// `selected`, a substitution of `declared`, with the flexibility `declared`'s occurrences carry:
+/// a Java type argument naming a type variable stays flexible (`Inv<T!>` substituted is `Inv<E!>`).
+pub(super) fn declared_flexibility(declared: Ty, selected: Ty) -> Ty {
+    publish_selected(declared, selected, &HashMap::default())
+}
+
 fn publish_selected(declared: Ty, selected: Ty, bindings: &crate::types::TyParamBindings) -> Ty {
     match (declared.kind(), selected.kind()) {
         (TyKind::TyParam(name, declared_bound) | TyKind::Var(name, declared_bound), _) => {

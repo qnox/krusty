@@ -159,3 +159,13 @@ abstract class Strings : Factory<String> { override fun make(): Int = 1 }
         ]
     );
 }
+
+/// An inner class's inferred results read the outer class's type parameter through the inner
+/// receiver, so `next()` overrides `Iterator<T>.next()` and plain members keep `T` too.
+#[test]
+fn an_inner_class_result_keeps_the_outer_type_parameter() {
+    common::expect_box_same_as_kotlinc(
+        include_str!("box_regressions/InnerInferredOuterTypeParameter.kt"),
+        "InnerInferredOuterTypeParameter",
+    );
+}

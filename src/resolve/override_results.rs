@@ -12,7 +12,7 @@ use crate::ast::{ClassDecl, DeclId};
 use crate::libraries::{FunctionInfo, SourceMember};
 use crate::types::{Ty, TyKind, TypeName, Visibility};
 
-use super::{declaration_rendering, Checker};
+use super::{declaration_rendering, selected_result_publication, Checker};
 
 /// One overriding method of the class being checked.
 pub(super) struct OverrideResult {
@@ -115,13 +115,18 @@ impl Checker<'_> {
                     implementation,
                 )
         }) {
-            let expected = crate::symbol_resolver::inherited_function_result(candidate);
+            let expected = selected_result_publication::declared_flexibility(
+                candidate
+                    .declaration_identity
+                    .as_ref()
+                    .map_or(candidate.callable.ret, |declared| declared.ret),
+                candidate.ret.apply(candidate.callable.ret),
+            );
             if expected == Ty::Error
                 || crate::symbol_resolver::checked_function_result_refines(
                     &source,
-                    implementation,
-                    actual,
-                    candidate,
+                    (implementation, actual),
+                    (candidate, expected),
                 )
             {
                 continue;
