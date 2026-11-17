@@ -272,7 +272,7 @@ mod tests {
                 1,
                 1,
                 crate::frontend::PlatformProvider::jvm(Box::new(
-                    crate::symbol_source::EmptySymbolSource,
+                    crate::libraries::EmptySymbolSource,
                 )),
                 &LangFeatures::new(),
                 &mut diagnostics,
