@@ -797,7 +797,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
     }
 
     fn enter_declaration(&self, declaration: crate::fir::DeclarationId) {
-        self.declarations_in_evaluation.borrow_mut().push(declaration);
+        self.declarations_in_evaluation
+            .borrow_mut()
+            .push(declaration);
     }
 
     fn leave_declaration(&self, declaration: crate::fir::DeclarationId) {
