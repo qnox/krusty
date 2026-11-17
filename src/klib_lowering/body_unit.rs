@@ -1085,6 +1085,29 @@ impl<'s> CallLinker for Linker<'_, 's> {
         })
     }
 
+    fn continuation_intrinsic(
+        &self,
+        signature: &KlibDeclarationSignature,
+    ) -> Result<
+        Option<super::continuation_intrinsics::ContinuationIntrinsicCall>,
+        KlibBodyDeclineReason,
+    > {
+        let identity = match self
+            .sources
+            .bodies
+            .linked_origin(&self.active_module, signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => return Ok(None),
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "ambiguous producer origin for a continuation intrinsic".to_owned(),
+                ))
+            }
+        };
+        self.sources.callees.continuation_intrinsic(&identity)
+    }
+
     fn range_literal_bounds(
         &self,
         signature: &KlibDeclarationSignature,

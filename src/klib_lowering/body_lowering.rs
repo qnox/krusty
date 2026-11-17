@@ -152,6 +152,15 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The continuation intrinsic this linker's selected declaration of `callee` is: Native's
+    /// `getContinuation`/`returnIfSuspended`, which a body realizes as its suspension point.
+    fn continuation_intrinsic(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<super::continuation_intrinsics::ContinuationIntrinsicCall>> {
+        Ok(None)
+    }
+
     /// The range construction a range literal's membership compares against, read as
     /// [`Self::common_primitive`] reads its primitive but whatever range class the target lays
     /// out: the membership builds no range.

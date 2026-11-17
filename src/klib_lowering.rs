@@ -22,6 +22,7 @@ mod class_initialization;
 mod class_storage;
 mod closure_forms;
 mod constructor_calls;
+mod continuation_intrinsics;
 mod decline;
 mod enum_classes;
 mod for_loops;

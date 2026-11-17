@@ -1096,6 +1096,17 @@ fn prepare_bodyless_externals(
                     return false;
                 }
             }
+            match capabilities.callees.continuation_intrinsic(&callee) {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(reason) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("invalid KLIB continuation intrinsic: {reason:?}"),
+                    );
+                    return false;
+                }
+            }
             match capabilities.callees.target_intrinsic(
                 &callee,
                 bodies,

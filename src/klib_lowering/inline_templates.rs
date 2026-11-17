@@ -449,6 +449,39 @@ impl CallLinker for TemplateCalls<'_> {
             .is_some_and(|realization| realization.callable.suspend)
     }
 
+    fn continuation_intrinsic(
+        &self,
+        signature: &KlibDeclarationSignature,
+    ) -> Result<
+        Option<super::continuation_intrinsics::ContinuationIntrinsicCall>,
+        KlibBodyDeclineReason,
+    > {
+        let KlibDeclarationSignature::Public(_) = signature else {
+            return Ok(None);
+        };
+        let binding = match self.callees.references.get(self.module, signature) {
+            KlibReferenceOrigin::Exact(binding) => binding,
+            KlibReferenceOrigin::Ambiguous | KlibReferenceOrigin::Missing => return Ok(None),
+        };
+        let Some((_target, realization)) = self
+            .callees
+            .source
+            .external_callable_by_dependency(&binding.declaration)
+        else {
+            return Ok(None);
+        };
+        let Some(callable) = realization.klib_body_callable() else {
+            return Ok(None);
+        };
+        if callable.identity() != &binding.declaration {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected continuation intrinsic resolves to another provider identity"
+                    .to_owned(),
+            ));
+        }
+        super::continuation_intrinsics::authenticate(callable)
+    }
+
     fn unintercepted_suspension(
         &self,
         signature: &KlibDeclarationSignature,
