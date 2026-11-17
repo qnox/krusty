@@ -1148,6 +1148,13 @@ fn class_formals(
         }
         bounds.push(parameter_bounds);
     }
+    for ((&formal, &variance), declared) in formals.iter().zip(&variances).zip(&bounds) {
+        if !types.record_bounds(formal, declared.clone())
+            || !types.record_variance(formal, variance)
+        {
+            return Err(mismatch("a non-public class repeats a type parameter"));
+        }
+    }
     Ok(ClassFormals {
         types,
         formals,

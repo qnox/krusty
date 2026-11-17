@@ -116,6 +116,7 @@ pub mod referenced_classifiers;
 mod references;
 mod reified_markers;
 mod reified_templates;
+mod sam_function_value_adapter;
 mod sam_target;
 mod type_tests;
 pub(crate) use type_tests::admits_null_at_runtime;
@@ -1386,6 +1387,10 @@ pub struct IrSpecializedAnonymousClass {
     /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
     /// it, and so does an object nested in the copy that is specialized later.
     pub crossinline_operands: Vec<Option<u32>>,
+    /// The call-site copy whose body regenerated this copy, when the object is nested in another
+    /// regenerated anonymous object. A target names it under that copy rather than as another
+    /// expansion of the inline call.
+    pub parent: Option<ClassId>,
     /// Source function → the function on this copy. Accessor functions materialized after the
     /// copy are added here before bridges and metadata read the copy.
     pub method_clones: crate::fx_hash::HashMap<FunId, FunId>,
@@ -1510,6 +1515,11 @@ pub struct IrFile {
     pub classifier_hierarchies: crate::fx_hash::HashMap<TypeName, Vec<IrAppliedClassifier>>,
     /// The interface defaults each source classifier inherits without overriding, as override
     /// resolution selected them; a target backend realizes each record without selecting one.
+    /// The function names of each source classifier that keep more than one member slot, as
+    /// override resolution grouped them. A target whose realization can merge two slots checks
+    /// these records; it never compares the declarations again.
+    pub function_slot_families:
+        crate::fx_hash::HashMap<TypeName, Vec<crate::fir::ResolvedFunctionSlotFamily>>,
     pub inherited_defaults:
         crate::fx_hash::HashMap<TypeName, Vec<crate::fir::ResolvedInheritedDefault>>,
     /// The frontend-selected custom serializer construction of each source classifier whose

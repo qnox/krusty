@@ -1058,6 +1058,12 @@ fn realize_expressions(
                 unreachable!("a target KLIB scalar instruction cannot reach JVM call realization")
             }
             Some(
+                krusty::libraries::CompilerIntrinsic::CurrentContinuation
+                | krusty::libraries::CompilerIntrinsic::ReturnIfSuspended,
+            ) => {
+                unreachable!("a Native continuation intrinsic cannot reach JVM call realization")
+            }
+            Some(
                 krusty::libraries::CompilerIntrinsic::UnsignedDivide { .. }
                 | krusty::libraries::CompilerIntrinsic::UnsignedRemainder { .. }
                 | krusty::libraries::CompilerIntrinsic::ResultFailure(_)

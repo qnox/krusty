@@ -152,6 +152,15 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The continuation intrinsic this linker's selected declaration of `callee` is: Native's
+    /// `getContinuation`/`returnIfSuspended`, which a body realizes as its suspension point.
+    fn continuation_intrinsic(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<super::continuation_intrinsics::ContinuationIntrinsicCall>> {
+        Ok(None)
+    }
+
     /// The range construction a range literal's membership compares against, read as
     /// [`Self::common_primitive`] reads its primitive but whatever range class the target lays
     /// out: the membership builds no range.
@@ -246,11 +255,13 @@ pub(super) trait CallLinker {
         unsupported("a callable reference without an exact provider declaration")
     }
 
-    /// The dependency constructor a constructor call of the public declaration `callee` invokes.
+    /// The dependency constructor a constructor call of the public declaration `callee` invokes:
+    /// one allocating its class, or a subclass delegating to it.
     fn link_constructor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
+        role: ConstructorRole,
     ) -> Lowered<LinkedConstructor>;
 
     /// The classifier a file-local signature names in the library of the body being lowered.
@@ -378,6 +389,15 @@ pub(super) trait CallLinker {
         let _ = name;
         unsupported("an object literal supertype")
     }
+}
+
+/// What a constructor call does with the constructor it names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ConstructorRole {
+    /// Allocates an instance of the constructor's class.
+    Allocation,
+    /// Initializes a subclass instance another constructor allocated.
+    Delegation,
 }
 
 /// The dependency constructor a constructor call invokes: the provider's identity, the class it
@@ -679,12 +699,17 @@ impl<'a> BodyLowering<'a> {
                 let crate::types::TyKind::Fun(signature) = ty.kind() else {
                     return unsupported("a closure of a non-function type");
                 };
+                // A suspend lambda overrides `SuspendFunctionN.invoke`, any other `FunctionN.invoke`.
                 let invocation = match &overridden.signature {
-                    crate::metadata::klib_ir::KlibIrSignature::Public(signature)
+                    crate::metadata::klib_ir::KlibIrSignature::Public(invoke)
                         if overridden.kind
                             == crate::metadata::klib_ir::KlibIrSymbolKind::Function =>
                     {
-                        super::klib_types::function_invocation_arity(signature)
+                        if signature.suspend {
+                            super::klib_types::suspend_function_invocation_arity(invoke)
+                        } else {
+                            super::klib_types::function_invocation_arity(invoke)
+                        }
                     }
                     _ => None,
                 };
@@ -924,10 +949,7 @@ impl<'a> BodyLowering<'a> {
     /// The direct supertypes recorded for the local or anonymous class lowered in this body that
     /// the non-null `actual` names; `None` when it names no such class.
     fn local_class_supertypes(&self, actual: Ty) -> Option<impl Iterator<Item = Ty> + '_> {
-        let name = actual.non_null().kotlin_class_internal()?;
-        let class = self.ir.classes.iter().find(|class| {
-            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
-        })?;
+        let class = self.local_class(actual)?;
         Some(
             class
                 .supertypes
@@ -947,6 +969,14 @@ impl<'a> BodyLowering<'a> {
             }
             None => self.linker.applied_supertype(sub, owner),
         }
+    }
+
+    /// The anonymous or local class lowered in this body that `ty` names.
+    fn local_class(&self, ty: Ty) -> Option<&crate::ir::IrClass> {
+        let name = ty.non_null().kotlin_class_internal()?;
+        self.ir.classes.iter().find(|class| {
+            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
+        })
     }
 
     /// Whether `supertype` counts as a supertype of `subtype`: one recorded for a local or

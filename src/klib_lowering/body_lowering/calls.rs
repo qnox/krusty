@@ -100,6 +100,9 @@ impl BodyLowering<'_> {
                 if let Some(suspension) = self.linker.unintercepted_suspension(&signature)? {
                     return self.unintercepted_suspension_call(suspension, access, ty);
                 }
+                if let Some(intrinsic) = self.linker.continuation_intrinsic(&signature)? {
+                    return self.continuation_intrinsic_call(intrinsic, access, ty);
+                }
                 if let Some(primitive) = self.linker.common_primitive(&signature)? {
                     return self.primitive_call(primitive, access, ty);
                 }
@@ -848,6 +851,59 @@ impl BodyLowering<'_> {
         self.ir
             .mark_unintercepted_suspension(invocation, logical_result);
         Ok(invocation)
+    }
+
+    /// A call of Native's `getContinuation<T>()` or `returnIfSuspended<T>(argument)`, which
+    /// kotlinc's inliner leaves where `suspendCoroutineUninterceptedOrReturn` was expanded. The
+    /// first is the body's own continuation; the second makes its operand the suspension point
+    /// the primitive is, as a source call of the primitive marks its block's invocation.
+    fn continuation_intrinsic_call(
+        &mut self,
+        selected: super::super::continuation_intrinsics::ContinuationIntrinsicCall,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        use super::super::continuation_intrinsics::ContinuationIntrinsic;
+        let [Some(type_argument)] = access.type_arguments.as_slice() else {
+            return Err(mismatch(
+                "a continuation intrinsic call has another type-argument shape",
+            ));
+        };
+        let type_argument = self.semantic(*type_argument)?;
+        let mut bindings = crate::fx_hash::HashMap::default();
+        bindings.insert(selected.formal, type_argument);
+        let substitute = |ty: Ty| crate::types::ty_subst_formals(ty, &[selected.formal], &bindings);
+        let params = selected
+            .params
+            .iter()
+            .map(|&ty| substitute(ty))
+            .collect::<Vec<_>>();
+        let result = substitute(selected.result);
+        let operands = self.call_operands(
+            access,
+            ty,
+            CalleeShape {
+                receiver: None,
+                params: &params,
+                ret: result,
+                context_count: 0,
+                class_type_parameters: &[],
+                parameter_defaults: &[],
+            },
+        )?;
+        match (selected.operation, operands.args.as_slice()) {
+            (ContinuationIntrinsic::Current, []) => {
+                let continuation = self.ir.add_expr(IrExpr::CurrentContinuation);
+                Ok(self.typed(continuation, operands.ret))
+            }
+            (ContinuationIntrinsic::ReturnIfSuspended, &[outcome]) => {
+                self.ir.mark_unintercepted_suspension(outcome, operands.ret);
+                Ok(outcome)
+            }
+            _ => Err(mismatch(
+                "a continuation intrinsic call has another operand shape",
+            )),
+        }
     }
 
     /// A call of a dependency property's accessor, lowered as checked FIR lowers a source access

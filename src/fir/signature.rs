@@ -52,6 +52,7 @@ pub enum InvokeSelection {
     Inapplicable(DiagnosticId),
 }
 mod classifier_headers;
+mod compact_declaration;
 mod declaration_metadata;
 mod serialization_records;
 pub use declaration_metadata::{NoArgSuperConstructor, PropertyAccessor};
@@ -1479,6 +1480,9 @@ pub struct ResolvedModuleIndex {
     /// The interface defaults each source classifier inherits without overriding, selected while
     /// the semantic hierarchy provider is live; target backends realize them without a walk.
     pub(super) inherited_defaults: HashMap<DeclarationId, Box<[super::ResolvedInheritedDefault]>>,
+    /// The function names of each source classifier that hold more than one member slot.
+    pub(super) function_slot_families:
+        HashMap<DeclarationId, Box<[super::ResolvedFunctionSlotFamily]>>,
     /// Non-default return-value statuses of module declarations, derived from the frozen edges.
     pub(super) callable_inherited_statuses: HashMap<CallableId, super::InheritedCallableStatus>,
     pub(super) property_return_value_statuses: HashMap<PropertyId, crate::types::ReturnValueStatus>,
@@ -3012,6 +3016,7 @@ impl ResolvedModuleIndex {
                 .map(|hierarchy| hierarchy.len() * std::mem::size_of::<ResolvedAppliedClassifier>())
                 .sum::<usize>()
             + self.override_relations.storage_bytes()
+            + self.function_slot_families_storage_bytes()
             + self
                 .inherited_defaults
                 .values()

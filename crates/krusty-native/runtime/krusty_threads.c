@@ -65,6 +65,13 @@ static void kt_unlock(void) {
 
 static KThread *kt_threads;
 
+/* Raw mapped storage: stable slot addresses, owned and traced with one OS-thread lifetime. */
+typedef struct KThreadObjectSlot {
+    const void *declaration;
+    KRef value;
+    struct KThreadObjectSlot *next;
+} KThreadObjectSlot;
+
 /* The holder, or NULL while every attached thread is in foreign code. Read by the release path in
    assembly, which is why it has external linkage. */
 KThread *kt_running;
@@ -86,6 +93,12 @@ static void kt_thread_remove(KThread *thread) {
         link = &(*link)->next;
     }
     *link = thread->next;
+    KThreadObjectSlot *slot = thread->object_slots;
+    while (slot != NULL) {
+        KThreadObjectSlot *next = slot->next;
+        kt_unmap(slot, sizeof(KThreadObjectSlot));
+        slot = next;
+    }
     kt_unmap(thread, sizeof(KThread));
 }
 
@@ -126,6 +139,53 @@ static KThread *kt_thread_of(long tid) {
     return NULL;
 }
 
+/* A host supplies the OS-thread lifetime; callbacks still supply each temporary stack boundary. */
+KThread *kt_thread_lifetime_begin(void) {
+    long tid = kt_sys_gettid();
+    kt_lock();
+    if (kt_thread_of(tid) != NULL) {
+        KT_FAIL("krusty: the OS thread already has a runtime lifetime\n");
+    }
+    KThread *thread = kt_thread_new(0, tid);
+    thread->number = kt_numbered_threads++;
+    thread->persistent = true;
+    thread->dormant = true;
+    thread->released = true;
+    kt_unlock();
+    return thread;
+}
+
+void kt_thread_lifetime_end(KThread *thread) {
+    long tid = kt_sys_gettid();
+    kt_lock();
+    /* Authenticate the current owner before dereferencing its token. A host balances one begin
+       and end on the same OS thread; a token is invalid after its end. */
+    if (kt_thread_of(tid) != thread || thread == NULL || !thread->persistent ||
+        !thread->dormant) {
+        KT_FAIL("krusty: ending a thread lifetime outside its inactive owner\n");
+    }
+    kt_thread_remove(thread);
+    kt_unlock();
+}
+
+KRef *kt_thread_object_slot(const void *canonical_declaration_token) {
+    KThread *thread = kt_running;
+    if (thread == NULL || thread->tid != kt_sys_gettid() || !thread->persistent ||
+        canonical_declaration_token == NULL) {
+        KT_FAIL("krusty: object slots require an active registered OS-thread lifetime\n");
+    }
+    for (KThreadObjectSlot *slot = thread->object_slots; slot != NULL; slot = slot->next) {
+        if (slot->declaration == canonical_declaration_token) {
+            return &slot->value;
+        }
+    }
+    KThreadObjectSlot *slot = (KThreadObjectSlot *)kt_map(sizeof(KThreadObjectSlot));
+    slot->declaration = canonical_declaration_token;
+    slot->next = thread->object_slots;
+    thread->object_slots = slot;
+    return &slot->value;
+}
+
 /* Become the holder: take the lock and the thread's own exception slot. */
 static void kt_acquire(KThread *thread) {
     kt_lock();
@@ -154,6 +214,7 @@ void kt_runtime_init(void *stack_bottom) {
     kt_lock();
     kt_running = kt_thread_new((uintptr_t)stack_bottom, kt_sys_gettid());
     kt_running->number = KT_MAIN_THREAD;
+    kt_running->persistent = true;
 }
 
 /* ---- out to foreign code -----------------------------------------------------------------------
@@ -248,9 +309,13 @@ void kt_callback_enter(KThreadEntry *entry, void *stack_bottom) {
     kt_lock();
     KThread *thread = kt_thread_of(tid);
     entry->attached = thread == NULL;
+    entry->outer_dormant = thread != NULL && thread->dormant;
     if (thread == NULL) {
         thread = kt_thread_new((uintptr_t)stack_bottom, tid);
         thread->number = kt_numbered_threads++;
+    } else if (entry->outer_dormant) {
+        thread->stack_bottom = (uintptr_t)stack_bottom;
+        thread->dormant = false;
     } else {
         /* A callback on a thread that is in a `kt_native_enter`: its released state describes the
            Kotlin frames waiting above this one, and is put back on the way out. Until then this
@@ -279,6 +344,17 @@ void kt_callback_leave(KThreadEntry *entry) {
         /* The thread leaves the runtime: its stack is about to be returned to whoever owns it, and
            nothing on it is a root any more. */
         kt_thread_remove(thread);
+        kt_running = NULL;
+        kt_unlock();
+        return;
+    }
+    if (entry->outer_dormant) {
+        /* The lifetime stays, but no frame/register from this callback remains a root. */
+        thread->dormant = true;
+        thread->released = true;
+        thread->stack_bottom = 0;
+        thread->saved_sp = 0;
+        kt_pending = NULL;
         kt_running = NULL;
         kt_unlock();
         return;
@@ -422,6 +498,7 @@ KThreadHandle *kt_thread_start(void (*routine)(KRef), KRef argument) {
        so a collection before it first runs keeps its argument; it waits for the lock this thread
        holds. */
     KThread *thread = kt_thread_new(0, 0);
+    thread->persistent = true;
     thread->released = true;
     thread->start_routine = routine;
     thread->start_argument = argument;
@@ -452,7 +529,10 @@ uintptr_t kt_threads_running_bottom(void) {
 
 void kt_threads_scan_released(void) {
     for (KThread *thread = kt_threads; thread != NULL; thread = thread->next) {
-        if (thread == kt_running) {
+        for (KThreadObjectSlot *slot = thread->object_slots; slot != NULL; slot = slot->next) {
+            kt_gc_scan_word((uintptr_t)slot->value);
+        }
+        if (thread == kt_running || thread->dormant) {
             continue;
         }
         if (!thread->released) {
