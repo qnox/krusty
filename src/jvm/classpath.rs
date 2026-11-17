@@ -24,7 +24,7 @@ mod class_entry_bytes;
 mod class_locations;
 mod class_members;
 pub mod content_snapshot;
-mod ct_sym_index;
+pub(crate) mod ct_sym_index;
 mod declaration_annotations;
 mod entry_class_reads;
 mod external_identities;
@@ -59,7 +59,6 @@ pub use crate::libraries::{ExternalCallableKind, ExternalCallableRealization};
 pub use call_metadata::MetadataCallFacts;
 
 use self::ct_sym_index::cached_ct_sym_index;
-pub(crate) use self::ct_sym_index::ct_sym_releases;
 use self::external_identities::{ExternalCallableKey, ExternalPropertyKey};
 use self::jimage_catalog::{cached_jimage_index, JimageIndex};
 use self::metadata_alignment::{aligned_meta_callable, aligned_meta_index};

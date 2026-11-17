@@ -243,9 +243,9 @@ fn a_release_the_jdk_does_not_describe_is_reported_in_kotlincs_words() {
     );
 }
 
-/// The reference JDK, every file but `lib/ct.sym` linked into a scratch home.
-fn jdk_without_ct_sym(fixture: &Fixture) -> PathBuf {
-    let home = fixture.work.join("jdk-without-ct-sym");
+/// The reference JDK, every file but `lib/<omitted>` linked into a scratch home.
+fn jdk_without(fixture: &Fixture, omitted: &str) -> PathBuf {
+    let home = fixture.work.join(format!("jdk-without-{omitted}"));
     let jdk = Path::new(&fixture.jdk);
     for directory in [jdk.to_path_buf(), jdk.join("lib")] {
         let target = home.join(directory.strip_prefix(jdk).expect("below the JDK home"));
@@ -253,7 +253,7 @@ fn jdk_without_ct_sym(fixture: &Fixture) -> PathBuf {
         for entry in std::fs::read_dir(&directory).expect("read the JDK home") {
             let source = entry.expect("JDK home entry").path();
             let name = source.file_name().expect("entry name");
-            if (directory == jdk && name == "lib") || name == "ct.sym" {
+            if (directory == jdk && name == "lib") || (directory != jdk && name == omitted) {
                 continue;
             }
             link(&source, &target.join(name));
@@ -280,7 +280,7 @@ fn link(source: &Path, link: &Path) {
 #[test]
 fn a_jdk_without_ct_sym_is_reported_in_kotlincs_words() {
     let fixture = Fixture::new();
-    let home = jdk_without_ct_sym(&fixture);
+    let home = jdk_without(&fixture, "ct.sym");
     let home = home.to_string_lossy().into_owned();
     let missing = |release: u16| {
         format!(
@@ -298,4 +298,57 @@ fn a_jdk_without_ct_sym_is_reported_in_kotlincs_words() {
             missing(fixture.release),
         ],
     );
+}
+
+/// The JDK's own release reads its module image. kotlinc fails with an internal error on a home
+/// without one; krusty reports the incomplete home and writes nothing.
+#[test]
+fn the_own_release_of_a_jdk_without_its_module_image_is_reported() {
+    let fixture = Fixture::new();
+    let home = jdk_without(&fixture, "modules");
+    let release = format!("-Xjdk-release={}", fixture.release);
+    let result = fixture.krusty_with_jdk(&home.to_string_lossy(), "krusty", &[&release]);
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr),
+        format!(
+            "krusty: error: {release} is the JDK's own release, but {} has neither lib/modules \
+             nor jre/lib/rt.jar\n",
+            home.display()
+        )
+    );
+    assert!(!fixture.work.join("krusty").exists());
+
+    // An older release reads `ct.sym` alone, so the same home still compiles it.
+    let older = fixture.krusty_with_jdk(&home.to_string_lossy(), "krusty-8", &["-Xjdk-release=8"]);
+    assert_eq!(older.status.code(), Some(0), "{older:?}");
+    assert_eq!(String::from_utf8_lossy(&older.stderr), "");
+}
+
+/// A release with no JDK selected (no `-jdk-home`, no `JAVA_HOME`) has no API to read. kotlinc
+/// always runs on a JDK, so this is krusty's configuration error; nothing is written.
+#[test]
+fn a_release_without_a_jdk_is_reported() {
+    let fixture = Fixture::new();
+    let output = fixture.work.join("krusty");
+    let result = std::process::Command::new(common::krusty_binary())
+        .arg(fixture.work.join("Box.kt"))
+        .arg("-d")
+        .arg(&output)
+        .arg("-Xjdk-release=8")
+        .env_remove("JAVA_HOME")
+        .output()
+        .expect("run krusty");
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr),
+        "krusty: error: -Xjdk-release=8 needs a JDK: pass -jdk-home or set JAVA_HOME\n"
+    );
+    assert!(!output.exists(), "krusty wrote {}", output.display());
+
+    // The same command line with the JDK selected compiles.
+    let selected = fixture.krusty("krusty", &["-Xjdk-release=8"]);
+    assert_eq!(selected.status.code(), Some(0), "{selected:?}");
 }

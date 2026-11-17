@@ -100,8 +100,10 @@ impl JdkApi {
     /// is the JDK's own release, compiled against its own modules. Any other release it describes
     /// is read from that release's signatures in `ct.sym`. A release it does not describe is an
     /// error, as is a JDK without `ct.sym`. A release from 9 on is modular, so either error leaves
-    /// it without `java.base`, which kotlinc reports first. With no release, the JDK's own API is
-    /// selected.
+    /// it without `java.base`, which kotlinc reports first. A release with no JDK to read, or the
+    /// JDK's own release in a home with no bootclasspath root, is a configuration error too (kotlinc
+    /// always runs on a JDK, and fails with an internal error on such a home). With no release,
+    /// the JDK's own API is selected, or nothing when there is none.
     pub fn for_release(
         jdk_home: Option<&Path>,
         release: Option<u16>,
@@ -110,7 +112,9 @@ impl JdkApi {
             return Ok(JdkApi::own(jdk_home));
         };
         let Some(home) = selected_jdk_home(jdk_home) else {
-            return Ok(None);
+            return Err(vec![format!(
+                "-Xjdk-release={release} needs a JDK: pass -jdk-home or set JAVA_HOME"
+            )]);
         };
         let unavailable = |reason: String| {
             let mut errors = Vec::new();
@@ -122,7 +126,8 @@ impl JdkApi {
         };
         let symbols = home.join("lib").join("ct.sym");
         let releases = if symbols.is_file() {
-            crate::jvm::classpath::ct_sym_releases(&symbols).map_err(|error| vec![error])?
+            crate::jvm::classpath::ct_sym_index::ct_sym_releases(&symbols)
+                .map_err(|error| vec![error])?
         } else {
             None
         };
@@ -137,7 +142,14 @@ impl JdkApi {
             .last()
             .is_some_and(|&own| u16::from(own) == release)
         {
-            return Ok(JdkApi::own(Some(&home)));
+            return match JdkApi::own(Some(&home)) {
+                Some(own) => Ok(Some(own)),
+                None => Err(vec![format!(
+                    "-Xjdk-release={release} is the JDK's own release, but {} has neither \
+                     lib/modules nor jre/lib/rt.jar",
+                    home.display()
+                )]),
+            };
         }
         match u8::try_from(release)
             .ok()
