@@ -158,7 +158,7 @@ impl BodyLowering<'_> {
             .ir
             .sam_function_value_adapter(target, value, name)
             .ok_or_else(|| mismatch("a SAM method has too many invocation parameters"))?;
-        Ok(expression)
+        Ok(self.typed(expression, ty))
     }
 }
 

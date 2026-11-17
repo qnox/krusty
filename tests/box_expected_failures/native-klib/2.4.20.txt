@@ -1237,12 +1237,6 @@ inlineClasses/privateConstructorFunInterfaceMultiModuleGeneric.kt
 inlineClasses/propertyDelegation/kt27070.kt
 inlineClasses/propertyDelegation/kt27070Generic.kt
 inlineClasses/removeInInlineCollectionOfInlineClassAsInt.kt
-inlineClasses/result/directCall1.kt
-inlineClasses/result/directCall2.kt
-inlineClasses/result/doubleOverride.kt
-inlineClasses/result/extensionOverride.kt
-inlineClasses/result/inlineMethodOnResult.kt
-inlineClasses/result/lambdaTakesResultThroughBridge.kt
 inlineClasses/samWrapperDifferentModule.kt
 inlineClasses/samWrapperDifferentModuleGeneric.kt
 inlineClasses/unboxGenericParameter/genericArrayInlineClassCast.kt
