@@ -457,10 +457,11 @@ impl Emitter<'_> {
     }
 
     /// Whether the literal lambda `argument`'s body reaches a declaration only its own class may: a
-    /// private field (a property's backing field), a private function, an `invokespecial`, or a
-    /// nested lambda (which may be materialized as a private method). Inlined into a regenerated
-    /// object, kotlinc reaches those through synthetic accessors, which the port does not generate
-    /// yet.
+    /// private field (a property's backing field), an `invokespecial`, or a nested lambda (which
+    /// may be materialized as a private method). Inlined into a regenerated object, kotlinc
+    /// reaches those through synthetic accessors, which the port does not generate for them yet.
+    /// A private static function is reached through its `access$` accessor already: the literal
+    /// is `crossinline`, and its body exports private access.
     pub(super) fn lambda_reaches_private_members(
         &self,
         argument: u32,
@@ -484,12 +485,7 @@ impl Emitter<'_> {
                 | IrExpr::LateinitInitialized { class, index, .. } => {
                     self.ir.classes[*class as usize].fields[*index as usize].is_private()
                 }
-                IrExpr::Call { callee, .. } => {
-                    matches!(&**callee, Callee::Special { .. })
-                        || callee.source_function().is_some_and(|function| {
-                            self.ir.method_visibility(function).is_private()
-                        })
-                }
+                IrExpr::Call { callee, .. } => matches!(&**callee, Callee::Special { .. }),
                 // A nested lambda may be materialized as a method of the caller, which the object
                 // could not reach and route planning cannot tell from its shape.
                 IrExpr::Lambda { .. } => true,
@@ -635,11 +631,15 @@ impl Emitter<'_> {
         let caller_type_parameters = self.type_parameter_function.replace(impl_fn);
         let caller_fakes = self.enter_placed_fake_continuations(&fake_continuations);
         let brace_depth = self.unit_lambda_brace_depth();
-        // A lambda nested in a `crossinline` one moves wherever that one does.
+        // A lambda nested in a `crossinline` one moves wherever that one does. Its private access
+        // goes through synthetic accessors, as the walk planning them found.
         let caller_crossinline = self.crossinline_lambda_body;
+        let caller_export = self.export_private_calls;
         self.crossinline_lambda_body |= crossinline;
+        self.export_private_calls |= crossinline;
         let result = self.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch);
         self.crossinline_lambda_body = caller_crossinline;
+        self.export_private_calls = caller_export;
         self.leave_placed_fake_continuations(&fake_continuations, caller_fakes);
         self.type_parameter_function = caller_type_parameters;
         if let Some(caller_machine) = caller_machine {
