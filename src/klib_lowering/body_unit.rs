@@ -1414,12 +1414,23 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 ))
             }
         };
-        if !allocating {
+        let materialized = if allocating {
+            None
+        } else {
             self.materialize_class(ir, &identity, selected)?;
-        }
+            self.constructors
+                .get(&identity)
+                .map(|constructor| crate::ir::IrConstructorTarget {
+                    ordinal: constructor.secondary.map_or(0, |index| {
+                        u32::try_from(index + 1).expect("too many constructors")
+                    }),
+                    access: super::same_library_class::constructor_access(function),
+                })
+        };
         Ok(LinkedConstructor {
             target,
             declaration,
+            materialized,
         })
     }
 

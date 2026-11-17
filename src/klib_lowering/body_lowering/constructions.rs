@@ -16,6 +16,9 @@ pub(super) struct ConstructorOperands {
     pub(super) declaration: super::super::constructor_calls::ConstructorDeclaration,
     pub(super) external_target: Option<crate::fir::ExternalCallableId>,
     pub(super) local_access: Option<crate::ir::IrConstructorAccess>,
+    /// The constructor of the class this unit materializes that a dependency constructor call
+    /// selects.
+    pub(super) materialized: Option<crate::ir::IrConstructorTarget>,
     pub(super) params: Vec<Ty>,
     pub(super) args: Vec<ExprId>,
     pub(super) defaults: Vec<u32>,
@@ -102,18 +105,24 @@ impl BodyLowering<'_> {
                 self.semantic(argument)
             })
             .collect::<Lowered<Vec<_>>>()?;
-        let (declaration, external_target, local_access) = match &access.symbol.signature {
-            KlibIrSignature::Public(callee)
-                if !self.linker.links_privately(&access.symbol.signature) =>
-            {
-                let linked = self.linker.link_constructor(self.ir, callee)?;
-                (linked.declaration, Some(linked.target), None)
-            }
-            signature => {
-                let linked = self.linker.link_local_constructor(self.ir, signature)?;
-                (linked.declaration, None, Some(linked.access))
-            }
-        };
+        let (declaration, external_target, local_access, materialized) =
+            match &access.symbol.signature {
+                KlibIrSignature::Public(callee)
+                    if !self.linker.links_privately(&access.symbol.signature) =>
+                {
+                    let linked = self.linker.link_constructor(self.ir, callee)?;
+                    (
+                        linked.declaration,
+                        Some(linked.target),
+                        None,
+                        linked.materialized,
+                    )
+                }
+                signature => {
+                    let linked = self.linker.link_local_constructor(self.ir, signature)?;
+                    (linked.declaration, None, Some(linked.access), None)
+                }
+            };
         let params = declaration.instantiate(&type_arguments, ty, |argument, bound| {
             self.linker
                 .constructor_bound(self.header.type_parameters(), argument, bound)
@@ -141,6 +150,7 @@ impl BodyLowering<'_> {
             declaration,
             external_target,
             local_access,
+            materialized,
             params,
             args,
             defaults,
@@ -157,6 +167,7 @@ impl BodyLowering<'_> {
             declaration,
             external_target,
             local_access,
+            materialized,
             params,
             args,
             defaults,
@@ -197,11 +208,13 @@ impl BodyLowering<'_> {
             defaults: defaults.into_boxed_slice(),
             default_prefix_count: 0,
         });
-        if let Some(access) = local_access {
-            self.ir.construction_targets.insert(
-                site,
-                super::super::same_library_class::construction_target(access),
-            );
+        // The construction selects its constructor by place, as a source construction records it:
+        // a generic class's instantiated parameters need not spell its declared ones.
+        let target = local_access
+            .map(super::super::same_library_class::construction_target)
+            .or(materialized);
+        if let Some(target) = target {
+            self.ir.construction_targets.insert(site, target);
         }
         Ok(site)
     }

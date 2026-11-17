@@ -522,6 +522,7 @@ impl CallLinker for TemplateCalls<'_> {
         Ok(LinkedConstructor {
             target,
             declaration,
+            materialized: None,
         })
     }
 
