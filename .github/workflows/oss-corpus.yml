@@ -191,12 +191,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # The newest earlier scheduled master run whose summary artifact is still kept; none on
-          # the first run or after every earlier artifact expired.
+          # The newest scheduled master run created before this one whose summary artifact is still
+          # kept; none on the first run or after every earlier artifact expired. Creation time, not
+          # the latest attempt, orders the runs, so a rerun of an older nightly never compares itself
+          # with a later one.
+          created=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)
           gh run list -R "$GITHUB_REPOSITORY" --workflow oss-corpus.yml --branch master --event schedule \
-            --status completed --limit 30 --json databaseId --jq '.[].databaseId' |
+            --status completed --limit 60 --json databaseId,createdAt |
+            jq -r --arg created "$created" \
+              '[.[] | select((.createdAt | fromdate) < ($created | fromdate))] | sort_by(.createdAt) | reverse | .[].databaseId' |
             while read -r id; do
-              [ "$id" != "$GITHUB_RUN_ID" ] || continue
               kept=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts" \
                 --jq '[.artifacts[] | select(.name == "summary" and (.expired | not))] | length')
               [ "$kept" -eq 1 ] || continue
