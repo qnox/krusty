@@ -16,6 +16,7 @@ import kotlin.KotlinVersion;
 import org.jetbrains.kotlin.buildtools.api.BaseCompilationOperation;
 import org.jetbrains.kotlin.buildtools.api.CompilationResult;
 import org.jetbrains.kotlin.buildtools.api.CompilerMessageRenderer;
+import org.jetbrains.kotlin.buildtools.api.ExecutionPolicy;
 import org.jetbrains.kotlin.buildtools.api.KotlinLogger;
 import org.jetbrains.kotlin.buildtools.api.KotlinToolchains;
 import org.jetbrains.kotlin.buildtools.api.SourcesChanges;
@@ -76,6 +77,29 @@ class KrustyToolchainsTest {
         assertEquals(CompilationResult.COMPILATION_SUCCESS, result, String.join("\n", logger.errors));
         assertTrue(Files.isRegularFile(destination.resolve("p/BoxKt.class")));
         assertFalse(Files.exists(stale), "a class of a deleted source survived");
+        assertEquals(List.of(), logger.errors);
+    }
+
+    @Test
+    void compilesUnderTheDaemonPolicyAsInProcess() throws IOException {
+        Path source = write("Box.kt", "package p\n\nfun box(): String = \"OK\"\n");
+        Path destination = work.resolve("classes");
+        ExecutionPolicy.WithDaemon.Builder daemon = toolchains.daemonExecutionPolicyBuilder();
+        daemon.set(ExecutionPolicy.WithDaemon.JVM_ARGUMENTS, List.of("-Xmx1g"));
+        daemon.set(ExecutionPolicy.WithDaemon.SHUTDOWN_DELAY_MILLIS, 1000L);
+        ExecutionPolicy.WithDaemon policy = daemon.build();
+        // The built policy keeps what was set, and a builder made from it starts from those values.
+        daemon.set(ExecutionPolicy.WithDaemon.SHUTDOWN_DELAY_MILLIS, 2000L);
+        assertEquals(List.of(List.of("-Xmx1g"), 1000L, 1000L), List.of(
+            policy.get(ExecutionPolicy.WithDaemon.JVM_ARGUMENTS),
+            policy.get(ExecutionPolicy.WithDaemon.SHUTDOWN_DELAY_MILLIS),
+            policy.toBuilder().get(ExecutionPolicy.WithDaemon.SHUTDOWN_DELAY_MILLIS)));
+
+        RecordingLogger logger = new RecordingLogger();
+        CompilationResult result = compile(List.of(source), destination, logger, null, stdlib(), null, policy);
+
+        assertEquals(CompilationResult.COMPILATION_SUCCESS, result, String.join("\n", logger.errors));
+        assertTrue(Files.isRegularFile(destination.resolve("p/BoxKt.class")));
         assertEquals(List.of(), logger.errors);
     }
 
@@ -157,6 +181,19 @@ class KrustyToolchainsTest {
         String classpath,
         Path incrementalWorkingDirectory
     ) {
+        return compile(sources, destination, logger, renderer, classpath, incrementalWorkingDirectory,
+            toolchains.createInProcessExecutionPolicy());
+    }
+
+    private CompilationResult compile(
+        List<Path> sources,
+        Path destination,
+        KotlinLogger logger,
+        CompilerMessageRenderer renderer,
+        String classpath,
+        Path incrementalWorkingDirectory,
+        ExecutionPolicy policy
+    ) {
         JvmPlatformToolchain jvm = toolchains.getToolchain(JvmPlatformToolchain.class);
         JvmCompilationOperation.Builder builder = jvm.jvmCompilationOperationBuilder(sources, destination);
         builder.getCompilerArguments().applyArgumentStrings(List.of(
@@ -173,7 +210,7 @@ class KrustyToolchainsTest {
                     incrementalWorkingDirectory, SourcesChanges.ToBeCalculated.INSTANCE, List.of()).build());
         }
         try (KotlinToolchains.BuildSession session = toolchains.createBuildSession()) {
-            return session.executeOperation(builder.build(), toolchains.createInProcessExecutionPolicy(), logger);
+            return session.executeOperation(builder.build(), policy, logger);
         }
     }
 
