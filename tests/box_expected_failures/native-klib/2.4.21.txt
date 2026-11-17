@@ -1470,7 +1470,6 @@ ranges/forInCharSequenceLengthDecreasedInLoopBody.kt
 ranges/forInCharSequenceLengthIncreasedInLoopBody.kt
 ranges/forInCharSequenceWithCustomIterator.kt
 ranges/forInCharSequenceWithMultipleGetFunctions.kt
-ranges/forInDoubleRangeWithCustomIterator.kt
 ranges/forInDownTo/forIntInDownTo.kt
 ranges/forInDownTo/forIntInDownToWithNonConstBounds.kt
 ranges/forInDownTo/forIntInNonOptimizedDownTo.kt
@@ -1528,7 +1527,6 @@ ranges/forInUntil/kt42533.kt
 ranges/forNullableIntInRangeWithImplicitReceiver.kt
 ranges/kt37370a.kt
 ranges/kt47492.kt
-ranges/safeCallRangeTo.kt
 ranges/stepped/expression/downTo/emptyProgression.kt
 ranges/stepped/expression/downTo/illegalStepNegative.kt
 ranges/stepped/expression/downTo/illegalStepNonConst.kt
