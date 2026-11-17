@@ -74,6 +74,10 @@ for patch in "${patches[@]}"; do
   git -C "$checkout" apply "$patch"
 done
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
+# The integration's repository rule reads KRUSTY_BINARY from the whole client environment, not only
+# from `--repo_env`, so a caller's own setting would route the reference build to krusty too. Only
+# the krusty build names the binary.
+unset KRUSTY_BINARY
 
 # Bazel's output root lives in the work directory, beside the checkout. The project caps its server
 # at 12 GB, more than a runner has beside the compilers.

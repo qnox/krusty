@@ -192,6 +192,8 @@ with open(os.environ['FAKE_BAZEL_CALLS'], 'a') as f:
     f.write(' '.join(a for a in args if not a.startswith('--output_user_root')) + '\n')
 startup = [a for a in args if a.startswith('--output_user_root') or a.startswith('--host_jvm_args')]
 command = args[len(startup)]
+if 'KRUSTY_BINARY' in os.environ:
+    sys.exit('the caller\'s KRUSTY_BINARY reached Bazel')
 if command == 'info':
     print(os.getcwd())
     sys.exit(0)
@@ -250,8 +252,10 @@ class Runner(unittest.TestCase):
             krusty = Path(work, 'krusty')
             krusty.write_text('#!/bin/sh\n')
             calls = Path(work, 'calls')
+            # A KRUSTY_BINARY the caller exports must not reach the reference build: the integration's
+            # repository rule reads the whole client environment.
             env = dict(os.environ, CORPUS_PROJECTS=str(projects), CORPUS_BAZEL=str(Path(work, 'bazel')),
-                       FAKE_BAZEL_CALLS=str(calls))
+                       FAKE_BAZEL_CALLS=str(calls), KRUSTY_BINARY=str(krusty))
             result = subprocess.run(['bash', str(HERE / 'run.sh'), 'p', f'{work}/corpus', str(krusty),
                                      '/nonexistent/repository', '0'], env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
