@@ -79,3 +79,59 @@ fun test() {
         ]
     );
 }
+
+/// For a Kotlin `var`, a Java class overrides the property only when it overrides both accessors;
+/// one of them alone stays an ordinary function. An accessor-named overload of another shape
+/// (`String setA(String)`, `getA(int)`) is never part of the property and stays callable.
+#[test]
+fn a_java_overload_or_lone_accessor_of_a_kotlin_var_stays_a_function() {
+    let lone = "\
+public class Lone extends Base {
+    @Override
+    public void setA(int value) { super.setA(value + 1); }
+}
+";
+    let both = "\
+public class Both extends Base {
+    @Override
+    public int getA() { return 1; }
+    @Override
+    public void setA(int value) { super.setA(value + 1); }
+}
+";
+    let derived = "\
+public class Derived extends Base {
+    public String setA(String value) { return value; }
+    public int getA(int offset) { return offset; }
+    @Override
+    public int getA() { return 1; }
+    @Override
+    public void setA(int value) { super.setA(value + 1); }
+}
+";
+    let source = "\
+open class Base { open var a: Int = 0 }
+fun lone(l: Lone) = l.setA(3)
+fun use(d: Derived): String {
+    val text: String = d.setA(\"OK\")
+    d.setA(3)
+    return text + d.getA(2) + d.a
+}
+fun both(b: Both) = b.getA()
+";
+    let sources = [
+        ("Lone.java", lone),
+        ("Both.java", both),
+        ("Derived.java", derived),
+        ("test.kt", source),
+    ];
+    common::assert_error_blocks_match_kotlinc(&sources, &[]);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &[]),
+        [
+            "test.kt:5:12: argument type mismatch: actual type is 'Int', but 'String!' was \
+             expected.",
+            "test.kt:8:23: unresolved reference 'getA' on receiver of type 'Both'.",
+        ]
+    );
+}
