@@ -12013,43 +12013,6 @@ impl<'a> Checker<'a> {
             })
     }
 
-    /// Whether `actual` fits a FUNCTION-typed parameter whose signature reached the checker ERASED.
-    /// A classpath `(StringBuilder) -> Unit` parameter is a bare `Function1` — `(Any) -> Any` — and a
-    /// source `() -> T` erases the same way, so neither can judge the lambda's own parameter and return
-    /// types. Matched on arity and suspend-ness, judging only components that are not the erased top.
-    fn erased_function_param_fits(&self, expected: Ty, actual: Ty) -> bool {
-        let (TyKind::Fun(expected), TyKind::Fun(actual)) = (expected.kind(), actual.kind()) else {
-            return false;
-        };
-        // `supertype` must accept `subtype`. A function's result is covariant and its parameters
-        // are contravariant: `(Any) -> B` reaches `(I & J) -> I & J` because `I & J` reaches `Any`.
-        // A parameter typed by the `null` literal is `Nothing?`, which accepts `Nothing?`.
-        let component = |supertype: Ty, subtype: Ty| {
-            let supertype = if supertype == Ty::Null {
-                Ty::nullable(Ty::Nothing)
-            } else {
-                supertype
-            };
-            supertype.is_erased_top()
-                || supertype.mentions_ty_param()
-                || subtype.mentions_ty_param()
-                || self.member_argument_score(supertype, subtype).is_some()
-        };
-        expected.params.len() == actual.params.len()
-            // Suspend conversion is one-way: a regular function value may be wrapped as suspend;
-            // a suspend value cannot flow to a regular function parameter.
-            && (!actual.suspend || expected.suspend)
-            && expected
-                .params
-                .iter()
-                .zip(&actual.params)
-                .all(|(expected, actual)| component(*actual, *expected))
-            // Lambdas and callable references are normalized before this comparison. A stored
-            // `() -> String` value reaches `() -> Unit` only through the language's unit conversion.
-            && (component(expected.ret, actual.ret)
-                || self.unit_conversion_admits_result(expected.ret))
-    }
-
     /// Whether one expression can reach a semantic SAM parameter through Kotlin's function-value
     /// conversion. Candidate providers must share this predicate: a source constructor parameter is
     /// not a different kind of applicability boundary from an ordinary callable parameter.
@@ -38644,16 +38607,6 @@ impl<'a> Checker<'a> {
             });
         }
         candidates
-    }
-
-    fn generic_function_constructor_arg_fits(&self, expected: Ty, actual: Ty) -> bool {
-        if actual == Ty::Null {
-            return expected.is_nullable();
-        }
-        if actual.is_nullable() && !expected.is_nullable() {
-            return false;
-        }
-        self.erased_function_param_fits(expected.non_null(), actual.non_null())
     }
 
     fn select_ctor_delegation(
