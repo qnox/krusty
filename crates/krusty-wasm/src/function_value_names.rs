@@ -10,11 +10,12 @@
 //! `tests/kotlin_box_wasm_conformance.rs` pins them.
 //!
 //! A value whose class kotlinc names otherwise is not given a name here: a lambda converted to a
-//! `fun interface`, and a reference to a property, which prints the property instead.
+//! `fun interface`, and a reference to a property, which prints the property instead
+//! ([`property_reference_string`]).
 
 use krusty::backend::class_names::member_class_names;
-use krusty::backend::BackendClassifierSource;
-use krusty::ir::{IrCallableReferenceTarget, IrExpr};
+use krusty::backend::{BackendClassifierSource, CheckedBackendCallables};
+use krusty::ir::{IrCallableReferenceTarget, IrExpr, IrFile};
 use krusty::types::{FnSig, Ty, TyKind};
 
 /// What a function value's class name is derived from, apart from its captures.
@@ -26,6 +27,28 @@ pub(super) struct NamedShape {
     pub(super) suspend: bool,
     /// The function type's parameters, a receiver and context parameters included.
     pub(super) arity: usize,
+}
+
+/// What `toString` prints for the property reference `expression` creates as a `KProperty` value:
+/// `property NAME (Kotlin reflection is not available)`, mutable or not, as the Kotlin/Wasm
+/// standard library's reference classes print it. `None` for every other value, and for a
+/// reference that cannot say its property's name.
+pub(super) fn property_reference_string(
+    ir: &IrFile,
+    callables: &CheckedBackendCallables,
+    expression: &IrExpr,
+) -> Option<String> {
+    let IrExpr::CallableReference(reference) = expression else {
+        return None;
+    };
+    if !matches!(&reference.target, IrCallableReferenceTarget::Property(property) if property.reflective)
+    {
+        return None;
+    }
+    let name = krusty::backend::reference_names::callable_reference_name(ir, callables, reference)?;
+    Some(format!(
+        "property {name} (Kotlin reflection is not available)"
+    ))
 }
 
 /// The shape kotlinc-wasm names the function value `expression` creates, a lambda of the checked
