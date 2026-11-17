@@ -22,6 +22,11 @@ pub(super) enum ParcelValue {
     Short,
     /// Written as its `Int` code.
     Char,
+    /// An unsigned integer, serialized as its signed counterpart of the same width.
+    UByte,
+    UShort,
+    UInt,
+    ULong,
 }
 
 impl ParcelValue {
@@ -39,17 +44,37 @@ impl ParcelValue {
             Ty::Boolean => Self::Boolean,
             Ty::Short => Self::Short,
             Ty::Char => Self::Char,
+            Ty::UByte => Self::UByte,
+            Ty::UShort => Self::UShort,
+            Ty::UInt => Self::UInt,
+            Ty::ULong => Self::ULong,
             _ => return None,
         };
         // `Parcel.writeString` writes `null` itself, so kotlinc never wraps a string.
         Some((value, nullable && value != Self::String))
     }
 
-    /// The `Parcel` member kind that stores the value: a boolean, short or char goes through `Int`.
-    fn member(self) -> Self {
+    /// The signed value an unsigned one is serialized as; any other value is its own.
+    fn signed(self) -> Self {
         match self {
-            Self::Boolean | Self::Short | Self::Char => Self::Int,
-            stored => stored,
+            Self::UByte => Self::Byte,
+            Self::UShort => Self::Short,
+            Self::UInt => Self::Int,
+            Self::ULong => Self::Long,
+            other => other,
+        }
+    }
+
+    /// The `Parcel` member kind that stores the value: a boolean, short or char goes through `Int`,
+    /// an unsigned integer through its signed counterpart.
+    fn member(self) -> ParcelMember {
+        match self.signed() {
+            Self::String => ParcelMember::String,
+            Self::Byte => ParcelMember::Byte,
+            Self::Long => ParcelMember::Long,
+            Self::Float => ParcelMember::Float,
+            Self::Double => ParcelMember::Double,
+            _ => ParcelMember::Int,
         }
     }
 
@@ -59,10 +84,32 @@ impl ParcelValue {
             Self::Boolean => Ty::Boolean,
             Self::Short => Ty::Short,
             Self::Char => Ty::Char,
-            stored => stored.declared(),
+            Self::UByte => Ty::UByte,
+            Self::UShort => Ty::UShort,
+            Self::UInt => Ty::UInt,
+            Self::ULong => Ty::ULong,
+            Self::String => Ty::String,
+            Self::Byte => Ty::Byte,
+            Self::Int => Ty::Int,
+            Self::Long => Ty::Long,
+            Self::Float => Ty::Float,
+            Self::Double => Ty::Double,
         }
     }
+}
 
+/// The `Parcel` member kinds values are stored with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParcelMember {
+    String,
+    Byte,
+    Int,
+    Long,
+    Float,
+    Double,
+}
+
+impl ParcelMember {
     /// The type `Parcel` declares the member with.
     fn declared(self) -> Ty {
         match self {
@@ -72,12 +119,11 @@ impl ParcelValue {
             Self::Long => Ty::Long,
             Self::Float => Ty::Float,
             Self::Double => Ty::Double,
-            Self::Boolean | Self::Short | Self::Char => Ty::Int,
         }
     }
 
-    /// Every `Parcel` member kind, in the order the members are bound.
-    const MEMBERS: [Self; 6] = [
+    /// Every member kind, in the order the members are bound.
+    const ALL: [Self; 6] = [
         Self::String,
         Self::Byte,
         Self::Int,
@@ -85,6 +131,28 @@ impl ParcelValue {
         Self::Float,
         Self::Double,
     ];
+
+    fn write_name(self) -> &'static str {
+        match self {
+            Self::String => "writeString",
+            Self::Byte => "writeByte",
+            Self::Int => "writeInt",
+            Self::Long => "writeLong",
+            Self::Float => "writeFloat",
+            Self::Double => "writeDouble",
+        }
+    }
+
+    fn read_name(self) -> &'static str {
+        match self {
+            Self::String => "readString",
+            Self::Byte => "readByte",
+            Self::Int => "readInt",
+            Self::Long => "readLong",
+            Self::Float => "readFloat",
+            Self::Double => "readDouble",
+        }
+    }
 }
 
 /// One property's serializer: a value written directly, or kotlinc's `IrNullAwareParcelSerializer`
@@ -101,8 +169,8 @@ pub(super) struct ParcelRuntime {
     /// class implements and bridges to.
     pub(super) create_from_parcel: BoundRuntimeFunction,
     pub(super) new_array: BoundRuntimeFunction,
-    writers: Vec<(ParcelValue, BoundRuntimeFunction)>,
-    readers: Vec<(ParcelValue, BoundRuntimeFunction)>,
+    writers: Vec<(ParcelMember, BoundRuntimeFunction)>,
+    readers: Vec<(ParcelMember, BoundRuntimeFunction)>,
 }
 
 impl ParcelRuntime {
@@ -137,22 +205,22 @@ impl ParcelRuntime {
         };
         // A null-aware value writes and reads its presence flag as an `Int`.
         let wraps = used.iter().any(|&value| value != ParcelValue::String);
-        for value in ParcelValue::MEMBERS {
+        for value in ParcelMember::ALL {
             if !used.iter().any(|used| used.member() == value)
-                && !(wraps && value == ParcelValue::Int)
+                && !(wraps && value == ParcelMember::Int)
             {
                 continue;
             }
             let writer = runtime.function(&RuntimeFunction {
                 declaration: parcel,
-                name: write_name(value),
+                name: value.write_name(),
                 params: vec![value.declared()],
                 ret: Ty::Unit,
                 appended: Vec::new(),
             })?;
             let reader = runtime.function(&RuntimeFunction {
                 declaration: parcel,
-                name: read_name(value),
+                name: value.read_name(),
                 params: Vec::new(),
                 ret: value.declared(),
                 appended: Vec::new(),
@@ -163,7 +231,7 @@ impl ParcelRuntime {
         Ok(bound)
     }
 
-    fn writer(&self, value: ParcelValue) -> &BoundRuntimeFunction {
+    fn writer(&self, value: ParcelMember) -> &BoundRuntimeFunction {
         &self
             .writers
             .iter()
@@ -172,7 +240,7 @@ impl ParcelRuntime {
             .1
     }
 
-    fn reader(&self, value: ParcelValue) -> &BoundRuntimeFunction {
+    fn reader(&self, value: ParcelMember) -> &BoundRuntimeFunction {
         &self
             .readers
             .iter()
@@ -249,10 +317,13 @@ impl ParcelRuntime {
             rhs: zero,
         });
         let null = ir.add_expr(IrExpr::Const(IrConst::Null));
-        let value = self.read_value(ir, serializer.value, parcel);
+        let read = self.read_value(ir, serializer.value, parcel);
+        // The member's result is the value itself, so boxing it to `ty` is the value's own box (an
+        // unsigned integer's `box-impl`), not that of the signed type `Parcel` declares.
+        ir.set_logical_type(read, serializer.value.source());
         let boxed = ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
-            arg: value,
+            arg: read,
             type_operand: ty,
         });
         ir.add_when(vec![(Some(absent), null), (None, boxed)], ty)
@@ -265,7 +336,7 @@ impl ParcelRuntime {
 
     fn write_value(&self, ir: &mut IrFile, value: ParcelValue, parcel: u32, arg: ExprId) -> ExprId {
         let receiver = ir.add_expr(IrExpr::GetValue(parcel));
-        let arg = match value {
+        let arg = match value.signed() {
             ParcelValue::Boolean => {
                 // `if (value) 1 else 0`.
                 let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
@@ -285,7 +356,7 @@ impl ParcelRuntime {
     fn read_value(&self, ir: &mut IrFile, value: ParcelValue, parcel: u32) -> ExprId {
         let receiver = ir.add_expr(IrExpr::GetValue(parcel));
         let read = call(ir, self.reader(value.member()), receiver, Vec::new());
-        match value {
+        match value.signed() {
             ParcelValue::Boolean => {
                 // `readInt() != 0`.
                 let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
@@ -298,36 +369,10 @@ impl ParcelRuntime {
             ParcelValue::Short | ParcelValue::Char => ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: read,
-                type_operand: value.source(),
+                type_operand: value.signed().source(),
             }),
             _ => read,
         }
-    }
-}
-
-fn write_name(value: ParcelValue) -> &'static str {
-    match value {
-        ParcelValue::String => "writeString",
-        ParcelValue::Byte => "writeByte",
-        ParcelValue::Int | ParcelValue::Boolean | ParcelValue::Short | ParcelValue::Char => {
-            "writeInt"
-        }
-        ParcelValue::Long => "writeLong",
-        ParcelValue::Float => "writeFloat",
-        ParcelValue::Double => "writeDouble",
-    }
-}
-
-fn read_name(value: ParcelValue) -> &'static str {
-    match value {
-        ParcelValue::String => "readString",
-        ParcelValue::Byte => "readByte",
-        ParcelValue::Int | ParcelValue::Boolean | ParcelValue::Short | ParcelValue::Char => {
-            "readInt"
-        }
-        ParcelValue::Long => "readLong",
-        ParcelValue::Float => "readFloat",
-        ParcelValue::Double => "readDouble",
     }
 }
 

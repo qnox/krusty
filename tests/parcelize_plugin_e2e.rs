@@ -103,6 +103,18 @@ class Scalars(
     val maybeLetter: Char?,
 ) : Parcelable
 
+@Parcelize
+class Unsigned(
+    val byte: UByte,
+    val short: UShort,
+    val int: UInt,
+    val long: ULong,
+    val maybeInt: UInt?,
+    val maybeLong: ULong?,
+    val maybeByte: UByte?,
+    val maybeShort: UShort?,
+) : Parcelable
+
 class Outer {
     @Parcelize
     class Point(val x: Int, val y: Long?) : Parcelable
@@ -118,6 +130,10 @@ fun <T : Parcelable> roundTrip(value: T, type: Class<T>): T {
     parcel.setDataPosition(0)
     return creator(type).createFromParcel(parcel)
 }
+
+fun ub(value: Int): UByte = value.toUByte()
+
+fun us(value: Int): UShort = value.toUShort()
 
 fun box(): String {
     val user = User("ann", null, 30, 7L, 1, 1.5f, 2.5, null)
@@ -138,13 +154,21 @@ fun box(): String {
     val others = roundTrip(Scalars(false, true, 0, null, '\u00e9', 'z'), Scalars::class.java)
     if (others.flag || others.maybeFlag != true || others.maybeSmall != null) return "other scalars"
     if (others.letter != '\u00e9' || others.maybeLetter != 'z') return "other chars"
+    val unsigned = roundTrip(
+        Unsigned(ub(200), us(60000), 4000000000u, 18000000000000000000uL, null, 5uL, ub(7), null),
+        Unsigned::class.java,
+    )
+    if (unsigned.byte != 200.toUByte() || unsigned.short != 60000.toUShort()) return "small unsigned"
+    if (unsigned.int != 4000000000u || unsigned.long != 18000000000000000000uL) return "unsigned"
+    if (unsigned.maybeInt != null || unsigned.maybeLong != 5uL) return "nullable unsigned"
+    if (unsigned.maybeByte != 7.toUByte() || unsigned.maybeShort != null) return "nullable small"
     val users = creator(User::class.java).newArray(2)
     if (users.size != 2 || users[0] != null) return "newArray"
     return "OK"
 }
 "#;
 
-/// Strings, primitives (booleans, shorts and chars included) and their nullable forms, top-level and nested classes: `describeContents`,
+/// Strings, primitives (booleans, shorts, chars and unsigned integers included) and their nullable forms, top-level and nested classes: `describeContents`,
 /// `writeToParcel`, `CREATOR` and its local `Creator` class with their bridges, generic signature
 /// and debug tables match kotlinc's, and each class reads back what it wrote.
 #[test]
