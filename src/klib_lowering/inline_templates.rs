@@ -127,7 +127,6 @@ pub fn lower_inline_template(
             .map_or(&[][..], |generic| &generic.formal_bounds),
         reified: &selected.callable.reified_type_parameter_ordinals,
         inline_modifiers: &selected.callable.inline_modifiers,
-        suspend: selected.callable.suspend,
     };
     let checkpoint = LoweringCheckpoint::of(ir);
     Some(
@@ -157,8 +156,6 @@ struct Declaration<'a> {
     /// Each value parameter's `noinline`/`crossinline` modifier, context parameters included and
     /// the extension receiver excluded, in declaration order.
     inline_modifiers: &'a [InlineParameterModifier],
-    /// Whether the function suspends. Its template would have to suspend its caller.
-    suspend: bool,
 }
 
 fn lower(
@@ -169,15 +166,11 @@ fn lower(
 ) -> Result<(FunId, Vec<crate::types::TyParamName>), KlibBodyDeclineReason> {
     let callable = declaration.callable;
     let mut calls = TemplateCalls {
+        identity: callable.identity(),
         module: &callable.identity().module,
         callees,
         bodies,
     };
-    if declaration.suspend {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "a suspend function",
-        ));
-    }
     let (arena, function) = bodies
         .function(callable.identity())
         .ok_or(KlibBodyDeclineReason::Unjoined)?;
@@ -254,6 +247,14 @@ fn lower(
     )?;
     ir.inline_fns.insert(template);
     ir.inline_only_fns.insert(template);
+    // A suspend template is a suspend function of the file, as a same-module inline one is: its
+    // body may suspend, and every expansion runs in a suspend caller.
+    if callable
+        .declaration_modifiers()
+        .is_some_and(|modifiers| modifiers.is_suspend)
+    {
+        ir.suspend_funs.push(template);
+    }
     Ok((template, class_type_parameters))
 }
 
@@ -373,6 +374,8 @@ fn modifiers_with_receiver(
 /// is linked as its caller would link it: an external call of the provider's identity for the
 /// exact serialized callee.
 struct TemplateCalls<'a> {
+    /// The template's own declaration, whose site names the local classes its body declares.
+    identity: &'a KlibDependencyCallable,
     /// The template's declaring module, whose producer graph resolves its calls.
     module: &'a str,
     callees: TemplateCallees<'a>,
@@ -435,6 +438,145 @@ impl TemplateCalls<'_> {
 }
 
 impl CallLinker for TemplateCalls<'_> {
+    fn site_container(&self) -> Option<crate::ir::IrSiteClassContainer> {
+        super::site_containers::site_container(self.bodies, self.identity)
+    }
+
+    fn is_suspend_callable(&self, target: ExternalCallableId) -> bool {
+        self.callees
+            .source
+            .external_callable(target)
+            .is_some_and(|realization| realization.callable.suspend)
+    }
+
+    fn continuation_intrinsic(
+        &self,
+        signature: &KlibDeclarationSignature,
+    ) -> Result<
+        Option<super::continuation_intrinsics::ContinuationIntrinsicCall>,
+        KlibBodyDeclineReason,
+    > {
+        let KlibDeclarationSignature::Public(_) = signature else {
+            return Ok(None);
+        };
+        let binding = match self.callees.references.get(self.module, signature) {
+            KlibReferenceOrigin::Exact(binding) => binding,
+            KlibReferenceOrigin::Ambiguous | KlibReferenceOrigin::Missing => return Ok(None),
+        };
+        let Some((_target, realization)) = self
+            .callees
+            .source
+            .external_callable_by_dependency(&binding.declaration)
+        else {
+            return Ok(None);
+        };
+        let Some(callable) = realization.klib_body_callable() else {
+            return Ok(None);
+        };
+        if callable.identity() != &binding.declaration {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected continuation intrinsic resolves to another provider identity"
+                    .to_owned(),
+            ));
+        }
+        super::continuation_intrinsics::authenticate(callable)
+    }
+
+    fn unintercepted_suspension(
+        &self,
+        signature: &KlibDeclarationSignature,
+    ) -> Result<Option<super::body_lowering::UninterceptedSuspensionCall>, KlibBodyDeclineReason>
+    {
+        let KlibDeclarationSignature::Public(_) = signature else {
+            return Ok(None);
+        };
+        let binding = match self.callees.references.get(self.module, signature) {
+            KlibReferenceOrigin::Exact(binding) => binding,
+            KlibReferenceOrigin::Ambiguous | KlibReferenceOrigin::Missing => return Ok(None),
+        };
+        let Some((_target, realization)) = self
+            .callees
+            .source
+            .external_callable_by_dependency(&binding.declaration)
+        else {
+            return Ok(None);
+        };
+        let intrinsic = crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn;
+        if realization.callable.compiler_intrinsic != Some(intrinsic) {
+            return Ok(None);
+        }
+        let Some(callable) = realization.klib_body_callable() else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic has no provider body identity".to_owned(),
+            ));
+        };
+        if callable.identity() != &binding.declaration {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic resolves to another provider identity"
+                    .to_owned(),
+            ));
+        }
+        let generic = realization.callable.generic_sig.as_deref().ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic has no generic contract".to_owned(),
+            )
+        })?;
+        let [formal] = generic.formals.as_slice() else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic does not have one type parameter".to_owned(),
+            ));
+        };
+        let [parameter] = realization.callable.params.as_slice() else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic does not have one block parameter".to_owned(),
+            ));
+        };
+        let (arena, declaration) = self
+            .callees
+            .declarations
+            .function(&binding.declaration)
+            .ok_or(KlibBodyDeclineReason::Unjoined)?;
+        let header = super::function_lowering::function_header(Some(callable), arena, declaration)?;
+        let (serialized_parameters, serialized_result, contexts, extension, receiver) =
+            header.linked_signature();
+        if realization.kind != ExternalCallableKind::TopLevel
+            || !realization.callable.suspend
+            || realization.callable.context_count != 0
+            || realization.callable.compiler_intrinsic != Some(intrinsic)
+            || serialized_parameters != realization.callable.params.as_slice()
+            || serialized_result != realization.callable.ret
+            || contexts != 0
+            || extension
+            || receiver.is_some()
+        {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic disagrees with its serialized header".to_owned(),
+            ));
+        }
+        let result = realization.callable.ret;
+        let is_result_formal = matches!(result.kind(), TyKind::TyParam(name, _) if name == *formal);
+        let function_shape = matches!(parameter.non_null().kind(), TyKind::Fun(function)
+            if !function.suspend
+                && function.context_count == 0
+                && !function.has_receiver
+                && function.params.len() == 1
+                && function.ret.is_nullable()
+                && function.ret.non_null() == Ty::obj("kotlin/Any")
+                && matches!(function.params[0].non_null().kind(), TyKind::Obj(owner, arguments)
+                    if owner.matches("kotlin/coroutines/Continuation")
+                        && arguments.as_slice() == std::slice::from_ref(&result)));
+        if !is_result_formal || !function_shape {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected suspension intrinsic has an unsupported block contract".to_owned(),
+            ));
+        }
+        Ok(Some(super::body_lowering::UninterceptedSuspensionCall {
+            parameter: *parameter,
+            result,
+            formal: *formal,
+        }))
+    }
+
     /// A template is expanded into a source file, whose read of the constant reaches the enum
     /// through the entry its declaring file exports. The selected library record proves the
     /// enum and its constant.
@@ -491,6 +633,7 @@ impl CallLinker for TemplateCalls<'_> {
         &mut self,
         _ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
+        _role: super::body_lowering::ConstructorRole,
     ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
         let identity = self.identity(callee)?;
         let declined = |reason| {
@@ -638,11 +781,6 @@ impl CallLinker for TemplateCalls<'_> {
                 reason,
             )))
         };
-        let (arena, declaration) = self
-            .callees
-            .declarations
-            .function(&identity)
-            .ok_or_else(|| declined(KlibBodyDeclineReason::Unjoined))?;
         let Some((target, realization)) = self
             .callees
             .source
@@ -668,26 +806,31 @@ impl CallLinker for TemplateCalls<'_> {
                 "an access of an inline dependency property from an inline template",
             ));
         }
-        accessor_access(
-            self.callees.source,
-            callee,
-            arena,
-            declaration,
-            &realization,
-        )
-        .map(|receiver| {
-            let (receiver, class_type_parameters) = receiver.unzip();
-            LinkedAccessor {
-                target: LinkedAccessorTarget::External(property),
-                write: accessors.setter == Some(target),
-                receiver,
-                params: realization.callable.params.clone(),
-                ret: realization.callable.ret,
-                context_count: realization.callable.context_count,
-                class_type_parameters: class_type_parameters.unwrap_or_default(),
-            }
-        })
-        .map_err(declined)
+        let selected = realization
+            .klib_body_callable()
+            .ok_or_else(|| declined(KlibBodyDeclineReason::Unjoined))?;
+        let selected_accessor = selected.accessor().ok_or_else(|| {
+            declined(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected accessor has no property identity".to_owned(),
+            ))
+        })?;
+        if selected_accessor.property != property
+            || (selected_accessor.role == crate::libraries::KlibAccessorRole::Setter)
+                != (accessors.setter == Some(target))
+        {
+            return Err(declined(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected callable resolves another accessor of the property".to_owned(),
+            )));
+        }
+        let mut linked = super::accessor_calls::authenticate(selected, self.callees.declarations)?
+            .ok_or_else(|| {
+                declined(KlibBodyDeclineReason::UnsupportedOperation(
+                    "an inline-template property accessor without an exact selected contract",
+                ))
+            })?;
+        linked.target = LinkedAccessorTarget::External(property);
+        linked.callable = Some(target);
+        Ok(linked)
     }
 
     fn requires_declaration(
@@ -1003,53 +1146,6 @@ fn member_call(
 /// The dispatch receiver an access through the non-generic accessor `declaration` reads, by the
 /// provider's realization of it: a member's must belong to the class metadata names as its owner
 /// and is read at the serialized receiver's type, the argument the call passes.
-fn accessor_access(
-    source: &dyn crate::symbol_source::SymbolSource,
-    callee: &KlibAccessorIdSignature,
-    arena: &crate::metadata::klib_ir::tree::KlibIrArena,
-    declaration: &crate::metadata::klib_ir::tree::KlibIrFunction,
-    realization: &ExternalCallableRealization,
-) -> Result<Option<(Ty, Vec<String>)>, KlibBodyDeclineReason> {
-    let generic = realization
-        .callable
-        .generic_sig
-        .as_deref()
-        .is_some_and(|generic| !generic.formals.is_empty());
-    if !declaration.type_parameters.is_empty() || generic {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "type parameters",
-        ));
-    }
-    let extension = declaration.extension_receiver.is_some();
-    let declared = declaration.context_parameters.len()
-        + usize::from(extension)
-        + declaration.regular_parameters.len();
-    if realization.callable.context_count != declaration.context_parameters.len()
-        || realization.callable.params.len() != declared
-    {
-        return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
-            "the serialized accessor is selected with {} parameters",
-            realization.callable.params.len()
-        )));
-    }
-    let Some(receiver) = &declaration.dispatch_receiver else {
-        return Ok(None);
-    };
-    if extension {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "a member extension",
-        ));
-    }
-    let owner = member_owner(callee.property())?;
-    if realization.declaration_owner != Some(SemanticCallableOwner::Classifier(owner)) {
-        return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
-            "the serialized member of {owner:?} is selected as one of {:?}",
-            realization.declaration_owner
-        )));
-    }
-    class_receiver(source, owner, arena, receiver).map(Some)
-}
-
 /// The type a member of `owner` reads its dispatch receiver at, with the class's type parameters
 /// a call binds from its receiver: the serialized receiver's type for a non-generic class, and the
 /// class applied to its own type parameters, as the provider names them, for a generic one.

@@ -29,6 +29,9 @@ pub struct CallSite<'a> {
     pub caller: Option<crate::ir::IrEnclosure>,
     pub caller_is_default: bool,
     pub caller_source_name: &'a str,
+    /// The container whose code the call is: an anonymous object the call regenerates is named
+    /// as one the caller declares itself. `None` when the caller's container is unknown.
+    pub caller_site: Option<crate::ir::IrSiteClassContainer>,
     pub inline_callee: crate::ir::IrInlineCallee,
     pub inline_callee_source_name: &'a str,
     /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
@@ -410,6 +413,10 @@ fn specialized_class(
     let mut copy = ir.classes[source as usize].clone();
     copy.fq_name = placeholder;
     copy.is_source_declared = false;
+    copy.site_name = expansion
+        .site
+        .caller_site
+        .map(crate::ir::IrSiteClassName::anonymous_object);
     copy.enclosure = expansion.site.caller.or(copy.enclosure);
     copy.methods = cloned_methods.clone();
     for supertype in &mut copy.supertypes {
@@ -1061,6 +1068,8 @@ fn publish_one_copy(
         caller: spec.caller,
         caller_is_default: spec.caller_is_default,
         caller_source_name: &spec.caller_source_name,
+        // An object regenerated inside this copy is declared by the copy's own code.
+        caller_site: Some(crate::ir::IrSiteClassContainer::Class(copy_id)),
         inline_callee: spec.inline_callee,
         inline_callee_source_name: &spec.inline_callee_source_name,
         crossinline_operands: &spec.crossinline_operands,

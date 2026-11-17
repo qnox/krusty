@@ -69,6 +69,8 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageCopy
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
+        || operation
+            == krusty::backend::BackendCompilerIntrinsic::StartCoroutineUninterceptedOrReturn
         || matches!(
             operation,
             krusty::backend::BackendCompilerIntrinsic::ClassName(_)
@@ -252,6 +254,7 @@ pub(super) fn lower_file(
                 classifiers,
                 plan,
                 laid_out: laid_out_classes,
+                callables,
             },
         )?;
         super::interface_members::record(
@@ -1458,6 +1461,20 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::External { target, params, .. } = &**call_callee
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(
+                            krusty::backend::BackendCompilerIntrinsic::StartCoroutineUninterceptedOrReturn,
+                        )
+                }) =>
+            {
+                self.start_coroutine_unintercepted_or_return(&args, params)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
             } if let Callee::External {
@@ -1851,6 +1868,7 @@ impl<'a> Body<'a> {
                     parameters,
                     result,
                     source_receiver: Some(_),
+                    ..
                 } = &**checked_op
                     && parameters.is_empty()
                     && let Some(field) = self.throwable_field_property(*target) =>
@@ -1977,9 +1995,7 @@ impl<'a> Body<'a> {
                     sam.as_deref(),
                 )?;
             }
-            IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
-                self.callable_reference(id, &reference)?
-            }
+            IrExpr::CallableReference(reference) => self.callable_reference(id, &reference)?,
             IrExpr::InvokeFunction {
                 func,
                 args,

@@ -29,6 +29,7 @@ impl CallLinker for NoCalls {
         &mut self,
         _: &mut IrFile,
         _: &KlibPublicIdSignature,
+        _: super::super::ConstructorRole,
     ) -> Lowered<LinkedConstructor> {
         panic!("no construction")
     }
@@ -98,6 +99,9 @@ impl Fixture {
         let field_ty = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
         let mut types = KlibTypeParameters::default();
         assert!(types.bind(&formal, field_ty));
+        // `Storage<T>` declares its formal as a class header binds one: unbounded and invariant.
+        assert!(types.record_bounds(field_ty, Vec::new()));
+        assert!(types.record_variance(field_ty, crate::types::TypeVariance::Invariant));
         let field_type = raw_type(&mut arena, formal, vec![]);
         let application = vec![KlibIrTypeArgument::Type {
             variance: KlibIrVariance::Invariant,
