@@ -513,16 +513,20 @@ impl ProductionSignatureSemantics<'_> {
             // graph remains typed until the checker reports the class-literal error.
         }
         if formals.len() != reference.targs.len() {
-            self.record_source_diagnostic_at(
+            // Unconditional: a superclass that fails here still publishes its classifier header.
+            let (span, identity, message) = super::super::type_argument_arity::alias_arity_report(
+                (&self.headers.syntax, scope.source),
+                reference,
+                identity,
+                &formals,
+                expansion,
+            );
+            self.record_unconditional_diagnostic_at(
                 scope.owner,
                 scope.source,
-                reference.span,
-                format!(
-                    "wrong number of type arguments for type alias '{}': expected {}, found {}.",
-                    reference.name,
-                    formals.len(),
-                    reference.targs.len()
-                ),
+                span,
+                identity,
+                message,
             );
             return Some(Ty::Error);
         }

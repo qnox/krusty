@@ -51,6 +51,7 @@ use tests::lower_alone;
 
 pub(super) use exceptions::runtime_lays_out;
 pub(super) use scalar_instructions::is_scalar_operation;
+pub(super) use scalar_value_classes::runtime_value_declaration;
 pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerIntrinsic) -> bool {
@@ -429,7 +430,7 @@ pub(super) fn lower_file(
     if let Some(classes) = &classes {
         for class in 0..ir.classes.len() {
             for member in AnyMember::ALL {
-                if !classes.realizes(class as ClassId, member) {
+                if classes.has_bodiless_instances(class as ClassId, member) {
                     reach.bodiless_class(member);
                 }
             }
@@ -516,6 +517,17 @@ struct FileContext<'a> {
     reach: &'a std::cell::RefCell<FileReach>,
     /// Local delegated-property accessors and the one object each property's convention receives.
     delegates: &'a local_delegates::Prepared,
+}
+
+/// The wasm value a parameter of type `ty` is passed as. A `Nothing` parameter holds no value any
+/// caller supplies, yet keeps its slot, so an implementation such as `contains(element: Nothing)`
+/// takes the operands its interface member passes: a reference, as an erased type parameter's is.
+/// A `Unit` parameter still has none.
+pub(super) fn parameter_carrier_of(ty: Ty) -> Result<Option<ValType>, Unsupported> {
+    if ty == Ty::Nothing {
+        return Ok(Some(REFERENCE));
+    }
+    carrier(ty)
 }
 
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
@@ -1100,7 +1112,10 @@ impl<'a> Body<'a> {
                 return Err("a shared cell read as a value".to_string());
             }
             IrExpr::GetValue(slot) => {
-                if let Some(&(local, declared)) = self.values.get(&slot) {
+                if let Some(&(_, Ty::Nothing)) = self.values.get(&slot) {
+                    // A `Nothing` parameter holds no value: no call reaches a read of it.
+                    self.code.unreachable();
+                } else if let Some(&(local, declared)) = self.values.get(&slot) {
                     self.code.local_get(local);
                     // A smart cast reads the slot at a narrower type: `Int` out of an `Int?`
                     // local holding a box.
@@ -1533,8 +1548,9 @@ impl<'a> Body<'a> {
                 arg,
                 type_operand,
             } if self.class_structure(type_operand)?.is_some()
-                || self.planned_class_table(type_operand)?.is_some()
-                || self.interface_of_type(type_operand).is_some() =>
+                || self.interface_of_type(type_operand).is_some()
+                || self.library_interface_of_type(type_operand).is_some()
+                || self.planned_class_table(type_operand)?.is_some() =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
@@ -1559,8 +1575,8 @@ impl<'a> Body<'a> {
                 type_operand,
             } => self.type_test(id, op, arg, type_operand)?,
             // A cast to a non-null type is the cast to its nullable form, then a null check: `as
-            // String` on an `Any` reads the reference as the runtime's string and traps on `null`,
-            // as a cast to a class of the file does.
+            // String` on an `Any` reads the reference as the runtime's string and throws the
+            // Kotlin NPE on `null`, as a cast to a class or an interface does.
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::ImplicitCoercion | IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
@@ -1600,7 +1616,7 @@ impl<'a> Body<'a> {
                     Some(target) => {
                         self.value(arg, type_operand)?;
                         if op == IrTypeOp::CastNonNull && matches!(target, ValType::Ref { .. }) {
-                            self.code.ref_as_non_null();
+                            self.require_nonnull_reference(target)?;
                         }
                     }
                 }
@@ -1718,6 +1734,19 @@ impl<'a> Body<'a> {
                     })?;
                 self.code.call(entry);
             }
+            // So are `values()` and `valueOf`, which read those constants.
+            IrExpr::EnumValues { classifier } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::Values,
+                None,
+            )?,
+            IrExpr::EnumValueOf {
+                classifier, arg, ..
+            } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::ValueOf,
+                Some(arg),
+            )?,
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
                 ty,
@@ -1933,6 +1962,12 @@ impl<'a> Body<'a> {
             IrExpr::LocalDelegateAccess(access) => self.local_delegate_access(access)?,
             IrExpr::LocalPropertyReference(reference) => {
                 self.local_property_reference(&reference)?
+            }
+            IrExpr::Checked(ref operation)
+                if let Some(reference) = operation.module_property_reference()
+                    && reference.delegated =>
+            {
+                self.delegated_property_reference(reference.property)?
             }
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
@@ -2498,11 +2533,21 @@ mod tests {
             &module_facts,
             &krusty::libraries::EmptySymbolSource,
         );
+        lower_with_classifiers(ir, properties, started, &module_facts, &classifiers)
+    }
+
+    pub(super) fn lower_with_classifiers(
+        ir: &IrFile,
+        properties: &RealizedProperties,
+        started: &mut super::super::Started,
+        module_facts: &krusty::backend::BackendModuleFacts,
+        classifiers: &dyn krusty::backend::BackendClassifierSource,
+    ) -> Result<LoweredFile, Unsupported> {
         lower_file(
             FileInput {
-                module_facts: &module_facts,
+                module_facts,
                 array_range_checks: super::super::super::array_access::default_range_checks(),
-                classifiers: &classifiers,
+                classifiers,
                 ir,
                 properties,
                 callables: &CheckedBackendCallables::default(),

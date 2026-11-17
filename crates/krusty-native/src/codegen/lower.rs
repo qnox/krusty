@@ -565,7 +565,7 @@ struct FileLowering<'a> {
     data_imports: HashMap<String, DataId>,
     /// The static `KType` object of each distinct type a `typeOf` in this file names.
     type_of_objects: HashMap<Ty, DataId>,
-    dependency_interface_descriptors: HashMap<krusty::libraries::KlibClassIdentity, DataId>,
+    dependency_interface_descriptors: HashMap<krusty::backend::KlibClassIdentity, DataId>,
     /// The static `KClass` of each descriptor a `typeOf` classifier names.
     static_classes: HashMap<DataId, DataId>,
     /// The program-wide static objects this file emits, each the COMDAT group of its own section.
@@ -2029,15 +2029,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 value,
             } => self.ref_set(holder, elem, value),
             // The shared enum lowering realized every enum this file declares; what is left names
-            // an enum another file declares, whose constants live there. A constant is read
-            // through the entry the declaring file exports.
+            // an enum another file declares, whose constants live there. A constant, `values()`
+            // and `valueOf` are each reached through the entry the declaring file exports.
             IrExpr::EnumEntry { classifier, name } => {
                 self.dependency_enum_constant(classifier, &name)
             }
-            IrExpr::EnumValues { classifier }
-            | IrExpr::EnumEntries { classifier }
-            | IrExpr::EnumValueOf { classifier, .. } => Err(declined!(
-                "an enum another file declares (`{}`)",
+            IrExpr::EnumValues { classifier } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::Values,
+                None,
+            ),
+            IrExpr::EnumValueOf {
+                classifier, arg, ..
+            } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::ValueOf,
+                Some(arg),
+            ),
+            IrExpr::EnumEntries { classifier } => Err(declined!(
+                "the `entries` of an enum another file declares (`{}`)",
                 classifier.render()
             )),
             IrExpr::EnumConstant {
