@@ -91,7 +91,7 @@ pub(super) fn realize(
     let any = Ty::nullable(Ty::obj_name(wk::any()));
     let machine_result_ty = Ty::obj_args_name(type_name("kotlin/Result"), &[any]);
     let completion_result_ty = Ty::obj_args_name(type_name("kotlin/Result"), &[function_result]);
-    let class_name = machine_name(ir, function)?;
+    let class_name = machine_name(ir, function);
     let type_arguments = type_parameters
         .iter()
         .map(IrTypeParameter::ty)
@@ -106,7 +106,7 @@ pub(super) fn realize(
         let machine = &mut ir.classes[class as usize];
         machine.is_compiler_generated = true;
         machine.is_local_class = true;
-        machine.is_source_declared = true;
+        machine.is_source_declared = ir.source_debug.current().is_some();
         machine.declaration_context = Some(crate::ir::IrClassDeclarationContext::Executable);
         machine.enclosure = Some(IrEnclosure::Function(function));
         machine.superclass = wk::any();
@@ -282,21 +282,21 @@ pub(super) fn realize(
         value: None,
     });
     ir.functions[function as usize].body = Some(wrapper);
-    let source = ir
-        .source_debug
-        .current()
-        .ok_or(ReentryDecline::UnsupportedCallShape)?;
-    let package = type_name(&ir.package.as_deref().unwrap_or("").replace('.', "/"));
-    ir.local_class_name_provenance.insert(
-        class,
-        IrLocalClassNameProvenance {
-            source: crate::ir::IrLocalClassNameRoot::Source(IrModuleSource { source, package }),
-            lexical_owner: None,
-            segments: vec![format!("Continuation${}${function}", source.raw())].into(),
-            ordinal: None,
-            parents: Box::default(),
-        },
-    );
+    // A source function's machine is a local class of its file; a serialized body's has no source
+    // naming provenance.
+    if let Some(source) = ir.source_debug.current() {
+        let package = type_name(&ir.package.as_deref().unwrap_or("").replace('.', "/"));
+        ir.local_class_name_provenance.insert(
+            class,
+            IrLocalClassNameProvenance {
+                source: crate::ir::IrLocalClassNameRoot::Source(IrModuleSource { source, package }),
+                lexical_owner: None,
+                segments: vec![format!("Continuation${}${function}", source.raw())].into(),
+                ordinal: None,
+                parents: Box::default(),
+            },
+        );
+    }
     Ok(())
 }
 
@@ -433,19 +433,21 @@ fn machine_type_parameters(ir: &IrFile, function: u32) -> Vec<IrTypeParameter> {
         .collect()
 }
 
-fn machine_name(ir: &IrFile, function: u32) -> Result<TypeName, ReentryDecline> {
-    let source = ir
-        .source_debug
-        .current()
-        .ok_or(ReentryDecline::UnsupportedCallShape)?;
+/// The machine's classifier: `$Continuation$<file>$<function>` in the unit's package. A function
+/// lowered from a serialized dependency body has no source file of this compilation; its machine
+/// is a compiler-generated class of that support unit, unique there by the function alone.
+fn machine_name(ir: &IrFile, function: u32) -> TypeName {
     let package = ir.package.as_deref().unwrap_or("").replace('.', "/");
-    let segment = format!("$Continuation${}${function}", source.raw());
+    let segment = match ir.source_debug.current() {
+        Some(source) => format!("$Continuation${}${function}", source.raw()),
+        None => format!("$Continuation${function}"),
+    };
     let classifier = if package.is_empty() {
         segment
     } else {
         format!("{package}/{segment}")
     };
-    Ok(type_name(&classifier))
+    type_name(&classifier)
 }
 
 fn build_resume_with(ir: &mut IrFile, contract: ResumeContract) -> Result<u32, ReentryDecline> {

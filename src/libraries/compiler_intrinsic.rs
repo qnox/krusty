@@ -195,6 +195,15 @@ pub enum CompilerIntrinsic {
     /// the suspend function value `f` invoked with its inputs and `completion` as its
     /// continuation. Its stdlib body only says the compiler implements it.
     StartCoroutineUninterceptedOrReturn,
+    /// Native's `kotlin.native.internal.getContinuation<T>()`, an external typed intrinsic: the
+    /// enclosing suspend body's own continuation. A KLIB body reaches it where kotlinc's
+    /// pre-serialization inliner expanded `suspendCoroutineUninterceptedOrReturn`.
+    CurrentContinuation,
+    /// Native's `kotlin.native.internal.returnIfSuspended<T>(argument)`, an external suspend typed
+    /// intrinsic: the enclosing suspend body suspends when `argument` is `COROUTINE_SUSPENDED`
+    /// and otherwise goes on with `argument` as its `T`. It is the suspension point of an expanded
+    /// `suspendCoroutineUninterceptedOrReturn`, whose block computed `argument`.
+    ReturnIfSuspended,
     EnumValues,
     EnumValueOf,
     /// The zero-argument `kotlin.enums.enumEntries<T>()`. Its stdlib body only throws; the selected

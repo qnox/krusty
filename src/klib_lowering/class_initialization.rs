@@ -58,6 +58,10 @@ pub(super) struct ClassInitialization<'a, 'b> {
     /// the open and abstract members an open class declares. A materialized class always carries
     /// them, so dispatch never reaches an implementation the instance's class overrides.
     pub(super) dispatched: Vec<&'b KlibIrFunction>,
+    /// The default accessors of its stored properties another declaration can call, which no
+    /// dispatch reaches. The unit materializing the class owns its storage, so it emits them
+    /// with the class: a later unit calls their exports instead of materializing it again.
+    pub(super) storage_accessors: Vec<&'b KlibIrFunction>,
     /// The superclass constructor the constructor delegates to, unless that is `Any`'s.
     pub(super) superclass: Option<SuperclassCall>,
     /// Whether the constructor is the class's primary one. A class without a primary constructor
@@ -145,6 +149,7 @@ fn admit<'a, 'b>(
     let open = contract.modality != KotlinModality::Final;
     let mut constructors = Vec::new();
     let mut dispatched = Vec::new();
+    let mut storage_accessors = Vec::new();
     // A member function or property accessor dispatch reaches: an override with a body, an open
     // class's open member, or an abstract member. A fake override is the inherited declaration;
     // any other bodyless member is the target's, and the class keeps that target boundary.
@@ -173,8 +178,22 @@ fn admit<'a, 'b>(
             }
             KlibIrMember::Property(property) => {
                 for accessor in [property.getter, property.setter].into_iter().flatten() {
-                    if !dispatch(header.arena.function(accessor)) {
+                    let accessor = header.arena.function(accessor);
+                    if !dispatch(accessor) {
                         return Ok(None);
+                    }
+                    if property.backing_field.is_some()
+                        && accessor.body.is_some()
+                        && accessor.base.origin
+                            == super::function_lowering::DEFAULT_PROPERTY_ACCESSOR
+                        && accessor.overridden.is_empty()
+                        && (!open
+                            || crate::metadata::semantic::declaration_modality(accessor.base.flags)
+                                == KotlinModality::Final)
+                        && crate::metadata::semantic::declaration_visibility(accessor.base.flags)
+                            != crate::types::Visibility::Private
+                    {
+                        storage_accessors.push(accessor);
                     }
                 }
             }
@@ -286,6 +305,7 @@ fn admit<'a, 'b>(
         storage: storage.storage,
         steps,
         dispatched,
+        storage_accessors,
         superclass,
         primary,
         supertypes,
@@ -671,8 +691,14 @@ fn initialization_callees(
         .arena
         .emitted_callable_symbols_from(roots, super::EMITTED_CALL_FORMS)
         .into_iter()
-        // The class's dispatched members are always emitted with it, as dispatch reaches them.
-        .chain(plan.dispatched.iter().map(|function| &function.base.symbol))
+        // The class's dispatched members are always emitted with it, as dispatch reaches them,
+        // and so are the accessors of the storage it owns.
+        .chain(
+            plan.dispatched
+                .iter()
+                .chain(&plan.storage_accessors)
+                .map(|function| &function.base.symbol),
+        )
         .filter_map(|symbol| match &symbol.signature {
             KlibIrSignature::Public(signature) => {
                 Some(KlibDeclarationSignature::Public(signature.clone()))

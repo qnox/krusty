@@ -172,6 +172,7 @@ fn lower(
 ) -> Result<(FunId, Vec<crate::types::TyParamName>), KlibBodyDeclineReason> {
     let callable = declaration.callable;
     let mut calls = TemplateCalls {
+        identity: callable.identity(),
         module: &callable.identity().module,
         callees,
         bodies,
@@ -379,6 +380,8 @@ fn modifiers_with_receiver(
 /// is linked as its caller would link it: an external call of the provider's identity for the
 /// exact serialized callee.
 struct TemplateCalls<'a> {
+    /// The template's own declaration, whose site names the local classes its body declares.
+    identity: &'a KlibDependencyCallable,
     /// The template's declaring module, whose producer graph resolves its calls.
     module: &'a str,
     callees: TemplateCallees<'a>,
@@ -441,11 +444,48 @@ impl TemplateCalls<'_> {
 }
 
 impl CallLinker for TemplateCalls<'_> {
+    fn site_container(&self) -> Option<crate::ir::IrSiteClassContainer> {
+        super::site_containers::site_container(self.bodies, self.identity)
+    }
+
     fn is_suspend_callable(&self, target: ExternalCallableId) -> bool {
         self.callees
             .source
             .external_callable(target)
             .is_some_and(|realization| realization.callable.suspend)
+    }
+
+    fn continuation_intrinsic(
+        &self,
+        signature: &KlibDeclarationSignature,
+    ) -> Result<
+        Option<super::continuation_intrinsics::ContinuationIntrinsicCall>,
+        KlibBodyDeclineReason,
+    > {
+        let KlibDeclarationSignature::Public(_) = signature else {
+            return Ok(None);
+        };
+        let binding = match self.callees.references.get(self.module, signature) {
+            KlibReferenceOrigin::Exact(binding) => binding,
+            KlibReferenceOrigin::Ambiguous | KlibReferenceOrigin::Missing => return Ok(None),
+        };
+        let Some((_target, realization)) = self
+            .callees
+            .source
+            .external_callable_by_dependency(&binding.declaration)
+        else {
+            return Ok(None);
+        };
+        let Some(callable) = realization.klib_body_callable() else {
+            return Ok(None);
+        };
+        if callable.identity() != &binding.declaration {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "the selected continuation intrinsic resolves to another provider identity"
+                    .to_owned(),
+            ));
+        }
+        super::continuation_intrinsics::authenticate(callable)
     }
 
     fn unintercepted_suspension(
@@ -613,6 +653,7 @@ impl CallLinker for TemplateCalls<'_> {
         &mut self,
         _ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
+        _role: super::body_lowering::ConstructorRole,
     ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
         let identity = self.identity(callee)?;
         let declined = |reason| {

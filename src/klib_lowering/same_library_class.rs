@@ -1618,12 +1618,19 @@ fn class_formals(
     // `T : Enum<T>` is an `Enum`, whose members a body calls on it. A bound naming a formal reads
     // it unbounded, as the provider decodes a recursive bound.
     let mut types = KlibTypeParameters::default();
-    for ((&parameter, formal), parameter_bounds) in parameters.iter().zip(&mut formals).zip(&bounds)
+    for (((&parameter, formal), parameter_bounds), &variance) in parameters
+        .iter()
+        .zip(&mut formals)
+        .zip(&bounds)
+        .zip(&variances)
     {
         if let (Some(&bound), Some(name)) = (parameter_bounds.first(), formal.ty_param_name()) {
             *formal = Ty::ty_param(name, bound);
         }
-        if !types.bind(&parameter.base.symbol, *formal) {
+        if !types.bind(&parameter.base.symbol, *formal)
+            || !types.record_bounds(*formal, parameter_bounds.clone())
+            || !types.record_variance(*formal, variance)
+        {
             return Err(mismatch("a non-public class repeats a type parameter"));
         }
     }

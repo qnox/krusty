@@ -174,6 +174,15 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The continuation intrinsic this linker's selected declaration of `callee` is: Native's
+    /// `getContinuation`/`returnIfSuspended`, which a body realizes as its suspension point.
+    fn continuation_intrinsic(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<super::continuation_intrinsics::ContinuationIntrinsicCall>> {
+        Ok(None)
+    }
+
     /// The range construction a range literal's membership compares against, read as
     /// [`Self::common_primitive`] reads its primitive but whatever range class the target lays
     /// out: the membership builds no range.
@@ -274,11 +283,13 @@ pub(super) trait CallLinker {
         unsupported("a callable reference without an exact provider declaration")
     }
 
-    /// The dependency constructor a constructor call of the public declaration `callee` invokes.
+    /// The dependency constructor a constructor call of the public declaration `callee` invokes:
+    /// one allocating its class, or a subclass delegating to it.
     fn link_constructor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
+        role: ConstructorRole,
     ) -> Lowered<LinkedConstructor>;
 
     /// The classifier a file-local signature names in the library of the body being lowered.
@@ -406,6 +417,15 @@ pub(super) trait CallLinker {
         let _ = name;
         unsupported("an object literal supertype")
     }
+}
+
+/// What a constructor call does with the constructor it names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ConstructorRole {
+    /// Allocates an instance of the constructor's class.
+    Allocation,
+    /// Initializes a subclass instance another constructor allocated.
+    Delegation,
 }
 
 /// The dependency constructor a constructor call invokes: the provider's identity, the class it
@@ -721,12 +741,17 @@ impl<'a> BodyLowering<'a> {
                         origin.as_deref(),
                     );
                 };
+                // A suspend lambda overrides `SuspendFunctionN.invoke`, any other `FunctionN.invoke`.
                 let invocation = match &overridden.signature {
-                    crate::metadata::klib_ir::KlibIrSignature::Public(signature)
+                    crate::metadata::klib_ir::KlibIrSignature::Public(invoke)
                         if overridden.kind
                             == crate::metadata::klib_ir::KlibIrSymbolKind::Function =>
                     {
-                        super::klib_types::function_invocation_arity(signature)
+                        if signature.suspend {
+                            super::klib_types::suspend_function_invocation_arity(invoke)
+                        } else {
+                            super::klib_types::function_invocation_arity(invoke)
+                        }
                     }
                     _ => None,
                 };

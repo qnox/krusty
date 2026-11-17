@@ -1906,19 +1906,71 @@ pub(super) fn throwable_field(owner: krusty::types::TypeName, name: &str) -> Opt
 /// `Int.Companion === Long.Companion` is false.
 ///
 pub(super) fn builtin_companion(classifier: krusty::types::TypeName) -> Option<&'static str> {
+    builtin_companion_symbols(classifier).map(|(instance, _)| instance)
+}
+
+/// The runtime descriptor of the companion object [`builtin_companion`] answers, which an `is`
+/// check against the companion's type asks its instance about.
+pub(super) fn builtin_companion_descriptor(
+    classifier: krusty::types::TypeName,
+) -> Option<&'static str> {
+    builtin_companion_symbols(classifier).map(|(_, descriptor)| descriptor)
+}
+
+fn builtin_companion_symbols(
+    classifier: krusty::types::TypeName,
+) -> Option<(&'static str, &'static str)> {
     [
-        ("kotlin/Byte$Companion", "kt_byte_companion"),
-        ("kotlin/Short$Companion", "kt_short_companion"),
-        ("kotlin/Int$Companion", "kt_int_companion"),
-        ("kotlin/Long$Companion", "kt_long_companion"),
-        ("kotlin/Char$Companion", "kt_char_companion"),
-        ("kotlin/Boolean$Companion", "kt_boolean_companion"),
-        ("kotlin/Float$Companion", "kt_float_companion"),
-        ("kotlin/Double$Companion", "kt_double_companion"),
-        ("kotlin/String$Companion", "kt_string_companion"),
+        (
+            "kotlin/Byte$Companion",
+            "kt_byte_companion",
+            "kt_type_byte_companion",
+        ),
+        (
+            "kotlin/Short$Companion",
+            "kt_short_companion",
+            "kt_type_short_companion",
+        ),
+        (
+            "kotlin/Int$Companion",
+            "kt_int_companion",
+            "kt_type_int_companion",
+        ),
+        (
+            "kotlin/Long$Companion",
+            "kt_long_companion",
+            "kt_type_long_companion",
+        ),
+        (
+            "kotlin/Char$Companion",
+            "kt_char_companion",
+            "kt_type_char_companion",
+        ),
+        (
+            "kotlin/Boolean$Companion",
+            "kt_boolean_companion",
+            "kt_type_boolean_companion",
+        ),
+        (
+            "kotlin/Float$Companion",
+            "kt_float_companion",
+            "kt_type_float_companion",
+        ),
+        (
+            "kotlin/Double$Companion",
+            "kt_double_companion",
+            "kt_type_double_companion",
+        ),
+        (
+            "kotlin/String$Companion",
+            "kt_string_companion",
+            "kt_type_string_companion",
+        ),
     ]
     .into_iter()
-    .find_map(|(owner, symbol)| classifier.matches(owner).then_some(symbol))
+    .find_map(|(owner, instance, descriptor)| {
+        classifier.matches(owner).then_some((instance, descriptor))
+    })
 }
 
 /// The runtime entry point answering a stdlib object the runtime lays out itself, if this names one.

@@ -3,8 +3,9 @@
 //! A KLIB names a classifier by its exact public signature. That structural package/declaration
 //! path is interned directly as the classifier's Kotlin identity, without rendering a qualified
 //! spelling and parsing it back: a body's types and its selected declaration's types are one
-//! model. A type argument converts as the provider converts a metadata type argument (a star is
-//! the out-projection of `Any?`), and a `kotlin.FunctionN` type with its arguments is the function
+//! model. A type argument converts as the provider converts a metadata type argument (a star keeps
+//! its star-projection identity, with an `Any?` placeholder refined at the declaring classifier),
+//! and a `kotlin.FunctionN` type with its arguments is the function
 //! type it denotes, a receiver function type when `@ExtensionFunctionType` marks it. A type
 //! parameter is the semantic type parameter the declaration's provider record states for it
 //! ([`KlibTypeParameters`]); a body whose declaration binds none of its type parameters declines
@@ -35,6 +36,8 @@ pub(crate) enum KlibTypeError {
 pub(crate) struct KlibTypeParameters {
     bindings: HashMap<KlibIrSymbol, Ty>,
     bounds: HashMap<String, Vec<Ty>>,
+    /// Each class formal's declared variance. A function formal is always invariant.
+    variances: HashMap<String, crate::types::TypeVariance>,
 }
 
 impl KlibTypeParameters {
@@ -60,6 +63,29 @@ impl KlibTypeParameters {
 
     pub(crate) fn declared_bounds(&self, name: &str) -> Option<&[Ty]> {
         self.bounds.get(name).map(Vec::as_slice)
+    }
+
+    /// Record the declared variance of the class formal `formal`.
+    pub(crate) fn record_variance(
+        &mut self,
+        formal: Ty,
+        variance: crate::types::TypeVariance,
+    ) -> bool {
+        let TyKind::TyParam(identity, _) = formal.kind() else {
+            return false;
+        };
+        self.variances
+            .insert(identity.as_str().to_owned(), variance)
+            .is_none()
+    }
+
+    /// The declared variance of the formal `name`: a class formal's recorded one, otherwise the
+    /// invariance every function formal has.
+    pub(crate) fn declared_variance(&self, name: &str) -> crate::types::TypeVariance {
+        self.variances
+            .get(name)
+            .copied()
+            .unwrap_or(crate::types::TypeVariance::Invariant)
     }
 }
 
@@ -219,9 +245,11 @@ fn function_shape(
     Ok(None)
 }
 
-/// The outer function-class shape, independent of the enclosing type-parameter bindings.
-/// Full argument types are checked by `semantic_type` when the body is lowered.
-pub(crate) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Option<usize> {
+/// The source arity of a closure of the serialized function type `id`, and whether that type is a
+/// suspend function type, whose invocation also takes the continuation after those parameters.
+/// The outer shape is independent of the enclosing type-parameter bindings; full argument types are
+/// checked by `semantic_type` when the body is lowered.
+pub(crate) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Option<(usize, bool)> {
     let KlibIrType::Simple {
         classifier,
         nullability,
@@ -239,9 +267,7 @@ pub(crate) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Optio
     }
     let (name, _) = class_head(classifier, annotations, &|_| Ok::<_, KlibTypeError>(None)).ok()?;
     let function = function_shape(name, arguments.len()).ok()??;
-    // A suspend lambda's implementation also takes the continuation, which closure planning does
-    // not model yet.
-    (!function.is_reflective() && !function.is_suspend()).then(|| function.arity())
+    (!function.is_reflective()).then(|| (function.arity(), function.is_suspend()))
 }
 
 /// One type argument, as the provider converts a metadata type argument.
@@ -252,7 +278,7 @@ fn type_argument<E: From<KlibTypeError>>(
     local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, E>,
 ) -> Result<Ty, E> {
     Ok(match argument {
-        KlibIrTypeArgument::Star => Ty::out_projection(Ty::nullable(Ty::obj_name(wk::any()))),
+        KlibIrTypeArgument::Star => Ty::star_projection(Ty::nullable(Ty::obj_name(wk::any()))),
         KlibIrTypeArgument::Type { variance, ty } => {
             let ty = semantic_type_in(arena, parameters, ty, local_class)?;
             match variance {
@@ -434,6 +460,69 @@ mod tests {
     use super::*;
     use crate::metadata::klib_ir::KlibIrSignature;
 
+    #[test]
+    fn serialized_star_and_explicit_out_agree_with_their_selected_metadata_headers() {
+        use crate::metadata::semantic::{semantic_ty, KotlinType};
+        let mut arena = KlibIrArena::default();
+        let application = |arena: &mut KlibIrArena, argument| {
+            arena.push_type(KlibIrType::Simple {
+                classifier: KlibIrSymbol {
+                    kind: KlibIrSymbolKind::Class,
+                    signature: KlibIrSignature::Public(KlibPublicIdSignature::classifier(
+                        crate::types::type_name("sample/Box"),
+                    )),
+                },
+                nullability: KlibIrNullability::NotSpecified,
+                arguments: vec![argument],
+                annotations: Vec::new(),
+                abbreviation: None,
+            })
+        };
+        let star = application(&mut arena, KlibIrTypeArgument::Star);
+        let any = arena.push_type(KlibIrType::Simple {
+            classifier: KlibIrSymbol {
+                kind: KlibIrSymbolKind::Class,
+                signature: KlibIrSignature::Public(KlibPublicIdSignature::classifier(wk::any())),
+            },
+            nullability: KlibIrNullability::MarkedNullable,
+            arguments: Vec::new(),
+            annotations: Vec::new(),
+            abbreviation: None,
+        });
+        let explicit_out = application(
+            &mut arena,
+            KlibIrTypeArgument::Type {
+                variance: KlibIrVariance::Out,
+                ty: any,
+            },
+        );
+        let metadata = |argument| KotlinType::Class {
+            internal: "sample/Box".to_owned(),
+            args: vec![argument],
+            nullable: false,
+            shape: Default::default(),
+        };
+        let selected_star = semantic_ty(&metadata(KotlinType::Star), &HashMap::default());
+        let selected_out = semantic_ty(
+            &metadata(KotlinType::OutProjection(Box::new(KotlinType::Class {
+                internal: "kotlin/Any".to_owned(),
+                args: Vec::new(),
+                nullable: true,
+                shape: Default::default(),
+            }))),
+            &HashMap::default(),
+        );
+        let parameters = KlibTypeParameters::default();
+        // Raw and prepared function headers require exact agreement with the selected metadata;
+        // neither boundary may erase the distinction to make the header compare successfully.
+        assert_eq!(semantic_type(&arena, &parameters, star), Ok(selected_star));
+        assert_eq!(
+            semantic_type(&arena, &parameters, explicit_out),
+            Ok(selected_out)
+        );
+        assert_ne!(selected_star, selected_out);
+    }
+
     /// `T & Any` as kotlinc serializes it: the type parameter `T` marked definitely non-null.
     fn definitely_non_null(bound: Ty) -> Ty {
         let symbol = KlibIrSymbol {
@@ -495,8 +584,7 @@ mod tests {
 
     /// kotlinc serializes the receiver of `startCoroutine`, `suspend () -> T`, as
     /// `kotlin.coroutines.SuspendFunction0<T>`: the suspend function type checked source gives
-    /// the same declaration. Closure planning gives a suspend lambda no closure arity, since its
-    /// implementation also takes the continuation.
+    /// the same declaration. Closure planning reads its source arity and that it suspends.
     #[test]
     fn a_suspend_function_classifier_is_the_suspend_function_type() {
         let mut arena = KlibIrArena::default();
@@ -519,7 +607,7 @@ mod tests {
             semantic_type(&arena, &parameters, plain).expect("a function type"),
             Ty::fun_with_shape(vec![int_ty], string_ty, 0, false, false)
         );
-        assert_eq!(closure_type_arity(&arena, suspend), None);
-        assert_eq!(closure_type_arity(&arena, plain), Some(1));
+        assert_eq!(closure_type_arity(&arena, suspend), Some((1, true)));
+        assert_eq!(closure_type_arity(&arena, plain), Some((1, false)));
     }
 }
