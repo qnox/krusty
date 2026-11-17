@@ -1081,13 +1081,52 @@ impl<'w, 'c> FirstUses<'w, 'c> {
         }
     }
 
-    /// An included classifier: an inner class's code reads this class's storage directly; any
-    /// other classifier contributes its captures, in its first-use order.
+    /// An included classifier: every value it carries from this class is a use of storage.
     fn classifier(&mut self, declaration: DeclId, uses: &mut ClosureUses<'w>) {
+        for field in self.carried_fields(declaration, uses) {
+            self.stored_use(field, uses);
+        }
+    }
+
+    /// An anonymous object constructed in this class's constructor code. Each value it carries
+    /// from this class is passed from the constructor parameter at `construction`, so it is a
+    /// construction read rather than a use of storage. A shared cell keeps its field, as a direct
+    /// read of one does.
+    fn constructed_classifier(
+        &mut self,
+        declaration: DeclId,
+        construction: ExprId,
+        uses: &mut ClosureUses<'w>,
+    ) {
+        if !self.included.insert(Inclusion::Classifier(declaration)) {
+            return;
+        }
+        let carried = self.carried_fields(declaration, uses);
+        let unshared = carried.iter().all(|field| {
+            self.captures
+                .get(*field as usize)
+                .is_some_and(|capture| capture.storage_ty.is_none())
+        });
+        if !unshared {
+            for field in carried {
+                self.stored_use(field, uses);
+            }
+            return;
+        }
+        if !carried.is_empty() {
+            self.construction_reads.push(construction);
+        }
+        uses.direct.extend(carried);
+    }
+
+    /// The fields of this class that an included classifier carries: an inner class's code reads
+    /// this class's storage directly; any other classifier contributes its captures, in its
+    /// first-use order.
+    fn carried_fields(&mut self, declaration: DeclId, uses: &mut ClosureUses<'w>) -> Vec<u32> {
         let checker = self.checker;
         let file = checker.file;
         let Decl::Class(class) = file.decl(declaration) else {
-            return;
+            return Vec::new();
         };
         let (captures, bindings) = match (
             checker.discovered_local_class_captures.get(&declaration),
@@ -1113,7 +1152,7 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                 if inner {
                     self.class(class, None, uses);
                 }
-                return;
+                return Vec::new();
             }
         };
         let mut physical = captures.iter().enumerate().collect::<Vec<_>>();
@@ -1127,6 +1166,7 @@ impl<'w, 'c> FirstUses<'w, 'c> {
             .values()
             .any(|object| *object == declaration)
             || self.inside_class(class.span);
+        let mut fields = Vec::new();
         for (field, capture) in physical {
             let carried = if inside {
                 match capture.source {
@@ -1144,10 +1184,9 @@ impl<'w, 'c> FirstUses<'w, 'c> {
             } else {
                 self.carried_capture(capture, bindings.get(field).copied().flatten())
             };
-            if let Some(field) = carried {
-                self.stored_use(field, uses);
-            }
+            fields.extend(carried);
         }
+        fields
     }
 
     fn logical_capture_field(&self, identity: crate::fir::ClassCaptureIdentity) -> Option<u32> {
@@ -1240,6 +1279,12 @@ impl<'w, 'c> FirstUses<'w, 'c> {
                 for delegation in &class.interface_delegations {
                     self.expression(delegation.value, uses);
                 }
+            }
+            // An object constructed in constructor code takes the values it captures from this
+            // class's constructor parameters, as kotlinc's constructor code does.
+            if self.construction {
+                self.constructed_classifier(object, expression, uses);
+                return;
             }
             let object = Closure::Included(Inclusion::Classifier(object));
             uses.nested.push((position, object));
