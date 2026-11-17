@@ -336,12 +336,14 @@ pub(crate) fn reified_runtime_type(ty: Ty, declarations: &ReifiedDeclarations<'_
     )
 }
 
+type SemanticJoin<'a> = &'a dyn Fn(&[Ty]) -> Option<Ty>;
+
 /// How an intersection is approximated where a supertype is wanted. A reified runtime type keeps
 /// only the components' single shared classifier; a published declaration type takes `join`, the
 /// components' semantic common supertype with its applied type arguments.
 struct Approximation<'a, 'b> {
     declarations: &'a ReifiedDeclarations<'b>,
-    join: Option<&'a dyn Fn(&[Ty]) -> Option<Ty>>,
+    join: Option<SemanticJoin<'a>>,
 }
 
 fn approximate_to_super(ty: Ty, approximation: &Approximation<'_, '_>) -> Ty {
