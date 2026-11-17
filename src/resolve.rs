@@ -30404,6 +30404,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         expected_declared: false,
         expectation_frames: Vec::new(),
         unreachable_statement_depth: 0,
+        annotation_argument_depth: 0,
         discover_anonymous_captures: false,
         selected_qualifier_accesses: HashMap::default(),
         selector_operands: None,
@@ -33072,6 +33073,8 @@ struct Checker<'a> {
     /// semantic state, but a write there is not a reachable reassignment and therefore must never
     /// create a `VAL_REASSIGNMENT` diagnostic.
     unreachable_statement_depth: usize,
+    /// Nonzero while checking an annotation argument, whose array factory calls are array literals.
+    annotation_argument_depth: usize,
     /// This check exists only to discover anonymous-object captures: its diagnostics and results
     /// are discarded. It is also set while an object's body is checked for its captures.
     discover_anonymous_captures: bool,
@@ -54484,25 +54487,6 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    /// The array operation selected at `expression`: a compiler-built array literal or size
-    /// constructor, or a call whose selected declaration is one of the `kotlin` array factory
-    /// functions (`arrayOf`, `intArrayOf`, `emptyArray`, …).
-    pub(super) fn selected_array_operation(
-        &self,
-        expression: ExprId,
-    ) -> Option<crate::synthetics::SyntheticKind> {
-        if let Some(ExprLowering::CompilerSynthetic(kind)) = self.expr_lowers.get(&expression) {
-            return Some(*kind);
-        }
-        match self.resolved_calls.get(&expression) {
-            Some(ResolvedCall::TopLevel(call)) => match call.callable.compiler_intrinsic {
-                Some(crate::libraries::CompilerIntrinsic::ArrayFactory(kind)) => Some(kind),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
     /// Check a call whose every candidate is one `kotlin` vararg array factory (`arrayOf`,
     /// `intArrayOf`, …) once that declaration is known, before argument probes commit a type.
     ///
@@ -54556,9 +54540,13 @@ impl<'a> Checker<'a> {
                 Some(self.type_ref_ty(scope, argument))
             }
         });
+        // An expected `Array<out E>` (a vararg parameter's array) bounds the element by `E`.
         let expected_element = expected
             .and_then(Ty::array_elem)
-            .filter(|element| element.projection_inner().is_none());
+            .and_then(|element| match element.kind() {
+                TyKind::OutProjection(inner) => Some(inner),
+                _ => element.projection_inner().is_none().then_some(element),
+            });
         let element_hint = explicit_element.or(expected_element);
         let candidate = candidates.into_iter().next()?;
         let result = self.check_array_builtin(
