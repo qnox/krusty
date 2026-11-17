@@ -885,7 +885,6 @@ evaluate/inJavaPackage.kt
 evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
 evaluate/intrinsicConst/kCallableNameWithSideEffect.kt
-evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/kt9443.kt
 evaluate/objectConstValInAnnotationArgument.kt
 evaluate/serialization/typeAnnotation.kt
@@ -1569,7 +1568,6 @@ properties/eagerInitializationGlobal2.kt
 properties/generalAccess.kt
 properties/genericPropertyMultiModule.kt
 properties/kt10729.kt
-properties/kt1398.kt
 properties/kt4383.kt
 properties/kt78962.kt
 properties/lateinit/accessorException.kt

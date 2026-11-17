@@ -1881,7 +1881,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                authenticate(native, text.clone(), &predicate(name, entry, "kotlin/Char")),
+                authenticate(native, text, &predicate(name, entry, "kotlin/Char")),
                 Some(KlibIntrinsicShape {
                     operation: CompilerIntrinsic::CharIsSurrogate(half),
                     kind: ExternalCallableKind::Extension,
@@ -1899,7 +1899,7 @@ mod tests {
                 None
             );
             assert_eq!(
-                authenticate(native, text.clone(), &predicate(name, entry, "kotlin/Int")),
+                authenticate(native, text, &predicate(name, entry, "kotlin/Int")),
                 None
             );
             let mut with_parameter = predicate(name, entry, "kotlin/Char");
@@ -1907,12 +1907,12 @@ mod tests {
             with_parameter.param_names = vec!["p0".to_owned()];
             with_parameter.param_defaults = vec![false];
             with_parameter.inline_modifiers = vec![crate::types::InlineParameterModifier::None];
-            assert_eq!(authenticate(native, text.clone(), &with_parameter), None);
+            assert_eq!(authenticate(native, text, &with_parameter), None);
             let mut wrong_result = predicate(name, entry, "kotlin/Char");
             wrong_result.ret = KotlinType::class("kotlin/Int");
-            assert_eq!(authenticate(native, text.clone(), &wrong_result), None);
+            assert_eq!(authenticate(native, text, &wrong_result), None);
             assert_eq!(
-                authenticate(None, text.clone(), &predicate(name, entry, "kotlin/Char")),
+                authenticate(None, text, &predicate(name, entry, "kotlin/Char")),
                 None
             );
         }
