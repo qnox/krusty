@@ -32,6 +32,8 @@ pub struct KlibCalleeFacts<'a> {
     sam_declarations: HashMap<crate::ir::KlibSamKey, crate::ir::CheckedKlibSamDeclaration>,
     /// The library objects and enum classes whose instances the closed bodies read, by classifier.
     read_classes: HashMap<crate::types::TypeName, crate::libraries::KlibBodyClassContract>,
+    /// The checked edge of an enum's synthetic `entries` body: the selected `enumEntries`.
+    enum_entries_factory: Option<KlibDependencyCallable>,
 }
 
 #[derive(Clone)]
@@ -93,6 +95,21 @@ impl<'a> KlibCalleeFacts<'a> {
             self.member_edges.entry(identity).or_insert(edge);
         }
         self
+    }
+
+    /// These facts with `factory`, the selected `enumEntries`: the checker freezing its edge, or a
+    /// target that builds an enum's `entries` by calling it.
+    pub(crate) fn with_enum_entries_factory(
+        mut self,
+        factory: Option<KlibDependencyCallable>,
+    ) -> Self {
+        self.enum_entries_factory = factory;
+        self
+    }
+
+    /// The declaration an enum's synthetic `entries` body calls with the enum's `values()`.
+    pub(super) fn enum_entries_factory(&self) -> Option<&KlibDependencyCallable> {
+        self.enum_entries_factory.as_ref()
     }
 
     pub(super) fn sam_declaration(

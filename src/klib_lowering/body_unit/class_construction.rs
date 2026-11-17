@@ -187,6 +187,16 @@ impl<'u, 's> Linker<'u, 's> {
         // are lowered in the enum's own initialization frame.
         if plan.header.contract.kind == crate::libraries::TypeKind::Enum {
             self.queue_enum_entry_arguments(class, identity, &plan, function);
+            // Its synthetic `entries` body calls the checked `enumEntries` with its `values()`,
+            // an edge the unit lowers as any body's call, so the enum's entries are built by the
+            // unit's own factory.
+            let factory =
+                super::super::class_initialization::entries_factory(&plan, self.sources.callees);
+            if let Some(KlibDeclarationSignature::Public(factory)) =
+                factory.map(|factory| &factory.declaration)
+            {
+                self.link(ir, factory)?;
+            }
         }
         if existing.is_none() {
             for function in &plan.dispatched {

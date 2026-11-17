@@ -592,7 +592,7 @@ pub(super) fn constructor_initialization_callees(
     callees: &super::KlibCalleeFacts<'_>,
 ) -> Result<Option<Vec<KlibDependencyCallable>>, KlibBodyDeclineReason> {
     match plan(selected, bodies, callees)? {
-        Some(plan) => Ok(Some(initialization_callees(&plan, bodies))),
+        Some(plan) => Ok(Some(initialization_callees(&plan, bodies, callees))),
         None => primary_delegation_callees(selected, bodies, callees),
     }
 }
@@ -627,7 +627,7 @@ pub(super) fn declared_instances_callees(
     callees: &super::KlibCalleeFacts<'_>,
 ) -> Result<Option<Vec<KlibDependencyCallable>>, KlibBodyDeclineReason> {
     Ok(declared_instances_plan(class, bodies, callees)?
-        .map(|plan| initialization_callees(&plan, bodies)))
+        .map(|plan| initialization_callees(&plan, bodies, callees)))
 }
 
 /// The expressions an initialization evaluates: an enum's entry arguments, the superclass
@@ -677,9 +677,24 @@ fn initialization_objects(
     objects
 }
 
+/// The checked declaration the synthetic `entries` body of the enum `plan` initializes calls:
+/// Kotlin builds an enum's `entries` by passing its `values()` to the selected `enumEntries`. A
+/// class without that body has no such edge.
+pub(super) fn entries_factory<'c>(
+    plan: &ClassInitialization<'_, '_>,
+    callees: &'c super::KlibCalleeFacts<'_>,
+) -> Option<&'c KlibDependencyCallable> {
+    let synthetic_entries = plan
+        .header
+        .class
+        .declares_synthetic_enum_entries(plan.header.arena);
+    callees.enum_entries_factory().filter(|_| synthetic_entries)
+}
+
 fn initialization_callees(
     plan: &ClassInitialization<'_, '_>,
     bodies: &KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
 ) -> Vec<KlibDependencyCallable> {
     let roots = initialization_roots(plan);
     let superclass = plan
@@ -716,6 +731,7 @@ fn initialization_callees(
         })
         // A materialized superclass is initialized first, through its own constructor.
         .chain(superclass)
+        .chain(entries_factory(plan, callees).cloned())
         .collect()
 }
 

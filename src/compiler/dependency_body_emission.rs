@@ -158,8 +158,21 @@ pub(super) fn emit_dependencies<B: Backend>(
     let target_represents_classifier =
         |classifier| backend.represents_dependency_classifier(classifier);
     let dispatched_classes = backend.dispatched_dependency_classes();
+    // The checker froze the selected `enumEntries` as the edge of every synthetic `entries` body;
+    // a unit emits that call only for a target whose enums build `entries` by it.
+    let entries_factory = backend
+        .common_ir_preparation()
+        .filter(|preparation| preparation.enums.builds_entries_by_factory())
+        .and_then(|_| {
+            source
+                .callables
+                .klib_dependency_facts()
+                .enum_entries_factory()
+                .cloned()
+        });
     let callees = KlibCalleeFacts::new(selected.iter().copied())
         .with_checked_dependency_facts(source.callables.klib_dependency_facts())
+        .with_enum_entries_factory(entries_factory.clone())
         .with_target_classifiers(&target_represents_classifier);
     let mut roots: Vec<crate::libraries::KlibBodyCallable<'_>> = Vec::new();
     for callable in selected.iter().copied().filter(|callable| {
@@ -337,6 +350,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         .with_checked_dependency_facts(source.callables.klib_dependency_facts())
         .with_authorized_member_edges(authorized_member_edges)
         .with_read_classes(read_classes)
+        .with_enum_entries_factory(entries_factory.clone())
         .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
