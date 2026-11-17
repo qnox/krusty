@@ -119,6 +119,13 @@ pub(super) struct RangeMembershipHeader {
     pub(super) ret: Ty,
 }
 
+/// The exact provider-selected `suspendCoroutineUninterceptedOrReturn<T>` call shape.
+pub(super) struct UninterceptedSuspensionCall {
+    pub(super) parameter: Ty,
+    pub(super) result: Ty,
+    pub(super) formal: crate::types::TyParamName,
+}
+
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
 pub(super) trait CallLinker {
     /// Read the checked declaration selected for this serialized SAM target, without lookup.
@@ -129,12 +136,37 @@ pub(super) trait CallLinker {
         unsupported("a SAM conversion without a checked declaration")
     }
 
+    /// Whether this exact provider-assigned dependency callable is declared `suspend`. A selected
+    /// suspend call in a KLIB body keeps its source result type in common IR; the common coroutine
+    /// preparation later supplies the target continuation ABI.
+    fn is_suspend_callable(&self, _target: crate::fir::ExternalCallableId) -> bool {
+        false
+    }
+
     /// The same authenticated primitive call shape that dependency planning treats as a leaf.
     /// Template linkers retain their ordinary checked external-call boundary by default.
     fn common_primitive(
         &self,
         _callee: &crate::libraries::KlibDeclarationSignature,
     ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
+        Ok(None)
+    }
+
+    /// The provider-selected compiler suspension intrinsic, if this template linker owns its
+    /// identity and has authenticated its serialized header.
+    fn unintercepted_suspension(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<UninterceptedSuspensionCall>> {
+        Ok(None)
+    }
+
+    /// The continuation intrinsic this linker's selected declaration of `callee` is: Native's
+    /// `getContinuation`/`returnIfSuspended`, which a body realizes as its suspension point.
+    fn continuation_intrinsic(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<super::continuation_intrinsics::ContinuationIntrinsicCall>> {
         Ok(None)
     }
 
@@ -232,11 +264,13 @@ pub(super) trait CallLinker {
         unsupported("a callable reference without an exact provider declaration")
     }
 
-    /// The dependency constructor a constructor call of the public declaration `callee` invokes.
+    /// The dependency constructor a constructor call of the public declaration `callee` invokes:
+    /// one allocating its class, or a subclass delegating to it.
     fn link_constructor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
+        role: ConstructorRole,
     ) -> Lowered<LinkedConstructor>;
 
     /// The classifier a file-local signature names in the library of the body being lowered.
@@ -246,6 +280,13 @@ pub(super) trait CallLinker {
         _signature: &crate::metadata::klib_ir::KlibIrSignature,
     ) -> Lowered<Option<crate::types::TypeName>> {
         Ok(None)
+    }
+
+    /// The declaration that names the local classifiers of the body being lowered: the package
+    /// of a top-level function, or the classifier a member belongs to. `None` when the linker
+    /// lowers no declared body or that body belongs to a classifier with no member name.
+    fn site_container(&self) -> Option<crate::ir::IrSiteClassContainer> {
+        None
     }
 
     /// Whether `callee`, a public or accessor signature, is a constructor or member of a class private to the
@@ -358,6 +399,15 @@ pub(super) trait CallLinker {
     }
 }
 
+/// What a constructor call does with the constructor it names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ConstructorRole {
+    /// Allocates an instance of the constructor's class.
+    Allocation,
+    /// Initializes a subclass instance another constructor allocated.
+    Delegation,
+}
+
 /// The dependency constructor a constructor call invokes: the provider's identity, the class it
 /// constructs and its declared value parameters.
 pub(super) struct LinkedConstructor {
@@ -378,6 +428,13 @@ pub(super) struct LinkedAccessor {
     pub(super) context_count: usize,
     /// As [`LinkedCallee::class_type_parameters`].
     pub(super) class_type_parameters: Vec<String>,
+    /// The exact provider-selected external accessor called by this property operation, when the
+    /// target is a dependency property.
+    pub(super) callable: Option<crate::fir::ExternalCallableId>,
+    /// This accessor's own formal identities and bounds, distinct from declaring-class formals.
+    pub(super) type_parameters: Vec<crate::types::TyParamName>,
+    pub(super) type_parameter_bounds: Vec<Vec<Ty>>,
+    pub(super) reified_type_parameters: Vec<u32>,
 }
 
 /// The value of a serialized constant typed `ty`, and the type the lowered constant has: `null`
@@ -662,12 +719,17 @@ impl<'a> BodyLowering<'a> {
                         origin.as_deref(),
                     );
                 };
+                // A suspend lambda overrides `SuspendFunctionN.invoke`, any other `FunctionN.invoke`.
                 let invocation = match &overridden.signature {
-                    crate::metadata::klib_ir::KlibIrSignature::Public(signature)
+                    crate::metadata::klib_ir::KlibIrSignature::Public(invoke)
                         if overridden.kind
                             == crate::metadata::klib_ir::KlibIrSymbolKind::Function =>
                     {
-                        super::klib_types::function_invocation_arity(signature)
+                        if signature.suspend {
+                            super::klib_types::suspend_function_invocation_arity(invoke)
+                        } else {
+                            super::klib_types::function_invocation_arity(invoke)
+                        }
                     }
                     _ => None,
                 };
@@ -902,17 +964,36 @@ impl<'a> BodyLowering<'a> {
         if actual.is_nullable() && !expected.is_nullable() {
             return false;
         }
-        let Some(class) = self.local_class(actual) else {
-            return false;
-        };
         let parameters = self.header.type_parameters();
-        class
-            .supertypes
-            .iter()
-            .any(|supertype| self.linker.is_subtype(parameters, *supertype, expected))
-            || self
-                .linker
-                .is_subtype(parameters, Ty::obj_name(class.superclass), expected)
+        self.local_class_supertypes(actual)
+            .is_some_and(|mut supertypes| {
+                supertypes.any(|supertype| self.linker.is_subtype(parameters, supertype, expected))
+            })
+    }
+
+    /// The direct supertypes recorded for the local or anonymous class lowered in this body that
+    /// the non-null `actual` names; `None` when it names no such class.
+    fn local_class_supertypes(&self, actual: Ty) -> Option<impl Iterator<Item = Ty> + '_> {
+        let class = self.local_class(actual)?;
+        Some(
+            class
+                .supertypes
+                .iter()
+                .copied()
+                .chain(std::iter::once(Ty::obj_name(class.superclass))),
+        )
+    }
+
+    /// The generic class `owner` as `sub` applies it through its hierarchy: through the supertypes
+    /// recorded for a local or anonymous class lowered in this body, or the calling compilation's
+    /// class model otherwise.
+    fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
+        match self.local_class_supertypes(sub) {
+            Some(mut supertypes) => {
+                supertypes.find_map(|supertype| self.linker.applied_supertype(supertype, owner))
+            }
+            None => self.linker.applied_supertype(sub, owner),
+        }
     }
 
     /// The anonymous or local class lowered in this body that `ty` names.
