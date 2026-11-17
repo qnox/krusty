@@ -749,6 +749,11 @@ impl<'a> BodyLowering<'a> {
                 origin.as_str(),
                 "INLINE_ARGS_CONTAINER"
                     | "WHEN"
+                    | "PLUSEQ"
+                    | "MINUSEQ"
+                    | "MULTEQ"
+                    | "DIVEQ"
+                    | "PERCEQ"
                     | "POSTFIX_INCR"
                     | "POSTFIX_DECR"
                     | "PREFIX_INCR"
