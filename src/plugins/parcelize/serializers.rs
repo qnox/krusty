@@ -27,6 +27,9 @@ pub(super) enum ParcelValue {
     UShort,
     UInt,
     ULong,
+    /// A specialized primitive array (`IntArray`, ...) of the given element, which `Parcel`
+    /// writes and creates itself, `null` included.
+    PrimitiveArray(Ty),
 }
 
 impl ParcelValue {
@@ -48,10 +51,12 @@ impl ParcelValue {
             Ty::UShort => Self::UShort,
             Ty::UInt => Self::UInt,
             Ty::ULong => Self::ULong,
-            _ => return None,
+            array => Self::PrimitiveArray(primitive_array_element(array)?),
         };
-        // `Parcel.writeString` writes `null` itself, so kotlinc never wraps a string.
-        Some((value, nullable && value != Self::String))
+        // `Parcel.writeString` and the array writers write `null` themselves, so kotlinc never
+        // wraps a string or an array.
+        let writes_null = matches!(value, Self::String | Self::PrimitiveArray(_));
+        Some((value, nullable && !writes_null))
     }
 
     /// The signed value an unsigned one is serialized as; any other value is its own.
@@ -74,6 +79,7 @@ impl ParcelValue {
             Self::Long => ParcelMember::Long,
             Self::Float => ParcelMember::Float,
             Self::Double => ParcelMember::Double,
+            Self::PrimitiveArray(element) => ParcelMember::PrimitiveArray(element),
             _ => ParcelMember::Int,
         }
     }
@@ -88,6 +94,7 @@ impl ParcelValue {
             Self::UShort => Ty::UShort,
             Self::UInt => Ty::UInt,
             Self::ULong => Ty::ULong,
+            Self::PrimitiveArray(element) => Ty::array(element),
             Self::String => Ty::String,
             Self::Byte => Ty::Byte,
             Self::Int => Ty::Int,
@@ -107,6 +114,41 @@ enum ParcelMember {
     Long,
     Float,
     Double,
+    PrimitiveArray(Ty),
+}
+
+/// The element of a `Parcel`-serialized specialized primitive array type, or `None` for any other
+/// type. A `ShortArray` and the unsigned arrays are written by kotlinc's own element loops, so they
+/// are not covered yet.
+fn primitive_array_element(ty: Ty) -> Option<Ty> {
+    let element = ty
+        .array_elem()
+        .filter(|_| ty.is_array() && !ty.is_reference_array())?;
+    [
+        Ty::Int,
+        Ty::Byte,
+        Ty::Long,
+        Ty::Float,
+        Ty::Double,
+        Ty::Boolean,
+        Ty::Char,
+    ]
+    .contains(&element)
+    .then_some(element)
+}
+
+/// The `Parcel` members that write and create a primitive array of `element`.
+fn array_names(element: Ty) -> (&'static str, &'static str) {
+    match element {
+        Ty::Int => ("writeIntArray", "createIntArray"),
+        Ty::Byte => ("writeByteArray", "createByteArray"),
+        Ty::Long => ("writeLongArray", "createLongArray"),
+        Ty::Float => ("writeFloatArray", "createFloatArray"),
+        Ty::Double => ("writeDoubleArray", "createDoubleArray"),
+        Ty::Boolean => ("writeBooleanArray", "createBooleanArray"),
+        Ty::Char => ("writeCharArray", "createCharArray"),
+        other => unreachable!("{other:?} is not a Parcel-serialized primitive array element"),
+    }
 }
 
 impl ParcelMember {
@@ -119,18 +161,37 @@ impl ParcelMember {
             Self::Long => Ty::Long,
             Self::Float => Ty::Float,
             Self::Double => Ty::Double,
+            Self::PrimitiveArray(element) => Ty::platform_nullable(Ty::array(element)),
         }
     }
 
-    /// Every member kind, in the order the members are bound.
-    const ALL: [Self; 6] = [
-        Self::String,
-        Self::Byte,
-        Self::Int,
-        Self::Long,
-        Self::Float,
-        Self::Double,
-    ];
+    /// The member kinds `used` values are stored with, in the order the members are bound, plus the
+    /// `Int` a null-aware value's presence flag is stored with.
+    fn bound(used: &[ParcelValue]) -> Vec<Self> {
+        let wraps = used
+            .iter()
+            .any(|value| !matches!(value, ParcelValue::String | ParcelValue::PrimitiveArray(_)));
+        let mut members = Vec::new();
+        for member in [
+            Self::String,
+            Self::Byte,
+            Self::Int,
+            Self::Long,
+            Self::Float,
+            Self::Double,
+        ] {
+            if used.iter().any(|value| value.member() == member) || (wraps && member == Self::Int) {
+                members.push(member);
+            }
+        }
+        for value in used {
+            let member = value.member();
+            if matches!(member, Self::PrimitiveArray(_)) && !members.contains(&member) {
+                members.push(member);
+            }
+        }
+        members
+    }
 
     fn write_name(self) -> &'static str {
         match self {
@@ -140,6 +201,7 @@ impl ParcelMember {
             Self::Long => "writeLong",
             Self::Float => "writeFloat",
             Self::Double => "writeDouble",
+            Self::PrimitiveArray(element) => array_names(element).0,
         }
     }
 
@@ -151,6 +213,7 @@ impl ParcelMember {
             Self::Long => "readLong",
             Self::Float => "readFloat",
             Self::Double => "readDouble",
+            Self::PrimitiveArray(element) => array_names(element).1,
         }
     }
 }
@@ -203,14 +266,7 @@ impl ParcelRuntime {
             writers: Vec::new(),
             readers: Vec::new(),
         };
-        // A null-aware value writes and reads its presence flag as an `Int`.
-        let wraps = used.iter().any(|&value| value != ParcelValue::String);
-        for value in ParcelMember::ALL {
-            if !used.iter().any(|used| used.member() == value)
-                && !(wraps && value == ParcelMember::Int)
-            {
-                continue;
-            }
+        for value in ParcelMember::bound(used) {
             let writer = runtime.function(&RuntimeFunction {
                 declaration: parcel,
                 name: value.write_name(),
