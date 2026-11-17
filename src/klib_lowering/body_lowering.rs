@@ -385,6 +385,9 @@ pub(super) trait CallLinker {
 pub(super) struct LinkedConstructor {
     pub(super) target: crate::fir::ExternalCallableId,
     pub(super) declaration: super::constructor_calls::ConstructorDeclaration,
+    /// The constructor of the class this unit materialized for the call, when it did: the
+    /// construction names it by its place, as a source construction names its selected one.
+    pub(super) materialized: Option<crate::ir::IrConstructorTarget>,
 }
 
 /// The dependency property a call of one of its accessors reads or writes, as a source access of

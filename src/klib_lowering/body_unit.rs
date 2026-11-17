@@ -1454,9 +1454,21 @@ impl<'s> CallLinker for Linker<'_, 's> {
         if !allocating {
             self.materialize_class(ir, &identity, selected)?;
         }
+        // A public constructor this unit materialized is selected by its place in the class, as
+        // the materialization ordered it; matching parameter types cannot find a generic class's.
+        let materialized = self
+            .constructors
+            .get(&identity)
+            .map(|constructor| crate::ir::IrConstructorTarget {
+                ordinal: constructor.secondary.map_or(0, |index| {
+                    u32::try_from(index + 1).expect("a constructor ordinal fits u32")
+                }),
+                access: crate::ir::IrConstructorAccess::Unrestricted,
+            });
         Ok(LinkedConstructor {
             target,
             declaration,
+            materialized,
         })
     }
 
