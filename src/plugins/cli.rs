@@ -59,6 +59,10 @@ pub struct PluginConfig {
     pub options: Vec<PluginOption>,
     /// `-Xcompiler-plugin=` registrations, in order.
     pub compiler_plugins: Vec<CompilerPluginSpec>,
+    /// `-Xcompiler-plugin-order=` values, in order. kotlinc parses them as it loads the plugins
+    /// ([`super::plugin_order::parse_constraints`]), so an unparsable one is a plugin error, not an
+    /// argument error.
+    pub order_constraints: Vec<String>,
     /// Switches kotlinc rejects, in its words. A driver must fail on any of them rather than compile
     /// with the plugin configuration it could not read.
     pub errors: Vec<String>,
@@ -72,6 +76,7 @@ impl PluginConfig {
             plugin_jars: Vec::new(),
             options: Vec::new(),
             compiler_plugins: Vec::new(),
+            order_constraints: Vec::new(),
             errors: Vec::new(),
         }
     }
@@ -94,7 +99,8 @@ impl PluginConfig {
     /// - `-Xplugin=<jar>,<jar>` — repeatable; kotlinc splits the value on `,` only (a `:` is part of
     ///   the path: `-Xplugin=a.jar:b.jar` names one non-existent jar);
     /// - `-P plugin:<id>:<key>=<value>` and `-P=plugin:…`;
-    /// - `-Xcompiler-plugin=<jar>,<jar>[=<key>=<value>,…]` — repeatable, one plugin per switch.
+    /// - `-Xcompiler-plugin=<jar>,<jar>[=<key>=<value>,…]` — repeatable, one plugin per switch;
+    /// - `-Xcompiler-plugin-order=<before>><after>` — repeatable, one constraint per switch.
     ///
     /// Call [`PluginConfig::finish`] once every argument has been offered.
     pub fn accept(&mut self, argument: &str, next: impl FnOnce() -> Option<String>) -> bool {
@@ -110,6 +116,8 @@ impl PluginConfig {
                     .map(|(key, value)| (key.to_string(), value.to_string()))
                     .collect(),
             });
+        } else if let Some(raw) = argument.strip_prefix("-Xcompiler-plugin-order=") {
+            self.order_constraints.push(raw.to_string());
         } else if let Some(spec) = argument.strip_prefix("-P=") {
             self.push_spec(spec);
         } else if argument == "-P" {
