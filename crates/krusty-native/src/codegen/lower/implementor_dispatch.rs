@@ -153,10 +153,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         if declared_member_params.len() != params.len() {
             return Err(declined!(
-                "the dependency interface member `{}` is applied to {} parameters but declares {}",
-                signature.name,
-                params.len(),
-                declared_member_params.len()
+                "the dependency interface member `{}` is called with another arity than it declares",
+                signature.name
             ));
         }
         let runtime = self.runtime_implementations(signature)?;
@@ -168,47 +166,36 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
-        // The interface slot has the declaration's ABI. A generic member applied at a primitive
-        // or value class (`ListIterator<Int>.previous`) crosses that boundary as a call through
-        // the erased slot does: each operand enters at its declared type and the answer leaves
-        // it at the type the site asked for.
-        let mut crossed = Vec::with_capacity(arguments.len());
-        for ((&value, &applied), &declared) in
-            arguments.iter().zip(params).zip(&declared_member_params)
-        {
-            let Some(value) = self.convert(value, Some(applied), declared)? else {
-                return Ok(None);
-            };
-            crossed.push(value);
-        }
-        let operands: Vec<(Value, Option<Ty>)> = crossed
+        let operands: Vec<(Value, Option<Ty>)> = arguments
             .iter()
-            .zip(&declared_member_params)
+            .zip(params)
             .map(|(&value, &param)| (value, Some(param)))
             .collect();
-        let declared_ret = signature.ret;
-        let produced = self.dispatch_runtime_implementations(
-            &runtime,
-            object,
-            &operands,
-            declared_ret,
-            |body| {
-                body.dispatch_through(
-                    object,
-                    model::Dispatch::Interface(number),
-                    &declared_member_params,
-                    declared_ret,
-                    &crossed,
-                )
-            },
-        )?;
-        if self.terminated {
-            return Ok(None);
-        }
-        match produced {
-            Some(value) => self.convert(value, Some(declared_ret), ret),
-            None => self.unit_where_wanted(ret),
-        }
+        self.dispatch_runtime_implementations(&runtime, object, &operands, ret, |body| {
+            // The stub takes the declaration's own ABI, whatever types this call applies: an
+            // applied primitive or value class crosses into the declared (erased) parameter and
+            // the declared result back into the applied one, as through a bridge.
+            let mut declared_arguments = Vec::with_capacity(arguments.len());
+            for ((&value, &applied), &declared) in
+                arguments.iter().zip(params).zip(&declared_member_params)
+            {
+                let Some(converted) = body.convert(value, Some(applied), declared)? else {
+                    return Ok(None);
+                };
+                declared_arguments.push(converted);
+            }
+            let produced = body.dispatch_through(
+                object,
+                model::Dispatch::Interface(number),
+                &declared_member_params,
+                signature.ret,
+                &declared_arguments,
+            )?;
+            match produced {
+                Some(value) if !body.terminated => body.convert(value, Some(signature.ret), ret),
+                _ => Ok(None),
+            }
+        })
     }
 
     /// A read of a dependency interface's abstract property this file finds no other realization

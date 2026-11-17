@@ -178,6 +178,12 @@ impl Backend for WasmBackend {
         self.target == WasmTarget::Wasi
     }
 
+    /// The runtime's `ArrayList` walks a collection argument with its `iterator()` and asks it
+    /// `contains`, whatever class it is (`crate::array_lists`).
+    fn reads_collections_through_interfaces(&self) -> bool {
+        true
+    }
+
     fn realizes_dependency_intrinsic(
         &self,
         operation: krusty::backend::BackendCompilerIntrinsic,
