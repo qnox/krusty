@@ -1212,9 +1212,16 @@ impl Body<'_> {
     /// A class cast then reads the checked reference as the class's structure.
     pub(super) fn cast(&mut self, arg: u32, target: Ty, non_null: bool) -> Result<(), Unsupported> {
         let tested = target.non_null();
-        let structure = match self.interface_of_type(tested) {
-            Some(_) => None,
-            None => self.class_structure(tested)?,
+        let structure = if tested.is_array() {
+            // An array's values are its array form's objects, even where a library also
+            // materializes the array classifier as an ordinary class.
+            let (form, _) = self.array_form(tested)?;
+            Some(form.object)
+        } else {
+            match self.interface_of_type(tested) {
+                Some(_) => None,
+                None => self.class_structure(tested)?,
+            }
         };
         self.value(arg, any())?;
         let value = self.local(REFERENCE);
