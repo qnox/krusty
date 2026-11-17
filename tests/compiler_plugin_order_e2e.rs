@@ -151,3 +151,33 @@ fn a_cycle_among_loaded_plugins_is_kotlincs_error() {
         );
     }
 }
+
+#[test]
+fn a_cycle_is_reported_before_a_plugins_options_are_processed() {
+    let forward = format!("{ALLOPEN_ID}>{NOARG_ID}");
+    let backward = format!("{NOARG_ID}>{ALLOPEN_ID}");
+    let constraints = [
+        format!(
+            "PluginOrderConstraint(before={ALLOPEN_ID}, after={NOARG_ID}, rawArgument={forward})"
+        ),
+        format!(
+            "PluginOrderConstraint(before={NOARG_ID}, after={ALLOPEN_ID}, rawArgument={backward})"
+        ),
+    ]
+    .join(", ");
+    let fixture = PluginFixture::new("plugin-order-cycle-with-bad-option");
+    let sources = [("Entity.kt", SOURCE)];
+    // The all-open plugin declares no `unknown` option; kotlinc reports that option only once the
+    // plugins are ordered, and the order has no solution.
+    let mut switches = switches(true, &[forward.as_str(), backward.as_str()]);
+    switches.extend(["-P".to_string(), format!("plugin:{ALLOPEN_ID}:unknown=1")]);
+    let expected = fixture.kotlinc_rejects("main", &sources, &[], &switches);
+    let actual = fixture.krusty_rejects("main", &sources, &[], &switches);
+    assert_eq!(actual, expected);
+    assert_eq!(
+        expected,
+        format!(
+            "error: compiler plugin '{ALLOPEN_ID}' is part of an constraint cycle: {constraints}\n"
+        )
+    );
+}

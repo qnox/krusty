@@ -644,6 +644,19 @@ impl PluginRegistry {
             .all_plugin_jars()
             .map(|jar| (jar, declared_registrars(jar)))
             .collect::<Vec<_>>();
+        // kotlinc orders the loaded plugins, and rejects a cycle among them, before it processes any
+        // plugin's options, so a cycle is the compilation's only error.
+        let registration_order =
+            match self.registration_order(act.config, &order_constraints, &jars) {
+                Ok(order) => order,
+                Err(cycle) => {
+                    return Resolved {
+                        native,
+                        ksp_active,
+                        diagnostics: vec![PluginDiagnostic::OrderCycle(cycle)],
+                    };
+                }
+            };
 
         for ext in &self.extensions {
             let jar = jars
@@ -753,15 +766,12 @@ impl PluginRegistry {
             }
         }
 
-        match self.registration_order(act.config, &order_constraints, &jars) {
-            Ok(order) => native.enabled.sort_by_key(|enabled| {
-                order
-                    .iter()
-                    .position(|plugin_id| *plugin_id == enabled.plugin_id)
-                    .unwrap_or(usize::MAX)
-            }),
-            Err(cycle) => diagnostics.push(PluginDiagnostic::OrderCycle(cycle)),
-        }
+        native.enabled.sort_by_key(|enabled| {
+            registration_order
+                .iter()
+                .position(|plugin_id| *plugin_id == enabled.plugin_id)
+                .unwrap_or(usize::MAX)
+        });
 
         Resolved {
             native,
