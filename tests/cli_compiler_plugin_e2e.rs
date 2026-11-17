@@ -862,6 +862,94 @@ fn a_library_composable_lambda_parameter_aligns_with_its_method() {
     assert_eq!(compiled.code, Some(1));
 }
 
+/// The widths around the Compose compiler's changed-word boundaries (nine and ten parameters, and
+/// the last width with a `Function` class of its own) of a `@Composable` function type, taken from
+/// a library the reference compiler and its plugin compiled.
+const COMPOSABLE_WIDTHS: [usize; 6] = [0, 9, 10, 11, 19, 20];
+
+fn composable_function_type(parameters: usize) -> String {
+    format!("({})", vec!["Int"; parameters].join(", "))
+}
+
+/// Every width aligns with the descriptor the producer emitted: metadata keeps the one source
+/// parameter, and no neighbouring width of the same declaration does.
+#[test]
+fn a_library_composable_function_parameter_aligns_at_every_changed_word_boundary() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let mut library = String::from("package lib\nimport androidx.compose.runtime.Composable\n");
+    for width in COMPOSABLE_WIDTHS {
+        let ty = composable_function_type(width);
+        library.push_str(&format!(
+            "@Composable fun Wide{width}(content: @Composable {ty} -> Unit) {{}}\n\
+             fun Plain{width}(content: {ty} -> Unit) {{}}\n"
+        ));
+    }
+    let producer = Probe::new("compose-widths-lib", &library);
+    producer.kotlinc_classes(&classpath, &switches);
+    classpath.push(producer.dir.join("kotlinc"));
+    let classpath = krusty::jvm::classpath::Classpath::new(classpath);
+    let facade = krusty::types::type_name("lib/ProbeKt");
+    let class = classpath
+        .find_name(facade)
+        .expect("the producer's facade class");
+    // The source parameters metadata keeps for `declaration` aligned with the descriptor the
+    // producer emitted for `method`.
+    let kept = |declaration: &str, method: &str| {
+        let method = class
+            .methods
+            .iter()
+            .find(|candidate| candidate.name == method)
+            .unwrap_or_else(|| panic!("the producer emits {method}"));
+        let (parameters, ret) =
+            krusty::jvm::jvm_libraries::parse_method_desc(&method.descriptor).expect("descriptor");
+        classpath
+            .metadata_call_facts_name(facade, declaration, &parameters, &ret, false, &|_| None)
+            .kept_params
+    };
+    for width in COMPOSABLE_WIDTHS {
+        let (composable, plain) = (format!("Wide{width}"), format!("Plain{width}"));
+        assert_eq!(kept(&composable, &composable), Some(1), "{composable}");
+        assert_eq!(kept(&plain, &plain), Some(1), "{plain}");
+        // Each declaration refuses the other's erasure: the composable one has the composer and
+        // changed words, the plain one has none.
+        assert_eq!(kept(&composable, &plain), None, "{composable} as {plain}");
+        assert_eq!(kept(&plain, &composable), None, "{plain} as {composable}");
+    }
+}
+
+/// A function type without the annotation keeps the source arity at the width where the
+/// composable erasure gains a second changed word, so its call resolves and compiles.
+#[test]
+fn a_function_parameter_aligns_by_the_erasure_its_producer_emitted() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let ty = composable_function_type(10);
+    let plain = Probe::new(
+        "compose-widths-plain-lib",
+        &format!("package lib\nfun Plain(content: {ty} -> Unit) {{}}\n"),
+    );
+    plain.kotlinc_classes(&classpath, &[]);
+    classpath.push(plain.dir.join("kotlinc"));
+    let probe = Probe::new(
+        "compose-widths-plain",
+        &format!("package probe\nfun use(content: {ty} -> Unit) {{\nlib.Plain(content)\n}}\n"),
+    );
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let compiled = probe.krusty(&classpath, &switches);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+    }
+    .message();
+    assert_eq!(compiled.stderr, format!("info: {partial}\n"));
+    assert_eq!(compiled.code, Some(0));
+}
+
 fn assert_compose_rejects(name: &str, declarations: &str, others: &[(&str, &str)], error: &str) {
     let compose = reference_plugin_jar("compose-compiler-plugin.jar");
     let source =

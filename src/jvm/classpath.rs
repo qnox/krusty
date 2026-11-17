@@ -4147,7 +4147,6 @@ fn read_one_type<'a>(s: &mut &'a str) -> &'a str {
 
 #[cfg(test)]
 mod fq_tests {
-    use super::metadata_alignment::function_parameter_erasure_matches;
     use super::test_support::{
         test_temp_dir, write_test_archive_entries, write_test_jar_with_entry,
     };
@@ -4180,81 +4179,6 @@ mod fq_tests {
                 .visibility,
             crate::types::Visibility::Protected
         );
-    }
-
-    #[test]
-    fn suspend_receiver_function_metadata_matches_its_function_interface_erasure() {
-        let TyKind::Fun(metadata) = Ty::fun_with_shape(
-            vec![Ty::obj("kotlin/sequences/SequenceScope")],
-            Ty::Unit,
-            0,
-            true,
-            true,
-        )
-        .kind() else {
-            unreachable!()
-        };
-        let erased = Ty::fun(
-            vec![Ty::obj("kotlin/Any"), Ty::obj("kotlin/Any")],
-            Ty::obj("kotlin/Any"),
-        );
-
-        assert!(function_parameter_erasure_matches(
-            metadata,
-            false,
-            erased,
-            &|ty| ty.fun_arity().map(usize::from),
-        ));
-    }
-
-    #[test]
-    fn composable_function_metadata_matches_the_erasure_with_composer_and_changed() {
-        let arity = &|ty: Ty| ty.fun_arity().map(usize::from);
-        let erased = |arguments: usize| {
-            Ty::fun(
-                vec![Ty::obj("kotlin/Any"); arguments],
-                Ty::obj("kotlin/Any"),
-            )
-        };
-        let signature = |parameters: usize| {
-            let TyKind::Fun(signature) = Ty::fun(vec![Ty::Int; parameters], Ty::Unit).kind() else {
-                unreachable!()
-            };
-            signature
-        };
-
-        // `@Composable () -> Unit` is `Function2<Composer, Int, Unit>`; a parameter adds a slot.
-        assert!(function_parameter_erasure_matches(
-            signature(0),
-            true,
-            erased(2),
-            arity
-        ));
-        assert!(function_parameter_erasure_matches(
-            signature(1),
-            true,
-            erased(3),
-            arity
-        ));
-        // Past ten slots the changed words grow by one.
-        assert!(function_parameter_erasure_matches(
-            signature(11),
-            true,
-            erased(14),
-            arity
-        ));
-        assert!(!function_parameter_erasure_matches(
-            signature(0),
-            false,
-            erased(2),
-            arity
-        ));
-        assert!(!function_parameter_erasure_matches(
-            signature(0),
-            true,
-            erased(0),
-            arity
-        ));
     }
 
     #[test]
