@@ -660,7 +660,8 @@ impl<'a> FileLowering<'a> {
     /// interface written on `ListQueue`. That superclass is someone else's declaration, so its
     /// frozen supertypes name the interface. A superclass this file does declare stays its own
     /// arm; the subclass is not a second one, because an instance test of the superclass already
-    /// matches it.
+    /// matches it. An abstract superclass is no arm, so its concrete subclasses are, through it:
+    /// a dependency support unit's object literal extending a materialized abstract class.
     pub(super) fn implementors_of(&self, internal: TypeName) -> Vec<ClassId> {
         (0..self.ir.classes.len() as ClassId)
             .filter(|&id| {
@@ -688,8 +689,19 @@ impl<'a> FileLowering<'a> {
             if named == internal {
                 return true;
             }
-            if self.ir.class_id_by_name(named).is_none() {
-                external_supertypes.push(named);
+            match self.ir.class_id_by_name(named) {
+                None => external_supertypes.push(named),
+                // An abstract superclass is no arm of its own, so a concrete class stands behind
+                // what it implements.
+                Some(superclass) => {
+                    let superclass = &self.ir.classes[superclass as usize];
+                    if superclass.is_abstract
+                        && !superclass.is_interface
+                        && self.class_stands_behind(superclass, internal)
+                    {
+                        return true;
+                    }
+                }
             }
         }
         external_supertypes
