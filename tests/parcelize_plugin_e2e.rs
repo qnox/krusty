@@ -93,6 +93,16 @@ class User(
     val level: Int?,
 ) : Parcelable
 
+@Parcelize
+class Scalars(
+    val flag: Boolean,
+    val maybeFlag: Boolean?,
+    val small: Short,
+    val maybeSmall: Short?,
+    val letter: Char,
+    val maybeLetter: Char?,
+) : Parcelable
+
 class Outer {
     @Parcelize
     class Point(val x: Int, val y: Long?) : Parcelable
@@ -121,13 +131,20 @@ fun box(): String {
     val point = roundTrip(Outer.Point(3, 4L), Outer.Point::class.java)
     if (point.x != 3 || point.y != 4L) return "point"
     if (roundTrip(Outer.Point(1, null), Outer.Point::class.java).y != null) return "point null"
+    val scalars = roundTrip(Scalars(true, null, -7, 9, 'k', null), Scalars::class.java)
+    if (!scalars.flag || scalars.maybeFlag != null) return "booleans"
+    if (scalars.small != (-7).toShort() || scalars.maybeSmall != 9.toShort()) return "shorts"
+    if (scalars.letter != 'k' || scalars.maybeLetter != null) return "chars"
+    val others = roundTrip(Scalars(false, true, 0, null, '\u00e9', 'z'), Scalars::class.java)
+    if (others.flag || others.maybeFlag != true || others.maybeSmall != null) return "other scalars"
+    if (others.letter != '\u00e9' || others.maybeLetter != 'z') return "other chars"
     val users = creator(User::class.java).newArray(2)
     if (users.size != 2 || users[0] != null) return "newArray"
     return "OK"
 }
 "#;
 
-/// Strings, primitives and their nullable forms, top-level and nested classes: `describeContents`,
+/// Strings, primitives (booleans, shorts and chars included) and their nullable forms, top-level and nested classes: `describeContents`,
 /// `writeToParcel`, `CREATOR` and its local `Creator` class with their bridges, generic signature
 /// and debug tables match kotlinc's, and each class reads back what it wrote.
 #[test]
