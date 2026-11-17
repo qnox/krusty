@@ -136,7 +136,7 @@ impl Classpath {
                             annotations: &m.annotations,
                         },
                     );
-                    crate::libraries::LibraryMember {
+                    let mut member = crate::libraries::LibraryMember {
                         deprecation: None,
                         external_identity: None,
                         declaration_owner: None,
@@ -210,7 +210,9 @@ impl Classpath {
                         plugin_expression: None,
                         stable_declaration: None,
                         source_member: None,
-                    }
+                    };
+                    super::atomic_exchange::realize(internal_id, m.is_property, &mut member);
+                    member
                 })
             })
             .into_iter()

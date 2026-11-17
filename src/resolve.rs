@@ -12014,35 +12014,6 @@ impl<'a> Checker<'a> {
             })
     }
 
-    /// Whether `actual` fits a FUNCTION-typed parameter whose signature reached the checker ERASED.
-    /// A classpath `(StringBuilder) -> Unit` parameter is a bare `Function1` — `(Any) -> Any` — and a
-    /// source `() -> T` erases the same way, so neither can judge the lambda's own parameter and return
-    /// types. Matched on arity and suspend-ness, judging only components that are not the erased top.
-    fn erased_function_param_fits(&self, expected: Ty, actual: Ty) -> bool {
-        let (TyKind::Fun(expected), TyKind::Fun(actual)) = (expected.kind(), actual.kind()) else {
-            return false;
-        };
-        let component = |expected: Ty, actual: Ty| {
-            expected.is_erased_top()
-                || expected.mentions_ty_param()
-                || actual.mentions_ty_param()
-                || self.member_argument_score(expected, actual).is_some()
-        };
-        expected.params.len() == actual.params.len()
-            // Suspend conversion is one-way: a regular function value may be wrapped as suspend;
-            // a suspend value cannot flow to a regular function parameter.
-            && (!actual.suspend || expected.suspend)
-            && expected
-                .params
-                .iter()
-                .zip(&actual.params)
-                .all(|(expected, actual)| component(*expected, *actual))
-            // Lambdas and callable references are normalized before this comparison. A stored
-            // `() -> String` value reaches `() -> Unit` only through the language's unit conversion.
-            && (component(expected.ret, actual.ret)
-                || self.unit_conversion_admits_result(expected.ret))
-    }
-
     /// Whether one expression can reach a semantic SAM parameter through Kotlin's function-value
     /// conversion. Candidate providers must share this predicate: a source constructor parameter is
     /// not a different kind of applicability boundary from an ordinary callable parameter.
@@ -38639,16 +38610,6 @@ impl<'a> Checker<'a> {
         candidates
     }
 
-    fn generic_function_constructor_arg_fits(&self, expected: Ty, actual: Ty) -> bool {
-        if actual == Ty::Null {
-            return expected.is_nullable();
-        }
-        if actual.is_nullable() && !expected.is_nullable() {
-            return false;
-        }
-        self.erased_function_param_fits(expected.non_null(), actual.non_null())
-    }
-
     fn select_ctor_delegation(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -44348,72 +44309,11 @@ impl<'a> Checker<'a> {
                 for &argument in &entry.args {
                     self.finish_executable_root(argument);
                 }
-                let (primary, stable_declaration) = match &selected.target {
-                    ResolvedCtorDelegationTarget::ThisPrimary { .. } => (
-                        true,
-                        streamed_enum_owner
-                            .and_then(|owner| {
-                                self.resolved_index?.owned_declaration(
-                                    owner,
-                                    crate::fir::DeclarationKind::Constructor,
-                                    0,
-                                )
-                            })
-                            .or_else(|| {
-                                enum_signature
-                                    .as_ref()
-                                    .and_then(|signature| signature.primary_constructor_declaration)
-                            }),
-                    ),
-                    ResolvedCtorDelegationTarget::ThisSecondary { index, .. } => {
-                        let sibling = u32::try_from(*index + 1)
-                            .expect("too many enum secondary constructors");
-                        (
-                            false,
-                            streamed_enum_owner
-                                .and_then(|owner| {
-                                    self.resolved_index?.owned_declaration(
-                                        owner,
-                                        crate::fir::DeclarationKind::Constructor,
-                                        sibling,
-                                    )
-                                })
-                                .or_else(|| {
-                                    enum_signature.as_ref().and_then(|signature| {
-                                        signature
-                                            .secondary_constructor_declarations
-                                            .get(*index)
-                                            .copied()
-                                            .flatten()
-                                    })
-                                }),
-                        )
-                    }
-                    ResolvedCtorDelegationTarget::Super { .. } => {
-                        unreachable!("an enum entry selects a constructor of its enum class")
-                    }
-                };
-                self.resolved_enum_entry_constructors.insert(
-                    (entry.span.lo, entry.span.hi),
-                    ResolvedConstructor::Source {
-                        owner: streamed_enum_owner
-                            .and_then(|owner| self.resolved_index?.classifier_header(owner))
-                            .map(|header| header.classifier)
-                            .or_else(|| enum_signature.as_ref().map(ClassSig::internal_name))
-                            .expect("checked enum must have a semantic owner"),
-                        stable_declaration,
-                        outer: None,
-                        primary,
-                        context_args: selected.context_args,
-                        declaration_params: selected.target.params().to_vec(),
-                        params: selected.target.params().to_vec(),
-                        argument_slots: selected.argument_slots,
-                        argument_bindings: Vec::new(),
-                        argument_types: selected.argument_types,
-                        omitted: selected.omitted,
-                        vararg: selected.vararg,
-                        default_masks: selected.default_masks,
-                    },
+                self.record_enum_entry_constructor(
+                    entry.span,
+                    streamed_enum_owner,
+                    enum_signature.as_ref(),
+                    selected,
                 );
             }
             self.static_companion_this = previous_static_this;
