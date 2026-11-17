@@ -662,6 +662,11 @@ impl Checker<'_> {
                 }
             }
         }
+        shape.fixed_input_bindings = binds
+            .iter()
+            .filter(|(formal, _)| fixed_expectation_formals.contains(*formal))
+            .map(|(formal, actual)| (*formal, *actual))
+            .collect();
         let mut expectation_binds = binds.clone();
         expectation_binds.retain(|formal, _| {
             !semantic.formals.iter().any(|declared| declared == formal)
@@ -1408,6 +1413,7 @@ impl Checker<'_> {
         let params = self.lambda_return_overload_param_types(receiver, name)?;
         Some(crate::symbol_resolver::LambdaCallShape {
             generic_formals: Vec::new(),
+            fixed_input_bindings: Default::default(),
             argument_parameters: Vec::new(),
             param_types: Some(
                 args.iter()
@@ -1537,9 +1543,9 @@ impl Checker<'_> {
             {
                 *fixed = None;
             }
-            return MemberExtensionLambdaShape::Selected(shape);
+            return MemberExtensionLambdaShape::Selected(Box::new(shape));
         };
-        MemberExtensionLambdaShape::Selected(tied.swap_remove(chosen))
+        MemberExtensionLambdaShape::Selected(Box::new(tied.swap_remove(chosen)))
     }
 
     /// What a tie of the extension call's ordinary selection decides for its lambdas. Tied
@@ -1560,9 +1566,9 @@ impl Checker<'_> {
             return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Absent);
         };
         if others.iter().all(|(shape, _)| shape == first) {
-            return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Selected(
+            return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Selected(Box::new(
                 first.clone(),
-            ));
+            )));
         }
         let refinable = tied.iter().any(|(_, overload)| {
             overload

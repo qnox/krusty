@@ -16943,6 +16943,15 @@ impl<'a> Checker<'a> {
                     Some(shape) => (Some(shape), shape.inline),
                     None => (toplevel_lambda_shape.as_ref(), toplevel_inline),
                 };
+                // The selected callable's explicit type arguments and receiver fix some formals before
+                // any argument is analyzed. An implicit receiver's extension (`runningFold` inside
+                // an extension of `List<E>`) proves `T = E` only through its shape, so its lambdas'
+                // rechecks would otherwise keep the declaration's own `T`.
+                if let Some(shape) = selected_lambda_shape {
+                    for (formal, actual) in &shape.fixed_input_bindings {
+                        known_generic_bindings.entry(*formal).or_insert(*actual);
+                    }
+                }
                 let selected_lambda_pts: Option<Vec<Vec<Ty>>> =
                     selected_lambda_shape.and_then(|shape| shape.param_types.clone());
                 let selected_lambda_expected: Option<Vec<Option<Ty>>> =
