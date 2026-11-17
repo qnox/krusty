@@ -43,35 +43,53 @@ fn temporary(name: &str) -> PathBuf {
 fn dump_plugin(runtime: &HostRuntime) -> PathBuf {
     static PLUGIN: OnceLock<PathBuf> = OnceLock::new();
     PLUGIN
+        .get_or_init(|| fixture_plugin(runtime, "dump", "dump/DumpIr.kt", "fixture.dump.Dump"))
+        .clone()
+}
+
+/// The rewrite plugin's classes, which change the module they run over.
+fn rewrite_plugin(runtime: &HostRuntime) -> PathBuf {
+    static PLUGIN: OnceLock<PathBuf> = OnceLock::new();
+    PLUGIN
         .get_or_init(|| {
-            let plugin = temporary("dump-plugin");
-            let _ = std::fs::remove_dir_all(&plugin);
-            let source = concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/crates/krusty-plugin-host/tests/fixtures/dump/DumpIr.kt"
-            );
-            kotlinc(
+            fixture_plugin(
                 runtime,
-                &runtime.compiler_classpath,
-                &plugin,
-                &[source.as_ref()],
-                &[],
-            );
-            let services = plugin.join("META-INF/services");
-            std::fs::create_dir_all(&services).unwrap();
-            for (service, class) in [
-                ("CommandLineProcessor", "fixture.dump.DumpOptions"),
-                ("CompilerPluginRegistrar", "fixture.dump.DumpRegistrar"),
-            ] {
-                std::fs::write(
-                    services.join(format!("org.jetbrains.kotlin.compiler.plugin.{service}")),
-                    class,
-                )
-                .unwrap();
-            }
-            plugin
+                "rewrite",
+                "rewrite/RewriteIr.kt",
+                "fixture.rewrite.Rewrite",
+            )
         })
         .clone()
+}
+
+/// The fixture plugin `source` (under the host's test fixtures) compiled into a directory, with the
+/// services kotlinc's `-Xplugin` finds `<prefix>Options` and `<prefix>Registrar` by.
+fn fixture_plugin(runtime: &HostRuntime, name: &str, source: &str, prefix: &str) -> PathBuf {
+    let plugin = temporary(&format!("{name}-plugin"));
+    let _ = std::fs::remove_dir_all(&plugin);
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/krusty-plugin-host/tests/fixtures")
+        .join(source);
+    kotlinc(
+        runtime,
+        &runtime.compiler_classpath,
+        &plugin,
+        &[source.as_ref()],
+        &[],
+    );
+    let services = plugin.join("META-INF/services");
+    std::fs::create_dir_all(&services).unwrap();
+    for (service, class) in [
+        ("CommandLineProcessor", "Options"),
+        ("CompilerPluginRegistrar", "Registrar"),
+    ] {
+        std::fs::write(
+            services.join(format!("org.jetbrains.kotlin.compiler.plugin.{service}")),
+            format!("{prefix}{class}"),
+        )
+        .unwrap();
+    }
+    plugin
 }
 
 fn dump_option(out: &Path) -> String {
@@ -97,13 +115,20 @@ fn kotlinc_dump(runtime: &HostRuntime, source: &str) -> String {
 
 /// A host with the dump plugin loaded, writing to `out`, and a session open over the stdlib.
 fn host_with_dump(runtime: &HostRuntime, out: &Path) -> Host {
+    host_with(runtime, &[dump_plugin(runtime)], &[dump_option(out)])
+}
+
+/// A host with the plugin classpath `plugins` loaded with `options`, and a session open over the
+/// stdlib.
+fn host_with(runtime: &HostRuntime, plugins: &[PathBuf], options: &[String]) -> Host {
     let (_, env) = support::runtime();
     let mut host = start(runtime, &env);
-    host.load(
-        &[dump_plugin(runtime).display().to_string()],
-        &[dump_option(out)],
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+    let entries: Vec<String> = plugins
+        .iter()
+        .map(|plugin| plugin.display().to_string())
+        .collect();
+    host.load(&entries, options)
+        .unwrap_or_else(|error| panic!("{error}"));
     host.open_session(&SessionRequest {
         classpath: vec![stdlib(runtime)],
         jdk_home: runtime.java_home.clone(),
@@ -130,18 +155,18 @@ fn kotlin(name: &str, nullable: bool) -> TypeIdentity {
     }
 }
 
-fn span(start: u32, end: u32) -> Span {
+fn span(start: i32, end: i32) -> Span {
     Span { start, end }
 }
 
-fn expression(start: u32, end: u32, kind: ExpressionKind) -> ExpressionIr {
+fn expression(start: i32, end: i32, kind: ExpressionKind) -> ExpressionIr {
     ExpressionIr {
         span: span(start, end),
         kind,
     }
 }
 
-fn get(start: u32, end: u32, value: u32) -> Option<ExpressionIr> {
+fn get(start: i32, end: i32, value: u32) -> Option<ExpressionIr> {
     Some(expression(
         start,
         end,
@@ -149,11 +174,11 @@ fn get(start: u32, end: u32, value: u32) -> Option<ExpressionIr> {
     ))
 }
 
-fn int(start: u32, end: u32, value: i32) -> ExpressionIr {
+fn int(start: i32, end: i32, value: i32) -> ExpressionIr {
     expression(start, end, ExpressionKind::Constant(Constant::Int(value)))
 }
 
-fn parameter(start: u32, end: u32, name: &str, ty: TypeIdentity) -> ParameterIr {
+fn parameter(start: i32, end: i32, name: &str, ty: TypeIdentity) -> ParameterIr {
     ParameterIr {
         span: span(start, end),
         name: name.into(),
@@ -283,9 +308,90 @@ fn the_host_builds_a_modules_ir_as_kotlinc_builds_it_from_source() {
     let expected = kotlinc_dump(&runtime, SAMPLE);
     let out = temporary("host-dump.txt");
     let mut host = host_with_dump(&runtime, &out);
-    host.generate(&sample())
+    let returned = host
+        .generate(&sample())
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(std::fs::read_to_string(out).unwrap(), expected);
+    // The dump plugin changes nothing, so the host returns the module it was sent.
+    assert_eq!(returned, sample());
+}
+
+/// `sample()` as the rewrite plugin leaves it: each Int constant one more, and each function
+/// starting with a call of `println` with its name, made without a source position.
+fn rewritten_sample() -> ModuleIr {
+    let println = CallableIdentity {
+        kind: CallableKind::Function {
+            name: "println".into(),
+        },
+        package: "kotlin.io".into(),
+        classes: Vec::new(),
+        type_parameters: 0,
+        context_parameters: Vec::new(),
+        extension_receiver: None,
+        value_parameters: vec![kotlin("Any", true)],
+    };
+    let mut module = sample();
+    for function in &mut module.files[0].functions {
+        let name = ExpressionIr {
+            span: Span::UNDEFINED,
+            kind: ExpressionKind::Constant(Constant::String(function.name.clone())),
+        };
+        function.body.statements.insert(
+            0,
+            StatementIr::Expression(ExpressionIr {
+                span: Span::UNDEFINED,
+                kind: ExpressionKind::Call(Box::new(CallIr {
+                    callee: Callee::External(Box::new(println.clone())),
+                    ty: kotlin("Unit", false),
+                    type_arguments: Vec::new(),
+                    arguments: vec![Some(name)],
+                })),
+            }),
+        );
+    }
+    let greet = &mut module.files[0].functions[2];
+    let StatementIr::Variable(n) = &mut greet.body.statements[2] else {
+        unreachable!()
+    };
+    n.initializer = Some(int(169, 170, 2));
+    let StatementIr::Expression(set) = &mut greet.body.statements[3] else {
+        unreachable!()
+    };
+    set.kind = ExpressionKind::SetValue {
+        value: ValueId(1),
+        to: Box::new(int(179, 180, 3)),
+    };
+    module
+}
+
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn the_host_returns_the_module_its_plugins_leave() {
+    let (runtime, _) = runtime();
+    let mut host = host_with(&runtime, &[rewrite_plugin(&runtime)], &[]);
+    let returned = host
+        .generate(&sample())
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(returned, rewritten_sample());
+}
+
+/// IR a plugin leaves that the plugin IR cannot carry back refuses the module by what it is, rather
+/// than returning the module without it.
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn ir_a_plugin_leaves_that_the_plugin_ir_does_not_cover_refuses_the_module() {
+    let (runtime, _) = runtime();
+    let mut host = host_with(
+        &runtime,
+        &[rewrite_plugin(&runtime)],
+        &["plugin:fixture.rewrite:mode=branch".into()],
+    );
+    assert_eq!(
+        host.generate(&sample()).unwrap_err(),
+        HostError::Plugin {
+            message: "a plugin produced an expression, which krusty's plugin IR does not cover yet: WHEN type=kotlin.Int origin=null".into()
+        }
+    );
 }
 
 /// `source`'s plugin IR as krusty's compiler builds it, against the stdlib and the session's JDK.
