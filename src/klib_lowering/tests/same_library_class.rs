@@ -1601,3 +1601,89 @@ fn a_declined_secondary_constructor_leaves_its_materialized_class_as_it_was() {
     assert_eq!(unit_inventory(&unit), before);
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+const PROCESS_OBJECT: &str = r#"package fixture
+
+private object Counter {
+    private val count: Int = 1
+    override fun toString(): String = "Counter $count"
+}
+
+fun counter(): Any = Counter
+"#;
+
+const PER_THREAD_OBJECT: &str = r#"package fixture
+
+@kotlin.native.concurrent.ThreadLocal
+private object Counter {
+    private val count: Int = 1
+    override fun toString(): String = "Counter $count"
+}
+
+fun counter(): Any = Counter
+"#;
+
+fn lower_counter(
+    name: &str,
+    source_text: &str,
+) -> Option<(
+    DependencyBodyUnit,
+    Result<(), super::super::KlibBodyDeclineReason>,
+)> {
+    let (directory, libraries) = produce_library(name, source_text)?;
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+        "counter",
+    );
+    let [function] = symbols.callables.functions() else {
+        panic!("one producer declaration counter")
+    };
+    let selected = libraries
+        .external_callable(function.callable.external_identity.unwrap())
+        .unwrap();
+    let callable = selected.klib_body_callable().unwrap();
+    let callees = super::super::KlibCalleeFacts::new([callable]);
+    let mut unit = DependencyBodyUnit::default();
+    let lowered = unit
+        .lower_function_with_declarations(
+            callable,
+            libraries.declaration_bodies(),
+            &callees,
+            libraries.intrinsic_facts(),
+            &ProducedExternals::default(),
+            &libraries,
+        )
+        .map(|_| ())
+        .map_err(|decline| decline.reason().clone());
+    let _ = std::fs::remove_dir_all(directory);
+    Some((unit, lowered))
+}
+
+/// A private object is installed as the one process-wide instance only when its declaration
+/// proves that storage. The same object marked per-thread needs an instance and state on every
+/// thread, which the installed class does not carry, so the body stays refused.
+#[test]
+fn official_klib_private_object_storage_is_authenticated() {
+    let Some((unit, lowered)) = lower_counter("process-object", PROCESS_OBJECT) else {
+        return;
+    };
+    assert_eq!(lowered, Ok(()));
+    validated(unit.ir());
+    let objects = unit
+        .ir()
+        .classes
+        .iter()
+        .filter(|class| class.is_object)
+        .count();
+    assert_eq!(objects, 1);
+
+    let (unit, lowered) =
+        lower_counter("per-thread-object", PER_THREAD_OBJECT).expect("the producer ran above");
+    assert_eq!(
+        lowered,
+        Err(super::super::KlibBodyDeclineReason::UnsupportedOperation(
+            "a non-public per-thread object"
+        ))
+    );
+    assert!(unit.ir().classes.iter().all(|class| !class.is_object));
+}

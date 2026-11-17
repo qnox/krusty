@@ -642,6 +642,28 @@ fn prepare<'a>(
     )
 }
 
+/// Authenticates that `object` keeps the one process-wide instance its installed class is
+/// realized as. Each annotation is joined to its declared classifier; one of unknown identity
+/// cannot prove the storage role. A per-thread object needs its own identity and state on every
+/// thread, which installed objects do not carry, so it stays refused.
+fn object_storage(object: &KlibIrClass) -> Result<(), KlibBodyDeclineReason> {
+    let per_thread = crate::types::type_name("kotlin/native/concurrent/ThreadLocal");
+    for annotation in &object.base.annotations {
+        match super::klib_types::annotation_classifier(annotation) {
+            None => {
+                return Err(unsupported(
+                    "a non-public object annotation of unknown identity",
+                ))
+            }
+            Some(classifier) if classifier == per_thread => {
+                return Err(unsupported("a non-public per-thread object"))
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
 /// One class declaration and the constructor that builds it, with the identity it is cached by.
 struct ClassDeclaration<'a> {
     arena: &'a KlibIrArena,
@@ -702,6 +724,9 @@ fn prepare_class<'a>(
         return Err(mismatch(
             "an object is not created by its private constructor alone",
         ));
+    }
+    if object {
+        object_storage(class)?;
     }
     let resolve = |signature: &KlibIrSignature| classifier(source.bodies, source.module, signature);
     let ClassFormals {
