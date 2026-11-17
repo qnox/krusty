@@ -139,21 +139,6 @@ fn split_classpath(v: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-pub(super) fn collect_sources(path: &str, out: &mut Vec<String>) {
-    let p = std::path::Path::new(path);
-    if p.is_dir() {
-        if let Ok(rd) = std::fs::read_dir(p) {
-            let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-            entries.sort();
-            for e in entries {
-                collect_sources(&e.to_string_lossy(), out);
-            }
-        }
-    } else if krusty::source::is_batch_compilable_path(p) {
-        out.push(path.to_string());
-    }
-}
-
 /// `-Xkotlin-reference-version` is krusty's own argument: it selects the kotlinc release whose
 /// argument table parses everything else, so it is read before that table is chosen.
 pub(super) fn take_reference_version(arguments: Vec<String>, opts: &mut Options) -> Vec<String> {
