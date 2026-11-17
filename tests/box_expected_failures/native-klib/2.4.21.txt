@@ -206,10 +206,6 @@ casts/mutableCollections/reifiedIsWithMutable.kt
 casts/mutableCollections/reifiedSafeAsWithMutable.kt
 casts/mutableCollections/safeAsWithMutable.kt
 casts/mutableCollections/weirdMutableCasts.kt
-casts/nativeCCEMessage/castAnonymousClass.kt
-casts/nativeCCEMessage/castGlobalClass.kt
-casts/nativeCCEMessage/castLocalClass.kt
-casts/nativeCCEMessage/castToLocalClass.kt
 casts/toNativePointers.kt
 classDelegation/delegationToStarProjectedType.kt
 classDelegation/multipleModules.kt
@@ -893,7 +889,6 @@ evaluate/intrinsicConst/constTrim.kt
 evaluate/intrinsicConst/equals_after.kt
 evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/serialization/typeAnnotation.kt
-evaluate/thisPlusString.kt
 exceptions/catch1.kt
 exceptions/catch2.kt
 exceptions/rethrow.kt
@@ -926,7 +921,6 @@ funInterface/funInterfaceWithSuspendMethod.kt
 funInterface/implIsNotFunction.kt
 funInterface/inlinedSamWrapper.kt
 funInterface/intersectionTypeToFunInterfaceConversion.kt
-funInterface/kt46512_indyFunInterfaceOverCallableReference.kt
 funInterface/kt49384.kt
 funInterface/kt49384_getSame.kt
 funInterface/kt77685-sam.kt
@@ -1171,7 +1165,6 @@ inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClas
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypes.kt
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypesGeneric.kt
 inlineClasses/kt27113.kt
-inlineClasses/kt28405.kt
 inlineClasses/kt32793.kt
 inlineClasses/kt70461.kt
 inlineClasses/privateConstructorFunInterfaceMultiModule.kt
@@ -1514,7 +1507,6 @@ ranges/forInCharSequenceLengthDecreasedInLoopBody.kt
 ranges/forInCharSequenceLengthIncreasedInLoopBody.kt
 ranges/forInCharSequenceWithCustomIterator.kt
 ranges/forInCharSequenceWithMultipleGetFunctions.kt
-ranges/forInDoubleRangeWithCustomIterator.kt
 ranges/forInDownTo/forIntInDownTo.kt
 ranges/forInDownTo/forIntInDownToWithNonConstBounds.kt
 ranges/forInDownTo/forIntInNonOptimizedDownTo.kt
@@ -1574,7 +1566,6 @@ ranges/forWithPossibleOverflow/forInUntilIntMinValueReversed.kt
 ranges/kt37370a.kt
 ranges/kt47492.kt
 ranges/literal/overflowZeroToMinValue.kt
-ranges/safeCallRangeTo.kt
 ranges/stepped/expression/downTo/emptyProgression.kt
 ranges/stepped/expression/downTo/illegalStepNegative.kt
 ranges/stepped/expression/downTo/illegalStepNonConst.kt
@@ -2128,7 +2119,6 @@ reflection/types/typeArguments.kt
 reflection/types/useSiteVariance.kt
 regressions/directInvokeNameBasedDestructuring.kt
 regressions/floatingRangeContainsMixedWidths.kt
-regressions/generic.kt
 regressions/kt15196.kt
 regressions/kt2017.kt
 regressions/kt2060.kt

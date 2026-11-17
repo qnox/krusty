@@ -27,12 +27,12 @@ fn template(
     libraries: &KlibLibraries,
     selected: &ExternalCallableRealization,
 ) -> Result<KlibInlineTemplate, crate::klib_lowering::KlibBodyDecline> {
-    let hierarchy = checked_template_hierarchy(libraries, selected);
+    let hierarchy = checked_template_facts(libraries, selected);
     let callees = TemplateCallees {
         declarations: libraries.declaration_bodies(),
         references: libraries.reference_bindings(),
         source: libraries,
-        type_hierarchy: &hierarchy,
+        dependency_facts: &hierarchy,
     };
     lower_inline_template(ir, selected, libraries.inline_declaration_bodies(), callees)
         .expect("a KLIB function")
