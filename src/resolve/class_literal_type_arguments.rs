@@ -29,23 +29,11 @@ impl WrittenAlias {
             Some(identity) => identity.nested_segment_ref().to_string(),
             None => source_name.to_string(),
         };
-        let rendered_formals = if alias.formals.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "<{}>",
-                alias
-                    .formals
-                    .iter()
-                    .map(|formal| crate::types::type_parameter_source_name(formal))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        };
         Self {
-            display: format!(
-                "typealias {declared}{rendered_formals} = {}",
-                alias.expansion.source_name()
+            display: candidate_display::type_alias_header_display(
+                &declared,
+                &alias.formals,
+                alias.expansion,
             ),
             formals: alias.formals,
             expansion: alias.expansion,

@@ -620,6 +620,7 @@ pub(crate) fn streamed_pass_one_file_type_aliases(
             let crate::fir::HeaderDeclarationKind::TypeAlias {
                 type_parameters,
                 target,
+                ..
             } = declaration.kind
             else {
                 return None;
@@ -650,6 +651,7 @@ pub(in crate::resolve) fn streamed_type_alias_header_by_declaration(
     let crate::fir::HeaderDeclarationKind::TypeAlias {
         type_parameters,
         target,
+        ..
     } = header.kind
     else {
         return None;

@@ -181,6 +181,19 @@ impl Emitter<'_> {
                     let ci = self.cw.class_ref("java/lang/String");
                     code.checkcast(ci);
                 }
+                // A value-class result is its box (`kotlin/UByteArray`), which the callable-reference
+                // adapter or lambda tail produced. Its carrier (`[B`) is what the box's unbox yields,
+                // not what the interface returned.
+                _ if self.is_value_class_ty(&ret) => {
+                    let box_class = ret
+                        .non_null()
+                        .obj_internal()
+                        .expect("a value class names a class");
+                    let ci = self.cw.class_ref(
+                        &krusty::jvm::jvm_class_map::to_jvm_classfile_type_name(box_class).render(),
+                    );
+                    code.checkcast(ci);
+                }
                 _ if rt.is_array() => {
                     let ci = self.cw.class_ref(&type_descriptor(rt));
                     code.checkcast(ci);

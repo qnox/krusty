@@ -90,10 +90,7 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
         });
     }
 
-    let mut groups = TopLevelFunctionConflictGroups::default();
-    let mut pending = HashMap::default();
-    let mut reserved_diagnostic_bytes = 0usize;
-    let mut retained_display_bytes = 0usize;
+    let mut functions = Vec::with_capacity(entries.len());
     for entry in &entries {
         let span = streamed_callable_signature_span(headers, entry.declaration)
             .expect("a top-level callable must retain its signature origin");
@@ -107,26 +104,18 @@ pub(crate) fn finalize_streamed_top_level_conflicts(
         ) else {
             continue;
         };
-        register_top_level_function_conflict(
-            TopLevelFunctionConflictDisplaySource::Compact(headers),
-            &mut groups,
-            TopLevelFunctionConflictRegistration {
-                key,
-                declaration: TopLevelFunctionConflictDecl {
-                    file: entry.source,
-                    declaration: TopLevelFunctionConflictDeclaration::Stable(entry.declaration),
-                    diagnostic_span: span,
-                },
-                private: entry.signature.visibility.is_private(),
-                entry_point: entry.entry_point.is_some(),
+        functions.push(TopLevelFunctionConflictRegistration {
+            key,
+            declaration: TopLevelFunctionConflictDecl {
+                file: entry.source,
+                declaration: TopLevelFunctionConflictDeclaration::Stable(entry.declaration),
+                diagnostic_span: span,
             },
-            &mut pending,
-            &mut reserved_diagnostic_bytes,
-            &mut retained_display_bytes,
-        );
+            private: entry.signature.visibility.is_private(),
+            entry_point: entry.entry_point.is_some(),
+        });
     }
-
-    commit_top_level_conflict_groups(table, &groups, &pending, reserved_diagnostic_bytes, diags);
+    commit_package_overload_conflicts(headers, index, table, functions, diags);
     publish_entry_points(
         index,
         entries.iter().filter_map(|entry| {

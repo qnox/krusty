@@ -358,14 +358,45 @@ impl<'a> FileLowering<'a> {
             if body.body.is_none() {
                 continue;
             }
-            // What the body takes beyond the captures is what a caller supplies. A SUSPEND lambda's
-            // body takes a continuation nobody here can pass, and that is what this catches.
+            // What the body takes beyond the captures is the physical invoke frame. A suspend
+            // lambda's frame includes its continuation; its source arity is one less and is
+            // authenticated independently by `ir.suspend_funs` below.
             let Some(arity) = body.params.len().checked_sub(captures.len()) else {
                 return Err(declined!(
                     "a function value whose body takes {} parameters for {} captures",
                     body.params.len(),
                     captures.len()
                 ));
+            };
+            let suspend_source_arity = if self.ir.suspend_funs.contains(&impl_fn) {
+                let Some((source_parameters, source_result)) =
+                    self.ir.suspend_declared_sigs.get(&impl_fn)
+                else {
+                    return Err(declined!(
+                        "a suspend function value without its checked source signature"
+                    ));
+                };
+                let Some(source_arity) = source_parameters.len().checked_sub(captures.len()) else {
+                    return Err(declined!(
+                        "a suspend function value whose source signature has {} parameters for {} captures",
+                        source_parameters.len(),
+                        captures.len()
+                    ));
+                };
+                let (continuation, erased_result) =
+                    krusty::types::continuation_passing(*source_result);
+                if body.params.len() != source_parameters.len() + 1
+                    || body.params[..source_parameters.len()] != source_parameters[..]
+                    || body.params.last() != Some(&continuation)
+                    || body.ret != erased_result
+                {
+                    return Err(declined!(
+                        "a suspend function value whose emitted frame does not match its checked continuation signature"
+                    ));
+                }
+                Some(source_arity)
+            } else {
+                None
             };
             if let IrExpr::Lambda {
                 arity: declared, ..
@@ -527,7 +558,8 @@ impl<'a> FileLowering<'a> {
                     // What an `is` against a function type asks about. This object's own type is
                     // one of a kind — there is a descriptor per lambda — so the type written at a
                     // check site is never this one, and the markers are what the two have in
-                    // common. Both the arity's and the bare `Function` are named, because
+                    // common. The physical `FunctionN` arity and bare `Function` are named,
+                    // because
                     // `KType.interfaces` is flattened and an interface's own bases are not walked.
                     // 22 is Kotlin's largest function arity, and the runtime declares exactly
                     // those; a wider one names nothing rather than a symbol that does not exist.
@@ -535,6 +567,15 @@ impl<'a> FileLowering<'a> {
                     if arity <= 22 {
                         markers.push(self.import_data(&format!("kt_type_function{arity}"))?);
                         markers.push(self.import_data("kt_type_function")?);
+                    }
+                    if let Some(source_arity) = suspend_source_arity {
+                        if source_arity <= 22 {
+                            markers.push(
+                                self.import_data(&format!(
+                                    "kt_type_suspend_function{source_arity}"
+                                ))?,
+                            );
+                        }
                     }
                     self.define_type_descriptor(
                         descriptor,
@@ -697,6 +738,32 @@ impl<'a> FileLowering<'a> {
         let mut itable = self.table_functions(&itable_template, None)?;
         if let Some(number) = sam_number {
             itable[number as usize] = thunk;
+        }
+        // A functional interface that is itself a function type (`fun interface F : (Int) -> String`)
+        // is also called through the one invoke slot every function value declares, whose entry
+        // takes and returns references. The member above wears the interface's own signature, so
+        // the slot gets an entry of its own over the same lambda body.
+        if let Some(method) = method.filter(|method| {
+            self.ir.overrides_function_invoke(
+                self.ir.classes[interface as usize].fq_name_id(),
+                *method,
+            )
+        }) {
+            let arity = self.ir.functions[method as usize].params.len();
+            let boxed = self.declare_local_function(
+                &format!("{base}_function_invoke"),
+                &vec![any(); arity + 1],
+                any(),
+            )?;
+            self.define_sam_thunk(
+                boxed,
+                &format!("{base}_function"),
+                impl_fn,
+                captures,
+                &vec![any(); arity],
+                any(),
+            )?;
+            vtable[model::FUNCTION_SLOT as usize] = boxed;
         }
 
         let mut interfaces: Vec<DataId> = Vec::new();
