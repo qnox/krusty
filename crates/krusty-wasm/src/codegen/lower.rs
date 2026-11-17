@@ -265,6 +265,7 @@ pub(super) fn lower_file(
                 functions: &indices,
                 callables,
                 exports: dependency_exports,
+                classifiers,
             },
             &mut classes,
             &mut super::interface_members::Destination {
