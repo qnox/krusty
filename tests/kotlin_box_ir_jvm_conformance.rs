@@ -844,6 +844,11 @@ fn compose_library_default_arguments_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_qualified_library_call_names_its_selector_in_source_information() {
+    assert_compose_fixture_matches_kotlinc("libraryDefaultArgumentsSized");
+}
+
+#[test]
 fn compose_generic_field_stability_is_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("genericFieldStability");
 }
