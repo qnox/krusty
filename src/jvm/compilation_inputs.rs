@@ -520,7 +520,7 @@ mod tests {
         for (name, bytes) in [
             ("8/java.base/demo/Legacy.sig", class.as_slice()),
             ("9A/java.base/demo/Modular.sig", b"unread".as_slice()),
-            ("B/system-modules", b"java.base".as_slice()),
+            ("C/system-modules", b"java.base".as_slice()),
             ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0".as_slice()),
         ] {
             archive.start_file(name, options).expect("start entry");
@@ -536,7 +536,7 @@ mod tests {
             JdkApi::for_release(Some(&root), None),
             Ok(Some(own.clone()))
         );
-        assert_eq!(JdkApi::for_release(Some(&root), Some(11)), Ok(Some(own)));
+        assert_eq!(JdkApi::for_release(Some(&root), Some(12)), Ok(Some(own)));
         for release in [8, 9, 10] {
             assert_eq!(
                 JdkApi::for_release(Some(&root), Some(release)),
@@ -555,10 +555,10 @@ mod tests {
             Err(vec![not_supported(7)])
         );
         assert_eq!(
-            JdkApi::for_release(Some(&root), Some(12)),
+            JdkApi::for_release(Some(&root), Some(11)),
             Err(vec![
                 "module java.base cannot be found in the module graph".to_string(),
-                not_supported(12)
+                not_supported(11)
             ])
         );
 
