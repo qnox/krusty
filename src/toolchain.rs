@@ -482,9 +482,10 @@ pub fn classpath_jars_for(src: &str) -> Vec<PathBuf> {
         .map(|corpus| corpus.plugin.as_str())
         .collect();
     let sig = (sig, plugins);
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<crate::fx_hash::HashMap<(u8, Vec<&'static str>), Vec<PathBuf>>>,
-    > = std::sync::OnceLock::new();
+    /// Jars by directive signature and the plugin corpora the case enables.
+    type JarsBySignature = crate::fx_hash::HashMap<(u8, Vec<&'static str>), Vec<PathBuf>>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<JarsBySignature>> =
+        std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(crate::fx_hash::HashMap::default()));
     if let Some(v) = cache.lock().unwrap().get(&sig) {
         return v.clone();
