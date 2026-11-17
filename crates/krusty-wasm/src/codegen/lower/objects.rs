@@ -1261,6 +1261,10 @@ impl Body<'_> {
     /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
     /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
     fn library_interface_test(&mut self, interface: TypeName, nullable: bool) {
+        if let Some(arity) = self.function_arity(Ty::obj_name(interface)) {
+            self.function_type_test(arity, nullable, false);
+            return;
+        }
         let subtypes = self.classifiers.builtin_subtypes(interface);
         self.runtime.builtin_instances(interface, subtypes);
         self.interface_test(interface, nullable);
@@ -1359,6 +1363,10 @@ impl Body<'_> {
     /// Replace the reference on the stack with whether it is an instance of the reference type
     /// `tested` — or null, when `nullable`.
     fn reference_type_test(&mut self, tested: Ty, nullable: bool) -> Result<(), Unsupported> {
+        if let Some(arity) = self.function_arity(tested) {
+            self.function_type_test(arity, nullable, self.is_suspend_function_type(tested));
+            return Ok(());
+        }
         match tested.kind() {
             TyKind::STRING => {
                 self.code.ref_test(nullable, STRING_HEAP);
