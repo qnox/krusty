@@ -42,7 +42,8 @@ pub struct KlibDeclarationBodies {
 /// A public classifier search over one producer dependency closure.
 pub(crate) enum LocatedClass<'a> {
     Missing,
-    One(&'a KlibIrClass),
+    /// The one class, and the arena that owns its types and members.
+    One(&'a KlibIrArena, &'a KlibIrClass),
     Several,
 }
 
@@ -868,12 +869,12 @@ impl KlibDeclarationBodies {
                     if found.is_some() {
                         return LocatedClass::Several;
                     }
-                    found = Some(class);
+                    found = Some((&tree.arena, class));
                 }
             }
         }
         match found {
-            Some(class) => LocatedClass::One(class),
+            Some((arena, class)) => LocatedClass::One(arena, class),
             None => LocatedClass::Missing,
         }
     }

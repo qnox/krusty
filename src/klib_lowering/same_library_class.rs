@@ -358,6 +358,7 @@ fn supertype_application(
     found.ok_or_else(|| mismatch("an override's declaring type is not a supertype of the object"))
 }
 
+#[derive(Clone)]
 struct AdmittedInterface {
     name: TypeName,
     signature: KlibIrSignature,
@@ -690,8 +691,11 @@ fn prepare_class<'a>(
         variances,
         bounds,
     } = formals;
-    let (supertypes, interfaces) =
-        authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
+    let AuthenticatedSupertypes {
+        supertypes,
+        interfaces,
+        supertype_interfaces,
+    } = authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
     let self_type = Ty::obj_args_name(class_name, &formals);
     let result = semantic_type_in(arena, &types, function.return_type, &resolve)?;
     if result != self_type {
@@ -714,7 +718,7 @@ fn prepare_class<'a>(
         bodies: source.bodies,
         declarations: source.declarations,
         module: source.module,
-        interfaces: &interfaces,
+        interfaces: &supertype_interfaces,
     };
     let StoredMembers {
         fields,
@@ -775,6 +779,14 @@ fn prepare_class<'a>(
     })
 }
 
+/// The class's direct supertypes, the interfaces among them, and every interface above it with
+/// its application (`supertype_interfaces`).
+struct AuthenticatedSupertypes {
+    supertypes: Vec<Ty>,
+    interfaces: Vec<AdmittedInterface>,
+    supertype_interfaces: Vec<AdmittedInterface>,
+}
+
 fn authenticate_supertypes(
     bodies: &KlibDeclarationBodies,
     module: &str,
@@ -782,9 +794,10 @@ fn authenticate_supertypes(
     class: &KlibIrClass,
     types: &KlibTypeParameters,
     resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
-) -> Result<(Vec<Ty>, Vec<AdmittedInterface>), KlibBodyDeclineReason> {
+) -> Result<AuthenticatedSupertypes, KlibBodyDeclineReason> {
     let mut supertypes = Vec::new();
     let mut interfaces = Vec::new();
+    let mut pending = Vec::new();
     for supertype in &class.supertypes {
         let ty = semantic_type_in(arena, types, *supertype, resolve)?;
         if ty == Ty::obj_name(crate::types::wk::any()) {
@@ -804,23 +817,101 @@ fn authenticate_supertypes(
                 ))
             }
             LocatedClass::Several => return Err(mismatch("two libraries serialize one supertype")),
-            LocatedClass::One(found) => {
+            LocatedClass::One(found_arena, found) => {
                 if class_kind(found.base.flags) != TypeKind::Interface {
                     return Err(unsupported("a superclass other than Any"));
                 }
                 let TyKind::Obj(name, _) = ty.kind() else {
                     return Err(mismatch("an interface supertype is not a class"));
                 };
-                interfaces.push(AdmittedInterface {
+                let interface = AdmittedInterface {
                     name,
                     signature: classifier.signature.clone(),
                     arguments: ty.type_args().to_vec(),
-                });
+                };
+                pending.push((found_arena, found, interface.clone()));
+                interfaces.push(interface);
                 supertypes.push(ty);
             }
         }
     }
-    Ok((supertypes, interfaces))
+    let supertype_interfaces = interfaces_above(bodies, module, pending, resolve)?;
+    Ok(AuthenticatedSupertypes {
+        supertypes,
+        interfaces,
+        supertype_interfaces,
+    })
+}
+
+/// Every interface at or above the admitted direct interfaces `pending`, each applied as the
+/// class sees it: an interface's own supertypes are read with its formals bound to its
+/// application. A member may override a declaration of any of them, not only of a direct one.
+/// An interface this library does not serialize is not admitted, so an override of it declines
+/// where it is authenticated; one reached with two applications is a mismatch.
+fn interfaces_above<'a>(
+    bodies: &'a KlibDeclarationBodies,
+    module: &str,
+    mut pending: Vec<(&'a KlibIrArena, &'a KlibIrClass, AdmittedInterface)>,
+    resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
+) -> Result<Vec<AdmittedInterface>, KlibBodyDeclineReason> {
+    let mut admitted: Vec<AdmittedInterface> = Vec::new();
+    while let Some((arena, class, interface)) = pending.pop() {
+        if let Some(known) = admitted
+            .iter()
+            .find(|known| known.signature == interface.signature)
+        {
+            if known.arguments != interface.arguments {
+                return Err(mismatch(
+                    "an interface is inherited with two different applications",
+                ));
+            }
+            continue;
+        }
+        if interface.arguments.len() != class.type_parameters.len() {
+            return Err(mismatch(
+                "an interface application disagrees with its type parameters",
+            ));
+        }
+        let mut arguments = interface.arguments.iter().copied();
+        let types = bind_interface_parameters(class, |_| {
+            arguments
+                .next()
+                .ok_or_else(|| mismatch("an interface application is too short"))
+        })?;
+        for supertype in &class.supertypes {
+            let ty = semantic_type_in(arena, &types, *supertype, resolve)?;
+            if ty == Ty::obj_name(crate::types::wk::any()) {
+                continue;
+            }
+            let KlibIrType::Simple { classifier, .. } = arena.ty(*supertype) else {
+                return Err(mismatch("an interface supertype is not a class"));
+            };
+            let KlibIrSignature::Public(signature) = &classifier.signature else {
+                return Err(mismatch("an interface has a non-public supertype"));
+            };
+            let (found_arena, found) = match bodies.public_class(module, signature) {
+                LocatedClass::Missing => continue,
+                LocatedClass::Several => {
+                    return Err(mismatch("two libraries serialize one supertype"))
+                }
+                LocatedClass::One(found_arena, found) => (found_arena, found),
+            };
+            let TyKind::Obj(name, _) = ty.kind() else {
+                return Err(mismatch("an interface supertype is not a class"));
+            };
+            pending.push((
+                found_arena,
+                found,
+                AdmittedInterface {
+                    name,
+                    signature: classifier.signature.clone(),
+                    arguments: ty.type_args().to_vec(),
+                },
+            ));
+        }
+        admitted.push(interface);
+    }
+    Ok(admitted)
 }
 
 struct StoredMembers<'a> {
@@ -837,6 +928,7 @@ struct MemberScope<'a> {
     bodies: &'a KlibDeclarationBodies,
     declarations: &'a dyn crate::symbol_source::SymbolSource,
     module: &'a str,
+    /// Every interface at or above the class, as it applies them; a member overrides one's.
     interfaces: &'a [AdmittedInterface],
 }
 
