@@ -41,6 +41,7 @@ pub(crate) use class_construction::superclass_constructor_ordinal;
 mod enum_materialization;
 #[cfg(test)]
 mod initializer_capability_tests;
+mod inline_functions;
 mod local_class;
 mod static_properties;
 
@@ -717,7 +718,10 @@ impl DependencyBodyUnit {
     ) -> impl Iterator<Item = (&KlibDependencyCallable, FunId)> + '_ {
         self.functions
             .iter()
-            .filter(|(identity, _)| !self.private_members.contains(*identity))
+            .filter(|(identity, function)| {
+                !self.private_members.contains(*identity)
+                    && !self.ir.inline_only_fns.contains(*function)
+            })
             .map(|(identity, &function)| (identity, function))
     }
 
@@ -1016,6 +1020,8 @@ impl DependencyBodyUnit {
             })?;
             self.ir.functions[body.function as usize].body = Some(lowered);
         }
+        inline_functions::expand_calls(&mut self.ir)
+            .map_err(|reason| KlibBodyDecline::new(identity.declaration.clone(), reason))?;
         Ok(root)
     }
 }
@@ -2561,6 +2567,12 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
+        // The selected root is lowered as the declaration it is; a call of an inline callee is
+        // expanded.
+        let root = self.root.is_some_and(|root| root.identity() == identity);
+        if !root && inline_functions::declares_inline(function) {
+            inline_functions::declare(ir, declared, function, &header)?;
+        }
         self.functions.insert(identity.clone(), declared);
         if let Some(receiver) = header.value_receiver() {
             self.member_receivers.insert(identity.clone(), receiver);
