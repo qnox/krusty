@@ -787,22 +787,6 @@ struct ObjectInitialization {
     objects: Vec<crate::metadata::id_signature::KlibPublicIdSignature>,
 }
 
-/// The initialization edges of each object the closed bodies read, which the unit materializes
-/// with every member dispatch reaches, as it materializes the object of a member it calls.
-pub(super) fn read_object_initializations(
-    platform: &dyn SemanticPlatform,
-    bodies: &KlibDeclarationBodies,
-    callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
-) -> Result<Vec<KlibDependencyCallable>, String> {
-    let mut edges = Vec::new();
-    for class in callees.read_objects() {
-        if let Some(initialization) = object_initialization(platform, bodies, callees, class)? {
-            edges.extend(initialization.callees);
-        }
-    }
-    Ok(edges)
-}
-
 /// The object declaring the member `identity`, when a support unit materializes it.
 pub(super) fn member_object(
     platform: &dyn SemanticPlatform,

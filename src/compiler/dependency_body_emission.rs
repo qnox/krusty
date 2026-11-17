@@ -962,14 +962,6 @@ fn prepare_bodyless_externals(
         .iter()
         .map(|root| root.identity().clone())
         .collect::<VecDeque<_>>();
-    // An object a body reads is materialized with the members its initialization reaches.
-    match emitted_roots::read_object_initializations(platform, bodies, capabilities.callees) {
-        Ok(edges) => pending.extend(edges),
-        Err(error) => {
-            diags.error(Span::new(0, 0), format!("internal error: {error}"));
-            return false;
-        }
-    }
     let mut visited = HashSet::default();
     while let Some(identity) = pending.pop_front() {
         if !visited.insert(identity.clone()) {

@@ -114,13 +114,6 @@ impl<'a> KlibCalleeFacts<'a> {
         self.read_objects.get(&classifier)
     }
 
-    /// The library objects the closed bodies read, which the unit materializes.
-    pub(crate) fn read_objects(
-        &self,
-    ) -> impl Iterator<Item = &crate::libraries::KlibBodyClassContract> {
-        self.read_objects.values()
-    }
-
     pub(crate) fn member_edge(&self, identity: &KlibDependencyCallable) -> Option<&CallEdge> {
         self.member_edges.get(identity)
     }
