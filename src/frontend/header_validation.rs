@@ -61,6 +61,58 @@ pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
     }
 }
 
+/// These semantic errors do not invalidate the parsed declaration inventory or suppress body
+/// checking. Report them only after the caller records its parser-failure state.
+pub(super) fn validate_after_parsing(file: &File, diags: &mut DiagSink) {
+    // The brackets were parsed. Report the language gate only after `parse_error` is captured,
+    // so the file's declarations still join the module for every other file.
+    for span in file
+        .destructuring
+        .ungated_bracket_spans
+        .iter()
+        .copied()
+        .chain(file.destructuring.ungated_full_form_spans.iter().copied())
+    {
+        diags.error(
+            span,
+            "the feature \"name based destructuring\" is only available since language version 2.5",
+        );
+    }
+    for span in file.destructuring.ungated_short_form_spans.iter().copied() {
+        diags.error(
+            span,
+            "the feature \"enable name based destructuring short form\" is experimental and \
+             should be enabled explicitly. This can be done by supplying the compiler \
+             argument '-Xname-based-destructuring=complete', but note that no stability \
+             guarantees are provided.",
+        );
+    }
+    if file.is_script {
+        return;
+    }
+    for &declaration in &file.decls {
+        let Decl::Fun(function) = file.decl(declaration) else {
+            continue;
+        };
+        if !matches!(function.body, crate::ast::FunBody::None)
+            || function.is_abstract()
+            || function.is_external()
+            || function.is_companion_block_member()
+            || file
+                .expect_decls
+                .iter()
+                .any(|expected| expected.declaration == declaration)
+        {
+            continue;
+        }
+        diags.error_named(
+            function.span,
+            crate::diag::names::NON_MEMBER_FUNCTION_NO_BODY,
+            format!("function '{}' must have a body.", function.name),
+        );
+    }
+}
+
 fn validate_type_alias(alias: &crate::ast::TypeAliasDecl, diagnostics: &mut DiagSink) {
     for diagnostic in crate::declaration_validation::type_alias_diagnostics(alias) {
         diagnostics.error(diagnostic.span, diagnostic.message.to_string());
@@ -197,6 +249,52 @@ fn validate_expect_property(
     if let Some(setter) = &property.setter {
         if setter.body.is_some() {
             diagnostics.error(setter.span, body_message());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::diag::{DiagSink, Severity};
+    use crate::features::LangFeatures;
+    use crate::source::SourceInput;
+
+    #[test]
+    fn a_declaration_error_retains_the_inventory_and_checked_body_in_trimmed_analysis() {
+        for source in [
+            "fun missing(): String\nval wrong: String = 1\n",
+            "val wrong: String = 1\nfun missing(): String\n",
+        ] {
+            let inputs = [SourceInput::kotlin(source)];
+            let mut diagnostics = DiagSink::new();
+            let analysis = crate::frontend::analyze_source_set_prefix_with_features_trimmed(
+                &inputs,
+                1,
+                1,
+                crate::frontend::PlatformProvider::jvm(Box::new(
+                    crate::symbol_source::EmptySymbolSource,
+                )),
+                &LangFeatures::new(),
+                &mut diagnostics,
+            );
+            assert!(analysis.streamed.is_some());
+            assert!(analysis.types[0].is_some());
+            assert_eq!(diagnostics.diags.len(), 2, "{:?}", diagnostics.diags);
+            assert!(diagnostics.diags.iter().all(|diagnostic| {
+                diagnostic.file == 0 && diagnostic.severity == Severity::Error
+            }));
+            let messages = diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                messages,
+                [
+                    "function 'missing' must have a body.",
+                    "initializer type mismatch: expected 'String', actual 'Int'.",
+                ]
+            );
         }
     }
 }
