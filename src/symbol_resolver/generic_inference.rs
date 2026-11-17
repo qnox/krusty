@@ -161,9 +161,9 @@ fn parameter_formals_in_mention_order(signature: &GenericSig) -> GenericSig {
     while let Some(&ordinal) = slots.get(next) {
         next += 1;
         for bound in signature.formal_bounds.get(ordinal).into_iter().flatten() {
-            for reached in 0..signature.formals.len() {
+            for (reached, formal) in signature.formals.iter().enumerate() {
                 if !slots.contains(&reached)
-                    && crate::types::ty_mentions_param(*bound, &[signature.formals[reached]])
+                    && crate::types::ty_mentions_param(*bound, std::slice::from_ref(formal))
                 {
                     slots.push(reached);
                 }
