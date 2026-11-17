@@ -233,3 +233,64 @@ fn the_builtin_subtypes_of_a_classifier_are_the_builtin_classes_below_it() {
         assert!(builtin_subtypes(&libraries, type_name("kotlin/Int")).is_empty());
     }
 }
+
+#[test]
+fn a_target_laid_out_class_carries_its_own_overrides_of_the_members_above_it() {
+    let builder = type_name("kotlin/text/StringBuilder");
+    for libraries in wasm_stdlibs() {
+        let char_sequence = type_name("kotlin/CharSequence");
+        let appendable = type_name("kotlin/text/Appendable");
+        let (appends, _) =
+            declared_member_declarations(&libraries, Ty::obj_name(appendable), "append")
+                .into_parts();
+        let append_char = appends
+            .overloads
+            .iter()
+            .find(|function| function_declaration_identity(function).params.as_ref() == [Ty::Char])
+            .and_then(|function| function.callable.external_identity)
+            .expect("`Appendable` declares `append(Char)`");
+        for (owner, name, identity, params) in [
+            (
+                char_sequence,
+                "length",
+                getter(&libraries, "kotlin/CharSequence", "length"),
+                &[][..],
+            ),
+            (
+                char_sequence,
+                "get",
+                member(&libraries, "kotlin/CharSequence", "get"),
+                &[Ty::Int][..],
+            ),
+            (appendable, "append", append_char, &[Ty::Char][..]),
+        ] {
+            let facts =
+                represented_implementation_facts(&libraries, &[builder], owner, name, identity);
+            let [fact] = facts.as_slice() else {
+                panic!("`StringBuilder` is the one laid-out class below `{owner:?}`");
+            };
+            assert_eq!(fact.receiver, Ty::obj_name(builder));
+            let declaration = fact
+                .declaration
+                .as_ref()
+                .expect("`StringBuilder` overrides the member itself");
+            assert_eq!(declaration.operation, None);
+            assert_eq!(declaration.params.as_ref(), params);
+            // The builtin classes' facts stay as they were: no builtin class is an `Appendable`.
+            if owner == appendable {
+                assert!(builtin_implementation_facts(&libraries, owner, name, identity).is_empty());
+            }
+        }
+        // A laid-out class not below the member's owner runs nothing for it.
+        let number = type_name("kotlin/Number");
+        let to_long = member(&libraries, "kotlin/Number", "toLong");
+        assert!(represented_implementation_facts(
+            &libraries,
+            &[builder],
+            number,
+            "toLong",
+            to_long
+        )
+        .is_empty());
+    }
+}

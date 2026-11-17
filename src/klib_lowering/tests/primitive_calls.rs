@@ -494,6 +494,7 @@ fn checked_klib_property_facts_use_the_exact_property_name() {
             &libraries,
             libraries.declaration_bodies(),
             [selected],
+            &[],
         )
         .expect("selected property body has checked facts"),
     );

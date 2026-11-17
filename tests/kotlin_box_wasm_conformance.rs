@@ -1598,6 +1598,9 @@ mod default_identity_hash;
 #[path = "wasm_type_of.rs"]
 mod type_of;
 
+#[path = "wasm_char_sequence_appends.rs"]
+mod char_sequence_appends;
+
 #[test]
 fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
     expect_wasm_box(
