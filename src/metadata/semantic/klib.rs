@@ -1786,6 +1786,7 @@ fn semantic_property(
         annotation_applications,
         contract: None,
     };
+    let has_context_parameters = !context_params.is_empty();
     let property = metadata::KotlinProperty {
         name,
         receiver,
@@ -1808,6 +1809,12 @@ fn semantic_property(
         constant,
         annotations,
         return_value_status: member.return_value_status,
+        read_stability: crate::metadata::property_read_stability::declared_read_stability(
+            modern_flags,
+            compatibility_flags.is_some(),
+            getter_flags,
+            has_context_parameters,
+        ),
     };
     Ok((member, property))
 }

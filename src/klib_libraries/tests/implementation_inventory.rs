@@ -582,6 +582,7 @@ pub(super) fn fixture_property(name: &str, mutable: bool) -> KotlinProperty {
         constant: None,
         annotations: Vec::new(),
         return_value_status: Default::default(),
+        read_stability: Default::default(),
     }
 }
 

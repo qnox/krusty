@@ -1916,6 +1916,17 @@ impl PropertyReadStability {
         }
     }
 
+    /// What a module other than the declaring one may rely on: kotlinc treats another module's
+    /// property as unstable, except a final default-getter component of a value class, which it
+    /// smart-casts under `AllowSmartCastsOnValueClassUnderlyingProperties`.
+    pub(crate) fn across_modules(self, value_class_component: bool) -> Self {
+        if value_class_component && self == Self::Stable {
+            Self::ValueClassComponentOfOtherModule
+        } else {
+            Self::Unstable
+        }
+    }
+
     pub(crate) fn permits(
         self,
         receiver_is_final: bool,
