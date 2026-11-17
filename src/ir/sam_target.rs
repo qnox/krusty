@@ -68,6 +68,27 @@ pub struct IrSamTarget {
     /// The interface's own type parameters in declaration order, which the declared shape names.
     /// A target that writes a class implementing the interface declares them on that class.
     pub type_parameters: Vec<IrSamTypeParameter>,
+    /// The declaration whose code holds the conversion, where a target that writes a class for
+    /// it places that class.
+    pub placement: IrSamPlacement,
+}
+
+/// Where the code holding a SAM conversion stands after inlining: Kotlin places the class a
+/// conversion compiles to in the class whose member holds it, or at its file's level. A target
+/// that names that class (kotlinc-wasm's `pkg.Owner.sam$pkg_Interface$0`) formats it from this.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrSamPlacement {
+    /// Code of the file being lowered, inlined copies included: the classifier owning the
+    /// expression ([`super::IrFile::expression_owners`]), or else this file's package.
+    ThisFile,
+    /// A dependency's code at the level of a file declaring `package`, a package name-tree node
+    /// ([`TypeName::ROOT`] for the root package).
+    DependencyFile { package: TypeName },
+    /// A dependency's code in a member of its classifier `owner`.
+    DependencyMember { owner: TypeName },
+    /// A dependency's code in a member of a class private to its file, which the dependency does
+    /// not name to this compilation.
+    UnnamedDependencyClass,
 }
 
 /// An exact checked declaration and the unspecialized frame its interface slot carries.

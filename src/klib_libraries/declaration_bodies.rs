@@ -698,6 +698,13 @@ impl KlibDeclarationBodies {
         })
     }
 
+    /// The package the serialized file `file` of `module` declares, as its segments; empty for
+    /// the root package.
+    pub(crate) fn module_file_package(&self, module: &str, file: u32) -> Option<&[String]> {
+        let &library = self.modules.get(module)?;
+        self.libraries[library].file_package(file)
+    }
+
     /// The serialized file of `identity` when it is a top-level function or a top-level property
     /// accessor of its library: the file whose initialization a call of it runs first.
     pub(crate) fn top_level_file(&self, identity: &KlibDependencyCallable) -> Option<u32> {

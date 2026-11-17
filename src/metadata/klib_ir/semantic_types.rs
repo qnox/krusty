@@ -371,16 +371,31 @@ pub(crate) fn member_owner(member: &KlibPublicIdSignature) -> Result<TypeName, K
     declaration_name(member.package().segments(), class)
 }
 
+/// The package name-tree node whose segments are `package`; [`TypeName::ROOT`] for none.
+pub(crate) fn package_name(package: &[String]) -> Result<TypeName, KlibTypeError> {
+    if !package.iter().all(|segment| valid_segment(segment)) {
+        return Err(KlibTypeError::UnsupportedType(
+            "a package with an invalid identity path",
+        ));
+    }
+    Ok(package.iter().fold(TypeName::ROOT, |parent, segment| {
+        type_name_child(parent, segment)
+    }))
+}
+
+fn valid_segment(segment: &str) -> bool {
+    !segment.is_empty() && !segment.contains('/')
+}
+
 fn declaration_name(package: &[String], declaration: &[String]) -> Result<TypeName, KlibTypeError> {
-    let valid = |segment: &String| !segment.is_empty() && !segment.contains('/');
-    if !package.iter().all(valid) || !declaration.iter().all(valid) {
+    if !package.iter().all(|segment| valid_segment(segment))
+        || !declaration.iter().all(|segment| valid_segment(segment))
+    {
         return Err(KlibTypeError::UnsupportedType(
             "a class with an invalid identity path",
         ));
     }
-    let package = package.iter().fold(TypeName::ROOT, |parent, segment| {
-        type_name_child(parent, segment)
-    });
+    let package = package_name(package)?;
     let (first, nested) = declaration
         .split_first()
         .ok_or(KlibTypeError::UnsupportedType(

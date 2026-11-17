@@ -111,6 +111,7 @@ pub(super) fn freeze(
                 bounds: p.bounds,
             })
             .collect(),
+        placement: crate::ir::IrSamPlacement::ThisFile,
     };
     // A lambda the producer serialized with the interface's type names the method it overrides.
     // That is the selected method or one of the dispatch frames it implements, by exact identity.

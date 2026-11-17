@@ -1849,6 +1849,7 @@ impl BodyLowering<'_> {
                             .iter()
                             .map(crate::ir::IrSamTypeParameter::lowered)
                             .collect(),
+                        placement: crate::ir::IrSamPlacement::ThisFile,
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,

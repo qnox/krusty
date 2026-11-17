@@ -105,6 +105,7 @@ mod tests {
                 kotlin_interface: false,
                 parameter_identities: Vec::new(),
                 type_parameters: Vec::new(),
+                placement: krusty::ir::IrSamPlacement::ThisFile,
             })),
             inline_body: None,
         });

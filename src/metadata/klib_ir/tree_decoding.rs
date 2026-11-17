@@ -56,6 +56,8 @@ pub struct KlibIrModuleTrees {
     /// The serialized file each tree of [`Self::trees`] is a top-level declaration of, by tree
     /// index: the file a file-local signature of that file names.
     files: Vec<u32>,
+    /// The package each serialized file declares, by file index, as its `fqName` segments.
+    file_packages: Vec<Box<[String]>>,
     functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
     /// File-local functions, meaningful only inside this library.
     local_functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
@@ -121,6 +123,14 @@ impl KlibIrModuleTrees {
             .declaration
             .declares_top_level(function)
             .then(|| self.files[tree])
+    }
+
+    /// The package the serialized file `file` declares, as its segments; empty for the root
+    /// package.
+    pub(crate) fn file_package(&self, file: u32) -> Option<&[String]> {
+        self.file_packages
+            .get(file as usize)
+            .map(|package| &**package)
     }
 
     /// Every tree with the serialized file it is a top-level declaration of, in serialized order.
@@ -461,7 +471,8 @@ fn read_declaration_trees_from(
                 .map(|tables| entries(&tables[index], FILE_ENTRIES).map(|entries| entries.len()))
                 .transpose()?,
         };
-        let declaration_ids = ir_file_declaration_ids(&mut file, &files[index])?;
+        let (declaration_ids, package) = ir_file_header(&mut file, &files[index])?;
+        module.file_packages.push(package);
         let declarations = declaration_index(&declarations[index])?;
         for id in declaration_ids {
             let bytes = declarations.get(&id).ok_or_else(|| {
@@ -510,16 +521,24 @@ fn read_declaration_trees_from(
     Ok(module)
 }
 
-/// Validate an `IrFile`'s own provenance before decoding declarations from it. Kotlin 2.4.21
-/// requires one of fields 2 and 7 when consuming a produced KLIB; older inputs may omit both, but
-/// an id that is present must resolve in this file's `fileEntries.knf` table.
-fn ir_file_declaration_ids(
+/// An `IrFile`'s declaration ids (field 1) and the segments of the package it declares (field 3,
+/// `fqName`, as indices into the file's string table). Its own provenance is validated before
+/// declarations are decoded from it: Kotlin 2.4.21 requires one of fields 2 and 7 when consuming
+/// a produced KLIB; older inputs may omit both, but an id that is present must resolve in this
+/// file's `fileEntries.knf` table.
+fn ir_file_header(
     file: &mut FileTables<'_>,
     bytes: &[u8],
-) -> Result<Vec<u64>, KlibIrDecodeError> {
+) -> Result<(Vec<u64>, Box<[String]>), KlibIrDecodeError> {
     let ir_file = Msg::parse(bytes, 0, FILES)?;
     TreeDecoder::new(file).file_reference(&ir_file, 2, 7)?;
-    ir_file.packed(1, "declaration ids")
+    let declarations = ir_file.packed(1, "declaration ids")?;
+    let package = ir_file
+        .packed(3, "package segments")?
+        .into_iter()
+        .map(|segment| string(file.strings, segment, "a package segment"))
+        .collect::<Result<_, _>>()?;
+    Ok((declarations, package))
 }
 
 /// The identity of the declaration `msg` serializes, read from its base without decoding the rest.
@@ -2130,16 +2149,43 @@ mod tests {
         push_varint(9, &mut declaration_ids);
         let mut valid = bytes_field(1, &declaration_ids);
         valid.extend(varint_field(7, 0));
-        assert_eq!(ir_file_declaration_ids(&mut file, &valid).unwrap(), [9]);
+        assert_eq!(ir_file_header(&mut file, &valid).unwrap().0, [9]);
 
         let mut absent = bytes_field(1, &declaration_ids);
         absent.extend(varint_field(7, 1));
         assert_eq!(
-            ir_file_declaration_ids(&mut file, &absent)
-                .unwrap_err()
-                .to_string(),
+            ir_file_header(&mut file, &absent).unwrap_err().to_string(),
             "invalid KLIB IR files.knf at byte 0: file entry 1 is absent from fileEntries.knf"
         );
+    }
+
+    #[test]
+    fn an_ir_file_names_its_package_by_string_table_segments() {
+        let strings = declaration_strings();
+        let signatures: Vec<&[u8]> = Vec::new();
+        let mut file = FileTables {
+            strings: &strings,
+            signatures: SignatureTable::new(0, &signatures, &strings),
+            types: Vec::new(),
+            bodies: Vec::new(),
+            file_entries: Some(1),
+        };
+        let mut segments = Vec::new();
+        push_varint(1, &mut segments);
+        push_varint(0, &mut segments);
+        let mut packaged = varint_field(7, 0);
+        packaged.extend(bytes_field(3, &segments));
+        let (_, package) = ir_file_header(&mut file, &packaged).unwrap();
+        assert_eq!(*package, [strings[1].clone(), strings[0].clone()]);
+
+        let root = varint_field(7, 0);
+        assert!(ir_file_header(&mut file, &root).unwrap().1.is_empty());
+
+        let mut missing = Vec::new();
+        push_varint(u64::try_from(strings.len()).unwrap(), &mut missing);
+        let mut absent = varint_field(7, 0);
+        absent.extend(bytes_field(3, &missing));
+        assert!(ir_file_header(&mut file, &absent).is_err());
     }
 
     #[test]
