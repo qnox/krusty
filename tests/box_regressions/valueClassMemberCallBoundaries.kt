@@ -9,6 +9,20 @@ value class Count(val value: Int) {
     fun same(other: Count?): Boolean = other != null && other.value == value
     fun describe(other: Any): String = if (other is Count) "count:" + other.value else "other"
     fun <T> echo(other: T): T = other
+    val doubled: Int get() = value * 2
+    override fun toString(): String = "Count#" + value
+}
+
+interface Sink {
+    var last: Any?
+}
+
+OPTIONAL_JVM_INLINE_ANNOTATION
+value class Wrap(val sink: Sink) {
+    var stored: Any?
+        get() = sink.last
+        set(v) { sink.last = v }
+    fun offer(item: Any): Boolean { sink.last = item; return sink.last == item }
 }
 
 fun box(): String {
@@ -24,5 +38,13 @@ fun box(): String {
     if (a.same(null)) return "fail nullable null"
     if (a.describe(b) != "count:7") return "fail any param"
     if (a.echo(b).value != 7) return "fail generic"
+    if (a.doubled != 14) return "fail computed getter"
+    if (a.toString() != "Count#7") return "fail custom toString"
+    val sink = object : Sink { override var last: Any? = null }
+    val w = Wrap(sink)
+    w.stored = b
+    if (sink.last != b) return "fail setter boxes"
+    if (!w.offer(a)) return "fail any argument"
+    if (sink.last != a) return "fail any stored"
     return "OK"
 }

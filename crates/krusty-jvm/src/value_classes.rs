@@ -341,6 +341,10 @@ pub(crate) fn lower_value_classes(
     let value_class_ids: Vec<u32> = (0..ir.classes.len() as u32)
         .filter(|&i| ir.classes[i as usize].is_value)
         .collect();
+    // Each source function's parameters as declared, before synthesis gives a member its carrier. A
+    // function synthesis adds has no entry: it is a static that already lists its carrier first.
+    let source_function_params: Vec<Vec<Ty>> =
+        ir.functions.iter().map(|f| f.params.clone()).collect();
 
     // Exact identities of members whose JVM realization synthesis already finalized.
     let mut realized_members = synth_members::SynthesizedValueMembers::default();
@@ -2178,10 +2182,12 @@ pub(crate) fn lower_value_classes(
                     fq[*class as usize],
                     fid,
                     args.clone(),
-                    Some(source_parameters(
-                        &declared_params[fid as usize],
-                        args.len(),
-                    )),
+                    Some(match source_function_params.get(fid as usize) {
+                        Some(declared) => declared.clone().into_boxed_slice(),
+                        None => declared_params[fid as usize][1..]
+                            .to_vec()
+                            .into_boxed_slice(),
+                    }),
                 ))
             }
             // `x.getV()` getter: identity on an unboxed value, `unbox-impl()` on a boxed one.
@@ -4333,13 +4339,4 @@ mod boundary_tests {
             &under
         ));
     }
-}
-
-/// The parameters of a realized member static as its call passes them, receiver excluded. A
-/// source member lists only its own parameters, while a synthesized static (`equals-impl`) lists
-/// its carrier first; the call's operand count tells which, as the rewrite prepends the receiver.
-fn source_parameters(declared: &[Ty], operands: usize) -> Box<[Ty]> {
-    declared[declared.len().saturating_sub(operands)..]
-        .to_vec()
-        .into_boxed_slice()
 }
