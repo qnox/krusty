@@ -64,7 +64,9 @@ also split by kind), then stops the leftover daemons so the next build starts an
 tasks: kotlinc's Kotlin task, and krusty's replacement, support check and Kotlin task. The two
 measured builds are comparable: an unmeasured warm-up build first downloads everything the build
 needs (dependencies, plugins, toolchains) and its outputs are dropped, then both measured builds run
-with `--offline` from the same caches.
+with `--offline` from the same caches. A warm-up that fails to download something is retried twice,
+after a pause (`$CORPUS_RETRY_PAUSE` seconds, then twice that); one that still cannot download stops
+the run with a pointer to its log.
 
 The krusty build is also sampled: `perf` records every process at 99 Hz while it runs (the corpus
 binary keeps frame pointers), `hotspots.py` folds the krusty processes' call stacks, and
