@@ -337,6 +337,7 @@ impl Body<'_> {
         {
             self.value(argument, applied)?;
             self.coerce_emitted_value(applied, parameter)?;
+            self.unit_argument(parameter);
         }
         self.code.local_get(this);
         self.table_of_object();
@@ -388,7 +389,7 @@ impl Body<'_> {
         }
         self.value(receiver, objects::any())?;
         for (&arg, &param) in args.iter().zip(params) {
-            self.value(arg, param)?;
+            self.argument(arg, param)?;
         }
         let stub = self.runtime.objects.interfaces.stub(self.module, member);
         self.code.call(stub);
