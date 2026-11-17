@@ -48,6 +48,11 @@ pub(super) fn member_owner(
     semantic_types::member_owner(member).map_err(Into::into)
 }
 
+/// The package name-tree node whose segments are `package`; [`TypeName::ROOT`] for none.
+pub(super) fn package_name(package: &[String]) -> Result<TypeName, KlibBodyDeclineReason> {
+    semantic_types::package_name(package).map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
