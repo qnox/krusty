@@ -117,6 +117,10 @@ impl InheritedFacts for IrNodePositions {
             copy.selector_offset = selector_offset;
         }
     }
+
+    fn truncate_from(&mut self, first: ExprId) {
+        self.nodes.truncate(first as usize);
+    }
 }
 
 impl IrFile {

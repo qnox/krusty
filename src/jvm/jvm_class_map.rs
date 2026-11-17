@@ -273,8 +273,8 @@ pub fn jvm_to_kotlin_builtin_with_members_name(internal: TypeName) -> Option<Typ
 }
 
 /// The canonical Kotlin builtin declaration whose source metadata describes a mapped JVM type. Every
-/// erasure group contributes one owner here; for read-only/mutable collection siblings the read-only
-/// declaration is canonical. Consumers asking for `.kotlin_builtins` facts therefore never rebuild
+/// erasure group mapping both ways contributes one owner here; for read-only/mutable collection
+/// siblings the read-only declaration is canonical. Consumers asking for `.kotlin_builtins` facts therefore never rebuild
 /// partial collection-vs-class mapping branches or maintain a separate per-name capability table.
 pub fn jvm_to_kotlin_builtin_metadata_name(internal: TypeName) -> Option<TypeName> {
     builtin_ids().metadata_owner.get(&internal).copied()
@@ -619,6 +619,43 @@ const ERASURE_GROUPS: &[ErasureGroup] = &[
         "java/util/Map$Entry",
         CollectionKind::MapEntry,
     ),
+    // `JavaToKotlinClassMap`'s atomics map Kotlin to Java only: the Kotlin declaration keeps its
+    // own scope, and a Java `AtomicInteger` stays that Java class.
+    ErasureGroup::erasure_only(
+        &["kotlin/concurrent/atomics/AtomicInt"],
+        "java/util/concurrent/atomic/AtomicInteger",
+        BuiltinScopeProvenance::KotlinDeclaration,
+    ),
+    ErasureGroup::erasure_only(
+        &["kotlin/concurrent/atomics/AtomicLong"],
+        "java/util/concurrent/atomic/AtomicLong",
+        BuiltinScopeProvenance::KotlinDeclaration,
+    ),
+    ErasureGroup::erasure_only(
+        &["kotlin/concurrent/atomics/AtomicBoolean"],
+        "java/util/concurrent/atomic/AtomicBoolean",
+        BuiltinScopeProvenance::KotlinDeclaration,
+    ),
+    ErasureGroup::erasure_only(
+        &["kotlin/concurrent/atomics/AtomicReference"],
+        "java/util/concurrent/atomic/AtomicReference",
+        BuiltinScopeProvenance::KotlinDeclaration,
+    ),
+    ErasureGroup::erasure_only(
+        &["kotlin/concurrent/atomics/AtomicIntArray"],
+        "java/util/concurrent/atomic/AtomicIntegerArray",
+        BuiltinScopeProvenance::KotlinDeclaration,
+    ),
+    ErasureGroup::erasure_only(
+        &["kotlin/concurrent/atomics/AtomicLongArray"],
+        "java/util/concurrent/atomic/AtomicLongArray",
+        BuiltinScopeProvenance::KotlinDeclaration,
+    ),
+    ErasureGroup::erasure_only(
+        &["kotlin/concurrent/atomics/AtomicArray"],
+        "java/util/concurrent/atomic/AtomicReferenceArray",
+        BuiltinScopeProvenance::KotlinDeclaration,
+    ),
 ];
 
 /// Id-keyed views of the curated builtin tables, interned once. Hot resolution paths compare
@@ -632,12 +669,16 @@ struct BuiltinIds {
     /// JVM classifier that a Java source declaration denotes → its canonical Kotlin classifier.
     /// Groups that erase without that inverse (`kotlin/Nothing` → `java/lang/Void`) are absent.
     source_to_kotlin: FxHashMap<TypeName, TypeName>,
+    /// JVM classifier of a one-way group → its Kotlin classifier. A Java declaration naming it does
+    /// not denote the Kotlin declaration, but overrides one through it.
+    one_way_to_kotlin: FxHashMap<TypeName, TypeName>,
     /// Groups whose JVM face is a `java/util/*` collection interface, as a bitmask by group index.
     collection_groups: u32,
     /// Groups whose Kotlin metadata declaration replaces, rather than joins, the JVM source scope.
     authoritative_scope_groups: u32,
     /// Erasure groups whose JVM realization implements `java.io.Serializable`.
     java_serializable_groups: u32,
+    one_way_groups: u32,
     coll_to_kotlin: FxHashMap<TypeName, TypeName>,
     coll_to_kotlin_mutable: FxHashMap<TypeName, TypeName>,
     wrapper_prim: FxHashMap<TypeName, &'static str>,
@@ -661,9 +702,11 @@ fn builtin_ids() -> &'static BuiltinIds {
         let mut metadata_declarations = Vec::with_capacity(ERASURE_GROUPS.len());
         let mut jvm_builtin = FxHashMap::default();
         let mut source_to_kotlin = FxHashMap::default();
+        let mut one_way_to_kotlin = FxHashMap::default();
         let mut collection_groups = 0u32;
         let mut authoritative_scope_groups = 0u32;
         let mut java_serializable_groups = 0u32;
+        let mut one_way_groups = 0u32;
         let mut coll_to_kotlin = FxHashMap::default();
         let mut coll_to_kotlin_mutable = FxHashMap::default();
         let mut with_members = FxHashMap::default();
@@ -703,12 +746,13 @@ fn builtin_ids() -> &'static BuiltinIds {
             // Every erasure group is declared by a Kotlin builtin. Keeping the inverse beside the
             // forward identity table prevents consumers from reconstructing only the collection or
             // Kotlin-only-member subsets and silently missing mapped types such as Cloneable/String.
-            if let Some(kotlin_name) = kotlin_names.first() {
+            // A one-way group's JVM class is not its Kotlin declaration: a Java `AtomicInteger`
+            // keeps its own scope, names and signature, and is not a Kotlin `AtomicInt`.
+            if let Some(kotlin_name) = kotlin_names.first().filter(|_| *maps_java_source_to_kotlin)
+            {
                 let kotlin_id = tn(kotlin_name);
                 metadata_owner.insert(jvm_id, kotlin_id);
-                if *maps_java_source_to_kotlin {
-                    source_to_kotlin.insert(jvm_id, kotlin_id);
-                }
+                source_to_kotlin.insert(jvm_id, kotlin_id);
             }
             for kotlin_name in *kotlin_names {
                 let id = tn(kotlin_name);
@@ -725,6 +769,12 @@ fn builtin_ids() -> &'static BuiltinIds {
             }
             if *java_serializable {
                 java_serializable_groups |= 1 << group;
+            }
+            if !*maps_java_source_to_kotlin {
+                one_way_groups |= 1 << group;
+                if let Some(kotlin_name) = kotlin_names.first() {
+                    one_way_to_kotlin.insert(jvm_id, tn(kotlin_name));
+                }
             }
             if let Some(kotlin) = jvm_collection_to_kotlin(jvm_name) {
                 coll_to_kotlin.insert(jvm_id, tn(kotlin));
@@ -776,9 +826,11 @@ fn builtin_ids() -> &'static BuiltinIds {
             metadata_declarations,
             jvm_builtin,
             source_to_kotlin,
+            one_way_to_kotlin,
             collection_groups,
             authoritative_scope_groups,
             java_serializable_groups,
+            one_way_groups,
             coll_to_kotlin,
             coll_to_kotlin_mutable,
             wrapper_prim,
@@ -818,6 +870,20 @@ pub fn mapped_builtin_has_authoritative_kotlin_scope(internal: TypeName) -> bool
     let ids = builtin_ids();
     jvm_erasure_group(internal)
         .is_some_and(|group| ids.authoritative_scope_groups & (1 << group) != 0)
+}
+
+/// Whether a mapped builtin's JVM class is only its realization, never a face of it: a Kotlin
+/// `AtomicInt` constructs as its declaration states, without `AtomicInteger`'s other constructors.
+pub(super) fn mapped_builtin_is_one_way(internal: TypeName) -> bool {
+    let ids = builtin_ids();
+    jvm_erasure_group(internal).is_some_and(|group| ids.one_way_groups & (1 << group) != 0)
+}
+
+/// The Kotlin classifier a Java declaration's input of the one-way mapped JVM class `internal`
+/// overrides through: kotlinc's Java override checker matches a Kotlin `AtomicInt` input with a
+/// Java `AtomicInteger` one, although the Java type never denotes the Kotlin declaration.
+pub(super) fn one_way_java_override_classifier(internal: TypeName) -> Option<TypeName> {
+    builtin_ids().one_way_to_kotlin.get(&internal).copied()
 }
 
 /// Whether the JVM realization in the authoritative Kotlin/JVM builtin map implements

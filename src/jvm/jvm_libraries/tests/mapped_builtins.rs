@@ -29,6 +29,73 @@ fn mapped_number_members_publish_only_their_kotlin_names() {
 }
 
 #[test]
+fn atomics_map_onto_the_jdk_one_way() {
+    let (Some(stdlib), Some(jdk)) = (
+        crate::toolchain::stdlib_jar(),
+        crate::toolchain::jdk_modules(),
+    ) else {
+        return;
+    };
+    let libraries = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        vec![stdlib, jdk],
+    )));
+    let kotlin = libraries
+        .classifier_record(type_name("kotlin/concurrent/atomics/AtomicInt"))
+        .expect("AtomicInt classifier");
+    for (source, physical) in [
+        ("load", "get"),
+        ("store", "set"),
+        ("fetchAndAdd", "getAndAdd"),
+    ] {
+        assert!(
+            kotlin.members.iter().any(|member| {
+                member.name == source && member.physical_name.as_deref() == Some(physical)
+            }),
+            "missing {source} realized by {physical}"
+        );
+    }
+    assert!(kotlin.members.iter().all(|member| member.name != "get"));
+
+    let java = libraries
+        .classifier_record(type_name("java/util/concurrent/atomic/AtomicInteger"))
+        .expect("AtomicInteger classifier");
+    assert!(java.members.iter().any(|member| member.name == "get"));
+    assert!(
+        java.members.iter().all(|member| member.name != "load"),
+        "a Java AtomicInteger keeps its Java names"
+    );
+    assert!(
+        !java
+            .supertypes
+            .contains_name(type_name("kotlin/concurrent/atomics/AtomicInt")),
+        "a Java AtomicInteger is not a Kotlin AtomicInt"
+    );
+    assert!(
+        !kotlin.inheritance.is_extensible,
+        "a Kotlin AtomicInt is final"
+    );
+    assert!(
+        java.inheritance.is_extensible,
+        "a Java AtomicInteger is open"
+    );
+    assert!(!kotlin.inheritance.has_no_arg_constructor);
+    assert!(java.inheritance.has_no_arg_constructor);
+
+    let array = libraries
+        .classifier_record(type_name("kotlin/concurrent/atomics/AtomicArray"))
+        .expect("AtomicArray classifier");
+    assert_eq!(
+        array
+            .constructors
+            .iter()
+            .map(|constructor| constructor.descriptor.as_str())
+            .collect::<Vec<_>>(),
+        ["([Ljava/lang/Object;)V"],
+        "an AtomicArray constructs only as its Kotlin declaration states"
+    );
+}
+
+#[test]
 fn mapped_kotlin_number_publishes_jdk_realizations_without_stdlib() {
     let Some(jdk) = crate::toolchain::jdk_modules() else {
         return;
@@ -172,4 +239,91 @@ fn decoded_collection_barrier_role_is_declaration_exact() {
         ),
         None
     );
+}
+
+#[test]
+fn atomic_exchange_uses_the_stdlib_jvm8_static_realizations() {
+    let (Some(stdlib), Some(jdk)) = (
+        crate::toolchain::stdlib_jar(),
+        crate::toolchain::jdk_modules(),
+    ) else {
+        return;
+    };
+    let libraries = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        vec![stdlib, jdk],
+    )));
+    for (owner, name, physical, descriptor) in [
+        ("AtomicInt", "compareAndExchange", "AtomicInteger", "II)I"),
+        ("AtomicLong", "compareAndExchange", "AtomicLong", "JJ)J"),
+        (
+            "AtomicBoolean",
+            "compareAndExchange",
+            "AtomicBoolean",
+            "ZZ)Z",
+        ),
+        (
+            "AtomicReference",
+            "compareAndExchange",
+            "AtomicReference",
+            "Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        ),
+        (
+            "AtomicIntArray",
+            "compareAndExchangeAt",
+            "AtomicIntegerArray",
+            "III)I",
+        ),
+        (
+            "AtomicLongArray",
+            "compareAndExchangeAt",
+            "AtomicLongArray",
+            "IJJ)J",
+        ),
+        (
+            "AtomicArray",
+            "compareAndExchangeAt",
+            "AtomicReferenceArray",
+            "ILjava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        ),
+    ] {
+        let classifier = libraries
+            .classifier_record(type_name(&format!("kotlin/concurrent/atomics/{owner}")))
+            .expect("atomic declaration");
+        let members = classifier
+            .members
+            .iter()
+            .filter(|m| m.name == name)
+            .collect::<Vec<_>>();
+        let [member] = members.as_slice() else {
+            panic!("one declared {owner}.{name}")
+        };
+        assert_eq!(
+            member.owner,
+            Some(type_name("kotlin/concurrent/internal/AtomicIntrinsicsKt"))
+        );
+        assert_eq!(member.physical_name.as_deref(), Some("compareAndExchange"));
+        assert_eq!(
+            member.descriptor,
+            format!("(Ljava/util/concurrent/atomic/{physical};{descriptor}")
+        );
+        assert_eq!(
+            member.realization,
+            crate::libraries::MemberRealization::Direct {
+                pass_receiver: true
+            }
+        );
+        assert_eq!(
+            member.params.len(),
+            if name.ends_with("At") { 3 } else { 2 }
+        );
+        assert_eq!(
+            member
+                .generic_sig
+                .as_ref()
+                .expect("semantic signature")
+                .params
+                .len(),
+            member.params.len()
+        );
+    }
 }

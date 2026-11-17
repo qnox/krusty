@@ -52,6 +52,35 @@ fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> Ty {
     }
 }
 
+/// A Java declaration's override inputs ([`crate::libraries::FunctionInfo::override_inputs`]).
+/// kotlinc's Java override checker matches a raw Java input by its JVM erasure rather than by its
+/// Kotlin type, so a raw `AtomicReference` overrides a Kotlin `AtomicReference<Int>`: the slot is
+/// the Kotlin classifier that erases to the raw input's class. `None` when no input is raw.
+pub(super) fn java_override_inputs(inputs: &[Ty]) -> Option<Box<[Option<TypeName>]>> {
+    let slots = inputs
+        .iter()
+        .map(|input| raw_input_classifier(*input))
+        .collect::<Box<[_]>>();
+    slots.iter().any(Option::is_some).then_some(slots)
+}
+
+fn raw_input_classifier(ty: Ty) -> Option<TypeName> {
+    match ty.kind() {
+        TyKind::Obj(name, arguments)
+            if !arguments.is_empty()
+                && arguments
+                    .iter()
+                    .all(|argument| matches!(argument.kind(), TyKind::RawProjection(_))) =>
+        {
+            Some(crate::jvm::jvm_class_map::one_way_java_override_classifier(name).unwrap_or(name))
+        }
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner) => raw_input_classifier(inner),
+        _ => None,
+    }
+}
+
 pub(super) fn slot(
     libraries: &JvmLibraries,
     owner: TypeName,
@@ -128,6 +157,40 @@ mod tests {
         assert_ne!(
             normalized_input(&libraries, Ty::Error),
             normalized_input(&libraries, Ty::obj("kotlin/Any"))
+        );
+    }
+
+    #[test]
+    fn only_a_raw_java_input_overrides_through_the_classifier_it_erases_to() {
+        let raw = |internal| {
+            Ty::platform_nullable(Ty::obj_args(
+                internal,
+                &[Ty::raw_projection(Ty::platform_nullable(Ty::obj(
+                    "kotlin/Any",
+                )))],
+            ))
+        };
+        let atomic = raw("java/util/concurrent/atomic/AtomicReference");
+        let list = raw("java/util/ArrayList");
+        assert_eq!(
+            java_override_inputs(&[Ty::Int, atomic, list]).as_deref(),
+            Some(
+                &[
+                    None,
+                    Some(crate::types::type_name(
+                        "kotlin/concurrent/atomics/AtomicReference"
+                    )),
+                    Some(crate::types::type_name("java/util/ArrayList")),
+                ][..]
+            )
+        );
+        // A non-generic Java input is never raw, so `AtomicInteger` keeps its Kotlin type and does
+        // not override a Kotlin `AtomicInt`.
+        assert_eq!(
+            java_override_inputs(&[Ty::platform_nullable(Ty::obj(
+                "java/util/concurrent/atomic/AtomicInteger"
+            ))]),
+            None
         );
     }
 }
