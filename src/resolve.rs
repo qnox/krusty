@@ -34831,6 +34831,7 @@ impl<'a> Checker<'a> {
                             None,
                             Some(&expected.params),
                             Some(expected.ret),
+                            None,
                         )
                         .is_ok()
                     && self
@@ -35015,18 +35016,20 @@ impl<'a> Checker<'a> {
     /// the selected target's emit owner after overload selection.
     fn selected_top_level_ref(
         &mut self,
+        scope: &CheckerScope<'_>,
         expression: ExprId,
         name: &str,
         expected: &'static crate::types::FnSig,
     ) -> Option<Ty> {
         let candidates = self.resolver().top_level_candidates(name);
-        self.selected_receiverless_function_ref(expression, name, expected, candidates)
+        self.selected_receiverless_function_ref(scope, expression, name, expected, candidates)
     }
 
     /// Select, against `expected`, the receiver-less function a callable reference names among
     /// `candidates`: top-level functions, or a classifier's associated functions.
     fn selected_receiverless_function_ref(
         &mut self,
+        scope: &CheckerScope<'_>,
         expression: ExprId,
         name: &str,
         expected: &'static crate::types::FnSig,
@@ -35094,11 +35097,13 @@ impl<'a> Checker<'a> {
                 let declared_shape = callable_reference_selection::erased_declared_parameters(
                     &function.callable.params,
                 );
+                let context_arguments = self.reference_context_argument_types(scope, &function);
                 let specialization = self.specialize_callable_ref_candidate(
                     &mut function,
                     None,
                     Some(&expected.params),
                     Some(expected.ret),
+                    context_arguments.as_deref(),
                 );
                 if matches!(
                     specialization,
@@ -52582,7 +52587,9 @@ impl<'a> Checker<'a> {
                 resolver.classifier_associated_properties(internal, name),
             )
         };
-        if let Some(ty) = self.associated_callable_ref(expression, name, associated, expected) {
+        if let Some(ty) =
+            self.associated_callable_ref(scope, expression, name, associated, expected)
+        {
             return UnboundRefSelection::Selected(ty);
         }
         if self.reject_inaccessible_associated_reference(expression, internal, name) {
@@ -53176,6 +53183,7 @@ impl<'a> Checker<'a> {
                             let properties =
                                 resolver.static_scope_associated_properties(classifier, &name);
                             if let Some(ty) = self.associated_callable_ref(
+                                scope,
                                 e,
                                 &name,
                                 (functions, properties),
@@ -53361,7 +53369,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if let Some(TyKind::Fun(expected)) = expected.map(|ty| ty.kind()) {
-                    if let Some(ty) = self.selected_top_level_ref(e, &name, expected) {
+                    if let Some(ty) = self.selected_top_level_ref(scope, e, &name, expected) {
                         return self.set(e, ty);
                     }
                 }
