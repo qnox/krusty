@@ -323,12 +323,15 @@ fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frame
     let callees = KlibCalleeFacts::new([callable]).with_checked_dependency_facts(&checked);
     let externals = checked_member_externals(&libraries, &checked);
     let mut raw = DependencyBodyUnit::default();
-    raw.lower_function_with_intrinsics_and_externals(
+    // As dependency body emission does, the provider resolves the declarations the private
+    // class's members override, which its body never calls.
+    raw.lower_function_with_declarations(
         callable,
         libraries.declaration_bodies(),
         &callees,
         libraries.intrinsic_facts(),
         &externals,
+        &libraries,
     )
     .unwrap_or_else(|decline| panic!("private class hierarchy and initializer SAM: {decline}"));
     let targets = raw
