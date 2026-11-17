@@ -647,11 +647,16 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     for problem in cli::classpath_entry_problems(&opts.classpath) {
         eprintln!("{problem}");
     }
-    opts.check_jdk_release()
-        .map_err(|error| format!("krusty: error: {error}\n"))?;
-    let effective_classpath = opts
-        .effective_classpath()
+    opts.check_jdk_release().map_err(|errors| {
+        errors
+            .iter()
+            .map(|error| format!("krusty: error: {error}\n"))
+            .collect::<String>()
+    })?;
+    let inputs = opts
+        .compilation_inputs()
         .map_err(|error| format!("krusty: {error}\n"))?;
+    let effective_classpath = inputs.effective_classpath().to_vec();
     let plugins = opts.resolve_plugins(&effective_classpath);
     for note in &plugins.notes {
         eprintln!("info: {note}");
@@ -663,9 +668,10 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
             .map(|error| format!("error: {error}\n"))
             .collect());
     }
-    let cp = std::rc::Rc::new(Classpath::new_with_friend_paths(
+    let cp = std::rc::Rc::new(Classpath::new_with_friend_paths_and_jdk_release(
         effective_classpath,
         opts.friend_paths.clone(),
+        inputs.ct_sym_release(),
     ));
     // Construction is fallible: a corrupt selected dependency remains a terminal frontend
     // diagnostic and never becomes a queryable provider with an empty symbol index.

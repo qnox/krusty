@@ -79,6 +79,39 @@ fn build_ct_sym_index(
     index_archive(&mut archive, path, release)
 }
 
+/// The JDK releases whose API the `ct.sym` at `path` describes, ascending, or `None` when it does
+/// not open as an archive. Each top-level folder names the set of releases its signatures serve,
+/// one base-36 digit per release (`8`, `9`, `A` for 10, ...), optionally suffixed `-modules`; the
+/// newest of them is the release of the JDK that ships the file, whose own API is its module image.
+pub(crate) fn ct_sym_releases(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let Some(archive) = File::open(path)
+        .ok()
+        .and_then(|file| crate::archive::open_file(file).ok())
+    else {
+        return Ok(None);
+    };
+    let mut releases = Vec::new();
+    for ordinal in 0..archive.entry_count() {
+        let name =
+            archive_entry_name(&archive, path, ordinal).map_err(|error| error.diagnostic())?;
+        let folder = name.split('/').next().unwrap_or_default();
+        if folder == "META-INF" {
+            continue;
+        }
+        let set = folder
+            .rsplit_once("-modules")
+            .map_or(folder, |(set, _)| set);
+        releases.extend(
+            set.chars()
+                .filter_map(|digit| digit.to_digit(36))
+                .filter_map(|release| u8::try_from(release).ok()),
+        );
+    }
+    releases.sort_unstable();
+    releases.dedup();
+    Ok(Some(releases))
+}
+
 /// Build one release's public-class index. Entries are classfiles stored with a `.sig` suffix under
 /// `<release-set>/<module>/<internal>.sig`; the release-set contains every release for which those
 /// exact bytes apply. A name that does not decode fails the build: the entry cannot be classified,
