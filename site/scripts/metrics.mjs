@@ -224,6 +224,8 @@ function corpusRun(dir, id) {
     measured,
     projects,
     roots: corpusRoots(summary.projects),
+    // The summary's own records, for the comparison with the next run; never published.
+    records: summary.projects,
     // Listed projects the run has no result for: their job failed before it compared anything.
     // Null when the run's project list was not read.
     noResult: listed ? [...listed.keys()].filter((name) => !projects.some((p) => p.name === name)) : null,
@@ -257,6 +259,44 @@ export function corpusRoots(records) {
     .sort((a, b) => b.blocked - a.blocked || a.project.toLowerCase().localeCompare(b.project.toLowerCase()) || a.task.localeCompare(b.task));
 }
 
+/** Why a compilation krusty did not build was missed: its error, or what left it to kotlinc. */
+const missReason = (row) => row.error ?? (row.fallback ? `left to kotlinc: ${row.fallback}` : "krusty wrote no class");
+
+/**
+ * What changed from one corpus run to the next: every project measured by either run whose
+ * compilations built, identical classes or built compilations changed, with the compilations
+ * krusty no longer builds (and why) and the ones it now builds. A project only one run measured is
+ * `new` or `not measured`.
+ */
+export function corpusChanges(previous, latest) {
+  const before = new Map(previous.records.map((p) => [p.name, p]));
+  const now = new Map(latest.records.map((p) => [p.name, p]));
+  const names = [...new Set([...before.keys(), ...now.keys()])].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  const projects = [];
+  for (const name of names) {
+    const p = now.get(name);
+    const q = before.get(name);
+    const was = new Map((q?.rows ?? []).filter((r) => typeof r.task === "string").map((r) => [r.task, r.built]));
+    const rows = (p?.rows ?? []).filter((r) => typeof r.task === "string");
+    const lost = q && p ? rows.filter((r) => !r.built && was.get(r.task)).map((r) => ({ task: r.task, reason: missReason(r) })) : [];
+    const gained = q && p ? rows.filter((r) => r.built && was.has(r.task) && !was.get(r.task)).map((r) => r.task) : [];
+    const same = q && p && q.built === p.built && q.identical === p.identical && q.compilations === p.compilations && q.classes === p.classes;
+    if (same && lost.length === 0 && gained.length === 0) continue;
+    const latestOf = p ?? q;
+    projects.push({
+      name,
+      status: !q ? "new" : !p ? "not measured" : "changed",
+      built: [q?.built ?? null, p?.built ?? null],
+      compilations: latestOf.compilations,
+      identical: [q?.identical ?? null, p?.identical ?? null],
+      classes: latestOf.classes,
+      lost,
+      gained,
+    });
+  }
+  return { since: previous.measured, projects };
+}
+
 function corpus(dir) {
   const runsDir = join(dir, "corpus", "runs");
   if (!existsSync(runsDir)) return null;
@@ -277,6 +317,8 @@ function corpus(dir) {
     roots: latest.roots,
     total: { compilations: sum(projects, "compilations"), built: sum(projects, "built"), classes: sum(projects, "classes"), identical: sum(projects, "identical") },
     history: corpusHistory(runs),
+    // What changed since the run before the newest; null with only one run kept.
+    changes: runs.length > 1 ? corpusChanges(runs[runs.length - 2], latest) : null,
   };
 }
 
