@@ -306,6 +306,10 @@ pub struct FuncRef {
     /// (`Z(42)::ext`). The receiver is stored boxed as `Object`; the emitter `checkcast`s it to the box
     /// class then `unbox-impl`s it to the underlying before the mangled `invokestatic ext-<hash>(under)`.
     pub staticbound_recv_unbox: Option<TypeName>,
+    /// Per value bound for a leading context parameter: `Some(value_class_internal)` when the
+    /// physical target takes that value class's underlying. The value is stored boxed in
+    /// `boundContextArguments`; `invoke` unboxes it before the target call.
+    pub bound_context_unbox: Vec<Option<TypeName>>,
     /// The carrier's own specialized `invoke`: a common-IR instance method of this class whose body
     /// calls the referenced declaration directly, as kotlinc's `FunctionReferenceLowering` builds
     /// it. The backend then writes that method and the erased `FunctionN.invoke` bridge to it

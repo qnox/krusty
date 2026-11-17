@@ -120,6 +120,17 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
                 .and_then(|t| t.non_null().obj_internal())
                 .filter(|fq| callable_under.contains_key(fq));
         }
+        // A value bound for a leading context parameter is stored boxed in `boundContextArguments`;
+        // a value-class context the mangled target takes as its underlying is unboxed at `invoke`.
+        fr.bound_context_unbox = erase_src
+            .iter()
+            .take(fr.bound_contexts as usize)
+            .map(|parameter| {
+                parameter
+                    .obj_internal()
+                    .filter(|fq| callable_under.contains_key(fq))
+            })
+            .collect();
         if let Some((_, parameters, result)) = local_target {
             fr.target_param_tys = parameters;
             fr.target_ret_ty = result;
