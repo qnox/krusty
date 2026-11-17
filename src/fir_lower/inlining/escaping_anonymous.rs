@@ -377,14 +377,14 @@ fn specialized_class(
         // Member descriptors stay the declaration's erasure. Reified operations in the body are
         // specialized above; substituting the signature would emit a concrete descriptor plus a
         // bridge where kotlinc keeps the erased member.
-        shape.dispatch_receiver = Some(placeholder);
         // A concrete instantiation updates the generic signature so it matches that erased member.
         // A replacement that is still a type parameter belongs to the enclosing inline function.
         // It is not in this class's declaration table, so the copy keeps the declared parameter.
-        cloned_methods.push(crate::ir::clone_class_method(
+        cloned_methods.push(copy_member(
             ir,
             method,
             shape,
+            placeholder,
             &signature_bindings(expansion.bindings),
         ));
     }
@@ -1505,11 +1505,31 @@ fn clone_member_function(
     // Member descriptors stay the declaration's erasure. Reified operations in the body are
     // specialized above; substituting the signature would emit a concrete descriptor plus a
     // bridge where kotlinc keeps the erased accessor.
-    shape.dispatch_receiver = Some(dispatch_receiver);
     Ok((
-        crate::ir::clone_class_method(ir, method, shape, &HashMap::default()),
+        copy_member(ir, method, shape, dispatch_receiver, &HashMap::default()),
         copied,
     ))
+}
+
+/// Copy `method` into the copied class `owner`. An instance member takes the copy as its dispatch
+/// receiver. A class-static local function (a lambda or local function one of the members
+/// declares) takes no receiver; the copy is owned through the class-static owner instead.
+fn copy_member(
+    ir: &mut crate::ir::IrFile,
+    method: FunId,
+    mut shape: crate::ir::IrFunction,
+    owner: TypeName,
+    bindings: &HashMap<String, Ty>,
+) -> FunId {
+    let class_static = ir.class_static_local_functions.contains_key(&method);
+    if !class_static {
+        shape.dispatch_receiver = Some(owner);
+    }
+    let copy = crate::ir::clone_class_method(ir, method, shape, bindings);
+    if class_static {
+        ir.class_static_local_functions.insert(copy, owner);
+    }
+    copy
 }
 
 fn clone_initializer(
