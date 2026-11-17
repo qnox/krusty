@@ -49,6 +49,8 @@ pub(super) struct LocalIdentity {
 pub(super) struct LocalConstructor {
     pub(super) declaration: ConstructorDeclaration,
     pub(super) access: IrConstructorAccess,
+    /// Whether the constructor creates the one instance of an object.
+    pub(super) object: bool,
 }
 
 /// One file-local class materialized in the unit that lowers its library's bodies.
@@ -63,6 +65,8 @@ pub(super) struct MaterializedLocalClass {
     pub(super) supertypes: Vec<Ty>,
     pub(super) self_type: Ty,
     pub(super) class_type_parameters: Vec<String>,
+    /// Whether [`Self::class`] is an object.
+    pub(super) object: bool,
 }
 
 /// A field the class initializer and its members store through, in declaration order.
@@ -394,6 +398,8 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) init_header: FunctionHeader,
     pub(super) steps: Vec<InitializationStep<'a>>,
     pub(super) members: Vec<PreparedMember<'a>>,
+    /// Whether the class is an object, whose one instance its singleton value reads.
+    pub(super) object: bool,
 }
 
 /// The classifier identity of a class only `module`'s bodies link. A file-local class is named
@@ -437,8 +443,10 @@ pub(super) fn classifier(
         return Err(unsupported("a non-public value class"));
     }
     match class_kind(class.base.flags) {
-        TypeKind::Class => Ok(Some(name)),
-        _ => Err(unsupported("a non-public classifier other than a class")),
+        TypeKind::Class | TypeKind::Object => Ok(Some(name)),
+        _ => Err(unsupported(
+            "a non-public classifier other than a class or an object",
+        )),
     }
 }
 
@@ -567,6 +575,7 @@ pub(super) fn link<'bodies>(
         return Ok(LocalLink::Ready(LocalConstructor {
             declaration: known.declaration.clone(),
             access: known.access,
+            object: known.object,
         }));
     }
     let Some((class_arena, class)) = source
@@ -683,6 +692,17 @@ fn prepare_class<'a>(
         return Err(unsupported("a non-public class with another constructor"));
     }
     delegates_to_any(arena, &class.base.symbol, function, source.validate_root)?;
+    // An object's private constructor creates its one instance, which no call constructs again.
+    let object = class_kind(class.base.flags) == TypeKind::Object;
+    if object
+        && (declaration_visibility(function.base.flags) != Visibility::Private
+            || !function.regular_parameters.is_empty()
+            || !class.type_parameters.is_empty())
+    {
+        return Err(mismatch(
+            "an object is not created by its private constructor alone",
+        ));
+    }
     let resolve = |signature: &KlibIrSignature| classifier(source.bodies, source.module, signature);
     let ClassFormals {
         types,
@@ -772,6 +792,7 @@ fn prepare_class<'a>(
         init_header,
         steps,
         members,
+        object,
     })
 }
 
@@ -1312,5 +1333,6 @@ pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
     class.ctor_args = prepared.ctor_args.clone();
     class.ctor_param_count = 0;
     class.explicit_param_stores = true;
+    class.is_object = prepared.object;
     class
 }
