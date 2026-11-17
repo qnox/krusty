@@ -9,6 +9,7 @@ use super::common;
 use krusty::diag::{DiagSink, Severity};
 use krusty::klib_libraries::{KlibLibraryInput, KlibStdlibSemantics};
 use krusty::source::SourceInput;
+use object::{Object, ObjectSection};
 
 const PROGRAM: &str = include_str!("box_regressions/multimodule/dependencyInterfaceAppliedAbi.kt");
 
@@ -142,6 +143,37 @@ fn a_declared_generic_slot_converts_int_long_and_value_class_arguments_and_resul
         .map(|(_, bytes)| bytes.as_slice())
         .collect::<Vec<_>>();
     assert!(!objects.is_empty());
+    // The producer's method is abstract: its module has no executable export to seed this
+    // publication. Both real consumer implementations must still publish an identity record,
+    // with descriptor and callable relocations, before the linker can install their adapters.
+    let mut records = 0;
+    for bytes in &objects {
+        let object = object::File::parse(*bytes).expect("consumer object");
+        for section in object.sections().filter(|section| {
+            section.name().ok() == Some(".kt_interface_dependency_implementations")
+        }) {
+            let data = section.data().expect("implementation record bytes");
+            let mut at = 0;
+            let mut count = 0;
+            while at < data.len() {
+                let identity = u64::from_le_bytes(data[at..at + 8].try_into().unwrap());
+                let identity = usize::try_from(identity).unwrap();
+                at += 24 + identity.div_ceil(8) * 8;
+                count += 1;
+            }
+            assert_eq!(at, data.len(), "complete implementation records");
+            assert_eq!(
+                section.relocations().count(),
+                count * 2,
+                "each implementation names an actual descriptor and function"
+            );
+            records += count;
+        }
+    }
+    assert_eq!(
+        records, 2,
+        "IntSlot and ErasedSlot publish the abstract dependency member"
+    );
     let image = krusty_native::link_program_with_libraries(&objects, &imports, target).unwrap();
     let output =
         common::native_backend::run_native_image(&image, "DependencyInterfaceAppliedAbi", &[], &[])
