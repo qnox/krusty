@@ -28,6 +28,26 @@ pub(super) fn authenticate(
     selected: KlibBodyCallable<'_>,
     bodies: &crate::klib_libraries::KlibDeclarationBodies,
 ) -> Result<Option<LinkedAccessor>, KlibBodyDeclineReason> {
+    authenticate_role(selected, bodies, KlibAccessorRole::Getter)
+}
+
+/// The exact contract of a retained accessor export of either role: an earlier unit emitted the
+/// accessor's body, which a call reads or writes through.
+pub(super) fn authenticate_export(
+    selected: KlibBodyCallable<'_>,
+    bodies: &crate::klib_libraries::KlibDeclarationBodies,
+) -> Result<Option<LinkedAccessor>, KlibBodyDeclineReason> {
+    let Some(accessor) = selected.accessor() else {
+        return Ok(None);
+    };
+    authenticate_role(selected, bodies, accessor.role)
+}
+
+fn authenticate_role(
+    selected: KlibBodyCallable<'_>,
+    bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    role: KlibAccessorRole,
+) -> Result<Option<LinkedAccessor>, KlibBodyDeclineReason> {
     let Some(accessor) = selected.accessor() else {
         return Ok(None);
     };
@@ -39,7 +59,7 @@ pub(super) fn authenticate(
             "a getter contract belongs to a non-accessor declaration".to_owned(),
         ));
     }
-    if accessor.role != KlibAccessorRole::Getter {
+    if accessor.role != role {
         return Ok(None);
     }
     if !matches!(
@@ -130,7 +150,7 @@ pub(super) fn authenticate(
     }
     Ok(Some(LinkedAccessor {
         target: LinkedAccessorTarget::External(accessor.property),
-        write: false,
+        write: role == KlibAccessorRole::Setter,
         receiver: declared_receiver,
         params: params.to_vec(),
         ret,

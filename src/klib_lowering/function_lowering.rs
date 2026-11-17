@@ -938,7 +938,7 @@ fn serialized_identity(
 }
 
 /// The origin a producer records for a property accessor it generates.
-const DEFAULT_PROPERTY_ACCESSOR: &str = "DEFAULT_PROPERTY_ACCESSOR";
+pub(super) const DEFAULT_PROPERTY_ACCESSOR: &str = "DEFAULT_PROPERTY_ACCESSOR";
 
 /// The parameter identities of `selected`, after checking that it describes the serialized
 /// declaration: the same name, parameter list, parameter types and identities, and result.

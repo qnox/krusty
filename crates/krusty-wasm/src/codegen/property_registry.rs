@@ -1,8 +1,10 @@
 //! Exact property identities in one stateful Wasm source module.
 //!
-//! Files reserve or publish the Wasm global chosen for each top-level property and private
-//! getter/setter entries for each ordinary member property. Other files reach either realization
-//! by the frontend's stable [`PropertyId`]; neither spelling nor a file facade is reconstructed.
+//! Files reserve or publish the Wasm global chosen for each top-level property, private
+//! getter/setter entries for each ordinary member property, and private getter/setter entries for
+//! each receiver-less property realized by its accessors (a computed or delegated package property,
+//! or a property of a `companion { }` block). Other files reach any of these realizations by the
+//! frontend's stable [`PropertyId`]; neither spelling nor a file facade is reconstructed.
 
 use krusty::fx_hash::HashMap;
 
@@ -38,11 +40,28 @@ pub(super) struct MemberPropertyDefinition {
     pub(super) entry: MemberProperty,
 }
 
+/// The private Wasm entry points through which another source file reads or writes a
+/// receiver-less property that its defining file realizes through accessors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct AccessorProperty {
+    pub(super) getter: u32,
+    pub(super) setter: Option<u32>,
+    pub(super) ty: Ty,
+}
+
+/// One receiver-less accessor property this file defines, paired with its program-wide entries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct AccessorPropertyDefinition {
+    pub(super) property: PropertyId,
+    pub(super) entry: AccessorProperty,
+}
+
 #[derive(Default)]
 pub(super) struct PropertyRegistry {
     source_module: Option<String>,
     module: HashMap<PropertyId, TopLevelProperty>,
     members: HashMap<PropertyId, MemberProperty>,
+    accessors: HashMap<PropertyId, AccessorProperty>,
 }
 
 impl PropertyRegistry {
@@ -55,6 +74,7 @@ impl PropertyRegistry {
                 self.source_module = Some(module_name.to_owned());
                 self.module.clear();
                 self.members.clear();
+                self.accessors.clear();
             }
         }
     }
@@ -175,6 +195,106 @@ impl PropertyRegistry {
 
     pub(super) fn member(&self, property: PropertyId) -> Option<MemberProperty> {
         self.members.get(&property).copied()
+    }
+
+    /// Reserve the accessor-property entries this file defines or references. A file defines an
+    /// entry for each receiver-less property another file may reach only through its accessors;
+    /// a using file reserves the same entry from the module record, by the same declaration facts.
+    pub(super) fn prepare_accessor_properties(
+        &mut self,
+        ir: &IrFile,
+        module: &mut Module,
+    ) -> Result<Vec<AccessorPropertyDefinition>, String> {
+        let mut local = ir
+            .local_property_layouts
+            .iter()
+            .filter_map(|(&property, layout)| {
+                let receiverless = match layout {
+                    IrLocalPropertyLayout::TopLevelStorage {
+                        qualifier: None, ..
+                    } => true,
+                    IrLocalPropertyLayout::TopLevelAccessor {
+                        receiver,
+                        context_parameters,
+                        ..
+                    } => receiver.is_none() && context_parameters.is_empty(),
+                    _ => false,
+                };
+                receiverless.then_some(property)
+            })
+            .collect::<Vec<_>>();
+        local.sort_by_key(|property| property.raw());
+
+        let mut definitions = Vec::new();
+        for property in local {
+            // A property common lowering synthesized, such as a local declaration copied out of an
+            // inlined body, has no checked declaration and no module record another file could
+            // name.
+            let Some(declaration) = ir.checked_properties.get(&property) else {
+                continue;
+            };
+            let mutable = declaration.flags.has(DeclarationFlags::MUTABLE);
+            if declaration.visibility == krusty::types::Visibility::Private
+                || !accessor_realized(declaration.flags, mutable)
+            {
+                continue;
+            }
+            let entry = self.reserve_accessor(module, property, declaration.ty, mutable)?;
+            definitions.push(AccessorPropertyDefinition { property, entry });
+        }
+
+        let mut referenced = ir.referenced_module_properties.iter().collect::<Vec<_>>();
+        referenced.sort_by_key(|(property, _)| **property);
+        for (&property, declaration) in referenced {
+            if ir.local_property_layouts.contains_key(&property) {
+                continue;
+            }
+            // A block property's recorded receiver is its declaring classifier: the coordinate
+            // that associates it with the class, which its accessors do not take.
+            let receiverless = match declaration.placement {
+                krusty::ir::IrStaticPlacement::CompanionBlock { .. } => true,
+                krusty::ir::IrStaticPlacement::Package => {
+                    declaration.owner.is_none() && declaration.extension_receiver.is_none()
+                }
+            };
+            if !receiverless
+                || !declaration.context_parameters.is_empty()
+                || declaration.visibility == krusty::types::Visibility::Private
+                || !accessor_realized(declaration.flags, declaration.mutable)
+            {
+                continue;
+            }
+            self.reserve_accessor(module, property, declaration.ty, declaration.mutable)?;
+        }
+        Ok(definitions)
+    }
+
+    fn reserve_accessor(
+        &mut self,
+        module: &mut Module,
+        property: PropertyId,
+        ty: Ty,
+        mutable: bool,
+    ) -> Result<AccessorProperty, String> {
+        if let Some(entry) = self.accessors.get(&property).copied() {
+            if entry.ty != ty || entry.setter.is_some() != mutable {
+                return Err(
+                    "an accessor property reservation disagrees with its declaration".into(),
+                );
+            }
+            return Ok(entry);
+        }
+        let entry = AccessorProperty {
+            getter: module.declare(),
+            setter: mutable.then(|| module.declare()),
+            ty,
+        };
+        self.accessors.insert(property, entry);
+        Ok(entry)
+    }
+
+    pub(super) fn accessor(&self, property: PropertyId) -> Option<AccessorProperty> {
+        self.accessors.get(&property).copied()
     }
 
     /// Allocate this file's globals, reusing indices reserved by an earlier file, then reserve
@@ -313,6 +433,19 @@ fn storage_capabilities(flags: DeclarationFlags, mutable: bool) -> Option<(bool,
     (direct_read || direct_write).then_some((direct_read, direct_write))
 }
 
+/// Whether a receiver-less property is realized only through its accessors: it has no storage a
+/// global could hold, or its getter and setter both have bodies. A `lateinit`, an explicit backing
+/// field, an `expect`, an `external`, an `abstract` and a `const` declaration are not.
+fn accessor_realized(flags: DeclarationFlags, mutable: bool) -> bool {
+    !(flags.has(DeclarationFlags::LATEINIT)
+        || flags.has(DeclarationFlags::EXPLICIT_BACKING_FIELD)
+        || flags.has(DeclarationFlags::EXTERNAL)
+        || flags.has(DeclarationFlags::EXPECT)
+        || flags.has(DeclarationFlags::ABSTRACT)
+        || flags.has(DeclarationFlags::CONST))
+        && storage_capabilities(flags, mutable).is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +467,31 @@ mod tests {
             storage_capabilities(default_accessors, true),
             Some((true, true))
         );
+    }
+
+    #[test]
+    fn only_properties_without_direct_storage_are_reached_through_accessor_entries() {
+        let computed = DeclarationFlags::default().with(DeclarationFlags::CUSTOM_GETTER, true);
+        assert!(accessor_realized(computed, false));
+
+        let custom_accessors = DeclarationFlags::default()
+            .with(DeclarationFlags::HAS_INITIALIZER, true)
+            .with(DeclarationFlags::CUSTOM_GETTER, true)
+            .with(DeclarationFlags::SETTER_HAS_BODY, true);
+        assert!(accessor_realized(custom_accessors, true));
+
+        let stored = DeclarationFlags::default().with(DeclarationFlags::HAS_INITIALIZER, true);
+        assert!(!accessor_realized(stored, true));
+
+        for excluded in [
+            DeclarationFlags::LATEINIT,
+            DeclarationFlags::EXPLICIT_BACKING_FIELD,
+            DeclarationFlags::EXTERNAL,
+            DeclarationFlags::EXPECT,
+            DeclarationFlags::ABSTRACT,
+            DeclarationFlags::CONST,
+        ] {
+            assert!(!accessor_realized(computed.with(excluded, true), false));
+        }
     }
 }
