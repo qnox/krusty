@@ -271,5 +271,114 @@ fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frame
             assert_sam_frames(&prepared, method, 1);
         }
     }
+    // One emitted private class needs both header-only inventories: its public interface
+    // hierarchy and a SAM in its field initializer, whose body calls no declaration.
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("fixture")),
+        "erasedObject",
+    );
+    let [function] = symbols.callables.functions() else {
+        panic!("one erased-return object factory")
+    };
+    let selected = libraries
+        .external_callable(function.callable.external_identity.unwrap())
+        .unwrap();
+    let callable = selected.klib_body_callable().unwrap();
+    assert_eq!(callable.ret(), Ty::obj("kotlin/Any"));
+    let stored = libraries
+        .classifier(type_name("fixture/StoredAction"))
+        .unwrap();
+    let stored_identity = stored.klib_identity.as_ref().unwrap();
+    let stored_method = stored.declared_callables["apply"].functions()[0]
+        .callable
+        .external_identity
+        .unwrap();
+    let checked = crate::resolve::for_checked_klib_bodies(
+        &libraries,
+        libraries.declaration_bodies(),
+        [callable],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        checked.sam_declarations()[&(
+            callable.identity().module.clone(),
+            stored_identity.signature.clone(),
+        )]
+            .target
+            .method_target,
+        crate::ir::IrSamMethod::External(stored_method)
+    );
+    let hierarchy = checked
+        .type_hierarchy()
+        .expect("the checked public hierarchy");
+    assert!(crate::assignable::TypeOracle::direct_supertypes(
+        hierarchy,
+        Ty::obj_args("fixture/Leaf", &[Ty::String]),
+    )
+    .contains(&Ty::obj_args("fixture/Root", &[Ty::String])));
+    assert!(libraries
+        .classifier(type_name("fixture/HiddenWithSam"))
+        .is_none());
+    let callees = KlibCalleeFacts::new([callable]).with_checked_dependency_facts(&checked);
+    let externals = checked_member_externals(&libraries, &checked);
+    let mut raw = DependencyBodyUnit::default();
+    raw.lower_function_with_intrinsics_and_externals(
+        callable,
+        libraries.declaration_bodies(),
+        &callees,
+        libraries.intrinsic_facts(),
+        &externals,
+    )
+    .unwrap_or_else(|decline| panic!("private class hierarchy and initializer SAM: {decline}"));
+    let targets = raw
+        .ir()
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(id, node)| match node {
+            IrExpr::Lambda {
+                sam: Some(target), ..
+            } => Some((id as ExprId, target)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 2);
+    assert_eq!(
+        targets
+            .iter()
+            .filter(|(_, target)| target.method_target
+                == crate::ir::IrSamMethod::External(stored_method))
+            .count(),
+        1
+    );
+    for (expression, target) in targets {
+        let classifier = if target.method_target == crate::ir::IrSamMethod::External(stored_method)
+        {
+            "fixture/StoredAction"
+        } else {
+            assert_eq!(
+                target.method_target,
+                crate::ir::IrSamMethod::External(method)
+            );
+            "fixture/Action"
+        };
+        assert_eq!(
+            raw.ir().checked_type(expression),
+            Some(Ty::obj_args(classifier, &[Ty::String]))
+        );
+    }
+    validated(raw.ir());
+    let root = libraries.classifier(type_name("fixture/Root")).unwrap();
+    let get = root.declared_callables["get"].functions()[0]
+        .callable
+        .external_identity
+        .unwrap();
+    assert!(raw.ir().function_overrides.values().flatten().any(|edge| {
+        edge.overridden == crate::fir::ResolvedFunctionOverrideTarget::External(get)
+            && edge.overridden_owner == type_name("fixture/Root")
+            && edge.applied_result == Ty::String
+            && edge.implementation_result == Ty::String
+    }));
     std::fs::remove_dir_all(work).unwrap();
 }

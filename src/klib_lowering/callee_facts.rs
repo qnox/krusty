@@ -196,6 +196,11 @@ impl<'a> KlibCalleeFacts<'a> {
         self
     }
 
+    /// The class hierarchy the checker froze for the selected bodies, when it froze one.
+    pub(super) fn class_type_oracle(&self) -> Option<&'a dyn crate::assignable::TypeOracle> {
+        self.class_type_oracle
+    }
+
     pub(crate) fn with_target_classifiers(
         mut self,
         represents: &'a dyn Fn(crate::types::TypeName) -> bool,
