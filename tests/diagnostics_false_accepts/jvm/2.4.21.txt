@@ -317,6 +317,7 @@ compiler/testData/diagnostics/tests/contextSensitiveResolutionUsingExpectedType/
 compiler/testData/diagnostics/tests/contracts/suppressContractWarning.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/UninitializedEnumCompanionVals.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/backingFieldInsideGetter.kt
+compiler/testData/diagnostics/tests/controlFlowAnalysis/capturingUninitializedVariableInNonInPlaceLambda.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/constructorPropertyInterdependence.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/deadCode/initializationInUnreachableCode.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/deadCode/uninitializedMemberAfterUnreachableFunction.kt
@@ -1336,6 +1337,7 @@ compiler/testData/diagnostics/tests/smartCasts/noSmartcastForNonFinalMembersFrom
 compiler/testData/diagnostics/tests/smartCasts/objectLiterals/captured.kt
 compiler/testData/diagnostics/tests/smartCasts/propertyAsCondition.kt
 compiler/testData/diagnostics/tests/smartCasts/toInvisible.kt
+compiler/testData/diagnostics/tests/smartCasts/variables/capturedByAtLeastOnce.kt
 compiler/testData/diagnostics/tests/smartCasts/variables/capturedWithControlJumps.kt
 compiler/testData/diagnostics/tests/smartCasts/variables/varChangedInLoop.kt
 compiler/testData/diagnostics/tests/smartCasts/varnotnull/classDelegationError.kt

@@ -43,6 +43,77 @@ fn shared_diagnostic_wording_matches_kotlinc() {
     );
 }
 
+/// An inline function's inlinable parameter may only be invoked or passed on to an inline
+/// parameter of another inline function. Every other read is `USAGE_IS_NOT_INLINABLE`: an
+/// argument of a non-inline function (also through a safe call) or of a `noinline` parameter, the
+/// receiver of a safe call, `!!` or an extension call, and a value stored in a local. A `noinline`
+/// parameter is an ordinary value, and a contract only names the parameter.
+#[test]
+fn an_inline_parameter_is_only_invoked_or_inlined_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "InlineParameterUsage.kt",
+            "fun plain(f: (Int) -> Unit): (Int) -> Int = { it }\n\
+             inline fun inlined(f: (Int) -> Unit): (Int) -> Int = { it }\n\
+             inline fun takesNoinline(noinline f: (Int) -> Unit) = f\n\
+             inline fun ((Int) -> Unit).extension() {}\n\
+             class Box {\n\
+             \x20   inline fun call(f: (Int) -> Unit) { f(0) }\n\
+             \x20   fun plainCall(f: (Int) -> Unit) { f(0) }\n\
+             }\n\
+             inline fun safe(box: Box?, i: Int?, s: (Int) -> Unit) {\n\
+             \x20   box?.call(s)\n\
+             \x20   box?.plainCall(s)\n\
+             \x20   i?.let(s)\n\
+             }\n\
+             inline fun use(s: (Int) -> Unit, noinline n: ((Int) -> Unit)?, noinline k: (Int) -> Unit) {\n\
+             \x20   plain(s)\n\
+             \x20   inlined(s)\n\
+             \x20   takesNoinline(s)\n\
+             \x20   s(1)\n\
+             \x20   s.invoke(2)\n\
+             \x20   s?.invoke(3)\n\
+             \x20   s!!.invoke(4)\n\
+             \x20   s.extension()\n\
+             \x20   val t = s\n\
+             \x20   plain(k)\n\
+             \x20   plain(n ?: {})\n\
+             \x20   run { s(5) }\n\
+             \x20   listOf(1).forEach(s)\n\
+             \x20   if (t != k) println(t)\n\
+             }\n\
+             @OptIn(kotlin.contracts.ExperimentalContracts::class)\n\
+             inline fun once(s: () -> Unit) {\n\
+             \x20   kotlin.contracts.contract { callsInPlace(s, kotlin.contracts.InvocationKind.EXACTLY_ONCE) }\n\
+             \x20   s()\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// The forwarded-lambda program the box suite once ran: `c` passes its inlinable parameter to the
+/// non-inline `callIt`, which needs it as a value, so kotlinc rejects the whole input. The runtime
+/// behaviour is covered by the box suite's `noinline` variant.
+#[test]
+fn an_inline_parameter_forwarded_to_a_non_inline_function_is_rejected_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "InlineLambdaForwarded.kt",
+            "inline fun a(f: () -> Int): Int = f()\n\
+             inline fun b(f: () -> Int): Int = a(f) + 1\n\
+             fun callIt(f: () -> Int): Int = f()\n\
+             inline fun c(f: () -> Int): Int = callIt(f) * 2\n\
+             fun box(): String {\n\
+             \x20   if (b { 5 } != 6) return \"f0\"\n\
+             \x20   if (c { 7 } != 14) return \"f1\"\n\
+             \x20   return \"OK\"\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
 #[test]
 fn prohibited_script_returns_match_kotlinc() {
     let stdlib = common::stdlib_jar();
@@ -233,46 +304,6 @@ fn a_script_return_is_prohibited_in_its_result_position_like_kotlinc() {
             ("Declared.kts", "println(1)\nreturn\nfun g() {}\n"),
             ("Looped.kts", "println(1)\nwhile (true) return\n"),
         ],
-        &[],
-    );
-}
-
-/// An inline function's inlinable parameter may only be invoked or passed on to an inline
-/// parameter of another inline function. Every other read is `USAGE_IS_NOT_INLINABLE`: an
-/// argument of a non-inline function or of a `noinline` parameter, the receiver of a safe call,
-/// `!!` or an extension call, and a value stored in a local. A `noinline` parameter is an
-/// ordinary value, and a contract only names the parameter.
-#[test]
-fn an_inline_parameter_is_only_invoked_or_inlined_like_kotlinc() {
-    common::assert_errors_match_kotlinc(
-        &[(
-            "InlineParameterUsage.kt",
-            "fun plain(f: (Int) -> Unit): (Int) -> Int = { it }\n\
-             inline fun inlined(f: (Int) -> Unit): (Int) -> Int = { it }\n\
-             inline fun takesNoinline(noinline f: (Int) -> Unit) = f\n\
-             inline fun ((Int) -> Unit).extension() {}\n\
-             inline fun use(s: (Int) -> Unit, noinline n: ((Int) -> Unit)?, noinline k: (Int) -> Unit) {\n\
-             \x20   plain(s)\n\
-             \x20   inlined(s)\n\
-             \x20   takesNoinline(s)\n\
-             \x20   s(1)\n\
-             \x20   s.invoke(2)\n\
-             \x20   s?.invoke(3)\n\
-             \x20   s!!.invoke(4)\n\
-             \x20   s.extension()\n\
-             \x20   val t = s\n\
-             \x20   plain(k)\n\
-             \x20   plain(n ?: {})\n\
-             \x20   run { s(5) }\n\
-             \x20   listOf(1).forEach(s)\n\
-             \x20   if (t != k) println(t)\n\
-             }\n\
-             @OptIn(kotlin.contracts.ExperimentalContracts::class)\n\
-             inline fun once(s: () -> Unit) {\n\
-             \x20   kotlin.contracts.contract { callsInPlace(s, kotlin.contracts.InvocationKind.EXACTLY_ONCE) }\n\
-             \x20   s()\n\
-             }\n",
-        )],
         &[],
     );
 }

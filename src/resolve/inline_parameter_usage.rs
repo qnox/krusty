@@ -67,7 +67,7 @@ impl Checker<'_> {
         }
         .child(body, &mut illegal);
         for read in illegal {
-            if !self.reported_inline_parameter_usages.insert(read) {
+            if !self.inline_access.first_parameter_usage_report(read) {
                 continue;
             }
             let Some(parameter) = analysis_parameter(self, &parameters, read) else {
@@ -123,18 +123,24 @@ impl UsageAnalysis<'_, '_> {
         if self.checker.selects_contract_intrinsic(expression) {
             return;
         }
-        if let Expr::Call { callee, args } = self.checker.file.expr(expression) {
-            self.callee(expression, *callee, illegal);
-            for &argument in args {
-                if self.parameter_read(argument).is_some() {
-                    if self.inlined_argument(expression, argument) == Some(false) {
-                        illegal.push(argument);
-                    }
-                } else {
-                    self.expression(argument, illegal);
-                }
+        match self.checker.file.expr(expression) {
+            Expr::Call { callee, args } => {
+                self.callee(expression, *callee, illegal);
+                self.arguments(expression, args, illegal);
+                return;
             }
-            return;
+            // `receiver?.member(arguments)`: the receiver needs a value, the arguments are passed
+            // to the selected member like any call's.
+            Expr::SafeCall {
+                receiver,
+                args: Some(args),
+                ..
+            } => {
+                self.child(*receiver, illegal);
+                self.arguments(expression, args, illegal);
+                return;
+            }
+            _ => {}
         }
         let mut expressions = Vec::new();
         let mut statements = Vec::new();
@@ -157,6 +163,19 @@ impl UsageAnalysis<'_, '_> {
         }
         for child in expressions {
             self.child(child, illegal);
+        }
+    }
+
+    /// The value arguments of `call`: a parameter passed on is legal where the callee inlines it.
+    fn arguments(&self, call: ExprId, arguments: &[ExprId], illegal: &mut Vec<ExprId>) {
+        for &argument in arguments {
+            if self.parameter_read(argument).is_some() {
+                if self.inlined_argument(call, argument) == Some(false) {
+                    illegal.push(argument);
+                }
+            } else {
+                self.expression(argument, illegal);
+            }
         }
     }
 

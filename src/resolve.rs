@@ -30395,9 +30395,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         fn_closure_reassigned: Vec::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
-        public_api_inline_depth: 0,
-        public_inline_access_calls: HashSet::default(),
-        reported_inline_parameter_usages: HashSet::default(),
+        inline_access: inline_access::InlineAccessState::default(),
         argument_lambda_inlining: HashMap::default(),
         symbolic_signature_inference: false,
         postponed_call_constraints: Vec::new(),
@@ -33038,14 +33036,8 @@ struct Checker<'a> {
     /// (`forEach`), where a mutable capture is fine because the lambda body is inlined into the caller
     /// (no closure). Suppresses the mutable-capture rejection for that one lambda.
     allow_lambda_mutation: bool,
-    /// How many public or protected `inline` functions are being checked. A call to a
-    /// non-public-API function inside one is rejected. An `internal` or `private` inline body is
-    /// not this boundary.
-    public_api_inline_depth: u32,
-    /// Calls already reported for that rule. Inference may check one call twice.
-    public_inline_access_calls: HashSet<ExprId>,
-    /// Inline-parameter reads already reported. A body may be checked more than once.
-    reported_inline_parameter_usages: HashSet<ExprId>,
+    /// The `inline` function rules' checking state: public-API access and inline-parameter usage.
+    inline_access: inline_access::InlineAccessState,
     /// Per lambda argument, whether the selected parameter inlines it into the caller's frame: the
     /// callee is inline and the parameter is neither `crossinline` nor `noinline`. A lambda absent
     /// here was taken by no selected parameter, so its body runs in a frame of its own. Recorded where an argument
