@@ -12,6 +12,7 @@ use crate::plugins::{PluginRejection, PluginSourceView};
 use crate::types::{Ty, TyKind, TypeName};
 
 use super::applier_targets::{self, LambdaCall, TargetConstraints};
+use super::class_stability::ParameterStability;
 use super::durable_keys::{package_hash, radix_string, KeyPath};
 use super::runtime::ComposeRuntime;
 use super::{ComposeOptions, COMPOSABLE};
@@ -106,6 +107,8 @@ pub(super) struct TrackedParameter {
     /// Whether it is a composable `() -> Unit` value, which takes the caller's composer when called
     /// and is compared by identity.
     pub(super) lambda: bool,
+    /// Whether kotlinc infers its type unstable, which the function compares by identity.
+    pub(super) unstable: bool,
 }
 
 /// A composable call directly in a restartable body, and what the caller knows about each argument
@@ -224,8 +227,17 @@ pub(super) fn record(
         let lambdas = (0..declaration.params.len())
             .map(|index| is_composable_lambda(ir, declaration.function, index, composable))
             .collect::<Vec<_>>();
+        let stabilities = declaration
+            .params
+            .iter()
+            .zip(&lambdas)
+            .map(|((_, ty), &lambda)| match lambda {
+                true => Ok(ParameterStability::Stable),
+                false => super::class_stability::parameter_stability(ir, &*runtime, *ty),
+            })
+            .collect::<Vec<_>>();
         if let Some(what) = unsupported_group_annotation(ir, declaration.function)
-            .or_else(|| unsupported_declaration(declaration, &lambdas))
+            .or_else(|| unsupported_declaration(declaration, &stabilities))
             .or_else(|| unsupported_defaults(ir, declaration.function))
             .or_else(|| {
                 (options.source_information
@@ -381,6 +393,7 @@ pub(super) fn record(
                 used,
                 default: defaults.get(index).copied().flatten(),
                 lambda: lambdas[index],
+                unstable: stabilities[index] == Ok(ParameterStability::Unstable),
             })
             .collect::<Vec<_>>();
         let signature = format!(
@@ -713,19 +726,14 @@ fn call_location(positions: &Utf16Offsets, span: crate::diag::Span) -> String {
 /// parameters are composable `() -> Unit` values, which are stable.
 fn unsupported_declaration(
     declaration: &crate::ir::IrPackageFunction,
-    lambdas: &[bool],
+    stabilities: &[Result<ParameterStability, &'static str>],
 ) -> Option<&'static str> {
     if declaration.receiver.is_some() || declaration.context_count != 0 {
         Some("a composable function with a receiver")
     } else if declaration.vararg_index.is_some() {
         Some("a composable function with a vararg parameter")
-    } else if declaration
-        .params
-        .iter()
-        .zip(lambdas)
-        .any(|((_, ty), &lambda)| !lambda && !is_known_stable(*ty))
-    {
-        Some("a composable function parameter whose stability kotlinc infers")
+    } else if let Some(&Err(what)) = stabilities.iter().find(|stability| stability.is_err()) {
+        Some(what)
     } else if !matches!(declaration.ret.kind(), TyKind::Unit) {
         Some("a composable function with a result")
     } else if declaration.inline {
@@ -1316,12 +1324,6 @@ fn unsupported_defaults(ir: &IrFile, function: FunId) -> Option<&'static str> {
             .flatten()
             .any(|&default| !matches!(ir.exprs[default as usize], IrExpr::Const(_))))
     .then_some("a composable function with a default argument that is not a constant")
-}
-
-/// The parameter types the stability inferencer knows are stable without looking further: the
-/// primitives and `String`.
-fn is_known_stable(ty: Ty) -> bool {
-    ty == Ty::String || super::runtime::PRIMITIVES.contains(&ty)
 }
 
 /// Which of the first `count` values — the function's parameters — `block` reads.
