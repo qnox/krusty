@@ -84,7 +84,6 @@ associatedObjects/findAssociatedObject.kt
 associatedObjects/findAssociatedObjectAndDCE.kt
 associatedObjects/findAssociatedObjectLazyness.kt
 basics/canonical_name.kt
-basics/cast_null.kt
 basics/const_infinity.kt
 basics/expression_as_statement.kt
 basics/k42000_1.kt
@@ -96,7 +95,6 @@ basics/statements0.kt
 basics/superGetterCall.kt
 basics/superSetterCall.kt
 basics/unchecked_cast1.kt
-basics/unchecked_cast10.kt
 basics/unchecked_cast11.kt
 basics/unchecked_cast12.kt
 basics/unchecked_cast13.kt
@@ -263,7 +261,6 @@ callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorIsKFunction.kt
 callableReference/function/booleanNotIntrinsic.kt
 callableReference/function/enumValueOfMethod.kt
-callableReference/function/extensionFunctionAsASuperTypePassToSAMInterface.kt
 callableReference/function/genericCallableReferenceArgumentsNonJVM.kt
 callableReference/function/genericCallableReferenceWithReifiedTypeParam.kt
 callableReference/function/genericCallableReferencesWithNullableTypes.kt
@@ -273,7 +270,6 @@ callableReference/function/kt21787.kt
 callableReference/function/kt32462.kt
 callableReference/function/local/enumExtendsTrait.kt
 callableReference/function/overloadedFunVsVal.kt
-callableReference/function/referenceToCompanionMember.kt
 callableReference/function/sortListOfStrings.kt
 callableReference/generticReferences.kt
 callableReference/kt21014.kt
@@ -322,16 +318,8 @@ callableReference/starProjectionCallableReference.kt
 casts/asForConstants.kt
 casts/asToNothing.kt
 casts/asUnit.kt
-casts/castGenericNull.kt
 casts/functions/asFunKBig.kt
-casts/functions/asFunKSmall.kt
-casts/functions/isFunKBig.kt
-casts/functions/isFunKSmall.kt
-casts/functions/isFunKSmallNonJS.kt
 casts/functions/reifiedAsFunKBig.kt
-casts/functions/reifiedAsFunKSmall.kt
-casts/isNullablePrimitive.kt
-casts/kt50577.kt
 casts/kt53677.kt
 casts/kt65197.kt
 casts/kt68509.kt
@@ -343,14 +331,12 @@ casts/mutableCollections/reifiedAsWithMutable.kt
 casts/mutableCollections/reifiedIsWithMutable.kt
 casts/mutableCollections/reifiedSafeAsWithMutable.kt
 casts/mutableCollections/safeAsWithMutable.kt
-casts/mutableCollections/weirdMutableCasts.kt
 casts/nullableSafeCastToTypeParameterWithInterfaceUpperBound.kt
 casts/wasmCastMessages.kt
 classDelegation/multipleModules.kt
 classLiteral/bound/primitives.kt
 classLiteral/classEquality.kt
 classes/comanionObjectFieldVsClassField.kt
-classes/kt1535.kt
 classes/kt1538.kt
 classes/kt2417.kt
 classes/kt2566_2.kt
@@ -367,10 +353,7 @@ closures/capturedVarsOptimization/kt44347.kt
 closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
 closures/closureInsideClosure/propertyAndFunctionNameClash.kt
-closures/closureOnTopLevel1.kt
-closures/closureOnTopLevel2.kt
 closures/closuresAsSingleton.kt
-closures/crossinlineLocalDeclaration.kt
 closures/kt11634_4.kt
 closures/localFunctionInInitBlock.kt
 collectionLiterals/stdlibCollections.kt
@@ -433,7 +416,6 @@ contextParameters/substitutedContextReceivers.kt
 contextParameters/suspendContextParemetersWithExtension.kt
 contextParameters/suspendContextualWithExtension.kt
 contextParameters/useFromAnotherModuleSuspending.kt
-contextParameters/withExtensionReceiverInSupertype.kt
 contracts/contractForCast.kt
 contracts/destructuredVariable.kt
 contracts/forLoop.kt
@@ -1170,15 +1152,11 @@ exceptions/catch2.kt
 exceptions/kt69534.kt
 exceptions/rethrow.kt
 exceptions/throw_from_catch.kt
-extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
-extensionFunctions/extensionFunctionAsATypeLocal.kt
-extensionFunctions/extensionFunctionAsSupertype.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
 extensionFunctions/kt475.kt
 extensionFunctions/kt865.kt
-extensionFunctions/nestedExtensionFunctionAsASupertype.kt
 extensionFunctions/suspendConversionForExtensionFunAsAFunType.kt
 extensionFunctions/suspendConversionForExtensionFunAsAPropertyType.kt
 extensionFunctions/suspendConversionForExtensionFunAsASuperType.kt
@@ -1235,8 +1213,6 @@ funInterface/kt77685.kt
 funInterface/kt79092-sam.kt
 funInterface/kt79092.kt
 funInterface/multimodule.kt
-funInterface/noConversionForSubtype.kt
-funInterface/noConversionForSubtypeGeneric.kt
 funInterface/nonAbstractMethod.kt
 funInterface/nonTrivialProjectionInSuperType.kt
 funInterface/nullableSam.kt
@@ -1271,7 +1247,6 @@ function/sum_imm.kt
 function/sum_mixed.kt
 function/sum_silly.kt
 function/unreachableStatementAfterReturn.kt
-functions/bigArity/instanceOfCallableReference.kt
 functions/bigArity/subclass.kt
 functions/invoke/kt3190.kt
 functions/kt1199.kt
@@ -1280,9 +1255,6 @@ functions/localFunctions/callInlineLocalInLambda.kt
 functions/localFunctions/definedWithinLambda.kt
 functions/localFunctions/definedWithinLambdaInnerUsage1.kt
 functions/localFunctions/definedWithinLambdaInnerUsage2.kt
-ieee754/asComparableToDouble.kt
-ieee754/asComparableToDouble_properIeeeComparisons.kt
-ieee754/comparableTypeCast.kt
 ieee754/equalsNaN_properIeeeComparisons.kt
 ieee754/equalsNullableDouble_properIeeeComparisons.kt
 ieee754/equalsNullableFloat_properIeeeComparisons.kt
@@ -1807,8 +1779,6 @@ multiplatform/k2/basic/expectActualOverloads.kt
 multiplatform/k2/basic/expectActualTypeParameters.kt
 multiplatform/k2/basic/expectInterfaceInSupertypes.kt
 multiplatform/k2/basic/extensionAndFakeOverride.kt
-multiplatform/k2/basic/extensionFunctionAsASupertype.kt
-multiplatform/k2/basic/extensionFunctionAsASupertypeConversion.kt
 multiplatform/k2/basic/interfaceMethodFromSuperTypeIsImplementedInOtherExpectSuperClass.kt
 multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/nameBasedDestructuringFullForm.kt
@@ -2200,7 +2170,6 @@ ranges/literal/simpleRangeWithNonConstantEnds.kt
 ranges/literal/simpleSteppedDownTo.kt
 ranges/literal/simpleSteppedRange.kt
 ranges/multiAssignmentIterationOverIntRange.kt
-ranges/safeCallRangeTo.kt
 ranges/stepped/expression/downTo/emptyProgression.kt
 ranges/stepped/expression/downTo/illegalStepNegative.kt
 ranges/stepped/expression/downTo/illegalStepNonConst.kt
@@ -2812,7 +2781,6 @@ regressions/multimodule/inlineBuiltString.kt
 regressions/multimodule/inlineNarrowElementInRange.kt
 regressions/multimodule/inlineTextTrim.kt
 regressions/multimodule/inlineTodoDefaultMessage.kt
-regressions/multimodule/multimoduleDependencyFunctionImplementationMarkers.kt
 regressions/multimodule/multimoduleDirectCollectionIterator.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
@@ -3004,7 +2972,6 @@ typealias/typeAliasAsBareType.kt
 underscoredTypeArguments/backTicked.kt
 underscoredTypeArguments/simple.kt
 unit/kt3634.kt
-unitConversion/unitConversionForSubtype.kt
 unitConversion/unitConversionWithSuspend.kt
 unsignedTypes/forEachIndexedInListOfUInts.kt
 unsignedTypes/forInUnsignedDownTo.kt
