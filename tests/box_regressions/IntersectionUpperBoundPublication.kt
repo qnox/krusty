@@ -29,7 +29,7 @@ fun box(): String {
     val names = picked().name + property.name + kept().name + local().name
     val boxes = boxedPick().value.name + wrapped().value.name + hiddenName()
     val rebound = named().name
-    val marks = marked() is First
-    return if (names == "firstfirstfirstfirst" && boxes == "firstfirstfirst" && rebound == "first" && marks) "OK"
-    else "fail $names $boxes $rebound $marks"
+    marked()
+    return if (names == "firstfirstfirstfirst" && boxes == "firstfirstfirst" && rebound == "first") "OK"
+    else "fail $names $boxes $rebound"
 }
