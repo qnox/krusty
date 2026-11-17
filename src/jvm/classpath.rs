@@ -350,6 +350,7 @@ macro_rules! cache_stat {
     }};
 }
 
+mod atomic_exchange;
 mod builtin_members;
 mod inline_plan_cache;
 mod versioned_records;
