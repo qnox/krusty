@@ -1910,7 +1910,10 @@ fn parameter_lambda_uses(
         if !seen.insert(expression) {
             continue;
         }
-        if let IrExpr::Lambda { .. } = ir.expr(expression) {
+        // A nested lambda's body is its own frame, but its capture operands are evaluated here:
+        // a capture of the parameter is a use the copy must keep.
+        if let IrExpr::Lambda { captures, .. } = ir.expr(expression) {
+            pending.extend(captures.iter().copied());
             continue;
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));

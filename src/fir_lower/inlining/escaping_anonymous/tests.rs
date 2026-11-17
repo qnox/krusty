@@ -357,3 +357,40 @@ fn lifted_captures_after_a_fieldless_one_extend_the_recorded_order_by_constructo
     assert_eq!(&*ir.class_capture_order[&class], &[0, 2, 1, 3]);
     assert_eq!(ir.classes[class as usize].ctor_args[3].field_index, Some(2));
 }
+
+/// Constructor code that invokes a fieldless lambda parameter and also captures it in a nested
+/// lambda keeps the parameter: the capture operand is evaluated in the constructor even though
+/// the nested lambda's body is its own frame.
+#[test]
+fn a_lambda_parameter_captured_by_a_nested_lambda_is_not_consumed() {
+    let mut ir = crate::ir::IrFile::default();
+    let invoked = ir.add_expr(IrExpr::GetValue(1));
+    let invocation = ir.add_expr(IrExpr::InvokeFunction {
+        func: invoked,
+        args: Vec::new(),
+        params: Vec::new(),
+        ret: Ty::String,
+    });
+    let unit = ir.add_expr(IrExpr::UnitInstance);
+    let captured = ir.add_expr(IrExpr::GetValue(1));
+    let nested = ir.add_expr(IrExpr::Lambda {
+        impl_fn: 0,
+        arity: 0,
+        captures: vec![captured],
+        sam: None,
+        inline_body: Some(unit),
+    });
+    let body = ir.add_expr(IrExpr::Block {
+        stmts: vec![invocation, nested],
+        value: None,
+    });
+    assert!(parameter_lambda_uses(&ir, body, 1).is_none());
+
+    let only_invoked = ir.add_expr(IrExpr::Block {
+        stmts: vec![invocation],
+        value: None,
+    });
+    let uses = parameter_lambda_uses(&ir, only_invoked, 1).expect("the parameter is only invoked");
+    assert_eq!(uses.invocations, [invocation]);
+    assert!(uses.forwards.is_empty());
+}
