@@ -2178,7 +2178,10 @@ pub(crate) fn lower_value_classes(
                     fq[*class as usize],
                     fid,
                     args.clone(),
-                    Some(declared_params[fid as usize].clone().into_boxed_slice()),
+                    Some(source_parameters(
+                        &declared_params[fid as usize],
+                        args.len(),
+                    )),
                 ))
             }
             // `x.getV()` getter: identity on an unboxed value, `unbox-impl()` on a boxed one.
@@ -4330,4 +4333,13 @@ mod boundary_tests {
             &under
         ));
     }
+}
+
+/// The parameters of a realized member static as its call passes them, receiver excluded. A
+/// source member lists only its own parameters, while a synthesized static (`equals-impl`) lists
+/// its carrier first; the call's operand count tells which, as the rewrite prepends the receiver.
+fn source_parameters(declared: &[Ty], operands: usize) -> Box<[Ty]> {
+    declared[declared.len().saturating_sub(operands)..]
+        .to_vec()
+        .into_boxed_slice()
 }
