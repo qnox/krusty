@@ -6,7 +6,15 @@ use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-pub struct NameId(pub u32);
+pub struct NameId(pub(crate) u32);
+
+impl NameId {
+    /// Read-only position of this node in its tree. Turning an index back into an id goes through
+    /// [`NameTree::id_at`], which checks it against the nodes the tree has published.
+    pub fn index(self) -> u32 {
+        self.0
+    }
+}
 
 #[derive(Debug)]
 struct NameNode {
@@ -866,6 +874,11 @@ impl NameTree {
         self.arena.len() == 0
     }
 
+    /// The id of the node at `index`, or `None` when the tree has not published that many nodes.
+    pub fn id_at(&self, index: u32) -> Option<NameId> {
+        (index < self.arena.len()).then_some(NameId(index))
+    }
+
     #[inline]
     fn node(&self, id: NameId) -> &NameNode {
         self.arena.get(id.0)
@@ -1286,5 +1299,16 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    #[test]
+    fn id_at_only_yields_published_nodes() {
+        let tree = NameTree::default();
+        let published = tree.len() as u32;
+        assert_eq!(tree.id_at(published), None);
+        let a = tree.insert("p/A");
+        assert_eq!(tree.id_at(a.index()), Some(a));
+        assert_eq!(tree.id_at(tree.len() as u32), None);
+        assert_eq!(tree.id_at(u32::MAX), None);
     }
 }
