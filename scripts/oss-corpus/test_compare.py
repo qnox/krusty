@@ -46,11 +46,11 @@ class MultiplatformJvmTarget(unittest.TestCase):
         self.assertEqual(summary['rows'], [
             dict(task=':core:compileKotlinJvm', dir='core/build/classes/kotlin/jvm/main', built=True,
                  fallback=None, error=None, classes=2, identical=1, only_kotlinc=0, only_krusty=0,
-                 seconds=dict(kotlinc=None, krusty=None), verify=None),
+                 seconds=dict(kotlinc=None, krusty=None), verify=None, blocked_by=[]),
             dict(task=':core:compileTestKotlinJvm', dir='core/build/classes/kotlin/jvm/test',
                  built=False, fallback='unsupported plugin', error=None, classes=1, identical=0,
                  only_kotlinc=None, only_krusty=None, seconds=dict(kotlinc=None, krusty=None),
-                 verify=None),
+                 verify=None, blocked_by=[]),
         ])
         # Neither build was measured.
         self.assertEqual(summary['cost'], dict(kotlinc=None, krusty=None))
@@ -89,6 +89,50 @@ class FailedCompile(unittest.TestCase):
             (':b:compileKotlin', False, 'krusty wrote no class'),
             (':c:compileKotlin', False, 'not run: a task it depends on failed'),
         ])
+
+
+class RootFailures(unittest.TestCase):
+    def test_a_compilation_that_did_not_run_names_the_failed_tasks_that_stopped_it(self):
+        with tempfile.TemporaryDirectory() as work:
+            out = os.path.join(work, 'out', 'p')
+            for module in 'abcd':
+                write(f'{out}/kotlinc/{module}/build/classes/kotlin/main/{module.upper()}.class', b'K')
+            write(f'{work}/logs/p.kotlinc.compilations.tsv', ''.join(
+                f':{m}:compileKotlin\t{m}/build/classes/kotlin/main\n' for m in 'abcd').encode())
+            write(f'{work}/logs/p.krusty.log', (
+                '> Task :a:compileKotlinWithKrusty\n'
+                'e: a/A.kt:1:1 Unresolved reference: foo\n'
+                '> Task :a:compileKotlinWithKrusty FAILED\n'
+                '> Task :k:kspKotlin FAILED\n'
+                '> Task :b:compileKotlinWithKrusty\n').encode())
+            write(f'{work}/logs/p.krusty.tasks.tsv',
+                  b':a:compileKotlinWithKrusty\t1\t2\tfailed\n'
+                  b':k:kspKotlin\t1\t2\tfailed\n'
+                  b':b:compileKotlinWithKrusty\t1\t2\texecuted\n')
+            # c needs a's classes and a jar built from k's generated sources; d needs c. A failed
+            # task is where the walk stops: k's own inputs say nothing about what stopped c.
+            write(f'{work}/logs/p.krusty.deps.tsv',
+                  b':a:compileKotlin\t:a:compileKotlinWithKrusty\n'
+                  b':a:compileKotlinWithKrusty\t\n'
+                  b':b:compileKotlinWithKrusty\t\n'
+                  b':c:compileKotlin\t:c:compileKotlinWithKrusty\n'
+                  b':c:compileKotlinWithKrusty\t:a:compileKotlin,:x:jar\n'
+                  b':x:jar\t:k:kspKotlin\n'
+                  b':k:kspKotlin\t:b:compileKotlinWithKrusty\n'
+                  b':d:compileKotlin\t:d:compileKotlinWithKrusty\n'
+                  b':d:compileKotlinWithKrusty\t:c:compileKotlin\n')
+            subprocess.run([sys.executable, os.path.join(HERE, 'compare.py'), work, 'p', '0'],
+                           check=True, stdout=subprocess.DEVNULL)
+            with open(f'{out}/compare.json') as f:
+                summary = json.load(f)
+        self.assertEqual([(r['task'], r['error'], r['blocked_by']) for r in summary['rows']], [
+            (':a:compileKotlin', 'e: a/A.kt:1:1 Unresolved reference: foo', []),
+            (':b:compileKotlin', 'krusty wrote no class', []),
+            (':c:compileKotlin', 'not run: a task it depends on failed', [':a:compileKotlin', ':k:kspKotlin']),
+            (':d:compileKotlin', 'not run: a task it depends on failed', [':a:compileKotlin', ':k:kspKotlin']),
+        ])
+        self.assertEqual(summary['failed_tasks'], {':a:compileKotlin': 'e: a/A.kt:1:1 Unresolved reference: foo',
+                                                   ':k:kspKotlin': None})
 
 
 class VerifyBuild(unittest.TestCase):

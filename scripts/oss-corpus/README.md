@@ -29,7 +29,9 @@ task inside the Gradle root; the next build therefore starts without them. `comp
 the class files of every compile task the reference build listed, byte for byte, and reports apart
 a listed task kotlinc wrote no class for. A compile task the plugin leaves to kotlinc (an
 unsupported compiler plugin or option) counts as a miss, with the plugin's reason; a compile krusty
-fails counts as a miss with the first error it logged. With `$CORPUS_VERIFY_RECORDS` set,
+fails counts as a miss with the first error it logged. A compile that did not run because a task it
+depends on failed names the failed tasks that stopped it (`blocked_by`), traced through the task
+graph the init script writes to `$CORPUS_TASK_DEPS`. With `$CORPUS_VERIFY_RECORDS` set,
 `corpusCompile` also runs the plugin's verify compile (`<task>KrustyVerify`) of each listed task
 and lists the record each writes; `run.sh` names `krustyVerify`, which turns verify mode on, and
 excludes it, so only the listed compilations are verified rather than every module and variant.
@@ -70,7 +72,8 @@ binary keeps frame pointers), `hotspots.py` folds the krusty processes' call sta
 and the report lists the top ones across the corpus with a link to each project's flame graph.
 
 `summarize.py` turns the per-project results into the run's report: stars, Kotlin and Java lines,
-compilations built, identical classes, the reason for every miss, every error the verify build
+compilations built, identical classes, the failed tasks ranked by how many compilations each kept
+from running, the reason for every miss, every error the verify build
 reported (grouped by cause: the message without its location, with quoted text and numbers masked,
 counted across the corpus and listed in full per project; a project whose verify build recorded
 nothing is reported as unverified, not left out), the projects' tests that pass on krusty's classes,
