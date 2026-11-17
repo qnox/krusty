@@ -326,6 +326,30 @@ fn native_library_generic_any_override_uses_the_canonical_vtable_slot() {
     );
 }
 
+#[test]
+fn native_a_not_null_member_delegate_holds_what_was_written_to_it() {
+    let source = include_str!("box_regressions/notNullDelegateMember.kt");
+    expect_native_klib_box(source, "nativeNotNullDelegateMember");
+}
+
+#[test]
+fn native_a_local_not_null_delegate_is_read_through_a_capture() {
+    let source = include_str!("box_regressions/notNullDelegateLocalCapture.kt");
+    expect_native_klib_box(source, "nativeNotNullDelegateLocalCapture");
+}
+
+#[test]
+fn native_a_not_null_delegate_is_rewritten() {
+    let source = include_str!("box_regressions/notNullDelegateRewritten.kt");
+    expect_native_klib_box(source, "nativeNotNullDelegateRewritten");
+}
+
+#[test]
+fn native_an_observable_member_delegate_notifies_its_instance() {
+    let source = include_str!("box_regressions/observableDelegateMember.kt");
+    expect_native_klib_box(source, "nativeObservableDelegateMember");
+}
+
 fn expect_native_klib_box(source: &str, stem: &str) {
     super::common::expect_box_ok_with_stdlib(source, &format!("{stem}Oracle"));
     let target = host().expect("Native KLIB/runtime is required for this test");
@@ -540,6 +564,19 @@ fn native_cross_module_superclasses_keep_selected_constructor_and_generic_method
         run_native_abi_case(source, stem),
         Outcome::Pass,
         "Native must preserve selected superclass ABI across module boundaries"
+    );
+}
+
+#[test]
+fn native_cross_module_superclass_publishes_the_bridges_its_function_supertype_needs() {
+    let source = include_str!("box_regressions/multimodule/sourceLibraryUnboxedFunctionBridge.kt");
+    let stem = "sourceLibraryUnboxedFunctionBridge";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete source superclass module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "a library class's vtable bridges must be linkable by a subclass in another module"
     );
 }
 

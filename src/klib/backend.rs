@@ -989,6 +989,26 @@ fn record_class_property_exports(
                     {
                         Some((Some(*property), Some(*getter), *setter, false))
                     }
+                    (
+                        PropertyOrigin::CompanionBlock(index),
+                        crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+                            getter,
+                            setter,
+                            receiver: None,
+                            context_parameters,
+                            delegate: None,
+                        },
+                    ) if context_parameters.is_empty()
+                        && ir
+                            .companion_blocks
+                            .properties_of(name)
+                            .nth(*index)
+                            .is_some_and(|property| {
+                                property.getter == Some(*getter) && property.setter == *setter
+                            }) =>
+                    {
+                        Some((Some(*property), Some(*getter), *setter, false))
+                    }
                     _ => None,
                 });
         let first = selected.next();
@@ -1031,7 +1051,14 @@ fn record_class_property_exports(
                         property.source_order,
                     )
                 }
-                PropertyOrigin::Constant(_) | PropertyOrigin::CompanionBlock(_) => continue,
+                PropertyOrigin::Constant(_) => continue,
+                PropertyOrigin::CompanionBlock(_) => {
+                    return Err(format!(
+                        "{}.{} has no exact checked companion-block accessor layout",
+                        source.fq_name(),
+                        declaration.name,
+                    ));
+                }
             };
             let owner = ir
                 .class_id_by_name(name)
@@ -1257,12 +1284,28 @@ fn unsupported_class_construct(ir: &IrFile, class: &IrClass) -> Option<&'static 
     if ir
         .companion_blocks
         .properties_of(class.fq_name_id())
-        .next()
-        .is_some()
+        .any(|property| !companion_accessor_bodies(ir, property))
     {
         return Some("companion blocks");
     }
     None
+}
+
+/// Accessor-only block properties use the ordinary class metadata and exact receiver-less
+/// accessor export protocol. Stored properties still need their class initialization/storage
+/// publication; accepting their metadata alone would silently lose executable behavior.
+fn companion_accessor_bodies(ir: &IrFile, property: &crate::ir::IrCompanionBlockProperty) -> bool {
+    property.storage.is_none()
+        && property.getter.is_some()
+        && (!property.is_var || property.setter.is_some())
+        && property
+            .getter
+            .into_iter()
+            .chain(property.setter)
+            .all(|function| {
+                let function = &ir.functions[function as usize];
+                function.dispatch_receiver.is_none() && function.body.is_some()
+            })
 }
 
 /// The value a class `const val`'s static storage is initialized with.

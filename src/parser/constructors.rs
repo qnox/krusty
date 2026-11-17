@@ -23,6 +23,7 @@ impl Parser<'_> {
             .unwrap_or(keyword.lo);
         self.bump(); // 'constructor'
         let params = self.parse_param_list();
+        let signature_end = self.t[self.i.saturating_sub(1)].span.hi;
         let mut delegation = CtorDelegation::None;
         let mut delegation_offset = 0;
         if self.eat(TokenKind::Colon) {
@@ -71,6 +72,7 @@ impl Parser<'_> {
             span: Span::new(keyword.lo, end),
             is_actual: modifiers.iter().any(|modifier| modifier == "actual"),
             declaration_span: Span::new(start, end),
+            signature_span: Span::new(keyword.lo, signature_end),
             // The debug-line post-pass rewrites these to their lines, the way it rewrites every
             // other declaration's; the delegation carries its OFFSET until then.
             decl_line: 0,
