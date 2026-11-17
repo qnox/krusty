@@ -193,3 +193,13 @@ fn write_qualified(
     }
     Ok(())
 }
+
+impl From<crate::klib_libraries::semantic_types::KlibTypeDecline> for KlibBodyDeclineReason {
+    fn from(decline: crate::klib_libraries::semantic_types::KlibTypeDecline) -> Self {
+        use crate::klib_libraries::semantic_types::KlibTypeDecline;
+        match decline {
+            KlibTypeDecline::UnsupportedType(what) => Self::UnsupportedType(what),
+            KlibTypeDecline::SignatureMismatch(detail) => Self::SignatureMismatch(detail),
+        }
+    }
+}

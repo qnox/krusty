@@ -29,7 +29,7 @@ mod for_loops;
 mod function_lowering;
 mod inline_templates;
 mod ir_builtins;
-mod klib_types;
+use crate::klib_libraries::semantic_types as klib_types;
 mod local_values;
 mod lowering_checkpoint;
 mod primitive_calls;

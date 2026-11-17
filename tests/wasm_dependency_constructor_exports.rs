@@ -79,6 +79,26 @@ fn wasm_official_dependency_inherited_abstract_members_select_the_most_specific(
     );
 }
 
+/// The most specific inherited declaration is selected by subtyping its result: a covariant type
+/// argument of an `out` classifier, and an invariant argument against a use-site projection.
+#[test]
+fn wasm_official_dependency_inherited_covariant_results_select_by_variance() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyInheritedCovariantResults.kt"),
+        "DependencyInheritedCovariantResults",
+    );
+}
+
+/// A library body reads a property of a generic class of its library at a concrete type argument,
+/// and the read's value has that type.
+#[test]
+fn wasm_official_dependency_generic_property_reads_have_the_applied_type() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyGenericPropertyReads.kt"),
+        "DependencyGenericPropertyReads",
+    );
+}
+
 /// A library body reads a generic extension property at the receiver's type argument.
 #[test]
 fn wasm_official_dependency_generic_extension_properties_bind_their_type_parameters() {

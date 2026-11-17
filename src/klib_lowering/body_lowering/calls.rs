@@ -801,27 +801,32 @@ impl BodyLowering<'_> {
                 .external_singleton_dispatches
                 .insert(call, classifier);
         }
-        // The result of a generic local function is its declared type parameter; the call's
-        // value is that result at the call's type arguments. The call itself keeps the
-        // declaration's result, as a source call of a local function does, and the coercion
-        // carries the substituted one. A backend reads that published result rather than
-        // reconstructing it from the callee.
+        Ok(self.local_result(call, declared_ret, operands.ret))
+    }
+
+    /// The value of a `call` of a function of this unit, whose declared result is `declared`, at
+    /// the call's result `ret`. The result of a generic local function is its declared type
+    /// parameter; the call's value is that result at the call's type arguments. The call itself
+    /// keeps the declaration's result, as a source call of a local function does, and the
+    /// coercion carries the substituted one. A backend reads that published result rather than
+    /// reconstructing it from the callee.
+    fn local_result(&mut self, call: ExprId, declared: Option<Ty>, ret: Ty) -> ExprId {
         if let Some(declared) =
-            declared_ret.filter(|_| matches!(self.ir.expr(call), IrExpr::Call { .. }))
+            declared.filter(|_| matches!(self.ir.expr(call), IrExpr::Call { .. }))
         {
             self.ir.call_declared_ret.insert(call, declared);
         }
-        Ok(match declared_ret {
-            Some(declared) if declared != operands.ret => {
+        match declared {
+            Some(declared) if declared != ret => {
                 // As checked FIR lowering does for a source call, the inner call publishes the
                 // declaration's result it evaluates to, and the coercion the use's type.
                 self.ir.call_declared_ret.insert(call, declared);
-                let coerced = self.coercion(call, operands.ret);
-                self.ir.set_logical_type(coerced, operands.ret);
+                let coerced = self.coercion(call, ret);
+                self.ir.set_logical_type(coerced, ret);
                 coerced
             }
             _ => call,
-        })
+        }
     }
 }
 
@@ -866,11 +871,13 @@ impl BodyLowering<'_> {
         let target = match target {
             LinkedAccessorTarget::External(property) => property,
             LinkedAccessorTarget::Local(function) => {
-                return Ok(self.ir.add_expr(IrExpr::Call {
+                let call = self.ir.add_expr(IrExpr::Call {
                     callee: Box::new(Callee::Local(function)),
                     dispatch_receiver: receiver,
                     args: arguments,
-                }));
+                });
+                let declared = self.ir.functions[function as usize].ret;
+                return Ok(self.local_result(call, Some(declared), result));
             }
         };
         let dispatch = IrPropertyDispatch::Ordinary;

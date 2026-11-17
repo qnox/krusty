@@ -14,7 +14,6 @@
 
 use crate::fx_hash::HashMap;
 
-use super::decline::KlibBodyDeclineReason;
 use crate::libraries::function_classifiers;
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
@@ -24,10 +23,18 @@ use crate::metadata::klib_ir::tree::{
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::{builtin_semantic, type_name_child, wk, Ty, TyKind, TypeName};
 
+/// Why a serialized KLIB type has no semantic type: a form the model does not represent, or a
+/// serialized type that contradicts its own classifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum KlibTypeDecline {
+    UnsupportedType(&'static str),
+    SignatureMismatch(String),
+}
+
 /// The type parameters a body may name, each bound to the semantic type parameter its
 /// declaration's provider record uses for it.
 #[derive(Clone, Debug, Default)]
-pub(super) struct KlibTypeParameters {
+pub(crate) struct KlibTypeParameters {
     bindings: HashMap<KlibIrSymbol, Ty>,
     bounds: HashMap<String, Vec<Ty>>,
 }
@@ -35,11 +42,11 @@ pub(super) struct KlibTypeParameters {
 impl KlibTypeParameters {
     /// Bind the serialized type parameter `symbol` to `semantic`. A repeated symbol is a malformed
     /// declaration.
-    pub(super) fn bind(&mut self, symbol: &KlibIrSymbol, semantic: Ty) -> bool {
+    pub(crate) fn bind(&mut self, symbol: &KlibIrSymbol, semantic: Ty) -> bool {
         self.bindings.insert(symbol.clone(), semantic).is_none()
     }
 
-    pub(super) fn record_bounds(&mut self, formal: Ty, bounds: Vec<Ty>) -> bool {
+    pub(crate) fn record_bounds(&mut self, formal: Ty, bounds: Vec<Ty>) -> bool {
         let TyKind::TyParam(identity, _) = formal.kind() else {
             return false;
         };
@@ -49,24 +56,24 @@ impl KlibTypeParameters {
     }
 
     /// The semantic type parameter the serialized `symbol` is bound to.
-    pub(super) fn bound(&self, symbol: &KlibIrSymbol) -> Option<Ty> {
+    pub(crate) fn bound(&self, symbol: &KlibIrSymbol) -> Option<Ty> {
         self.bindings.get(symbol).copied()
     }
 
-    pub(super) fn declared_bounds(&self, name: &str) -> Option<&[Ty]> {
+    pub(crate) fn declared_bounds(&self, name: &str) -> Option<&[Ty]> {
         self.bounds.get(name).map(Vec::as_slice)
     }
 }
 
 /// A class application, with the same classifier and annotation normalization as closure planning.
-fn class_type(
+fn class_type<E: From<KlibTypeDecline>>(
     arena: &KlibIrArena,
     parameters: &KlibTypeParameters,
     classifier: &KlibIrSymbol,
     arguments: &[KlibIrTypeArgument],
     annotations: &[KlibIrAnnotation],
-    local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
-) -> Result<Ty, KlibBodyDeclineReason> {
+    local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, E>,
+) -> Result<Ty, E> {
     let (name, receiver) = class_head(classifier, annotations, local_class)?;
     let mut arguments = arguments
         .iter()
@@ -88,7 +95,8 @@ fn class_type(
     if receiver {
         return Err(mismatch(
             "a type other than a function type is marked `@ExtensionFunctionType`",
-        ));
+        )
+        .into());
     }
     if arguments.is_empty() {
         if let Some(builtin) = builtin_semantic(name) {
@@ -99,22 +107,22 @@ fn class_type(
 }
 
 /// The semantic type of the KLIB type `id`, naming only the type parameters of `parameters`.
-pub(super) fn semantic_type(
+pub(crate) fn semantic_type(
     arena: &KlibIrArena,
     parameters: &KlibTypeParameters,
     id: KlibIrTypeId,
-) -> Result<Ty, KlibBodyDeclineReason> {
+) -> Result<Ty, KlibTypeDecline> {
     semantic_type_in(arena, parameters, id, &|_| Ok(None))
 }
 
 /// [`semantic_type`], also admitting a non-public class `local_class` resolves inside the library
 /// whose body is being lowered. `Ok(None)` keeps the refusal of every other non-public classifier.
-pub(super) fn semantic_type_in(
+pub(crate) fn semantic_type_in<E: From<KlibTypeDecline>>(
     arena: &KlibIrArena,
     parameters: &KlibTypeParameters,
     id: KlibIrTypeId,
-    local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
-) -> Result<Ty, KlibBodyDeclineReason> {
+    local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, E>,
+) -> Result<Ty, E> {
     let (classifier, nullability, arguments, annotations) = match arena.ty(id) {
         KlibIrType::Simple {
             classifier,
@@ -125,15 +133,13 @@ pub(super) fn semantic_type_in(
             abbreviation: _,
         } => (classifier, nullability, arguments, annotations),
         KlibIrType::DefinitelyNotNull(_) => {
-            return Err(KlibBodyDeclineReason::UnsupportedType(
-                "a definitely non-null type",
-            ))
+            return Err(KlibTypeDecline::UnsupportedType("a definitely non-null type").into())
         }
         KlibIrType::Dynamic { .. } => {
-            return Err(KlibBodyDeclineReason::UnsupportedType("the dynamic type"))
+            return Err(KlibTypeDecline::UnsupportedType("the dynamic type").into())
         }
         KlibIrType::Error { .. } => {
-            return Err(KlibBodyDeclineReason::UnsupportedType("an error type"))
+            return Err(KlibTypeDecline::UnsupportedType("an error type").into())
         }
     };
     let semantic = match classifier.kind {
@@ -147,18 +153,20 @@ pub(super) fn semantic_type_in(
         )?,
         KlibIrSymbolKind::TypeParameter => {
             if !arguments.is_empty() {
-                return Err(mismatch("a type parameter is applied to type arguments"));
+                return Err(mismatch("a type parameter is applied to type arguments").into());
             }
-            parameters.bindings.get(classifier).copied().ok_or(
-                KlibBodyDeclineReason::UnsupportedType(
+            parameters
+                .bindings
+                .get(classifier)
+                .copied()
+                .ok_or(KlibTypeDecline::UnsupportedType(
                     "a type parameter its declaration does not bind",
-                ),
-            )?
+                ))?
         }
         _ => {
-            return Err(KlibBodyDeclineReason::UnsupportedType(
-                "a type whose classifier is not a class",
-            ))
+            return Err(
+                KlibTypeDecline::UnsupportedType("a type whose classifier is not a class").into(),
+            )
         }
     };
     Ok(match nullability {
@@ -175,21 +183,22 @@ pub(super) fn semantic_type_in(
     })
 }
 
-fn class_head(
+fn class_head<E: From<KlibTypeDecline>>(
     classifier: &KlibIrSymbol,
     annotations: &[KlibIrAnnotation],
-    local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
-) -> Result<(TypeName, bool), KlibBodyDeclineReason> {
+    local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, E>,
+) -> Result<(TypeName, bool), E> {
     let name = match &classifier.signature {
         KlibIrSignature::Public(signature) => {
             if signature.member_id().is_some() || signature.declaration().is_empty() {
-                return Err(KlibBodyDeclineReason::UnsupportedType(
+                return Err(KlibTypeDecline::UnsupportedType(
                     "a type whose classifier is not a class",
-                ));
+                )
+                .into());
             }
             classifier_name(signature)?
         }
-        signature => local_class(signature)?.ok_or(KlibBodyDeclineReason::UnsupportedType(
+        signature => local_class(signature)?.ok_or(KlibTypeDecline::UnsupportedType(
             "a type of a non-public class",
         ))?,
     };
@@ -201,9 +210,10 @@ fn class_head(
         if annotation == wk::extension_function_type() {
             receiver = true;
         } else if annotation == wk::context_function_type_params() {
-            return Err(KlibBodyDeclineReason::UnsupportedType(
+            return Err(KlibTypeDecline::UnsupportedType(
                 "a function type with context parameters",
-            ));
+            )
+            .into());
         }
     }
     Ok((name, receiver))
@@ -212,7 +222,7 @@ fn class_head(
 fn function_shape(
     name: TypeName,
     arguments: usize,
-) -> Result<Option<function_classifiers::FunctionClassifier>, KlibBodyDeclineReason> {
+) -> Result<Option<function_classifiers::FunctionClassifier>, KlibTypeDecline> {
     if let Some(function) = function_classifiers::classifier(name) {
         if !function.is_reflective() && arguments != function.arity() + 1 {
             return Err(mismatch(
@@ -226,7 +236,7 @@ fn function_shape(
 
 /// The outer function-class shape, independent of the enclosing type-parameter bindings.
 /// Full argument types are checked by `semantic_type` when the body is lowered.
-pub(super) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Option<usize> {
+pub(crate) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Option<usize> {
     let KlibIrType::Simple {
         classifier,
         nullability,
@@ -242,7 +252,8 @@ pub(super) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Optio
     {
         return None;
     }
-    let (name, _) = class_head(classifier, annotations, &|_| Ok(None)).ok()?;
+    let (name, _) =
+        class_head(classifier, annotations, &|_| Ok::<_, KlibTypeDecline>(None)).ok()?;
     let function = function_shape(name, arguments.len()).ok()??;
     // A suspend lambda's implementation also takes the continuation, which closure planning does
     // not model yet.
@@ -250,12 +261,12 @@ pub(super) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Optio
 }
 
 /// One type argument, as the provider converts a metadata type argument.
-fn type_argument(
+fn type_argument<E: From<KlibTypeDecline>>(
     arena: &KlibIrArena,
     parameters: &KlibTypeParameters,
     argument: KlibIrTypeArgument,
-    local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
-) -> Result<Ty, KlibBodyDeclineReason> {
+    local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, E>,
+) -> Result<Ty, E> {
     Ok(match argument {
         KlibIrTypeArgument::Star => Ty::out_projection(Ty::nullable(Ty::obj_name(wk::any()))),
         KlibIrTypeArgument::Type { variance, ty } => {
@@ -271,7 +282,7 @@ fn type_argument(
 
 /// The classifier a type-use annotation constructs, when its constructor is a public declaration
 /// with a valid identity path.
-pub(super) fn annotation_classifier(annotation: &KlibIrAnnotation) -> Option<TypeName> {
+pub(crate) fn annotation_classifier(annotation: &KlibIrAnnotation) -> Option<TypeName> {
     let symbol = &annotation.access.symbol;
     if symbol.kind != KlibIrSymbolKind::Constructor {
         return None;
@@ -288,13 +299,13 @@ pub(super) fn annotation_classifier(annotation: &KlibIrAnnotation) -> Option<Typ
 /// builtins provider's declaration of its exact classifier by its serialized name; that
 /// declaration's role, not the name, decides. Suspend and reflective classifiers are not invoked
 /// here.
-pub(super) fn function_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
+pub(crate) fn function_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
     invocation_arity(member, false)
 }
 
 /// A reflective function's inherited invocation, authenticated against the same builtins
 /// declaration as its ordinary function supertype. This grants no reflection-operation support.
-pub(super) fn reference_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
+pub(crate) fn reference_invocation_arity(member: &KlibPublicIdSignature) -> Option<usize> {
     invocation_arity(member, true)
 }
 
@@ -321,9 +332,9 @@ fn invocation_arity(member: &KlibPublicIdSignature, reflective: bool) -> Option<
 /// Intern a classifier identity one signature segment at a time. Package segments are namespace
 /// children; declaration segments after the first are nested classifiers. No qualified spelling is
 /// rendered and parsed back into the name tree.
-pub(super) fn classifier_name(
+pub(crate) fn classifier_name(
     signature: &KlibPublicIdSignature,
-) -> Result<TypeName, KlibBodyDeclineReason> {
+) -> Result<TypeName, KlibTypeDecline> {
     declaration_name(
         signature.package().segments(),
         signature.declaration().segments(),
@@ -331,13 +342,13 @@ pub(super) fn classifier_name(
 }
 
 /// The declaring container and own segment of the classifier `signature` names.
-pub(super) fn classifier_declaration(
+pub(crate) fn classifier_declaration(
     signature: &KlibPublicIdSignature,
-) -> Result<crate::types::ClassifierDeclarationName, KlibBodyDeclineReason> {
+) -> Result<crate::types::ClassifierDeclarationName, KlibTypeDecline> {
     let segments = signature.declaration().segments();
     let (name, owner) = segments
         .split_last()
-        .ok_or(KlibBodyDeclineReason::UnsupportedType(
+        .ok_or(KlibTypeDecline::UnsupportedType(
             "a type whose classifier is not a class",
         ))?;
     let name = name.as_str().into();
@@ -360,34 +371,36 @@ pub(super) fn classifier_declaration(
 
 /// The classifier that declares the member `member`: its signature's declaration path without the
 /// member's own segment.
-pub(super) fn member_owner(
-    member: &KlibPublicIdSignature,
-) -> Result<TypeName, KlibBodyDeclineReason> {
-    let (_, class) = member.declaration().segments().split_last().ok_or(
-        KlibBodyDeclineReason::UnsupportedType("a member without a declaration path"),
-    )?;
+pub(crate) fn member_owner(member: &KlibPublicIdSignature) -> Result<TypeName, KlibTypeDecline> {
+    let (_, class) =
+        member
+            .declaration()
+            .segments()
+            .split_last()
+            .ok_or(KlibTypeDecline::UnsupportedType(
+                "a member without a declaration path",
+            ))?;
     declaration_name(member.package().segments(), class)
 }
 
 fn declaration_name(
     package: &[String],
     declaration: &[String],
-) -> Result<TypeName, KlibBodyDeclineReason> {
+) -> Result<TypeName, KlibTypeDecline> {
     let valid = |segment: &String| !segment.is_empty() && !segment.contains('/');
     if !package.iter().all(valid) || !declaration.iter().all(valid) {
-        return Err(KlibBodyDeclineReason::UnsupportedType(
+        return Err(KlibTypeDecline::UnsupportedType(
             "a class with an invalid identity path",
         ));
     }
     let package = package.iter().fold(TypeName::ROOT, |parent, segment| {
         type_name_child(parent, segment)
     });
-    let (first, nested) =
-        declaration
-            .split_first()
-            .ok_or(KlibBodyDeclineReason::UnsupportedType(
-                "a type whose classifier is not a class",
-            ))?;
+    let (first, nested) = declaration
+        .split_first()
+        .ok_or(KlibTypeDecline::UnsupportedType(
+            "a type whose classifier is not a class",
+        ))?;
     Ok(nested
         .iter()
         .fold(type_name_child(package, first), |name, segment| {
@@ -395,8 +408,8 @@ fn declaration_name(
         }))
 }
 
-fn mismatch(detail: &str) -> KlibBodyDeclineReason {
-    KlibBodyDeclineReason::SignatureMismatch(detail.to_owned())
+fn mismatch(detail: &str) -> KlibTypeDecline {
+    KlibTypeDecline::SignatureMismatch(detail.to_owned())
 }
 
 #[cfg(test)]
