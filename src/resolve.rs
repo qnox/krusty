@@ -4025,10 +4025,13 @@ pub fn builtin_bitwise_ret(recv: Ty, name: &str, n_args: usize) -> Option<Ty> {
     }
 }
 
-/// Map a file's EXPLICIT imports `simple name -> internal name` (e.g. `Calc -> util/Calc`). A
-/// wildcard import (`a.b.*`) has no simple name — those are represented by [`import_levels`].
-pub fn import_map(file: &File) -> HashMap<String, String> {
-    let mut m = HashMap::default();
+/// Map a file's EXPLICIT imports `simple name -> internal names` (e.g. `Calc -> [util/Calc]`). Imports
+/// share syntax but not namespaces, so one visible name can be imported from several owners (a
+/// class and a same-named factory function); every import stays, in source order, and each
+/// namespace selects from the ones that declare something in it. A wildcard import (`a.b.*`) has
+/// no simple name — those are represented by [`import_levels`].
+pub fn import_map(file: &File) -> HashMap<String, Vec<String>> {
+    let mut m: HashMap<String, Vec<String>> = HashMap::default();
     for import in &file.import_paths {
         if import.wildcard {
             continue;
@@ -4036,7 +4039,10 @@ pub fn import_map(file: &File) -> HashMap<String, String> {
         let fq = import.path();
         if let Some(simple) = import.imported_name() {
             let internal = fq.replace('.', "/");
-            m.insert(simple.to_string(), internal);
+            let paths = m.entry(simple.to_string()).or_default();
+            if !paths.contains(&internal) {
+                paths.push(internal);
+            }
         }
     }
     m
@@ -4109,7 +4115,7 @@ fn import_levels(
 /// candidate resolves to its target internal. Existence is verified via `resolve_type`.
 fn classifier_from_imports<S: SymbolSource + ?Sized>(
     name: &str,
-    explicit: &HashMap<String, String>,
+    explicit: &HashMap<String, Vec<String>>,
     levels: &[crate::symbol_resolver::ClassifierImportLevel],
     source: &S,
 ) -> InheritedNestedClassifier {
@@ -4126,21 +4132,47 @@ fn classifier_from_imports<S: SymbolSource + ?Sized>(
     }
 }
 
+/// The explicit imports of one visible name whose path resolves to a classifier, with that
+/// classifier, one entry per distinct classifier.
+pub(crate) fn explicit_classifier_imports<'a, S: SymbolSource + ?Sized>(
+    paths: Option<&'a [String]>,
+    source: &S,
+) -> Vec<(&'a str, TypeName)> {
+    let mut selected: Vec<(&'a str, TypeName)> = Vec::new();
+    for path in paths.unwrap_or_default() {
+        if let Ok(classifier) = classifier_path(path, source, None) {
+            if !selected.iter().any(|(_, previous)| *previous == classifier) {
+                selected.push((path.as_str(), classifier));
+            }
+        }
+    }
+    selected
+}
+
 /// The classifier the imports bind `name` to: an explicit import, else the nearest import level
 /// that has any candidate, keeping every candidate of an ambiguous level.
 fn imported_classifier_selection<S: SymbolSource + ?Sized>(
     name: &str,
-    explicit: &HashMap<String, String>,
+    explicit: &HashMap<String, Vec<String>>,
     levels: &[crate::symbol_resolver::ClassifierImportLevel],
     source: &S,
 ) -> crate::symbol_resolver::CandidateSelectionWithTies<TypeName> {
     use crate::symbol_resolver::CandidateSelectionWithTies;
-    if let Some(fq) = explicit.get(name) {
-        // Imports share syntax but not namespaces. An explicit import of a callable named `Foo`
-        // must not erase a same-file classifier `Foo`; it contributes to classifier lookup only
-        // when the imported path actually resolves to a classifier.
-        if let Ok(classifier) = classifier_path(fq, source, None) {
-            return CandidateSelectionWithTies::Selected(classifier);
+    // Imports share syntax but not namespaces. An explicit import of a callable named `Foo` must
+    // not erase a same-file classifier `Foo`, nor an explicit class import of the same name; only
+    // the imports whose path resolves to a classifier are classifier candidates, and two distinct
+    // classifiers under one name are an ambiguity.
+    let candidates = explicit_classifier_imports(explicit.get(name).map(Vec::as_slice), source);
+    match candidates.as_slice() {
+        [] => {}
+        [(_, classifier)] => return CandidateSelectionWithTies::Selected(*classifier),
+        _ => {
+            return CandidateSelectionWithTies::Ambiguous(
+                candidates
+                    .into_iter()
+                    .map(|(_, classifier)| classifier)
+                    .collect(),
+            )
         }
     }
     for level in levels {
@@ -32762,7 +32794,7 @@ struct Checker<'a> {
     /// Concrete postponed callable-reference rechecks that already failed. Final selected-argument
     /// commitment consumes this fact instead of entering the same failed reference a third time.
     completed_failed_postponed_callable_rechecks: crate::fx_hash::HashSet<ExprId>,
-    imports: HashMap<String, String>,
+    imports: HashMap<String, Vec<String>>,
     /// Classifier import rungs. Callable lookup uses [`Self::function_import_scope`]'s order.
     import_levels: Vec<crate::symbol_resolver::ClassifierImportLevel>,
     function_import_scope: crate::symbol_resolver::FunctionImportScope,
@@ -39120,9 +39152,10 @@ impl<'a> Checker<'a> {
                     self.libraries.canonical_source_type_name(expansion.target) == internal
                 })
         };
-        if let Some(path) = self.imports.get(name) {
-            let identity = crate::types::type_name(&path.replace('.', "/"));
-            return matches_selected(identity);
+        if let Some(paths) = self.imports.get(name) {
+            return paths.iter().find_map(|path| {
+                matches_selected(crate::types::type_name(&path.replace('.', "/")))
+            });
         }
         if name.contains(['.', '/']) {
             let identity = crate::types::type_name(&name.replace('.', "/"));
@@ -39733,11 +39766,12 @@ impl<'a> Checker<'a> {
             return Some(identity);
         }
         let declared = |identity: TypeName| self.source_alias_declared(identity);
-        if let Some(path) = self.imports.get(name) {
+        if let Some(paths) = self.imports.get(name) {
             // An explicit import is the selected root; a miss is final (matching classifier
             // resolution — it never reopens same-package or star interpretations).
-            return crate::types::existing_type_name(&path.replace('.', "/"))
-                .filter(|&id| declared(id));
+            return paths.iter().find_map(|path| {
+                crate::types::existing_type_name(&path.replace('.', "/")).filter(|&id| declared(id))
+            });
         }
         for level in &self.import_levels {
             let mut hit: Option<TypeName> = None;
