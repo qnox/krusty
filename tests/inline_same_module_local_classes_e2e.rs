@@ -88,8 +88,9 @@ fn an_object_of_anonymous_type_a_regenerated_constructor_creates_fails_as_kotlin
         "ERROR:NoSuchFieldError:Class MainKt$box$$inlined$untyped$1 does not have member field \
          'MainKt$box$$inlined$untyped$1$1 nested'"
     );
+    // The defect is kotlinc's JVM field typing; the Native backend stores the copy correctly.
     assert_eq!(
-        common::expect_box_run_with_stdlib(UNTYPED_NESTED, "Main"),
+        common::expect_box_run_with_stdlib_diverging(UNTYPED_NESTED, "Main", "OK"),
         reference
     );
 }
