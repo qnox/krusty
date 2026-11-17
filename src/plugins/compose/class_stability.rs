@@ -837,9 +837,10 @@ impl Inference<'_> {
 fn mentions_type_parameter(ty: Ty) -> bool {
     match ty.kind() {
         TyKind::TyParam(..) => true,
-        TyKind::Obj(_, arguments) | TyKind::Intersection(arguments) => arguments
+        TyKind::Obj(_, arguments) => arguments
             .iter()
             .any(|&argument| mentions_type_parameter(argument)),
+        TyKind::Intersection(parts) => parts.iter().any(|&part| mentions_type_parameter(part)),
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
         | TyKind::MutabilityFlexible(inner)

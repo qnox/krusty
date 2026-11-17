@@ -70,7 +70,7 @@ pub(crate) use spelling::type_name_from_multifile_facade;
 pub use spelling::{existing_type_name, existing_type_name_child, type_name, type_name_from};
 use std::fmt;
 use std::sync::OnceLock;
-pub use thin_handles::{TyList, TyParamName};
+pub use thin_handles::{IntersectionParts, TyList, TyParamName};
 pub use ty_kind::TyKind;
 mod type_name_list;
 pub use type_name_list::TypeNameList;
@@ -839,6 +839,30 @@ impl Ty {
         intersection::canonical(parts)
     }
 
+    /// `A & B & …` that approximates to `approximation` where a supertype is wanted. See
+    /// [`TyKind::Intersection`].
+    pub fn intersection_approximated_to(parts: &[Ty], approximation: Option<Ty>) -> Ty {
+        let intersection = intersection::canonical(parts);
+        approximation.map_or(intersection, |approximation| {
+            intersection.with_intersection_approximation(approximation)
+        })
+    }
+
+    /// This type, with an intersection at its root (under a nullable marker) approximating to
+    /// `approximation` where a supertype is wanted. Any other type is returned unchanged.
+    pub fn with_intersection_approximation(self, approximation: Ty) -> Ty {
+        match self.kind() {
+            TyKind::Nullable(inner) => {
+                Ty::nullable(inner.with_intersection_approximation(approximation))
+            }
+            TyKind::Intersection(parts) => Ty::from(TyKind::Intersection(IntersectionParts::new(
+                parts.parts(),
+                Some(approximation),
+            ))),
+            _ => self,
+        }
+    }
+
     pub fn projection_inner(self) -> Option<Ty> {
         match self.kind() {
             TyKind::InProjection(inner)
@@ -1382,12 +1406,13 @@ impl Ty {
             TyKind::OutProjection(inner) => Ty::out_projection(inner.canonical_semantic()),
             TyKind::StarProjection(inner) => Ty::star_projection(inner.canonical_semantic()),
             TyKind::RawProjection(inner) => Ty::raw_projection(inner.canonical_semantic()),
-            TyKind::Intersection(parts) => Ty::intersection(
+            TyKind::Intersection(parts) => Ty::intersection_approximated_to(
                 &parts
                     .iter()
                     .copied()
                     .map(Ty::canonical_semantic)
                     .collect::<Vec<_>>(),
+                parts.approximation().map(Ty::canonical_semantic),
             ),
             TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
                 self.with_symbol_bound(bound.canonical_semantic())
