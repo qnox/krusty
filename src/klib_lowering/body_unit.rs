@@ -252,6 +252,8 @@ struct LocalFunction {
     class: super::same_library_class::LocalIdentity,
     /// Whether the function is its property's setter.
     setter: bool,
+    /// The function's own type parameters and their declared bounds.
+    formals: Vec<(crate::types::TyParamName, Vec<Ty>)>,
 }
 
 impl Default for DependencyBodyUnit {

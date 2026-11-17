@@ -992,14 +992,10 @@ impl BodyLowering<'_> {
                 }
             }
         };
-        // Without class bindings the shape is already at the call's type arguments, which may
-        // name the caller's own type parameters; erasing them would lose the call's types.
+        // The shape is already at the call's type arguments, which may name the caller's own type
+        // parameters; only the class's type parameters are the receiver's to bind.
         let substitute = |declared: Ty| {
-            if bindings.is_empty() {
-                declared
-            } else {
-                declared.substitute_erased(&bindings)
-            }
+            crate::types::ty_subst_formals(declared, callee.class_type_parameters, &bindings)
         };
         // A result read through a projected receiver argument (`Array<out T>.get`) is that
         // projection's read type, as a source call's result is; a nullable result reads its
@@ -1410,9 +1406,14 @@ fn substitute_local_signature(
     (receiver, params, ret): (&mut Option<Ty>, &mut [Ty], &mut Ty),
     bindings: &crate::fx_hash::HashMap<crate::types::TyParamName, Ty>,
 ) {
+    // Every one of the callee's own type parameters is bound. A member of a generic class keeps
+    // naming its class's type parameters, which [`BodyLowering::call_operands`] binds from the
+    // dispatch receiver's type.
+    let formals = bindings.keys().copied().collect::<Vec<_>>();
+    let substitute = |ty: Ty| crate::types::ty_subst_formals(ty, &formals, bindings);
     for param in params.iter_mut() {
-        *param = param.substitute_erased(bindings);
+        *param = substitute(*param);
     }
-    *ret = ret.substitute_erased(bindings);
-    *receiver = receiver.map(|receiver| receiver.substitute_erased(bindings));
+    *ret = substitute(*ret);
+    *receiver = receiver.map(substitute);
 }

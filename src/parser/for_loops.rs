@@ -34,6 +34,12 @@ impl Parser<'_> {
                 let is_var = self.at(TokenKind::KwVar);
                 let had_kw = is_var || self.at(TokenKind::KwVal);
                 if had_kw {
+                    if !self.name_based_destructuring && close == TokenKind::RParen {
+                        self.file
+                            .destructuring
+                            .ungated_full_form_spans
+                            .push(self.tok().span);
+                    }
                     self.bump();
                 }
                 let ignored =
@@ -43,7 +49,13 @@ impl Parser<'_> {
                 let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
                 let implicit =
                     close == TokenKind::RParen && (self.short_form_destructuring || had_kw);
-                let source = self.destructure_property(&n, implicit, &mut entry_type);
+                let source = self.destructure_property(
+                    &n,
+                    implicit,
+                    close == TokenKind::RParen,
+                    had_kw,
+                    &mut entry_type,
+                );
                 entries.push(DestructureEntry {
                     name: n,
                     name_span,

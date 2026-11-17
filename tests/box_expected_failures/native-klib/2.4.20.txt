@@ -463,7 +463,6 @@ coroutines/featureIntersection/overrideInInnerClass.kt
 coroutines/featureIntersection/safeCallOnTwoReceivers.kt
 coroutines/featureIntersection/safeCallOnTwoReceiversLong.kt
 coroutines/featureIntersection/suspendDestructuringInLambdas.kt
-coroutines/featureIntersection/suspendFunctionAsSupertypeIsCheckWithArity.kt
 coroutines/featureIntersection/suspendFunctionIsAs.kt
 coroutines/featureIntersection/suspendInlineSuspendFinally.kt
 coroutines/featureIntersection/suspendOperatorPlus.kt
@@ -922,7 +921,6 @@ enum/defaultCtor/noPrimaryConstructor.kt
 enum/enumEntriesMultimoduleNoMappings.kt
 enum/enumEntriesNameClashes.kt
 enum/enumEntryMembers.kt
-enum/enumMultiModule.kt
 enum/enumValueOf.kt
 enum/interfaceCallNoEntryClass.kt
 enum/interfaceCallWithEntryClass.kt
@@ -1050,7 +1048,6 @@ inference/pcla/issues/kt64066.kt
 inference/pcla/issues/kt64069.kt
 inference/pcla/issues/kt66229.kt
 inference/pcla/issues/kt74819e.kt
-inference/pcla/issues/kt76171.kt
 inference/pcla/memberScope.kt
 inference/pcla/nestedNonExhaustiveIf.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
@@ -1198,21 +1195,15 @@ inlineClasses/callableReferences/inlineClassInternalPrimaryVal.kt
 inlineClasses/callableReferences/inlineClassInternalPrimaryValGeneric.kt
 inlineClasses/callableReferences/inlineClassPrivatePrimaryVal.kt
 inlineClasses/callableReferences/inlineClassPrivatePrimaryValGeneric.kt
-inlineClasses/callableReferences/let/result.kt
 inlineClasses/constructorCallableReference.kt
 inlineClasses/constructorCallableReferenceGeneric.kt
 inlineClasses/contextParameterPropertyDeserialization.kt
-inlineClasses/crossinlineWithInlineClassInParameter.kt
-inlineClasses/crossinlineWithInlineClassInParameterGeneric.kt
-inlineClasses/crossinlineWithInlineClassInParameterGeneric2.kt
 inlineClasses/defaultParameterValues/kt26554.kt
 inlineClasses/dnnInValue.kt
-inlineClasses/funInterface/argumentResult.kt
 inlineClasses/funInterface/kt51121.kt
 inlineClasses/funInterface/kt51121_2.kt
 inlineClasses/funInterface/mangledSamWrappers.kt
 inlineClasses/funInterface/mangledSamWrappersGeneric.kt
-inlineClasses/funInterface/returnResult.kt
 inlineClasses/funInterfaceDoubleSuffux.kt
 inlineClasses/funInterfaceDoubleSuffux2.kt
 inlineClasses/functionNameMangling/reflectionForFunctionWithMangledName.kt
@@ -1247,7 +1238,6 @@ inlineClasses/jvmInline.kt
 inlineClasses/kt27113.kt
 inlineClasses/kt28405.kt
 inlineClasses/kt32793.kt
-inlineClasses/kt44141.kt
 inlineClasses/kt70461.kt
 inlineClasses/privateConstructorFunInterfaceMultiModule.kt
 inlineClasses/privateConstructorFunInterfaceMultiModuleGeneric.kt
@@ -1258,7 +1248,6 @@ inlineClasses/result/directCall1.kt
 inlineClasses/result/doubleOverride.kt
 inlineClasses/result/inlineMethodOnResult.kt
 inlineClasses/result/lambdaTakesResultThroughBridge.kt
-inlineClasses/resultInlining.kt
 inlineClasses/samWrapperDifferentModule.kt
 inlineClasses/samWrapperDifferentModuleGeneric.kt
 inlineClasses/unboxGenericParameter/genericArrayInlineClassCast.kt
@@ -1424,7 +1413,6 @@ multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/defaultArguments/withTypeParameter.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
-multiplatform/k2/enumStaticMethods.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
@@ -1458,7 +1446,6 @@ object/initialization1.kt
 object/method_call.kt
 objectExpression/expr1.kt
 objectExpression/expr3.kt
-objects/companionObjectAccess/multipleCompanionsWithAccessors/anonymousObjectInPropertyInitializer.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromAnonymousObjectInNestedClass.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlock.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlockOfNestedClass.kt
