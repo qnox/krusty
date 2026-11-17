@@ -4206,6 +4206,9 @@ pub(crate) fn finalized_streamed_signature_index(
         let Some(visibility) = generated_member_header::visibility(&semantics, stub) else {
             stop_with_failure!(stub.id);
         };
+        let emission_name = stub
+            .lookup_name
+            .and_then(|name| headers.lookup_names.get(name));
         index.publish_declaration_header(
             stub.id,
             crate::fir::ResolvedDeclarationHeader {
@@ -4216,9 +4219,15 @@ pub(crate) fn finalized_streamed_signature_index(
                 flags,
                 initialization_order: stub.initialization_order,
             },
-            stub.lookup_name
-                .and_then(|name| headers.lookup_names.get(name)),
+            emission_name,
         );
+        if stub.kind == DeclarationKind::Classifier {
+            if let Some(spelling) = headers.classifier_source_spelling(stub.id) {
+                if emission_name != Some(spelling) {
+                    index.index_declaration_source_spelling(stub.id, spelling);
+                }
+            }
+        }
         if stub.kind == DeclarationKind::Classifier {
             index.publish_classifier_identity(stub.id, classifier_types[&stub.id]);
         }

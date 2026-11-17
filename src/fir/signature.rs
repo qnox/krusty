@@ -2328,6 +2328,20 @@ impl ResolvedModuleIndex {
         }
     }
 
+    /// The source segment a hoisted classifier was declared with. Parser hoisting stores a
+    /// qualified lookup path on the declaration header; the segment is the name that owns it.
+    pub(crate) fn index_declaration_source_spelling(
+        &mut self,
+        declaration: DeclarationId,
+        spelling: &str,
+    ) {
+        let name = self.intern_declaration_name(spelling);
+        let entries = self.declarations_by_name.entry(name).or_default();
+        if !entries.contains(&declaration) {
+            entries.push(declaration);
+        }
+    }
+
     /// Publish only a classifier's stable semantic identity. Ordinary body-local parent types may
     /// depend on statement-local aliases and are completed by `publish_classifier_header` after the
     /// authoritative Pass-2 lexical check; no provisional parent edge is stored here.
