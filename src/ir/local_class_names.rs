@@ -1349,16 +1349,9 @@ impl super::IrFile {
             }
         }
         for overrides in self.property_overrides.values_mut() {
-            for edge in overrides {
-                name(&mut edge.implementation_owner, names);
-                name(&mut edge.overridden_owner, names);
-                edge.declared_type = ty(edge.declared_type, names);
-                edge.applied_type = ty(edge.applied_type, names);
-                edge.implementation_type = ty(edge.implementation_type, names);
-                edge.declared_receiver = edge.declared_receiver.map(|value| ty(value, names));
-                edge.implementation_receiver =
-                    edge.implementation_receiver.map(|value| ty(value, names));
-            }
+            overrides
+                .iter_mut()
+                .for_each(|edge| property_override(edge, names));
         }
         for defaults in self.inherited_defaults.values_mut() {
             for default in defaults {
@@ -1376,16 +1369,9 @@ impl super::IrFile {
             }
         }
         for overrides in self.function_overrides.values_mut() {
-            for edge in overrides {
-                name(&mut edge.implementation_owner, names);
-                name(&mut edge.overridden_owner, names);
-                tys(&mut edge.declared_parameters, names);
-                edge.declared_result = ty(edge.declared_result, names);
-                tys(&mut edge.applied_parameters, names);
-                edge.applied_result = ty(edge.applied_result, names);
-                tys(&mut edge.implementation_parameters, names);
-                edge.implementation_result = ty(edge.implementation_result, names);
-            }
+            overrides
+                .iter_mut()
+                .for_each(|edge| function_override(edge, names));
         }
         for constructor in self.checked_constructor_bodies.values_mut() {
             annotations(&mut constructor.annotations, names);
@@ -1649,6 +1635,7 @@ impl super::IrFile {
         remap_keyed(&mut self.property_overrides, names);
         remap_keyed(&mut self.function_overrides, names);
         remap_keyed(&mut self.inherited_defaults, names);
+        remap_keyed(&mut self.function_slot_families, names);
         remap_keyed(&mut self.generated_member_publications, names);
         remap_keyed(&mut self.class_type_aliases, names);
         remap_keyed(&mut self.jvm_value_class_secondary_ctors, names);
@@ -1883,6 +1870,27 @@ fn physical_name(
     }
     cache.insert(class, name);
     name
+}
+
+fn property_override(edge: &mut super::IrPropertyOverride, names: &IdentityRemap<'_>) {
+    name(&mut edge.implementation_owner, names);
+    name(&mut edge.overridden_owner, names);
+    edge.declared_type = ty(edge.declared_type, names);
+    edge.applied_type = ty(edge.applied_type, names);
+    edge.implementation_type = ty(edge.implementation_type, names);
+    edge.declared_receiver = edge.declared_receiver.map(|value| ty(value, names));
+    edge.implementation_receiver = edge.implementation_receiver.map(|value| ty(value, names));
+}
+
+fn function_override(edge: &mut super::IrFunctionOverride, names: &IdentityRemap<'_>) {
+    name(&mut edge.implementation_owner, names);
+    name(&mut edge.overridden_owner, names);
+    tys(&mut edge.declared_parameters, names);
+    edge.declared_result = ty(edge.declared_result, names);
+    tys(&mut edge.applied_parameters, names);
+    edge.applied_result = ty(edge.applied_result, names);
+    tys(&mut edge.implementation_parameters, names);
+    edge.implementation_result = ty(edge.implementation_result, names);
 }
 
 #[cfg(test)]
