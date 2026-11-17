@@ -91,10 +91,27 @@ internal class ModuleWriter(
             },
         )
         if (function.typeParameters.isNotEmpty()) throw uncovered(function, "a function with type parameters")
+        if (function.annotations.isNotEmpty()) throw uncovered(function, "an annotated function")
+        val modifiers = listOfNotNull(
+            "inline".takeIf { function.isInline },
+            "suspend".takeIf { function.isSuspend },
+            "operator".takeIf { function.isOperator },
+            "infix".takeIf { function.isInfix },
+            "tailrec".takeIf { function.isTailrec },
+            "external".takeIf { function.isExternal },
+            "expect".takeIf { function.isExpect },
+        )
+        if (modifiers.isNotEmpty()) throw uncovered(function, "a function with the ${modifiers.joinToString(" ")} modifier")
         val other = function.parameters.firstOrNull { it.kind != IrParameterKind.Regular }
         if (other != null) throw uncovered(function, "a function with a ${other.kind} parameter")
         writeInt(function.parameters.size)
         for (parameter in function.parameters) {
+            if (parameter.defaultValue != null) throw uncovered(parameter, "a parameter with a default value")
+            if (parameter.varargElementType != null) throw uncovered(parameter, "a vararg parameter")
+            if (parameter.annotations.isNotEmpty()) throw uncovered(parameter, "an annotated parameter")
+            if (parameter.isCrossinline || parameter.isNoinline) {
+                throw uncovered(parameter, "a crossinline or noinline parameter")
+            }
             writeOffsets(parameter)
             writeString(parameter.name.asString())
             writeType(parameter.type, function)
@@ -126,6 +143,7 @@ internal class ModuleWriter(
         values: MutableList<IrValueDeclaration>,
     ) {
         if (variable.isConst || variable.isLateinit) throw uncovered(variable, "a const or lateinit variable")
+        if (variable.annotations.isNotEmpty()) throw uncovered(variable, "an annotated variable")
         writeOffsets(variable)
         writeString(variable.name.asString())
         writeType(variable.type, function)
@@ -217,6 +235,8 @@ internal class ModuleWriter(
     private fun DataOutputStream.writeCall(call: IrCall, function: IrSimpleFunction, values: List<IrValueDeclaration>) {
         if (call.superQualifierSymbol != null) throw uncovered(call, "a super call")
         val callee = call.symbol.owner
+        // An accessor is named by its property, which the callable identity cannot spell yet.
+        if (callee.correspondingPropertySymbol != null) throw uncovered(call, "a call of a property accessor")
         val module = functions[callee]
         if (module != null) {
             writeByte(0)

@@ -2,8 +2,10 @@
 
 // An IR plugin that changes the module it runs over, as real IR plugins do: it adds 1 to every Int
 // constant, and starts every function with a call of `println` with the function's name, made
-// without a source position. With `mode=branch` it also returns every returned value through a
-// `when`, which krusty's plugin IR does not cover.
+// without a source position. Every other mode also leaves IR krusty's plugin IR does not cover:
+// `branch` returns every returned value through a `when`, `default` gives each function's first
+// parameter a default value, `accessor` reads `"".length` before the `println`, `inline` makes
+// each function inline, and `annotated` annotates each function with `@PublishedApi`.
 package fixture.rewrite
 
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
@@ -23,12 +25,17 @@ import org.jetbrains.kotlin.ir.expressions.IrConstKind
 import org.jetbrains.kotlin.ir.expressions.IrExpression
 import org.jetbrains.kotlin.ir.expressions.IrReturn
 import org.jetbrains.kotlin.ir.expressions.impl.IrBranchImpl
+import org.jetbrains.kotlin.ir.expressions.impl.IrAnnotationImpl
+import org.jetbrains.kotlin.ir.expressions.impl.fromSymbolOwner
 import org.jetbrains.kotlin.ir.expressions.impl.IrCallImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrConstImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrWhenImpl
+import org.jetbrains.kotlin.ir.types.defaultType
 import org.jetbrains.kotlin.ir.types.isNullableAny
+import org.jetbrains.kotlin.ir.util.constructors
 import org.jetbrains.kotlin.ir.visitors.IrTransformer
 import org.jetbrains.kotlin.name.CallableId
+import org.jetbrains.kotlin.name.ClassId
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 
@@ -36,7 +43,7 @@ val MODE: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("re
 
 class RewriteOptions : CommandLineProcessor {
     override val pluginId = "fixture.rewrite"
-    override val pluginOptions = listOf(CliOption("mode", "plain|branch", "what to rewrite", required = false))
+    override val pluginOptions = listOf(CliOption("mode", "plain|branch|default|accessor|inline|annotated", "what to rewrite", required = false))
 
     override fun processOption(option: AbstractCliOption, value: String, configuration: CompilerConfiguration) {
         configuration.put(MODE, value)
@@ -48,11 +55,11 @@ class RewriteRegistrar : CompilerPluginRegistrar() {
     override val supportsK2 = true
 
     override fun ExtensionStorage.registerExtensions(configuration: CompilerConfiguration) {
-        IrGenerationExtension.registerExtension(Rewrite(configuration.get(MODE) == "branch"))
+        IrGenerationExtension.registerExtension(Rewrite(configuration.get(MODE) ?: "plain"))
     }
 }
 
-private class Rewrite(private val branch: Boolean) : IrGenerationExtension {
+private class Rewrite(private val mode: String) : IrGenerationExtension {
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
         val builtIns = pluginContext.irBuiltIns
         val println = pluginContext.referenceFunctions(CallableId(FqName("kotlin.io"), Name.identifier("println")))
@@ -70,7 +77,7 @@ private class Rewrite(private val branch: Boolean) : IrGenerationExtension {
 
                     override fun visitReturn(expression: IrReturn, data: Nothing?): IrExpression {
                         expression.transformChildren(this, null)
-                        if (branch) {
+                        if (mode == "branch") {
                             val value = expression.value
                             expression.value = IrWhenImpl(value.startOffset, value.endOffset, value.type).apply {
                                 branches += IrBranchImpl(
@@ -87,6 +94,32 @@ private class Rewrite(private val branch: Boolean) : IrGenerationExtension {
                     UNDEFINED_OFFSET, UNDEFINED_OFFSET, builtIns.stringType, IrConstKind.String, function.name.asString(),
                 )
                 (function.body as IrBlockBody).statements.add(0, call)
+                when (mode) {
+                    "default" -> function.parameters.firstOrNull()?.let { parameter ->
+                        parameter.defaultValue = pluginContext.irFactory.createExpressionBody(
+                            UNDEFINED_OFFSET, UNDEFINED_OFFSET,
+                            IrConstImpl(UNDEFINED_OFFSET, UNDEFINED_OFFSET, parameter.type, IrConstKind.Int, 0),
+                        )
+                    }
+                    "accessor" -> {
+                        val length = pluginContext.referenceProperties(
+                            CallableId(FqName("kotlin"), FqName("String"), Name.identifier("length")),
+                        ).single().owner.getter!!.symbol
+                        val read = IrCallImpl(UNDEFINED_OFFSET, UNDEFINED_OFFSET, builtIns.intType, length, 0, null, null)
+                        read.arguments[0] = IrConstImpl(
+                            UNDEFINED_OFFSET, UNDEFINED_OFFSET, builtIns.stringType, IrConstKind.String, "",
+                        )
+                        (function.body as IrBlockBody).statements.add(0, read)
+                    }
+                    "inline" -> function.isInline = true
+                    "annotated" -> {
+                        val publishedApi = pluginContext.referenceClass(ClassId.fromString("kotlin/PublishedApi"))!!
+                        function.annotations += IrAnnotationImpl.fromSymbolOwner(
+                            UNDEFINED_OFFSET, UNDEFINED_OFFSET, publishedApi.defaultType,
+                            publishedApi.constructors.single(), null,
+                        )
+                    }
+                }
             }
         }
     }

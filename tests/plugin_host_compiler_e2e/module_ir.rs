@@ -380,18 +380,61 @@ fn the_host_returns_the_module_its_plugins_leave() {
 #[test]
 #[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
 fn ir_a_plugin_leaves_that_the_plugin_ir_does_not_cover_refuses_the_module() {
+    assert_eq!(
+        rewrite_refusal("branch"),
+        "a plugin produced an expression, which krusty's plugin IR does not cover yet: WHEN type=kotlin.Int origin=null"
+    );
+}
+
+/// A default value is not part of the plugin IR's parameter, so the module is refused rather than
+/// returned with the parameter's default dropped.
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn a_parameter_default_a_plugin_adds_refuses_the_module() {
+    assert_eq!(
+        rewrite_refusal("default"),
+        "a plugin produced a parameter with a default value, which krusty's plugin IR does not cover yet: VALUE_PARAMETER kind:Regular name:x index:0 type:kotlin.Int"
+    );
+}
+
+/// A callable identity names a function, never a property, so a call of an accessor is refused
+/// rather than returned as a call of a function that does not exist.
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn a_property_accessor_call_a_plugin_adds_refuses_the_module() {
+    assert_eq!(
+        rewrite_refusal("accessor"),
+        "a plugin produced a call of a property accessor, which krusty's plugin IR does not cover yet: CALL 'public open fun <get-length> (): kotlin.Int declared in kotlin.String' type=kotlin.Int origin=null"
+    );
+}
+
+/// The plugin IR's function has no modifiers or annotations, so a plugin that adds either is
+/// refused rather than returned without them.
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn a_function_modifier_or_annotation_a_plugin_adds_refuses_the_module() {
+    assert_eq!(
+        rewrite_refusal("inline"),
+        "a plugin produced a function with the inline modifier, which krusty's plugin IR does not cover yet: FUN name:twice visibility:public modality:FINAL <> (x:kotlin.Int) returnType:kotlin.Int [inline]"
+    );
+    assert_eq!(
+        rewrite_refusal("annotated"),
+        "a plugin produced an annotated function, which krusty's plugin IR does not cover yet: FUN name:twice visibility:public modality:FINAL <> (x:kotlin.Int) returnType:kotlin.Int"
+    );
+}
+
+/// The message the host refuses the sample's module with under the rewrite plugin in `mode`.
+fn rewrite_refusal(mode: &str) -> String {
     let (runtime, _) = runtime();
     let mut host = host_with(
         &runtime,
         &[rewrite_plugin(&runtime)],
-        &["plugin:fixture.rewrite:mode=branch".into()],
+        &[format!("plugin:fixture.rewrite:mode={mode}")],
     );
-    assert_eq!(
-        host.generate(&sample()).unwrap_err(),
-        HostError::Plugin {
-            message: "a plugin produced an expression, which krusty's plugin IR does not cover yet: WHEN type=kotlin.Int origin=null".into()
-        }
-    );
+    match host.generate(&sample()).unwrap_err() {
+        HostError::Plugin { message } => message,
+        other => panic!("mode={mode}: {other:?}"),
+    }
 }
 
 /// `source`'s plugin IR as krusty's compiler builds it, against the stdlib and the session's JDK.
