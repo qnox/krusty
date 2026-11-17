@@ -251,6 +251,7 @@ pub(super) fn lower_file(
                 classifiers,
                 plan,
                 laid_out: laid_out_classes,
+                callables,
             },
         )?;
         super::interface_members::record(

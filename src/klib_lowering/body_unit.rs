@@ -1870,46 +1870,9 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 Some(self.sources.bodies),
             )
             .map_err(callee_declined)?;
-            // A member of a generic class realized outside this unit, by the target, by its
-            // provider, or by an earlier unit's export, is read at its class's type arguments,
-            // which the call binds from its dispatch receiver.
-            let class = match selected {
-                Some(selected)
-                    if selected
-                        .class_contract()
-                        .is_some_and(|class| !class.parameters.formals.is_empty()) =>
-                {
-                    Some(
-                        super::class_headers::authenticate(selected, self.sources.bodies)
-                            .map_err(callee_declined)?,
-                    )
-                }
-                _ => None,
-            };
-            let (header, class_type_parameters) = match class {
-                Some(class) => {
-                    super::class_headers::authenticate_receiver(
-                        class.contract,
-                        class.arena,
-                        class.function,
-                    )
-                    .map_err(callee_declined)?;
-                    let header = super::function_lowering::raw_function_header_with_class(
-                        selected,
-                        purpose,
-                        class.arena,
-                        class.function,
-                        class.types,
-                    )
-                    .map_err(callee_declined)?;
-                    (header, class.formals)
-                }
-                None => (
-                    raw_function_header(selected, purpose, arena, declaration)
-                        .map_err(callee_declined)?,
-                    Vec::new(),
-                ),
-            };
+            let (header, class_type_parameters) = self
+                .outside_member_header(selected, purpose, arena, declaration)
+                .map_err(callee_declined)?;
             let (params, ret, context_count, extension_receiver, receiver) =
                 header.linked_signature();
             return Ok(LinkedCallee {
@@ -1972,6 +1935,17 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 materialized &= self
                     .materializes_class_of(*candidate)
                     .map_err(callee_declined)?;
+            }
+            // An abstract member of a class an earlier unit materialized is a dispatch slot of
+            // that unit's class, which no body here implements: the call dispatches through the
+            // member's frozen declaration, as a source call of it does.
+            if materialized && declaration.body.is_none() && !self.functions.contains_key(&identity)
+            {
+                let mut realized_earlier = true;
+                for candidate in candidates {
+                    realized_earlier &= self.class_realized_earlier(*candidate);
+                }
+                materialized = !realized_earlier;
             }
             if !materialized {
                 // Without a frozen declaration and call edge, which a target realizing the member
@@ -2226,6 +2200,29 @@ impl<'s> Linker<'_, 's> {
         Ok(!constructors.is_empty())
     }
 
+    /// Whether an earlier unit of the program materialized the class of the member `candidate`:
+    /// it published the initialization of each of the class's constructors.
+    fn class_realized_earlier(&self, candidate: KlibBodyCallable<'s>) -> bool {
+        let Some(constructors) = candidate.class_contract().and_then(|class| {
+            super::class_initialization::initializing_constructors(class, self.sources.bodies)
+        }) else {
+            return false;
+        };
+        !constructors.is_empty()
+            && constructors.iter().all(|identity| {
+                self.sources
+                    .externals
+                    .get(identity)
+                    .is_some_and(|external| {
+                        matches!(
+                            external.realization,
+                            DependencyExternalRealization::AllocatingConstructor
+                                | DependencyExternalRealization::ConstructorInitializer
+                        )
+                    })
+            })
+    }
+
     /// A call of a member of a class this unit does not materialize, through the member's
     /// declaration frozen with the unit's closure. The target realizes and dispatches it as it does
     /// a source call of the same declaration.
@@ -2251,16 +2248,12 @@ impl<'s> Linker<'_, 's> {
         .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
             "a call of a member function without a provider declaration",
         ))?;
-        if !selected
-            .class_contract()
-            .is_some_and(|class| class.parameters.formals.is_empty())
-        {
-            return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                "a call of a member of a generic class",
-            ));
-        }
-        let header =
-            raw_function_header(Some(selected), HeaderPurpose::External, arena, declaration)?;
+        let (header, class_type_parameters) = self.outside_member_header(
+            Some(selected),
+            HeaderPurpose::External,
+            arena,
+            declaration,
+        )?;
         let (params, ret, context_count, extension_receiver, receiver) = header.linked_signature();
         Ok(LinkedCallee {
             callee: Callee::External {
@@ -2283,10 +2276,57 @@ impl<'s> Linker<'_, 's> {
             type_parameter_bounds: selected
                 .generic_signature()
                 .map(|signature| signature.formal_bounds.clone()),
-            class_type_parameters: Vec::new(),
+            class_type_parameters,
             parameter_defaults: Vec::new(),
             edge: self.external_member_edge(identity)?,
         })
+    }
+
+    /// The header of `declaration`, a callable realized outside this unit (by the target, by its
+    /// provider, or by an earlier unit), with the formals of its class. A member of a generic
+    /// class is read at its class's type arguments, which the call binds from its dispatch
+    /// receiver.
+    fn outside_member_header(
+        &self,
+        selected: Option<KlibBodyCallable<'s>>,
+        purpose: HeaderPurpose,
+        arena: &'s KlibIrArena,
+        declaration: &'s KlibIrFunction,
+    ) -> Result<(FunctionHeader, Vec<String>), KlibBodyDeclineReason> {
+        let class = match selected {
+            Some(selected)
+                if selected
+                    .class_contract()
+                    .is_some_and(|class| !class.parameters.formals.is_empty()) =>
+            {
+                Some(super::class_headers::authenticate(
+                    selected,
+                    self.sources.bodies,
+                )?)
+            }
+            _ => None,
+        };
+        match class {
+            Some(class) => {
+                super::class_headers::authenticate_receiver(
+                    class.contract,
+                    class.arena,
+                    class.function,
+                )?;
+                let header = super::function_lowering::raw_function_header_with_class(
+                    selected,
+                    purpose,
+                    class.arena,
+                    class.function,
+                    class.types,
+                )?;
+                Ok((header, class.formals))
+            }
+            None => Ok((
+                raw_function_header(selected, purpose, arena, declaration)?,
+                Vec::new(),
+            )),
+        }
     }
 
     /// The facts a call of the member `identity`, which a target realizes, carries, as the

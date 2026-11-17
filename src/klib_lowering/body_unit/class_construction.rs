@@ -235,9 +235,11 @@ impl<'u, 's> Linker<'u, 's> {
                 "a storage accessor has no exact producer".to_owned(),
             ));
         };
+        // An accessor the program's closure never selected has no caller to export it to.
         let selected = match self.sources.callees.get(&identity) {
             Some(KlibCalleeFact::Selected(callables)) => callables[0],
-            _ => {
+            None => return Ok(()),
+            Some(KlibCalleeFact::Ambiguous) => {
                 return Err(KlibBodyDeclineReason::SignatureMismatch(
                     "a storage accessor has no unique provider declaration".to_owned(),
                 ))
