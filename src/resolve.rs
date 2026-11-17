@@ -12021,11 +12021,19 @@ impl<'a> Checker<'a> {
         let (TyKind::Fun(expected), TyKind::Fun(actual)) = (expected.kind(), actual.kind()) else {
             return false;
         };
-        let component = |expected: Ty, actual: Ty| {
-            expected.is_erased_top()
-                || expected.mentions_ty_param()
-                || actual.mentions_ty_param()
-                || self.member_argument_score(expected, actual).is_some()
+        // `supertype` must accept `subtype`. A function's result is covariant and its parameters
+        // are contravariant: `(Any) -> B` reaches `(I & J) -> I & J` because `I & J` reaches `Any`.
+        // A parameter typed by the `null` literal is `Nothing?`, which accepts `Nothing?`.
+        let component = |supertype: Ty, subtype: Ty| {
+            let supertype = if supertype == Ty::Null {
+                Ty::nullable(Ty::Nothing)
+            } else {
+                supertype
+            };
+            supertype.is_erased_top()
+                || supertype.mentions_ty_param()
+                || subtype.mentions_ty_param()
+                || self.member_argument_score(supertype, subtype).is_some()
         };
         expected.params.len() == actual.params.len()
             // Suspend conversion is one-way: a regular function value may be wrapped as suspend;
@@ -12035,7 +12043,7 @@ impl<'a> Checker<'a> {
                 .params
                 .iter()
                 .zip(&actual.params)
-                .all(|(expected, actual)| component(*expected, *actual))
+                .all(|(expected, actual)| component(*actual, *expected))
             // Lambdas and callable references are normalized before this comparison. A stored
             // `() -> String` value reaches `() -> Unit` only through the language's unit conversion.
             && (component(expected.ret, actual.ret)
