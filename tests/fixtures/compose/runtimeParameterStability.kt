@@ -7,9 +7,9 @@
 // FILE: lib.kt
 package lib
 
-class Point(val x: Int, val y: Int)
-
 interface Shape
+
+class Point(val x: Int, val y: Int) : Shape
 
 // MODULE: main(lib)
 // FILE: screens.kt
@@ -29,9 +29,16 @@ fun ShowShape(s: Shape) {
     println(s)
 }
 
+// A Point forwarded to a Shape is compared as the Point it is, not as the interface.
+@Composable
+fun Narrow(p: Point) {
+    ShowShape(p)
+}
+
 @Composable
 fun Screen(p: Point, s: Shape) {
     ShowPoint(p)
+    Narrow(p)
     ShowShape(s)
 }
 
@@ -79,6 +86,6 @@ fun box(): String {
         Composer::class.java,
         Integer.TYPE,
     ).invoke(null, lib.Point(3, 4), object : lib.Shape {}, composer, 0)
-    val expected = "changed;changed;execute true;execute true;execute true;"
+    val expected = "changed;changed;execute true;execute true;execute true;execute true;execute true;"
     return if (log.toString() == expected) "OK" else log.toString()
 }

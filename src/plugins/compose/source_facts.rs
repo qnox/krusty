@@ -555,16 +555,20 @@ pub(super) fn record(
         span,
         message: unsupported("a composable call outside the statements of a composable body"),
     }));
+    // The function whose parameters a site's forwarded arguments are: a restartable function, or
+    // the implementation of a composable lambda.
     let sites = functions
         .iter_mut()
-        .flat_map(|function| &mut function.calls)
-        .chain(
-            composable_lambdas
-                .iter_mut()
-                .flat_map(|lambda| &mut lambda.calls),
-        );
-    for site in sites {
-        match argument_stability(ir, &*runtime, site) {
+        .flat_map(|function| {
+            let caller = function.function;
+            function.calls.iter_mut().map(move |site| (caller, site))
+        })
+        .chain(composable_lambdas.iter_mut().flat_map(|lambda| {
+            let caller = lambda.implementation;
+            lambda.calls.iter_mut().map(move |site| (caller, site))
+        }));
+    for (caller, site) in sites {
+        match argument_stability(ir, &*runtime, site, caller) {
             Ok(stability) => site.stability = stability,
             Err(what) => rejections.push(PluginRejection {
                 span: calls
@@ -947,6 +951,7 @@ fn argument_stability(
     ir: &IrFile,
     runtime: &dyn PluginRuntime,
     site: &ComposableCallSite,
+    caller: FunId,
 ) -> Result<Vec<Vec<TypeName>>, &'static str> {
     let none = vec![Vec::new(); site.arguments.len()];
     let IrExpr::Call { callee, .. } = &ir.exprs[site.call as usize] else {
@@ -962,8 +967,14 @@ fn argument_stability(
         .zip(&params)
         .map(|(argument, &ty)| match argument {
             ArgumentState::Static | ArgumentState::Omitted => Ok(Vec::new()),
-            ArgumentState::Forwarded(_) => {
-                super::class_stability::parameter_stability_reads(ir, runtime, ty)
+            // The stability of what is passed is that of the caller's own parameter, which may be
+            // a subtype of the callee's formal type.
+            ArgumentState::Forwarded(parameter) => {
+                super::class_stability::parameter_stability_reads(
+                    ir,
+                    runtime,
+                    ir.functions[caller as usize].params[*parameter as usize],
+                )
             }
             ArgumentState::Uncertain => {
                 // The argument's own type may be narrower than the formal one, so only a formal
