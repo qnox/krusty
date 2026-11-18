@@ -1600,7 +1600,10 @@ impl BodyLowering<'_> {
             .source;
         let package = self.index.source_package(source)?;
         Some(crate::ir::IrLocalClassNameProvenance {
-            source: crate::ir::IrModuleSource { source, package },
+            source: crate::ir::IrLocalClassNameRoot::Source(crate::ir::IrModuleSource {
+                source,
+                package,
+            }),
             lexical_owner,
             segments: provenance.segments.clone(),
             ordinal: provenance.ordinal,

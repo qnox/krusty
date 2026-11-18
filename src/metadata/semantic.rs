@@ -424,6 +424,11 @@ pub(crate) fn class_kind(flags: u64) -> TypeKind {
     }
 }
 
+/// Class flag `IS_INNER` (bit 9): an `inner class`, whose instance holds its outer one.
+pub(crate) fn class_is_inner(flags: u64) -> bool {
+    flags & (1 << 9) != 0
+}
+
 /// Class flag `IS_DATA` (bit 10): a `data class` or `data object`.
 pub(crate) fn class_is_data(flags: u64) -> bool {
     flags & (1 << 10) != 0
