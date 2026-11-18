@@ -50,7 +50,7 @@ pub(super) struct StringBuilders {
     pub(super) append_string: u32,
     /// `(builder, value: String?, start: Int, end: Int) -> builder`: appends that range of
     /// `value`, or of `"null"`, trapping on a range outside it.
-    append_range: u32,
+    pub(super) append_range: u32,
     /// `(builder, value: Char) -> builder`.
     pub(super) append_char: u32,
     /// `(builder) -> String`: the units in use, copied.

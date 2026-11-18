@@ -48,6 +48,8 @@ enum Appended {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Member {
     Append(Appended),
+    /// `append(CharSequence?, Int, Int)`: a range of the sequence.
+    AppendRange,
     Length,
     Get,
 }
@@ -75,6 +77,11 @@ fn is_char_sequence(ty: Ty) -> bool {
 fn member(fact: &BackendCallableFact) -> Option<Member> {
     match (fact.name.as_str(), fact.params.as_slice()) {
         ("append", [param]) => appended(*param).map(Member::Append),
+        ("append", [value, Ty::Int, Ty::Int])
+            if appended(*value) == Some(Appended::CharSequence) =>
+        {
+            Some(Member::AppendRange)
+        }
         ("<get-length>", []) if fact.ret == Ty::Int => Some(Member::Length),
         ("get", [Ty::Int]) if fact.ret == Ty::Char => Some(Member::Get),
         _ => None,
@@ -178,6 +185,13 @@ impl Body<'_> {
                 self.value(*value, fact.params[0])?;
                 self.code.call(append);
             }
+            (Member::AppendRange, [value, start, end]) => {
+                let append = self.char_sequence_range_append()?;
+                self.value(*value, fact.params[0])?;
+                self.value(*start, Ty::Int)?;
+                self.value(*end, Ty::Int)?;
+                self.code.call(append);
+            }
             (Member::Length, []) => {
                 self.code.call(length);
             }
@@ -224,6 +238,13 @@ impl Body<'_> {
     fn char_sequence_append(&mut self) -> Result<u32, Unsupported> {
         self.record_char_sequence_reads()?;
         self.runtime.append_char_sequence(self.module)
+    }
+
+    /// The runtime's `StringBuilder.append(CharSequence?, Int, Int)`
+    /// (`crate::char_sequence_appends`).
+    fn char_sequence_range_append(&mut self) -> Result<u32, Unsupported> {
+        self.record_char_sequence_reads()?;
+        self.runtime.append_char_sequence_range(self.module)
     }
 
     /// On a target whose builder copies an appended sequence's units, record the checked
