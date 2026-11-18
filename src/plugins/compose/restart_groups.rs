@@ -48,7 +48,7 @@ use crate::ir::{
     Callee, ExprId, FunId, IrBinOp, IrConst, IrEnclosure, IrExpr, IrFile, IrFunction,
     IrNodePosition, IrParameterIdentity, IrShortCircuitKind, IrTypeOp,
 };
-use crate::types::{EqualityMode, Ty, TypeName};
+use crate::types::{EqualityMode, Ty, TyKind, TypeName};
 
 use super::class_stability::{read_stable, ParameterStability};
 use super::runtime::{self, ComposeRuntime};
@@ -804,7 +804,10 @@ fn dirty_preamble(
         let value = ir.add_expr(IrExpr::GetValue(index));
         let compared = match parameter.stability {
             ParameterStability::Stable => {
-                let changed = if parameter.lambda {
+                // A function value is compared by identity too, whatever its stability.
+                let changed = if parameter.lambda
+                    || matches!(parameter.ty.non_null().kind(), TyKind::Fun(_))
+                {
                     &runtime.changed_instance
                 } else {
                     runtime.changed_for(parameter.ty)
