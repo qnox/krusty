@@ -1178,6 +1178,9 @@ pub enum FirExprKind {
         function_type: ResolvedTy,
         reflective: bool,
         extension_receiver: Option<FirReceiver>,
+        /// Values selected at the reference site for the local function's leading context
+        /// parameters, bound into the reference exactly as for any other declaration.
+        context_arguments: Box<[FirReceiver]>,
         adaptation: Option<Box<FirReferenceAdaptation>>,
     },
     /// Reflection value supplied to a checked local delegated-property convention call: the
@@ -1481,11 +1484,16 @@ impl FirExprKind {
                             + adaptation.storage_payload_bytes()
                     })
             }
-            FirExprKind::LocalCallableReference { adaptation, .. } => {
-                adaptation.as_deref().map_or(0, |adaptation| {
-                    std::mem::size_of::<FirReferenceAdaptation>()
-                        + adaptation.storage_payload_bytes()
-                })
+            FirExprKind::LocalCallableReference {
+                context_arguments,
+                adaptation,
+                ..
+            } => {
+                context_arguments.len() * std::mem::size_of::<FirReceiver>()
+                    + adaptation.as_deref().map_or(0, |adaptation| {
+                        std::mem::size_of::<FirReferenceAdaptation>()
+                            + adaptation.storage_payload_bytes()
+                    })
             }
             FirExprKind::Call(call) => call.storage_payload_bytes(),
             FirExprKind::ConstructorCall(call) => call.storage_payload_bytes(),
