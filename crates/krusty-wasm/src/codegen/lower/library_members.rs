@@ -12,6 +12,7 @@
 //! entry its module exports. A published class dispatches through its producer-owned class table
 //! even when a concrete member also has an executable export, preserving virtual overrides.
 
+use crate::callable_references::{AccessorShape, PropertyAccess};
 use krusty::backend::interface_identity::property_member_identity;
 use krusty::backend::{BackendCallableFact, BackendPropertyFact, CheckedBackendCallables};
 use krusty::libraries::ExternalCallableKind;
@@ -400,14 +401,28 @@ impl Body<'_> {
         if reference_name {
             self.runtime.reference_name_member(self.module, member)?;
         }
-        match fact.semantic_role {
+        let accessor = match fact.semantic_role {
             Some(SemanticCallRole::KotlinPropertyReferenceGet(arity))
                 if usize::from(arity) == args.len() =>
             {
-                self.runtime
-                    .property_reference_read_member(self.module, member, args.len())?;
+                Some(PropertyAccess::Read)
             }
-            _ => {}
+            Some(SemanticCallRole::KotlinPropertyReferenceSet(arity))
+                if usize::from(arity) + 1 == args.len() =>
+            {
+                Some(PropertyAccess::Write)
+            }
+            _ => None,
+        };
+        if let Some(access) = accessor {
+            self.runtime.property_reference_accessor_member(
+                self.module,
+                member,
+                AccessorShape {
+                    access,
+                    operands: args.len(),
+                },
+            )?;
         }
         if let Some(step) = super::array_lists::iterator_step(&fact) {
             let function = match step {

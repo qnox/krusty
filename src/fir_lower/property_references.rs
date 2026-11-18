@@ -317,6 +317,7 @@ impl BodyLowering<'_> {
                             bound_extension_receiver: extension_capture.is_some(),
                             mutable,
                             reflective: false,
+                            writer: None,
                             substitutions: super::checked::lower_substitutions(substitutions),
                         },
                     )),

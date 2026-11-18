@@ -69,6 +69,10 @@ pub struct IrPropertyFunctionReference {
     /// Common lowering keeps such a reference checked; a target that realizes it as a function
     /// value (`crate::backend::property_reference_values`) sets this.
     pub reflective: bool,
+    /// The adapter writing the property of a reflective mutable reference, in a unit that writes
+    /// through one: the reference's
+    /// captures and receiver operands as the read adapter takes them, then the written value.
+    pub writer: Option<FunId>,
     pub substitutions: Vec<IrCheckedSubstitution>,
 }
 
