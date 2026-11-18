@@ -15,8 +15,8 @@ pub(super) struct InterfaceMemberCall<'a> {
     pub(super) physical: &'a [Ty],
 }
 
-/// A class of the module that implements a dependency declaration, by its descriptor, and the slot
-/// it does it in.
+/// A class of this file that implements a dependency declaration, and the slot it does it in.
+/// A class of another file of the module is an arm too: an arm names its class by descriptor.
 pub(super) struct ImplementorArm {
     descriptor: DataId,
     slot: u32,
