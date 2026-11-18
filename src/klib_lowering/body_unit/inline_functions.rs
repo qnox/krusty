@@ -11,6 +11,7 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::inline_expansion::{InlineBodySplice, InlineOperand, SplicedResult};
 use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
+use crate::libraries::KlibBodyCallable;
 use crate::metadata::klib_ir::tree::KlibIrFunction;
 use crate::types::{stored_value_ty, InlineExpansionMode, InlineParameterModifier};
 
@@ -19,8 +20,25 @@ use super::super::function_lowering::FunctionHeader;
 use super::super::inline_templates::{expansion_modes, modifiers_with_receiver};
 
 /// Whether the serialized `function` is inline: every call of it is expanded, never made.
-pub(super) fn declares_inline(function: &KlibIrFunction) -> bool {
+fn declares_inline(function: &KlibIrFunction) -> bool {
     function.base.flags & crate::metadata::function_flags::IS_INLINE != 0
+}
+
+/// Declare `function` as an inline callee when it is inline, unless it is the selected `root`:
+/// the root is lowered as the declaration it is, and a call of an inline callee is expanded.
+pub(super) fn declare_callee(
+    ir: &mut IrFile,
+    function: FunId,
+    declaration: &KlibIrFunction,
+    header: &FunctionHeader,
+    selected: Option<KlibBodyCallable<'_>>,
+    root: bool,
+) -> Result<(), KlibBodyDeclineReason> {
+    if root || !declares_inline(declaration) {
+        return Ok(());
+    }
+    let modifiers = selected.map(KlibBodyCallable::inline_modifiers);
+    declare(ir, function, declaration, header, modifiers)
 }
 
 /// Declare `function`, lowered from the serialized inline `declaration` with `header`, as one the
