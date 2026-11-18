@@ -2497,7 +2497,10 @@ impl<'s> Linker<'_, 's> {
         let value_member = match (header.value_receiver(), selected) {
             // A builtin type's member reads its receiver as the value the target carries.
             (Some(_), Some(selected))
-                if is_receiver_member(selected, self.sources.bodies, self.sources.callees) =>
+                if is_receiver_member(selected, self.sources.bodies, self.sources.callees)
+                    || selected.class_contract().is_some_and(
+                        crate::libraries::KlibBodyClassContract::emits_default_members,
+                    ) =>
             {
                 None
             }

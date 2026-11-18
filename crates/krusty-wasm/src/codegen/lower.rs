@@ -70,6 +70,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageCopy
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
+        || operation == krusty::backend::BackendCompilerIntrinsic::StringPlus
         || operation
             == krusty::backend::BackendCompilerIntrinsic::StartCoroutineUninterceptedOrReturn
         || matches!(
@@ -1475,6 +1476,37 @@ impl<'a> Body<'a> {
                 self.value(*other, Ty::String)?;
                 let function = self.runtime.string_compare(self.module);
                 self.code.call(function);
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::StringPlus)
+                }) =>
+            {
+                // The member `String.plus(Any?)` and the extension `String?.plus(Any?)` are the
+                // concatenation a template makes of its two operands.
+                let (receiver, other) =
+                    match (dispatch_receiver, args.as_slice(), *extension_receiver_parameter) {
+                        (Some(receiver), [other], None) => (receiver, *other),
+                        (None, [receiver, other], Some(0)) => (*receiver, *other),
+                        _ => {
+                            return Err("an authenticated `String.plus` with malformed operands"
+                                .into())
+                        }
+                    };
+                self.string_of(receiver)?;
+                self.string_of(other)?;
+                self.code.call(self.runtime.string_concat);
             }
             IrExpr::Call {
                 callee: ref call_callee,
