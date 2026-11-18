@@ -1454,10 +1454,10 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     }
     let merged = merge_inferred_ty(Some(current), actual);
     let Some(source) = source else { return merged };
-    if !merged.is_erased_top() || !current.is_reference() || !actual.is_reference() {
+    if !merged.is_erased_top() {
         return merged;
     }
-    // Two reference lower bounds join at their common supertype, as kotlinc's does: every
+    // Two lower bounds join at their common supertype, as kotlinc's does: every
     // most-specific classifier both hierarchies share, however far up each one sits, with type
     // arguments joined by declaration variance (`Inv<A>` and `Inv<B>` join at `Inv<out C>`, `C` the
     // common supertype of `A` and `B`), and an intersection when several incomparable classifiers
