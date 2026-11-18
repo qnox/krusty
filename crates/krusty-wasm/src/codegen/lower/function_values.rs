@@ -304,6 +304,37 @@ impl Body<'_> {
             return Err("a functional interface with default members".into());
         }
         let (member, params, result) = self.sam_member(method)?;
+        let ty = self.runtime.objects.interfaces.ty(member);
+        let thunk = self.sam_thunk(invoke, &params, result, ty)?;
+        self.runtime
+            .objects
+            .interfaces
+            .implement(record, member, thunk)?;
+        self.implement_sam_dependency_members(record, invoke, target.classifier, method)?;
+        let interfaces = &mut self.runtime.objects.interfaces;
+        let hierarchy = self
+            .ir
+            .classifier_hierarchies
+            .get(&target.classifier)
+            .into_iter()
+            .flatten()
+            .map(|applied| applied.classifier);
+        for interface in std::iter::once(target.classifier).chain(hierarchy) {
+            interfaces.instance_of(record, interface);
+        }
+        Ok(())
+    }
+
+    /// A function of type `ty` implementing a member taking `params` and answering `result` by
+    /// forwarding to the boxed entry `invoke`: each argument is boxed, and the answer unboxed to
+    /// the member's own carrier.
+    fn sam_thunk(
+        &mut self,
+        invoke: u32,
+        params: &[Ty],
+        result: Ty,
+        ty: u32,
+    ) -> Result<u32, Unsupported> {
         let mut code = Code::default();
         let mut locals = Vec::new();
         code.local_get(0);
@@ -320,22 +351,93 @@ impl Body<'_> {
         } else {
             self.unpack_argument(&mut code, result)?;
         }
-        let ty = self.runtime.objects.interfaces.ty(member);
         let thunk = self.module.declare();
         self.module.define(thunk, Function { ty, locals, code });
-        let interfaces = &mut self.runtime.objects.interfaces;
-        interfaces.implement(record, member, thunk)?;
-        let hierarchy = self
-            .ir
-            .classifier_hierarchies
-            .get(&target.classifier)
-            .into_iter()
-            .flatten()
-            .map(|applied| applied.classifier);
-        for interface in std::iter::once(target.classifier).chain(hierarchy) {
-            interfaces.instance_of(record, interface);
+        Ok(thunk)
+    }
+
+    /// Implement, for the function value of `record`, each member of a dependency's interface
+    /// that the functional interface `classifier`'s abstract member `method` overrides: a call
+    /// through that member reaches the value by the member's identity, not by this module's
+    /// number, and takes the overridden declaration's own carriers.
+    fn implement_sam_dependency_members(
+        &mut self,
+        record: crate::interface_dispatch::ClassRef,
+        invoke: u32,
+        classifier: krusty::types::TypeName,
+        method: krusty::fir::CallableId,
+    ) -> Result<(), Unsupported> {
+        let ir = self.ir;
+        for edge in ir.function_overrides.get(&classifier).into_iter().flatten() {
+            let krusty::fir::ResolvedFunctionOverrideTarget::External(overridden) = edge.overridden
+            else {
+                continue;
+            };
+            if !edge.overridden_is_interface
+                || edge.implementation
+                    != krusty::fir::ResolvedFunctionOverrideTarget::Module(method)
+            {
+                continue;
+            }
+            let Some(fact) = self.callables.callable(overridden) else {
+                continue;
+            };
+            let Some(member) = crate::codegen::interface_members::dependency_member(
+                &mut self.runtime.objects.interfaces,
+                self.module,
+                fact,
+                library_members::MemberRole::Function,
+            ) else {
+                continue;
+            };
+            if self
+                .runtime
+                .objects
+                .interfaces
+                .implements(record, member.member)
+            {
+                continue;
+            }
+            let implemented = self.implement_sam_member(
+                record,
+                invoke,
+                member.member,
+                (&edge.declared_parameters, edge.declared_result),
+            );
+            match implemented {
+                Err(reason) if member.library => self
+                    .runtime
+                    .objects
+                    .interfaces
+                    .unimplementable(member.member, reason),
+                implemented => implemented?,
+            }
         }
         Ok(())
+    }
+
+    /// Implement `member`, declared as taking `params` and answering `result`, for the function
+    /// value of `record` through a thunk to its boxed entry `invoke`.
+    fn implement_sam_member(
+        &mut self,
+        record: crate::interface_dispatch::ClassRef,
+        invoke: u32,
+        member: crate::interface_dispatch::MemberRef,
+        (params, result): (&[Ty], Ty),
+    ) -> Result<(), Unsupported> {
+        let (carried_params, carried_results) =
+            crate::codegen::interface_members::member_signature(params, result)?;
+        let ty = self.runtime.objects.interfaces.ty(member);
+        if self.module.func_type(carried_params, carried_results) != ty {
+            return Err(
+                "a functional interface member a dependency declares with other carriers".into(),
+            );
+        }
+        let thunk = self.sam_thunk(invoke, params, result, ty)?;
+        self.runtime
+            .objects
+            .interfaces
+            .implement(record, member, thunk)
     }
 
     /// `function(args)`, where `function` is a function value taking `params` and answering
