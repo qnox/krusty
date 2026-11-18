@@ -325,7 +325,20 @@ pub(super) trait CallLinker {
 
     /// Proves that `classifier` is a dependency object, whose value a body may read, and
     /// materializes it in `ir` when its instance is the linker's to create.
-    fn singleton(&mut self, ir: &mut IrFile, classifier: TypeName) -> Lowered<()>;
+    fn singleton(
+        &mut self,
+        ir: &mut IrFile,
+        classifier: TypeName,
+        signature: &KlibPublicIdSignature,
+    ) -> Lowered<()>;
+
+    /// The classifier of the object `signature` names, an object private to a class of this
+    /// library, installed so its value is the one instance its members are called on.
+    fn local_object(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<TypeName>;
 
     /// Whether the target owns the representation of `classifier`, which a class of this unit
     /// extends without the unit materializing it. A linker that knows no such class says no.

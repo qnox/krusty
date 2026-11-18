@@ -40,7 +40,20 @@ impl CallLinker for NoCalls {
     ) -> Lowered<LinkedAccessor> {
         panic!("no accessor")
     }
-    fn singleton(&mut self, _: &mut IrFile, _: TypeName) -> Lowered<()> {
+    fn local_object(
+        &mut self,
+        _: &mut IrFile,
+        _: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<TypeName> {
+        unreachable!("no object of this library is read")
+    }
+
+    fn singleton(
+        &mut self,
+        _: &mut IrFile,
+        _: TypeName,
+        _: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> Lowered<()> {
         panic!("no singleton")
     }
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {

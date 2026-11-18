@@ -1501,43 +1501,21 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.static_storage(ir, field)
     }
 
+    fn local_object(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<TypeName, KlibBodyDeclineReason> {
+        self.link_local_object(ir, signature)
+    }
+
     fn singleton(
         &mut self,
         ir: &mut IrFile,
         classifier: TypeName,
+        signature: &KlibPublicIdSignature,
     ) -> Result<(), KlibBodyDeclineReason> {
-        // The target realizes the value of an object whose representation it owns, as it does for
-        // a source reference of that object.
-        // An object an earlier unit materialized is read through that unit's export, as its own
-        // members are called.
-        if self.sources.callees.target_represents(classifier)
-            || self.realized_classes.contains(&classifier)
-        {
-            return Ok(());
-        }
-        // Any other library object is materialized with its instance, created by its own private
-        // primary constructor, as a call of one of its members materializes it.
-        let callees: &'s super::KlibCalleeFacts<'s> = self.sources.callees;
-        let class =
-            callees
-                .read_object(classifier)
-                .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
-                    "an object value",
-                ))?;
-        let primary = class.primary_constructor.clone().ok_or(
-            KlibBodyDeclineReason::UnsupportedOperation("an object value"),
-        )?;
-        let identity = KlibDependencyCallable {
-            module: class.module.clone(),
-            declaration: KlibDeclarationSignature::Public(primary),
-        };
-        self.materialize_object(ir, &identity, class)?;
-        if !self.classes.contains_key(&identity) {
-            return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                "an object value",
-            ));
-        }
-        Ok(())
+        self.link_object_value(ir, classifier, signature)
     }
 
     fn target_represents(&self, classifier: TypeName) -> bool {
