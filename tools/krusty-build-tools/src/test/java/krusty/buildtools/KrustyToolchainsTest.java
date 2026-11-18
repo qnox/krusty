@@ -104,6 +104,39 @@ class KrustyToolchainsTest {
     }
 
     @Test
+    void aNewDaemonPolicyAnswersTheDaemonsDefaults() {
+        ExecutionPolicy.WithDaemon.Builder fresh = toolchains.daemonExecutionPolicyBuilder();
+        ExecutionPolicy.WithDaemon built = fresh.build();
+        for (ExecutionPolicy.WithDaemon.Builder builder : List.of(fresh, built.toBuilder())) {
+            assertEquals(1048576L, builder.get(ExecutionPolicy.WithDaemon.LOGS_FILE_SIZE_LIMIT));
+            assertEquals(3, builder.get(ExecutionPolicy.WithDaemon.LOGS_FILE_COUNT_LIMIT));
+            assertEquals(
+                java.nio.file.Paths.get(System.getProperty("java.io.tmpdir")),
+                builder.get(ExecutionPolicy.WithDaemon.LOGS_PATH));
+            assertTrue(builder.get(ExecutionPolicy.WithDaemon.DAEMON_RUN_DIR_PATH).endsWith(
+                java.nio.file.Paths.get("kotlin", "daemon")) || builder.get(
+                ExecutionPolicy.WithDaemon.DAEMON_RUN_DIR_PATH).endsWith(
+                java.nio.file.Paths.get(".kotlin", "daemon")));
+        }
+        assertEquals(1048576L, built.get(ExecutionPolicy.WithDaemon.LOGS_FILE_SIZE_LIMIT));
+        // The JVM arguments and the shutdown delay default to null, in a fresh, built and copied policy.
+        for (ExecutionPolicy.WithDaemon.Builder builder : List.of(fresh, built.toBuilder())) {
+            assertEquals(null, builder.get(ExecutionPolicy.WithDaemon.JVM_ARGUMENTS));
+            assertEquals(null, builder.get(ExecutionPolicy.WithDaemon.SHUTDOWN_DELAY_MILLIS));
+        }
+        assertEquals(null, built.get(ExecutionPolicy.WithDaemon.JVM_ARGUMENTS));
+        assertEquals(null, built.get(ExecutionPolicy.WithDaemon.SHUTDOWN_DELAY_MILLIS));
+        // An option the policy does not declare has neither a value nor a default.
+        ExecutionPolicy.WithDaemon.Option<String> undeclared =
+            new ExecutionPolicy.WithDaemon.Option<>("UNDECLARED", new org.jetbrains.kotlin.buildtools.api.KotlinReleaseVersion(2, 3, 0));
+        String expected = "UNDECLARED was not set in org.jetbrains.kotlin.buildtools.api.ExecutionPolicy.WithDaemon";
+        for (java.util.function.Supplier<Object> read : List.<java.util.function.Supplier<Object>>of(
+            () -> fresh.get(undeclared), () -> built.get(undeclared), () -> built.toBuilder().get(undeclared))) {
+            assertEquals(expected, assertThrows(IllegalStateException.class, read::get).getMessage());
+        }
+    }
+
+    @Test
     void reportsEachErrorThroughTheCallersRenderer() throws IOException {
         Path source = write("Broken.kt", "fun broken(): Int = missing()\n");
         List<String> rendered = new ArrayList<>();
