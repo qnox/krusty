@@ -46,10 +46,17 @@ start=$SECONDS
 
 step() { printf '\nsmoke: [%3ss] %s\n' "$((SECONDS - start))" "$*" >&2; }
 
-# Paths the branch's own commits add, modify or rename to, that still exist at HEAD.
+# Every path the branch's own commits touch, including a deletion and both sides of a rename: what
+# a change can affect, which selects the lanes and checks. A path that no longer exists still changed
+# the effective inputs (a deleted expectation list), so it is not filtered out.
+affected() {
+  git log --first-parent --no-merges --no-renames --name-only --format= "$fork..HEAD" -- "$@" | sort -u
+}
+
+# The affected paths that still exist at HEAD: the executable inputs (E2E modules, owned regressions)
+# a step can run.
 changed() {
-  git log --first-parent --no-merges --diff-filter=AMR --name-only --format= "$fork..HEAD" -- "$@" \
-    | sort -u | while IFS= read -r file; do [ -e "$file" ] && printf '%s\n' "$file"; done
+  affected "$@" | while IFS= read -r file; do [ -e "$file" ] && printf '%s\n' "$file"; done
 }
 
 # The box lanes a change can affect. A backend crate, or its expected-failure lists, selects its own
@@ -68,7 +75,7 @@ select_lanes() {
       src/* | crates/* | tests/* | build.rs | Cargo.toml | Cargo.lock | .cargo/* | justfile)
         jvm=1 native=1 wasm=1 ;;
     esac
-  done < <(changed)
+  done < <(affected)
   local selected=()
   [ "$jvm" = 0 ] || selected+=(jvm)
   [ "$native" = 0 ] || selected+=(native)
@@ -76,6 +83,11 @@ select_lanes() {
   printf '%s\n' "${selected[*]}"
 }
 lanes="${KRUSTY_SMOKE_LANES-$(select_lanes)}"
+# The selection alone, for the scenario test: no checks, no build.
+if [ "${KRUSTY_SMOKE_PRINT_LANES:-}" = 1 ]; then
+  printf '%s\n' "$lanes"
+  exit 0
+fi
 
 step "attribution and outcome lists ($fork..HEAD)"
 bash scripts/check-attribution.sh "$fork..HEAD"
@@ -85,7 +97,7 @@ step "rustfmt"
 just fmt-check
 step "legacy baseline"
 just legacy-baseline-check
-if [ "${KRUSTY_SMOKE_SKIP_CLIPPY:-}" != 1 ] && [ -n "$(changed '*.rs')" ]; then
+if [ "${KRUSTY_SMOKE_SKIP_CLIPPY:-}" != 1 ] && [ -n "$(affected '*.rs')" ]; then
   step "clippy baseline"
   just clippy-baseline-check
 fi

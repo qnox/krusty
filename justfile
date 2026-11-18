@@ -46,11 +46,15 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests runner-profile-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
+lint: smoke-selection-tests versioning-tests runner-profile-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
 
 # The CI step that drops kotlinc reference inventories no recent run read, before master saves them.
 reference-cache-tests:
     bash scripts/test-prune-reference-cache.sh
+
+# The smoke check's lane selection, against a disposable repository with deleted and renamed paths.
+smoke-selection-tests:
+    bash scripts/test-smoke-selection.sh
 
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
