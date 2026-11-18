@@ -186,7 +186,7 @@ run_job() {
 
 logdir="$(mktemp -d "${TMPDIR:-/tmp}/krusty-smoke.XXXXXX")"
 trap 'rm -rf "$logdir"' EXIT
-declare -A job_pid
+declare -A job_pid kotlinc_of box_of native_of
 failed=()
 running=0
 order=()
@@ -207,15 +207,20 @@ start_job() {
 
 # Provision the given versions, run all their jobs in parallel, and report each result.
 run_versions() {
-  local v lane name
+  local v lane name kc bc kn
   order=()
   for v in "$@"; do
     # Each version's exact reference toolchain, provisioned before the jobs share it.
     step "provisioning Kotlin $v"
-    kotlinc_of[$v]="$(just kotlinc "$v")"
-    box_of[$v]="$(just box-corpus "$v")"
-    just ser-corpus "$v" >/dev/null
-    case " $lanes " in *" native "*) native_of[$v]="$(just kotlin-native "$v")" ;; esac
+    # Each step is checked on its own: an assignment's status is not reliably seen by `set -e`.
+    kc="$(just kotlinc "$v")" || exit 1
+    bc="$(just box-corpus "$v")" || exit 1
+    just ser-corpus "$v" >/dev/null || exit 1
+    kotlinc_of[$v]="$kc"
+    box_of[$v]="$bc"
+    case " $lanes " in
+      *" native "*) kn="$(just kotlin-native "$v")" || exit 1; native_of[$v]="$kn" ;;
+    esac
   done
   for v in "$@"; do
     for lane in $lanes; do start_job "$v" "$lane"; done
@@ -224,6 +229,8 @@ run_versions() {
     case " $lanes " in *" wasm-js "*|*" wasm-wasi "*) start_job "$v" wasm-focus ;; esac
     if [ "$diagnostics" = 1 ] && [ "$v" = "$newest" ]; then start_job "$v" diagnostics; fi
   done
+  # A run that scheduled nothing must not read as a pass.
+  [ "${#order[@]}" -gt 0 ] || { echo "smoke: no conformance job was scheduled" >&2; exit 1; }
   for name in "${order[@]}"; do
     wait "${job_pid[$name]}" 2>/dev/null || true
     if [ "$(cat "$logdir/${name// /_}.rc" 2>/dev/null)" = 0 ]; then
