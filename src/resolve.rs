@@ -29314,17 +29314,19 @@ pub(crate) fn applied_common_supertype_unguarded(
         .copied()
         .filter(|(candidate, _, _)| !dominated.contains(candidate))
         .collect::<Vec<_>>();
-    let [(owner, left_applied, right_applied)] = most_specific.as_slice() else {
-        return None;
+    // Several unrelated most-specific classifiers (a shared superclass and a shared interface)
+    // are all supertypes of both operands, and kotlinc keeps every one as an intersection.
+    let joined = most_specific
+        .iter()
+        .map(|&(owner, left_applied, right_applied)| {
+            join_applied_classifier(source, oracle, owner, left_applied, right_applied, visiting)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let joined = match joined.as_slice() {
+        [] => return None,
+        [single] => *single,
+        parts => Ty::intersection(parts),
     };
-    let joined = join_applied_classifier(
-        source,
-        oracle,
-        *owner,
-        *left_applied,
-        *right_applied,
-        visiting,
-    )?;
     Some(common_result_nullability(left, right, joined))
 }
 
