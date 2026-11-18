@@ -1,6 +1,9 @@
 // TARGET_BACKEND: JVM_IR
-// Not platform-specific: the Native and wasm backends cannot yet test an object against a class
-// another source module declares (`is K` below), which every program of this shape needs.
+// PLATFORM-SPECIFIC: the program relies on JVM classfile replacement. The JVM loader overlays
+// `m1`'s `S` and `K` with `m12`'s while `m2` stays compiled against the older hierarchy, so a
+// sealed interface gains a subclass after `m2` was compiled. Native links `m12`, `m2` and the
+// transitive `m1` as distinct libraries, which declares `pkg/S` twice, and its module model has
+// no replacement operation; a wasm link has none either.
 // An exhaustive subject `when` without an `else`, compiled against a sealed interface that gains a
 // subclass before the program runs, throws `NoWhenBranchMatchedException`. From the 2.5
 // API (`NoWhenBranchMatchedExceptionWithMessage`, since API 2.5) the failure passes the subject to
