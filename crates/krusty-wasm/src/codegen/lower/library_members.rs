@@ -16,7 +16,7 @@ use krusty::backend::interface_identity::property_member_identity;
 use krusty::backend::{BackendCallableFact, BackendPropertyFact, CheckedBackendCallables};
 use krusty::libraries::ExternalCallableKind;
 use krusty::libraries::MemberRealization;
-use krusty::types::{SemanticCallableOwner, TypeName};
+use krusty::types::{SemanticCallRole, SemanticCallableOwner, TypeName};
 
 use super::super::super::objects::{slot_field, REFERENCE};
 use super::super::interface_members::{accessor_types, member_signature, Signature};
@@ -388,6 +388,15 @@ impl Body<'_> {
         let member = self.library_member_of(&fact, identity, role, &name)?;
         if reference_name {
             self.runtime.reference_name_member(self.module, member)?;
+        }
+        match fact.semantic_role {
+            Some(SemanticCallRole::KotlinPropertyReferenceGet(arity))
+                if usize::from(arity) == args.len() =>
+            {
+                self.runtime
+                    .property_reference_read_member(self.module, member, args.len())?;
+            }
+            _ => {}
         }
         self.value(receiver, objects::any())?;
         for (&arg, &param) in args.iter().zip(params) {
