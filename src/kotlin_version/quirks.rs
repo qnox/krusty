@@ -102,6 +102,9 @@ quirks! {
     /// A synthetic annotation implementation stamps nullability on its constructor, `equals` and
     /// `toString`.
     AnnotationImplCarriesNullability { since: None, fixed_in: Some(KotlinVersion::V2_4_20) }
+    /// A `null` function value suspend-converted to a nullable suspend function type converts to an
+    /// adapter whose `invoke` yields `null`, instead of staying `null` (KT-89451).
+    NullFunctionValueConvertsToAdapter { since: None, fixed_in: Some(KotlinVersion::V2_5_0) }
     /// A library compiled below language 2.3 stamps KLIB `metadata_version` `1.4.1` instead of the
     /// language level's own (read off `kotlinc-native -p library -Xmetadata-klib`).
     KlibLegacyMetadataVersionBelowLanguage23 {
