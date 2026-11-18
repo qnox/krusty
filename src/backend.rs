@@ -27,6 +27,7 @@ pub mod local_properties;
 mod module_facts;
 pub mod module_links;
 pub mod property_entries;
+pub mod property_reference_values;
 pub mod range_constructions;
 pub mod reference_names;
 mod source_class_members;
@@ -130,6 +131,10 @@ pub type Artifact = (String, Vec<u8>);
 pub struct CommonIrPreparation {
     pub counted_loops: counted_loops::CountedLoopPolicy,
     pub enums: enums::Contract,
+    /// Realize each source `KProperty` reference as a function value
+    /// ([`property_reference_values::realize`]) instead of leaving it to the target's own
+    /// reference objects.
+    pub property_reference_values: bool,
 }
 
 /// An unsupported checked shape or a failed invariant during common-IR preparation.
