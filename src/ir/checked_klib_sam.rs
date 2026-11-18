@@ -2,7 +2,8 @@
 
 use super::IrSamTarget;
 use crate::libraries::{
-    classifier_type_parameter_bounds, sam_application_bindings, sam_substitute, LibraryType,
+    classifier_type_parameter_bounds, sam_application_bindings, sam_substitute,
+    KlibDependencyCallable, LibraryType,
 };
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use std::sync::Arc;
@@ -14,6 +15,9 @@ pub(crate) type KlibSamKey = (String, KlibPublicIdSignature);
 pub(crate) struct CheckedKlibSamDeclaration {
     pub(crate) classifier: Arc<LibraryType>,
     pub(crate) target: IrSamTarget,
+    /// The declarations a lambda converted to this interface may name as the one it overrides:
+    /// the selected method and the methods of its dispatch frames.
+    pub(crate) overridable: Box<[KlibDependencyCallable]>,
 }
 
 impl std::fmt::Debug for CheckedKlibSamDeclaration {
@@ -22,6 +26,7 @@ impl std::fmt::Debug for CheckedKlibSamDeclaration {
             .debug_struct("CheckedKlibSamDeclaration")
             .field("identity", &self.classifier.klib_identity)
             .field("target", &self.target)
+            .field("overridable", &self.overridable)
             .finish()
     }
 }
