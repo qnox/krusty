@@ -66,15 +66,40 @@ fn official_sam_dispatch_families_preserve_headers_frames_and_copy_without_body_
             &[],
         )
         .unwrap();
-        let callees = KlibCalleeFacts::new([callable]).with_checked_dependency_facts(&checked);
-        let externals = super::sam_conversions::checked_member_externals(&libraries, &checked);
+        let member_snapshots =
+            super::sam_conversions::checked_member_declarations(&libraries, &checked);
+        let callees = KlibCalleeFacts::with_reference_declarations(
+            [callable],
+            member_snapshots.iter().filter_map(|(target, declaration)| {
+                declaration
+                    .klib_body_callable()
+                    .map(|callable| (*target, callable))
+            }),
+        )
+        .with_checked_dependency_facts(&checked);
+        let externals = super::sam_conversions::checked_member_leaves(
+            &libraries,
+            &callees,
+            &member_snapshots,
+            &super::sam_conversions::supports_sam_ir_operation,
+            &super::sam_conversions::represents_sam_ir_classifier,
+        );
+        assert!(super::sam_conversions::checked_member_leaves(
+            &libraries,
+            &callees,
+            &member_snapshots,
+            &|_| false,
+            &super::sam_conversions::represents_sam_ir_classifier,
+        )
+        .is_empty());
         let mut unit = DependencyBodyUnit::default();
-        unit.lower_function_with_intrinsics_and_externals(
+        unit.lower_function_with_declarations(
             callable,
             libraries.declaration_bodies(),
             &callees,
             libraries.intrinsic_facts(),
             &externals,
+            &libraries,
         )
         .unwrap();
         let mut ir = unit.into_ir();
@@ -117,8 +142,9 @@ fn official_sam_dispatch_families_preserve_headers_frames_and_copy_without_body_
             assert!(facts.sam_declaration(declaration).is_some());
             assert!(facts.declaration_identity(declaration).is_some());
         }
-        // The SAM headers add no body obligation. The only dependency body is the target member
-        // the specialized lambdas call (`Int.plus`), one of the member edges the checker froze.
+        // The SAM headers add no body obligation. The specialized lambdas retain one actual
+        // external call and its declaration even though the target realizes its primitive
+        // operation without lowering that declaration's body.
         let bodies = facts
             .klib_body_callables()
             .into_iter()
@@ -130,6 +156,17 @@ fn official_sam_dispatch_families_preserve_headers_frames_and_copy_without_body_
             "{name}: {bodies:?}"
         );
         for body in &bodies {
+            let (external, declaration) = libraries.external_callable_by_dependency(body).unwrap();
+            let operation = declaration
+                .klib_body_callable()
+                .unwrap()
+                .compiler_intrinsic()
+                .unwrap();
+            assert!(crate::ir::IrBinOp::of_primitive_operator(operation).is_some());
+            assert_eq!(
+                facts.callable(external).unwrap().compiler_operation(),
+                Some(operation)
+            );
             assert!(
                 checked.member_edges().contains_key(body),
                 "{name}: {body:?}"
