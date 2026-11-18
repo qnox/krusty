@@ -960,6 +960,7 @@ impl BodyLowering<'_> {
                 context_count: 0,
                 class_type_parameters: &[],
                 parameter_defaults: &[],
+                declaration: None,
             },
         )?;
         let (&[continuation], &[continuation_type]) =
