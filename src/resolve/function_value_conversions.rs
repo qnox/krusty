@@ -7,6 +7,9 @@
 //! exact callable constituent the conversion wraps; checked FIR carries the pair and common
 //! lowering realizes it without selecting again.
 //!
+//! A function value's applicability to a function-typed parameter lives here too, because the
+//! argument boundary is where unit conversion may apply to the value's own result.
+//!
 //! kotlinc converts a value only where it is passed as a call argument (positional, named, or a
 //! conditional passed as one). An initializer, assignment, return, expression body or lambda
 //! result of a regular function type is a type mismatch against a `suspend` or `Unit`-returning
@@ -65,6 +68,75 @@ impl Checker<'_> {
             && !crate::kotlin_version::Quirks::target()
                 .has(crate::kotlin_version::Quirk::UnitConversionRejectsNonUnitResult)
             && expected == Ty::Unit
+    }
+
+    /// Whether the function value `actual` fits a function-typed parameter `expected` whose
+    /// signature may have reached the checker erased: a classpath `(StringBuilder) -> Unit` is a bare
+    /// `Function1`, `(Any) -> Any`, and a source `() -> T` erases the same way. The two match on
+    /// arity and suspend-ness; parameters are accepted contravariantly and the result covariantly,
+    /// and a component that is the erased top or mentions a type parameter is left to inference.
+    pub(super) fn erased_function_param_fits(&self, expected: Ty, actual: Ty) -> bool {
+        self.function_shape_fits(expected, actual, true)
+    }
+
+    /// [`Self::erased_function_param_fits`] for a generic constructor's function-typed parameter,
+    /// where either side may be nullable.
+    pub(super) fn generic_function_constructor_arg_fits(&self, expected: Ty, actual: Ty) -> bool {
+        if actual == Ty::Null {
+            return expected.is_nullable();
+        }
+        if actual.is_nullable() && !expected.is_nullable() {
+            return false;
+        }
+        self.erased_function_param_fits(expected.non_null(), actual.non_null())
+    }
+
+    /// The shape comparison. Unit conversion of the value's own result applies only `at_argument`:
+    /// it is an argument-boundary conversion, so a function type nested in a parameter or result
+    /// compares by subtyping alone (`(() -> Unit) -> Unit` does not reach `(() -> String) -> Unit`).
+    fn function_shape_fits(&self, expected: Ty, actual: Ty, at_argument: bool) -> bool {
+        let (TyKind::Fun(expected), TyKind::Fun(actual)) = (expected.kind(), actual.kind()) else {
+            return false;
+        };
+        expected.params.len() == actual.params.len()
+            // Suspend conversion is one-way: a regular function value may be wrapped as suspend;
+            // a suspend value cannot flow to a regular function parameter.
+            && (!actual.suspend || expected.suspend)
+            && expected
+                .params
+                .iter()
+                .zip(&actual.params)
+                .all(|(expected, actual)| self.function_component_accepts(*actual, *expected))
+            // Lambdas and callable references are normalized before this comparison. A stored
+            // `() -> String` value reaches `() -> Unit` only through the language's unit conversion.
+            && (self.function_component_accepts(expected.ret, actual.ret)
+                || at_argument && self.unit_conversion_admits_result(expected.ret))
+    }
+
+    /// Whether one component of a function type, `supertype`, accepts `subtype`. A component typed
+    /// by the `null` literal is `Nothing?`. A nested function type compares by shape again, so its own
+    /// erased or generic components stay open to inference.
+    fn function_component_accepts(&self, supertype: Ty, subtype: Ty) -> bool {
+        let supertype = if supertype == Ty::Null {
+            Ty::nullable(Ty::Nothing)
+        } else {
+            supertype
+        };
+        if supertype == subtype
+            || supertype.is_erased_top()
+            || supertype.mentions_ty_param()
+            || subtype.mentions_ty_param()
+            || self.postponed_call_mentions(supertype)
+            || self.postponed_call_mentions(subtype)
+        {
+            return true;
+        }
+        if subtype == Ty::Null {
+            return supertype.is_nullable();
+        }
+        crate::assignable::is_assignable(&crate::assignable::TyCtx::new(), self, subtype, supertype)
+            || (!subtype.is_nullable() || supertype.is_nullable())
+                && self.function_shape_fits(supertype.non_null(), subtype.non_null(), false)
     }
 
     /// Whether the function value `argument` is inapplicable to a function-typed parameter. The

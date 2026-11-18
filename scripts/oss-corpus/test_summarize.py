@@ -109,6 +109,56 @@ class Summary(unittest.TestCase):
                              ['left to kotlinc: compose', 1]]),
         ])
 
+    def test_root_failures_are_ranked_by_the_compilations_they_kept_from_running(self):
+        with tempfile.TemporaryDirectory() as work:
+            not_run = 'not run: a task it depends on failed'
+            zeta = project('zeta', [row(':a:compileKotlin', False, 1, 0, error='e: a/A.kt:1:1 boom'),
+                                    row(':c:compileKotlin', False, 1, 0, error=not_run),
+                                    row(':d:compileKotlin', False, 1, 0, error=not_run),
+                                    row(':e:compileKotlin', False, 1, 0, error=not_run)])
+            for r, roots in zip(zeta['rows'], ([], [':a:compileKotlin', ':k:kspKotlin'],
+                                               [':a:compileKotlin', ':k:kspKotlin'], [':k:kspKotlin'])):
+                r['blocked_by'] = roots
+            zeta['failed_tasks'] = {':a:compileKotlin': 'e: a/A.kt:1:1 boom', ':k:kspKotlin': None,
+                                    ':z:compileKotlin': 'e: z/Z.kt:1:1 alone'}
+            alpha = project('Alpha', [row(':x:compileKotlin', False, 1, 0, error='e: X.kt:2:2 bad'),
+                                      row(':y:compileKotlin', False, 1, 0, error=not_run)])
+            alpha['rows'][1]['blocked_by'] = [':x:compileKotlin']
+            alpha['failed_tasks'] = {':x:compileKotlin': 'e: X.kt:2:2 bad'}
+            # A result recorded before the corpus traced root failures has neither field.
+            old = project('old', [row(':o:compileKotlin', False, 1, 0, error=not_run)])
+            reports = []
+            for p in (zeta, alpha, old):
+                reports.append(os.path.join(work, p['name'] + '.json'))
+                with open(reports[-1], 'w') as f:
+                    json.dump(p, f)
+            text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'),
+                                   '--json', f'{work}/summary.json'] + reports,
+                                  check=True, capture_output=True, text=True).stdout
+            with open(f'{work}/summary.json') as f:
+                summary = {p['name']: p for p in json.load(f)['projects']}
+        lines = text.splitlines()
+        start = lines.index('## Root failures')
+        self.assertEqual(lines[start:lines.index('## Missed compilations')], [
+            '## Root failures',
+            '',
+            'Each failed task of the krusty builds, ranked by the compilations that did not run because it failed:',
+            'fixing it lets them run. A compilation stopped by two failed tasks counts for each.',
+            '',
+            '| Project | Failed task | First error | Compilations it kept from running |',
+            '| --- | --- | --- | ---: |',
+            '| zeta | `:k:kspKotlin` | | 3 |',
+            '| zeta | `:a:compileKotlin` | `e: a/A.kt:1:1 boom` | 2 |',
+            '| Alpha | `:x:compileKotlin` | `e: X.kt:2:2 bad` | 1 |',
+            '',
+        ])
+        self.assertEqual(summary['zeta']['roots'], [
+            dict(task=':k:kspKotlin', error=None, blocked=3),
+            dict(task=':a:compileKotlin', error='e: a/A.kt:1:1 boom', blocked=2),
+            dict(task=':z:compileKotlin', error='e: z/Z.kt:1:1 alone', blocked=0),
+        ])
+        self.assertIsNone(summary['old']['roots'])
+
     def test_verify_errors_are_listed_per_project_and_grouped_by_cause(self):
         def verified(task, *errors, status='failed'):
             r = row(task, False, 1, 0, error='not run: a task it depends on failed')

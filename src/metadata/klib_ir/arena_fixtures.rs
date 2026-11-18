@@ -60,6 +60,11 @@ impl KlibIrArena {
         &mut self.functions[id.index()]
     }
 
+    /// A decoded expression, to rewrite one serialized fact for a malformed-body control.
+    pub(crate) fn expr_mut(&mut self, id: KlibIrExprId) -> &mut KlibIrExpr {
+        &mut self.exprs[id.index()]
+    }
+
     /// A decoded class, to rewrite one serialized fact for a malformed-header control.
     pub(crate) fn class_mut(&mut self, id: KlibIrClassId) -> &mut KlibIrClass {
         &mut self.classes[id.index()]

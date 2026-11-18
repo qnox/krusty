@@ -366,6 +366,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             dispatch,
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         }
@@ -373,6 +374,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             dispatch,
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         } => {
@@ -383,6 +385,16 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             *result = ty(*result, names);
             if let Some(receiver) = source_receiver {
                 *receiver = ty(*receiver, names);
+            }
+            for substitution in substitutions {
+                substitution.value = ty(substitution.value, names);
+                substitution.reified_runtime = ty(substitution.reified_runtime, names);
+                substitution.additional_bounds = substitution
+                    .additional_bounds
+                    .iter()
+                    .copied()
+                    .map(|bound| ty(bound, names))
+                    .collect();
             }
             return;
         }
@@ -581,6 +593,14 @@ fn sam_target(sam: &mut crate::ir::IrSamTarget, names: &IdentityRemap<'_>) {
     tys(&mut sam.declared_parameters, names);
     sam.declared_result = ty(sam.declared_result, names);
     tys(&mut sam.overridden_results, names);
+    for frame in sam
+        .dispatch_methods
+        .iter_mut()
+        .chain(&mut sam.default_methods)
+    {
+        tys(&mut frame.parameters, names);
+        frame.result = ty(frame.result, names);
+    }
     for parameter in &mut sam.type_parameters {
         for (bound, _) in &mut parameter.bounds {
             *bound = ty(*bound, names);
@@ -1711,6 +1731,9 @@ fn remap_expression_facts(ir: &mut super::IrFile, expression: ExprId, names: &Id
     if let Some(parameters) = ir.physical_call_parameters.get_mut(&expression) {
         tys(parameters, names);
     }
+    if let Some(source_callee) = ir.suspend_call_declarations.get_mut(&expression) {
+        callee(source_callee, names);
+    }
     if let Some(access) = ir.module_member_accesses.get_mut(&expression) {
         module_member_access(access, names);
     }
@@ -2019,13 +2042,27 @@ mod tests {
                 has_receiver: false,
                 suspend: false,
                 source_suspend: false,
+                requires_object_dispatch: true,
                 overridden_results: vec![source_ty],
+                dispatch_methods: vec![crate::ir::IrSamMethodFrame {
+                    method: Some(IrSamMethod::External(
+                        crate::fir::ExternalCallableId::from_raw(71),
+                    )),
+                    parameters: vec![source_ty],
+                    result: source_ty,
+                }],
+                default_methods: vec![crate::ir::IrSamMethodFrame {
+                    method: None,
+                    parameters: vec![source_ty],
+                    result: source_ty,
+                }],
                 function_adapter: false,
                 wraps_function_value: false,
                 nullable: false,
                 kotlin_interface: true,
                 parameter_identities: Vec::new(),
                 type_parameters: Vec::new(),
+                placement: crate::ir::IrSamPlacement::ThisFile,
             })),
             inline_body: None,
         };
@@ -2034,7 +2071,18 @@ mod tests {
             unreachable!()
         };
         assert_eq!(sam.classifier, target);
+        assert!(sam.requires_object_dispatch);
         assert_eq!(sam.overridden_results, vec![target_ty]);
+        assert_eq!(
+            sam.dispatch_methods[0].method,
+            Some(IrSamMethod::External(
+                crate::fir::ExternalCallableId::from_raw(71)
+            ))
+        );
+        for frame in sam.dispatch_methods.iter().chain(&sam.default_methods) {
+            assert_eq!(frame.parameters, vec![target_ty]);
+            assert_eq!(frame.result, target_ty);
+        }
 
         let runtime = || IrRuntimeFunction {
             function: crate::fir::ExternalCallableId::from_raw(1),

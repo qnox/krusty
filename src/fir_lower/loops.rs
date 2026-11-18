@@ -362,6 +362,7 @@ impl BodyLowering<'_> {
                 },
                 extension_receiver: None,
                 arguments: &[],
+                substitutions: &[],
                 write: false,
             })
             .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))?;

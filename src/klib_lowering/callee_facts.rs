@@ -29,6 +29,7 @@ pub struct KlibCalleeFacts<'a> {
     target_classifiers: Option<&'a dyn Fn(crate::types::TypeName) -> bool>,
     /// The checked call edge facts of reachable dependency members, by declaration.
     member_edges: HashMap<KlibDependencyCallable, CallEdge>,
+    sam_declarations: HashMap<crate::ir::KlibSamKey, crate::ir::CheckedKlibSamDeclaration>,
     /// The library objects whose values the closed bodies read, by classifier.
     read_objects: HashMap<crate::types::TypeName, crate::libraries::KlibBodyClassContract>,
 }
@@ -70,6 +71,12 @@ impl<'a> KlibCalleeFacts<'a> {
                 .iter()
                 .map(|(id, edge)| (id.clone(), edge.clone())),
         );
+        self.sam_declarations.extend(
+            checked
+                .sam_declarations()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
         if let Some(hierarchy) = checked.type_hierarchy() {
             self.class_type_oracle = Some(hierarchy);
         }
@@ -86,6 +93,15 @@ impl<'a> KlibCalleeFacts<'a> {
             self.member_edges.entry(identity).or_insert(edge);
         }
         self
+    }
+
+    pub(super) fn sam_declaration(
+        &self,
+        module: &str,
+        signature: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> Option<&crate::ir::CheckedKlibSamDeclaration> {
+        self.sam_declarations
+            .get(&(module.to_owned(), signature.clone()))
     }
 
     pub(crate) fn builtin_implementation_facts(
@@ -178,6 +194,11 @@ impl<'a> KlibCalleeFacts<'a> {
     ) -> Self {
         self.class_type_oracle = Some(oracle);
         self
+    }
+
+    /// The class hierarchy the checker froze for the selected bodies, when it froze one.
+    pub(super) fn class_type_oracle(&self) -> Option<&'a dyn crate::assignable::TypeOracle> {
+        self.class_type_oracle
     }
 
     pub(crate) fn with_target_classifiers(
@@ -570,6 +591,24 @@ impl<'a> KlibCalleeFacts<'a> {
                 .kotlin_class_internal()
                 .is_some_and(|class| self.target_represents(class))
         }))
+    }
+
+    /// The continuation intrinsic `identity` is, which body lowering realizes as the suspension
+    /// point it stands for: no declaration of it is emitted or called.
+    pub(crate) fn continuation_intrinsic(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<
+        Option<super::continuation_intrinsics::ContinuationIntrinsicCall>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        // Two selected declarations prove no intrinsic; the call's own linking reports them.
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => {
+                super::continuation_intrinsics::authenticate(callables[0])
+            }
+            Some(KlibCalleeFact::Ambiguous) | None => Ok(None),
+        }
     }
 
     /// The range construction `identity` performs, whatever the target lays out. A membership in
