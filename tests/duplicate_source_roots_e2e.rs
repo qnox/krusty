@@ -174,3 +174,55 @@ fn a_symlinked_spelling_is_a_second_source_like_kotlinc() {
         "krusty"
     );
 }
+
+/// kotlinc folds `.` and `..` lexically before it reads a source, so `src/alias/../G.kt` is
+/// `src/G.kt` even when `alias` is a symlink into another directory, and the file is read once.
+#[test]
+fn a_parent_component_after_a_symlink_folds_before_the_read_like_kotlinc() {
+    let dir = common::scratch_dir().expect("allocate a scratch directory");
+    let (src, other) = (dir.join("src"), dir.join("other"));
+    std::fs::create_dir_all(other.join("deep")).unwrap();
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("G.kt"), "fun lexical() = 1\n").unwrap();
+    std::fs::write(other.join("G.kt"), "fun reached() = 2\n").unwrap();
+    std::os::unix::fs::symlink(Path::new("../other/deep"), src.join("alias")).unwrap();
+    let through_link = src.join("alias").join("..").join("G.kt");
+    let direct = src.join("G.kt");
+    let program = |compiler: &str| {
+        let output = dir.join(compiler);
+        let arguments = vec![
+            through_link.display().to_string(),
+            direct.display().to_string(),
+            "-d".to_string(),
+            output.display().to_string(),
+        ];
+        let status = if compiler == "kotlinc" {
+            common::kotlinc_server::kotlinc_compile_unrecorded(&arguments)
+                .expect("the reference kotlinc is available")
+                .0
+        } else {
+            Command::new(common::krusty_binary())
+                .args(&arguments)
+                .output()
+                .expect("run krusty")
+                .status
+                .code()
+                .expect("krusty exited")
+        };
+        let class = std::fs::read(output.join("GKt.class")).expect("the facade class");
+        let holds = |name: &str| class.windows(name.len()).any(|w| w == name.as_bytes());
+        (
+            status,
+            holds("lexical"),
+            holds("reached"),
+            output_files(&output),
+        )
+    };
+    let kotlinc = program("kotlinc");
+    assert_eq!(
+        (kotlinc.0, kotlinc.1, kotlinc.2),
+        (0, true, false),
+        "kotlinc"
+    );
+    assert_eq!(program("krusty"), kotlinc, "krusty");
+}

@@ -23,7 +23,7 @@ impl SourceRoots {
             return None;
         }
         let mut found = Vec::new();
-        walk(root, &mut found);
+        walk(&folded(root).to_string_lossy(), &mut found);
         let collected: Vec<String> = found
             .into_iter()
             .filter(|file| self.files.insert(identity(file)))
@@ -42,27 +42,34 @@ pub(super) fn duplicate_source_root(root: &str) -> CliWarning {
     }
 }
 
-/// The file a spelling names, as kotlinc compares source files: the absolute path with `.` and `..`
-/// folded lexically. Symlinks are not resolved, so two spellings that reach one file through
-/// different links stay two inputs.
-fn identity(file: &str) -> PathBuf {
-    let path = Path::new(file);
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-    };
+/// The path a spelling names, as kotlinc reads it: `.` and `..` folded lexically, never through a
+/// symlink, and still relative when it was written relative.
+fn folded(file: &str) -> PathBuf {
     let mut folded = PathBuf::new();
-    for component in absolute.components() {
+    for component in Path::new(file).components() {
         match component {
             Component::CurDir => {}
-            Component::ParentDir => {
-                folded.pop();
-            }
+            Component::ParentDir => match folded.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    folded.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => folded.push(Component::ParentDir),
+            },
             other => folded.push(other),
         }
     }
     folded
+}
+
+/// The file a spelling names, as kotlinc compares source files: its folded path made absolute.
+fn identity(file: &str) -> PathBuf {
+    let folded = folded(file);
+    if folded.is_absolute() {
+        folded
+    } else {
+        std::env::current_dir().map_or(folded.clone(), |cwd| cwd.join(&folded))
+    }
 }
 
 fn walk(path: &str, out: &mut Vec<String>) {
