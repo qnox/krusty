@@ -547,7 +547,6 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          with a default argument that is not a constant yet",
     );
     assert_compose_rejects(
-    assert_compose_rejects(
         "compose-local-argument",
         "@Composable fun Show(text: String) {}\n@Composable fun Greeting() {\nval text = \"a\"\nShow(text)\n}\n",
         &[],
