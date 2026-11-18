@@ -74,7 +74,7 @@ impl IrPlugin for ComposePlugin {
         entry
             .annotations
             .contains(&crate::types::type_name(COMPOSABLE))
-            && source_facts::takes_composer_frame(entry.synthetic, true)
+            && source_facts::takes_composer_frame(entry.synthetic, entry.parameters, true)
     }
 }
 
@@ -97,6 +97,7 @@ mod transformed_entry_tests {
             &TransformedEntry {
                 annotations: &annotations,
                 synthetic,
+                parameters: 3,
             },
         )
     }

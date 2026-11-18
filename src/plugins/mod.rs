@@ -950,6 +950,8 @@ pub struct TransformedEntry<'a> {
     pub annotations: &'a [TypeName],
     /// The parameters its compiled entry takes after its source parameters.
     pub synthetic: &'a [Ty],
+    /// How many source parameters the declaration has, which the appended words follow.
+    pub parameters: usize,
 }
 
 /// What a plugin reads of a dependency function's declaration besides its parameter types.
