@@ -90,35 +90,23 @@ fun f(w: Boolean) {
     );
 }
 
+const LOCAL_SOURCE: &str = include_str!("box_regressions/LocalIntersectionArgument.kt");
+
 /// A local whose value is a non-denotable intersection reaches a generic call with its
-/// constituents, whether the intersection comes from its initializer or from flow narrowing.
+/// constituents, whether the intersection comes from its initializer or from flow narrowing, for a
+/// plain parameter and for a vararg element ranked against a single-element overload. The program
+/// runs on every backend from the shared box inventory; this driver compares its result with
+/// kotlinc.
 #[test]
 fn a_local_intersection_reaches_the_generic_call_result() {
-    let source = "\
-interface Node
-interface Styled : Node
-interface Backed : Node
-class Paragraph : Styled, Backed
-class Link : Styled, Backed
-class Items : Node
-class Pair2<T>(val first: T?, val second: T?)
-fun <T> pairOf(first: T?, second: T?): Pair2<T> = Pair2(first, second)
-fun render(pair: Pair2<Node>): Int = if (pair.first != null) 1 else 0
-fun fromInitializer(w: Boolean): Int {
-    val x = if (w) Paragraph() else Link()
-    return render(pairOf(x, Items()))
-}
-fun fromNarrowing(v: Any): Int {
-    if (v is Styled && v is Backed) return render(pairOf(v, Items()))
-    return 0
-}
-fun box(): String =
-    if (fromInitializer(true) == 1 && fromNarrowing(Paragraph()) == 1) \"OK\" else \"Fail\"
-";
-    common::expect_box_same_as_kotlinc(source, "LocalIntersectionArgumentRun");
+    common::expect_box_same_as_kotlinc(LOCAL_SOURCE, "LocalIntersectionArgumentRun");
 }
 
-/// The vararg collection factories take the same flow-narrowed intersection.
+/// The vararg collection factory takes the same flow-narrowed intersection.
+///
+/// PLATFORM-SPECIFIC: this is the quarkdown shape with the real `listOf`, whose KLIB body the
+/// wasm lanes cannot yet lower. The same overload shapes (a single-element overload beside a
+/// vararg one) run on every backend in `LocalIntersectionArgument.kt`, which is not cropped.
 #[test]
 fn a_local_intersection_reaches_a_vararg_collection() {
     const PRELUDE: &str = "\
