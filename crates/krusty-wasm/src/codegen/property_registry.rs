@@ -16,7 +16,7 @@ use krusty::fir::{DeclarationFlags, PropertyId};
 use krusty::ir::{IrFile, IrLocalPropertyLayout};
 use krusty::types::{Ty, TypeName};
 
-use super::super::encode::Module;
+use super::super::encode::{Module, ValType};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct TopLevelProperty {
@@ -72,6 +72,10 @@ pub(super) struct PropertyRegistry {
     module: HashMap<PropertyId, TopLevelProperty>,
     members: HashMap<PropertyId, MemberProperty>,
     accessors: HashMap<PropertyId, AccessorProperty>,
+    /// The function that initializes the statics of one class, by the class that owns them. A file
+    /// reading a `companion { }` block property another file declares calls it first, so it is
+    /// reserved by whichever file needs it first and defined by the file that declares the class.
+    owner_initializers: HashMap<TypeName, u32>,
 }
 
 impl PropertyRegistry {
@@ -85,6 +89,7 @@ impl PropertyRegistry {
                 self.module.clear();
                 self.members.clear();
                 self.accessors.clear();
+                self.owner_initializers.clear();
             }
         }
     }
@@ -329,6 +334,25 @@ impl PropertyRegistry {
         Ok(entry)
     }
 
+    /// The initializer function of `owner`'s statics, reserving it with `declare` when no file has.
+    pub(super) fn owner_initializer(
+        &mut self,
+        owner: TypeName,
+        declare: impl FnOnce() -> u32,
+    ) -> u32 {
+        *self.owner_initializers.entry(owner).or_insert_with(declare)
+    }
+
+    pub(super) fn reserved_owner_initializer(&self, owner: TypeName) -> Option<u32> {
+        self.owner_initializers.get(&owner).copied()
+    }
+
+    pub(super) fn reserved_owner_initializers(&self) -> impl Iterator<Item = (TypeName, u32)> + '_ {
+        self.owner_initializers
+            .iter()
+            .map(|(owner, function)| (*owner, *function))
+    }
+
     pub(super) fn accessor(&self, property: PropertyId) -> Option<AccessorProperty> {
         self.accessors.get(&property).cloned()
     }
@@ -338,8 +362,15 @@ impl PropertyRegistry {
     pub(super) fn prepare_file(
         &mut self,
         ir: &IrFile,
-        mut allocate: impl FnMut(Ty) -> Result<u32, String>,
+        module: &mut Module,
+        carrier: impl Fn(Ty) -> Result<Option<ValType>, String>,
     ) -> Result<Vec<u32>, String> {
+        let allocate = |module: &mut Module, ty: Ty| {
+            let Some(value) = carrier(ty)? else {
+                return Err("a `Unit` top-level property".to_string());
+            };
+            Ok(module.global(value))
+        };
         let mut identities = vec![Vec::new(); ir.statics.len()];
         for (&property, layout) in &ir.local_property_layouts {
             let IrLocalPropertyLayout::TopLevelStorage {
@@ -384,7 +415,7 @@ impl PropertyRegistry {
                     target
                 }
                 None => TopLevelProperty {
-                    global: allocate(declaration.ty)?,
+                    global: allocate(module, declaration.ty)?,
                     ..declared
                 },
             };
@@ -402,8 +433,13 @@ impl PropertyRegistry {
         let mut references = ir.referenced_module_properties.iter().collect::<Vec<_>>();
         references.sort_by_key(|(property, _)| **property);
         for (&property, reference) in references {
-            if reference.owner.is_some()
-                || reference.extension_receiver.is_some()
+            // A `companion { }` block property is a static of its owner, which its recorded owner
+            // and receiver coordinate name; it takes no receiver.
+            let block = matches!(
+                reference.placement,
+                krusty::ir::IrStaticPlacement::CompanionBlock { .. }
+            );
+            if (!block && (reference.owner.is_some() || reference.extension_receiver.is_some()))
                 || !reference.context_parameters.is_empty()
             {
                 continue;
@@ -416,7 +452,7 @@ impl PropertyRegistry {
             let target = match self.module.get(&property).copied() {
                 Some(target) => target,
                 None => TopLevelProperty {
-                    global: allocate(reference.ty)?,
+                    global: allocate(module, reference.ty)?,
                     ty: reference.ty,
                     mutable: reference.mutable,
                     direct_read,
@@ -433,6 +469,13 @@ impl PropertyRegistry {
                 );
             }
             self.bind(property, target)?;
+            // The owner initializes the storage on first use; a constant is folded at its uses.
+            if let (krusty::ir::IrStaticPlacement::CompanionBlock { declaring_class }, false) = (
+                reference.placement,
+                reference.flags.has(DeclarationFlags::CONST),
+            ) {
+                self.owner_initializer(declaring_class, || module.declare());
+            }
         }
         Ok(globals)
     }
