@@ -1,9 +1,9 @@
 //! The source files a command line names, collected as kotlinc collects its source roots: a root
 //! repeated with the same spelling is reported and read once, and a file reached through two roots
-//! (a directory and a file inside it, or two spellings of one path) is compiled once, silently.
+//! (a directory and a file inside it, or two lexical spellings of one path) is compiled once, silently.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::CliWarning;
 
@@ -42,10 +42,27 @@ pub(super) fn duplicate_source_root(root: &str) -> CliWarning {
     }
 }
 
-/// The file a spelling names. A path that does not resolve keeps its spelling; reading it reports
-/// the problem.
+/// The file a spelling names, as kotlinc compares source files: the absolute path with `.` and `..`
+/// folded lexically. Symlinks are not resolved, so two spellings that reach one file through
+/// different links stay two inputs.
 fn identity(file: &str) -> PathBuf {
-    std::fs::canonicalize(file).unwrap_or_else(|_| PathBuf::from(file))
+    let path = Path::new(file);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+    };
+    let mut folded = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                folded.pop();
+            }
+            other => folded.push(other),
+        }
+    }
+    folded
 }
 
 fn walk(path: &str, out: &mut Vec<String>) {
@@ -108,6 +125,21 @@ mod tests {
             (
                 vec![g.clone(), h.clone()],
                 vec![Some(vec![g]), Some(vec![h]), Some(Vec::new())]
+            )
+        );
+    }
+
+    #[test]
+    fn a_symlinked_spelling_stays_a_distinct_input() {
+        let dir = layout("symlink");
+        std::os::unix::fs::symlink(dir.join("src"), dir.join("alias")).unwrap();
+        let g = dir.join("src/G.kt").display().to_string();
+        let aliased = dir.join("alias/G.kt").display().to_string();
+        assert_eq!(
+            collect(&[g.clone(), aliased.clone()]),
+            (
+                vec![g.clone(), aliased.clone()],
+                vec![Some(vec![g]), Some(vec![aliased])]
             )
         );
     }

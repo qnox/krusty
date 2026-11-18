@@ -418,6 +418,11 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
     if let Some(refusal) = fragments.unsupported {
         opts.refuse(refusal);
     }
+    // kotlinc resolves source roots only once the module configuration is accepted, so a
+    // configuration error ends the run before a duplicate root is reported.
+    if !fragments.configuration_errors.is_empty() {
+        duplicate_roots.clear();
+    }
     opts.configuration_errors
         .extend(fragments.configuration_errors);
     opts.plugins.finish();

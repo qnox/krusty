@@ -111,3 +111,66 @@ fn a_source_named_twice_compiles_once_like_kotlinc() {
         );
     }
 }
+
+/// kotlinc compares source files by their lexical absolute path, so one file reached through a
+/// symlinked directory is a second input and its declarations conflict with the first's.
+#[test]
+fn a_symlinked_spelling_is_a_second_source_like_kotlinc() {
+    let dir = common::scratch_dir().expect("allocate a scratch directory");
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("G.kt"), "fun g() = 1\n").unwrap();
+    std::os::unix::fs::symlink(&src, dir.join("alias")).unwrap();
+    let arguments = |compiler: &str| {
+        vec![
+            src.join("G.kt").display().to_string(),
+            dir.join("alias").join("G.kt").display().to_string(),
+            "-d".to_string(),
+            dir.join(compiler).display().to_string(),
+        ]
+    };
+    let (kotlinc_code, kotlinc_stderr) =
+        common::kotlinc_server::kotlinc_compile_unrecorded(&arguments("kotlinc"))
+            .expect("the reference kotlinc is available");
+    let krusty = Command::new(common::krusty_binary())
+        .args(arguments("krusty"))
+        .output()
+        .expect("run krusty");
+    // Both compilers print a source as it was spelled: relative to the working directory here.
+    let working = std::env::current_dir().expect("the working directory");
+    let conflict = |root: &Path| {
+        format!(
+            "{}:1:1: error: conflicting overloads:\nfun g(): Int\nfun g() = 1\n^^^^^^^\n",
+            root.join("G.kt")
+                .strip_prefix(&working)
+                .expect("the scratch directory is under the working directory")
+                .display()
+        )
+    };
+    let expected = format!("{}{}", conflict(&dir.join("alias")), conflict(&src));
+    assert_eq!(
+        (kotlinc_code, kotlinc_stderr.as_str()),
+        (1, expected.as_str()),
+        "kotlinc"
+    );
+    // krusty reports the same two conflicts in its own rendering, one per spelling.
+    let krusty_conflict = |root: &Path| {
+        format!(
+            "{}:1:1: error: conflicting overloads:\nfun g(): Int\n",
+            root.join("G.kt").display()
+        )
+    };
+    let krusty_expected = format!(
+        "{}{}krusty: 2 error(s)\n",
+        krusty_conflict(&src),
+        krusty_conflict(&dir.join("alias"))
+    );
+    assert_eq!(
+        (
+            krusty.status.code(),
+            String::from_utf8_lossy(&krusty.stderr).as_ref()
+        ),
+        (Some(1), krusty_expected.as_str()),
+        "krusty"
+    );
+}
