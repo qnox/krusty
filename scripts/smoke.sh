@@ -11,14 +11,19 @@
 #      legacy and clippy baselines;
 #   3. the lib tests of krusty and the backend crates;
 #   4. the e2e modules (`tests/*_e2e.rs`) this branch changes;
-#   5. a box slice on JVM, Native, wasm-js and wasm-wasi: an even sample of the corpus, then the
-#      owned regressions (`tests/box_regressions/`): all of them on JVM and Wasm, the ones this
-#      branch changes on Native (see run_lane).
+#   5. the conformance entries CI runs, in parallel jobs, on the newest Kotlin version, and on the
+#      others too if it fails: per lane (JVM, Native, wasm-js, wasm-wasi) an even sample of the box
+#      corpus and the owned regressions (`tests/box_regressions/`), the non-box conformance
+#      (CLI and bytecode corpora), the focused Native and Wasm tests, and the diagnostics lane
+#      when this branch changes its expectations.
 #
 # Every test process runs under the harness's configurable deadlines (scripts/test-gate-defaults.sh).
 #
 # Knobs: KRUSTY_SMOKE_BOX_LIMIT (corpus cases sampled per lane, default 150; 0 runs the owned
 # regressions only), KRUSTY_SMOKE_LANES (default "jvm native wasm-js wasm-wasi"),
+# KRUSTY_SMOKE_VERSIONS (default: newest, then the rest on failure; "all" runs every version,
+# or list versions), KRUSTY_SMOKE_JOBS (parallel jobs, default nproc),
+# KRUSTY_SMOKE_DIAGNOSTICS=1 (always run the diagnostics lane),
 # KRUSTY_SMOKE_SKIP_CLIPPY=1 (skip step 2's clippy run, which is the slowest static check).
 set -euo pipefail
 
@@ -91,13 +96,49 @@ done < <(changed 'tests/box_regressions/*.kt' 'tests/box_regressions/**/*.kt')
 
 step "building the conformance binary"
 bin="$(scripts/cargo-test-binary.sh conformance --test conformance)"
+# The CLI the non-box corpus drives is the one built beside the binary, as in CI.
+sibling="$(cd "$(dirname "$bin")" && pwd)/krusty"
+[ -x "$sibling" ] && export KRUSTY_BIN="${KRUSTY_BIN:-$sibling}"
 
-# One lane: the sampled corpus slice, then owned regressions. JVM, wasm-js and wasm-wasi run every
-# owned regression; their inventory keeps only the ones that apply to the release under test.
-# Native runs only the regressions this branch changes, because each multi-module one first runs
-# kotlinc-native as its oracle, which takes minutes for the whole set; a changed regression outside
-# the release under test selects nothing there. A narrowed run checks the expected-failure lists over
-# exactly the cases it scanned.
+# Every conformance entry CI runs, for the newest Kotlin version first (then the others if it fails), as parallel jobs:
+#   <v> <lane>        the sampled corpus slice, then the owned regressions (run_lane)
+#   <v> nonbox        scripts/conformance-regressions.sh: the JVM-owned non-box tests, the CLI corpus
+#                     and the bytecode corpora against the reference compiler
+#   <v> native-focus  scripts/target-conformance-regressions.sh native
+#   <v> wasm-focus    scripts/target-conformance-regressions.sh wasm
+#   <max> diagnostics the diagnostics test data lane; a full run compiles every case, so it runs
+#                     when the branch changes its expectations or KRUSTY_SMOKE_DIAGNOSTICS=1
+# A job's output goes to a log that is printed only when the job fails. All jobs run to the end so
+# one push fixes every failure the try would have reported.
+# The newest version first; the others only when it fails (the failure may be version-specific, or
+# fixed for it and not for them) or when KRUSTY_SMOKE_VERSIONS=all (or a list) asks for them.
+newest="$(just max-version)"
+all_versions="$(just kotlin-versions | tr '\n' ' ')"
+case "${KRUSTY_SMOKE_VERSIONS:-}" in
+  "") first="$newest" rest="" ;;
+  all) first="$newest" rest="$(printf '%s\n' $all_versions | grep -vxF "$newest" | tr '\n' ' ')" ;;
+  *) first="$KRUSTY_SMOKE_VERSIONS" rest="" ;;
+esac
+jobs_max="${KRUSTY_SMOKE_JOBS:-$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)}"
+export KRUSTY_BOX_CASE_TIMEOUT_MS="${KRUSTY_BOX_CASE_TIMEOUT_MS:-8000}"
+export KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE=1
+export KRUSTY_BOX_TIMEOUT_MS="${KRUSTY_BOX_TIMEOUT_MS:-60000}"
+export KRUSTY_KLIB_REFERENCE_CACHE="${KRUSTY_KLIB_REFERENCE_CACHE:-$PWD/target/cache/klib-references}"
+
+diagnostics=0
+[ "${KRUSTY_SMOKE_DIAGNOSTICS:-}" = 1 ] && diagnostics=1
+if [ -n "$(changed 'tests/diagnostics_false_accepts/**' 'tests/diagnostics_not_scored/**' 'tests/kotlin_diagnostics_jvm_conformance.rs')" ]; then
+  diagnostics=1
+fi
+
+declare -A kotlinc_of box_of native_of
+
+# One lane of one version: the sampled corpus slice, then owned regressions. JVM, wasm-js and
+# wasm-wasi run every owned regression; their inventory keeps only the ones that apply to the
+# release under test. Native runs only the regressions this branch changes, because each
+# multi-module one first runs kotlinc-native as its oracle, which takes minutes for the whole set;
+# a changed regression outside the release under test selects nothing there. A narrowed run checks
+# the expected-failure lists over exactly the cases it scanned.
 run_lane() {
   local lane=$1 infix test deadline only
   case "$lane" in
@@ -110,25 +151,100 @@ run_lane() {
   local require=()
   [ -z "$infix" ] || require=("KRUSTY_REQUIRE_${infix}CONFORMANCE=1")
   if [ "$limit" -gt 0 ]; then
-    step "$lane: $limit sampled corpus cases"
+    echo "$lane: $limit sampled corpus cases"
     run_with_deadline "$deadline" env "${require[@]}" "KRUSTY_${infix}BOX_LIMIT=$limit" \
       "$bin" --exact "$test" --nocapture
   fi
   if [ "$lane" != native ]; then
-    step "$lane: owned regressions"
+    echo "$lane: owned regressions"
     run_with_deadline "$deadline" env "${require[@]}" "KRUSTY_${infix}BOX_ONLY=/tests/box_regressions/" \
       "$bin" --exact "$test" --nocapture
     return
   fi
   for only in "${regressions[@]}"; do
-    step "$lane: changed regression $only"
+    echo "$lane: changed regression $only"
     run_with_deadline "$deadline" env "${require[@]}" "KRUSTY_${infix}BOX_ONLY=$only" \
       "$bin" --exact "$test" --nocapture
   done
 }
 
-for lane in $lanes; do
-  run_lane "$lane"
-done
+# One job, in its own subshell so its version's environment reaches nothing else.
+run_job() {
+  local v=$1 kind=$2
+  export KRUSTY_LANGUAGE_VERSION="$v" KRUSTY_KOTLINC="${kotlinc_of[$v]}" KRUSTY_KOTLIN_BOX_DIR="${box_of[$v]}"
+  case "$kind" in
+    nonbox) bash scripts/conformance-regressions.sh "$bin" "$v" ;;
+    native-focus) KRUSTY_KOTLIN_NATIVE="${native_of[$v]}" bash scripts/target-conformance-regressions.sh native "$bin" "$v" ;;
+    wasm-focus) bash scripts/target-conformance-regressions.sh wasm "$bin" "$v" ;;
+    diagnostics) bash scripts/diagnostics-conformance.sh "$bin" "$v" ;;
+    native) KRUSTY_KOTLIN_NATIVE="${native_of[$v]}" run_lane native ;;
+    *) run_lane "$kind" ;;
+  esac
+}
 
+logdir="$(mktemp -d "${TMPDIR:-/tmp}/krusty-smoke.XXXXXX")"
+trap 'rm -rf "$logdir"' EXIT
+declare -A job_pid
+failed=()
+running=0
+order=()
+
+start_job() {
+  local name="$1 $2"
+  while [ "$running" -ge "$jobs_max" ]; do
+    wait -n || true
+    running=$((running - 1))
+  done
+  # The exit status goes to a file: `wait -n` above reaps jobs, so `wait <pid>` cannot report it.
+  ( trap 'echo $? >"$logdir/${name// /_}.rc"' EXIT; run_job "$1" "$2" ) >"$logdir/${name// /_}.log" 2>&1 &
+  job_pid[$name]=$!
+  order+=("$name")
+  running=$((running + 1))
+  step "started: $name"
+}
+
+# Provision the given versions, run all their jobs in parallel, and report each result.
+run_versions() {
+  local v lane name
+  order=()
+  for v in "$@"; do
+    # Each version's exact reference toolchain, provisioned before the jobs share it.
+    step "provisioning Kotlin $v"
+    kotlinc_of[$v]="$(just kotlinc "$v")"
+    box_of[$v]="$(just box-corpus "$v")"
+    just ser-corpus "$v" >/dev/null
+    case " $lanes " in *" native "*) native_of[$v]="$(just kotlin-native "$v")" ;; esac
+  done
+  for v in "$@"; do
+    for lane in $lanes; do start_job "$v" "$lane"; done
+    start_job "$v" nonbox
+    case " $lanes " in *" native "*) start_job "$v" native-focus ;; esac
+    case " $lanes " in *" wasm-js "*|*" wasm-wasi "*) start_job "$v" wasm-focus ;; esac
+    if [ "$diagnostics" = 1 ] && [ "$v" = "$newest" ]; then start_job "$v" diagnostics; fi
+  done
+  for name in "${order[@]}"; do
+    wait "${job_pid[$name]}" 2>/dev/null || true
+    if [ "$(cat "$logdir/${name// /_}.rc" 2>/dev/null)" = 0 ]; then
+      step "ok: $name"
+    else
+      step "FAILED: $name"
+      failed+=("$name")
+      echo "----- $name -----" >&2
+      tail -n 80 "$logdir/${name// /_}.log" >&2
+    fi
+  done
+  running=0
+}
+
+run_versions $first
+if [ "${#failed[@]}" -gt 0 ] && [ -z "$rest" ]; then
+  rest="$(printf '%s\n' $all_versions | grep -vxF -e "$first" | tr '\n' ' ')"
+  [ -z "${KRUSTY_SMOKE_VERSIONS:-}" ] && step "newest version failed: checking the other versions too"
+fi
+[ -z "$rest" ] || run_versions $rest
+
+if [ "${#failed[@]}" -gt 0 ]; then
+  printf 'smoke: failed: %s\n' "${failed[@]}" >&2
+  exit 1
+fi
 step "passed"
