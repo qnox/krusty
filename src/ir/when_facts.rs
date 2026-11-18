@@ -41,6 +41,13 @@ impl InheritedFacts for IrWhenFacts {
         elvises.inherit(source, target);
         elvis_chain_links.inherit(source, target);
     }
+
+    fn truncate_from(&mut self, first: ExprId) {
+        self.exhaustive.truncate_from(first);
+        self.source_lines.truncate_from(first);
+        self.elvises.truncate_from(first);
+        self.elvis_chain_links.truncate_from(first);
+    }
 }
 
 impl super::IrFile {
