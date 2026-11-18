@@ -225,11 +225,13 @@ fn case_cli_arguments(
         ]);
     }
     if directive(src, "WITH_ATOMICFU") {
-        let plugin = crate::toolchain::atomicfu_compiler_plugin_jar().ok_or_else(|| {
-            "box directive `// WITH_ATOMICFU` needs the atomicfu compiler plugin of the reference \
-             Kotlin version"
-                .to_string()
-        })?;
+        let plugin =
+            crate::toolchain::atomicfu_compiler_plugin_jar_or_reason().map_err(|reason| {
+                format!(
+                    "box directive `// WITH_ATOMICFU` needs the atomicfu compiler plugin of the \
+                 reference Kotlin version: {reason}"
+                )
+            })?;
         arguments.push(format!("-Xplugin={}", plugin.display()));
     }
     Ok(arguments)

@@ -382,12 +382,24 @@ fn ensure_repository_artifact(
     version: &str,
     extension: &str,
 ) -> Option<PathBuf> {
+    fetch_repository_artifact(repository, group, artifact, version, extension).ok()
+}
+
+/// [`ensure_repository_artifact`] that says why an artifact is unavailable: the URL and the status
+/// or deadline that stopped the download, so a failed provisioning explains itself.
+fn fetch_repository_artifact(
+    repository: &str,
+    group: &str,
+    artifact: &str,
+    version: &str,
+    extension: &str,
+) -> Result<PathBuf, String> {
     if extension.is_empty()
         || !extension
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     {
-        return None;
+        return Err(format!("{extension:?} is not a file extension"));
     }
     let cache = std::env::var("KRUSTY_DEPS_CACHE")
         .ok()
@@ -397,33 +409,46 @@ fn ensure_repository_artifact(
             std::env::var("HOME")
                 .ok()
                 .map(|h| PathBuf::from(h).join(".cache/krusty-deps"))
-        })?;
+        })
+        .ok_or_else(|| "neither KRUSTY_DEPS_CACHE nor HOME is set".to_string())?;
     let _ = std::fs::create_dir_all(&cache);
     let file = cache.join(format!("{artifact}-{version}.{extension}"));
     if file.is_file() {
-        return Some(file);
+        return Ok(file);
     }
     let url = format!(
         "{repository}/{}/{artifact}/{version}/{artifact}-{version}.{extension}",
         group.replace('.', "/"),
     );
     let download = maven_download_path(&file);
-    let completed = maven_download::process_budget()
-        .spend(|deadline| {
-            maven_download::download(
-                &url,
-                &download,
-                maven_download::MAVEN_CENTRAL_RETRIES,
-                deadline,
-            )
-            .completed
-        })
-        .unwrap_or(false);
-    if completed {
-        publish_maven_download(&download, &file)
-    } else {
-        let _ = std::fs::remove_file(&download);
-        None
+    let downloaded = maven_download::process_budget().spend(|deadline| {
+        maven_download::download(
+            &url,
+            &download,
+            maven_download::MAVEN_CENTRAL_RETRIES,
+            deadline,
+        )
+    });
+    match downloaded {
+        Some((outcome, _)) if outcome.completed => publish_maven_download(&download, &file)
+            .ok_or_else(|| {
+                format!(
+                    "{url} downloaded but could not be published to {}",
+                    file.display()
+                )
+            }),
+        Some((outcome, failure)) => {
+            let _ = std::fs::remove_file(&download);
+            Err(format!(
+                "{url} was not downloaded after {} attempt(s): {}",
+                outcome.attempts,
+                failure.unwrap_or_else(|| "no failure was recorded".to_string())
+            ))
+        }
+        None => Err(format!(
+            "{url} was not downloaded: the process's download budget \
+             (KRUSTY_DEPS_DEADLINE_SECONDS) was already spent by earlier downloads"
+        )),
     }
 }
 
@@ -622,10 +647,17 @@ pub fn atomicfu_runtime_jar() -> Option<PathBuf> {
 /// Compose and serialization plugins, the distribution does not ship it; Maven Central publishes it
 /// with every Kotlin release.
 pub fn atomicfu_compiler_plugin_jar() -> Option<PathBuf> {
-    ensure_maven(
+    atomicfu_compiler_plugin_jar_or_reason().ok()
+}
+
+/// [`atomicfu_compiler_plugin_jar`] with the reason it is unavailable.
+pub fn atomicfu_compiler_plugin_jar_or_reason() -> Result<PathBuf, String> {
+    fetch_repository_artifact(
+        MAVEN_CENTRAL,
         "org.jetbrains.kotlin",
         "kotlin-atomicfu-compiler-plugin-embeddable",
         &kotlin_version(),
+        "jar",
     )
 }
 
