@@ -87,6 +87,11 @@ pub(super) fn validate_after_parsing(file: &File, parser_error: bool, diags: &mu
              guarantees are provided.",
         );
     }
+    if parser_error {
+        // The body check does not run for a syntax-error file. A member left without a body is
+        // still the reference diagnostic, reported at `fun`.
+        report_bodyless_members(file, diags);
+    }
     if parser_error || file.is_script {
         return;
     }
@@ -110,6 +115,33 @@ pub(super) fn validate_after_parsing(file: &File, parser_error: bool, diags: &mu
             crate::diag::names::NON_MEMBER_FUNCTION_NO_BODY,
             format!("function '{}' must have a body.", function.name),
         );
+    }
+}
+
+fn report_bodyless_members(file: &File, diagnostics: &mut DiagSink) {
+    for &declaration in &file.decls {
+        let Decl::Class(class) = file.decl(declaration) else {
+            continue;
+        };
+        if class.is_interface() {
+            continue;
+        }
+        for function in &class.methods {
+            if !matches!(function.body, crate::ast::FunBody::None)
+                || function.is_abstract()
+                || function.is_external()
+            {
+                continue;
+            }
+            diagnostics.error_named(
+                function.span,
+                crate::diag::names::NON_ABSTRACT_FUNCTION_WITH_NO_BODY,
+                format!(
+                    "function '{}' without a body must be abstract.",
+                    function.name
+                ),
+            );
+        }
     }
 }
 

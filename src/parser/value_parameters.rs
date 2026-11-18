@@ -10,9 +10,22 @@ impl Parser<'_> {
     /// Parse `(a: A, vararg b: B, noinline c: () -> Unit = …)`, positioned on the `(`.
     pub(super) fn parse_param_list(&mut self) -> Vec<Param> {
         let mut params = Vec::new();
-        self.expect(TokenKind::LParen, "'('");
+        let open = self.tok().span;
+        if !self.expect(TokenKind::LParen, "'('") {
+            // `fun` with no parameter list still owes a `)`, reported on the token that is there.
+            self.expect(TokenKind::RParen, "')'");
+            return params;
+        }
         self.skip_semicolons();
+        let mut closed_by_enclosing = false;
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+            // `}` belongs to the enclosing class. Parsing it as a parameter cascades
+            // "expected parameter name / ':' / type / ')'" at the brace. kotlinc reports one
+            // syntax error at the unclosed `(`.
+            if self.at(TokenKind::RBrace) {
+                closed_by_enclosing = true;
+                break;
+            }
             let prefix_start = self.i;
             let mut pmods = Vec::new();
             let mut pannos = Vec::new();
@@ -85,7 +98,12 @@ impl Parser<'_> {
             }
             self.skip_semicolons();
         }
-        self.expect(TokenKind::RParen, "')'");
+        if closed_by_enclosing {
+            self.diags
+                .error(Span::new(open.hi, open.hi), "syntax error: Expecting ')'.");
+        } else {
+            self.expect(TokenKind::RParen, "')'");
+        }
         params
     }
 
