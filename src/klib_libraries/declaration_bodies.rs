@@ -869,10 +869,19 @@ impl KlibDeclarationBodies {
         module: &str,
         signature: &KlibPublicIdSignature,
     ) -> bool {
-        matches!(
-            self.public_class(module, signature),
-            LocatedClass::One(arena, class) if class.declares_synthetic_enum_entries(arena)
-        )
+        let wanted = KlibIrSignature::Public(signature.clone());
+        let mut found = None;
+        for owner in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&owner) else {
+                continue;
+            };
+            for (arena, class) in self.libraries[library].classes_with_signature(&wanted) {
+                if found.replace((arena, class)).is_some() {
+                    return false;
+                }
+            }
+        }
+        found.is_some_and(|(arena, class)| class.declares_synthetic_enum_entries(arena))
     }
 
     /// A public classifier serialized by `module` or a library its manifest depends on.
