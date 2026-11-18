@@ -547,13 +547,6 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          with a default argument that is not a constant yet",
     );
     assert_compose_rejects(
-        "compose-file-extension-call",
-        "@Composable fun String.Show() {}\n@Composable fun Greeting() {\n\"a\".Show()\n}\n",
-        &[],
-        "5:1: error: krusty's Compose compiler plugin does not support a call to a composable \
-         function of the file with a receiver yet",
-    );
-    assert_compose_rejects(
         "compose-local-argument",
         "@Composable fun Show(text: String) {}\n@Composable fun Greeting() {\nval text = \"a\"\nShow(text)\n}\n",
         &[],

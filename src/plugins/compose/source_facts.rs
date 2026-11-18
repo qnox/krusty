@@ -1346,7 +1346,7 @@ impl BodyScope<'_> {
     ) -> Option<(ComposableCallSite, String)> {
         let found = &self.calls[&call];
         let declined = match found.origin {
-            CalleeOrigin::File => self.unsupported_file_call(ir, call),
+            CalleeOrigin::File => None,
             CalleeOrigin::Module => unsupported_module_call(ir, call),
             CalleeOrigin::Library(target) => self.unsupported_library_call(ir, call, target),
         };
@@ -1373,11 +1373,23 @@ impl BodyScope<'_> {
         else {
             unreachable!("a composable call is a call");
         };
-        // A library extension's receiver is its dispatch receiver, the first tracked value.
-        let receiver = match (found.origin, dispatch_receiver) {
-            (CalleeOrigin::Library(_), &Some(receiver)) => Some(receiver),
+        // A library callee takes no function value, so only the file's own callee is passed one.
+        let function = (found.origin == CalleeOrigin::File).then(|| {
+            callee
+                .source_function()
+                .expect("a call of the file's composable function names it")
+        });
+        // A library extension's receiver is its dispatch receiver, ahead of the arguments. An
+        // extension of the file takes it as its first argument.
+        let receiver = match found.origin {
+            CalleeOrigin::Library(_) => *dispatch_receiver,
             _ => None,
         };
+        let file_receiver = function.is_some_and(|function| {
+            ir.package_functions.iter().any(|declaration| {
+                declaration.function == function && declaration.receiver.is_some()
+            })
+        });
         let omitted = omitted_parameters(callee);
         let mut supplied = supplied_arguments(callee, args).peekable();
         let arguments = receiver
@@ -1444,29 +1456,11 @@ impl BodyScope<'_> {
                 call,
                 arguments,
                 library_mask,
-                receiver: receiver.is_some(),
+                receiver: receiver.is_some() || file_receiver,
                 stability: Vec::new(),
             },
             call_location(self.positions, found.own_span.unwrap_or(call_span)),
         ))
-    }
-
-    /// What a call to a composable function of the file does that the pass does not cover yet.
-    fn unsupported_file_call(&self, ir: &IrFile, call: ExprId) -> Option<&'static str> {
-        let IrExpr::Call {
-            callee,
-            dispatch_receiver,
-            ..
-        } = &ir.exprs[call as usize]
-        else {
-            unreachable!("a composable call is a call");
-        };
-        let function = callee.source_function()?;
-        (dispatch_receiver.is_some()
-            || ir.package_functions.iter().any(|declaration| {
-                declaration.function == function && declaration.receiver.is_some()
-            }))
-        .then_some("a call to a composable function of the file with a receiver")
     }
 
     /// What a call to the library composable `target` does that the pass does not cover yet.
