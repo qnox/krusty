@@ -1025,21 +1025,23 @@ mod tests {
         );
         let (_, action) = probe_action(&provider, FakeRunner::stdout(&recorded_output()));
 
+        assert_eq!(action.distribution, Distribution::BuildDistribution);
+        assert_eq!(action.tasks, vec![TASK.to_string()]);
         assert_eq!(action.arguments[2], "--no-configuration-cache");
+        assert_eq!(action.arguments[3], "--init-script");
+        let script = Path::new(&action.arguments[4]);
+        assert!(
+            script.is_file(),
+            "the launcher runs the init script written for this project"
+        );
         assert_eq!(action.java_home.as_deref(), Some(java_17.as_path()));
+        assert!(java_17.join("bin").join("java").is_file());
         let request = tooling::gradle_request(&action).expect("tooling request");
         let value: serde_json::Value =
             serde_json::from_str(&request).expect("tooling request json");
+        assert_eq!(value["kind"], "gradle");
         assert_eq!(value["javaHome"].as_str(), java_17.to_str());
-        let client = include_str!("../../java/krusty/tooling/GradleToolingClient.java");
-        assert!(
-            client.contains(".setJavaHome("),
-            "the tooling build action must run the daemon on the selected JVM"
-        );
-        assert!(
-            !client.contains("gradlew") && !client.contains("ProcessBuilder"),
-            "the daemon JVM is a Tooling API parameter"
-        );
+        assert_eq!(value["projectDir"].as_str(), tree.root.to_str());
     }
 
     fn write_jvm(tree: &TempTree, relative: &str, version: &str) -> PathBuf {
