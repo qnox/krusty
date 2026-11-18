@@ -11,7 +11,7 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::inline_expansion::{InlineBodySplice, InlineOperand, SplicedResult};
 use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
-use crate::libraries::KlibBodyCallable;
+use crate::libraries::{KlibBodyCallable, KlibDependencyCallable};
 use crate::metadata::klib_ir::tree::KlibIrFunction;
 use crate::types::{
     stored_value_ty, InlineExpansionMode, InlineParameterModifier, Ty, TyKind, TypeName,
@@ -50,14 +50,17 @@ impl<'a, 's> Candidate<'a, 's> {
         }
     }
 
-    /// Declare it as one the unit expands at each call, unless it is the selected `root`: the root
-    /// is lowered as the declaration it is, and a call of an inline callee is expanded.
+    /// Declare it, which is `identity`, as one the unit expands at each call, unless it is the
+    /// selected `root`: the root is lowered as the declaration it is, and a call of an inline
+    /// callee is expanded.
     pub(super) fn declare(
         &self,
         ir: &mut IrFile,
-        root: bool,
+        root: Option<KlibBodyCallable<'_>>,
+        identity: &KlibDependencyCallable,
         is_interface: &mut dyn FnMut(TypeName) -> Result<bool, KlibBodyDeclineReason>,
     ) -> Result<(), KlibBodyDeclineReason> {
+        let root = root.is_some_and(|root| root.identity() == identity);
         if root || !declares_inline(self.function) {
             return Ok(());
         }
@@ -495,16 +498,4 @@ fn reads(ir: &IrFile, root: ExprId, slot: u32) -> bool {
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
     false
-}
-
-impl super::Linker<'_, '_> {
-    /// Whether the selected classifier `name` is an interface.
-    pub(super) fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
-        match self.sources.declarations.classifier(name) {
-            Some(record) => Ok(record.is_interface()),
-            None => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
-                "an object literal's supertype {name:?} is not a selected classifier"
-            ))),
-        }
-    }
 }
