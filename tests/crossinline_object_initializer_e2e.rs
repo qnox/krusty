@@ -6,50 +6,26 @@
 
 use super::common;
 
-const LIB: &str = r#"
-package lib
+const PROGRAM: &str = include_str!("box_regressions/multimodule/crossinlineObjectInitializer.kt");
 
-inline fun counted(crossinline text: () -> String) =
-    object {
-        val value = text()
-        var count = 0
-
-        init {
-            count = value.length
-        }
-
-        fun grow(): Int {
-            count += 1
-            return count
-        }
-
-        override fun toString() = value + grow()
-    }
-
-inline fun both(crossinline text: () -> String) =
-    object {
-        val first = text()
-
-        override fun toString() = first + text()
-    }
-"#;
-
-const MAIN: &str = r#"
-import lib.*
-
-fun counting(prefix: String) = counted { prefix + "!" }
-
-fun twice(word: String) = both { word }
-
-fun box(): String {
-    val result = counting("O").toString() + counting("KK").toString() + twice("a").toString()
-    return if (result == "O!3KK!4aa") "OK" else result
+/// The library and consumer sources of the shared portable program.
+fn modules() -> (String, String) {
+    let modules = krusty::conformance::split_modules(PROGRAM).expect("a two-module program");
+    let source = |name: &str| {
+        let module = modules
+            .iter()
+            .find(|module| module.name == name)
+            .unwrap_or_else(|| panic!("module {name}"));
+        assert_eq!(module.files.len(), 1);
+        module.files[0].1.clone()
+    };
+    (source("lib"), source("main"))
 }
-"#;
 
 #[test]
 fn a_lambda_read_during_construction_runs_like_the_reference_compiler() {
-    let output = common::expect_box_run_against_ref("crossinline_object_initializer", LIB, MAIN)
+    let (lib, main) = modules();
+    let output = common::expect_box_run_against_ref("crossinline_object_initializer", &lib, &main)
         .expect("reference kotlinc is provisioned");
     assert_eq!(output, "OK");
 }
@@ -58,7 +34,8 @@ fn a_lambda_read_during_construction_runs_like_the_reference_compiler() {
 /// original read the parameter, and the lambda's captured values are the copy's fields.
 #[test]
 fn the_object_copies_are_kotlincs() {
-    let classes = common::classes_against_kotlinc_lib("Initializing", &[("Lib.kt", LIB)], MAIN)
+    let (lib, main) = modules();
+    let classes = common::classes_against_kotlinc_lib("Initializing", &[("Lib.kt", &lib)], &main)
         .expect("reference kotlinc is provisioned");
     assert_eq!(
         classes.reference.keys().collect::<Vec<_>>(),
