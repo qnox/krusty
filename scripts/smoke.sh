@@ -201,20 +201,17 @@ logdir="$(mktemp -d "${TMPDIR:-/tmp}/krusty-smoke.XXXXXX")"
 trap 'rm -rf "$logdir"' EXIT
 declare -A job_pid kotlinc_of box_of native_of
 failed=()
-running=0
 order=()
 
 start_job() {
   local name="$1 $2"
-  while [ "$running" -ge "$jobs_max" ]; do
-    wait -n || true
-    running=$((running - 1))
-  done
-  # The exit status goes to a file: `wait -n` above reaps jobs, so `wait <pid>` cannot report it.
+  # Count the live jobs rather than keeping a counter: `wait -n` also returns for a child that is
+  # not one of the jobs, which let a counter drift below the real number running.
+  while [ "$(jobs -rp | wc -l)" -ge "$jobs_max" ]; do sleep 1; done
+  # The exit status goes to a file, so the result does not depend on when the job is reaped.
   ( trap 'echo $? >"$logdir/${name// /_}.rc"' EXIT; run_job "$1" "$2" ) >"$logdir/${name// /_}.log" 2>&1 &
   job_pid[$name]=$!
   order+=("$name")
-  running=$((running + 1))
   step "started: $name"
 }
 
@@ -255,8 +252,7 @@ run_versions() {
       tail -n 80 "$logdir/${name// /_}.log" >&2
     fi
   done
-  running=0
-}
+  }
 
 run_versions $first
 # Only the default falls back; an explicit list runs exactly that list.
