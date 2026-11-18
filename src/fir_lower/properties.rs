@@ -311,6 +311,7 @@ fn publish_foreign_accessor_layouts(
 pub(super) fn finalize_properties(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
+    templates: &mut super::dependency_templates::DependencyTemplateCache,
 ) -> Result<(), FirFileLoweringFailure> {
     let mut properties = ir
         .checked_properties
@@ -372,47 +373,87 @@ pub(super) fn finalize_properties(
             .then_some(shape.extension_receiver)
             .flatten()
             .map(crate::fir::ResolvedTy::get);
-        match property.class {
-            Some(class) if extension_receiver.is_some() => materialize_member_extension_property(
-                index,
-                PropertyMaterialization {
-                    source_order,
-                    property_id,
-                    property,
-                    context_parameters,
-                },
-                class,
-                extension_receiver.expect("guarded member extension receiver"),
-                ir,
-                &mut realizations,
-                &mut initialization,
-            )?,
-            Some(class_id) => materialize_member_property(
-                index,
-                MemberProperty {
-                    anchor,
-                    source_order,
-                    property_id,
-                    property,
-                    class_id,
-                    context_parameters,
-                },
-                ir,
-                &mut realizations,
-                &mut initialization,
-            )?,
-            None => materialize_top_level_property(
-                index,
-                PropertyMaterialization {
-                    source_order,
-                    property_id,
-                    property,
-                    context_parameters,
-                },
-                extension_receiver,
-                ir,
-                &mut realizations,
-            )?,
+        let property_class = property.class;
+        if property.delegate.is_some() || property.delegate_plan.is_some() {
+            let mut lowering = super::delegated_properties::DelegateLowering { index, templates };
+            let declaration = super::delegated_properties::DelegatedDeclaration {
+                source_order,
+                property_id,
+                property,
+                context_parameters,
+            };
+            match (property_class, extension_receiver) {
+                (Some(class), Some(receiver)) => {
+                    super::delegated_properties::materialize_member_extension_delegate(
+                        &mut lowering,
+                        declaration,
+                        class,
+                        receiver,
+                        ir,
+                        &mut realizations,
+                        &mut initialization,
+                    )?
+                }
+                (Some(class), None) => super::delegated_properties::materialize_member_delegate(
+                    &mut lowering,
+                    declaration,
+                    class,
+                    ir,
+                    &mut realizations,
+                    &mut initialization,
+                )?,
+                (None, receiver) => super::delegated_properties::materialize_top_level_delegate(
+                    declaration,
+                    receiver,
+                    &mut lowering,
+                    ir,
+                    &mut realizations,
+                )?,
+            }
+        } else {
+            match property.class {
+                Some(class) if extension_receiver.is_some() => {
+                    materialize_member_extension_property(
+                        index,
+                        PropertyMaterialization {
+                            source_order,
+                            property_id,
+                            property,
+                            context_parameters,
+                        },
+                        class,
+                        extension_receiver.expect("guarded member extension receiver"),
+                        ir,
+                        &mut realizations,
+                    )?
+                }
+                Some(class_id) => materialize_member_property(
+                    index,
+                    MemberProperty {
+                        anchor,
+                        source_order,
+                        property_id,
+                        property,
+                        class_id,
+                        context_parameters,
+                    },
+                    ir,
+                    &mut realizations,
+                    &mut initialization,
+                )?,
+                None => materialize_top_level_property(
+                    index,
+                    PropertyMaterialization {
+                        source_order,
+                        property_id,
+                        property,
+                        context_parameters,
+                    },
+                    extension_receiver,
+                    ir,
+                    &mut realizations,
+                )?,
+            }
         }
         if decl_line != 0 {
             let layout = realizations
@@ -528,7 +569,6 @@ fn materialize_member_extension_property(
     receiver: Ty,
     ir: &mut IrFile,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
-    initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
     let PropertyMaterialization {
         source_order,
@@ -536,22 +576,6 @@ fn materialize_member_extension_property(
         property,
         context_parameters,
     } = materialization;
-    if property.delegate.is_some() || property.delegate_plan.is_some() {
-        return super::delegated_properties::materialize_member_extension_delegate(
-            index,
-            super::delegated_properties::DelegatedDeclaration {
-                source_order,
-                property_id,
-                property,
-                context_parameters,
-            },
-            class_id,
-            receiver,
-            ir,
-            realizations,
-            initialization,
-        );
-    }
     if property.initializer.is_some() {
         return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
             property.declaration,
@@ -710,20 +734,6 @@ fn materialize_top_level_property(
         property,
         context_parameters,
     } = materialization;
-    if property.delegate.is_some() || property.delegate_plan.is_some() {
-        return super::delegated_properties::materialize_top_level_delegate(
-            super::delegated_properties::DelegatedDeclaration {
-                source_order,
-                property_id,
-                property,
-                context_parameters,
-            },
-            extension_receiver,
-            index,
-            ir,
-            realizations,
-        );
-    }
     let companion_block_owner = companion_block_owner(index, property_id, &property, ir)?;
     let has_storage = property.initializer.is_some()
         || property.flags.has(DeclarationFlags::LATEINIT)
@@ -1115,21 +1125,6 @@ fn materialize_member_property(
         .and_then(|owner| index.declaration_header(owner))
         .map(|header| header.flags)
         .unwrap_or_default();
-    if property.delegate.is_some() || property.delegate_plan.is_some() {
-        return super::delegated_properties::materialize_member_delegate(
-            index,
-            super::delegated_properties::DelegatedDeclaration {
-                source_order,
-                property_id,
-                property,
-                context_parameters,
-            },
-            class_id,
-            ir,
-            realizations,
-            initialization,
-        );
-    }
     // A checked member `const val` is necessarily declared on an object/companion. Its common-IR
     // declaration is static storage owned by that semantic classifier, not an instance property:
     // the JVM pass may subsequently move a companion constant to its outer class, while other

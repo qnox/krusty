@@ -43,6 +43,7 @@ mod erased_parameters;
 mod error;
 mod expect_realization;
 mod expression;
+mod external_delegate_calls;
 mod external_references;
 #[cfg(test)]
 mod fact_completeness_tests;
