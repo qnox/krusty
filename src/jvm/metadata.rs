@@ -854,8 +854,12 @@ fn build_generic_sig(
         tparams: &context.names,
         bounds: &context.erasure_bounds,
     };
-    let receiver_ref =
-        metadata_type_ref(pf.receiver_body.as_deref(), pf.receiver_type_id, type_table);
+    // A written `companion fun C.name` has no receiver operand: `take_companion_extension` took
+    // it out of the signature shape, so it is not the generic signature's receiver either.
+    let receiver_ref = pf
+        .has_receiver
+        .then(|| metadata_type_ref(pf.receiver_body.as_deref(), pf.receiver_type_id, type_table))
+        .flatten();
     let receiver = if let Some((body, table_nullable)) = receiver_ref {
         // An EXTENSION: its `receiver_type` is the receiver gsig node (`T`, `Ch`, `List<T>`, …).
         Some(decode_metadata_type(body, &source, table_nullable, 0)?)
