@@ -116,7 +116,6 @@ boxingOptimization/safeCallWithElvis.kt
 boxingOptimization/safeCallWithElvisMultipleFiles.kt
 boxingOptimization/simple.kt
 boxingOptimization/simpleUninitializedMerge.kt
-boxingOptimization/taintedValues.kt
 boxingOptimization/unsafeRemoving.kt
 boxingOptimization/unsignedArrayForEach.kt
 boxingOptimization/variables.kt
@@ -277,7 +276,6 @@ constants/comparisonTrue.kt
 constants/float.kt
 contextParameters/contextPropertyInInterface.kt
 contextParameters/explicitPassing.kt
-contextParameters/genericPropertyWithContextParameters.kt
 contextParameters/inlineAnonymousParameter.kt
 contextParameters/kt51863.kt
 contextParameters/kt53551.kt
@@ -969,7 +967,6 @@ inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inference/pcla/substituteStubTypeIntoCR.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt
 inference/pcla/topDownCompletionBreakedByNonBuilderInferenceSession.kt
-inference/pcla/withoutAnnotation.kt
 inference/plusAssignInsideLambda.kt
 initializers/correctOrder1.kt
 initializers/correctOrder2.kt
