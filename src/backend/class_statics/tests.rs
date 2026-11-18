@@ -78,12 +78,11 @@ fn a_class_runs_its_own_statics_in_declaration_order_at_each_activation_point() 
 
 #[test]
 fn a_class_with_other_initialization_parts_declines_an_owned_static() {
-    for shape in ["object", "interface", "value", "companion", "enum"] {
+    for shape in ["object", "value", "companion", "enum"] {
         let mut ir = IrFile::default();
         let mut declaration = crate::ir::test_support::blank_class("p/Owner");
         match shape {
             "object" => declaration.is_object = true,
-            "interface" => declaration.is_interface = true,
             "value" => declaration.is_value = true,
             "companion" => declaration.companion_class = Some(type_name("p/Owner$Companion")),
             _ => declaration.superclass = crate::types::wk::kotlin_enum(),
@@ -120,4 +119,33 @@ fn an_initialization_order_nothing_observes_runs_with_the_file_even_on_an_object
         (plan.is_deferred(uninitialized), plan.is_deferred(constant)),
         (false, false)
     );
+}
+
+#[test]
+fn an_interface_runs_its_own_statics_when_its_storage_or_block_functions_are_used() {
+    for companion in [false, true] {
+        let mut ir = IrFile::default();
+        let mut declaration = crate::ir::test_support::blank_class("p/Owner");
+        declaration.is_interface = true;
+        if companion {
+            declaration.companion_class = Some(type_name("p/Owner$Companion"));
+        }
+        let owner = ir.add_class(declaration);
+        let first = static_of(&mut ir, "first", Some("p/Owner"), Some(1));
+        let second = static_of(&mut ir, "second", Some("p/Owner"), Some(2));
+
+        let plan = ClassStaticPlan::new(&ir).expect("an interface orders its statics");
+
+        let groups: Vec<(ClassId, Vec<u32>)> = plan
+            .classes()
+            .iter()
+            .map(|group| (group.class, group.statics.to_vec()))
+            .collect();
+        assert_eq!(groups, vec![(owner, vec![first, second])], "{companion}");
+        assert_eq!(
+            [first, second].map(|index| plan.access_activation(index)),
+            [Some(owner), Some(owner)],
+            "{companion}"
+        );
+    }
 }

@@ -28,7 +28,7 @@ pub struct ClassStatics {
 }
 
 /// A class owns a static whose initialization this plan cannot order with the rest of the class:
-/// an interface, an enum, an object, a value class, or a class with a companion object.
+/// an enum, an object, a value class, or a class with a companion object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnorderedClassStatic {
     pub owner: TypeName,
@@ -57,10 +57,13 @@ impl ClassStaticPlan {
             let unordered = UnorderedClassStatic { owner };
             let class = ir.class_id_by_name(owner).ok_or(unordered)?;
             let declaration = &ir.classes[class as usize];
-            if declaration.is_interface
-                || declaration.is_object
+            // An interface has no superclass chain and no constructor, so what initializes it is
+            // exactly the access to its storage or the call of one of its block functions: the
+            // same activation points a class has. Its companion object is initialized by the
+            // activation step that follows its statics.
+            if declaration.is_object
                 || declaration.is_value
-                || declaration.companion_class.is_some()
+                || (declaration.companion_class.is_some() && !declaration.is_interface)
                 || declaration.superclass == wk::kotlin_enum()
             {
                 return Err(unordered);
