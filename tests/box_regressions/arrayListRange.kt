@@ -33,6 +33,29 @@ fun box(): String {
     }
     if (root[4] != 5) return "set past the range wrote"
 
+    val written = ints(1, 2, 3, 4, 5)
+    written.add(0, 0)
+    if (written != ints(0, 1, 2, 3, 4, 5)) return "insert at an index $written"
+    if (written.removeAt(0) != 0 || !written.remove(5)) return "remove at an index"
+    if (written != ints(1, 2, 3, 4)) return "removed $written"
+    val window = written.subList(1, 3)
+    window.add(9)
+    if (written != ints(1, 2, 3, 9, 4) || window.size != 3) return "add through a range $written"
+    window.add(1, 7)
+    if (written != ints(1, 2, 7, 3, 9, 4) || window != ints(2, 7, 3, 9)) return "insert through a range $written"
+    if (window.removeAt(0) != 2 || !window.remove(9)) return "remove through a range"
+    if (written != ints(1, 7, 3, 4) || window != ints(7, 3)) return "removed through a range $written"
+    val pair = window.subList(1, 2)
+    pair.add(8)
+    if (written != ints(1, 7, 3, 8, 4) || window.size != 3 || pair.size != 2) return "nested add $written"
+    pair.clear()
+    if (written != ints(1, 7, 4) || window != ints(7) || pair.size != 0) return "nested clear $written"
+    window.clear()
+    if (written != ints(1, 4) || window.size != 0) return "clear through a range $written"
+    val wider = written.subList(0, 2)
+    wider.addAll(ints(5, 6))
+    if (written != ints(1, 4, 5, 6)) return "addAll through a range $written"
+
     growable.add(5)
     val fresh = readable.subList(0, 5)
     try {
