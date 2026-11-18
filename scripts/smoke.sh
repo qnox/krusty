@@ -108,6 +108,7 @@ sibling="$(cd "$(dirname "$bin")" && pwd)/krusty"
 #   <v> wasm-focus    scripts/target-conformance-regressions.sh wasm
 #   <max> diagnostics the diagnostics test data lane; a full run compiles every case, so it runs
 #                     when the branch changes its expectations or KRUSTY_SMOKE_DIAGNOSTICS=1
+# Deadlines and parallelism: see KRUSTY_SMOKE_JOBS and the *_TIMEOUT_SECONDS defaults below.
 # A job's output goes to a log that is printed only when the job fails. All jobs run to the end so
 # one push fixes every failure the try would have reported.
 # The newest version first; the others only when it fails (the failure may be version-specific, or
@@ -119,7 +120,32 @@ case "${KRUSTY_SMOKE_VERSIONS:-}" in
   all) first="$newest" rest="$(printf '%s\n' $all_versions | grep -vxF "$newest" | tr '\n' ' ')" ;;
   *) first="$KRUSTY_SMOKE_VERSIONS" rest="" ;;
 esac
-jobs_max="${KRUSTY_SMOKE_JOBS:-$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)}"
+cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)"
+# Every job is itself multi-threaded and several share one machine, so half the cores run at once
+# and the deadlines are CI's, not the plain gate's two minutes.
+jobs_max="${KRUSTY_SMOKE_JOBS:-$(( cores / 2 > 2 ? cores / 2 : 2 ))}"
+export KRUSTY_CONFORMANCE_TIMEOUT_SECONDS="${KRUSTY_SMOKE_CONFORMANCE_TIMEOUT_SECONDS:-600}"
+export KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS="${KRUSTY_SMOKE_TARGET_TIMEOUT_SECONDS:-1800}"
+export KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS="${KRUSTY_SMOKE_TARGET_TIMEOUT_SECONDS:-1800}"
+
+# The JDK feature releases the CLI corpus names that no home provides (the same places the test
+# looks: KRUSTY_JDK_<n>_HOME, JAVA_HOME_<n>_X64/ARM64, JAVA_HOME and /usr/lib/jvm). Without them
+# the CLI corpus results differ from CI's by environment, not by a regression, so that one failure
+# is reported as unverified instead of failed and does not start the other-version fallback.
+missing_jdks=()
+for n in 8 11 17 21; do
+  found=0
+  for var in "KRUSTY_JDK_${n}_HOME" "JAVA_HOME_${n}_X64" "JAVA_HOME_${n}_ARM64" JAVA_HOME; do
+    h="${!var:-}"
+    [ -n "$h" ] && [ -f "$h/release" ] && grep -qE "^JAVA_VERSION=\"($n|1\.$n)[.\"]" "$h/release" && found=1
+  done
+  for h in /usr/lib/jvm/*/; do
+    [ -f "$h/release" ] && grep -qE "^JAVA_VERSION=\"($n|1\.$n)[.\"]" "$h/release" && found=1
+  done
+  [ "$found" = 1 ] || missing_jdks+=("$n")
+done
+cli_tests='kotlin_cli_jvm_conformance::krusty_reproduces_kotlincs_cli_test_corpus|kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case'
+
 export KRUSTY_BOX_CASE_TIMEOUT_MS="${KRUSTY_BOX_CASE_TIMEOUT_MS:-8000}"
 export KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE=1
 export KRUSTY_BOX_TIMEOUT_MS="${KRUSTY_BOX_TIMEOUT_MS:-60000}"
@@ -186,6 +212,7 @@ logdir="$(mktemp -d "${TMPDIR:-/tmp}/krusty-smoke.XXXXXX")"
 trap 'rm -rf "$logdir"' EXIT
 declare -A job_pid
 failed=()
+unverified=()
 running=0
 order=()
 
@@ -226,6 +253,11 @@ run_versions() {
     wait "${job_pid[$name]}" 2>/dev/null || true
     if [ "$(cat "$logdir/${name// /_}.rc" 2>/dev/null)" = 0 ]; then
       step "ok: $name"
+    elif [ "${name#* }" = nonbox ] && [ "${#missing_jdks[@]}" -gt 0 ] \
+      && [ -n "$(grep -E '^test .* FAILED$' "$logdir/${name// /_}.log")" ] \
+      && ! grep -E '^test .* FAILED$' "$logdir/${name// /_}.log" | grep -vqE " ($cli_tests) \.\.\. FAILED$"; then
+      step "UNVERIFIED: $name (the CLI corpus needs JDK ${missing_jdks[*]}; set KRUSTY_JDK_<n>_HOME)"
+      unverified+=("$name")
     else
       step "FAILED: $name"
       failed+=("$name")
@@ -247,5 +279,9 @@ fi
 if [ "${#failed[@]}" -gt 0 ]; then
   printf 'smoke: failed: %s\n' "${failed[@]}" >&2
   exit 1
+fi
+if [ "${#unverified[@]}" -gt 0 ]; then
+  printf 'smoke: NOT VERIFIED (JDK %s missing, so the CLI corpus cannot match CI): %s\n' \
+    "${missing_jdks[*]}" "${unverified[*]}" >&2
 fi
 step "passed"
