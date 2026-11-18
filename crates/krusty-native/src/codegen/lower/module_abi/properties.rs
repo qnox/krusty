@@ -424,14 +424,6 @@ impl FileLowering<'_> {
                     };
                     body.top_level_write_value(&target, value)?;
                 }
-                LocalRealization::Member {
-                    value_class: true, ..
-                } => {
-                    return Err(format!(
-                        "internal: a writable property of a value class (`{name}`)"
-                    )
-                    .into());
-                }
                 LocalRealization::Member { class, index, .. } => {
                     let stored = body.written_property_ty(class, index)?;
                     let Some(value) = body.convert(params[1], Some(ty), stored)? else {
