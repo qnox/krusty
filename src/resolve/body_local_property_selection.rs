@@ -494,7 +494,17 @@ impl Checker<'_> {
     /// A reference to a member property of a classifier declared in the active bounded body takes
     /// its type from the checked declaration, as a read of that property does: the provider's
     /// model of the classifier does not type it until the body is finalized.
-    pub(super) fn type_body_local_property_ref(
+    pub(super) fn typed_body_local_property_ref(
+        &self,
+        receiver: Ty,
+        property: Option<crate::symbol_resolver::ResolvedPropertyRef>,
+    ) -> Option<crate::symbol_resolver::ResolvedPropertyRef> {
+        let mut property = property?;
+        self.type_body_local_property_ref(receiver, &mut property);
+        Some(property)
+    }
+
+    fn type_body_local_property_ref(
         &self,
         receiver: Ty,
         property: &mut crate::symbol_resolver::ResolvedPropertyRef,

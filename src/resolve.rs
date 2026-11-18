@@ -35442,7 +35442,7 @@ impl<'a> Checker<'a> {
                 .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             {
                 Some(Symbol::Member(facets)) => CallableRefCandidates {
-                    property: facets.property_ref.clone(),
+                    property: self.typed_body_local_property_ref(recv, facets.property_ref.clone()),
                     method: facets.method_ref.clone(),
                     overloads: facets.overloads.clone(),
                     inaccessible_extensions: facets.inaccessible_extensions.clone(),
@@ -35453,9 +35453,6 @@ impl<'a> Checker<'a> {
                 | Some(Symbol::Constructor(_))
                 | None => CallableRefCandidates::none(),
             };
-        if let Some(property) = candidates.property.as_mut() {
-            self.type_body_local_property_ref(recv, property);
-        }
         let (_, members, contains_body_local) = self.body_local_member_overload_rung(recv, name);
         if !contains_body_local {
             return self.hidden_members_yield_to_extensions(recv, candidates);
