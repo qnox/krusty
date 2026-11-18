@@ -42,8 +42,7 @@ pub struct KlibDeclarationBodies {
 /// A public classifier search over one producer dependency closure.
 pub(crate) enum LocatedClass<'a> {
     Missing,
-    /// The class and the arena its types are serialized in.
-    One(&'a KlibIrArena, &'a KlibIrClass),
+    One(&'a KlibIrClass),
     Several,
 }
 
@@ -200,8 +199,7 @@ impl std::fmt::Display for KlibDeclarationBodiesError {
 
 impl std::error::Error for KlibDeclarationBodiesError {}
 
-/// Distinct inventories from one authenticated emitted-body traversal: its callees, the objects
-/// and enum entries whose values it reads, and its declaration roots. Declaration roots never
+/// Distinct inventories from one authenticated emitted-body traversal. Declaration roots never
 /// become executable call obligations merely by sharing this walk with callable symbols.
 #[derive(Default)]
 struct EmittedBodyInventory<'a> {
@@ -636,8 +634,7 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_class(signature)
     }
 
-    /// The package the serialized file `file` of `module` declares, as its segments; empty for
-    /// the root package.
+    /// The package segments of the serialized file `file` of `module`.
     pub(crate) fn module_file_package(&self, module: &str, file: u32) -> Option<&[String]> {
         let library = *self.modules.get(module)?;
         self.libraries[library].file_package(file)
@@ -863,10 +860,19 @@ impl KlibDeclarationBodies {
         module: &str,
         signature: &KlibPublicIdSignature,
     ) -> bool {
-        matches!(
-            self.public_class(module, signature),
-            LocatedClass::One(arena, class) if class.declares_synthetic_enum_entries(arena)
-        )
+        let wanted = KlibIrSignature::Public(signature.clone());
+        let mut found = None;
+        for owner in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&owner) else {
+                continue;
+            };
+            for (arena, class) in self.libraries[library].classes_with_signature(&wanted) {
+                if found.replace((arena, class)).is_some() {
+                    return false;
+                }
+            }
+        }
+        found.is_some_and(|(arena, class)| class.declares_synthetic_enum_entries(arena))
     }
 
     /// A public classifier serialized by `module` or a library its manifest depends on.
@@ -881,14 +887,14 @@ impl KlibDeclarationBodies {
             let Some(&library) = self.modules.get(&owner) else {
                 continue;
             };
-            for (arena, class) in self.libraries[library].classes_with_signature(&wanted) {
-                if found.replace((arena, class)).is_some() {
+            for (_, class) in self.libraries[library].classes_with_signature(&wanted) {
+                if found.replace(class).is_some() {
                     return LocatedClass::Several;
                 }
             }
         }
         match found {
-            Some((arena, class)) => LocatedClass::One(arena, class),
+            Some(class) => LocatedClass::One(class),
             None => LocatedClass::Missing,
         }
     }
@@ -1066,8 +1072,8 @@ impl KlibDeclarationBodies {
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibDependencyCallable> {
-        self.emitted_body_symbols(identity, forms)
-            .callables
+        let symbols = self.emitted_body_symbols(identity, forms).callables;
+        symbols
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(
@@ -1159,8 +1165,8 @@ impl KlibDeclarationBodies {
             .public_hierarchy_roots
     }
 
-    /// Callable, object, enum entry, hierarchy and SAM inventories cover exactly the same emitted
-    /// roots: the selected body, its file initialization, and the local classes those roots construct.
+    /// Callable, object and hierarchy inventories cover exactly the same emitted roots: the
+    /// selected body, its file initialization, and the local classes those roots construct.
     fn emitted_body_symbols<'a>(
         &'a self,
         identity: &KlibDependencyCallable,

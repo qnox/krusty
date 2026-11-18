@@ -1344,6 +1344,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             super::same_library_class::LocalClassSource {
                 bodies,
                 declarations: self.sources.declarations,
+                classes: callees.class_type_oracle(),
                 module: &module,
                 validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
             },
@@ -1457,7 +1458,6 @@ impl<'s> CallLinker for Linker<'_, 's> {
             // missing declaration and must not invent a constructor handle.
             .ok_or_else(|| KlibBodyDeclineReason::UnsupportedCallee(Box::new(callee.clone())))?;
         if let Some(initializer) = retained_initializer {
-            // An earlier unit owns the class, so this unit materialized none of its constructors.
             return Ok(LinkedConstructor {
                 target: initializer.target(),
                 declaration,

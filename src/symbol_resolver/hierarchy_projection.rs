@@ -7,7 +7,6 @@ use crate::fx_hash::HashMap as FxHashMap;
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind, TypeName};
 
-use crate::assignable::applied_hierarchy_through;
 pub(crate) use crate::libraries::classifier_bindings;
 
 thread_local! {
@@ -176,7 +175,9 @@ pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
 /// Applied semantic hierarchy in breadth-first order. Providers expose only direct declarations;
 /// core owns the transitive walk and generic substitution for every declaration origin.
 pub(crate) fn applied_hierarchy(source: &dyn SymbolSource, root: Ty) -> Vec<(TypeName, Ty, usize)> {
-    applied_hierarchy_through(root, |_, applied| direct_supertypes(source, applied))
+    crate::assignable::applied_hierarchy_through(root, |_, applied| {
+        direct_supertypes(source, applied)
+    })
 }
 
 /// Apply a runtime subtype named without source arguments to the generic arguments already known on

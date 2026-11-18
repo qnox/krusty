@@ -195,6 +195,22 @@ impl<'a> FileLowering<'a> {
             {
                 "kt_type_char_sequence"
             }
+            // `Appendable` likewise: the runtime's builder points at it, so a check of a builder
+            // and of a program class that implements it asks about the one marker.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_appendable) =>
+            {
+                "kt_type_appendable"
+            }
+            // `ClosedRange` is worn by the runtime's ranges, which name this marker among their
+            // interfaces.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_closed_range) =>
+            {
+                "kt_type_closed_range"
+            }
             // `EnumEntries` is sealed, so the runtime's `EnumEntriesList` is every instance there
             // is, and it names this descriptor among its interfaces.
             _ if target

@@ -124,11 +124,8 @@ impl Body<'_> {
             FunctionEquality::Identity => self.runtime.identity.hash_code,
             FunctionEquality::Declaration { .. } => self.runtime.callable_references.hash_code,
         };
-        let to_string = match function_value_names::function_value_name(self.ir, site, instance) {
-            Some(function_value_names::FunctionValueName::SamWrapper(name)) => {
-                self.runtime.function_value_to_string(self.module, &name)
-            }
-            Some(function_value_names::FunctionValueName::Shape(shape)) => {
+        let to_string = match function_value_names::named_shape(self.ir.expr(site), instance) {
+            Some(shape) => {
                 let codes: Vec<String> = params[..captures.len()]
                     .iter()
                     .enumerate()
@@ -143,8 +140,11 @@ impl Body<'_> {
                 let name = function_value_names::class_name(shape, &codes);
                 self.runtime.function_value_to_string(self.module, &name)
             }
-            // kotlinc-wasm names this value's class otherwise, or prints it otherwise.
-            None => self.runtime.objects.trap(self.module, to_string_ty),
+            None => match function_value_names::sam_class_name(self.ir, site) {
+                Some(name) => self.runtime.function_value_to_string(self.module, &name),
+                // kotlinc-wasm names this value's class otherwise, or prints it otherwise.
+                None => self.runtime.objects.trap(self.module, to_string_ty),
+            },
         };
         let callable = sam.is_none_or(|target| {
             classifier_and_supertypes(self.classifiers, target.classifier)
