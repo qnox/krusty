@@ -48,7 +48,7 @@ use crate::ir::{
     Callee, ExprId, FunId, IrBinOp, IrConst, IrEnclosure, IrExpr, IrFile, IrFunction,
     IrNodePosition, IrParameterIdentity, IrShortCircuitKind, IrTypeOp,
 };
-use crate::types::{EqualityMode, Ty};
+use crate::types::{EqualityMode, Ty, TyKind};
 
 use super::runtime::{self, ComposeRuntime};
 use super::source_facts::{
@@ -766,7 +766,11 @@ fn dirty_preamble(
         let uncertain = int_comparison(ir, IrBinOp::Eq, isolated, 0);
         let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
         let value = ir.add_expr(IrExpr::GetValue(index));
-        let changed = if parameter.lambda {
+        // A function value is compared by identity too, whatever its stability.
+        let changed = if parameter.lambda
+            || parameter.unstable
+            || matches!(parameter.ty.non_null().kind(), TyKind::Fun(_))
+        {
             &runtime.changed_instance
         } else {
             runtime.changed_for(parameter.ty)

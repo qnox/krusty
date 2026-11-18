@@ -393,6 +393,38 @@ struct Inference<'a> {
     resolving: Vec<TyParamName>,
 }
 
+/// How a composable function compares a parameter of a type: by value when kotlinc infers the type
+/// stable, by identity when it infers it unstable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ParameterStability {
+    Stable,
+    Unstable,
+}
+
+/// kotlinc's `stabilityOf` for the type of a composable function's parameter, or why it is not
+/// decided before the function runs.
+pub(super) fn parameter_stability(
+    ir: &IrFile,
+    runtime: &dyn PluginRuntime,
+    ty: Ty,
+) -> Result<ParameterStability, &'static str> {
+    let mut inference = Inference {
+        ir,
+        runtime,
+        analyzed: Default::default(),
+        substitutions: Vec::new(),
+        resolving: Vec::new(),
+    };
+    let stability = inference.of_type(ty, &mut Vec::new())?.normalize();
+    if stability.known_stable() {
+        Ok(ParameterStability::Stable)
+    } else if stability == Stability::UNSTABLE {
+        Ok(ParameterStability::Unstable)
+    } else {
+        Err("a composable function parameter whose stability is decided when it runs")
+    }
+}
+
 /// The type parameters `class` declares, as its declaration names them.
 fn type_parameters(
     ir: &IrFile,
