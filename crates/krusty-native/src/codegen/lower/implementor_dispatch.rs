@@ -15,9 +15,10 @@ pub(super) struct InterfaceMemberCall<'a> {
     pub(super) physical: &'a [Ty],
 }
 
-/// A class of this file that implements a dependency declaration, and the slot it does it in.
+/// A class of the module that implements a dependency declaration, by its descriptor, and the slot
+/// it does it in.
 pub(super) struct ImplementorArm {
-    class: ClassId,
+    descriptor: DataId,
     slot: u32,
     params: Vec<ParameterBoundary>,
     ret: Ty,
@@ -89,7 +90,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             })
             .collect();
         Some(ImplementorArm {
-            class,
+            descriptor: self.file.classes[class as usize].descriptor,
             slot,
             params,
             ret: declaration.ret,
@@ -130,11 +131,58 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .model
             .slot(class, &crate::classes::SlotKey::Getter(target))?;
         Some(ImplementorArm {
-            class,
+            descriptor: self.file.classes[class as usize].descriptor,
             slot,
             params: Vec::new(),
             ret: implementation,
         })
+    }
+
+    /// The slot of `class`, a class another file of the module declares, that holds the member
+    /// realizing the dependency property getter `overridden`, answering `declared`: an override
+    /// or a delegation forwarder, at the slot the module plan numbers for every file alike. `None`
+    /// where the plan has no table for the class, no slot for the member, or a slot whose carrier
+    /// is not the declaration's.
+    pub(super) fn planned_property_getter_slot(
+        &mut self,
+        class: krusty::types::TypeName,
+        overridden: krusty::fir::ExternalCallableId,
+        declared: Ty,
+    ) -> Result<Option<ImplementorArm>, Unsupported> {
+        let plan = self.file.slot_plan;
+        let Some(Ok(table)) = plan.table(class) else {
+            return Ok(None);
+        };
+        let Some(key) = self
+            .file
+            .module_facts
+            .classes()
+            .dependency_getter_implementation(class, overridden)
+        else {
+            return Ok(None);
+        };
+        let Some(&slot) = table.slots.get(&key) else {
+            return Ok(None);
+        };
+        let Some(krusty::backend::class_tables::module_slots::PlannedSignature::Member {
+            parameters: [],
+            result,
+        }) = plan.slot_signature(table, slot)
+        else {
+            return Ok(None);
+        };
+        if self.carrier(result) != self.carrier(declared) {
+            return Ok(None);
+        }
+        let Some(descriptor) = self.file.type_descriptor(Ty::obj_name(class))? else {
+            return Ok(None);
+        };
+        Ok(Some(ImplementorArm {
+            descriptor,
+            slot,
+            params: Vec::new(),
+            ret: result,
+        }))
     }
 
     /// A call of a dependency interface member this file does not implement. The link joins the
@@ -605,8 +653,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             self.builder.append_block_param(merge, clif);
         }
         for arm in implementors {
-            let descriptor = self.file.classes[arm.class as usize].descriptor;
-            let type_address = self.data_address(descriptor);
+            let type_address = self.data_address(arm.descriptor);
             let matches = self
                 .runtime_call(
                     "kt_is_instance",
