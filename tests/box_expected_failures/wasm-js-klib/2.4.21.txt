@@ -843,7 +843,6 @@ delegatedProperty/delegateToSingleton/delegateToSingleton.kt
 delegatedProperty/delegatedByExtensionMemberProperty.kt
 delegatedProperty/delegatedByExtensionProperty.kt
 delegatedProperty/delegatedOverride.kt
-delegatedProperty/functionRefDelefate.kt
 delegatedProperty/genericDelegateUncheckedCast1.kt
 delegatedProperty/genericDelegateUncheckedCast2.kt
 delegatedProperty/kt37204.kt
@@ -876,7 +875,6 @@ delegatedProperty/provideDelegate/genericDelegateWithNoAdditionalInfo.kt
 delegatedProperty/provideDelegate/genericProvideDelegateOnNumberLiteral.kt
 delegatedProperty/provideDelegate/inClass.kt
 delegatedProperty/provideDelegate/inlineProvideDelegate.kt
-delegatedProperty/provideDelegate/kt18902.kt
 delegatedProperty/provideDelegate/kt39588.kt
 delegatedProperty/provideDelegate/local.kt
 delegatedProperty/provideDelegate/localCaptured.kt
@@ -1359,8 +1357,6 @@ inlineClasses/overrideReturnNothing.kt
 inlineClasses/overridingFunCallingPrivateFunGeneric.kt
 inlineClasses/privateConstructorFunInterfaceMultiModule.kt
 inlineClasses/privateConstructorFunInterfaceMultiModuleGeneric.kt
-inlineClasses/propertyDelegation/kt27070.kt
-inlineClasses/propertyDelegation/kt27070Generic.kt
 inlineClasses/removeInInlineCollectionOfInlineClassAsInt.kt
 inlineClasses/resultRunCatchingOrElse.kt
 inlineClasses/samWrapperDifferentModule.kt

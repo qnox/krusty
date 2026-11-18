@@ -51736,7 +51736,7 @@ impl<'a> Checker<'a> {
                         else_branch,
                     } = self.file.expr(level).clone()
                     {
-                        if !self.expr_diverges(then_branch) {
+                        if self.normal_completion(then_branch) {
                             break;
                         }
                         let (casts, declined) = self.condition_narrowings(scope, cond, false);
