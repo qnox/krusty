@@ -64,6 +64,7 @@ impl Checker<'_> {
                         &crate::plugins::TransformedEntry {
                             annotations: &callable.annotations,
                             synthetic: tail,
+                            parameters: callable.params.len(),
                         },
                     )
                 })

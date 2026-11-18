@@ -134,9 +134,6 @@ pub(super) enum ArgumentState {
     Omitted,
 }
 
-/// The most value parameters one `$changed` int tracks; a function with more takes several.
-const SLOTS_PER_INT: usize = 10;
-
 /// Why a construct is outside what krusty's Compose pass compiles yet.
 fn unsupported(what: &str) -> String {
     format!(
@@ -565,8 +562,11 @@ pub(super) fn record(
         .chain(composable_lambdas.iter().flat_map(|lambda| &lambda.calls));
     for site in sites {
         if let Some(CalleeOrigin::Library(target)) = calls.get(&site.call).map(|call| call.origin) {
-            let mut appended = vec![Ty::nullable(super::runtime::composer()), Ty::Int];
-            // The `$default` mask of a declaration with defaults follows its `$changed`.
+            let mut appended = vec![Ty::nullable(super::runtime::composer())];
+            appended.extend(
+                (0..super::restart_groups::changed_ints(site.arguments.len())).map(|_| Ty::Int),
+            );
+            // The `$default` mask of a declaration with defaults follows its `$changed` ints.
             if site.library_mask {
                 appended.push(Ty::Int);
             }
@@ -737,8 +737,6 @@ fn unsupported_declaration(
         Some("a composable function with a receiver")
     } else if declaration.vararg_index.is_some() {
         Some("a composable function with a vararg parameter")
-    } else if declaration.params.len() > SLOTS_PER_INT {
-        Some("a composable function with more than ten parameters")
     } else if declaration
         .params
         .iter()
@@ -943,12 +941,17 @@ fn omitted_parameters(callee: &Callee) -> &[u32] {
     }
 }
 
-/// Whether `synthetic`, the parameters a library composable's entry takes after its source
-/// parameters, are what `ComposerParamTransformer` appends: the composer, one `$changed` word,
-/// and, for a declaration with defaults, one `$default` word. The pass passes a library call no
-/// more than ten parameters, which one word of each covers.
-pub(super) fn takes_composer_frame(synthetic: &[Ty], defaults: bool) -> bool {
-    let words = if defaults { 2 } else { 1 };
+/// Whether `synthetic`, the parameters a library composable's entry takes after its `parameters`
+/// source parameters, are what `ComposerParamTransformer` appends: the composer, a `$changed` word
+/// for every ten parameters and, for a declaration with defaults, a `$default` word. The pass
+/// passes one `$default` word, which covers at most 31 parameters.
+pub(super) fn takes_composer_frame(synthetic: &[Ty], parameters: usize, defaults: bool) -> bool {
+    let default_words = match (defaults, parameters <= 31) {
+        (false, _) => 0,
+        (true, true) => 1,
+        (true, false) => return false,
+    };
+    let words = super::restart_groups::changed_ints(parameters) as usize + default_words;
     matches!(synthetic, [composer, rest @ ..]
         if composer.obj_internal().is_some_and(|name| name.matches(super::runtime::COMPOSER))
             && rest.len() == words
@@ -1191,11 +1194,9 @@ impl BodyScope<'_> {
                 "a call to a library composable function with a function-typed parameter other \
                  than `@Composable () -> Unit`",
             )
-        } else if params.len() > 10 {
-            Some("a call to a library composable function with more than ten parameters")
         } else if !matches!(ret.kind(), TyKind::Unit) {
             Some("a call to a library composable function with a result")
-        } else if !takes_composer_frame(&shape.synthetic_parameters, shape.defaults) {
+        } else if !takes_composer_frame(&shape.synthetic_parameters, params.len(), shape.defaults) {
             Some(
                 "a call to a library composable function whose entry does not take the composer, \
                  `$changed` and `$default` parameters",
@@ -1414,6 +1415,10 @@ fn is_composable_lambda(ir: &IrFile, function: FunId, index: usize, composable: 
 /// evaluates in a defaults group of its own.
 fn unsupported_defaults(ir: &IrFile, function: FunId) -> Option<&'static str> {
     let defaults = ir.param_defaults(function)?;
+    // One `$default` int holds a bit per parameter.
+    if defaults.len() > 31 {
+        return Some("a composable function with default arguments and more than 31 parameters");
+    }
     (ir.param_defaults_stub_only(function)
         || defaults
             .iter()
@@ -1717,30 +1722,66 @@ mod composer_frame_tests {
 
     #[test]
     fn the_composer_and_its_words_are_the_frame() {
-        assert!(takes_composer_frame(&[composer(), Ty::Int], false));
-        assert!(takes_composer_frame(&[composer(), Ty::Int, Ty::Int], true));
+        assert!(takes_composer_frame(&[composer(), Ty::Int], 3, false));
+        assert!(takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int],
+            3,
+            true
+        ));
     }
 
     #[test]
     fn a_missing_or_extra_word_is_not() {
-        assert!(!takes_composer_frame(&[composer(), Ty::Int], true));
+        assert!(!takes_composer_frame(&[composer(), Ty::Int], 3, true));
         assert!(!takes_composer_frame(
             &[composer(), Ty::Int, Ty::Int],
+            3,
             false
         ));
-        assert!(!takes_composer_frame(&[], false));
+        assert!(!takes_composer_frame(&[], 3, false));
+    }
+
+    #[test]
+    fn a_changed_word_follows_every_ten_parameters() {
+        assert!(takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int],
+            11,
+            false
+        ));
+        assert!(!takes_composer_frame(&[composer(), Ty::Int], 11, false));
+        assert!(takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int, Ty::Int],
+            12,
+            true
+        ));
+        // One `$default` word covers 31 parameters.
+        assert!(!takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int, Ty::Int, Ty::Int],
+            32,
+            true
+        ));
     }
 
     #[test]
     fn a_wrong_role_is_not() {
-        assert!(!takes_composer_frame(&[Ty::Long, Ty::Int, Ty::Int], true));
         assert!(!takes_composer_frame(
-            &[composer(), Ty::Long, Ty::Int],
+            &[Ty::Long, Ty::Int, Ty::Int],
+            3,
             true
         ));
-        assert!(!takes_composer_frame(&[Ty::Int, composer(), Ty::Int], true));
+        assert!(!takes_composer_frame(
+            &[composer(), Ty::Long, Ty::Int],
+            3,
+            true
+        ));
+        assert!(!takes_composer_frame(
+            &[Ty::Int, composer(), Ty::Int],
+            3,
+            true
+        ));
         assert!(!takes_composer_frame(
             &[Ty::String, Ty::Long, Ty::Int],
+            3,
             true
         ));
     }
