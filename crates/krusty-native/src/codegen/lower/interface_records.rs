@@ -185,6 +185,7 @@ impl FileLowering<'_> {
                 DependencyImplementation::Function(function) => {
                     Some(self.import_object_function(&function)?)
                 }
+                DependencyImplementation::Declared(function) => Some(function),
                 DependencyImplementation::Bridge {
                     slot,
                     declared,
@@ -337,6 +338,29 @@ impl FileLowering<'_> {
                     continue;
                 };
                 if implemented.iter().any(|(known, _)| *known == identity) {
+                    continue;
+                }
+                // A default the interface publishes and the class does not override implements the
+                // member with its own body, which is not a slot of the class.
+                if edge.implementation == edge.overridden
+                    && edge.implementation_function.is_some_and(|function| {
+                        self.ir.functions[function as usize].dispatch_receiver
+                            != Some(self.ir.classes[owner as usize].fq_name_id())
+                    })
+                {
+                    let function = edge
+                        .implementation_function
+                        .and_then(|function| self.functions.get(function as usize).copied())
+                        .flatten()
+                        .ok_or_else(|| {
+                            declined!(
+                                "a default a dependency's interface declares without a body to \
+                                 call (`{}.{}`)",
+                                self.kotlin_name(owner),
+                                edge.name
+                            )
+                        })?;
+                    implemented.push((identity, DependencyImplementation::Declared(function)));
                     continue;
                 }
                 let carried_alike = edge.declared_parameters.len()
