@@ -762,17 +762,21 @@ impl Body<'_> {
             .struct_get(object, 0);
     }
 
-    /// A call to member `function` of this file: through its class's dispatch slot when it has
-    /// one, as an override reached through the receiver's own table answers it, and directly
-    /// otherwise.
+    /// A call to member `function` of this file. Common lowering already dispatches an
+    /// overridable function and leaves a `super` call direct, so a function with a body is
+    /// called directly here. A bodiless (abstract) member has nothing to call directly: it is
+    /// reached through its class's dispatch slot, as an override the receiver's own table
+    /// answers.
     pub(super) fn local_member_call(
         &mut self,
         function: FunId,
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
-        let class = self.ir.functions[function as usize]
+        let declaration = &self.ir.functions[function as usize];
+        let class = declaration
             .dispatch_receiver
+            .filter(|_| declaration.body.is_none())
             .and_then(|owner| self.classes.and(self.ir.class_id_by_name(owner)));
         if let Some(class) = class {
             let tables = &self.file_classes()?.tables;
