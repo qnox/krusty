@@ -2,7 +2,7 @@
 // Earlier JVM reference compilers fail during IR lowering of the consumer module.
 // MODULE: lib
 // FILE: Lib.kt
-// LANGUAGE: +CompanionBlocksAndExtensions
+// LANGUAGE: +CompanionBlocks
 OPTIONAL_JVM_INLINE_ANNOTATION
 value class W(val value: Int) {
     companion {
@@ -15,7 +15,7 @@ value class W(val value: Int) {
 }
 // MODULE: main(lib)
 // FILE: Main.kt
-// LANGUAGE: +CompanionBlocksAndExtensions
+// LANGUAGE: +CompanionBlocks
 fun box(): String {
     val r = W.plain(W.takes(W.makes())) + W.one + W(1).sum()
     return if (r == 4 + 1 + 6) "OK" else "r = $r"

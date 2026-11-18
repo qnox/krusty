@@ -448,6 +448,7 @@ impl BodyLowering<'_> {
                                 source_ty,
                                 signature_parameters[parameter as usize],
                             ),
+                            context: Default::default(),
                         }
                     }
                     crate::fir::FirAdaptedReferenceArgument::Context => {
@@ -457,6 +458,7 @@ impl BodyLowering<'_> {
                         IrCheckedArgument::Expression {
                             parameter,
                             value: self.ir.add_expr(IrExpr::GetValue(slot)),
+                            context: Default::default(),
                         }
                     }
                     crate::fir::FirAdaptedReferenceArgument::Default => {
@@ -512,6 +514,7 @@ impl BodyLowering<'_> {
                             source_type,
                             signature_parameters[parameter],
                         ),
+                        context: Default::default(),
                     },
                 )
                 .collect::<Vec<_>>()
@@ -1079,7 +1082,9 @@ impl BodyLowering<'_> {
         if reordered {
             for argument in &mut arguments {
                 match argument {
-                    IrCheckedArgument::Expression { parameter, value } => {
+                    IrCheckedArgument::Expression {
+                        parameter, value, ..
+                    } => {
                         if super::constructors::is_forwarded_super_argument(self.ir, *value)
                             || self.passes_reordered_operand_in_place(*value)
                         {
@@ -1461,10 +1466,21 @@ impl BodyLowering<'_> {
                     parameter,
                     value,
                     conversion,
-                } => Ok(IrCheckedArgument::Expression {
-                    parameter: *parameter,
-                    value: self.expression_with_conversion(*value, *conversion)?,
-                }),
+                } => {
+                    let lowered = self.expression_with_conversion(*value, *conversion)?;
+                    let context = if self.body.is_implicit_context_argument(*value) {
+                        crate::ir::IrContextArgumentRole::Implicit
+                    } else if self.body.is_receiver_ordered_context_argument(*value) {
+                        crate::ir::IrContextArgumentRole::AfterReceiver
+                    } else {
+                        crate::ir::IrContextArgumentRole::Ordinary
+                    };
+                    Ok(IrCheckedArgument::Expression {
+                        parameter: *parameter,
+                        value: lowered,
+                        context,
+                    })
+                }
                 FirCallArgument::Default { parameter, .. } => Ok(IrCheckedArgument::Default {
                     parameter: *parameter,
                 }),

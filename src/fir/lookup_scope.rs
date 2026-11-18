@@ -140,9 +140,9 @@ impl HeaderScopeArena {
                 len: import_end - import_start,
             },
             is_common,
-            explicit_context_arguments: file.explicit_context_arguments,
-            eager_lambda_analysis: file.eager_lambda_analysis,
-            callable_references_to_contextual: file.callable_references_to_contextual,
+            explicit_context_arguments: file.language.explicit_context_arguments,
+            eager_lambda_analysis: file.language.eager_lambda_analysis,
+            callable_references_to_contextual: file.language.callable_references_to_contextual,
         });
     }
 

@@ -3,10 +3,10 @@
 // that input as one collected element and later ones bind the whole array, so `box()` asserts that
 // every such case agrees on one binding; a concrete or array-shaped input takes the whole array on
 // every release. The release-specific binding itself is pinned by
-// `vararg_reference_type_variable_input_e2e.rs`, which reuses this file.
+// `vararg_reference_type_variable_input_e2e.rs`, which reuses this file. A nullable input is
+// admitted only by the element binding, so `varargReferenceNullableTypeVariableInput.kt` owns it.
 fun <T> applyIt(t: T, f: (T) -> Int): Int = f(t)
 fun <T, R> applyR(t: T, f: (T) -> R): R = f(t)
-fun <T> applyNullable(t: T, f: (T?) -> Int): Int = f(t)
 fun <T> explicit(f: (T) -> Int): (T) -> Int = f
 fun <T> applyArray(t: Array<T>, f: (Array<T>) -> Int): Int = f(t)
 fun <E> countG(vararg xs: E): Int = xs.size
@@ -15,6 +15,9 @@ fun countI(vararg xs: Int): Int = xs.size
 fun <E> firstG(vararg xs: E): E = xs[0]
 class Wrap<E>(val items: Array<out E>)
 fun <E> listG(vararg xs: E): Wrap<E> = Wrap(xs)
+// The result's runtime class, read as `Any?`: its static type is the binding's own, so a direct
+// `is Array<*>` would be a check that is always true on one binding and always false on the other.
+fun isArray(value: Any?): Boolean = value is Array<*>
 
 class Box {
     fun <E> count(vararg xs: E): Int = xs.size
@@ -33,8 +36,7 @@ fun describe(): String {
     return "top=${applyIt(arr, ::countG)}" +
         ",explicit=${explicit<Array<String>>(::countG)(arr)}" +
         ",let=${arr.let(::countG)}" +
-        ",nullable=${applyNullable(arr, ::countG)}" +
-        ",result=${applyR(arr, ::firstG) is Array<*>}" +
+        ",result=${isArray(applyR(arr, ::firstG))}" +
         ",list=${applyR(arr, ::listG).items.size}" +
         ",member=${applyIt(arr, Box()::count)}" +
         ",extension=${applyIt(arr, Box()::countX)}" +
@@ -48,7 +50,7 @@ fun describe(): String {
 }
 
 fun bindings(count: Int): String =
-    "top=$count,explicit=$count,let=$count,nullable=$count,result=${count == 1},list=$count" +
+    "top=$count,explicit=$count,let=$count,result=${count == 1},list=$count" +
         ",member=$count,extension=$count,local=$count,ownFormal=$count" +
         ",receiverFormal=2,arrayInput=2,concreteVararg=2,primitive=3,declared=2"
 

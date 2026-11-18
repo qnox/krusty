@@ -29,6 +29,7 @@ macro_rules! releases {
 releases! {
     V2_4_0 => "2.4.0",
     V2_4_20 => "2.4.20",
+    V2_5_0_RC => "2.5.0-RC",
 }
 
 /// The vendored policy text a supported release reads, for comparison with a fresh dump.
@@ -220,6 +221,18 @@ mod tests {
         assert_eq!(older.supported().last(), Some(&LanguageVersion::V2_5));
         assert_eq!(newer.supported().last(), Some(&LanguageVersion::V2_6));
         assert_eq!(older.language(LanguageVersion::V2_6), None);
+
+        let rc = LanguageVersionPolicy::for_release(KotlinVersion::V2_5_0_RC).unwrap();
+        assert_eq!(rc.latest_stable(), LanguageVersion::V2_5);
+        assert_eq!(rc.first_non_deprecated(false), LanguageVersion::V2_3);
+        assert_eq!(rc.first_non_deprecated(true), LanguageVersion::V2_3);
+        assert!(rc.is_stable(LanguageVersion::V2_5));
+        assert!(rc.language(LanguageVersion::V2_0).unwrap().unsupported);
+        assert!(rc.language(LanguageVersion::V2_2).unwrap().deprecated);
+        let experimental = LanguageVersion::new(2, 7);
+        assert!(!rc.is_stable(LanguageVersion::V2_6));
+        assert!(!rc.is_stable(experimental));
+        assert_eq!(rc.supported().last(), Some(&experimental));
     }
 
     #[test]

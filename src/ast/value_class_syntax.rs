@@ -16,25 +16,44 @@ pub struct ValueClassKeyword {
 
 impl ClassDecl {
     /// The keyword that makes this declaration a value class, when it is one.
+    ///
+    /// Under `+ExplicitInlineValueClassesSyntax` an `inline value class` declares itself inline,
+    /// exactly as a legacy `inline class` does; its shape is reported at its first keyword.
     pub fn value_class_keyword(&self, file: &File) -> Option<ValueClassKeyword> {
-        if let Some(span) = self.value_modifier_span {
-            return Some(ValueClassKeyword {
-                span,
-                declares_inline: false,
+        let inline_span = || {
+            let prefix = file.declaration_prefixes.at(self.name_span.lo)?;
+            file.declaration_prefixes
+                .keywords(prefix)
+                .iter()
+                .find(|(keyword, _)| *keyword == ModifierKeyword::Inline)
+                .map(|(_, span)| *span)
+        };
+        if let Some(value_span) = self.value_modifier_span {
+            let explicit_inline = file
+                .language
+                .explicit_inline_value_classes
+                .then(inline_span)
+                .flatten();
+            return Some(match explicit_inline {
+                Some(inline_span) => ValueClassKeyword {
+                    span: if inline_span.lo <= value_span.lo {
+                        inline_span
+                    } else {
+                        value_span
+                    },
+                    declares_inline: true,
+                },
+                None => ValueClassKeyword {
+                    span: value_span,
+                    declares_inline: false,
+                },
             });
         }
         if !self.is_value {
             return None;
         }
-        let prefix = file.declaration_prefixes.at(self.name_span.lo)?;
-        let span = file
-            .declaration_prefixes
-            .keywords(prefix)
-            .iter()
-            .find(|(keyword, _)| *keyword == ModifierKeyword::Inline)?
-            .1;
         Some(ValueClassKeyword {
-            span,
+            span: inline_span()?,
             declares_inline: true,
         })
     }

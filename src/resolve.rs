@@ -396,6 +396,7 @@ mod type_parameter_owners;
 use type_parameter_owners::ty_param_names_into;
 mod cyclic_upper_bounds;
 mod resolved_bound_view;
+mod runtime_functions;
 mod type_argument_arity;
 mod uninferred_call_results;
 mod upper_bound_violations;
@@ -7159,7 +7160,7 @@ pub struct TypeInfo {
     /// function rechecks of the same parser expression.
     reflective_callable_references: crate::fx_hash::HashSet<ExprId>,
     /// `when`s the checker proved exhaustive, by an `else` or by covering their subject.
-    exhaustive_whens: crate::fx_hash::HashSet<ExprId>,
+    exhaustive_whens: when_exhaustiveness::ExhaustiveWhens,
     /// What each condition of a subject `when` was checked against (numeric equality plans and
     /// narrowed subject views). Keyed by the condition expression.
     when_subject_plans: when_flow::WhenSubjectPlans,
@@ -11795,7 +11796,7 @@ impl<'a> Checker<'a> {
         arg_names: Option<&[Option<String>]>,
     ) -> Result<ContextualCallShape, MissingContextParameter> {
         contextual_call_shape_with(
-            self.file.explicit_context_arguments,
+            self.file.language.explicit_context_arguments,
             &|parameters| self.select_context_arguments_with_types(scope, parameters),
             semantic_params,
             call_sig,
@@ -30219,7 +30220,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         misfit_callable_references: crate::fx_hash::HashSet::default(),
         checked_calls: Vec::new(),
         checked_call_argument: None,
-        exhaustive_whens: crate::fx_hash::HashSet::default(),
+        exhaustive_whens: when_exhaustiveness::ExhaustiveWhens::default(),
         when_subject_plans: when_flow::WhenSubjectPlans::default(),
         resolved_type_tys: HashMap::default(),
         unresolved_type_segments: HashMap::default(),
@@ -32664,7 +32665,7 @@ struct Checker<'a> {
     /// knows whether it is postponed into a call.
     checked_calls: Vec<ExprId>,
     checked_call_argument: Option<ExprId>,
-    exhaustive_whens: crate::fx_hash::HashSet<ExprId>,
+    exhaustive_whens: when_exhaustiveness::ExhaustiveWhens,
     /// See [`TypeInfo::when_subject_plans`].
     when_subject_plans: when_flow::WhenSubjectPlans,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
@@ -33836,7 +33837,10 @@ impl<'a> Checker<'a> {
         expected: Ty,
         marked_parameter: bool,
     ) -> bool {
-        if !self.file.implicit_signed_to_unsigned_integer_conversion
+        if !self
+            .file
+            .language
+            .implicit_signed_to_unsigned_integer_conversion
             || !marked_parameter
             || !expected.non_null().is_unsigned()
         {
@@ -34857,7 +34861,7 @@ impl<'a> Checker<'a> {
             if callable_reference_selection::select_adapted_instance_candidate(
                 &source,
                 &candidates,
-                self.file.callable_references_to_contextual,
+                self.file.language.callable_references_to_contextual,
                 None,
                 self.instance_reference_expectation(expected),
                 |actual, target| self.receiver_is_assignable(actual, target),
@@ -35039,7 +35043,7 @@ impl<'a> Checker<'a> {
                 }
                 // Without `CallableReferencesToContextual` a declaration with context parameters
                 // cannot be referenced at all.
-                if function.context_count > 0 && !self.file.callable_references_to_contextual {
+                if function.context_count > 0 && !self.file.language.callable_references_to_contextual {
                     context_parameter_candidate.get_or_insert_with(|| function.clone());
                     return None;
                 }
@@ -35579,7 +35583,7 @@ impl<'a> Checker<'a> {
             callable_reference_selection::select_adapted_instance_candidate(
                 &source,
                 overloads,
-                self.file.callable_references_to_contextual,
+                self.file.language.callable_references_to_contextual,
                 None,
                 self.instance_reference_expectation(expected),
                 |actual, target| self.receiver_is_assignable(actual, target),
@@ -38828,14 +38832,14 @@ impl<'a> Checker<'a> {
                 "resolve",
                 "classifier entries owner={owner} enum={} enabled={} prioritized={}",
                 classifier.is_enum(),
-                self.file.enum_entries_enabled,
-                self.file.prioritized_enum_entries,
+                self.file.language.enum_entries_enabled,
+                self.file.language.prioritized_enum_entries,
             );
         }
         if classifier.is_enum_entry(name) {
             return None;
         }
-        if name == "entries" && classifier.is_enum() && !self.file.enum_entries_enabled {
+        if name == "entries" && classifier.is_enum() && !self.file.language.enum_entries_enabled {
             return None;
         }
         Some((owner, classifier.classifier_property(owner, name)?))
@@ -40084,6 +40088,9 @@ impl<'a> Checker<'a> {
         let bound = self.equality_bound_for_receiver(receiver_ty)?;
         let path = self.expr_access_path(operand)?;
         let declared = self.stable_path_ty(scope, &path, self.span(operand))?;
+        // A null receiver equals a null operand: a nullable receiver proves only the nullable bound.
+        let nullable = receiver_ty.is_nullable() && declared.is_nullable();
+        let bound = if nullable { Ty::nullable(bound) } else { bound };
         self.receiver_is_assignable(bound, declared)
             .then_some((path, bound))
     }
@@ -40138,14 +40145,10 @@ impl<'a> Checker<'a> {
                     if let Some(safe_call) = safe_call {
                         self.null_check_narrowings(scope, safe_call, &mut out, declined);
                     }
-                    // When equality is known to hold, the compiler-known bound on either selected
-                    // `equals` receiver proves the opposite stable operand has that classifier.
-                    // Keep both directions: `typed == erased` and `erased == typed` select the
-                    // receiver differently but establish the same data-flow fact.
+                    // When equality is known to hold, the compiler-known bound on the selected
+                    // `equals` proves the argument has that classifier. `a == b` selects `a`'s
+                    // `equals`, so `erased == typed` selects `Any.equals` and proves nothing.
                     if let Some(narrowing) = self.equality_bound_narrowing(scope, lhs, rhs) {
-                        out.push(narrowing);
-                    }
-                    if let Some(narrowing) = self.equality_bound_narrowing(scope, rhs, lhs) {
                         out.push(narrowing);
                     }
                 }
@@ -45253,7 +45256,7 @@ impl<'a> Checker<'a> {
             );
             if self.callable_reference_types.get(&argument).copied() == Some(sam_function) {
                 if let Some(conversion) = self.sam_conversion_record(scope, argument, actual, sam) {
-                    self.resolved_sam_conversions.insert(argument, conversion);
+                    self.note_sam_conversion(argument, conversion);
                 }
                 return;
             }
@@ -45261,7 +45264,7 @@ impl<'a> Checker<'a> {
                 let recorded = self.sam_conversion_record(scope, argument, actual, sam);
                 self.expr_expected(scope, argument, sam_function);
                 if let Some(recorded) = recorded {
-                    self.resolved_sam_conversions.insert(argument, recorded);
+                    self.note_sam_conversion(argument, recorded);
                 }
                 return;
             }
@@ -45322,7 +45325,7 @@ impl<'a> Checker<'a> {
                     if let Some(conversion) =
                         self.sam_conversion_record(scope, argument, actual, sam)
                     {
-                        self.resolved_sam_conversions.insert(argument, conversion);
+                        self.note_sam_conversion(argument, conversion);
                     }
                     return;
                 }
@@ -45338,7 +45341,7 @@ impl<'a> Checker<'a> {
                     if let Some(conversion) =
                         self.sam_conversion_record(scope, argument, actual, sam)
                     {
-                        self.resolved_sam_conversions.insert(argument, conversion);
+                        self.note_sam_conversion(argument, conversion);
                     }
                     return;
                 }
@@ -45349,7 +45352,7 @@ impl<'a> Checker<'a> {
                 && !self.sam_argument_already_implements(argument, actual, expected)
             {
                 if let Some(conversion) = self.sam_conversion_record(scope, argument, actual, sam) {
-                    self.resolved_sam_conversions.insert(argument, conversion);
+                    self.note_sam_conversion(argument, conversion);
                 }
                 return;
             }
@@ -46710,7 +46713,7 @@ impl<'a> Checker<'a> {
                     self.expect_assignable(sam.ret, returned, self.span(e), "lambda return");
                 }
                 if let Some(conversion) = self.sam_conversion_record(scope, e, function, sam) {
-                    self.resolved_sam_conversions.insert(e, conversion);
+                    self.note_sam_conversion(e, conversion);
                 }
                 return expected;
             }
@@ -49007,7 +49010,10 @@ impl<'a> Checker<'a> {
                 checker.runtime_type_ref_ty(scope, &ty)
             });
             if tt == Ty::Error
-                && self.file.context_sensitive_resolution_using_expected_type
+                && self
+                    .file
+                    .language
+                    .context_sensitive_resolution_using_expected_type
                 && !ty.name.contains(['.', '/', '$'])
             {
                 let source = self.fed_source();
@@ -50160,7 +50166,11 @@ impl<'a> Checker<'a> {
         name: &str,
         expected: Option<Ty>,
     ) -> Option<Ty> {
-        if !self.file.context_sensitive_resolution_using_expected_type {
+        if !self
+            .file
+            .language
+            .context_sensitive_resolution_using_expected_type
+        {
             return None;
         }
         let expected = expected?.non_null();
@@ -50236,7 +50246,11 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         expression: ExprId,
     ) -> Option<&str> {
-        if !self.file.context_sensitive_resolution_using_expected_type {
+        if !self
+            .file
+            .language
+            .context_sensitive_resolution_using_expected_type
+        {
             return None;
         }
         let Expr::Name(name) = self.file.expr(expression) else {
@@ -50957,7 +50971,10 @@ impl<'a> Checker<'a> {
             let rt = if equality
                 && lt != Ty::Error
                 && !lt.mentions_pending()
-                && self.file.context_sensitive_resolution_using_expected_type
+                && self
+                    .file
+                    .language
+                    .context_sensitive_resolution_using_expected_type
                 && matches!(self.file.expr(rhs), Expr::Name(_))
             {
                 self.expr_expected(scope, rhs, lt)
@@ -51365,7 +51382,7 @@ impl<'a> Checker<'a> {
             // an unresolved reference for an enum that has no companion instance. Only a receiver
             // that resolved as a value can be that companion, or a local that shadows the enum.
             let entries_owner = if name == "entries"
-                && self.file.prioritized_enum_entries
+                && self.file.language.prioritized_enum_entries
                 && matches!(receiver_qualifier, Ok(ResolvedQualifier::Value))
             {
                 self.enum_entries_value_classifier(scope, receiver)
@@ -51380,7 +51397,7 @@ impl<'a> Checker<'a> {
                 .or(entries_owner)
             {
                 let legacy_enum_entries = name == "entries"
-                    && !self.file.prioritized_enum_entries
+                    && !self.file.language.prioritized_enum_entries
                     && self
                         .resolved_type_name(owner)
                         .is_some_and(|classifier| classifier.is_enum());
@@ -52122,7 +52139,7 @@ impl<'a> Checker<'a> {
                 CompletedFlow::publish_common(self, scope, &completing_flows);
             }
             let result_ty = if exhaustive {
-                self.exhaustive_whens.insert(e);
+                self.record_exhaustive_when(e, has_else, subject.is_some());
                 result.unwrap_or(Ty::Unit)
             } else if value_required {
                 let span = self.span(e);
@@ -52533,7 +52550,7 @@ impl<'a> Checker<'a> {
                         callable_reference_selection::select_adapted_instance_candidate(
                             &source,
                             &candidates,
-                            self.file.callable_references_to_contextual,
+                            self.file.language.callable_references_to_contextual,
                             None,
                             self.instance_reference_expectation(expected),
                             |actual, target| self.receiver_is_assignable(actual, target),
@@ -52832,7 +52849,7 @@ impl<'a> Checker<'a> {
                     callable_reference_selection::select_adapted_instance_candidate(
                         &source,
                         &receiver_candidates.overloads,
-                        self.file.callable_references_to_contextual,
+                        self.file.language.callable_references_to_contextual,
                         Some(receiver_ty),
                         self.instance_reference_expectation(expected),
                         |actual, target| self.receiver_is_assignable(actual, target),
@@ -53260,7 +53277,8 @@ impl<'a> Checker<'a> {
                         .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
                         .collect::<Vec<_>>();
                     if let [selected] = candidates.as_slice() {
-                        if selected.context_count > 0 && self.file.callable_references_to_contextual
+                        if selected.context_count > 0
+                            && self.file.language.callable_references_to_contextual
                         {
                             if let Some(ty) =
                                 self.contextual_top_level_reference(e, &name, selected)
@@ -57295,7 +57313,7 @@ impl<'a> Checker<'a> {
     ) -> R {
         let deferred_type_variables = self.active_postponed_type_variables();
         f(MemberExtensionProbes {
-            explicit_context_arguments: self.file.explicit_context_arguments,
+            explicit_context_arguments: self.file.language.explicit_context_arguments,
             deferred_type_variables: &deferred_type_variables,
             select_context_arguments: &|parameters| {
                 self.select_context_arguments_with_types(scope, parameters)

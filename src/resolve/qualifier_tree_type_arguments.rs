@@ -105,7 +105,7 @@ impl Checker<'_> {
 
     pub(super) fn check_package_receiver_type_arguments(&mut self, tree: &QualifierTree) {
         let last = tree.last();
-        if self.file.forbid_package_qualifier_forms
+        if self.file.language.forbid_package_qualifier_forms
             || !last.has_type_arguments
             || !matches!(last.binding, QualifierBinding::Package(_))
         {

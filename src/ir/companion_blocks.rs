@@ -37,6 +37,9 @@ pub struct IrCompanionBlockProperty {
     /// field annotations travel with the stable block-property record instead of being joined by
     /// field spelling.
     pub field_annotations: crate::ir::DeclarationAnnotations,
+    /// The property's resolved declaration annotations, including those with binary or SOURCE
+    /// retention: what its storage's modifiers (`@Volatile`, `@Transient`) are read from.
+    pub annotations: Box<[TypeName]>,
     pub ty: Ty,
     pub is_var: bool,
     pub is_const: bool,
