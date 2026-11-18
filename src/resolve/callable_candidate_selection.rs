@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// Whether an argument of exactly the parameter's type takes the top specificity rank. A type
+/// parameter is not such evidence: whether `X` fits better than its bound is decided by comparing
+/// the declarations, so two overloads over `X` and `Right` stay tied.
+pub(super) fn is_exact_argument_rank(expected: Ty, actual: Ty) -> bool {
+    expected == actual && !matches!(expected.kind(), TyKind::TyParam(..) | TyKind::Var(..))
+}
+
 impl Checker<'_> {
     /// Select one declaration from a provider's raw callable family. Receiver/name lookup has already
     /// produced the family; applicability, generic binding, and contextual argument shape are shared.
