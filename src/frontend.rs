@@ -124,6 +124,46 @@ pub struct StreamingSourceSetAnalysis {
     pub(crate) streamed: Option<StreamedPassState>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl StreamingSourceSetAnalysis {
+    /// Select one written file-level function for an owned backend fixture. Selection happens
+    /// here, while finalized declaration headers are available; emission receives only its id.
+    pub fn fixture_function(
+        &self,
+        source: u32,
+        name: &str,
+    ) -> Result<crate::fir::CallableId, &'static str> {
+        let index = self
+            .streamed
+            .as_ref()
+            .ok_or("missing checked fixture module")?
+            .module
+            .index();
+        let mut selected = None;
+        for raw in 0..index.declaration_count() {
+            let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
+            let Some(anchor) = index.declaration_anchor(declaration) else {
+                continue;
+            };
+            if anchor.source.raw() != source
+                || anchor.owner.is_some()
+                || anchor.kind != crate::fir::DeclarationKind::Function
+                || index.declaration_name(declaration) != Some(name)
+            {
+                continue;
+            }
+            let callable = index
+                .callable_for_declaration(declaration)
+                .ok_or("fixture function has no finalized callable")?
+                .id;
+            if selected.replace(callable).is_some() {
+                return Err("ambiguous fixture function");
+            }
+        }
+        selected.ok_or("missing fixture function")
+    }
+}
+
 impl From<SourceSetAnalysis> for StreamingSourceSetAnalysis {
     fn from(analysis: SourceSetAnalysis) -> Self {
         let SourceSetAnalysis {

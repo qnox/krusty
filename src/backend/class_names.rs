@@ -126,7 +126,7 @@ pub fn source_class_names(ir: &IrFile, class: ClassId) -> Option<ClassNames> {
         Some(IrLocalClassOwner::Class(owner)) => source_class_names(ir, owner)?.qualified,
         Some(IrLocalClassOwner::External(owner)) => member_class_names(owner).qualified,
         // Boundary conversion: the package path is spelled with `/` in the name tree.
-        None => provenance.source.package.render().replace('/', "."),
+        None => provenance.source.package().render().replace('/', "."),
     };
     if !qualified.is_empty() {
         qualified.push('.');
@@ -141,12 +141,7 @@ pub fn source_class_names(ir: &IrFile, class: ClassId) -> Option<ClassNames> {
 /// The names of a local classifier with no source provenance: its container's qualified name,
 /// then its own name.
 fn site_class_names(ir: &IrFile, site: &IrSiteClassName) -> Option<ClassNames> {
-    let mut qualified = match site.container {
-        // Boundary conversion: the package path is spelled with `/` in the name tree.
-        IrSiteClassContainer::Package(package) => package.render().replace('/', "."),
-        IrSiteClassContainer::Classifier(owner) => member_class_names(owner).qualified,
-        IrSiteClassContainer::Class(owner) => source_class_names(ir, owner)?.qualified,
-    };
+    let mut qualified = site_container_name(ir, site.container)?;
     if !qualified.is_empty() {
         qualified.push('.');
     }
@@ -154,6 +149,18 @@ fn site_class_names(ir: &IrFile, site: &IrSiteClassName) -> Option<ClassNames> {
     Some(ClassNames {
         qualified,
         simple: site.name.to_string(),
+    })
+}
+
+/// The qualified name of the declaration container `container`, which prefixes the names of the
+/// classes Kotlin places in it; empty for the root package. `None` for a local container Kotlin
+/// does not name from source.
+pub fn site_container_name(ir: &IrFile, container: IrSiteClassContainer) -> Option<String> {
+    Some(match container {
+        // Boundary conversion: the package path is spelled with `/` in the name tree.
+        IrSiteClassContainer::Package(package) => package.render().replace('/', "."),
+        IrSiteClassContainer::Classifier(owner) => member_class_names(owner).qualified,
+        IrSiteClassContainer::Class(owner) => source_class_names(ir, owner)?.qualified,
     })
 }
 
@@ -217,6 +224,17 @@ pub fn declared_class(ir: &IrFile, class: ClassId) -> ReflectionNames {
             package,
             simple: Some(simple),
             qualified: None,
+        };
+    }
+    // A dependency's file-private classifier keeps its declared name, which its naming provenance
+    // records; its physical identity is a synthetic local one.
+    if let Some(provenance) = ir.local_class_name_provenance.get(&class) {
+        let names = source_class_names(ir, class);
+        return ReflectionNames {
+            // Boundary conversion: the package path is spelled with `/` in the name tree.
+            package: provenance.source.package().render().replace('/', "."),
+            simple: names.as_ref().map(|names| names.simple.clone()),
+            qualified: names.map(|names| names.qualified),
         };
     }
     let ClassNames { qualified, simple } = member_class_names(declaration.fq_name);
