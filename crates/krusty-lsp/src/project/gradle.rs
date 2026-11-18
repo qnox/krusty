@@ -448,6 +448,9 @@ pub struct GradleProvider {
     probe_timeout: Duration,
     /// Scan and offline model only. The editor probe leaves dependency jars where they are.
     materialize_dependencies: bool,
+    /// Replaces filesystem JDK discovery. Production probes leave this empty.
+    #[cfg(test)]
+    jvm_search: Option<super::gradle_daemon_jvm::JvmSearch>,
 }
 
 impl GradleProvider {
@@ -474,7 +477,15 @@ impl GradleProvider {
             init_script,
             probe_timeout,
             materialize_dependencies,
+            #[cfg(test)]
+            jvm_search: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_jvm_search(mut self, search: super::gradle_daemon_jvm::JvmSearch) -> Self {
+        self.jvm_search = Some(search);
+        self
     }
 
     pub fn build_files(&self) -> Vec<PathBuf> {
@@ -505,7 +516,19 @@ impl GradleProvider {
             tasks,
             arguments,
             timeout: self.probe_timeout,
+            java_home: self.daemon_java_home(),
         }
+    }
+
+    fn daemon_java_home(&self) -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(search) = &self.jvm_search {
+            return super::gradle_daemon_jvm::daemon_java_home(&self.root, search);
+        }
+        super::gradle_daemon_jvm::daemon_java_home(
+            &self.root,
+            &super::gradle_daemon_jvm::JvmSearch::system(&self.root),
+        )
     }
 
     fn write_init_script(&self) -> Result<(), ProbeError> {
@@ -981,6 +1004,51 @@ mod tests {
         );
         assert!(!script.contains("set.allSource?.srcDirs"), "{script}");
         assert!(!tree.path(".krusty").exists());
+    }
+
+    #[test]
+    fn gradle_8_loads_the_init_script_on_a_jvm_that_can_read_it() {
+        let tree = TempTree::new("gradle-8-init-jvm");
+        tree.write("settings.gradle.kts", "");
+        tree.write(
+            "gradle/wrapper/gradle-wrapper.properties",
+            "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.0-bin.zip\n",
+        );
+        let java_21 = write_jvm(&tree, "jvms/21", "21.0.2");
+        let java_17 = write_jvm(&tree, "jvms/17", "17.0.13");
+        let provider = GradleProvider::new(tree.root()).with_jvm_search(
+            super::super::gradle_daemon_jvm::JvmSearch {
+                daemon_home: Some(java_21),
+                install_roots: vec![tree.path("jvms")],
+            },
+        );
+        let (_, action) = probe_action(&provider, FakeRunner::stdout(&recorded_output()));
+
+        assert_eq!(action.arguments[2], "--no-configuration-cache");
+        assert_eq!(action.java_home.as_deref(), Some(java_17.as_path()));
+        let request = tooling::gradle_request(&action).expect("tooling request");
+        let value: serde_json::Value =
+            serde_json::from_str(&request).expect("tooling request json");
+        assert_eq!(value["javaHome"].as_str(), java_17.to_str());
+        let client = include_str!("../../java/krusty/tooling/GradleToolingClient.java");
+        assert!(
+            client.contains(".setJavaHome("),
+            "the tooling build action must run the daemon on the selected JVM"
+        );
+        assert!(
+            !client.contains("gradlew") && !client.contains("ProcessBuilder"),
+            "the daemon JVM is a Tooling API parameter"
+        );
+    }
+
+    fn write_jvm(tree: &TempTree, relative: &str, version: &str) -> PathBuf {
+        let home = tree.directory(relative);
+        tree.write(
+            &format!("{relative}/release"),
+            &format!("JAVA_VERSION=\"{version}\"\n"),
+        );
+        tree.write(&format!("{relative}/bin/java"), "");
+        home
     }
 
     #[test]
