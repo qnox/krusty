@@ -44,6 +44,7 @@ mod fake_overrides;
 mod initializer_capability_tests;
 mod inline_functions;
 mod local_class;
+mod sam_placement;
 mod static_properties;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
@@ -1123,6 +1124,19 @@ impl<'s> CallLinker for Linker<'_, 's> {
         })
     }
 
+    fn sam_declaration(
+        &self,
+        classifier: &KlibPublicIdSignature,
+    ) -> Result<crate::ir::CheckedKlibSamDeclaration, KlibBodyDeclineReason> {
+        self.sources
+            .callees
+            .sam_declaration(&self.active_module, classifier)
+            .cloned()
+            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a SAM conversion without a checked declaration",
+            ))
+    }
+
     fn declares_implementation(
         &self,
         callee: &KlibPublicIdSignature,
@@ -1556,6 +1570,10 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.sources.callees.applied_supertype(sub, owner)
     }
 
+    fn sam_placement(&self) -> Result<crate::ir::IrSamPlacement, KlibBodyDeclineReason> {
+        self.active_sam_placement()
+    }
+
     fn dependency_override(
         &self,
         symbol: &KlibIrSymbol,
@@ -1603,15 +1621,6 @@ impl<'s> CallLinker for Linker<'_, 's> {
             self.sources.declarations,
         )
         .map(|handle| handle.target())
-    }
-
-    fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
-        match self.sources.declarations.classifier(name) {
-            Some(record) => Ok(record.is_interface()),
-            None => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
-                "an object literal's supertype {name:?} is not a selected classifier"
-            ))),
-        }
     }
 
     fn link_accessor(
@@ -2576,20 +2585,9 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
-        // The selected root is lowered as the declaration it is; a call of an inline callee is
-        // expanded.
         let root = self.root.is_some_and(|root| root.identity() == identity);
-        if !root && inline_functions::declares_inline(function) {
-            let mut is_interface = |name| self.is_interface(name);
-            inline_functions::declare(
-                ir,
-                declared,
-                function,
-                &header,
-                selected,
-                &mut is_interface,
-            )?;
-        }
+        let callee = inline_functions::Candidate::new(declared, function, &header, selected);
+        callee.declare(ir, root, &mut |name| self.is_interface(name))?;
         self.functions.insert(identity.clone(), declared);
         if let Some(receiver) = header.value_receiver() {
             self.member_receivers.insert(identity.clone(), receiver);
