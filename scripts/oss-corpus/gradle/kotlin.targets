@@ -1,0 +1,10 @@
+# The JVM standard library with its tests, the whole JVM compiler (its CLI, frontends, IR and JVM
+# backend), and the Compose compiler plugin with its tests, a kotlinc plugin built on the compiler's
+# FIR and IR APIs, with every compile they depend on. The standard library's JVM tests run on the
+# classes each build wrote.
+:kotlin-stdlib:compileKotlinJvm
+:kotlin-stdlib:compileTestKotlinJvm
+:compiler:cli-jvm:compileKotlin
+:plugins:compose-compiler-plugin:compiler-hosted:compileKotlin
+:plugins:compose-compiler-plugin:compiler-hosted:compileTestKotlin
+:kotlin-stdlib:jvmTest
