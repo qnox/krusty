@@ -1200,8 +1200,9 @@ impl BodyLowering<'_> {
         Ok(applied)
     }
 
-    /// The type arguments `call` of the inline function `function` binds, under the identities the
-    /// function's own signature declares, for the expansion to specialize its body with.
+    /// The type arguments `call` of the inline function `function` binds, under the selected
+    /// semantic identities of the function's type parameters, which its body's types name, for the
+    /// expansion to specialize that body with.
     fn record_inline_type_arguments(
         &mut self,
         call: ExprId,
@@ -1219,7 +1220,7 @@ impl BodyLowering<'_> {
         let formals = signature
             .type_params
             .iter()
-            .map(|formal| (formal.name.clone(), formal.reified))
+            .map(|formal| (formal.semantic_name.clone(), formal.reified))
             .collect::<Vec<_>>();
         let mut bound = Vec::with_capacity(formals.len());
         let mut reified = Vec::new();

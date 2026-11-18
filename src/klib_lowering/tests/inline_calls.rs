@@ -472,15 +472,74 @@ fn a_generic_inline_function_is_expanded_at_the_call_s_type_arguments() {
     let id = function_named(ir, "id");
     let caller = function_named(ir, "caller");
     assert_eq!(callers(ir, id), Vec::<FunId>::new());
+    // The provider mints the formal's identity; the binding is keyed by it, not by its spelling.
+    let crate::types::TyKind::TyParam(formal, _) = ir.functions[id as usize].params[0].kind()
+    else {
+        panic!("the declared parameter names the type parameter")
+    };
     assert_eq!(
         ir.inline_call_type_arguments.values().collect::<Vec<_>>(),
-        vec![&vec![("P".to_owned(), crate::types::Ty::String)]],
-        "the call binds the function's type parameter"
+        vec![&vec![(
+            formal.as_str().to_owned(),
+            crate::types::Ty::String
+        )]],
+        "the call binds the function's type parameter by its selected identity"
     );
+    assert_eq!(
+        ir.signatures[&id].type_params[0].semantic_name,
+        formal.as_str()
+    );
+    // The copied body names no type parameter any more: its operand is held at the argument type.
+    let unspecialized = reached(ir, caller)
+        .into_iter()
+        .filter(|expression| {
+            matches!(expression, IrExpr::Variable { ty, .. }
+                if matches!(ty.kind(), crate::types::TyKind::TyParam(..)))
+        })
+        .count();
+    assert_eq!(unspecialized, 0);
     assert_eq!(
         unit.callable_functions()
             .map(|(_, function)| function)
             .collect::<Vec<_>>(),
         vec![caller]
+    );
+}
+
+#[test]
+fn a_declined_generic_inline_expansion_leaves_no_signature_on_a_reused_function_id() {
+    let demo = demo_inlining(
+        &[
+            ("loops", &[T::P], T::P),
+            ("caller", &[T::String], T::String),
+            ("plain", &[T::Int], T::Int),
+        ],
+        &["loops"],
+        |name, body| match name {
+            "loops" | "caller" => {
+                let argument = body.param(0);
+                let ty = if name == "loops" { T::P } else { T::String };
+                let call = body.generic_call("loops", vec![argument], T::String, ty);
+                Some(vec![body.ret(call)])
+            }
+            _ => sole_return(body),
+        },
+    );
+    let mut unit = DependencyBodyUnit::default();
+    demo.lower(&mut unit, "caller", &["caller", "loops"])
+        .expect_err("a recursive inline function cannot be expanded");
+    assert!(unit.ir().signatures.is_empty());
+    // The retry reuses the function id the declined lowering declared.
+    let plain = demo
+        .lower(&mut unit, "plain", &["plain"])
+        .expect("an ordinary callable lowers");
+    validated(unit.ir());
+    assert!(!unit.ir().signatures.contains_key(&plain));
+    assert_eq!(
+        unit.callable_functions()
+            .map(|(_, function)| function)
+            .collect::<Vec<_>>(),
+        vec![plain],
+        "the ordinary callable is still emitted"
     );
 }
