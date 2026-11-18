@@ -237,9 +237,10 @@ run_versions() {
 }
 
 run_versions $first
-if [ "${#failed[@]}" -gt 0 ] && [ -z "$rest" ]; then
-  rest="$(printf '%s\n' $all_versions | grep -vxF -e "$first" | tr '\n' ' ')"
-  [ -z "${KRUSTY_SMOKE_VERSIONS:-}" ] && step "newest version failed: checking the other versions too"
+# Only the default falls back; an explicit list runs exactly that list.
+if [ "${#failed[@]}" -gt 0 ] && [ -z "${KRUSTY_SMOKE_VERSIONS:-}" ]; then
+  rest="$(printf '%s\n' $all_versions | grep -vxF -e "$newest" | tr '\n' ' ')"
+  step "newest version failed: checking the other versions too"
 fi
 [ -z "$rest" ] || run_versions $rest
 
