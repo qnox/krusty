@@ -201,7 +201,6 @@ impl<'s> Linker<'_, 's> {
                 LocalFunction {
                     function,
                     class: prepared.key.clone(),
-                    setter: member.setter,
                 },
             );
             self.pending.push_back(PendingBody {
@@ -494,17 +493,12 @@ impl Linker<'_, '_> {
         &self,
         ir: &IrFile,
         identity: &KlibDependencyCallable,
-    ) -> Result<Option<(LinkedCallee, bool)>, KlibBodyDeclineReason> {
+    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
         let key = installed_identity(identity);
-        let Some(setter) = self
-            .local_functions
-            .get(&key)
-            .map(|function| function.setter)
-        else {
+        if !self.local_functions.contains_key(&key) {
             return Ok(None);
-        };
-        self.linked_installed_member(ir, &key)
-            .map(|linked| Some((linked, setter)))
+        }
+        self.linked_installed_member(ir, &key).map(Some)
     }
 }
 

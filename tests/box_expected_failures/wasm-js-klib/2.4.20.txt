@@ -57,7 +57,6 @@ arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
 arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
 arrays/hashMap.kt
 arrays/inProjectionOfList.kt
-arrays/indices.kt
 arrays/kt33.kt
 arrays/kt47483.kt
 arrays/kt7009.kt
@@ -1635,7 +1634,6 @@ ranges/contains/evaluationOrderForRangeLiteral.kt
 ranges/contains/evaluationOrderForRangeLiteralReversed.kt
 ranges/contains/evaluationOrderForUntil.kt
 ranges/contains/evaluationOrderForUntilReversed.kt
-ranges/contains/generated/arrayIndices.kt
 ranges/contains/generated/charDownTo.kt
 ranges/contains/generated/intDownTo.kt
 ranges/contains/generated/longDownTo.kt
