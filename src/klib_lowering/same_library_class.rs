@@ -390,6 +390,9 @@ struct InterfaceSignature {
 pub(super) struct PreparedLocalClass<'a> {
     pub(super) key: LocalIdentity,
     pub(super) classifier: TypeName,
+    /// The name Kotlin's IR gives the class: its declaring file's package or enclosing classifier,
+    /// then its serialized name.
+    pub(super) site_name: Option<crate::ir::IrSiteClassName>,
     pub(super) self_type: Ty,
     pub(super) supertypes: Vec<Ty>,
     pub(super) interfaces: Vec<TypeName>,
@@ -799,6 +802,7 @@ fn prepare_class<'a>(
         class_name,
         outer,
     } = declaration;
+    let site_name = super::site_containers::class_site_name(source.bodies, source.module, class);
     if declaration_modality(class.base.flags).is_abstract() {
         return Err(unsupported("a non-public abstract class"));
     }
@@ -961,6 +965,7 @@ fn prepare_class<'a>(
     Ok(PreparedLocalClass {
         key,
         classifier: class_name,
+        site_name,
         self_type,
         supertypes,
         interfaces: interfaces.iter().map(|interface| interface.name).collect(),
@@ -1732,6 +1737,7 @@ pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
     // A class private to its enclosing class is a member classifier its public signature names,
     // as its source declares it; a file-local one has no name of its own here.
     class.is_source_declared = matches!(prepared.key.signature, KlibIrSignature::Public(_));
+    class.site_name = prepared.site_name.clone();
     class.supertypes = prepared.supertypes.clone();
     for interface in &prepared.interfaces {
         class.interfaces.push_name(*interface);

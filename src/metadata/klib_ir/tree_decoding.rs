@@ -239,6 +239,8 @@ impl KlibIrModuleTrees {
     pub(crate) fn from_trees(trees: Vec<KlibIrDeclarationTree>) -> Result<Self, KlibIrDecodeError> {
         let mut module = Self {
             files: vec![0; trees.len()],
+            // Hand-built trees are all declared by one file of the `demo` package.
+            packages: vec![vec!["demo".to_owned()]],
             trees,
             ..Self::default()
         };

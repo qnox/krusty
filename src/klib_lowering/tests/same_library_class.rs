@@ -80,7 +80,37 @@ fn any_constructor() -> KlibPublicIdSignature {
     .expect("Any.<init> is signable")
 }
 
+thread_local! {
+    /// Whether the fixture class is `demo.Outer.Hidden`, a class private to a public one: it keeps
+    /// its public class identity while its private constructor stays file-local.
+    static NESTED_IN_PUBLIC_CLASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn nested_class_signature() -> KlibPublicIdSignature {
+    let package = ["demo".to_owned()];
+    let outer = [ClassScope::<KotlinType> {
+        name: "Outer",
+        type_parameters: Vec::new(),
+        expect: false,
+    }];
+    class_signature(
+        DeclarationContainer {
+            package: &package,
+            classes: &outer,
+            native_interop_library: false,
+        },
+        &ClassScope::<KotlinType> {
+            name: "Hidden",
+            type_parameters: Vec::new(),
+            expect: false,
+        },
+    )
+}
+
 fn class_symbol() -> KlibIrSymbol {
+    if NESTED_IN_PUBLIC_CLASS.with(std::cell::Cell::get) {
+        return public_symbol(KlibIrSymbolKind::Class, nested_class_signature());
+    }
     file_local(KlibIrSymbolKind::Class, CLASS_SLOT)
 }
 
@@ -418,6 +448,12 @@ fn a_body_constructs_a_non_public_class_of_its_own_library() {
     assert_eq!(ir.class_id_by_name(classifier), Some(0));
     let class = &ir.classes[0];
     assert_eq!(class.fq_name, classifier);
+    let names = crate::backend::class_names::source_class_names(ir, 0)
+        .expect("a materialized file-local class has the name its library serialized");
+    assert_eq!(
+        (names.qualified.as_str(), names.simple.as_str()),
+        ("demo.Hidden", "Hidden")
+    );
     assert!(class.has_primary_ctor);
     assert!(class.explicit_param_stores);
     assert_eq!(class.ctor_param_count, 0);
@@ -1815,3 +1851,26 @@ fn official_klib_private_object_storage_is_authenticated() {
 }
 
 mod hierarchy_publication;
+
+/// A class private to a public one keeps its public class identity while its private constructor
+/// is file-local, so a name derived from the constructor would be the package's `demo.Hidden`.
+/// Materialization names the class by its own identity: `demo.Outer.Hidden`.
+#[test]
+fn a_private_class_nested_in_a_public_one_is_named_by_its_enclosing_classifier() {
+    NESTED_IN_PUBLIC_CLASS.with(|nested| nested.set(true));
+    let demo = demo_with(&[MAKE], vec![hidden_class(T::Any)], |_, body| {
+        Some(hidden_body(body))
+    });
+    let mut unit = DependencyBodyUnit::default();
+    demo.lower(&mut unit, "make", &[])
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    let ir = unit.ir();
+    assert_eq!(ir.classes.len(), 1);
+    let names = crate::backend::class_names::source_class_names(ir, 0)
+        .expect("a materialized class has the name its library serialized");
+    assert_eq!(
+        (names.qualified.as_str(), names.simple.as_str()),
+        ("demo.Outer.Hidden", "Hidden")
+    );
+}
