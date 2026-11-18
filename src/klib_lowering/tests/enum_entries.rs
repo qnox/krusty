@@ -145,6 +145,24 @@ fn an_enum_constant_resolves_in_the_reading_body_s_producer_graph() {
             .unwrap_or_else(|decline| panic!("{decline:?}"));
     assert_eq!(name, "RESUMED");
     assert_eq!(classifier, type_name(COROUTINE_SINGLETONS));
+    // The admitted initialization of the enum is the one the producer graph declares: its
+    // constructor's module, and its constants in declaration order.
+    let oracle = crate::symbol_resolver::SourceOracle(&libraries);
+    let facts = reading(&libraries, &[COROUTINE_SINGLETONS], &oracle);
+    let class = facts
+        .read_class(type_name(COROUTINE_SINGLETONS))
+        .expect("the closure read the enum");
+    let plan = super::super::class_initialization::declared_instances_plan(class, bodies, &facts)
+        .unwrap_or_else(|decline| panic!("{decline:?}"))
+        .expect("an enum declaring only its constants is admitted");
+    assert_eq!(plan.header.contract.module, *module);
+    assert_eq!(
+        plan.entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["COROUTINE_SUSPENDED", "UNDECIDED", "RESUMED"]
+    );
 
     // An entry no producer module declares is not an enum constant of the graph.
     assert_eq!(
@@ -202,5 +220,75 @@ fn an_enum_with_constructor_state_admits_its_initialization() {
             crate::types::wk::kotlin_enum(),
             &[Ty::obj_name(type_name(CHAR_CATEGORY))]
         ))
+    );
+}
+
+#[test]
+fn an_enum_declaring_only_its_constants_admits_its_initialization() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let bodies = libraries.declaration_bodies();
+    let getter = coroutine_suspended_getter(&libraries);
+    let module = &getter
+        .klib_body_callable()
+        .expect("signed")
+        .identity()
+        .module;
+    // `DeprecationLevel` declares only its constants: its constructor takes no parameter.
+    let level = KlibPublicIdSignature::classifier(type_name("kotlin/DeprecationLevel.ERROR"));
+    assert!(super::super::enum_classes::authenticate_entry(bodies, module, &level).is_ok());
+    const DEPRECATION_LEVEL: &str = "kotlin/DeprecationLevel";
+    let oracle = crate::symbol_resolver::SourceOracle(&libraries);
+    let facts = reading(&libraries, &[DEPRECATION_LEVEL], &oracle);
+    let class = facts
+        .read_class(type_name(DEPRECATION_LEVEL))
+        .expect("the closure read the enum");
+    let plan = super::super::class_initialization::declared_instances_plan(class, bodies, &facts)
+        .unwrap_or_else(|decline| panic!("{decline:?}"))
+        .expect("an enum declaring only its constants is admitted");
+    assert_eq!(
+        plan.entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["WARNING", "ERROR", "HIDDEN"]
+    );
+    assert!(plan.entries.iter().all(|entry| entry.arguments.is_empty()));
+    assert!(plan.header.function.regular_parameters.is_empty());
+}
+
+#[test]
+fn an_enum_constructor_with_a_defaulted_parameter_keeps_its_target_boundary() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let bodies = libraries.declaration_bodies();
+    let getter = coroutine_suspended_getter(&libraries);
+    let module = &getter
+        .klib_body_callable()
+        .expect("signed")
+        .identity()
+        .module;
+    // `RegexOption`'s constants take constructor arguments, which it stores in member properties,
+    // and its constructor's `mask` parameter defaults to `value`. A default value is lowered in
+    // the call frame of a constructor call, not in the entry's initializer frame, so the class is
+    // not admitted: its initialization stays the target's, and the plan declines without an
+    // initialization rather than lowering a partial one.
+    let option =
+        KlibPublicIdSignature::classifier(type_name("kotlin/text/RegexOption.IGNORE_CASE"));
+    assert!(super::super::enum_classes::authenticate_entry(bodies, module, &option).is_ok());
+    const REGEX_OPTION: &str = "kotlin/text/RegexOption";
+    let oracle = crate::symbol_resolver::SourceOracle(&libraries);
+    let facts = reading(&libraries, &[REGEX_OPTION], &oracle);
+    let class = facts
+        .read_class(type_name(REGEX_OPTION))
+        .expect("the closure read the enum");
+    assert!(
+        super::super::class_initialization::declared_instances_plan(class, bodies, &facts)
+            .expect("a defaulted parameter is not a mismatch")
+            .is_none()
     );
 }
