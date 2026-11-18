@@ -60,6 +60,7 @@ mod constructors;
 mod default_arguments;
 mod enum_switch_whens;
 pub use enum_switch_whens::EnumSwitchWhen;
+mod declared_hierarchy;
 mod emitted_body_roots;
 mod enums;
 mod expect_actualization;

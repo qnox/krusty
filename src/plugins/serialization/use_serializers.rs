@@ -1,7 +1,7 @@
 //! `@file:UseSerializers(S::class, ...)`: serializers a file applies to every property type they
 //! serve. The annotation targets files only.
 //!
-//! A serializer serves the type its `KSerializer<T>` supertype names. The annotation makes every occurrence of `T` or `T?` inside a serializable
+//! A serializer serves the type its `KSerializer<T>` applied supertype names. The annotation makes every occurrence of `T` or `T?` inside a serializable
 //! property's declared type (the type itself, or a type argument at any depth) use that serializer,
 //! as if the occurrence had been written `@Serializable(with = S::class) T`. This module rewrites
 //! the property's checked declared spelling that way, so the element-serializer derivation, which
@@ -18,18 +18,24 @@ use super::{KSERIALIZER_FQ, SERIALIZABLE_FQ};
 
 const USE_SERIALIZERS_FQ: &str = "kotlinx/serialization/UseSerializers";
 
-/// One serializer the file applies, with the type it serves.
+/// One entry of the file's serializer registry: the serializer, keyed by the classifier it serves
+/// and the nullability of the served type (`KSerializer<Token>` and `KSerializer<Token?>` are
+/// distinct keys).
 #[derive(Clone, Copy)]
 pub(super) struct UsedSerializer {
     serializer: TypeName,
-    served: Ty,
+    served: TypeName,
+    nullable: bool,
 }
 
-/// The serializers the file names through `@UseSerializers`, in the order it lists them. A
-/// serializer this compilation does not declare, or one that has no `KSerializer<T>` supertype,
-/// serves nothing here.
+/// The serializers the file names through `@UseSerializers`, in the order it lists them, keyed as
+/// the file registry is: a later entry for the same served classifier and nullability replaces an
+/// earlier one (see [`serializer_for`]). A serializer this compilation does not declare, one with
+/// no `KSerializer<T>` in its applied hierarchy, and one whose served type still names the
+/// serializer's own type parameters are declined: they serve nothing here.
 pub(super) fn used_serializers(ir: &IrFile) -> Vec<UsedSerializer> {
     let use_serializers = type_name(USE_SERIALIZERS_FQ);
+    let kserializer = Ty::obj_name(type_name(KSERIALIZER_FQ));
     ir.file_annotations
         .applications()
         .filter(|application| application.internal == use_serializers)
@@ -40,15 +46,19 @@ pub(super) fn used_serializers(ir: &IrFile) -> Vec<UsedSerializer> {
                 .classes
                 .iter()
                 .find(|class| class.fq_name_id() == serializer)?;
-            let kserializer = type_name(KSERIALIZER_FQ);
-            let served = declaration
-                .supertypes
-                .iter()
-                .find(|supertype| supertype.kotlin_class_internal() == Some(kserializer))?
+            if !declaration.type_params.is_empty() {
+                return None;
+            }
+            let served = ir
+                .declared_applied_supertype(Ty::obj_name(serializer), kserializer)?
                 .type_args()
                 .first()
                 .copied()?;
-            Some(UsedSerializer { serializer, served })
+            Some(UsedSerializer {
+                serializer,
+                served: served.non_null().kotlin_class_internal()?,
+                nullable: served.is_nullable(),
+            })
         })
         .collect()
 }
@@ -84,10 +94,7 @@ fn apply_node(spelled: &mut Spelled, ty: Ty, used: &[UsedSerializer], withheld: 
     if withheld || names_serializer(spelled) {
         return;
     }
-    if let Some(applied) = used
-        .iter()
-        .find(|used| used.served.non_null() == ty.non_null())
-    {
+    if let Some(applied) = serializer_for(used, ty) {
         spelled
             .annotations
             .push(TypeUseAnnotation::Checked(ResolvedAnnotation {
@@ -100,6 +107,25 @@ fn apply_node(spelled: &mut Spelled, ty: Ty, used: &[UsedSerializer], withheld: 
                 written: None,
             }));
     }
+}
+
+/// The registry's serializer for `ty`: the exact (classifier, nullability) key first, the latest
+/// entry winning; a nullable use then falls back to the non-null key. A non-null use never takes a
+/// nullable entry.
+fn serializer_for(used: &[UsedSerializer], ty: Ty) -> Option<&UsedSerializer> {
+    let served = ty.non_null().kotlin_class_internal()?;
+    let latest = |nullable: bool| {
+        used.iter()
+            .rev()
+            .find(|entry| entry.served == served && entry.nullable == nullable)
+    };
+    latest(ty.is_nullable()).or_else(|| {
+        if ty.is_nullable() {
+            latest(false)
+        } else {
+            None
+        }
+    })
 }
 
 fn names_serializer(spelled: &Spelled) -> bool {

@@ -83,3 +83,68 @@ object TokenUpper : KSerializer<Token> {
         "use_serializers_explicit_wins",
     );
 }
+
+const TOKEN_UPPER: &str = r#"
+object TokenUpper : KSerializer<Token> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("Token", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: Token) = encoder.encodeString(value.raw.uppercase())
+    override fun deserialize(decoder: Decoder): Token = Token(decoder.decodeString())
+}
+"#;
+
+#[test]
+fn a_serializer_inheriting_kserializer_through_a_generic_base_serves_its_type() {
+    run(
+        "@file:UseSerializers(TokenUpperViaBase::class)",
+        r#"data class Holder(val token: Token)
+
+abstract class UppercaseBase<T> : KSerializer<T> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("Token", PrimitiveKind.STRING)
+}
+
+object TokenUpperViaBase : UppercaseBase<Token>() {
+    override fun serialize(encoder: Encoder, value: Token) = encoder.encodeString(value.raw.uppercase())
+    override fun deserialize(decoder: Decoder): Token = Token(decoder.decodeString())
+}"#,
+        &expect_json(r#"Holder(Token("a"))"#, r#"{"token":"A"}"#),
+        "use_serializers_file_generic_base",
+    );
+}
+
+#[test]
+fn a_later_entry_for_the_same_served_type_replaces_an_earlier_one() {
+    let holder = format!("data class Holder(val token: Token)\n{TOKEN_UPPER}");
+    run(
+        "@file:UseSerializers(TokenAsString::class, TokenUpper::class)",
+        &holder,
+        &expect_json(r#"Holder(Token("a"))"#, r#"{"token":"A"}"#),
+        "use_serializers_file_later_wins",
+    );
+    run(
+        "@file:UseSerializers(TokenUpper::class, TokenAsString::class)",
+        &holder,
+        &expect_json(r#"Holder(Token("a"))"#, r#"{"token":"a"}"#),
+        "use_serializers_file_earlier_replaced",
+    );
+}
+
+#[test]
+fn a_nullable_use_prefers_the_nullable_entry_and_a_non_null_use_never_takes_it() {
+    let holder = r#"data class Holder(val token: Token, val maybe: Token?)
+
+object TokenOrNull : KSerializer<Token?> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("TokenOrNull", PrimitiveKind.STRING).nullable
+    override fun serialize(encoder: Encoder, value: Token?) = encoder.encodeString(value!!.raw + "?")
+    override fun deserialize(decoder: Decoder): Token? = Token(decoder.decodeString())
+}"#;
+    run(
+        "@file:UseSerializers(TokenAsString::class, TokenOrNull::class)\nimport kotlinx.serialization.descriptors.nullable",
+        holder,
+        &expect_json(
+            r#"Holder(Token("a"), Token("b"))"#,
+            r#"{"token":"a","maybe":"b?"}"#,
+        ),
+        "use_serializers_file_nullable_key",
+    );
+}
