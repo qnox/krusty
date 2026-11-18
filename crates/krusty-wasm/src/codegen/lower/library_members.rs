@@ -389,6 +389,8 @@ impl Body<'_> {
         if reference_name {
             self.runtime.reference_name_member(self.module, member)?;
         }
+        self.runtime
+            .null_receiver_throws(self.module, self.classifiers)?;
         self.value(receiver, objects::any())?;
         for (&arg, &param) in args.iter().zip(params) {
             self.value(arg, param)?;
