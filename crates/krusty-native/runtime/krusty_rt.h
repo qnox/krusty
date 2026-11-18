@@ -488,6 +488,7 @@ kt_boolean kt_mutable_list_remove(KRef self, KRef value);
 kt_boolean kt_mutable_list_remove_all(KRef self, KRef elements);
 kt_boolean kt_mutable_list_retain_all(KRef self, KRef elements);
 void kt_mutable_list_clear(KRef self);
+KRef kt_mutable_list_build(KRef self);
 /* `list += element` and `list += elements`: Kotlin's `plusAssign`, which is `add`/`addAll` and
    answers `Unit`. */
 void kt_mutable_list_plus_assign(KRef self, KRef value);

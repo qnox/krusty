@@ -297,6 +297,11 @@ impl CollectionDeclaration {
             )
     }
 
+    /// A member only the standard `ArrayList` declares, never one of its interfaces.
+    pub(super) fn is_array_list(self) -> bool {
+        self == Self::Implementation(StandardCollectionImplementation::List)
+    }
+
     /// A mutating member of one of `kinds`: declared on its mutable face, or by an implementation.
     pub(super) fn mutates(self, kinds: &[CollectionKind]) -> bool {
         kinds.contains(&self.kind())
@@ -350,14 +355,20 @@ pub(super) fn collection_shape(
     })
 }
 
-/// The runtime marker a type check against one of Kotlin's read-only mapped collection interfaces
-/// tests: every runtime collection and every class implementing the interface wears it.
+/// The runtime marker a type check against one of Kotlin's mapped collection interfaces tests:
+/// every runtime collection of that kind and every class implementing the interface wears it. A
+/// read-only list is no `MutableList`, as on Kotlin/Native, while a growable one (an `ArrayList`,
+/// `buildList`'s result among them) is. The other mutable interfaces are not answered yet.
 pub(super) fn collection_check_descriptor(
     classifiers: &dyn BackendClassifierSource,
     internal: TypeName,
 ) -> Option<&'static str> {
     match classifiers.classifier(internal)?.role? {
-        ClassifierRole::MappedCollection(collection) if !collection.mutable => {
+        // Only a list kind has a distinct mutable marker its read-only runtime representation
+        // lacks; the other mutable spellings keep declining until theirs is separated too.
+        ClassifierRole::MappedCollection(collection)
+            if !collection.mutable || collection.kind == CollectionKind::List =>
+        {
             exact_collection_descriptor(collection)
         }
         _ => None,
