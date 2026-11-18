@@ -6,6 +6,7 @@
 //! with a fixed signature (`KMapMembers` in `krusty_rt.h`) that dispatches to the class's override
 //! virtually, so one table serves the class and every subclass that inherits it.
 
+use super::super::implementor_dispatch::ParameterBoundary;
 use super::*;
 use krusty::types::{ClassifierRole, CollectionKind};
 
@@ -50,6 +51,11 @@ struct MemberSlot {
     slot: u32,
     declared: (Vec<Ty>, Ty),
     implemented: (Vec<Ty>, Ty),
+    /// Whether the overridden declaration has a collection special bridge: its erased operand is
+    /// checked against the override's type, and the bridge's neutral result answers instead of
+    /// the override when it is of another type. The ordinary implementor dispatch decides this
+    /// by the same classifier role and member.
+    bridge: bool,
 }
 
 impl FileLowering<'_> {
@@ -108,6 +114,28 @@ impl FileLowering<'_> {
         let signature = self.signature_of(&params, member.answer)?;
         let answer = member.answer;
         self.emit_function(thunk, signature, answer, &name, &mut |body, values| {
+            if let (true, Some(&declared), Some(&implementation)) = (
+                slot.bridge,
+                slot.declared.0.first(),
+                slot.implemented.0.first(),
+            ) {
+                let boundary = ParameterBoundary {
+                    declared,
+                    implementation,
+                };
+                if let Some((accepted, rejected)) =
+                    body.bridge_argument_guard(values[1], &boundary)?
+                {
+                    body.continue_in(rejected);
+                    body.builder.seal_block(rejected);
+                    let Some(neutral) = body.bridge_rejection(answer) else {
+                        return Err(declined!("a `Unit` answer from `{name}`"));
+                    };
+                    body.builder.ins().return_(&[neutral]);
+                    body.continue_in(accepted);
+                    body.builder.seal_block(accepted);
+                }
+            }
             let mut operands = Vec::with_capacity(slot.implemented.0.len());
             for ((&value, &declared), &implemented) in values[1..]
                 .iter()
@@ -182,6 +210,15 @@ impl FileLowering<'_> {
         )
     }
 
+    /// Whether the member `name` of the collection declaration `owner` has a special bridge.
+    fn has_special_bridge(&self, owner: krusty::types::TypeName, name: &str) -> bool {
+        matches!(
+            self.classifiers.classifier(owner).and_then(|fact| fact.role),
+            Some(ClassifierRole::MappedCollection(collection))
+                if crate::intrinsics::has_special_bridge(collection, name)
+        )
+    }
+
     fn map_property_slot(
         &self,
         class: ClassId,
@@ -224,6 +261,7 @@ impl FileLowering<'_> {
                 slot,
                 declared: (Vec::new(), edge.declared_type),
                 implemented: (Vec::new(), edge.implementation_type),
+                bridge: false,
             });
         }
         Ok(selected)
@@ -314,6 +352,7 @@ impl FileLowering<'_> {
                 slot,
                 declared: (edge.declared_parameters.to_vec(), edge.declared_result),
                 implemented: (implementation.params.clone(), implementation.ret),
+                bridge: self.has_special_bridge(edge.overridden_owner, member.name),
             });
         }
         Ok(selected)
