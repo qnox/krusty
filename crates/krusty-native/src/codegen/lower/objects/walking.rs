@@ -65,6 +65,9 @@ impl FileLowering<'_> {
                 continue;
             }
             let slot = biased - 1;
+            if self.is_unreachable_abstract_entry(class, slot) {
+                continue;
+            }
             // What the SLOT answers, which is not what the thunk does: `next` on an
             // `Iterator<Int>` answers an unboxed machine integer and the runtime reads a
             // reference, so the conversion is the ordinary boundary one. Read from the slot
@@ -96,7 +99,7 @@ impl FileLowering<'_> {
         }
         // The indexed read takes an ARGUMENT, which is the whole of what separates it from the
         // four above: the index crosses unboxed, at the width the declaration states.
-        if slots.char_at != 0 {
+        if slots.char_at != 0 && !self.is_unreachable_abstract_entry(class, slots.char_at - 1) {
             let slot = slots.char_at - 1;
             let declared = self.walk_slot_result(class, slot)?;
             let name = format!("{base}_walk_get");
@@ -123,6 +126,16 @@ impl FileLowering<'_> {
         }
         members.collection_size = self.define_collection_size(class, base)?;
         Ok(members)
+    }
+
+    /// Whether the entry in `slot` of an abstract class's table is still abstract: no instance
+    /// of the class reaches it, and a concrete subclass walks its own table's entry instead.
+    fn is_unreachable_abstract_entry(&self, class: ClassId, slot: u32) -> bool {
+        self.ir.classes[class as usize].is_abstract
+            && matches!(
+                self.model.layout(class).vtable.get(slot as usize),
+                Some(Slot::Abstract)
+            )
     }
 
     /// The type the entry in `slot` takes as its ONE parameter, for the thunk that dispatches
