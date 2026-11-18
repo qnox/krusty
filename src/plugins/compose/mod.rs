@@ -34,6 +34,7 @@ pub use source_facts::ComposeFileFacts;
 use crate::ir::IrFile;
 use crate::plugins::runtime_declarations::PluginRuntime;
 use crate::plugins::{IrPlugin, PluginContext, PluginRejection, PluginSourceView};
+use crate::types::Ty;
 
 /// The runtime's `@Composable` annotation.
 const COMPOSABLE: &str = "androidx/compose/runtime/Composable";
@@ -68,7 +69,37 @@ impl IrPlugin for ComposePlugin {
         restart_groups::transform(ir);
     }
 
-    fn passes_transformed_entry_defaults(&self) -> bool {
-        true
+    fn passes_transformed_entry_defaults(&self, synthetic: &[Ty]) -> bool {
+        source_facts::takes_composer_frame(synthetic, true)
+    }
+}
+
+#[cfg(test)]
+mod transformed_entry_tests {
+    use super::{ComposeOptions, ComposePlugin};
+    use crate::plugins::IrPlugin;
+    use crate::types::Ty;
+
+    fn composer() -> Ty {
+        Ty::obj("androidx/compose/runtime/Composer")
+    }
+
+    fn passes(synthetic: &[Ty]) -> bool {
+        ComposePlugin::new(ComposeOptions::from_options(&[]))
+            .passes_transformed_entry_defaults(synthetic)
+    }
+
+    #[test]
+    fn the_composer_changed_and_mask_are_the_entry_this_plugin_passes() {
+        assert!(passes(&[composer(), Ty::Int, Ty::Int]));
+    }
+
+    #[test]
+    fn a_tail_of_other_roles_ending_in_the_mask_words_is_not() {
+        assert!(!passes(&[Ty::Long, Ty::Int, Ty::Int]));
+        assert!(!passes(&[Ty::Int, Ty::Int, Ty::Int]));
+        assert!(!passes(&[Ty::obj("lib/NotAComposer"), Ty::Int, Ty::Int]));
+        assert!(!passes(&[composer(), Ty::Long, Ty::Int]));
+        assert!(!passes(&[composer(), Ty::Int, Ty::Int, Ty::Int]));
     }
 }
