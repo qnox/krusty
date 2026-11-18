@@ -57,9 +57,24 @@ download() { # <n> <dest>
   # A macOS archive keeps the home under Contents/Home.
   [ -d "$work/home/Contents/Home" ] && { mv "$work/home" "$work/mac" && mv "$work/mac/Contents/Home" "$work/home"; }
   is_release "$work/home" "$n" || { echo "provision-jdks: the Temurin $n download is not JDK $n" >&2; rm -rf "$work"; return 1; }
-  rm -rf "$dest"
-  mv "$work/home" "$dest"
+  publish "$n" "$work/home" "$dest"
   rm -rf "$work"
+}
+
+# Publish a staged home at <dest> under a per-release lock, keeping a complete home another caller
+# published first: that home may be in use, so it is never replaced. Only an incomplete leftover is.
+publish() { # <n> <staged home> <dest>
+  local n=$1 staged=$2 dest=$3 lock="$3.lock" waited=0
+  until mkdir "$lock" 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+    [ "$waited" -le 300 ] || { echo "provision-jdks: timed out waiting for $lock" >&2; return 1; }
+  done
+  if ! is_release "$dest" "$n"; then
+    rm -rf "$dest"
+    mv "$staged" "$dest" || { rmdir "$lock"; return 1; }
+  fi
+  rmdir "$lock"
 }
 
 mkdir -p "$cache"

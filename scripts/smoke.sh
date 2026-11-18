@@ -131,9 +131,11 @@ export KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS="${KRUSTY_SMOKE_TARGET_TIMEOUT_
 
 # The JDKs the CLI corpus names (8, 11, 17, 21) and the box runner's 25, downloaded into
 # target/cache/jdks when no installed home provides them (scripts/provision-jdks.sh).
+# The helper's status is checked before any export, so a failed download leaves nothing half set.
+jdk_homes="$(scripts/provision-jdks.sh 8 11 17 21 25)" || exit 1
 while IFS='=' read -r name home; do
   export "$name=$home"
-done < <(scripts/provision-jdks.sh 8 11 17 21 25)
+done <<<"$jdk_homes"
 
 export KRUSTY_BOX_CASE_TIMEOUT_MS="${KRUSTY_BOX_CASE_TIMEOUT_MS:-8000}"
 export KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE=1
