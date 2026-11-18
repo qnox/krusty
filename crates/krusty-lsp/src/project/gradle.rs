@@ -15,6 +15,7 @@ use super::runner::{CommandRunner, BUILD_TOOL_TIMEOUT, SCAN_PROBE_TIMEOUT};
 use super::tooling::{self, Distribution, GradleBuildAction};
 
 const PROBE_VERSION: &str = "9";
+const ISOLATED_PROJECTS: &str = "org.gradle.unsafe.isolated-projects";
 /// `GradleConnector.newConnector`. Failures name this entry point.
 const TOOLING_ENTRY: &str = "org.gradle.tooling.GradleConnector";
 /// Cold `krustyModel` configuration of a repository the size of the Kotlin compiler. Used only by
@@ -451,6 +452,10 @@ pub struct GradleProvider {
     /// Replaces filesystem JDK discovery. Production probes leave this empty.
     #[cfg(test)]
     jvm_search: Option<super::gradle_daemon_jvm::JvmSearch>,
+    /// Gradle user home consulted for isolated projects. Tests leave this empty so a machine
+    /// `gradle.properties` cannot change the probe arguments.
+    #[cfg(test)]
+    gradle_user_home: Option<PathBuf>,
 }
 
 impl GradleProvider {
@@ -479,6 +484,8 @@ impl GradleProvider {
             materialize_dependencies,
             #[cfg(test)]
             jvm_search: None,
+            #[cfg(test)]
+            gradle_user_home: None,
         }
     }
 
@@ -488,17 +495,23 @@ impl GradleProvider {
         self
     }
 
+    #[cfg(test)]
+    fn with_gradle_user_home(mut self, home: PathBuf) -> Self {
+        self.gradle_user_home = Some(home);
+        self
+    }
+
     pub fn build_files(&self) -> Vec<PathBuf> {
         collect_build_files(&self.root, 8, &is_gradle_build_file)
     }
 
     fn build_action(&self) -> GradleBuildAction {
-        let mut arguments = vec![
-            "--quiet".to_string(),
-            "--console=plain".to_string(),
-            // Gradle's configuration cache rejects the probe's execution-time project access.
-            "--no-configuration-cache".to_string(),
-        ];
+        let mut arguments = vec!["--quiet".to_string(), "--console=plain".to_string()];
+        // The configuration cache rejects the probe's execution-time project access. Isolated
+        // projects require that cache, and Gradle refuses this flag while they are enabled.
+        if !self.isolated_projects_enabled() {
+            arguments.push("--no-configuration-cache".to_string());
+        }
         // `--continue` leaves the modules whose artifacts did land on disk.
         if self.materialize_dependencies {
             arguments.push("--continue".to_string());
@@ -518,6 +531,27 @@ impl GradleProvider {
             timeout: self.probe_timeout,
             java_home: self.daemon_java_home(),
         }
+    }
+
+    fn isolated_projects_enabled(&self) -> bool {
+        if let Some(enabled) = self
+            .probe_gradle_user_home()
+            .as_deref()
+            .and_then(|home| isolated_projects_property(&home.join("gradle.properties")))
+        {
+            return enabled;
+        }
+        isolated_projects_property(&self.root.join("gradle.properties")).unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    fn probe_gradle_user_home(&self) -> Option<PathBuf> {
+        self.gradle_user_home.clone()
+    }
+
+    #[cfg(not(test))]
+    fn probe_gradle_user_home(&self) -> Option<PathBuf> {
+        Some(super::tooling::gradle_user_home())
     }
 
     fn daemon_java_home(&self) -> Option<PathBuf> {
@@ -588,6 +622,24 @@ fn init_script_path(root: &Path) -> PathBuf {
         "krusty-gradle-{:016x}-v{PROBE_VERSION}.init.gradle",
         hasher.finish().as_u64()
     ))
+}
+
+/// The user Gradle home wins over the project file. A commented line is not a setting.
+fn isolated_projects_property(file: &Path) -> Option<bool> {
+    let text = std::fs::read_to_string(file).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if name.trim() == ISOLATED_PROJECTS {
+            return Some(value.trim().trim_matches('"').eq_ignore_ascii_case("true"));
+        }
+    }
+    None
 }
 
 fn is_gradle_build_file(path: &Path) -> bool {
@@ -1004,6 +1056,72 @@ mod tests {
         );
         assert!(!script.contains("set.allSource?.srcDirs"), "{script}");
         assert!(!tree.path(".krusty").exists());
+    }
+
+    #[test]
+    fn isolated_projects_are_not_asked_to_disable_the_configuration_cache() {
+        let tree = TempTree::new("gradle-isolated-projects");
+        tree.write("settings.gradle.kts", "");
+        tree.write(
+            "gradle.properties",
+            "org.gradle.unsafe.isolated-projects=true\n",
+        );
+        let provider = GradleProvider::new(tree.root());
+        let (_, action) = probe_action(&provider, FakeRunner::stdout(&recorded_output()));
+
+        assert!(
+            !action
+                .arguments
+                .iter()
+                .any(|argument| argument == "--no-configuration-cache"),
+            "isolated projects refuse that flag: {:?}",
+            action.arguments
+        );
+        assert_eq!(action.arguments[0], "--quiet");
+        assert_eq!(action.arguments[1], "--console=plain");
+        assert!(action
+            .arguments
+            .iter()
+            .any(|argument| argument == "--init-script"));
+        assert_eq!(action.java_home, None);
+    }
+
+    #[test]
+    fn a_disabled_isolated_projects_property_keeps_no_configuration_cache() {
+        let tree = TempTree::new("gradle-isolated-off");
+        tree.write("settings.gradle.kts", "");
+        tree.write(
+            "gradle.properties",
+            "org.gradle.unsafe.isolated-projects=true\n",
+        );
+        let user = tree.directory("user-gradle");
+        tree.write(
+            "user-gradle/gradle.properties",
+            "# org.gradle.unsafe.isolated-projects=true\norg.gradle.unsafe.isolated-projects=false\n",
+        );
+        let provider = GradleProvider::new(tree.root()).with_gradle_user_home(user);
+        let (_, action) = probe_action(&provider, FakeRunner::stdout(&recorded_output()));
+        assert!(action
+            .arguments
+            .iter()
+            .any(|argument| argument == "--no-configuration-cache"));
+    }
+
+    #[test]
+    fn a_user_gradle_home_can_enable_isolated_projects() {
+        let tree = TempTree::new("gradle-isolated-user");
+        tree.write("settings.gradle.kts", "");
+        let user = tree.directory("user-gradle");
+        tree.write(
+            "user-gradle/gradle.properties",
+            "org.gradle.unsafe.isolated-projects = true\n",
+        );
+        let provider = GradleProvider::new(tree.root()).with_gradle_user_home(user);
+        let (_, action) = probe_action(&provider, FakeRunner::stdout(&recorded_output()));
+        assert!(!action
+            .arguments
+            .iter()
+            .any(|argument| argument == "--no-configuration-cache"));
     }
 
     #[test]
