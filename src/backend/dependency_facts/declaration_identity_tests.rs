@@ -80,6 +80,7 @@ fn sam_value(
             kotlin_interface: true,
             parameter_identities: vec![],
             type_parameters: vec![],
+            placement: crate::ir::IrSamPlacement::ThisFile,
         })),
     })
 }

@@ -91,9 +91,11 @@ impl BodyLowering<'_> {
             return unsupported("a SAM conversion to a non-public classifier");
         };
         let declaration = self.linker.sam_declaration(signature)?;
-        declaration.applied(target_type.non_null()).ok_or_else(|| {
+        let mut target = declaration.applied(target_type.non_null()).ok_or_else(|| {
             mismatch("a SAM conversion differs from its checked classifier application")
-        })
+        })?;
+        target.placement = self.linker.sam_placement()?;
+        Ok(target)
     }
 
     /// Whether `overridden` is one of the declarations the checked SAM declaration of the

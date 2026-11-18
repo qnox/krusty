@@ -42,6 +42,7 @@ mod enum_materialization;
 #[cfg(test)]
 mod initializer_capability_tests;
 mod local_class;
+mod sam_placement;
 mod static_properties;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
@@ -1557,6 +1558,10 @@ impl<'s> CallLinker for Linker<'_, 's> {
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
         self.sources.callees.applied_supertype(sub, owner)
+    }
+
+    fn sam_placement(&self) -> Result<crate::ir::IrSamPlacement, KlibBodyDeclineReason> {
+        self.active_sam_placement()
     }
 
     fn dependency_override(
