@@ -689,6 +689,7 @@ fn prepare_interface<'a>(
         self_type,
         bodies: source.bodies,
         declarations: source.declarations,
+        classes: source.classes,
         module: source.module,
         interfaces: &interfaces,
     };
