@@ -144,7 +144,9 @@ impl KlibDeclarationBodies {
     /// The members the class `class` (serialized at `signature` in `arena`) inherits from its
     /// direct interface supertypes without overriding them, each with the one inherited
     /// declaration that has a body and the bodyless declarations it implements with it:
-    /// `AbstractList` implements `List.contains` with `AbstractCollection.contains`.
+    /// `AbstractList` implements `List.contains` with `AbstractCollection.contains`. An interface
+    /// default that nothing else declares implements itself: `CombinedContext` implements
+    /// `CoroutineContext.plus` with it.
     pub(crate) fn inherited_implementations(
         &self,
         body_module: &str,
@@ -196,11 +198,16 @@ impl KlibDeclarationBodies {
                     continue;
                 };
                 let body = body.clone();
-                let implemented = declarations
+                let mut implemented = declarations
                     .into_iter()
                     .filter(|identity| *identity != body)
                     .collect::<Vec<_>>();
-                if !implemented.is_empty() && !found.iter().any(|(known, _)| *known == body) {
+                // A default no other declaration overrides implements itself for the class: the
+                // class's instances reach it through the interface it declares.
+                if implemented.is_empty() {
+                    implemented.push(body.clone());
+                }
+                if !found.iter().any(|(known, _)| *known == body) {
                     found.push((body, implemented));
                 }
             }
