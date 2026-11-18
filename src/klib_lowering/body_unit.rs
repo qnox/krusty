@@ -42,6 +42,7 @@ mod enum_materialization;
 #[cfg(test)]
 mod initializer_capability_tests;
 mod local_class;
+mod sam_placement;
 mod static_properties;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
@@ -1117,6 +1118,19 @@ impl<'s> CallLinker for Linker<'_, 's> {
         })
     }
 
+    fn sam_declaration(
+        &self,
+        classifier: &KlibPublicIdSignature,
+    ) -> Result<crate::ir::CheckedKlibSamDeclaration, KlibBodyDeclineReason> {
+        self.sources
+            .callees
+            .sam_declaration(&self.active_module, classifier)
+            .cloned()
+            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a SAM conversion without a checked declaration",
+            ))
+    }
+
     fn declares_implementation(
         &self,
         callee: &KlibPublicIdSignature,
@@ -1311,6 +1325,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             super::same_library_class::LocalClassSource {
                 bodies,
                 declarations: self.sources.declarations,
+                classes: callees.class_type_oracle(),
                 module: &module,
                 validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
             },
@@ -1549,6 +1564,10 @@ impl<'s> CallLinker for Linker<'_, 's> {
             owner,
             &|sub, owner| callees.applied_supertype(sub, owner),
         )
+    }
+
+    fn sam_placement(&self) -> Result<crate::ir::IrSamPlacement, KlibBodyDeclineReason> {
+        self.active_sam_placement()
     }
 
     fn dependency_override(

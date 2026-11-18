@@ -12,6 +12,7 @@ mod call_sig;
 mod callable_scope_rung;
 mod class_identity;
 mod class_name_property;
+mod classifier_application;
 mod classifier_callables;
 mod classifier_declaration;
 mod classifier_kind;
@@ -44,6 +45,7 @@ mod property_producer;
 mod provider_override;
 mod result_nullability;
 mod runtime_exception;
+mod sam_application;
 mod scalar_instruction;
 mod singleton_dispatch;
 mod source_inputs;
@@ -65,6 +67,7 @@ pub use call_realization::{
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub use class_identity::KlibClassIdentity;
+pub(crate) use classifier_application::{classifier_bindings, classifier_type_parameter_bounds};
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
     ConstructorCallConstraints,
@@ -103,6 +106,7 @@ pub use property_producer::PropertyProducer;
 pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
 pub use runtime_exception::{RuntimeExceptionKind, RuntimeExceptionLayout};
+pub(crate) use sam_application::{sam_application_bindings, sam_substitute};
 pub use singleton_dispatch::SingletonDispatch;
 pub(crate) use source_inputs::{ReceiverInputBounds, SourceInputDeclaration};
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
