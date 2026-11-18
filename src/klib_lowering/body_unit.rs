@@ -1089,6 +1089,22 @@ impl<'s> CallLinker for Linker<'_, 's> {
         })
     }
 
+    fn intercepted_continuation(
+        &self,
+        signature: &KlibDeclarationSignature,
+    ) -> Result<
+        Option<super::intercepted_continuation::InterceptedContinuationExpansion>,
+        KlibBodyDeclineReason,
+    > {
+        let bodies = self.sources.bodies;
+        match bodies.linked_origin(&self.active_module, signature) {
+            KlibCalleeOrigin::Exact(identity) => {
+                super::intercepted_continuation::expansion(self.sources.callees, bodies, &identity)
+            }
+            KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => Ok(None),
+        }
+    }
+
     fn continuation_intrinsic(
         &self,
         signature: &KlibDeclarationSignature,
