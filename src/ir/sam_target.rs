@@ -40,6 +40,8 @@ pub struct IrSamTarget {
     /// The converted value's own callable view is `suspend`. A non-suspend value adapted to a
     /// suspend method is stored as that value's `FunctionN`; the continuation stays on the method.
     pub source_suspend: bool,
+    /// The selected declaration requires the object-method dispatch path, not an ordinary slot.
+    pub requires_object_dispatch: bool,
     /// The distinct own results of the declarations the method overrides, unspecialized. A target
     /// whose method result or bridges depend on the overridden results realizes them from these.
     pub overridden_results: Vec<Ty>,
