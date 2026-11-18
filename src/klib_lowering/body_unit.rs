@@ -1314,6 +1314,14 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .is_some()
     }
 
+    fn link_local_object(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<TypeName, KlibBodyDeclineReason> {
+        self.install_local_object(ir, signature)
+    }
+
     fn link_local_constructor(
         &mut self,
         ir: &mut IrFile,
