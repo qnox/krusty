@@ -68,11 +68,12 @@ pub(super) fn declare(
 /// Expand every call of an inline function of the unit in `ir`, including the calls a copied body
 /// itself makes.
 pub(super) fn expand_calls(ir: &mut IrFile) -> Result<(), KlibBodyDeclineReason> {
-    let mut sites = (0..ir.exprs.len())
-        .map(|site| site as ExprId)
-        .filter(|&site| called(ir, site).is_some_and(|callee| ir.inline_only_fns.contains(&callee)))
-        .collect::<Vec<_>>();
-    sites.sort_unstable();
+    let mut sites = Vec::new();
+    for site in 0..ir.exprs.len() as ExprId {
+        if inline_callee(ir, site)?.is_some() {
+            sites.push(site);
+        }
+    }
     if sites.is_empty() {
         return Ok(());
     }
@@ -84,15 +85,20 @@ pub(super) fn expand_calls(ir: &mut IrFile) -> Result<(), KlibBodyDeclineReason>
     Ok(())
 }
 
-/// The function `site` calls directly, when it is such a call. A call that leaves arguments to an
-/// inline function's defaults declines.
-fn called(ir: &IrFile, site: ExprId) -> Option<FunId> {
+/// The inline function of the unit `site` calls, when it is such a call. A call that leaves
+/// arguments to an inline function's defaults is not expanded, so it declines.
+fn inline_callee(ir: &IrFile, site: ExprId) -> Result<Option<FunId>, KlibBodyDeclineReason> {
     let IrExpr::Call { callee, .. } = ir.expr(site) else {
-        return None;
+        return Ok(None);
     };
     match **callee {
-        Callee::Local(function) => Some(function),
-        _ => None,
+        Callee::Local(function) => Ok(ir.inline_only_fns.contains(&function).then_some(function)),
+        Callee::LocalWithDefaults { function, .. } if ir.inline_only_fns.contains(&function) => {
+            Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call of an inline function that leaves arguments to its defaults",
+            ))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -102,8 +108,7 @@ fn expand(
     next_temporary: &mut u32,
     stack: &mut HashSet<FunId>,
 ) -> Result<(), KlibBodyDeclineReason> {
-    let Some(function) = called(ir, site).filter(|function| ir.inline_only_fns.contains(function))
-    else {
+    let Some(function) = inline_callee(ir, site)? else {
         return Ok(());
     };
     let IrExpr::Call {
@@ -162,12 +167,12 @@ fn expand(
         value: Some(value),
     };
     ir.inline_regions.insert(site);
-    let mut nested = spliced
-        .copies
-        .values()
-        .copied()
-        .filter(|&copy| called(ir, copy).is_some_and(|callee| ir.inline_only_fns.contains(&callee)))
-        .collect::<Vec<_>>();
+    let mut nested = Vec::new();
+    for &copy in spliced.copies.values() {
+        if inline_callee(ir, copy)?.is_some() {
+            nested.push(copy);
+        }
+    }
     nested.sort_unstable();
     for nested in nested {
         expand(ir, nested, next_temporary, stack)?;
