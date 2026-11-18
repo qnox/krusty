@@ -703,6 +703,14 @@ impl BackendModuleFacts {
             | super::instance_links::InstanceEntry::ConstructorDefaults { declaration, .. } => {
                 self.source_constructors.contains(declaration)
             }
+            super::instance_links::InstanceEntry::TypeTest(classifier) => {
+                self.classifiers.get(classifier).is_some_and(|fact| {
+                    fact.source
+                        && !fact.is_interface()
+                        && !fact.is_enum()
+                        && fact.kind != crate::libraries::TypeKind::Object
+                })
+            }
         }
     }
 
