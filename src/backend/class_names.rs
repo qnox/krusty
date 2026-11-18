@@ -141,12 +141,7 @@ pub fn source_class_names(ir: &IrFile, class: ClassId) -> Option<ClassNames> {
 /// The names of a local classifier with no source provenance: its container's qualified name,
 /// then its own name.
 fn site_class_names(ir: &IrFile, site: &IrSiteClassName) -> Option<ClassNames> {
-    let mut qualified = match site.container {
-        // Boundary conversion: the package path is spelled with `/` in the name tree.
-        IrSiteClassContainer::Package(package) => package.render().replace('/', "."),
-        IrSiteClassContainer::Classifier(owner) => member_class_names(owner).qualified,
-        IrSiteClassContainer::Class(owner) => source_class_names(ir, owner)?.qualified,
-    };
+    let mut qualified = site_container_name(ir, site.container)?;
     if !qualified.is_empty() {
         qualified.push('.');
     }
@@ -154,6 +149,18 @@ fn site_class_names(ir: &IrFile, site: &IrSiteClassName) -> Option<ClassNames> {
     Some(ClassNames {
         qualified,
         simple: site.name.to_string(),
+    })
+}
+
+/// The qualified name of the declaration container `container`, which prefixes the names of the
+/// classes Kotlin places in it; empty for the root package. `None` for a local container Kotlin
+/// does not name from source.
+pub fn site_container_name(ir: &IrFile, container: IrSiteClassContainer) -> Option<String> {
+    Some(match container {
+        // Boundary conversion: the package path is spelled with `/` in the name tree.
+        IrSiteClassContainer::Package(package) => package.render().replace('/', "."),
+        IrSiteClassContainer::Classifier(owner) => member_class_names(owner).qualified,
+        IrSiteClassContainer::Class(owner) => source_class_names(ir, owner)?.qualified,
     })
 }
 
