@@ -63,7 +63,12 @@ pub(super) fn classifier_record(
         .properties
         .iter()
         .map(|property| {
-            let published = published_property(identities, property, member, enclosing);
+            let mut published = published_property(identities, property, member, enclosing);
+            published.read_stability = property.declaration.read_stability.across_modules(
+                signed
+                    .value_class_components
+                    .contains(&property.declaration.name),
+            );
             (property.declaration.name.clone(), published)
         })
         .collect::<Vec<_>>();

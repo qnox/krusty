@@ -264,6 +264,7 @@ fn an_extension_property_with_a_type_parameter() {
         constant: None,
         annotations: Vec::new(),
         return_value_status: Default::default(),
+        read_stability: Default::default(),
     };
     let signature =
         package_property_signature(top_level(&kotlin_collections), &last_index).unwrap();
@@ -361,6 +362,7 @@ fn an_extension_property_without_type_parameters() {
         constant: None,
         annotations: Vec::new(),
         return_value_status: Default::default(),
+        read_stability: Default::default(),
     };
     let signature = package_property_signature(top_level(&kotlin_text), &last_index).unwrap();
     assert_eq!(member_id(&signature), 1_266_685_057_648_611_082);
@@ -397,6 +399,7 @@ fn a_getter_is_a_function_with_the_property_receiver_and_type_parameters() {
         constant: None,
         annotations: Vec::new(),
         return_value_status: Default::default(),
+        read_stability: Default::default(),
     };
     let getter = package_property_accessor_signature(
         top_level(&kotlin_collections),
