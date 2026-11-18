@@ -1308,15 +1308,26 @@ tasks.register<JavaExec>("runJvm") {
             .iter()
             .take_while(|line| line.starts_with("  "))
             .collect::<Vec<_>>();
-        assert_eq!(reasons.len(), 1, "{output}");
+        let reasons = reasons
+            .iter()
+            .map(|reason| reason.trim_start())
+            .collect::<Vec<_>>();
         assert_eq!(
-            reasons[0].trim_start(),
-            format!(
-                "{}/src/main/kotlin/Greeting.kt:5:1: error: krusty's Compose compiler plugin \
-                 does not support a composable function parameter whose stability kotlinc infers \
-                 yet; compile this module with kotlinc",
-                root.display()
-            ),
+            reasons,
+            [
+                format!(
+                    "{}/src/main/kotlin/Greeting.kt:5:1: error: krusty's Compose compiler plugin \
+                     does not support a lambda in a composable function yet; compile this module \
+                     with kotlinc",
+                    root.display()
+                ),
+                format!(
+                    "{}/src/main/kotlin/Greeting.kt:6:5: error: krusty's Compose compiler plugin \
+                     does not support a composable call outside the statements of a composable \
+                     body yet; compile this module with kotlinc",
+                    root.display()
+                ),
+            ],
             "{output}"
         );
         // krusty ran once, and the classes are the Kotlin task's.
@@ -1442,7 +1453,7 @@ dependencies {
         );
         write(
             "src/main/kotlin/Greeting.kt",
-            "import androidx.compose.runtime.Composable\n\n// Inferred stability: kotlinc decides how List compares.\n@Composable\nfun Greeting(names: List<String>) {}\n",
+            "import androidx.compose.runtime.Composable\nimport androidx.compose.runtime.ReusableContent\n\n@Composable\nfun Greeting() {\n    ReusableContent(1) { }\n}\n",
         );
     }
 
