@@ -2062,6 +2062,7 @@ mod tests {
                 kotlin_interface: true,
                 parameter_identities: Vec::new(),
                 type_parameters: Vec::new(),
+                placement: crate::ir::IrSamPlacement::ThisFile,
             })),
             inline_body: None,
         };

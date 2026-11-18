@@ -209,7 +209,9 @@ pub use references::{
     IrConstructorReferenceDeclaration, IrPropertyFunctionReference, IrReferencedProperty, PropRef,
     ReflectedCallable,
 };
-pub use sam_target::{IrSamMethod, IrSamMethodFrame, IrSamTarget, IrSamTypeParameter};
+pub use sam_target::{
+    IrSamMethod, IrSamMethodFrame, IrSamPlacement, IrSamTarget, IrSamTypeParameter,
+};
 pub use site_class_names::{IrSiteClassContainer, IrSiteClassName};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;

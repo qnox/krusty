@@ -253,6 +253,12 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// Where the code of the body being lowered stands, for a SAM conversion in it. A template
+    /// is expanded into the file being compiled, whose placement is its own.
+    fn sam_placement(&self) -> Lowered<crate::ir::IrSamPlacement> {
+        Ok(crate::ir::IrSamPlacement::ThisFile)
+    }
+
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 
