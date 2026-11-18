@@ -235,6 +235,27 @@ impl Checker<'_> {
         argument.is_expected_type_callable() && !argument.result_is_input_constrained()
     }
 
+    /// Whether the selected nested call took a solution for every one of its type arguments from
+    /// inputs that are themselves determined: an argument that is another call whose result is
+    /// still open (`forward(produce())`) only passes on a provisional completion. An integer
+    /// literal argument is not determined either: its provisional `Int` widens to the type the
+    /// enclosing parameter expects (`listOf(1)` as `List<Long>`).
+    pub(super) fn nested_call_type_arguments_solved(&self, expression: ExprId) -> bool {
+        let arguments: &[ExprId] = match self.file.expr(expression) {
+            Expr::Call { args, .. } => args,
+            Expr::SafeCall {
+                args: Some(args), ..
+            } => args,
+            _ => &[],
+        };
+        self.selected_call_type_arguments(expression)
+            .is_some_and(|solved| !solved.is_empty() && solved.iter().all(Option::is_some))
+            && arguments.iter().all(|&argument| {
+                !matches!(self.file.expr(argument), Expr::IntLit(_) | Expr::UIntLit(_))
+                    && self.unbound_call_result_signature(argument).is_none()
+            })
+    }
+
     /// Whether an enclosing parameter may complete this nested result without replacing type
     /// evidence fixed by the nested call's own inputs.
     pub(super) fn argument_result_may_bind_expected(
@@ -288,7 +309,11 @@ impl Checker<'_> {
         .unwrap_or_default();
         generic_sig.formals.iter().all(|formal| {
             match (input_bindings.get(formal), expected_bindings.get(formal)) {
-                (Some(&input), Some(&expected)) => self.receiver_is_assignable(input, expected),
+                // An erased top is a nested call's default completion of a variable its own inputs
+                // left open, not a lower bound the expectation must keep.
+                (Some(&input), Some(&expected)) => {
+                    input.is_erased_top() || self.receiver_is_assignable(input, expected)
+                }
                 _ => true,
             }
         })

@@ -179,7 +179,14 @@ pub(super) fn score_with_declaration(
                 return None;
             }
         }
-        let contextual_call_result = checker.call_result_can_bind_expected(argument, expected);
+        // A nested call whose own inputs solved every type argument (`T` of
+        // `BuilderNode().apply {}` from its receiver) has real lower bounds, so an expectation
+        // may only widen its result, never replace it; an unsolved variable is still open.
+        let contextual_call_result = if checker.nested_call_type_arguments_solved(argument) {
+            checker.argument_result_may_bind_expected(scope, argument, expected)
+        } else {
+            checker.call_result_can_bind_expected(argument, expected)
+        };
         // A collection literal is an expected-type-dependent expression. Its expectation-free
         // probe deliberately materializes the language fallback (`List<T>`), but that probe is
         // not applicability evidence against a candidate whose parameter supplies an array or
