@@ -71,9 +71,7 @@ use super::super::runtime::Runtime;
 use super::laid_out_classes::{
     DependencyImplementation, FunctionBridgeEntry, LaidOutClass, LaidOutClasses, Placed,
 };
-use super::lower::{
-    carrier, cell_reference, parameter_carrier, parameter_carrier_of, Unsupported, STRING,
-};
+use super::lower::{carrier, cell_reference, parameter_carrier, Unsupported, STRING};
 
 mod constructor_prefix;
 mod published_slots;

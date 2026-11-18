@@ -13,7 +13,7 @@ use super::super::super::encode::{
     BlockType, CompositeType, FieldType, Function, Module, StorageType, SubType, ValType,
 };
 use super::super::super::runtime::Runtime;
-use super::{carrier, parameter_carrier_of, Body, FileContext, Unsupported};
+use super::{carrier, Body, FileContext, Unsupported};
 
 /// Accessors reserved for one file, and the object each local delegated property is.
 pub(super) struct Prepared {
