@@ -1424,13 +1424,11 @@ fn member_overrides(
     Ok(overrides)
 }
 
-/// Every supertype above a class's written interfaces, at the
+/// Every supertype from a class's written interfaces and its library superclass up, at the
 /// application the walk from them reaches it with, through the hierarchy the checker froze.
 /// Without that evidence only the written supertypes themselves are known.
 fn applied_supertypes(scope: &MemberScope<'_>) -> Vec<(TypeName, Ty)> {
     let mut supertypes = Vec::<(TypeName, Ty)>::new();
-    // The library superclass is walked like a written interface: a member it declares, or one
-    // above it, is applied as the class applies its superclass.
     for written in scope.interfaces.iter().chain(scope.library_superclass) {
         let root = Ty::obj_args_name(written.name, &written.arguments);
         for (classifier, applied, _) in
