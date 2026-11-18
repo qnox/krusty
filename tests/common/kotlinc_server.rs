@@ -530,7 +530,7 @@ fn provision_kotlinc(release: &str) -> Option<PathBuf> {
 /// Download `url` and publish its `kotlinc/` tree as `dest/kotlinc`, once, under the release lock.
 fn provision_distribution(dest: &Path, release: &str, url: &str) -> Option<PathBuf> {
     let jar = dest.join("kotlinc/lib/kotlin-compiler.jar");
-    std::fs::create_dir_all(&dest).ok()?;
+    std::fs::create_dir_all(dest).ok()?;
     let lock_path = dest.join(".provision.lock");
     let lock = std::fs::OpenOptions::new()
         .create(true)
