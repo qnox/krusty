@@ -11,6 +11,9 @@ use crate::metadata::semantic::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KlibBodyDeclarationModifiers {
     pub(crate) is_inline: bool,
+    /// The declaration has a `reified` type parameter, whose run-time type only an expansion at
+    /// each call site supplies.
+    pub(crate) has_reified_type_parameters: bool,
     pub(crate) is_suspend: bool,
     pub(crate) is_external: bool,
     pub(crate) property_is_external: bool,
@@ -43,8 +46,12 @@ impl KlibBodyDeclarationModifiers {
     /// Whether a call of the declaration runs a body the support unit lowers from its serialized
     /// one. A suspend body is one too: the common coroutine preparation gives it the continuation
     /// ABI and the state machine, as it does a source suspend function.
+    ///
+    /// An `inline` declaration qualifies unless it has a `reified` type parameter: a call that
+    /// is not expanded at its site (a delegated property's convention call, a callable reference)
+    /// runs the same body as an ordinary call does.
     pub(crate) fn permits_ordinary_body(self) -> bool {
-        !self.is_inline
+        !(self.is_inline && self.has_reified_type_parameters)
             && !self.is_external
             && !self.property_is_external
             && matches!(self.modality, KotlinModality::Final | KotlinModality::Open)
@@ -65,6 +72,7 @@ impl KlibBodyDeclarationModifiers {
     pub(crate) fn function(declaration: &KotlinFunction) -> Self {
         Self {
             is_inline: declaration.is_inline,
+            has_reified_type_parameters: declaration.has_reified_type_params,
             is_suspend: declaration.is_suspend,
             is_external: declaration.is_external,
             property_is_external: false,
@@ -75,6 +83,7 @@ impl KlibBodyDeclarationModifiers {
     pub(crate) fn accessor(property: &KotlinProperty, accessor: &KotlinAccessorModifiers) -> Self {
         Self {
             is_inline: accessor.is_inline,
+            has_reified_type_parameters: property.formals.iter().any(|formal| formal.reified),
             is_suspend: false,
             is_external: accessor.is_external,
             property_is_external: property.is_external,
@@ -97,6 +106,7 @@ mod tests {
         ] {
             let modifiers = KlibBodyDeclarationModifiers {
                 is_inline: false,
+                has_reified_type_parameters: false,
                 is_suspend: false,
                 is_external: false,
                 property_is_external: false,
@@ -110,6 +120,7 @@ mod tests {
     fn ordinary_body_admission_requires_every_implementation_modifier() {
         let ordinary = KlibBodyDeclarationModifiers {
             is_inline: false,
+            has_reified_type_parameters: false,
             is_suspend: false,
             is_external: false,
             property_is_external: false,
@@ -126,9 +137,15 @@ mod tests {
             ..ordinary
         }
         .permits_ordinary_body());
+        assert!(KlibBodyDeclarationModifiers {
+            is_inline: true,
+            ..ordinary
+        }
+        .permits_ordinary_body());
         for excluded in [
             KlibBodyDeclarationModifiers {
                 is_inline: true,
+                has_reified_type_parameters: true,
                 ..ordinary
             },
             KlibBodyDeclarationModifiers {
