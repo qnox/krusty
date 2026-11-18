@@ -198,6 +198,45 @@ impl<'s> Linker<'_, 's> {
         Ok(constructor)
     }
 
+    /// The constructor a file-local construction invokes: one of a class already installed for
+    /// this library, or the constructor of a class prepared and installed now.
+    pub(super) fn link_constructor_of_local_class(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibIrSignature,
+    ) -> Result<super::super::same_library_class::LocalConstructor, KlibBodyDeclineReason> {
+        let module = self.active_module.clone();
+        let bodies = self.sources.bodies;
+        let callees = self.sources.callees;
+        match super::super::same_library_class::link(
+            super::super::same_library_class::LocalClassSource {
+                bodies,
+                declarations: self.sources.declarations,
+                classes: callees.class_type_oracle(),
+                module: &module,
+                validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
+            },
+            callee,
+            self.local_classes,
+        )? {
+            super::super::same_library_class::LocalLink::Ready(constructor) => Ok(constructor),
+            super::super::same_library_class::LocalLink::Prepared(prepared) => {
+                self.install_local_class(ir, prepared)
+            }
+        }
+    }
+
+    /// Whether `signature` names a non-public interface of this library.
+    pub(super) fn names_local_interface(&self, signature: &KlibIrSignature) -> bool {
+        self.sources
+            .bodies
+            .module_local_class(&self.active_module, signature)
+            .is_some_and(|(_, class)| {
+                crate::metadata::semantic::class_kind(class.base.flags)
+                    == crate::libraries::TypeKind::Interface
+            })
+    }
+
     /// Install the non-public interface `signature` of this library in the unit, with its abstract
     /// members declared, so a type test or a member call of it has a class to name.
     pub(super) fn install_local_interface(

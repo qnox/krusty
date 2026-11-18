@@ -1322,13 +1322,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn is_local_interface(&self, signature: &KlibIrSignature) -> bool {
-        self.sources
-            .bodies
-            .module_local_class(&self.active_module, signature)
-            .is_some_and(|(_, class)| {
-                crate::metadata::semantic::class_kind(class.base.flags)
-                    == crate::libraries::TypeKind::Interface
-            })
+        self.names_local_interface(signature)
     }
 
     fn link_local_interface(
@@ -1344,25 +1338,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         ir: &mut IrFile,
         callee: &KlibIrSignature,
     ) -> Result<super::same_library_class::LocalConstructor, KlibBodyDeclineReason> {
-        let module = self.active_module.clone();
-        let bodies = self.sources.bodies;
-        let callees = self.sources.callees;
-        match super::same_library_class::link(
-            super::same_library_class::LocalClassSource {
-                bodies,
-                declarations: self.sources.declarations,
-                classes: callees.class_type_oracle(),
-                module: &module,
-                validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
-            },
-            callee,
-            self.local_classes,
-        )? {
-            super::same_library_class::LocalLink::Ready(constructor) => Ok(constructor),
-            super::same_library_class::LocalLink::Prepared(prepared) => {
-                self.install_local_class(ir, prepared)
-            }
-        }
+        self.link_constructor_of_local_class(ir, callee)
     }
 
     fn link_local_function(
