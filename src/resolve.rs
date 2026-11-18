@@ -237,6 +237,7 @@ mod lambda_returns;
 mod lexical_bindings;
 mod lexical_policies;
 mod library_constructor_failure;
+mod library_default_realization;
 mod local_call_applicability;
 mod local_call_arguments;
 mod local_callable_reference_selection;
@@ -36353,44 +36354,6 @@ impl<'a> Checker<'a> {
         self.file.member_name_span(member, name)
     }
 
-    /// The literal each omitted defaulted parameter takes, or `None` when the provider cannot say.
-    ///
-    /// Every omitted slot must be answered: a call that can fill three of four omitted parameters
-    /// is a call that cannot be made, and half an answer here would pass the callee a value it
-    /// never declared. The value must also FIT the parameter it fills — a provider that decoded a
-    /// constant of the wrong shape is a provider that is wrong about the declaration, and passing
-    /// it would be a silently miscompiled argument rather than a diagnosis.
-    fn library_default_literals(
-        &self,
-        call: ExprId,
-        selected: &crate::libraries::FunctionInfo,
-    ) -> Option<Vec<(usize, crate::libraries::DefaultValue)>> {
-        let slots = self.resolved_call_arg_slots.get(&call)?;
-        // Provider defaults are parallel to VALUE parameters. Context parameters are supplied
-        // independently and must not shift this declaration-owned table.
-        let parameters = selected.value_params();
-        if selected.context_count > selected.call_sig.param_names.len() {
-            return None;
-        }
-        let context_count = selected.context_count;
-        let value_call_sig = selected.call_sig.suffix(context_count);
-        let mut literals = Vec::new();
-        for (parameter, argument) in slots.iter().enumerate() {
-            if argument.is_some() || value_call_sig.vararg_index == Some(parameter) {
-                continue;
-            }
-            let value = selected.default_values.get(parameter)?.clone()?;
-            if !self
-                .resolver()
-                .default_literal_fits(&value, *parameters.get(parameter)?)
-            {
-                return None;
-            }
-            literals.push((parameter, value));
-        }
-        (!literals.is_empty()).then_some(literals)
-    }
-
     fn nullable_receiver_call_span(&self, call: ExprId) -> Span {
         if let Expr::Call { callee, .. } = self.file.expr(call) {
             if let Some((_, span)) = self
@@ -36986,21 +36949,7 @@ impl<'a> Checker<'a> {
                 // arguments, so the call site passes it and no `$default` symbol is named.
                 self.resolved_library_default_literals
                     .insert(call, literals);
-            } else if selected.callable.defaults_from_declaration
-                && selected
-                    .callable
-                    .transformed_entry_tail
-                    .as_deref()
-                    .is_none_or(|tail| {
-                        self.native_plugins.passes_transformed_entry_defaults(
-                            &crate::plugins::TransformedEntry {
-                                annotations: &selected.callable.annotations,
-                                synthetic: tail,
-                                parameters: selected.callable.params.len(),
-                            },
-                        )
-                    })
-            {
+            } else if self.library_entry_fills_its_own_defaults(&selected.callable) {
                 selected.callable.default_call = true;
             } else {
                 self.diags.error(
