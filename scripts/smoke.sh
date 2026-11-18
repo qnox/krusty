@@ -130,8 +130,8 @@ export KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS="${KRUSTY_SMOKE_TARGET_TIMEOUT_
 
 # The JDK feature releases the CLI corpus names that no home provides (the same places the test
 # looks: KRUSTY_JDK_<n>_HOME, JAVA_HOME_<n>_X64/ARM64, JAVA_HOME and /usr/lib/jvm). Without them
-# the CLI corpus results differ from CI's by environment, not by a regression, so that one failure
-# is reported as unverified instead of failed and does not start the other-version fallback.
+# the CLI corpus cannot match CI. Only a warning here: a failing job stays a failure, whatever its
+# cause, and its log shows the cases.
 missing_jdks=()
 for n in 8 11 17 21; do
   found=0
@@ -144,7 +144,6 @@ for n in 8 11 17 21; do
   done
   [ "$found" = 1 ] || missing_jdks+=("$n")
 done
-cli_tests='kotlin_cli_jvm_conformance::krusty_reproduces_kotlincs_cli_test_corpus|kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case'
 
 export KRUSTY_BOX_CASE_TIMEOUT_MS="${KRUSTY_BOX_CASE_TIMEOUT_MS:-8000}"
 export KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE=1
@@ -158,6 +157,10 @@ if [ -n "$(changed 'tests/diagnostics_false_accepts/**' 'tests/diagnostics_not_s
 fi
 
 declare -A kotlinc_of box_of native_of
+
+if [ "${#missing_jdks[@]}" -gt 0 ]; then
+  step "warning: no JDK ${missing_jdks[*]} home found; the CLI corpus in the nonbox jobs will not match CI (set KRUSTY_JDK_<n>_HOME)"
+fi
 
 # One lane of one version: the sampled corpus slice, then owned regressions. JVM, wasm-js and
 # wasm-wasi run every owned regression; their inventory keeps only the ones that apply to the
@@ -212,7 +215,6 @@ logdir="$(mktemp -d "${TMPDIR:-/tmp}/krusty-smoke.XXXXXX")"
 trap 'rm -rf "$logdir"' EXIT
 declare -A job_pid
 failed=()
-unverified=()
 running=0
 order=()
 
@@ -253,11 +255,6 @@ run_versions() {
     wait "${job_pid[$name]}" 2>/dev/null || true
     if [ "$(cat "$logdir/${name// /_}.rc" 2>/dev/null)" = 0 ]; then
       step "ok: $name"
-    elif [ "${name#* }" = nonbox ] && [ "${#missing_jdks[@]}" -gt 0 ] \
-      && [ -n "$(grep -E '^test .* FAILED$' "$logdir/${name// /_}.log")" ] \
-      && ! grep -E '^test .* FAILED$' "$logdir/${name// /_}.log" | grep -vqE " ($cli_tests) \.\.\. FAILED$"; then
-      step "UNVERIFIED: $name (the CLI corpus needs JDK ${missing_jdks[*]}; set KRUSTY_JDK_<n>_HOME)"
-      unverified+=("$name")
     else
       step "FAILED: $name"
       failed+=("$name")
@@ -279,9 +276,5 @@ fi
 if [ "${#failed[@]}" -gt 0 ]; then
   printf 'smoke: failed: %s\n' "${failed[@]}" >&2
   exit 1
-fi
-if [ "${#unverified[@]}" -gt 0 ]; then
-  printf 'smoke: NOT VERIFIED (JDK %s missing, so the CLI corpus cannot match CI): %s\n' \
-    "${missing_jdks[*]}" "${unverified[*]}" >&2
 fi
 step "passed"
