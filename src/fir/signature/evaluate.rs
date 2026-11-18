@@ -1816,9 +1816,15 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         // reports `broken()` from the body check. A later expression that depends
                         // on a failed effect fails on its own read of it.
                         for effect in graph.operands(effects).iter().copied() {
-                            let _ = evaluate_expression(
+                            if let Err(failure) = evaluate_expression(
                                 semantics, effect, graph, demand, memo, computing,
-                            );
+                            ) {
+                                // A committed read of a declaration still being inferred is a
+                                // recursive-inference outcome, not an effect's own diagnostic.
+                                if failure.in_progress_declaration().is_some() {
+                                    return Err(failure);
+                                }
+                            }
                         }
                         evaluate_expression(semantics, result, graph, demand, memo, computing)
                     }
@@ -1909,6 +1915,11 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 semantics, operand, graph, demand, memo, computing,
                             ) {
                                 Ok(resolved) => resolved_operands.push(resolved),
+                                Err(diagnostic)
+                                    if diagnostic.in_progress_declaration().is_some() =>
+                                {
+                                    return Err(diagnostic);
+                                }
                                 Err(diagnostic) => {
                                     branch_failure.get_or_insert(diagnostic);
                                 }
