@@ -199,7 +199,7 @@ run_job() {
 
 logdir="$(mktemp -d "${TMPDIR:-/tmp}/krusty-smoke.XXXXXX")"
 trap 'rm -rf "$logdir"' EXIT
-declare -A job_pid kotlinc_of box_of native_of
+declare -A job_pid job_began kotlinc_of box_of native_of
 failed=()
 order=()
 
@@ -209,10 +209,13 @@ start_job() {
   # not one of the jobs, which let a counter drift below the real number running.
   while [ "$(jobs -rp | wc -l)" -ge "$jobs_max" ]; do sleep 1; done
   # The exit status goes to a file, so the result does not depend on when the job is reaped.
-  ( trap 'echo $? >"$logdir/${name// /_}.rc"' EXIT; run_job "$1" "$2" ) >"$logdir/${name// /_}.log" 2>&1 &
+  # The file also records when the job ended, so the report shows how many ran at once.
+  ( trap 'echo $? >"$logdir/${name// /_}.rc"; echo $((SECONDS - start)) >"$logdir/${name// /_}.end"' EXIT
+    run_job "$1" "$2" ) >"$logdir/${name// /_}.log" 2>&1 &
   job_pid[$name]=$!
+  job_began[$name]=$((SECONDS - start))
   order+=("$name")
-  step "started: $name"
+  step "started: $name ($(jobs -rp | wc -l) of $jobs_max running)"
 }
 
 # Provision the given versions, run all their jobs in parallel, and report each result.
@@ -244,9 +247,9 @@ run_versions() {
   for name in "${order[@]}"; do
     wait "${job_pid[$name]}" 2>/dev/null || true
     if [ "$(cat "$logdir/${name// /_}.rc" 2>/dev/null)" = 0 ]; then
-      step "ok: $name"
+      step "ok: $name (ran ${job_began[$name]}s to $(cat "$logdir/${name// /_}.end")s)"
     else
-      step "FAILED: $name"
+      step "FAILED: $name (ran ${job_began[$name]}s to $(cat "$logdir/${name// /_}.end" 2>/dev/null || echo ?)s)"
       failed+=("$name")
       echo "----- $name -----" >&2
       tail -n 80 "$logdir/${name// /_}.log" >&2
