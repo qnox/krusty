@@ -143,6 +143,46 @@ fn parcelized_classes_match_kotlinc_and_round_trip() {
     assert_same_classes_and_box(&reference, &krusty, &runtime);
 }
 
+const DATA_CLASS: &str = r#"package demo
+
+import android.os.Parcel
+import android.os.Parcelable
+import kotlinx.parcelize.Parcelize
+
+@Parcelize
+data class Counter(val label: String, val count: Int) : Parcelable {
+    fun bumped(): Counter = copy(count = count + 1)
+}
+
+fun box(): String {
+    val parcel = Parcel.obtain()
+    Counter("clicks", 2).bumped().writeToParcel(parcel, 0)
+    parcel.setDataPosition(0)
+    @Suppress("UNCHECKED_CAST")
+    val back = Counter::class.java.getField("CREATOR").get(null) as Parcelable.Creator<Counter>
+    val counter = back.createFromParcel(parcel)
+    if (counter != Counter("clicks", 3)) return "round trip"
+    if (counter.component1() != "clicks" || counter.component2() != 3) return "components"
+    return "OK"
+}
+"#;
+
+/// A `data class` is parcelable too: the members the plugin declares (`describeContents`,
+/// `writeToParcel`) precede the `componentN`, `copy`, `toString`, `hashCode` and `equals` the
+/// compiler generates for it, as in kotlinc, and the class reads back what it wrote.
+#[test]
+fn a_parcelized_data_class_matches_kotlinc_and_round_trips() {
+    let fixture = PluginFixture::new("parcelize-data-class");
+    let sources = [("Counter.kt", DATA_CLASS)];
+    let switches = parcelize_switches();
+    let classpath = android_classpath();
+    let reference = fixture.kotlinc("main", &sources, &classpath, &switches);
+    let krusty = fixture.krusty("main", &sources, &classpath, &switches);
+    let mut runtime = classpath;
+    runtime.push(common::stdlib_jar());
+    assert_same_classes_and_box(&reference, &krusty, &runtime);
+}
+
 const UNSUPPORTED: &str = r#"package demo
 
 import android.os.Parcelable
