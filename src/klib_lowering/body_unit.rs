@@ -2028,9 +2028,6 @@ impl<'s> Linker<'_, 's> {
         })
     }
 
-impl<'s> Linker<'_, 's> {
-    /// The type parameters of the generic class declaring `selected`, which a call of the member
-    /// binds from its dispatch receiver; none for a top-level function or a non-generic class.
     /// The accessor of a property of a class whose members the unit emits, when it has a body or
     /// is abstract.
     fn materialized_member_accessor(
