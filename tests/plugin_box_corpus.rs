@@ -124,7 +124,7 @@ fn run_case(case: &Case, stubs: &[PathBuf]) -> Result<Outcome, String> {
         &case.source,
         krusty::conformance::TestTarget::Jvm,
     );
-    if let Err(e) = box_reference_classes::checked_prepared_box_with(&prepared, &case.stem, stubs) {
+    if box_reference_classes::checked_prepared_box_with(&prepared, &case.stem, stubs).is_err() {
         return Ok(Outcome::NotApplicable);
     }
     let mut classpath = common::classpath_jars_for(&prepared);
