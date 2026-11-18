@@ -463,10 +463,12 @@ fn compile_jar(compiler_jar: &Path, args: &[String]) -> Option<(i32, String)> {
     Some(result)
 }
 
-/// The `lib/` directory of `release`'s kotlinc distribution, provisioning it when needed.
+/// The `lib/` directory of `release`'s kotlinc distribution, provisioning it when needed. A
+/// distribution is available only when its whole payload is: a directory another process is still
+/// unpacking, or one an interrupted run left half-written, is provisioned again under the lock.
 pub fn kotlinc_lib_for_release(release: &str) -> Option<PathBuf> {
     let jar = cached_compiler_jar(release);
-    if jar.is_file() {
+    if distribution_is_complete(release) {
         return jar.parent().map(Path::to_path_buf);
     }
     if release == krusty::kotlin_version::target().to_string() {
@@ -488,6 +490,30 @@ fn cached_compiler_jar(release: &str) -> PathBuf {
     ))
 }
 
+/// The files of a kotlinc distribution that tests read: the compiler, the standard library the
+/// companion programs link against, and the build identity the recorded-byte replay keys on.
+const DISTRIBUTION_PAYLOAD: [&str; 3] = [
+    "lib/kotlin-compiler.jar",
+    "lib/kotlin-stdlib.jar",
+    "build.txt",
+];
+
+fn kotlinc_cache_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("target/cache/kotlinc")
+}
+
+fn distribution_is_complete(release: &str) -> bool {
+    distribution_is_complete_in(&kotlinc_cache_root().join(release))
+}
+
+/// Whether `release_dir/kotlinc` holds the whole tested payload.
+fn distribution_is_complete_in(release_dir: &Path) -> bool {
+    let root = release_dir.join("kotlinc");
+    DISTRIBUTION_PAYLOAD
+        .iter()
+        .all(|file| root.join(file).is_file())
+}
+
 fn build_identity(lib: &Path) -> Option<String> {
     let text = std::fs::read_to_string(lib.parent()?.join("build.txt")).ok()?;
     let line = text.lines().next()?.trim();
@@ -495,8 +521,14 @@ fn build_identity(lib: &Path) -> Option<String> {
 }
 
 fn provision_kotlinc(release: &str) -> Option<PathBuf> {
-    let dest =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/cache/kotlinc/{release}"));
+    let url = format!(
+        "https://github.com/JetBrains/kotlin/releases/download/v{release}/kotlin-compiler-{release}.zip"
+    );
+    provision_distribution(&kotlinc_cache_root().join(release), release, &url)
+}
+
+/// Download `url` and publish its `kotlinc/` tree as `dest/kotlinc`, once, under the release lock.
+fn provision_distribution(dest: &Path, release: &str, url: &str) -> Option<PathBuf> {
     let jar = dest.join("kotlinc/lib/kotlin-compiler.jar");
     std::fs::create_dir_all(&dest).ok()?;
     let lock_path = dest.join(".provision.lock");
@@ -510,18 +542,16 @@ fn provision_kotlinc(release: &str) -> Option<PathBuf> {
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return None;
     }
-    if jar.is_file() {
+    // Another process may have finished while this one waited for the lock.
+    if distribution_is_complete_in(dest) {
         return Some(jar);
     }
-    let url = format!(
-        "https://github.com/JetBrains/kotlin/releases/download/v{release}/kotlin-compiler-{release}.zip"
-    );
     let tmp = std::env::temp_dir().join(format!("kotlinc-{release}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).ok()?;
     let zip = tmp.join("kotlinc.zip");
     let downloaded = Command::new("curl")
-        .args(["-fsSL", &url, "-o"])
+        .args(["-fsSL", url, "-o"])
         .arg(&zip)
         .status()
         .ok()
@@ -530,21 +560,37 @@ fn provision_kotlinc(release: &str) -> Option<PathBuf> {
         let _ = std::fs::remove_dir_all(&tmp);
         return None;
     }
+    // Unpack beside the destination and publish the whole tree with one rename, so a reader never
+    // finds a distribution that is missing part of its payload.
+    let staging = dest.join(format!(".staging-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).ok()?;
     let unpacked = Command::new("unzip")
         .args(["-q"])
         .arg(&zip)
         .arg("-d")
-        .arg(&dest)
+        .arg(&staging)
         .status()
         .ok()
         .is_some_and(|status| status.success());
     let _ = std::fs::remove_dir_all(&tmp);
-    if !unpacked || !jar.is_file() {
+    let root = staging.join("kotlinc");
+    if !unpacked
+        || !DISTRIBUTION_PAYLOAD
+            .iter()
+            .all(|file| root.join(file).is_file())
+    {
+        let _ = std::fs::remove_dir_all(&staging);
         return None;
     }
-    let bin = dest.join("kotlinc/bin/kotlinc");
+    let bin = root.join("bin/kotlinc");
     let _ = std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755));
-    Some(jar)
+    // Only this function, under the lock, replaces the directory; readers pass only a complete one.
+    let published = dest.join("kotlinc");
+    let _ = std::fs::remove_dir_all(&published);
+    let renamed = std::fs::rename(&root, &published).is_ok();
+    let _ = std::fs::remove_dir_all(&staging);
+    (renamed && distribution_is_complete_in(dest)).then_some(jar)
 }
 
 /// [`kotlinc_compile`] without the recorded-byte archive: always the live persistent compiler, and
@@ -801,6 +847,110 @@ fn kotlinc_server_key(classpath: &str, properties: &[String]) -> String {
         key.push_str(property);
     }
     key
+}
+
+#[cfg(test)]
+mod provisioning_tests {
+    use super::{distribution_is_complete_in, provision_distribution, DISTRIBUTION_PAYLOAD};
+    use std::path::Path;
+    use std::process::Command;
+
+    /// A distribution archive with the whole tested payload, served from a local file.
+    fn archive(work: &Path) -> String {
+        let tree = work.join("tree");
+        for file in DISTRIBUTION_PAYLOAD {
+            let path = tree.join("kotlinc").join(file);
+            std::fs::create_dir_all(path.parent().expect("a payload file has a directory"))
+                .expect("create the payload directory");
+            std::fs::write(&path, file).expect("write the payload file");
+        }
+        let bin = tree.join("kotlinc/bin");
+        std::fs::create_dir_all(&bin).expect("create bin");
+        std::fs::write(bin.join("kotlinc"), "#!/bin/sh\n").expect("write the launcher");
+        let zip = work.join("kotlinc.zip");
+        let status = Command::new("jar")
+            .arg("--create")
+            .arg("--file")
+            .arg(&zip)
+            .arg("-C")
+            .arg(&tree)
+            .arg("kotlinc")
+            .status()
+            .expect("run jar");
+        assert!(status.success(), "archive the payload");
+        format!("file://{}", zip.display())
+    }
+
+    // A directory that holds the compiler jar alone is what a run interrupted mid-extraction
+    // leaves; it must not read as a distribution, and provisioning must replace it.
+    #[test]
+    fn a_partial_distribution_is_not_available_and_is_replaced_whole() {
+        let work = super::super::scratch_dir().expect("allocate a directory");
+        let url = archive(&work);
+        let dest = work.join("cache/9.9.9");
+        let lib = dest.join("kotlinc/lib");
+        std::fs::create_dir_all(&lib).expect("create the partial lib");
+        std::fs::write(lib.join("kotlin-compiler.jar"), "partial").expect("write the jar");
+        assert!(!distribution_is_complete_in(&dest));
+        let jar = provision_distribution(&dest, "9.9.9", &url).expect("provision");
+        assert_eq!(jar, lib.join("kotlin-compiler.jar"));
+        assert!(distribution_is_complete_in(&dest));
+        assert_eq!(
+            std::fs::read_to_string(&jar).expect("read the jar"),
+            "lib/kotlin-compiler.jar"
+        );
+        assert!(
+            std::fs::read_dir(&dest)
+                .expect("list the destination")
+                .all(|entry| !entry
+                    .expect("a directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".staging")),
+            "the staging directory is removed"
+        );
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    // Readers poll availability while provisioners race for the lock: whenever a reader sees a
+    // distribution, every payload file is there, and every provisioner returns a usable jar.
+    #[test]
+    fn a_concurrent_reader_never_sees_a_distribution_missing_its_payload() {
+        let work = super::super::scratch_dir().expect("allocate a directory");
+        let url = archive(&work);
+        let dest = work.join("cache/9.9.8");
+        std::fs::create_dir_all(&dest).expect("create the destination");
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut sightings = 0u32;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    if distribution_is_complete_in(&dest) {
+                        sightings += 1;
+                        for file in DISTRIBUTION_PAYLOAD {
+                            assert!(
+                                dest.join("kotlinc").join(file).is_file(),
+                                "{file} is missing from a distribution the reader accepted"
+                            );
+                        }
+                    }
+                }
+                sightings
+            });
+            let provisioners: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| provision_distribution(&dest, "9.9.8", &url)))
+                .collect();
+            for provisioner in provisioners {
+                assert!(provisioner.join().expect("provisioner").is_some());
+            }
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            reader
+                .join()
+                .expect("the reader never saw a partial payload");
+        });
+        assert!(distribution_is_complete_in(&dest));
+        let _ = std::fs::remove_dir_all(&work);
+    }
 }
 
 #[cfg(test)]
