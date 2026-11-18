@@ -976,7 +976,7 @@ fn a_library_composable_lambda_parameter_aligns_with_its_method() {
              krusty: 2 error(s)\n"
         )
     );
-    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.code, Some(3));
 }
 
 /// A composable lambda parameter passed on to a library composable needs the applier scheme of the
@@ -1015,7 +1015,7 @@ fn forwarding_a_composable_lambda_parameter_to_a_producer_library_is_declined() 
             probe.source.display()
         )
     );
-    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.code, Some(3));
 }
 
 /// The widths around the Compose compiler's changed-word boundaries (nine and ten parameters, and
