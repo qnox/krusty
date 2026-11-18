@@ -393,15 +393,10 @@ fn a_common_call_of_an_expect_member_binds_its_actual_as_kotlinc_does() {
         common_and_jvm,
     );
     assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
-    assert_eq!(compiled.krusty.0, 0, "krusty: {}", compiled.krusty.1);
-    // Acceptance is what this pins: the delegating class's bytes are another comparison's concern.
-    let names = |files: &[(String, Vec<u8>)]| {
-        files
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(names(&compiled.krusty.2), names(&compiled.kotlinc.2));
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
 }
 
 #[test]
@@ -484,15 +479,10 @@ fn a_common_call_of_the_alias_target_itself_compiles_as_kotlinc_does() {
         common_and_jvm,
     );
     assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
-    assert_eq!(compiled.krusty.0, 0, "krusty: {}", compiled.krusty.1);
-    // Acceptance is what this pins: the delegating class's bytes are another comparison's concern.
-    let names = |files: &[(String, Vec<u8>)]| {
-        files
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(names(&compiled.krusty.2), names(&compiled.kotlinc.2));
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
 }
 
 #[test]
@@ -503,15 +493,10 @@ fn a_common_call_of_an_alias_actualized_expect_member_binds_the_target_as_kotlin
         common_and_jvm,
     );
     assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
-    assert_eq!(compiled.krusty.0, 0, "krusty: {}", compiled.krusty.1);
-    // Acceptance is what this pins: the delegating class's bytes are another comparison's concern.
-    let names = |files: &[(String, Vec<u8>)]| {
-        files
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(names(&compiled.krusty.2), names(&compiled.kotlinc.2));
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
 }
 
 #[test]
@@ -522,15 +507,10 @@ fn every_declared_use_of_an_alias_actualized_expect_class_matches_kotlinc() {
         common_and_jvm,
     );
     assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
-    assert_eq!(compiled.krusty.0, 0, "krusty: {}", compiled.krusty.1);
-    // Acceptance is what this pins: the delegating class's bytes are another comparison's concern.
-    let names = |files: &[(String, Vec<u8>)]| {
-        files
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(names(&compiled.krusty.2), names(&compiled.kotlinc.2));
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
 }
 
 #[test]
@@ -541,15 +521,10 @@ fn a_common_subclass_of_an_expect_class_actualized_as_any_matches_kotlinc() {
         common_and_jvm,
     );
     assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
-    assert_eq!(compiled.krusty.0, 0, "krusty: {}", compiled.krusty.1);
-    // Acceptance is what this pins: the delegating class's bytes are another comparison's concern.
-    let names = |files: &[(String, Vec<u8>)]| {
-        files
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(names(&compiled.krusty.2), names(&compiled.kotlinc.2));
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
 }
 
 #[test]
@@ -568,15 +543,10 @@ fn common_aliases_and_bounds_of_an_alias_actualized_expect_class_match_kotlinc()
         common_and_jvm,
     );
     assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
-    assert_eq!(compiled.krusty.0, 0, "krusty: {}", compiled.krusty.1);
-    // Acceptance is what this pins: the delegating class's bytes are another comparison's concern.
-    let names = |files: &[(String, Vec<u8>)]| {
-        files
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(names(&compiled.krusty.2), names(&compiled.kotlinc.2));
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
 }
 
 #[test]
@@ -599,15 +569,10 @@ fn function_types_projections_and_bounds_naming_an_alias_actualized_expect_class
         common_and_jvm,
     );
     assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
-    assert_eq!(compiled.krusty.0, 0, "krusty: {}", compiled.krusty.1);
-    // Acceptance is what this pins: the delegating class's bytes are another comparison's concern.
-    let names = |files: &[(String, Vec<u8>)]| {
-        files
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(names(&compiled.krusty.2), names(&compiled.kotlinc.2));
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
 }
 
 #[test]
@@ -622,15 +587,10 @@ fn a_platform_call_of_a_common_extension_of_an_alias_actualized_expect_class_mat
         common_and_jvm,
     );
     assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
-    assert_eq!(compiled.krusty.0, 0, "krusty: {}", compiled.krusty.1);
-    // Acceptance is what this pins: the delegating class's bytes are another comparison's concern.
-    let names = |files: &[(String, Vec<u8>)]| {
-        files
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(names(&compiled.krusty.2), names(&compiled.kotlinc.2));
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
 }
 
 #[test]
@@ -649,15 +609,10 @@ fn a_platform_call_of_a_common_generic_extension_of_an_alias_actualized_expect_c
         common_and_jvm,
     );
     assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
-    assert_eq!(compiled.krusty.0, 0, "krusty: {}", compiled.krusty.1);
-    // Acceptance is what this pins: the delegating class's bytes are another comparison's concern.
-    let names = |files: &[(String, Vec<u8>)]| {
-        files
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(names(&compiled.krusty.2), names(&compiled.kotlinc.2));
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
 }
 
 #[test]
@@ -699,15 +654,10 @@ fn a_common_call_of_an_expect_function_typed_by_an_alias_actualized_class_matche
         common_and_jvm,
     );
     assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
-    assert_eq!(compiled.krusty.0, 0, "krusty: {}", compiled.krusty.1);
-    // Acceptance is what this pins: the delegating class's bytes are another comparison's concern.
-    let names = |files: &[(String, Vec<u8>)]| {
-        files
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(names(&compiled.krusty.2), names(&compiled.kotlinc.2));
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
 }
 
 /// The result of a common call of an `expect` function is the common fragment's `expect` class,
@@ -730,15 +680,10 @@ fn a_common_call_of_an_inline_expect_function_inlines_its_actual_as_kotlinc_does
         common_and_jvm,
     );
     assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
-    assert_eq!(compiled.krusty.0, 0, "krusty: {}", compiled.krusty.1);
-    // Acceptance is what this pins: the delegating class's bytes are another comparison's concern.
-    let names = |files: &[(String, Vec<u8>)]| {
-        files
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(names(&compiled.krusty.2), names(&compiled.kotlinc.2));
+    assert_eq!(
+        (compiled.krusty.0, &compiled.krusty.2),
+        (compiled.kotlinc.0, &compiled.kotlinc.2)
+    );
 }
 
 /// A dependency, built by kotlinc, whose interface an actual class implements by delegation. Each
@@ -789,7 +734,7 @@ fn an_expect_member_is_implemented_by_the_inherited_dependency_member_it_matches
     assert_eq!(names(&compiled.krusty.2), names(&compiled.kotlinc.2));
 }
 
-fn rejected_over_dependency(common_source: &str) {
+fn rejected_over_dependency(common_source: &str, reference_names_an_incompatible_pair: bool) {
     let library = common::kotlinc_library(SPEAKING).expect("kotlinc builds the dependency");
     let compiled = compile_sources(
         common_source,
@@ -804,14 +749,52 @@ fn rejected_over_dependency(common_source: &str) {
         (1, 0),
         "krusty: {krusty_stderr}"
     );
+    let reference = common::compiler_errors(stderr);
+    let krusty = common::compiler_errors(krusty_stderr);
+    if !reference_names_an_incompatible_pair {
+        assert_eq!(krusty, reference);
+        return;
+    }
+    // kotlinc words a member that exists but disagrees as an incompatible pair; krusty reports an
+    // unmatched `expect` member the one way it always has. Both reject the class at one position,
+    // and the two complete spellings are pinned side by side.
+    let positions = |errors: &[common::CompilerError]| {
+        errors
+            .iter()
+            .map(|error| (error.file.clone(), error.line, error.column))
+            .collect::<Vec<_>>()
+    };
+    let messages = |errors: &[common::CompilerError]| {
+        errors
+            .iter()
+            .map(|error| error.message.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(positions(&krusty), positions(&reference));
     assert_eq!(
-        common::compiler_errors(krusty_stderr),
-        common::compiler_errors(stderr)
+        messages(&reference),
+        ["'actual class Speaker : Source' contains an incompatible pair of 'expect' and 'actual' member declarations."]
+    );
+    assert_eq!(
+        messages(&krusty),
+        ["'actual class Speaker : Source' has no corresponding members for 'expect' class members:"]
     );
 }
 
 /// A generic dependency member is not the non-generic `expect` member of its name.
 #[test]
 fn a_generic_inherited_dependency_member_does_not_implement_a_non_generic_expect_member() {
-    rejected_over_dependency("package p\nexpect class Speaker {\n    fun answer(): String\n}\n");
+    rejected_over_dependency(
+        "package p\nexpect class Speaker {\n    fun answer(): String\n}\n",
+        false,
+    );
+}
+
+/// An ordinary dependency function is not the `suspend` `expect` function of its name.
+#[test]
+fn an_ordinary_inherited_dependency_function_does_not_implement_a_suspend_expect_function() {
+    rejected_over_dependency(
+        "package p\nexpect class Speaker {\n    suspend fun ping()\n}\n",
+        true,
+    );
 }

@@ -417,7 +417,7 @@ fn has_type_arguments(
 /// and specialization, so a member a nearer declaration overrides is absent. Private members are
 /// never inherited. A member the `expect` side cannot state is excluded here, with its evidence
 /// intact, rather than projected into a record it would then equal: one with a receiver, context
-/// parameters, type parameters, `suspend` or `vararg`, an accessor with its own availability or
+/// parameters, type parameters, a modifier the record cannot carry (`suspend`, `operator`, `infix`, `inline`) or `vararg`, an accessor with its own availability or
 /// visibility, or a property that is a Java field or synthesized from Java accessors.
 fn inherited_members(
     platform: &dyn SemanticPlatform,
@@ -433,6 +433,9 @@ fn inherited_members(
                 && crate::symbol_resolver::member_is_inheritable(function.callable.visibility)
                 && function.context_count == 0
                 && !function.flags.suspend
+                && !function.flags.operator
+                && !function.flags.infix
+                && function.flags.inline == crate::libraries::InlineKind::None
                 && !function.call_sig.vararg
                 && function
                     .generic_sig

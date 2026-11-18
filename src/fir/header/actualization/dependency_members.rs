@@ -53,7 +53,7 @@ fn implements(
     name: &str,
     member: &InheritedDependencyMember,
 ) -> bool {
-    if member.kind != expect.kind || member.name != name {
+    if member.kind != expect.kind || member.name != name || carries_unprojected_modifier(expect) {
         return false;
     }
     match headers
@@ -111,6 +111,24 @@ fn implements(
         }
         _ => false,
     }
+}
+
+/// A declaration modifier the inherited-member record does not carry. The record cannot prove the
+/// two sides agree on it, so an `expect` member that states one is never discharged by an
+/// inherited member, whatever else matches; the dependency side refuses the same forms.
+fn carries_unprojected_modifier(expect: &DeclarationStub) -> bool {
+    [
+        DeclarationFlags::SUSPEND,
+        DeclarationFlags::INLINE,
+        DeclarationFlags::EXTERNAL,
+        DeclarationFlags::TAILREC,
+        DeclarationFlags::OPERATOR,
+        DeclarationFlags::INFIX,
+        DeclarationFlags::LATEINIT,
+        DeclarationFlags::CONST,
+    ]
+    .into_iter()
+    .any(|flag| expect.flags.has(flag))
 }
 
 /// Whether the written `expect` type names the same classifier, with the same nullability and no
