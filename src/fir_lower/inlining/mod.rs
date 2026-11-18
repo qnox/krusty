@@ -2139,8 +2139,12 @@ fn specialize_checked_operation(
             target,
             substitutions,
             adaptation,
+            function_type,
             ..
         } => {
+            if let Some(function_type) = function_type {
+                specialize_ty(function_type, bindings);
+            }
             specialize_property_reference_target(target, bindings);
             for substitution in substitutions {
                 specialize_checked_substitution(substitution, bindings);
