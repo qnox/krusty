@@ -28793,41 +28793,7 @@ impl<'a> Checker<'a> {
 
     fn implicit_receivers(&self, scope: &CheckerScope<'_>) -> Vec<ImplicitReceiver> {
         let mut receivers = self.declared_implicit_receivers(scope);
-        // Flow facts for the unqualified `this` value change the semantic type of the nearest
-        // receiver rung, not its runtime identity. Bare member lookup must see that narrowed type
-        // (`fun A?.bar() = if (this != null) foo() else ...`) while FIR continues to materialize the
-        // exact receiver depth selected above.
-        if let Some(narrowed) = self.actual_this_narrow(scope) {
-            if let Some(current) = receivers.iter_mut().find(|receiver| receiver.current) {
-                current.ty = narrowed;
-                // An `is B` proof on a receiver of an incomparable declared class keeps both: bare
-                // members of the declaration and of `B` stay visible (`check(this is B); field = x`).
-                let context = crate::assignable::TyCtx::new();
-                let declared = current.declared_ty;
-                // A type-parameter receiver is judged by its bound: `this is B` on `M : A` with
-                // `B : A` narrows `M` toward `B`, it does not introduce an unrelated class.
-                let declared_class = declared
-                    .non_null()
-                    .ty_param_bound()
-                    .map_or(declared, Ty::non_null);
-                let comparable = narrowed.non_null() == Ty::Nothing
-                    || crate::assignable::is_subtype(
-                        &context,
-                        self,
-                        declared_class.non_null(),
-                        narrowed.non_null(),
-                    )
-                    || crate::assignable::is_subtype(
-                        &context,
-                        self,
-                        narrowed.non_null(),
-                        declared_class.non_null(),
-                    );
-                if !comparable {
-                    current.ty = Ty::intersection(&[declared, narrowed]);
-                }
-            }
-        }
+        self.narrow_current_implicit_receiver(scope, &mut receivers);
         receivers
     }
 
