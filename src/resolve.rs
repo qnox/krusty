@@ -40133,7 +40133,7 @@ impl<'a> Checker<'a> {
         // declaration applications below belong to the passes that retain their arguments.
         if !self.fragment.is_type_use_annotations() {
             self.check_classifier_own_annotations(scope, cl, current_owner);
-            self.check_supertype_usage(cl, current_owner);
+            self.check_supertype_usage(scope, cl, current_owner);
             // Member annotations see the classifier's own static rungs (nested classifiers and
             // its companion), which the class body scope below has not opened yet.
             let member_rung = self.enter_annotation_class_rung(current_owner);
@@ -40353,7 +40353,7 @@ impl<'a> Checker<'a> {
             self.record_finalized_superclass_type(span, superclass);
         }
         if let Some(declaration) = stable_classifier_header {
-            if !self.check_finalized_supertype_bounds(cl, declaration)
+            if !self.check_finalized_supertype_bounds(scope, cl, declaration)
                 && finalized_local_classifier_header
             {
                 self.failed_local_declaration_bindings.insert(declaration);
