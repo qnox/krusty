@@ -2383,6 +2383,59 @@ KRef kt_ulong_range(kt_long first, kt_long last) {
     return kt_range_new(&kt_type_ulong_range, first, last);
 }
 
+/* `IntProgression(first, last, step)` and its kin constructed directly, as a stdlib body such as
+   `IntProgression.fromClosedRange` does. Kotlin's constructor refuses a zero step, and the minimum
+   step too because the walk negates it; both are its `IllegalArgumentException` with its own
+   message, RECORDED rather than raised, so the return after it must not build the progression. */
+#define KT_PROGRESSION_MINIMUM_STEP(name) \
+    ("Step must be greater than " name " to avoid overflow on negation.")
+
+static KRef kt_progression_new(const KType *type, kt_long first, kt_long last, kt_long step,
+                               kt_long minimum, const char *minimum_message,
+                               kt_int minimum_length) {
+    if (step == 0) {
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
+                                  kt_string_utf8("Step must be non-zero.", 22)));
+        return NULL;
+    }
+    if (step == minimum) {
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
+                                  kt_string_utf8(minimum_message, minimum_length)));
+        return NULL;
+    }
+    return kt_range_allocate(type, first, last, step);
+}
+
+#define KT_INT_MINIMUM_STEP                                                                        \
+    INT32_MIN, KT_PROGRESSION_MINIMUM_STEP("Int.MIN_VALUE"),                                       \
+        (kt_int)(sizeof(KT_PROGRESSION_MINIMUM_STEP("Int.MIN_VALUE")) - 1)
+#define KT_LONG_MINIMUM_STEP                                                                       \
+    INT64_MIN, KT_PROGRESSION_MINIMUM_STEP("Long.MIN_VALUE"),                                      \
+        (kt_int)(sizeof(KT_PROGRESSION_MINIMUM_STEP("Long.MIN_VALUE")) - 1)
+
+KRef kt_int_progression(kt_int first, kt_int last, kt_int step) {
+    return kt_progression_new(&kt_type_int_progression, first, last, step, KT_INT_MINIMUM_STEP);
+}
+
+KRef kt_long_progression(kt_long first, kt_long last, kt_long step) {
+    return kt_progression_new(&kt_type_long_progression, first, last, step, KT_LONG_MINIMUM_STEP);
+}
+
+KRef kt_char_progression(kt_char first, kt_char last, kt_int step) {
+    return kt_progression_new(&kt_type_char_progression, first, last, step, KT_INT_MINIMUM_STEP);
+}
+
+/* Unsigned bounds arrive zero-extended, as for `kt_uint_range`; the step stays signed. */
+KRef kt_uint_progression(kt_int first, kt_int last, kt_int step) {
+    return kt_progression_new(&kt_type_uint_progression, (uint32_t)first, (uint32_t)last, step,
+                              KT_INT_MINIMUM_STEP);
+}
+
+KRef kt_ulong_progression(kt_long first, kt_long last, kt_long step) {
+    return kt_progression_new(&kt_type_ulong_progression, first, last, step,
+                              KT_LONG_MINIMUM_STEP);
+}
+
 /* The half-open form. Kotlin's `until` answers the declared EMPTY range when `last` is the element
    type's minimum, rather than computing `last - 1` and wrapping round to the maximum. That empty
    range is a specific pair of bounds -- `1..0` for the integral types, and the same pair widened

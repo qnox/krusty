@@ -1226,6 +1226,7 @@ mod tests {
                         folded_call: |_, _| false,
                         folded_calls: |_, _| Vec::new(),
                         implied_callee: |_, _| None,
+                        converted_closure: |_, _| None,
                     }
                 )
                 .into_iter()
@@ -1242,6 +1243,7 @@ mod tests {
                         folded_call: |_, _| false,
                         folded_calls: |_, _| Vec::new(),
                         implied_callee: |_, _| None,
+                        converted_closure: |_, _| None,
                     }
                 )
                 .into_iter()
