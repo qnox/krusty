@@ -172,6 +172,28 @@ test("the newest corpus run is shown, every kept run is history", () => {
   }
 });
 
+test("root failures are ranked across the newest run's projects", () => {
+  const dir = inputs(corpusRun(CORPUS_RUN, [
+    project("p", { roots: [
+      { task: ":k:kspKotlin", error: null, blocked: 3 },
+      { task: ":a:compileKotlin", error: "e: A.kt:1:1 boom", blocked: 1 },
+      { task: ":z:compileKotlin", error: "e: Z.kt:1:1 alone", blocked: 0 },
+    ] }),
+    project("q", { roots: [{ task: ":x:compileKotlin", error: "e: X.kt:2:2 bad", blocked: 2 }] }),
+    // A result recorded before the corpus traced root failures has none.
+    project("r"),
+  ]));
+  try {
+    assert.deepEqual(collectMetrics(dir).corpus.roots, [
+      { project: "p", task: ":k:kspKotlin", error: null, blocked: 3 },
+      { project: "q", task: ":x:compileKotlin", error: "e: X.kt:2:2 bad", blocked: 2 },
+      { project: "p", task: ":a:compileKotlin", error: "e: A.kt:1:1 boom", blocked: 1 },
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
 test("a run whose summary artifact has no summary.json is left out", () => {
   const older = { ...CORPUS_RUN, databaseId: 5, createdAt: "2026-10-30T01:30:00Z", url: "https://example.test/run/5" };
   const dir = inputs({
