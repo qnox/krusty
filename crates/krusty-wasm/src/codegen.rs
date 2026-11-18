@@ -167,10 +167,11 @@ impl Backend for WasmBackend {
         vec![crate::string_builders::class()]
     }
 
-    /// The WASI stdlib's `StringBuilder.append(CharSequence?)` copies the sequence's `length`
-    /// indexed `Char`s; the JS one appends its `toString` (`crate::string_builders`).
-    fn appends_char_sequences_by_index(&self) -> bool {
-        self.target == WasmTarget::Wasi
+    /// Both stdlibs read an appended sequence's `length`: the WASI one copies that many indexed
+    /// `Char`s, and the JS one checks `appendRange`'s bounds against it before it appends the
+    /// sequence's `toString` (`crate::char_sequence_appends`).
+    fn reads_appended_char_sequences(&self) -> bool {
+        true
     }
 
     fn realizes_dependency_intrinsic(

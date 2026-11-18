@@ -388,7 +388,7 @@ impl Body<'_> {
         if fact.builtin_implementations.iter().any(|implementation| {
             super::string_builders::is_string_builder_type(implementation.receiver)
         }) {
-            self.record_char_sequence_reads()?;
+            self.record_char_sequence_reads(false)?;
         }
         self.runtime.builtin_member(
             self.module,

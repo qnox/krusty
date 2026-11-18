@@ -1,5 +1,6 @@
 //! `StringBuilder.append(CharSequence?)` and `append(CharSequence?, Int, Int)` on the runtime's
-//! builder, as each target's stdlib declares them.
+//! builder, as each target's stdlib declares them. The ranged append's range check is the
+//! caller's: it throws Kotlin exceptions, which need the body's exception classes.
 //!
 //! Kotlin/Wasm JS appends the sequence's `toString()`. Kotlin/Wasm WASI copies its units instead:
 //! `append` reads `value.length`, and `appendRange` checks the range against a second read and
@@ -12,7 +13,7 @@
 use super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::interface_dispatch::MemberRef;
 use super::objects::REFERENCE;
-use super::runtime::{Runtime, ADD32, GE_S32, GT_S32, LT_S32, OR32};
+use super::runtime::{Runtime, ADD32, GE_S32, GT_S32, LT_S32, OR32, SUB32};
 
 /// The append of a `CharSequence` to the runtime's builder, as the target declares it.
 pub(super) struct CharSequenceAppends {
@@ -148,8 +149,11 @@ impl Runtime {
     }
 
     /// `(builder, value: CharSequence?, start, end) -> builder`: the target's
-    /// `StringBuilder.append(CharSequence?, Int, Int)`, which appends `value[start, end)`, or
-    /// that range of `"null"` for `null`, and throws for a range outside the sequence.
+    /// `StringBuilder.append(CharSequence?, Int, Int)` after its range check, which appends
+    /// `value[start, end)`, or that range of `"null"` for `null`; JS clamps the range to the
+    /// rendered string, as its `substring` does. The caller has checked
+    /// `0 <= start <= end <= value.length` and thrown for a range outside it
+    /// (`Body::check_char_sequence_range`), so nothing is written for an invalid one.
     pub(super) fn append_char_sequence_range(
         &mut self,
         module: &mut Module,
@@ -163,11 +167,10 @@ impl Runtime {
         let builders = &self.string_builders;
         if self.char_sequence_appends.by_index {
             let reads = self.char_sequence_appends.reads.ok_or(MISSING_READS)?;
-            let length = self.objects.interfaces.stub(module, reads.length);
             let get = self.objects.interfaces.stub(module, reads.get);
             let string = HeapType::Concrete(self.string);
-            let index = 4;
-            locals.push(ValType::I32);
+            let (index, at, units) = (4, 5, 6);
+            locals.extend([ValType::I32, ValType::I32, ValType::reference(self.chars)]);
             // `value ?: "null"`, the range of the string it is.
             code.local_get(value)
                 .ref_is_null()
@@ -178,22 +181,6 @@ impl Runtime {
                 .local_get(end)
                 .call(builders.append_range)
                 .return_()
-                .end();
-            // `0 <= start <= end <= value.length`, checked against one read of the length.
-            code.local_get(start)
-                .i32_const(0)
-                .op(LT_S32)
-                .local_get(start)
-                .local_get(end)
-                .op(GT_S32)
-                .op(OR32)
-                .local_get(end)
-                .local_get(value)
-                .call(length)
-                .op(GT_S32)
-                .op(OR32)
-                .if_(BlockType::Empty)
-                .unreachable()
                 .end();
             // A string is copied whole, as `insertString` does.
             code.local_get(value)
@@ -207,7 +194,19 @@ impl Runtime {
                 .call(builders.append_range)
                 .return_()
                 .end();
-            // Every other sequence is copied one `value[index]` at a time.
+            // Every other sequence is copied as `array[_length++] = value[index]`: the backing
+            // array and the unit's offset are taken, and the unit counted in use, before the
+            // sequence's getter runs. A getter that reads this builder sees the unit, one that
+            // throws leaves it counted, and one that grows the builder does not redirect the
+            // store, which goes to the array taken first.
+            // The storage for the whole range is prepared once, before the first getter runs, as
+            // `appendRange` ensures capacity for `end - start`.
+            code.local_get(builder)
+                .local_get(end)
+                .local_get(start)
+                .op(SUB32)
+                .call(builders.ensure_capacity)
+                .drop_();
             code.local_get(start).local_set(index);
             code.block(BlockType::Empty)
                 .loop_(BlockType::Empty)
@@ -216,11 +215,17 @@ impl Runtime {
                 .op(GE_S32)
                 .br_if(1)
                 .local_get(builder)
+                .call(builders.claim_unit)
+                .local_set(at)
+                .local_get(builder)
+                .call(builders.units)
+                .local_set(units)
+                .local_get(units)
+                .local_get(at)
                 .local_get(value)
                 .local_get(index)
                 .call(get)
-                .call(builders.append_char)
-                .drop_()
+                .call(builders.set_unit)
                 .local_get(index)
                 .i32_const(1)
                 .op(ADD32)
@@ -235,7 +240,7 @@ impl Runtime {
                 .call(self.object_strings.any_to_string)
                 .local_get(start)
                 .local_get(end)
-                .call(builders.append_range);
+                .call(builders.append_clamped_range);
         }
         let ty = module.func_type(
             vec![REFERENCE, REFERENCE, ValType::I32, ValType::I32],
@@ -247,8 +252,18 @@ impl Runtime {
         Ok(function)
     }
 
+    /// The stub of the checked `CharSequence.length` a ranged append reads before it renders or
+    /// copies, on every target: recorded by `record_char_sequence_reads`.
+    pub(super) fn char_sequence_range_length(&mut self, module: &mut Module) -> Option<u32> {
+        let reads = self.char_sequence_appends.reads?;
+        Some(self.objects.interfaces.stub(module, reads.length))
+    }
+
     /// The stub of the checked `CharSequence.length` an append reads, on a target that reads it.
     pub(super) fn char_sequence_length(&mut self, module: &mut Module) -> Option<u32> {
+        if !self.char_sequence_appends.by_index {
+            return None;
+        }
         let reads = self.char_sequence_appends.reads?;
         Some(self.objects.interfaces.stub(module, reads.length))
     }

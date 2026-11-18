@@ -30,8 +30,8 @@ pub(super) struct ModuleEmission<'a> {
     /// ([`crate::backend::Backend::dispatched_dependency_classes`]).
     pub dispatched_classes: &'a [crate::types::TypeName],
     /// The backend appends a `CharSequence` to a `StringBuilder` through its `length` and `get`
-    /// ([`crate::backend::Backend::appends_char_sequences_by_index`]).
-    pub char_sequences_by_index: bool,
+    /// ([`crate::backend::Backend::reads_appended_char_sequences`]).
+    pub reads_appended_char_sequences: bool,
 }
 
 /// Freeze `ir`'s backend view, or report an internal error when a dependency identity the IR holds
@@ -73,7 +73,7 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     };
-    if module.char_sequences_by_index {
+    if module.reads_appended_char_sequences {
         if let Some(protocol) = symbols.char_sequence_protocol() {
             if let Err(error) =
                 callables.freeze_char_sequence_protocol(protocol, symbols.semantic_platform())
