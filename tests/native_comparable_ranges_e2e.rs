@@ -54,6 +54,23 @@ fn two_comparable_ranges_are_equal_by_their_bounds_or_by_being_empty() {
     expect_native_box(source, "ComparableRangeEquality", "OK");
 }
 
+/// The runtime's comparable range is a `ClosedRange` to an erased test too, as every other closed
+/// range it builds is, and nothing else it holds is.
+#[test]
+fn a_comparable_range_is_a_closed_range_to_an_erased_test() {
+    let source = "fun isClosedRange(value: Any?): Boolean = value is ClosedRange<*>\n\
+         fun box(): String {\n\
+         \x20   val range = \"a\"..\"c\"\n\
+         \x20   if (!isClosedRange(range)) return \"fail range\"\n\
+         \x20   if (!isClosedRange(\"a\"..\"c\")) return \"fail literal\"\n\
+         \x20   if (isClosedRange(\"a\")) return \"fail String\"\n\
+         \x20   if (isClosedRange(null)) return \"fail null\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "ComparableRangeIsClosedRange");
+    expect_native_box(source, "ComparableRangeIsClosedRange", "OK");
+}
+
 /// An INTEGRAL range held under `ClosedRange<T>`: the member names the interface, the object is
 /// still the range the literal built, and a bound comes back at the element's own width.
 #[test]
