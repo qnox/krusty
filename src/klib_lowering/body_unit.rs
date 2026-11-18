@@ -2572,8 +2572,15 @@ impl<'s> Linker<'_, 's> {
         // expanded.
         let root = self.root.is_some_and(|root| root.identity() == identity);
         if !root && inline_functions::declares_inline(function) {
-            let modifiers = selected.map(KlibBodyCallable::inline_modifiers);
-            inline_functions::declare(ir, declared, function, &header, modifiers)?;
+            let mut is_interface = |name| self.is_interface(name);
+            inline_functions::declare(
+                ir,
+                declared,
+                function,
+                &header,
+                selected,
+                &mut is_interface,
+            )?;
         }
         self.functions.insert(identity.clone(), declared);
         if let Some(receiver) = header.value_receiver() {

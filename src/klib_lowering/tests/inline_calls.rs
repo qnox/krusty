@@ -449,3 +449,38 @@ fn a_declined_inline_expansion_leaves_its_function_id_free_for_an_ordinary_calla
         "the ordinary callable is still emitted"
     );
 }
+
+#[test]
+fn a_generic_inline_function_is_expanded_at_the_call_s_type_arguments() {
+    let demo = demo_inlining(
+        &[("id", &[T::P], T::P), ("caller", &[T::String], T::String)],
+        &["id"],
+        |name, body| match name {
+            "id" => sole_return(body),
+            _ => {
+                let argument = body.param(0);
+                let call = body.generic_call("id", vec![argument], T::String, T::String);
+                Some(vec![body.ret(call)])
+            }
+        },
+    );
+    let mut unit = DependencyBodyUnit::default();
+    demo.lower(&mut unit, "caller", &["caller", "id"])
+        .expect("the generic inline call expands");
+    let ir = unit.ir();
+    validated(ir);
+    let id = function_named(ir, "id");
+    let caller = function_named(ir, "caller");
+    assert_eq!(callers(ir, id), Vec::<FunId>::new());
+    assert_eq!(
+        ir.inline_call_type_arguments.values().collect::<Vec<_>>(),
+        vec![&vec![("P".to_owned(), crate::types::Ty::String)]],
+        "the call binds the function's type parameter"
+    );
+    assert_eq!(
+        unit.callable_functions()
+            .map(|(_, function)| function)
+            .collect::<Vec<_>>(),
+        vec![caller]
+    );
+}
