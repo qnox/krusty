@@ -10,10 +10,7 @@ impl ProductionSignatureSemantics<'_> {
         receiver: Ty,
         spelling: &str,
         publication_origin: Option<crate::fir::OriginId>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
         let source = crate::symbol_source::CompositeSource::new(vec![

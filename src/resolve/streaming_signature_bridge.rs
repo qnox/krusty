@@ -184,10 +184,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         spelling: &str,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<Ty>, crate::fir::DiagnosticId> {
         let declaration = match self.headers.declarations.anchor(scope.owner) {
             Some(declaration) if declaration.kind == crate::fir::DeclarationKind::Property => {
@@ -1633,10 +1630,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         from: Option<crate::fir::SignatureScope>,
         declaration: Option<crate::fir::DeclarationId>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedSignature>, crate::fir::DiagnosticId> {
         self.demanded_source_signature_at(from, declaration, None, demand)
     }
@@ -1646,10 +1640,7 @@ impl ProductionSignatureSemantics<'_> {
         from: Option<crate::fir::SignatureScope>,
         declaration: Option<crate::fir::DeclarationId>,
         origin: Option<crate::fir::OriginId>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedSignature>, crate::fir::DiagnosticId> {
         let Some(declaration) = declaration else {
             return Ok(None);
@@ -1703,10 +1694,7 @@ impl ProductionSignatureSemantics<'_> {
     fn demanded_member_signature(
         &self,
         declaration: Option<crate::fir::DeclarationId>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedSignature>, crate::fir::DiagnosticId> {
         declaration.map_or(Ok(None), |declaration| demand(declaration).map(Some))
     }
@@ -2008,10 +1996,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         super_spelling: &str,
         member_spelling: &str,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let (class_super, interface_supers) = self.direct_super_receivers(scope, super_spelling)?;
         if let Some(receiver) = class_super {
@@ -2044,10 +2029,7 @@ impl ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         type_arguments: &[Ty],
         trailing_lambda: bool,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let (class_super, interface_supers) = self.direct_super_receivers(scope, super_spelling)?;
         // `super.Inner(args)` is a constructor call on an inner classifier inherited through the

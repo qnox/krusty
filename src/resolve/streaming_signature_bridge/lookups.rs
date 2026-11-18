@@ -948,10 +948,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         qualifier: &str,
         origin: crate::fir::OriginId,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         // A CLASSIFIER prefix is a namespace, not a value: `A.E.OK` reads the entry `OK` of the
         // nested enum `A.E`, and only the last classifier in the path denotes a value at all. Take
@@ -1423,10 +1420,7 @@ impl ProductionSignatureSemantics<'_> {
         trailing_lambda: bool,
         refresh_typed_postponed: bool,
         expected: Option<Ty>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
         let call = super::semantics::ReceiverLevelCall {
             scope,
