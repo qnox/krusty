@@ -222,7 +222,10 @@ internal class ModuleWriter(
             }
             IrConstKind.String -> {
                 writeByte(3)
-                writeString(constant.value as String)
+                val text = constant.value as String
+                // The wire carries UTF-8, which cannot spell an unpaired surrogate.
+                if (!text.isWellFormedUtf16()) throw uncovered(constant, "a string constant with an unpaired surrogate")
+                writeString(text)
             }
             IrConstKind.Null -> {
                 writeByte(4)
@@ -322,7 +325,12 @@ internal class ModuleWriter(
             else -> throw Refused("krusty's plugin IR does not cover the type ${type.render()} yet")
         }
         writeBoolean(type.isMarkedNullable())
+        // A type annotation travels as its class alone, so one that carries anything more would
+        // come back as a different annotation.
         val annotations = type.annotations.map { annotation ->
+            if (annotation.typeArguments.isNotEmpty() || annotation.arguments.any { it != null }) {
+                throw Refused("krusty's plugin IR does not cover the type annotation ${annotation.render()} yet")
+            }
             annotation.symbol.owner.parentClassOrNull?.classId
                 ?: throw Refused("krusty's plugin IR does not cover the type annotation ${annotation.render()} yet")
         }
@@ -359,4 +367,21 @@ internal class ModuleWriter(
     private fun uncovered(element: IrElement, what: String) = Refused(
         "a plugin produced $what, which krusty's plugin IR does not cover yet: ${element.render().lineSequence().first()}",
     )
+}
+
+/** Whether every surrogate in the string is half of a pair, as UTF-8 needs. */
+private fun String.isWellFormedUtf16(): Boolean {
+    var index = 0
+    while (index < length) {
+        val unit = this[index]
+        when {
+            unit.isHighSurrogate() -> {
+                if (index + 1 >= length || !this[index + 1].isLowSurrogate()) return false
+                index += 2
+            }
+            unit.isLowSurrogate() -> return false
+            else -> index++
+        }
+    }
+    return true
 }

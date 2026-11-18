@@ -5,7 +5,9 @@
 // without a source position. Every other mode also leaves IR krusty's plugin IR does not cover:
 // `branch` returns every returned value through a `when`, `default` gives each function's first
 // parameter a default value, `accessor` reads `"".length` before the `println`, `inline` makes
-// each function inline, and `annotated` annotates each function with `@PublishedApi`.
+// each function inline, `annotated` annotates each function with `@PublishedApi`, `typeannotation`
+// annotates each return type with `@JvmSuppressWildcards(false)`, and `surrogate` prints a string
+// holding an unpaired surrogate.
 package fixture.rewrite
 
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
@@ -30,6 +32,7 @@ import org.jetbrains.kotlin.ir.expressions.impl.fromSymbolOwner
 import org.jetbrains.kotlin.ir.expressions.impl.IrCallImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrConstImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrWhenImpl
+import org.jetbrains.kotlin.ir.types.addAnnotations
 import org.jetbrains.kotlin.ir.types.defaultType
 import org.jetbrains.kotlin.ir.types.isNullableAny
 import org.jetbrains.kotlin.ir.util.constructors
@@ -43,7 +46,7 @@ val MODE: CompilerConfigurationKey<String> = CompilerConfigurationKey.create("re
 
 class RewriteOptions : CommandLineProcessor {
     override val pluginId = "fixture.rewrite"
-    override val pluginOptions = listOf(CliOption("mode", "plain|branch|default|accessor|inline|annotated", "what to rewrite", required = false))
+    override val pluginOptions = listOf(CliOption("mode", "plain|branch|default|accessor|inline|annotated|typeannotation|surrogate", "what to rewrite", required = false))
 
     override fun processOption(option: AbstractCliOption, value: String, configuration: CompilerConfiguration) {
         configuration.put(MODE, value)
@@ -91,7 +94,7 @@ private class Rewrite(private val mode: String) : IrGenerationExtension {
                 }, null)
                 val call = IrCallImpl(UNDEFINED_OFFSET, UNDEFINED_OFFSET, builtIns.unitType, println, 0, null, null)
                 call.arguments[0] = IrConstImpl(
-                    UNDEFINED_OFFSET, UNDEFINED_OFFSET, builtIns.stringType, IrConstKind.String, function.name.asString(),
+                    UNDEFINED_OFFSET, UNDEFINED_OFFSET, builtIns.stringType, IrConstKind.String, if (mode == "surrogate") "\uD800" else function.name.asString(),
                 )
                 (function.body as IrBlockBody).statements.add(0, call)
                 when (mode) {
@@ -112,6 +115,17 @@ private class Rewrite(private val mode: String) : IrGenerationExtension {
                         (function.body as IrBlockBody).statements.add(0, read)
                     }
                     "inline" -> function.isInline = true
+                    "typeannotation" -> {
+                        val suppress = pluginContext.referenceClass(ClassId.fromString("kotlin/jvm/JvmSuppressWildcards"))!!
+                        val annotation = IrAnnotationImpl.fromSymbolOwner(
+                            UNDEFINED_OFFSET, UNDEFINED_OFFSET, suppress.defaultType,
+                            suppress.constructors.single(), null,
+                        )
+                        annotation.arguments[0] = IrConstImpl(
+                            UNDEFINED_OFFSET, UNDEFINED_OFFSET, builtIns.booleanType, IrConstKind.Boolean, false,
+                        )
+                        function.returnType = function.returnType.addAnnotations(listOf(annotation))
+                    }
                     "annotated" -> {
                         val publishedApi = pluginContext.referenceClass(ClassId.fromString("kotlin/PublishedApi"))!!
                         function.annotations += IrAnnotationImpl.fromSymbolOwner(

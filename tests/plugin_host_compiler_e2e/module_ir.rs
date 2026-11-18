@@ -423,6 +423,28 @@ fn a_function_modifier_or_annotation_a_plugin_adds_refuses_the_module() {
     );
 }
 
+/// A type annotation travels as its class alone, so one with an argument is refused rather than
+/// returned as the same annotation with another argument.
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn a_type_annotation_argument_a_plugin_adds_refuses_the_module() {
+    assert_eq!(
+        rewrite_refusal("typeannotation"),
+        "krusty's plugin IR does not cover the type annotation CONSTRUCTOR_CALL 'public constructor <init> (suppress: kotlin.Boolean) [primary] declared in kotlin.jvm.JvmSuppressWildcards' type=kotlin.jvm.JvmSuppressWildcards origin=null yet"
+    );
+}
+
+/// The wire carries UTF-8, so a string constant with an unpaired surrogate is refused rather than
+/// returned as a different string.
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn a_string_with_an_unpaired_surrogate_a_plugin_adds_refuses_the_module() {
+    assert_eq!(
+        rewrite_refusal("surrogate"),
+        "a plugin produced a string constant with an unpaired surrogate, which krusty's plugin IR does not cover yet: CONST String type=kotlin.String value=\"\\uD800\""
+    );
+}
+
 /// The message the host refuses the sample's module with under the rewrite plugin in `mode`.
 fn rewrite_refusal(mode: &str) -> String {
     let (runtime, _) = runtime();
