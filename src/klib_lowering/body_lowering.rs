@@ -1049,6 +1049,9 @@ impl<'a> BodyLowering<'a> {
         if let Some(narrowed) = self.null_proven_field(id, lowered, actual, expected) {
             return Ok(narrowed);
         }
+        if captures_star_projection(actual, expected) {
+            return Ok(lowered);
+        }
         self.upcast(lowered, actual, expected)
             .ok_or(KlibBodyDeclineReason::ImplicitConversion)
     }
@@ -1351,6 +1354,24 @@ fn is_value_of(actual: Ty, expected: Ty) -> bool {
     actual == expected || (actual == Ty::Null && expected.is_nullable())
 }
 
+/// A value typed `actual` is one of `expected` through capture conversion: both apply the same
+/// class with the same nullability, and every argument that differs is a star projection in
+/// `actual`. The serialized call states the type argument kotlinc inferred for the captured
+/// star, so the value crosses as it is (a `Key<*>` where a `Key<E>` is bound to `E`'s bound).
+fn captures_star_projection(actual: Ty, expected: Ty) -> bool {
+    let (Some((actual_class, actual_args)), Some((expected_class, expected_args))) =
+        (actual.obj_parts(), expected.obj_parts())
+    else {
+        return false;
+    };
+    actual_class == expected_class
+        && actual_args.len() == expected_args.len()
+        && actual_args
+            .iter()
+            .zip(expected_args)
+            .all(|(have, want)| have == want || have.is_star_projection())
+}
+
 /// The target-neutral zero a deferred local of type `ty` holds before its first assignment, as the
 /// source parser supplies it: the primitive's zero, and `null` for every other type (a backend
 /// reads the deferred type to choose the physical zero it stores).
@@ -1365,5 +1386,43 @@ fn deferred_zero(ty: Ty) -> IrConst {
         Ty::Double => IrConst::Double(0.0),
         Ty::Char => IrConst::Char(0),
         _ => IrConst::Null,
+    }
+}
+
+#[cfg(test)]
+mod capture_conversion_tests {
+    use super::captures_star_projection;
+    use crate::types::Ty;
+
+    #[test]
+    fn a_star_projected_argument_is_captured_where_the_call_binds_its_bound() {
+        let element = Ty::obj("demo/Element");
+        let star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
+        assert!(captures_star_projection(
+            Ty::obj_args("demo/Key", &[star]),
+            Ty::obj_args("demo/Key", &[element])
+        ));
+    }
+
+    #[test]
+    fn only_a_star_projection_in_the_actual_type_is_captured() {
+        let (element, other) = (Ty::obj("demo/Element"), Ty::obj("demo/Other"));
+        let star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
+        assert!(!captures_star_projection(
+            Ty::obj_args("demo/Key", &[element]),
+            Ty::obj_args("demo/Key", &[other])
+        ));
+        assert!(!captures_star_projection(
+            Ty::obj_args("demo/Key", &[element]),
+            Ty::obj_args("demo/Key", &[star])
+        ));
+        assert!(!captures_star_projection(
+            Ty::obj_args("demo/Key", &[star]),
+            Ty::obj_args("demo/Lock", &[element])
+        ));
+        assert!(!captures_star_projection(
+            Ty::obj_args("demo/Key", &[star]),
+            Ty::nullable(Ty::obj_args("demo/Key", &[element]))
+        ));
     }
 }
