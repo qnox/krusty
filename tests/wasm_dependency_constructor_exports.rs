@@ -68,6 +68,16 @@ fn wasm_official_dependency_public_constructors_delegate_to_a_private_primary() 
     );
 }
 
+/// A library body that asserts a value of a nullable-bounded type parameter non-null (`item!!`)
+/// types the assertion `T & Any`, and lowers from the official producer's bodies.
+#[test]
+fn wasm_official_dependency_definitely_non_null_assertions_lower_from_their_bodies() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyDefinitelyNonNullAssertion.kt"),
+        "DependencyDefinitelyNonNullAssertion",
+    );
+}
+
 /// Generic classes, a generic superclass and a secondary constructor of a generic class lower
 /// from the official producer's bodies.
 #[test]
