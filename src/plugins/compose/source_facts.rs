@@ -313,6 +313,7 @@ pub(super) fn record(
                 unsupported_plain_body(ir, declaration.function, &body, &calls, &lambdas)
             {
                 rejections.push(PluginRejection {
+                    refusal: true,
                     span,
                     message: unsupported(what),
                 });
@@ -656,6 +657,7 @@ refusal: true,
         match argument_stability(ir, &*runtime, site, caller) {
             Ok(stability) => site.stability = stability,
             Err(what) => rejections.push(PluginRejection {
+                refusal: true,
                 span: calls
                     .get(&site.call)
                     .and_then(|call| call.span)
