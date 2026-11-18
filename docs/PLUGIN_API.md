@@ -494,7 +494,7 @@ silently dropping a plugin would emit wrong bytecode, each activated plugin gets
 | native reimpl (serialization, all-open, no-arg, sam-with-receiver) | `NativeSubstitution` — krusty runs its own ABI-matched impl; the supplied jar is **not** executed | INFO |
 | hosted (KSP) | `Hosted` — the real jar runs via the sidecar | INFO |
 | hosted (KSP), from a driver with no codegen host (`Activation::codegen_host == false`) | `HostUnavailable` — reporting it hosted would drop its generated sources | **ERROR** (fails the compile) |
-| partly covered native reimpl (Compose) | `PartialSubstitution` — krusty runs its own pass, which rejects every construct it does not cover yet with an error at that construct; `krusty refusals` lists the plugin, so the Gradle integration hands the module to kotlinc | INFO |
+| partly covered native reimpl (Compose) | `PartialSubstitution` — krusty runs its own pass, which rejects every construct it does not cover yet with an error at that construct and exit status 3; the Gradle integration tries krusty and hands only that refused module to kotlinc | INFO |
 | `-Xplugin` jar declaring a registrar no extension answers to (any third-party FIR/IR plugin) | `Unsupported` — krusty can neither run nor substitute it | **ERROR** (fails the compile) |
 | `-Xplugin` entry krusty cannot read (not a zip, not a directory) | `Unsupported` — it cannot be identified, so it cannot be honoured | **ERROR** (fails the compile) |
 | `-P plugin:<id>:…` for an id no extension answers to | `Unsupported` (`plugin id '<id>'`) — the option cannot be honoured | **ERROR** (fails the compile) |

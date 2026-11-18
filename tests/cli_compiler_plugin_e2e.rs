@@ -429,21 +429,12 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
             String::new()
         )
     );
-    // Compose runs as a partial native pass, which a build is refused until it is complete.
+    // Compose runs as a partial native pass. A build still tries krusty, which rejects a construct
+    // the pass does not cover with its own exit status, so the support check does not refuse it.
     let compose = reference_plugin_jar("compose-compiler-plugin.jar");
     assert_eq!(
         check(&[format!("-Xplugin={}", compose.display())]),
-        (
-            Some(1),
-            format!(
-                "{}\n",
-                PluginDiagnostic::PartialSubstitution {
-                    plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string()
-                }
-                .message()
-            ),
-            String::new()
-        )
+        (Some(0), String::new(), String::new())
     );
     // So is a Kotlin release krusty does not support: kotlinc of that release compiles it.
     assert_eq!(
@@ -533,6 +524,64 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
                 .to_string()
         )
     );
+}
+
+/// A build tells a plugin pass's refusal of valid source from a compile error by the exit status
+/// alone: 3 for a refusal (kotlinc compiles the module), 1 for an error. `verify-compile` records the
+/// refusal as unsupported and the error as a failure.
+#[test]
+fn a_plugin_refusal_has_its_own_exit_status_and_verify_records_it_as_unsupported() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let verify = |probe: &Probe| {
+        let record = probe.dir.join("record.json");
+        let reference = probe.dir.join("kotlinc");
+        std::fs::create_dir_all(&reference).expect("reference directory");
+        let output = Command::new(common::krusty_binary())
+            .args(["verify-compile", "--reference"])
+            .arg(&reference)
+            .arg("--record")
+            .arg(&record)
+            .args(["--compilation", ":compileKotlin", "--"])
+            .args(["-cp", &join_classpath(&classpath)])
+            .args(&switches)
+            .arg("-d")
+            .arg(probe.dir.join("verified"))
+            .arg(&probe.source)
+            .output()
+            .expect("run krusty verify-compile");
+        assert_eq!(output.status.code(), Some(0));
+        std::fs::read_to_string(record).expect("the record")
+    };
+    let status = |record: &str| {
+        record
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("\"status\":"))
+            .expect("the record's status")
+            .trim_end_matches(',')
+            .to_string()
+    };
+
+    let refused = Probe::new(
+        "refusal-status",
+        "package probe\nimport androidx.compose.runtime.Composable\nimport androidx.compose.runtime.ReusableContent\n@Composable fun Greeting() {\nReusableContent(1) { }\n}\n",
+    );
+    let compiled = refused.krusty(&classpath, &switches);
+    assert_eq!(compiled.code, Some(3), "{}", compiled.stderr);
+    assert_eq!(compiled.classes, Vec::<String>::new());
+    assert_eq!(status(&verify(&refused)), "\"status\": \"unsupported\"");
+
+    let invalid = Probe::new(
+        "error-status",
+        "package probe\nimport androidx.compose.runtime.Composable\n@Composable fun Greeting() {}\nval number: Int = \"text\"\n",
+    );
+    let compiled = invalid.krusty(&classpath, &switches);
+    assert_eq!(compiled.code, Some(1), "{}", compiled.stderr);
+    assert_eq!(status(&verify(&invalid)), "\"status\": \"failed\"");
 }
 
 /// Compiled directly, a Compose module compiles through krusty's partial pass, which rejects each
@@ -855,7 +904,7 @@ fn assert_atomicfu_rejects(name: &str, declarations: &str, error: &str) {
             probe.source.display()
         )
     );
-    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.code, Some(3));
     assert_eq!(compiled.classes, Vec::<String>::new());
 }
 
@@ -892,7 +941,7 @@ fn assert_compose_library_call_rejects(name: &str, library: &str, declarations: 
             probe.source.display()
         )
     );
-    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.code, Some(3));
     assert_eq!(compiled.classes, Vec::<String>::new());
 }
 
@@ -927,7 +976,7 @@ fn a_library_composable_lambda_parameter_aligns_with_its_method() {
              krusty: 2 error(s)\n"
         )
     );
-    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.code, Some(3));
 }
 
 /// A composable lambda parameter passed on to a library composable needs the applier scheme of the
@@ -966,7 +1015,7 @@ fn forwarding_a_composable_lambda_parameter_to_a_producer_library_is_declined() 
             probe.source.display()
         )
     );
-    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.code, Some(3));
 }
 
 /// The widths around the Compose compiler's changed-word boundaries (nine and ten parameters, and
@@ -1083,7 +1132,7 @@ fn assert_compose_rejects(name: &str, declarations: &str, others: &[(&str, &str)
             probe.source.display()
         )
     );
-    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.code, Some(3));
     assert_eq!(compiled.classes, Vec::<String>::new());
 }
 
