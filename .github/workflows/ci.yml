@@ -1337,6 +1337,9 @@ jobs:
         with:
           name: tool-bins
       - name: build, test and package for Kotlin ${{ matrix.kotlin }}
+        env:
+          # The dependencies came from the build-tools-deps job's cache; never fetch from Central here.
+          KRUSTY_GRADLE_OFFLINE: "1"
         run: |
           set -euo pipefail
           chmod +x krusty
