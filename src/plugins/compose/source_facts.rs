@@ -1367,7 +1367,7 @@ impl BodyScope<'_> {
                 library_mask,
                 stability: Vec::new(),
             },
-            call_location(self.positions, call_span),
+            call_location(self.positions, found.own_span.unwrap_or(call_span)),
         ))
     }
 
@@ -1788,6 +1788,8 @@ pub(super) fn expression_body(ir: &IrFile, function: FunId) -> Option<FunctionBo
 /// A call whose selected declaration is composable.
 struct ComposableCall {
     span: Option<crate::diag::Span>,
+    /// The call's own syntax, which `sourceInformation` names: a qualified call's selector.
+    own_span: Option<crate::diag::Span>,
     origin: CalleeOrigin,
 }
 
@@ -1874,6 +1876,7 @@ fn composable_calls(
                 call,
                 ComposableCall {
                     span: source.expression_span(ir, call),
+                    own_span: source.call_span(ir, call),
                     origin,
                 },
             ))

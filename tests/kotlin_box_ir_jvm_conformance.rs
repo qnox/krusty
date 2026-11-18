@@ -869,6 +869,11 @@ fn compose_library_calls_with_many_parameters_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_qualified_library_call_names_its_selector_in_source_information() {
+    assert_compose_fixture_matches_kotlinc("libraryDefaultArgumentsSized");
+}
+
+#[test]
 fn compose_captured_locals_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("capturedLocals");
 }

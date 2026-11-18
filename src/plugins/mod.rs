@@ -878,6 +878,15 @@ pub struct PluginSourceView<'a> {
 }
 
 impl PluginSourceView<'_> {
+    /// The span of the call `expression`'s own syntax, which kotlinc's call offsets begin at.
+    pub fn call_span(
+        &self,
+        ir: &IrFile,
+        expression: crate::ir::ExprId,
+    ) -> Option<crate::diag::Span> {
+        self.checked.call_span(ir, expression)
+    }
+
     /// The span in this file that `expression` was lowered from, when it has one.
     pub fn expression_span(
         &self,
@@ -896,6 +905,15 @@ pub trait CheckedSourceFacts {
         ir: &IrFile,
         expression: crate::ir::ExprId,
     ) -> Option<crate::diag::Span>;
+    /// The span of the call `expression`'s own syntax: the whole expression, or for a qualified
+    /// call (`lib.f(x)`) its selector (`f(x)`), where kotlinc's call offsets begin.
+    fn call_span(&self, ir: &IrFile, expression: crate::ir::ExprId) -> Option<crate::diag::Span> {
+        let span = self.expression_span(ir, expression)?;
+        Some(match ir.selector_offset(expression) {
+            Some(offset) => crate::diag::Span::new(offset, span.hi),
+            None => span,
+        })
+    }
     /// The checked annotations of the dependency function a call selected by `callable`.
     fn dependency_annotations(&self, callable: crate::ir::ExternalCallableId) -> &[TypeName];
     /// The declaring owner and Kotlin name of the dependency function a call selected by
