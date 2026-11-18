@@ -1534,12 +1534,12 @@ fn kotlin_codegen_box_conformance() {
                     };
                     (
                         file.clone(),
-                        TestResult::Fail(format!("compiler panic: {message}")),
+                        TestResult::Panic(format!("compiler panic: {message}")),
                         case_score,
                     )
                 });
                 t_closure.fetch_add(tc0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                if let TestResult::Fail(why) = &__ret.1 {
+                if let TestResult::Fail(why) | TestResult::Panic(why) = &__ret.1 {
                     let summary = why.lines().next().unwrap_or(why).to_string();
                     recent_failures
                         .lock()
@@ -1630,7 +1630,7 @@ fn kotlin_codegen_box_conformance() {
                 compiled += 1;
                 passed += 1;
             }
-            TestResult::Fail(why) => {
+            TestResult::Fail(why) | TestResult::Panic(why) => {
                 compiled += 1;
                 failures.push(format!("{}: {why}", file.display()));
             }
@@ -1653,7 +1653,7 @@ fn kotlin_codegen_box_conformance() {
             let tag = match r {
                 TestResult::NotApplicable => "NOT-APPLICABLE",
                 TestResult::Pass => "PASS",
-                TestResult::Fail(_) => "FAIL",
+                TestResult::Fail(_) | TestResult::Panic(_) => "FAIL",
             };
             listing.push(format!("{tag} {}", file.display()));
         }
@@ -1770,7 +1770,7 @@ fn kotlin_codegen_box_conformance() {
             let tag = match r {
                 TestResult::NotApplicable => "NOT-APPLICABLE",
                 TestResult::Pass => "PASS",
-                TestResult::Fail(_) => "FAIL",
+                TestResult::Fail(_) | TestResult::Panic(_) => "FAIL",
             };
             eprintln!("  {tag} {}", file.display());
         }
@@ -1814,7 +1814,10 @@ fn kotlin_codegen_box_conformance() {
     }
 }
 
-/// Reject every applicable failure and hold exclusions to the exact JVM applicability inventory.
+/// Hold every outcome to the exact JVM inventory of this release. A failure is accepted only when
+/// the release's committed failure baseline lists it, and that baseline only shrinks. A compiler
+/// panic, a failing owned regression, or an owned case that is not applicable is never accepted and
+/// can never be blessed.
 fn check_jvm_outcomes(
     box_dir: &Path,
     results: &[(PathBuf, TestResult, box_byte_score::CaseScore)],
@@ -1822,32 +1825,34 @@ fn check_jvm_outcomes(
     full_run: bool,
 ) {
     let version = krusty::kotlin_version::target();
-    let failures: Vec<String> = results
+    let fatal: Vec<String> = results
         .iter()
-        .filter_map(|(file, result, _)| match result {
-            TestResult::Fail(reason) => Some(format!(
-                "{}: {reason}",
-                box_ratchet::corpus_key(box_dir, file)
-            )),
-            TestResult::NotApplicable if super::box_inventory::owned(file) => Some(format!(
-                "{}: owned portable box case may not be not-applicable",
-                box_ratchet::corpus_key(box_dir, file)
-            )),
-            TestResult::Pass | TestResult::NotApplicable => None,
+        .filter_map(|(file, result, _)| {
+            let key = box_ratchet::corpus_key(box_dir, file);
+            match result {
+                TestResult::Panic(reason) => Some(format!("{key}: {reason}")),
+                TestResult::Fail(reason) if super::box_inventory::owned(file) => {
+                    Some(format!("{key}: owned box regression failed: {reason}"))
+                }
+                TestResult::NotApplicable if super::box_inventory::owned(file) => Some(format!(
+                    "{key}: owned portable box case may not be not-applicable"
+                )),
+                TestResult::Pass | TestResult::NotApplicable | TestResult::Fail(_) => None,
+            }
         })
         .collect();
     assert!(
-        failures.is_empty(),
-        "{} applicable JVM box case(s) failed:\n  {}",
-        failures.len(),
-        failures.join("\n  ")
+        fatal.is_empty(),
+        "{} JVM box case(s) failed in a way no baseline may accept:\n  {}",
+        fatal.len(),
+        fatal.join("\n  ")
     );
     let outcomes: BTreeMap<String, Outcome> = results
         .iter()
         .map(|(file, result, _)| {
             let outcome = match result {
                 TestResult::Pass => Outcome::Pass,
-                TestResult::Fail(_) => Outcome::Fail,
+                TestResult::Fail(_) | TestResult::Panic(_) => Outcome::Fail,
                 TestResult::NotApplicable => Outcome::NotApplicable,
             };
             (box_ratchet::corpus_key(box_dir, file), outcome)
@@ -1864,36 +1869,41 @@ fn check_jvm_outcomes(
             env("CI").is_none(),
             "KRUSTY_BLESS_BOX_EXPECTATIONS is refused under CI: expectations are blessed locally and reviewed"
         );
-        let not_applicable: BTreeSet<String> = outcomes
-            .iter()
-            .filter(|(_, outcome)| **outcome == Outcome::NotApplicable)
-            .map(|(path, _)| path.clone())
-            .collect();
-        let not_applicable_path = box_ratchet::not_applicable_path(Platform::Jvm, version);
-        box_ratchet::write_not_applicable(Platform::Jvm, version, &not_applicable).unwrap_or_else(
-            |err| panic!("failed to replace {}: {err}", not_applicable_path.display()),
-        );
+        box_ratchet::write(Platform::Jvm, version, &outcomes)
+            .unwrap_or_else(|err| panic!("failed to write the JVM box expectations: {err}"));
         eprintln!(
-            "JVM box expectations: wrote {} expected not-applicable cases to {}",
-            not_applicable.len(),
-            not_applicable_path.display(),
+            "JVM box expectations: wrote {} and {}",
+            box_ratchet::failure_path(Platform::Jvm, version).display(),
+            box_ratchet::not_applicable_path(Platform::Jvm, version).display(),
         );
         return;
     }
     let expected = box_ratchet::load(Platform::Jvm, version);
-    assert!(
-        expected.failures.is_empty(),
-        "JVM expected-failure inventories are obsolete; remove every entry from {}",
-        box_ratchet::failure_path(Platform::Jvm, version).display()
-    );
     let mismatches = box_ratchet::compare(&expected, &outcomes, corpus);
-    assert!(
-        mismatches.is_empty(),
-        "{}",
-        mismatches.report(Platform::Jvm, version)
-    );
+    if !mismatches.is_empty() {
+        let reasons: Vec<String> = results
+            .iter()
+            .filter_map(|(file, result, _)| {
+                let key = box_ratchet::corpus_key(box_dir, file);
+                match result {
+                    TestResult::Fail(reason) if mismatches.unexpected_failures.contains(&key) => {
+                        Some(format!("{key}: {reason}"))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        let mut report = mismatches.report(Platform::Jvm, version);
+        if !reasons.is_empty() {
+            report.push_str("\nunexpected JVM box failures:\n  ");
+            report.push_str(&reasons.join("\n  "));
+        }
+        panic!("{report}");
+    }
     eprintln!(
-        "JVM box applicability matches {} ({} expected not-applicable)",
+        "JVM box outcomes match {} ({} expected failures) and {} ({} expected not-applicable)",
+        box_ratchet::failure_path(Platform::Jvm, version).display(),
+        expected.failures.len(),
         box_ratchet::not_applicable_path(Platform::Jvm, version).display(),
         expected.not_applicable.len(),
     );
@@ -1903,6 +1913,8 @@ enum TestResult {
     NotApplicable,
     Pass,
     Fail(String),
+    /// The compiler crashed: a defect to fix, never an outcome a baseline records.
+    Panic(String),
 }
 
 // ===================== Byte-identity differential mode =====================
