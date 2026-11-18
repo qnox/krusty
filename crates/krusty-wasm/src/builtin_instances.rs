@@ -58,10 +58,12 @@ impl Runtime {
                 .interfaces
                 .instance_of(self.string_builders.class, interface);
         }
+        // The list is an instance by its struct, as a string is, so the interface's members are
+        // not obligations of the list: its class implements only the members the runtime realizes.
         if laid_out.array_list {
             self.objects
                 .interfaces
-                .instance_of(self.array_lists.class, interface);
+                .representation_instance_of(self.array_lists.list, interface);
         }
         for form in self.box_forms() {
             if subtypes.contains(&form.boxed) {
