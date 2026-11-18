@@ -1367,9 +1367,11 @@ fn push_body_children(ir: &IrFile, expression: ExprId, pending: &mut Vec<ExprId>
 }
 
 /// Whether parameter `index` of `function` is declared `@Composable () -> Unit`, the one composable
-/// function type whose calling convention the transform implements.
+/// function type whose calling convention the transform implements. `index` counts the declared
+/// value parameters, so an extension receiver ahead of them in the physical parameters is skipped.
 fn is_composable_lambda(ir: &IrFile, function: FunId, index: usize, composable: TypeName) -> bool {
-    let Some(&ty) = ir.functions[function as usize].params.get(index) else {
+    let receiver = usize::from(ir.extension_receiver_fns.contains(&function));
+    let Some(&ty) = ir.functions[function as usize].params.get(index + receiver) else {
         return false;
     };
     let TyKind::Fun(signature) = ty.kind() else {

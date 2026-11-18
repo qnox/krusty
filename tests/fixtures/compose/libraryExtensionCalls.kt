@@ -23,6 +23,12 @@ fun String.Plain(size: Int) {
     seen.append(size).append(';')
 }
 
+// A composable lambda parameter after the receiver is still recognised as one.
+@Composable
+fun String.Wrap(content: @Composable () -> Unit) {
+    content()
+}
+
 // MODULE: main(lib)
 // FILE: greeting.kt
 package probe
