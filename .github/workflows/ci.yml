@@ -729,8 +729,10 @@ jobs:
         with:
           path: target/cache/kotlinc/${{ matrix.version }}
           key: kotlinc-${{ matrix.version }}
+      # The Native lane's JVM oracle needs the same extra libraries (the atomicfu plugin), so it
+      # restores the entry the JVM lane saves; only the JVM lane saves it.
       - name: restore serialization and KSP conformance inputs (${{ matrix.version }})
-        if: matrix.target == 'jvm'
+        if: matrix.target == 'jvm' || matrix.target == 'native'
         id: conformance-inputs
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -906,6 +908,7 @@ jobs:
         # Complete migration runs exceeded the former 600-second corpus budget. Keep ordinary
         # and focused deadlines unchanged; a corpus timeout still fails this row.
         env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
           KRUSTY_NATIVE_BYTE_REPORT: ${{ github.workspace }}/native-byte-equality.txt
           KRUSTY_KLIB_REFERENCE_CACHE: ${{ github.workspace }}/target/cache/klib-references
@@ -923,6 +926,7 @@ jobs:
         id: native_focused
         continue-on-error: true
         env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
