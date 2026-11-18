@@ -469,10 +469,14 @@ impl BodyLowering<'_> {
                 function_type,
                 reflective: _,
                 extension_receiver,
+                context_arguments,
                 adaptation,
             } => self.checked_local_callable_reference(
                 target.clone(),
-                *extension_receiver,
+                super::local_callables::LocalReferenceBindings {
+                    extension_receiver: *extension_receiver,
+                    context_arguments,
+                },
                 adaptation.as_deref(),
                 function_type.get(),
             )?,
