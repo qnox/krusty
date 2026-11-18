@@ -144,6 +144,7 @@ impl BodyLowering<'_> {
                 .iter()
                 .map(crate::ir::IrSamTypeParameter::lowered)
                 .collect(),
+            placement: crate::ir::IrSamPlacement::ThisFile,
         };
         let name = format!(
             "$fir_sam_delegate_{}_{}",
