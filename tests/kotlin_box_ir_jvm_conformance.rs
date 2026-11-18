@@ -849,6 +849,11 @@ fn compose_inferred_parameter_stability_is_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_runtime_parameter_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("runtimeParameterStability");
+}
+
+#[test]
 fn compose_library_calls_with_many_parameters_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("libraryManyParameters");
 }

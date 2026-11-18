@@ -107,8 +107,8 @@ pub(super) struct TrackedParameter {
     /// Whether it is a composable `() -> Unit` value, which takes the caller's composer when called
     /// and is compared by identity.
     pub(super) lambda: bool,
-    /// Whether kotlinc infers its type unstable, which the function compares by identity.
-    pub(super) unstable: bool,
+    /// What kotlinc infers of its type's stability, which decides how the function compares it.
+    pub(super) stability: ParameterStability,
 }
 
 /// A composable call directly in a restartable body, and what the caller knows about each argument
@@ -122,6 +122,9 @@ pub(super) struct ComposableCallSite {
     /// A library callee declares parameter defaults, so it takes a `$default` mask after its
     /// `$changed`, whether or not the call omits an argument.
     pub(super) library_mask: bool,
+    /// For each argument, the classes whose `$stable` the callee's `$changed` takes the argument's
+    /// stability from, when its type's stability is decided when the caller runs.
+    pub(super) stability: Vec<Vec<TypeName>>,
 }
 
 /// What kotlinc's `argumentMetaOf` finds about one argument of a composable call.
@@ -343,6 +346,7 @@ pub(super) fn record(
                     call,
                     arguments: vec![ArgumentState::Forwarded(index)],
                     library_mask: false,
+                    stability: Vec::new(),
                 });
                 locations.push(call_location(&positions, call_span));
                 continue;
@@ -411,7 +415,7 @@ pub(super) fn record(
                 used,
                 default: defaults.get(index).copied().flatten(),
                 lambda: lambdas[index],
-                unstable: stabilities[index] == Ok(ParameterStability::Unstable),
+                stability: stabilities[index].unwrap_or(ParameterStability::Undecided),
             })
             .collect::<Vec<_>>();
         let signature = format!(
@@ -565,6 +569,30 @@ pub(super) fn record(
         span,
         message: unsupported("a composable call outside the statements of a composable body"),
     }));
+    // The function whose parameters a site's forwarded arguments are: a restartable function, or
+    // the implementation of a composable lambda.
+    let sites = functions
+        .iter_mut()
+        .flat_map(|function| {
+            let caller = function.function;
+            function.calls.iter_mut().map(move |site| (caller, site))
+        })
+        .chain(composable_lambdas.iter_mut().flat_map(|lambda| {
+            let caller = lambda.implementation;
+            lambda.calls.iter_mut().map(move |site| (caller, site))
+        }));
+    for (caller, site) in sites {
+        match argument_stability(ir, &*runtime, site, caller) {
+            Ok(stability) => site.stability = stability,
+            Err(what) => rejections.push(PluginRejection {
+                span: calls
+                    .get(&site.call)
+                    .and_then(|call| call.span)
+                    .unwrap_or(crate::diag::Span::new(0, 0)),
+                message: unsupported(what),
+            }),
+        }
+    }
     let Some(first) = functions.first() else {
         return;
     };
@@ -966,6 +994,51 @@ pub(super) fn takes_composer_frame(synthetic: &[Ty], parameters: usize, defaults
             && rest.iter().all(|word| *word == Ty::Int))
 }
 
+/// What each argument of `site` tells its callee of its stability: the classes whose `$stable` the
+/// call reads, or why the call cannot say yet.
+fn argument_stability(
+    ir: &IrFile,
+    runtime: &dyn PluginRuntime,
+    site: &ComposableCallSite,
+    caller: FunId,
+) -> Result<Vec<Vec<TypeName>>, &'static str> {
+    let none = vec![Vec::new(); site.arguments.len()];
+    let IrExpr::Call { callee, .. } = &ir.exprs[site.call as usize] else {
+        return Ok(none);
+    };
+    let params = match &**callee {
+        Callee::External { params, .. } => params.to_vec(),
+        Callee::Local(function) => ir.functions[*function as usize].params.clone(),
+        _ => return Ok(none),
+    };
+    site.arguments
+        .iter()
+        .zip(&params)
+        .map(|(argument, &ty)| match argument {
+            ArgumentState::Static | ArgumentState::Omitted => Ok(Vec::new()),
+            // The stability of what is passed is that of the caller's own parameter, which may be
+            // a subtype of the callee's formal type.
+            ArgumentState::Forwarded(parameter) => {
+                super::class_stability::parameter_stability_reads(
+                    ir,
+                    runtime,
+                    ir.functions[caller as usize].params[*parameter as usize],
+                )
+            }
+            ArgumentState::Uncertain => {
+                // The argument's own type may be narrower than the formal one, so only a formal
+                // type whose stability is certain says what the argument's is.
+                match super::class_stability::parameter_stability(ir, runtime, ty)? {
+                    ParameterStability::Undecided => {
+                        Err("a call argument whose type's stability is decided when it runs")
+                    }
+                    ParameterStability::Stable | ParameterStability::Unstable => Ok(Vec::new()),
+                }
+            }
+        })
+        .collect()
+}
+
 /// The Kotlin name of the function a call calls, of the file or of a library.
 fn callee_name<'a>(
     ir: &'a IrFile,
@@ -1147,6 +1220,7 @@ impl BodyScope<'_> {
                 call,
                 arguments,
                 library_mask,
+                stability: Vec::new(),
             },
             call_location(self.positions, call_span),
         ))
