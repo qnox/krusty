@@ -28824,7 +28824,7 @@ impl<'a> Checker<'a> {
                         declared_class.non_null(),
                     );
                 if !comparable {
-                    current.ty = Ty::intersection(&[declared.non_null(), narrowed]);
+                    current.ty = Ty::intersection(&[declared, narrowed]);
                 }
             }
         }
