@@ -412,6 +412,9 @@ pub(super) struct PreparedLocalClass<'a> {
     /// The same-library superclass the constructor delegates to; `Any` otherwise.
     pub(super) superclass: Option<LocalSuperclass<'a>>,
     pub(super) open: bool,
+    /// Where the source declares the class and the name it gives it there, which Kotlin names an
+    /// instance by; `None` for a class this unit does not name.
+    pub(super) site_name: Option<crate::ir::IrSiteClassName>,
 }
 
 /// A same-library superclass constructor a class's constructor delegates to, and the slot of the
@@ -893,6 +896,16 @@ fn prepare_class<'a>(
         (None, None) => None,
         _ => return Err(mismatch("an inner class constructor has no outer instance")),
     };
+    // A file-private top-level class is declared in its file's package, under its own name.
+    let site_name = source
+        .bodies
+        .module_top_level_local_class_package(&key.module, &key.signature)
+        .map(|package| crate::ir::IrSiteClassName {
+            container: crate::ir::IrSiteClassContainer::Package(super::klib_types::package_name(
+                package,
+            )),
+            name: class.name.as_str().into(),
+        });
     let superclass = local_superclass(
         source,
         LocalDelegation {
@@ -958,6 +971,7 @@ fn prepare_class<'a>(
         outer: outer_instance,
         superclass,
         open: declaration_modality(class.base.flags) != KotlinModality::Final,
+        site_name,
     })
 }
 
@@ -1708,5 +1722,6 @@ pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
         class.constructor_prefix_count = 1;
         class.pre_super_param_fields.push((0, outer.field));
     }
+    class.site_name = prepared.site_name.clone();
     class
 }

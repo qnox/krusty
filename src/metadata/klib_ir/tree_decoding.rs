@@ -147,6 +147,20 @@ impl KlibIrModuleTrees {
         Some((arena, arena.class(class)))
     }
 
+    /// The package segments of the file whose top-level declaration is the file-local class this
+    /// library serializes under `signature`. `None` for a class nested in another declaration or
+    /// local to a body, and for a signature the library does not serialize.
+    pub(crate) fn top_level_local_class_package(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> Option<&[String]> {
+        let (tree, class) = *self.local_classes.get(signature)?;
+        if !self.trees[tree].declaration.declares_top_level_class(class) {
+            return None;
+        }
+        self.file_package(self.files[tree])
+    }
+
     /// Every file-local class this library serializes, with the arena that owns it.
     pub(crate) fn local_classes(
         &self,
@@ -245,6 +259,16 @@ impl KlibIrModuleTrees {
         module.index()?;
         module.classes = super::class_index::KlibIrClassIndex::of(&module.trees);
         Ok(module)
+    }
+
+    /// Declare every tree's file in `package`, as a serialized file's header does.
+    #[cfg(test)]
+    pub(crate) fn in_package(mut self, package: &[&str]) -> Self {
+        self.packages = vec![package
+            .iter()
+            .map(|segment| (*segment).to_owned())
+            .collect()];
+        self
     }
 
     fn index(&mut self) -> Result<(), KlibIrDecodeError> {

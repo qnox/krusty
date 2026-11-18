@@ -155,6 +155,33 @@ fn field(
 
 /// `class Hidden<T>(value: T) : Super`, with `stored` initialized from the parameter and `mark`
 /// from a later constant. The field spelling is not the parameter spelling.
+/// Kotlin names an instance of a file-private top-level class by the package its file declares and
+/// the name the source gives it, so the materialized class records that site for a target that
+/// prints the instance.
+#[test]
+fn a_file_private_top_level_class_records_its_declaration_site() {
+    let (facts, trees) = module_trees("demo", &[MAKE], vec![hidden_class(T::Any)], |_, body| {
+        Some(hidden_body(body))
+    });
+    let bodies = KlibDeclarationBodies::from_libraries(vec![(
+        "demo".to_owned(),
+        trees.in_package(&["demo"]),
+    )])
+    .expect("one library");
+    let demo = Demo { facts, bodies };
+    let mut unit = DependencyBodyUnit::default();
+    demo.lower(&mut unit, "make", &[])
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    let class = &unit.ir().classes[0];
+    assert_eq!(
+        class.site_name,
+        Some(crate::ir::IrSiteClassName {
+            container: crate::ir::IrSiteClassContainer::Package(crate::types::type_name("demo")),
+            name: "Hidden".into(),
+        })
+    );
+}
+
 fn hidden_class(supertype: T) -> KlibIrDeclarationTree {
     let mut arena = KlibIrArena::default();
     let symbol = class_symbol();

@@ -600,6 +600,17 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_class(signature)
     }
 
+    /// The package of the file whose top-level declaration is the file-local class `module`
+    /// serializes under `signature`; `None` for a class nested in another declaration.
+    pub(crate) fn module_top_level_local_class_package(
+        &self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<&[String]> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].top_level_local_class_package(signature)
+    }
+
     /// The package segments of the serialized file `file` of `module`.
     pub(crate) fn module_file_package(&self, module: &str, file: u32) -> Option<&[String]> {
         let library = *self.modules.get(module)?;

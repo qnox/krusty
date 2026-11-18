@@ -923,6 +923,12 @@ pub enum KlibIrMember {
 }
 
 impl KlibIrMember {
+    /// Whether this top-level declaration is the class `class` itself, rather than a class nested
+    /// in it or local to a body.
+    pub fn declares_top_level_class(&self, class: KlibIrClassId) -> bool {
+        matches!(self, Self::Class(declared) if *declared == class)
+    }
+
     /// Whether `function` is this top-level declaration itself or an accessor of the property it
     /// declares, rather than a member of a class or a function local to a body.
     pub fn declares_top_level(&self, function: KlibIrFunctionId) -> bool {
