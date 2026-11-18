@@ -3,6 +3,7 @@ package krusty.buildtools;
 import java.io.File;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.HashMap;
 import java.util.Map;
 import org.jetbrains.kotlin.buildtools.api.ExecutionPolicy;
 
@@ -12,8 +13,9 @@ import org.jetbrains.kotlin.buildtools.api.ExecutionPolicy;
  * under the in-process one. The options configure the JVM of a Kotlin daemon (its arguments,
  * shutdown delay, run and log directories); krusty starts no daemon, so they are kept for the
  * caller and nothing else reads them. A new builder answers the defaults of the Kotlin daemon's own
- * options (its run and log directories and the log file limits); the JVM arguments and the shutdown
- * delay have none, so reading one before it is set is an {@link IllegalStateException}.
+ * options: its run and log directories and the log file limits, and null for the JVM arguments and
+ * the shutdown delay, which are left to the daemon. An option the policy does not declare is an
+ * {@link IllegalStateException}.
  */
 final class DaemonPolicy implements ExecutionPolicy.WithDaemon {
     private static final String OWNER = "org.jetbrains.kotlin.buildtools.api.ExecutionPolicy.WithDaemon";
@@ -62,11 +64,14 @@ final class DaemonPolicy implements ExecutionPolicy.WithDaemon {
     }
 
     private static Map<String, Object> defaults() {
-        return Map.of(
-            ExecutionPolicy.WithDaemon.DAEMON_RUN_DIR_PATH.getId(), runFilesPath(),
-            ExecutionPolicy.WithDaemon.LOGS_PATH.getId(), Paths.get(tempPath()),
-            ExecutionPolicy.WithDaemon.LOGS_FILE_SIZE_LIMIT.getId(), 1048576L,
-            ExecutionPolicy.WithDaemon.LOGS_FILE_COUNT_LIMIT.getId(), 3);
+        Map<String, Object> defaults = new HashMap<>();
+        defaults.put(ExecutionPolicy.WithDaemon.JVM_ARGUMENTS.getId(), null);
+        defaults.put(ExecutionPolicy.WithDaemon.SHUTDOWN_DELAY_MILLIS.getId(), null);
+        defaults.put(ExecutionPolicy.WithDaemon.DAEMON_RUN_DIR_PATH.getId(), runFilesPath());
+        defaults.put(ExecutionPolicy.WithDaemon.LOGS_PATH.getId(), Paths.get(tempPath()));
+        defaults.put(ExecutionPolicy.WithDaemon.LOGS_FILE_SIZE_LIMIT.getId(), 1048576L);
+        defaults.put(ExecutionPolicy.WithDaemon.LOGS_FILE_COUNT_LIMIT.getId(), 3);
+        return defaults;
     }
 
     /**

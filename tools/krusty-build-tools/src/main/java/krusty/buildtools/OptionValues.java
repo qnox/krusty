@@ -20,8 +20,9 @@ final class OptionValues {
 
     /**
      * The values of a builder whose options all answer: those given by {@code defaults} until set,
-     * and for any other option an {@link IllegalStateException}, as the Build Tools API's own
-     * implementation answers for an option that has neither a value nor a default.
+     * and for an option that is not among them an {@link IllegalStateException}, as the Build Tools
+     * API's own implementation answers for an option its builder does not declare. A default may be
+     * null, which is then what the option reads.
      */
     static OptionValues withDefaults(String owner, Map<String, Object> defaults) {
         return new OptionValues(new HashMap<>(defaults), owner);
