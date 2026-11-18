@@ -44,6 +44,7 @@ mod fake_overrides;
 mod initializer_capability_tests;
 mod inline_functions;
 mod local_class;
+mod sam_placement;
 mod static_properties;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
@@ -1124,6 +1125,19 @@ impl<'s> CallLinker for Linker<'_, 's> {
         })
     }
 
+    fn sam_declaration(
+        &self,
+        classifier: &KlibPublicIdSignature,
+    ) -> Result<crate::ir::CheckedKlibSamDeclaration, KlibBodyDeclineReason> {
+        self.sources
+            .callees
+            .sam_declaration(&self.active_module, classifier)
+            .cloned()
+            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a SAM conversion without a checked declaration",
+            ))
+    }
+
     fn declares_implementation(
         &self,
         callee: &KlibPublicIdSignature,
@@ -1554,7 +1568,17 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
-        self.sources.callees.applied_supertype(sub, owner)
+        let callees = self.sources.callees;
+        super::same_library_class::applied_supertype(
+            self.local_classes,
+            sub,
+            owner,
+            &|sub, owner| callees.applied_supertype(sub, owner),
+        )
+    }
+
+    fn sam_placement(&self) -> Result<crate::ir::IrSamPlacement, KlibBodyDeclineReason> {
+        self.active_sam_placement()
     }
 
     fn dependency_override(
@@ -2030,7 +2054,8 @@ impl<'s> CallLinker for Linker<'_, 's> {
 impl<'s> Linker<'_, 's> {
     /// The type parameters of the generic class declaring `selected`, which a call of the member
     /// binds from its dispatch receiver; none for a top-level function or a non-generic class.
-    /// The accessor of a property of a class whose members the unit emits, when it has a body.
+    /// The accessor of a property of a class whose members the unit emits, when it has a body or
+    /// is abstract.
     fn materialized_member_accessor(
         &mut self,
         ir: &mut IrFile,
@@ -2056,7 +2081,12 @@ impl<'s> Linker<'_, 's> {
         let Some((arena, declaration)) = self.sources.bodies.function(identity) else {
             return Ok(None);
         };
-        if !matches!(declaration.body, Some(KlibIrBody::Block(_))) {
+        // An abstract accessor is declared with its class, as an abstract member function is,
+        // and a call of it dispatches to the instance's override.
+        let abstract_ = declaration.body.is_none()
+            && crate::metadata::semantic::declaration_modality(declaration.base.flags)
+                == crate::metadata::semantic::KotlinModality::Abstract;
+        if !abstract_ && !matches!(declaration.body, Some(KlibIrBody::Block(_))) {
             return Ok(None);
         }
         let selected = selected_callable_for_header_purpose(

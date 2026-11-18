@@ -275,3 +275,158 @@ fn generic_constraint_collection_projects_callable_references_through_sam() {
     assert_eq!(bindings.get("T"), Some(&Ty::String));
     assert_eq!(bindings.get("U"), Some(&Ty::Boolean));
 }
+
+#[test]
+fn sam_dispatch_keeps_both_diamond_declarations_and_their_declared_frames() {
+    let left_t = Ty::ty_param("LeftT", Ty::nullable(Ty::obj("kotlin/Any")));
+    let right_t = Ty::ty_param("RightT", Ty::nullable(Ty::obj("kotlin/Any")));
+    let mut left = abstract_generic_member("apply", vec![left_t], left_t);
+    left.external_identity = Some(crate::fir::ExternalCallableId::from_raw(31));
+    let mut right = abstract_generic_member("apply", vec![right_t], right_t);
+    right.external_identity = Some(crate::fir::ExternalCallableId::from_raw(47));
+    let source = SamHierarchySource {
+        classifiers: [
+            (
+                crate::types::type_name("test/Left"),
+                std::sync::Arc::new(sam_classifier(&["LeftT"], vec![], vec![left])),
+            ),
+            (
+                crate::types::type_name("test/Right"),
+                std::sync::Arc::new(sam_classifier(&["RightT"], vec![], vec![right])),
+            ),
+            (
+                crate::types::type_name("test/Diamond"),
+                std::sync::Arc::new(sam_classifier(
+                    &[],
+                    vec![
+                        Ty::obj_args("test/Left", &[Ty::Int]),
+                        Ty::obj_args("test/Right", &[Ty::Int]),
+                    ],
+                    vec![],
+                )),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let signature = semantic_sam_signature(&source, Ty::obj("test/Diamond")).unwrap();
+    assert_eq!(signature.params, vec![Ty::Int]);
+    assert_eq!(signature.ret, Ty::Int);
+    assert_eq!(
+        signature.dispatch_methods,
+        vec![
+            SamMethodFrame {
+                declaration: Some(SamMethodDeclaration::External(
+                    crate::fir::ExternalCallableId::from_raw(31)
+                )),
+                parameters: vec![left_t],
+                result: left_t
+            },
+            SamMethodFrame {
+                declaration: Some(SamMethodDeclaration::External(
+                    crate::fir::ExternalCallableId::from_raw(47)
+                )),
+                parameters: vec![right_t],
+                result: right_t
+            },
+        ]
+    );
+    assert!(signature.default_methods.is_empty());
+}
+
+#[test]
+fn sam_dispatch_retains_erased_parent_and_effective_default_without_selecting_its_body() {
+    let formal = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+    let mut parent = abstract_generic_member("apply", vec![formal], formal);
+    parent.external_identity = Some(crate::fir::ExternalCallableId::from_raw(3));
+    let mut child = abstract_generic_member("apply", vec![Ty::Int], Ty::Int);
+    child.external_identity = Some(crate::fir::ExternalCallableId::from_raw(5));
+    let mut default = LibraryMember::new("note".into(), vec![], Ty::String, String::new());
+    default.external_identity = Some(crate::fir::ExternalCallableId::from_raw(9));
+    let mut factory = LibraryMember::new("factory".into(), vec![], Ty::String, String::new());
+    factory.external_identity = Some(crate::fir::ExternalCallableId::from_raw(13));
+    factory.set_is_classifier_static(true);
+    let source = SamHierarchySource {
+        classifiers: [
+            (
+                crate::types::type_name("test/Parent"),
+                std::sync::Arc::new(sam_classifier(&["T"], vec![], vec![parent])),
+            ),
+            (
+                crate::types::type_name("test/Child"),
+                std::sync::Arc::new(sam_classifier(
+                    &[],
+                    vec![Ty::obj_args("test/Parent", &[Ty::Int])],
+                    vec![child, default, factory],
+                )),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let signature = semantic_sam_signature(&source, Ty::obj("test/Child")).unwrap();
+    assert_eq!(
+        signature.dispatch_methods,
+        vec![
+            SamMethodFrame {
+                declaration: Some(SamMethodDeclaration::External(
+                    crate::fir::ExternalCallableId::from_raw(5)
+                )),
+                parameters: vec![Ty::Int],
+                result: Ty::Int
+            },
+            SamMethodFrame {
+                declaration: Some(SamMethodDeclaration::External(
+                    crate::fir::ExternalCallableId::from_raw(3)
+                )),
+                parameters: vec![formal],
+                result: formal
+            },
+        ]
+    );
+    assert_eq!(
+        signature.default_methods,
+        vec![SamMethodFrame {
+            declaration: Some(SamMethodDeclaration::External(
+                crate::fir::ExternalCallableId::from_raw(9)
+            )),
+            parameters: vec![],
+            result: Ty::String,
+        }]
+    );
+}
+
+#[test]
+fn direct_object_method_requirement_uses_the_existing_checked_sam_rule() {
+    let mut object = abstract_generic_member("toString", vec![], Ty::String);
+    object.external_identity = Some(crate::fir::ExternalCallableId::from_raw(71));
+    let mut ordinary = abstract_generic_member("toString", vec![Ty::Int], Ty::String);
+    ordinary.external_identity = Some(crate::fir::ExternalCallableId::from_raw(73));
+    let source = SamHierarchySource {
+        classifiers: [
+            (
+                crate::types::type_name("test/ObjectMethod"),
+                std::sync::Arc::new(sam_classifier(&[], vec![], vec![object])),
+            ),
+            (
+                crate::types::type_name("test/Ordinary"),
+                std::sync::Arc::new(sam_classifier(&[], vec![], vec![ordinary])),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let selected = semantic_sam_signature(&source, Ty::obj("test/ObjectMethod")).unwrap();
+    assert!(selected.requires_object_dispatch);
+    assert_eq!(
+        selected.declaration,
+        Some(SamMethodDeclaration::External(
+            crate::fir::ExternalCallableId::from_raw(71)
+        ))
+    );
+    assert!(
+        !semantic_sam_signature(&source, Ty::obj("test/Ordinary"))
+            .unwrap()
+            .requires_object_dispatch
+    );
+}
