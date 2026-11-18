@@ -1281,6 +1281,171 @@ tasks.register<JavaExec>("runJvm") {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The real Compose compiler plugin, with no injected exit status: krusty's Compose pass refuses a
+    /// composable parameter whose stability kotlinc infers, krusty exits 3 and writes no classes, and
+    /// the Kotlin task alone reruns on kotlinc. The classes that task leaves are those of a build that
+    /// never applied the krusty plugin.
+    #[test]
+    #[ignore = "downloads Gradle, the Kotlin Gradle plugin and the Compose runtime"]
+    fn compose_refusal_is_handed_to_kotlinc_with_its_classes() {
+        let fixture =
+            IntegrationFixture::new("krusty-compose-handoff", write_compose_handoff_build);
+        let (root, log) = (&fixture.root, &fixture.log);
+
+        let output = fixture
+            .build()
+            .tasks([":compileKotlin"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("a Compose refusal is handed to kotlinc: {error}"));
+        let header = "krusty: task ':compileKotlinWithKrusty' is handed to kotlinc: a krusty \
+                      compiler plugin does not implement everything the module uses";
+        let lines = output.lines().collect::<Vec<_>>();
+        let at = lines
+            .iter()
+            .position(|line| *line == header)
+            .unwrap_or_else(|| panic!("{header}\n{output}"));
+        let reasons = lines[at + 1..]
+            .iter()
+            .take_while(|line| line.starts_with("  "))
+            .collect::<Vec<_>>();
+        assert_eq!(reasons.len(), 1, "{output}");
+        assert_eq!(
+            reasons[0].trim_start(),
+            format!(
+                "{}/src/main/kotlin/Greeting.kt:5:1: error: krusty's Compose compiler plugin \
+                 does not support a composable function parameter whose stability kotlinc infers \
+                 yet; compile this module with kotlinc",
+                root.display()
+            ),
+            "{output}"
+        );
+        // krusty ran once, and the classes are the Kotlin task's.
+        let text = read_invocation_log(log).expect("invocation log");
+        assert_eq!(invocations(&text).len(), 1, "{text}");
+        let handed = class_files_under(&root.join("build/classes/kotlin/main"));
+        assert_eq!(
+            handed.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["GreetingKt.class"]
+        );
+
+        // The same project with the krusty plugin left out compiles to the same bytes.
+        let _ = std::fs::remove_dir_all(root.join("build"));
+        fixture
+            .build()
+            .property("krusty.negative", "kotlinc-only")
+            .tasks([":compileKotlin"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("the same module without krusty: {error}"));
+        assert_eq!(
+            class_files_under(&root.join("build/classes/kotlin/main")),
+            handed
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Every `.class` file under `dir`, by its path relative to it.
+    fn class_files_under(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(dir: &Path, base: &Path, found: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).expect("read the class directory") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    walk(&path, base, found);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension == "class")
+                {
+                    found.insert(
+                        path.strip_prefix(base)
+                            .expect("under the base")
+                            .to_string_lossy()
+                            .into_owned(),
+                        std::fs::read(&path).expect("read a class file"),
+                    );
+                }
+            }
+        }
+        let mut found = std::collections::BTreeMap::new();
+        walk(dir, dir, &mut found);
+        found
+    }
+
+    fn write_compose_handoff_build(root: &Path, plugin_version: &str, kgp_version: &str) {
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            let body = body
+                .replace("PLUGIN_VERSION", plugin_version)
+                .replace("KGP_VERSION", kgp_version)
+                .replace(
+                    "COMPOSE_VERSION",
+                    krusty::toolchain::COMPOSE_RUNTIME_VERSION,
+                );
+            std::fs::write(path, body).expect("write");
+        };
+        write(
+            "settings.gradle.kts",
+            r#"
+pluginManagement {
+    repositories {
+        providers.gradleProperty("krusty.plugin.repository").orNull?.let {
+            maven { url = uri(it) }
+        }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "compose-handoff"
+"#,
+        );
+        // The krusty plugin is left out for the build that is the reference for the hand-off.
+        write(
+            "build.gradle.kts",
+            r#"
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+plugins {
+    kotlin("jvm") version "KGP_VERSION"
+    kotlin("plugin.compose") version "KGP_VERSION"
+    id("dev.krustythecompiler") version "PLUGIN_VERSION" apply false
+}
+
+repositories {
+    mavenCentral()
+    google()
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+        if (providers.gradleProperty("krusty.negative").orNull == "kotlinc-only") {
+            // Changes the compile's cache key, so the reference build compiles instead of restoring
+            // the hand-off build's classes.
+            freeCompilerArgs.add("-nowarn")
+        }
+    }
+}
+
+tasks.withType<JavaCompile>().configureEach {
+    options.release.set(17)
+}
+
+if (providers.gradleProperty("krusty.negative").orNull != "kotlinc-only") {
+    pluginManager.apply("dev.krustythecompiler")
+}
+
+dependencies {
+    implementation("androidx.compose.runtime:runtime-desktop:COMPOSE_VERSION")
+}
+"#,
+        );
+        write(
+            "src/main/kotlin/Greeting.kt",
+            "import androidx.compose.runtime.Composable\n\n// Inferred stability: kotlinc decides how List compares.\n@Composable\nfun Greeting(names: List<String>) {}\n",
+        );
+    }
+
     /// What the recording proxy prints when `refuse-compile` exists in the fixture root, for the
     /// status that file holds.
     const REFUSAL: &str = "refused.kt:1:1: error: krusty's Compose compiler plugin does not \
