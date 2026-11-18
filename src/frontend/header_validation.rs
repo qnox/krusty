@@ -87,27 +87,53 @@ pub(super) fn validate_after_parsing(file: &File, parser_error: bool, diags: &mu
              guarantees are provided.",
         );
     }
+    // The body check does not run for a syntax-error file. Members still owe the same body
+    // requirement as a top-level function; only the sentence differs. The top-level sentence is
+    // reported for a syntax-error file too — `fun broken(` at EOF is still a function without a
+    // body. A script keeps its previous exemption.
     if parser_error {
-        // The body check does not run for a syntax-error file. A member left without a body is
-        // still the reference diagnostic, reported at `fun`.
-        report_bodyless_members(file, diags);
+        report_member_functions_without_bodies(file, diags);
     }
-    if parser_error || file.is_script {
-        return;
+    if !file.is_script {
+        report_top_level_functions_without_bodies(file, diags);
     }
+}
+
+fn function_body_status(
+    function: &crate::ast::FunDecl,
+    is_abstract: bool,
+    is_expect: bool,
+) -> crate::declaration_validation::FunctionBodyStatus {
+    crate::declaration_validation::FunctionBodyStatus {
+        has_body: !matches!(function.body, crate::ast::FunBody::None),
+        is_abstract,
+        is_external: function.is_external(),
+        is_expect,
+        is_companion_block_member: function.is_companion_block_member(),
+    }
+}
+
+fn declaration_is_expect(file: &File, declaration: crate::ast::DeclId) -> bool {
+    file.expect_decls
+        .iter()
+        .any(|expected| expected.declaration == declaration)
+}
+
+fn report_top_level_functions_without_bodies(file: &File, diags: &mut DiagSink) {
     for &declaration in &file.decls {
         let Decl::Fun(function) = file.decl(declaration) else {
             continue;
         };
-        if !matches!(function.body, crate::ast::FunBody::None)
-            || function.is_abstract()
-            || function.is_external()
-            || function.is_companion_block_member()
-            || file
-                .expect_decls
-                .iter()
-                .any(|expected| expected.declaration == declaration)
-        {
+        // A failed name parse (`fun` with nothing after it) is not a function this requirement
+        // reports. That file's diagnostics stay the three syntax errors the recovery test pins.
+        if function.name == "<error>" {
+            continue;
+        }
+        if !crate::declaration_validation::function_requires_body(function_body_status(
+            function,
+            function.is_abstract(),
+            declaration_is_expect(file, declaration),
+        )) {
             continue;
         }
         diags.error_named(
@@ -118,19 +144,23 @@ pub(super) fn validate_after_parsing(file: &File, parser_error: bool, diags: &mu
     }
 }
 
-fn report_bodyless_members(file: &File, diagnostics: &mut DiagSink) {
+fn report_member_functions_without_bodies(file: &File, diagnostics: &mut DiagSink) {
     for &declaration in &file.decls {
         let Decl::Class(class) = file.decl(declaration) else {
             continue;
         };
-        if class.is_interface() {
-            continue;
-        }
+        let owner_is_expect = declaration_is_expect(file, declaration);
         for function in &class.methods {
-            if !matches!(function.body, crate::ast::FunBody::None)
-                || function.is_abstract()
-                || function.is_external()
-            {
+            if function.name == "<error>" {
+                continue;
+            }
+            // Interface members are abstract by the classifier's kind. An expect classifier's
+            // members are expect declarations even though each one is not marked abstract.
+            if !crate::declaration_validation::function_requires_body(function_body_status(
+                function,
+                function.is_abstract() || class.is_interface(),
+                owner_is_expect,
+            )) {
                 continue;
             }
             diagnostics.error_named(
