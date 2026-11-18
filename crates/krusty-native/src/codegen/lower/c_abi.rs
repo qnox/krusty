@@ -7,6 +7,61 @@
 use super::*;
 
 impl<'a> FileLowering<'a> {
+    /// Reuse the normal initialization/pending-exception trampoline for dev-only checked entries.
+    #[cfg(feature = "test-support")]
+    pub(super) fn driver_records(
+        &self,
+        entries: &[super::super::DriverEntry],
+        symbols: &mut krusty::fx_hash::HashSet<String>,
+    ) -> Result<Vec<super::super::super::c_abi::Record>, Unsupported> {
+        let mut records = Vec::new();
+        for entry in entries {
+            let Some(&function) = self.ir.checked_callable_functions.get(&entry.callable) else {
+                continue; // This file does not declare the selected function.
+            };
+            if !super::super::super::c_abi::is_file_level(self.ir, function as usize)
+                || self.ir.suspend_funs.contains(&function)
+                || self
+                    .ir
+                    .signatures
+                    .get(&function)
+                    .is_some_and(|s| !s.type_params.is_empty())
+                || self.ir.functions[function as usize]
+                    .params
+                    .iter()
+                    .any(|ty| self.carrier(*ty) != Carrier::Ref)
+            {
+                return Err("a driver entry without a plain reference-argument frame".into());
+            }
+            let result = match self.carrier(self.ir.functions[function as usize].ret) {
+                Carrier::Ref => "kt_ref",
+                Carrier::Void => "void",
+                Carrier::Scalar(..) => return Err("a driver entry with a scalar result".into()),
+            };
+            if !super::super::super::c_abi::valid_driver_symbol(&entry.symbol)
+                || !symbols.insert(entry.symbol.clone())
+            {
+                return Err("an invalid or duplicate driver entry symbol".into());
+            }
+            let parameters = self.ir.functions[function as usize]
+                .params
+                .iter()
+                .map(|_| "kt_ref")
+                .collect::<Vec<_>>();
+            let parameters = if parameters.is_empty() {
+                "void".into()
+            } else {
+                parameters.join(", ")
+            };
+            records.push(super::super::super::c_abi::Record::Declaration {
+                function,
+                symbol: entry.symbol.clone(),
+                prototype: format!("{result} {}({parameters})", entry.symbol),
+            });
+        }
+        Ok(records)
+    }
+
     /// Export exact dependency declaration identities as target symbols. The ordinary
     /// module-local entry remains unchanged; this narrow trampoline is the only bridge from a
     /// later module's provider-selected `Callee::External` to this file's executable body.
