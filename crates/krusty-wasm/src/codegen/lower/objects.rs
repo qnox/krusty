@@ -1328,6 +1328,15 @@ impl Body<'_> {
             .then_some(name)
     }
 
+    /// Whether the runtime's `ArrayList`, whose class the program does not declare, is below the
+    /// library interface `interface`, by the frontend's supertype traversal.
+    fn runtime_array_list_is_below(&self, interface: TypeName) -> bool {
+        let Some(array_list) = Ty::obj("kotlin/collections/ArrayList").obj_internal() else {
+            return false;
+        };
+        self.classifiers.is_subclassifier(array_list, interface)
+    }
+
     /// Replace the reference on the stack with whether it is an instance of the library interface
     /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
     /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
@@ -1337,11 +1346,13 @@ impl Body<'_> {
             return;
         }
         let subtypes = self.classifiers.builtin_subtypes(interface);
-        let string_builder = self
-            .classifiers
-            .is_subclassifier(krusty::types::wk::string_builder(), interface);
-        self.runtime
-            .builtin_instances(interface, subtypes, string_builder);
+        let laid_out = crate::builtin_instances::RuntimeLayouts {
+            string_builder: self
+                .classifiers
+                .is_subclassifier(krusty::types::wk::string_builder(), interface),
+            array_list: self.runtime_array_list_is_below(interface),
+        };
+        self.runtime.builtin_instances(interface, subtypes, laid_out);
         self.interface_test(interface, nullable);
     }
 
