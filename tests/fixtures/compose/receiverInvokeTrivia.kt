@@ -33,11 +33,17 @@ fun Escaped(content: @Composable String.() -> Unit) {
 }
 
 @Composable
+fun ByName(content: @Composable String.() -> Unit) {
+    content("x")
+}
+
+@Composable
 fun Screen() {
     Commented { Leaf() }
     Broken { Leaf() }
     Wrapped { Leaf() }
     Escaped { Leaf() }
+    ByName { Leaf() }
 }
 
 fun box(): String = "OK"

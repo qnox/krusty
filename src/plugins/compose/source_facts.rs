@@ -340,19 +340,12 @@ pub(super) fn record(
                 };
                 // kotlinc locates an `invoke` where its selector, the parameter's name, starts: after
                 // the receiver of a function type with one.
-                // A function type with a receiver is called through a selector the checker recorded;
-                // one without has none, so its call is located where it starts.
-                let has_receiver = matches!(
-                    declaration.params[index as usize].1.kind(),
-                    TyKind::Fun(signature) if signature.has_receiver
-                );
+                // The checker records where the callee of each call it checked is written.
                 let call_span = source.expression_span(ir, call).and_then(|whole| {
-                    let lo = if has_receiver {
-                        source.selector_span(ir, call)?.lo
-                    } else {
-                        whole.lo
-                    };
-                    Some(crate::diag::Span::new(lo, whole.hi))
+                    Some(crate::diag::Span::new(
+                        source.selector_span(ir, call)?.lo,
+                        whole.hi,
+                    ))
                 });
                 let Some(call_span) = call_span else {
                     rejections.push(PluginRejection {

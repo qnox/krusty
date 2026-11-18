@@ -1828,21 +1828,19 @@ impl BodyFirChecker<'_> {
                             ));
                         }
                     };
-                    if let Expr::Member { name, .. } = self.file.expr(*callee) {
-                        let selector = self.file.member_name_span(*callee, name);
-                        self.record_invoke_selector(expression, selector)?;
-                    }
+                    self.record_call_selector(expression, *callee)?;
                     let kind =
                         self.receiver_function_invoke(expression, explicit_receiver, args)?;
                     let ty = self.invoke_result_type(expression, &kind)?;
                     return self.add_expression_with_type(expression, ty, kind);
                 }
-                Expr::Call { args, .. }
+                Expr::Call { callee, args }
                     if matches!(
                         self.info.expr_lowers.get(&expression),
                         Some(ExprLowering::Invoke { .. })
                     ) =>
                 {
+                    self.record_call_selector(expression, *callee)?;
                     let ExprLowering::Invoke {
                         receiver,
                         params,
