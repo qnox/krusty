@@ -968,11 +968,13 @@ impl BodyLowering<'_, '_, '_> {
         Some(self.reference_property_read(slot, owner, property.getter, receiver, property.result))
     }
 
-    /// A reflection property read whose receiver may be a class of this file rather than a
+    /// A reflection property read whose receiver may be a class of the module rather than a
     /// reference object: `KCallable.name` on a class that implements `KProperty` by delegation or
     /// override. Such a class lays its table out as a class, so the reference-object slot means
-    /// something else in it. Each implementor of the getter's owner is tested first and enters its
-    /// own getter; any other object is a reference object and answers from its fixed slot.
+    /// something else in it. Each class of the module that can stand behind the getter's owner is
+    /// tested first and enters its own getter: one of this file through its laid-out slot, one of
+    /// another file through the slot the module plan gives it. Any other object is a reference
+    /// object and answers from its fixed slot.
     fn reference_property_read(
         &mut self,
         slot: u32,
@@ -981,32 +983,35 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        let declared = self.file.implementors_of(owner);
-        if declared.is_empty() {
+        let local = self.file.implementors_of(owner);
+        let mut implementors = Vec::with_capacity(local.len());
+        for &class in &local {
+            let Some(arm) = self.external_property_getter_slot(class, getter, ret) else {
+                return Err(self.undispatched_reference_read(owner));
+            };
+            implementors.push(arm);
+        }
+        // The module's other files, by the dependency classifiers their classes name: the owner
+        // itself or one of its dependency subtypes, such as `KProperty` for `KCallable.name`.
+        let mut remote = Vec::new();
+        for (dependency, classes) in self.file.module_facts.dependency_implementor_roots() {
+            if !self.file.is_subclassifier(dependency, owner) {
+                continue;
+            }
+            for implementor in classes {
+                if implementor.file != self.file.source && !remote.contains(&implementor.class) {
+                    remote.push(implementor.class);
+                }
+            }
+        }
+        for class in remote {
+            let Some(arm) = self.planned_property_getter_slot(class, getter, ret)? else {
+                return Err(self.undispatched_reference_read(owner));
+            };
+            implementors.push(arm);
+        }
+        if implementors.is_empty() {
             return self.reference_call(slot, receiver, &[], ret);
-        }
-        if self
-            .file
-            .module_facts
-            .dependency_implementors(owner)
-            .iter()
-            .any(|&file| file != self.file.source)
-        {
-            return Err(declined!(
-                "a read of `{}` where another file implements it",
-                owner.render().replace('/', ".")
-            ));
-        }
-        let implementors: Vec<_> = declared
-            .iter()
-            .filter_map(|&class| self.external_property_getter_slot(class, getter, ret))
-            .collect();
-        if implementors.len() != declared.len() {
-            return Err(declined!(
-                "a read of a `{}` member where this file implements it with a class whose \
-                 override cannot be dispatched to",
-                owner.render().replace('/', ".")
-            ));
         }
         let object = self.reference(receiver)?;
         if self.terminated {
@@ -1015,6 +1020,14 @@ impl BodyLowering<'_, '_, '_> {
         self.dispatch_by_implementor_with(&implementors, object, &[], ret, false, |body, object| {
             body.reference_slot_call(slot, object, Vec::new(), ret)
         })
+    }
+
+    fn undispatched_reference_read(&self, owner: krusty::types::TypeName) -> Unsupported {
+        declined!(
+            "a read of a `{}` member where the module implements it with a class whose override \
+             cannot be dispatched to",
+            owner.render().replace('/', ".")
+        )
     }
 
     /// `p.getValue(thisRef, property)` and `p.setValue(thisRef, property, value)`.
