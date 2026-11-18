@@ -257,6 +257,62 @@ void kt_program_entry(void) {
 }
 
 #[test]
+fn owned_driver_entries_keep_checked_reference_frames_and_file_initialization() {
+    let Some(target) = host() else { return };
+    let compiler = c_compiler().expect("a C compiler for the owned fixture caller");
+    let compilation = crate::native_klib_driver::compile(
+        &[(
+            "DriverEntries",
+            "private var initializationCount: Int = 0\n\
+            private fun initialize(): String { initializationCount++; return \"OK\" }\n\
+            private val initialized: String = initialize()\n\
+            internal fun identity(raw: Any?): Any? = if (initialized == \"OK\") raw else null\n\
+            internal fun initializedOnce(raw: Any?): Any? = if (initializationCount == 1) raw else null\n",
+        )],
+        target,
+        "driver_entries",
+        &[
+            (0, "identity", "fixture_identity"),
+            (0, "initializedOnce", "fixture_initialized_once"),
+        ],
+        None,
+    );
+    let scratch = Scratch::new("checked-driver-entry");
+    std::fs::write(scratch.path().join("defs.h"), &compilation.header).unwrap();
+    let caller = "\
+#include \"defs.h\"
+void kt_runtime_init(void *stack_bottom);
+void kt_exit(kt_int status);
+kt_ref kt_string_utf8(const char *bytes, kt_int length);
+void kt_program_entry(void) {
+    char slot;
+    kt_runtime_init(&slot);
+    kt_ref text = kt_string_utf8(\"OK\", 2);
+    if (fixture_identity(text) != text) kt_exit(2);
+    if (fixture_initialized_once(text) != text) kt_exit(3);
+    if (fixture_identity((kt_ref)0) != (kt_ref)0) kt_exit(4);
+    kt_ref second = kt_string_utf8(\"second\", 6);
+    if (fixture_identity(second) != second) kt_exit(5);
+    if (fixture_identity(text) != text) kt_exit(6);
+    if (fixture_initialized_once(second) != second) kt_exit(7);
+    if (fixture_initialized_once(text) != text) kt_exit(8);
+    kt_exit(0);
+}
+";
+    let object = compile_c(&compiler, scratch.path(), caller);
+    let image = compilation.image(&[&object]);
+    let output = common::native_backend::run_native_image(&image, "CheckedDriverEntry", &[], &[])
+        .unwrap_or_else(|failure| panic!("checked driver entry: {}", failure.as_failure()));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, Vec::<u8>::new());
+    assert_eq!(output.stderr, Vec::<u8>::new());
+}
+
+#[test]
 fn a_public_classifier_parameter_is_declined_by_name() {
     let Some(target) = host() else {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
