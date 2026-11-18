@@ -21,7 +21,7 @@ pub(super) fn freeze(
     }
     if !matches!(
         bodies.public_class(module, signature),
-        crate::klib_libraries::LocatedClass::One(..)
+        crate::klib_libraries::LocatedClass::One(_)
     ) || bodies
         .class_header(&identity.module, signature)
         .ok()

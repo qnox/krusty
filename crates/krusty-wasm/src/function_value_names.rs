@@ -9,52 +9,14 @@
 //! wasm-js and wasm-wasi alike: `wasm_function_values_print_their_class_names` in
 //! `tests/kotlin_box_wasm_conformance.rs` pins them.
 //!
-//! A lambda converted to a `fun interface` is an instance of the wrapper class kotlinc-wasm declares
-//! for that interface where the code holding the conversion stands ([`sam_class_name`]):
-//! `pk.sam$pk_IntOp$0`, `pk.Outer.Companion.sam$pk_Outer_In$0`, and `sam$IntOp$0` in the root
-//! package. A reference to a property is not given a name here: it prints the property instead.
+//! A lambda converted to a `fun interface` is an instance of a class named for the interface and
+//! for where the code holding the conversion stands ([`sam_class_name`]). A reference to a property
+//! is not given a name here: it prints the property instead.
 
-use krusty::backend::class_names::{member_class_names, site_container_name, source_class_names};
+use krusty::backend::class_names::{member_class_names, site_container_name};
 use krusty::backend::BackendClassifierSource;
 use krusty::ir::{ExprId, IrCallableReferenceTarget, IrExpr, IrFile, IrSamPlacement};
 use krusty::types::{FnSig, Ty, TyKind};
-
-/// How kotlinc-wasm names the class of one function value.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum FunctionValueName {
-    /// A class named for the value's shape and captures (see [`class_name`]).
-    Shape(NamedShape),
-    /// The qualified name of a `fun interface` conversion's wrapper class.
-    SamWrapper(String),
-}
-
-/// How kotlinc-wasm names the class of the function value the expression `site` of `ir` creates,
-/// of the checked type `instance`, or `None` for a value it names in a way not modelled here.
-pub(super) fn function_value_name(
-    ir: &IrFile,
-    site: ExprId,
-    instance: Option<Ty>,
-) -> Option<FunctionValueName> {
-    match ir.expr(site) {
-        IrExpr::Lambda { sam: Some(_), .. } => {
-            sam_class_name(ir, site).map(FunctionValueName::SamWrapper)
-        }
-        expression => named_shape(expression, instance).map(FunctionValueName::Shape),
-    }
-}
-
-/// The wrapper class name for a conversion to the interface `interface` (dotted) in `container`
-/// (dotted, empty for the root package).
-fn wrapper_name(container: &str, interface: &str) -> String {
-    let mut name = container.to_string();
-    if !name.is_empty() {
-        name.push('.');
-    }
-    name.push_str("sam$");
-    name.push_str(&interface.replace('.', "_"));
-    name.push_str("$0");
-    name
-}
 
 /// What a function value's class name is derived from, apart from its captures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,7 +31,7 @@ pub(super) struct NamedShape {
 
 /// The shape kotlinc-wasm names the function value `expression` creates, a lambda of the checked
 /// type `instance` or a callable reference, or `None` for a value it names otherwise.
-fn named_shape(expression: &IrExpr, instance: Option<Ty>) -> Option<NamedShape> {
+pub(super) fn named_shape(expression: &IrExpr, instance: Option<Ty>) -> Option<NamedShape> {
     let (reference, function_type) = match expression {
         IrExpr::Lambda { sam: None, .. } => (false, instance?),
         IrExpr::CallableReference(reference)
@@ -98,7 +60,7 @@ fn named_shape(expression: &IrExpr, instance: Option<Ty>) -> Option<NamedShape> 
 /// keeps one class per container and interface, so every such conversion shares the `$0` name.
 /// `wasm_sam_conversions_print_their_class_names` in `tests/kotlin_box_wasm_conformance.rs` pins
 /// them.
-fn sam_class_name(ir: &IrFile, expression: ExprId) -> Option<String> {
+pub(super) fn sam_class_name(ir: &IrFile, expression: ExprId) -> Option<String> {
     let IrExpr::Lambda {
         sam: Some(target), ..
     } = ir.expr(expression)
@@ -106,7 +68,7 @@ fn sam_class_name(ir: &IrFile, expression: ExprId) -> Option<String> {
         return None;
     };
     // Boundary conversions: kotlinc-wasm spells these names into the class name it prints.
-    let container = match target.placement {
+    let mut name = match target.placement {
         IrSamPlacement::ThisFile => match ir.expression_owners.get(&expression) {
             Some(&owner) => member_classifier_name(ir, owner)?,
             None => ir.package.clone().unwrap_or_default(),
@@ -114,10 +76,17 @@ fn sam_class_name(ir: &IrFile, expression: ExprId) -> Option<String> {
         IrSamPlacement::Dependency(container) => site_container_name(ir, container)?,
         IrSamPlacement::UnnamedDependencyClass => return None,
     };
-    Some(wrapper_name(
-        &container,
-        &member_class_names(target.classifier).qualified,
-    ))
+    if !name.is_empty() {
+        name.push('.');
+    }
+    name.push_str("sam$");
+    name.push_str(
+        &member_class_names(target.classifier)
+            .qualified
+            .replace('.', "_"),
+    );
+    name.push_str("$0");
+    Some(name)
 }
 
 /// The qualified name of this file's member classifier `owner`. A local classifier or an
@@ -131,7 +100,7 @@ fn member_classifier_name(ir: &IrFile, owner: krusty::types::TypeName) -> Option
     {
         return None;
     }
-    Some(source_class_names(ir, class)?.qualified)
+    Some(krusty::backend::class_names::source_class_names(ir, class)?.qualified)
 }
 
 fn function_signature(ty: Ty) -> Option<&'static FnSig> {
@@ -294,22 +263,6 @@ mod tests {
             "KFunction0R_bound1_A"
         );
         assert_eq!(class_name(shape(true, true, 0), &[]), "KSuspendFunction0R");
-    }
-
-    /// kotlinc-wasm 2.4.21's wrapper names for `fun interface` conversions, measured on wasm-js
-    /// and wasm-wasi.
-    #[test]
-    fn sam_wrappers_are_named_for_their_container_and_interface() {
-        assert_eq!(wrapper_name("pk", "pk.IntOp"), "pk.sam$pk_IntOp$0");
-        assert_eq!(
-            wrapper_name("pk.Outer.Companion", "pk.IntOp"),
-            "pk.Outer.Companion.sam$pk_IntOp$0"
-        );
-        assert_eq!(
-            wrapper_name("pk.Outer", "pk.Outer.In"),
-            "pk.Outer.sam$pk_Outer_In$0"
-        );
-        assert_eq!(wrapper_name("", "IntOp"), "sam$IntOp$0");
     }
 
     #[test]

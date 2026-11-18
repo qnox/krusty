@@ -1272,17 +1272,18 @@ impl Body<'_> {
         self.laid_out_classes.published_structure(&identity)
     }
 
-    /// `x as C`: the value, cast to an array classifier, to a class `C` with a physical layout, or
-    /// to an interface of the module or of a library. Kotlin checks the cast, so a value that is no
-    /// `C` throws the runtime `ClassCastException` through the Kotlin exception tag instead of
-    /// trapping, and, with `non_null`, a null throws the Kotlin NPE as any other cast to a non-null
-    /// type does. A class cast then reads the checked reference as the class's structure, and an
-    /// array cast as its array form's object, as its type test reads it, even where a library lays
-    /// the array class out as a class of its own.
+    /// `x as C`: the value, cast to a class `C` with a physical layout, or to an interface of the
+    /// module or of a library. Kotlin checks the cast, so a value that is no `C` throws the
+    /// runtime `ClassCastException` through the Kotlin exception tag instead of trapping, and,
+    /// with `non_null`, a null throws the Kotlin NPE as any other cast to a non-null type does.
+    /// A class cast then reads the checked reference as the class's structure.
     pub(super) fn cast(&mut self, arg: u32, target: Ty, non_null: bool) -> Result<(), Unsupported> {
         let tested = target.non_null();
         let structure = if tested.is_array() {
-            Some(self.array_form(tested)?.0.object)
+            // An array's values are its array form's objects, even where a library also
+            // materializes the array classifier as an ordinary class.
+            let (form, _) = self.array_form(tested)?;
+            Some(form.object)
         } else {
             match self.interface_of_type(tested) {
                 Some(_) => None,

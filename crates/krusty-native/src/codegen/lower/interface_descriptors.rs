@@ -90,12 +90,17 @@ impl FileLowering<'_> {
 
     /// Non-numbered dependency interfaces do not appear in `model.implemented`. Retain their
     /// nominal identities alongside that existing numbered closure and the built-in markers.
+    /// A class below a library superclass (a coroutine frame below the library's continuation
+    /// implementation) is an instance of the interfaces that superclass's published supertypes
+    /// reach, too.
     pub(super) fn dependency_interface_memberships(
         &mut self,
         class: ClassId,
         local_interfaces: &[ClassId],
     ) -> Result<Vec<DataId>, Unsupported> {
-        let mut pending = self.ir.classes[class as usize]
+        let declared = &self.ir.classes[class as usize];
+        let inherited = self.classifiers.inherited_interfaces(declared.fq_name_id());
+        let mut pending = declared
             .interfaces
             .iter()
             .chain(
@@ -103,6 +108,7 @@ impl FileLowering<'_> {
                     .iter()
                     .flat_map(|interface| self.ir.classes[*interface as usize].interfaces.iter()),
             )
+            .chain(inherited)
             .filter(|name| self.ir.class_id_by_name(*name).is_none())
             .collect::<Vec<_>>();
         let mut visited = krusty::fx_hash::HashSet::default();

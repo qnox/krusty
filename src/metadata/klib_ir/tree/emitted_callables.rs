@@ -29,7 +29,6 @@ struct EmittedWalk<'a> {
     calls: Vec<&'a KlibIrSymbol>,
     objects: Vec<&'a KlibIrSymbol>,
     enum_entries: Vec<&'a KlibIrSymbol>,
-    /// The functional interfaces the reached SAM conversions name.
     sams: Vec<&'a KlibIrSymbol>,
 }
 
@@ -43,7 +42,12 @@ impl KlibIrArena {
         function: &'a KlibIrFunction,
         forms: EmittedCallForms,
     ) -> Vec<&'a KlibIrSymbol> {
-        self.emitted_function_walk(function, forms).calls
+        self.emitted_walk(
+            self.function_expression_roots(function),
+            forms,
+            HashSet::from_iter([function.base.symbol.clone()]),
+        )
+        .calls
     }
 
     fn function_expression_roots(&self, function: &KlibIrFunction) -> Vec<KlibIrExprId> {
@@ -116,7 +120,12 @@ impl KlibIrArena {
         function: &'a KlibIrFunction,
         forms: EmittedCallForms,
     ) -> Vec<&'a KlibIrSymbol> {
-        self.emitted_function_walk(function, forms).objects
+        self.emitted_walk(
+            self.function_expression_roots(function),
+            forms,
+            HashSet::from_iter([function.base.symbol.clone()]),
+        )
+        .objects
     }
 
     /// [`Self::emitted_enum_entry_symbols_from`] of `function`'s body and parameter defaults.
@@ -125,38 +134,33 @@ impl KlibIrArena {
         function: &'a KlibIrFunction,
         forms: EmittedCallForms,
     ) -> Vec<&'a KlibIrSymbol> {
-        self.emitted_function_walk(function, forms).enum_entries
+        self.emitted_walk(
+            self.function_expression_roots(function),
+            forms,
+            HashSet::from_iter([function.base.symbol.clone()]),
+        )
+        .enum_entries
     }
 
-    /// The functional interfaces the SAM conversions reached from `function`'s body and
-    /// parameter defaults name.
-    pub(crate) fn emitted_sam_classifiers<'a>(
-        &'a self,
-        function: &'a KlibIrFunction,
+    pub(crate) fn emitted_sam_classifiers(
+        &self,
+        function: &KlibIrFunction,
         forms: EmittedCallForms,
-    ) -> Vec<&'a KlibIrSymbol> {
-        self.emitted_function_walk(function, forms).sams
+    ) -> Vec<&KlibIrSymbol> {
+        self.emitted_walk(
+            self.function_expression_roots(function),
+            forms,
+            HashSet::from_iter([function.base.symbol.clone()]),
+        )
+        .sams
     }
 
-    /// The functional interfaces the SAM conversions reached from `roots` name.
     pub(crate) fn emitted_sam_classifiers_from(
         &self,
         roots: Vec<KlibIrExprId>,
         forms: EmittedCallForms,
     ) -> Vec<&KlibIrSymbol> {
         self.emitted_walk(roots, forms, HashSet::default()).sams
-    }
-
-    fn emitted_function_walk<'a>(
-        &'a self,
-        function: &'a KlibIrFunction,
-        forms: EmittedCallForms,
-    ) -> EmittedWalk<'a> {
-        self.emitted_walk(
-            self.function_expression_roots(function),
-            forms,
-            HashSet::from_iter([function.base.symbol.clone()]),
-        )
     }
 
     /// The emitted calls and the object and enum entry values reached from `pending`, through

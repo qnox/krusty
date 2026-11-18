@@ -35,11 +35,11 @@ pub(super) struct ModuleTable {
     pub(super) slot_types: Vec<Option<u32>>,
 }
 
-/// The table types one plan has built, by class.
-type PlanTables = HashMap<TypeName, Result<ModuleTable, Unsupported>>;
-
 /// The table types built so far from the current module's plan, by class, and the dependency
 /// classes' of the whole program. A new plan starts with only the dependency classes'.
+/// The tables a plan built, by the class each types.
+type PlanTables = HashMap<TypeName, Result<ModuleTable, Unsupported>>;
+
 #[derive(Default)]
 pub(super) struct ModuleTables {
     tables: PlanTables,
