@@ -624,9 +624,11 @@ fn init_script_path(root: &Path) -> PathBuf {
     ))
 }
 
-/// The user Gradle home wins over the project file. A commented line is not a setting.
+/// The user Gradle home wins over the project file. Within one file the last assignment wins.
+/// A commented line is not a setting.
 fn isolated_projects_property(file: &Path) -> Option<bool> {
     let text = std::fs::read_to_string(file).ok()?;
+    let mut found = None;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
@@ -636,10 +638,10 @@ fn isolated_projects_property(file: &Path) -> Option<bool> {
             continue;
         };
         if name.trim() == ISOLATED_PROJECTS {
-            return Some(value.trim().trim_matches('"').eq_ignore_ascii_case("true"));
+            found = Some(value.trim().trim_matches('"').eq_ignore_ascii_case("true"));
         }
     }
-    None
+    found
 }
 
 fn is_gradle_build_file(path: &Path) -> bool {
@@ -1122,6 +1124,45 @@ mod tests {
             .arguments
             .iter()
             .any(|argument| argument == "--no-configuration-cache"));
+    }
+
+    #[test]
+    fn the_last_isolated_projects_assignment_in_a_file_wins() {
+        let tree = TempTree::new("gradle-isolated-last");
+        tree.write("settings.gradle.kts", "");
+        tree.write(
+            "gradle.properties",
+            "org.gradle.unsafe.isolated-projects=true\norg.gradle.unsafe.isolated-projects=false\n",
+        );
+        let (_, disabled) = probe_action(
+            &GradleProvider::new(tree.root()),
+            FakeRunner::stdout(&recorded_output()),
+        );
+        assert!(
+            disabled
+                .arguments
+                .iter()
+                .any(|argument| argument == "--no-configuration-cache"),
+            "a later false disables isolated projects: {:?}",
+            disabled.arguments
+        );
+
+        tree.write(
+            "gradle.properties",
+            "org.gradle.unsafe.isolated-projects=false\norg.gradle.unsafe.isolated-projects=true\n",
+        );
+        let (_, enabled) = probe_action(
+            &GradleProvider::new(tree.root()),
+            FakeRunner::stdout(&recorded_output()),
+        );
+        assert!(
+            !enabled
+                .arguments
+                .iter()
+                .any(|argument| argument == "--no-configuration-cache"),
+            "a later true enables isolated projects: {:?}",
+            enabled.arguments
+        );
     }
 
     #[test]
