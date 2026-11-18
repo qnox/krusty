@@ -292,25 +292,7 @@ mutants *ARGS:
 # (so it's cheap to cache). This is the reference toolchain the differential harness validates
 # against; its `lib/kotlin-stdlib.jar` is also what the box e2e tests put on the runtime classpath.
 kotlinc VERSION=`just max-version`:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ver="{{VERSION}}"
-    dest="$PWD/target/cache/kotlinc/$ver"
-    bin="$dest/kotlinc/bin/kotlinc"
-    if [ -x "$bin" ]; then echo "$bin"; exit 0; fi
-    url="https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-compiler-${ver}.zip"
-    tmp="$(mktemp -d)"
-    echo "downloading kotlin-compiler ${ver}…" >&2
-    # GitHub's release CDN answers 504 for minutes at a time. curl doubles its wait from one second,
-    # so eight retries span about four minutes; a connection that never opens fails within 30s.
-    curl -fsSL --connect-timeout 30 --retry 8 --retry-max-time 300 "$url" -o "$tmp/kotlinc.zip" || { echo "failed to download $url" >&2; rm -rf "$tmp"; exit 1; }
-    mkdir -p "$dest"
-    if command -v unzip >/dev/null 2>&1; then unzip -q "$tmp/kotlinc.zip" -d "$dest"
-    elif command -v python3 >/dev/null 2>&1; then python3 -c "import zipfile; zipfile.ZipFile('$tmp/kotlinc.zip').extractall('$dest')"
-    else ( cd "$dest" && jar xf "$tmp/kotlinc.zip" ); fi
-    rm -rf "$tmp"
-    chmod +x "$bin"
-    echo "$bin"
+    @scripts/provision-kotlinc.sh "{{VERSION}}" "$PWD/target/cache/kotlinc/{{VERSION}}"
 
 # Regenerate krusty's copy of one kotlinc release's argument table, language feature table and
 # diagnostic names from that release's distribution (crates/krusty-cli/src/kotlinc_arguments/releases/<ver>.tsv,
