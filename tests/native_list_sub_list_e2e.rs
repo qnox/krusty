@@ -64,28 +64,63 @@ fn a_range_that_writes_through_declines_by_name() {
     );
 }
 
-/// A walk of a range whose list changed ends with `ConcurrentModificationException`, and a range
-/// of a range is invalidated by a change of the list at the root.
+/// A change of the list at the root ends every walk and every range taken from it, nested ones
+/// too.
 #[test]
 fn a_change_of_the_root_list_invalidates_every_range_and_walk() {
-    let source = "fun box(): String {\n\
-         \x20   val growable = mutableListOf(1, 2, 3, 4)\n\
-         \x20   val readable: List<Int> = growable\n\
-         \x20   val outer = readable.subList(0, 3)\n\
-         \x20   val inner = outer.subList(0, 1)\n\
-         \x20   val walk = outer.iterator()\n\
-         \x20   growable.add(5)\n\
-         \x20   try {\n\
-         \x20       walk.next()\n\
-         \x20       return \"fail walk\"\n\
-         \x20   } catch (e: ConcurrentModificationException) {\n\
-         \x20   }\n\
-         \x20   try {\n\
-         \x20       inner.size\n\
-         \x20       return \"fail inner\"\n\
-         \x20   } catch (e: ConcurrentModificationException) {\n\
-         \x20   }\n\
-         \x20   return \"OK\"\n\
-         }\n";
+    let source = r#"fun box(): String {
+    val growable = mutableListOf(1, 2, 3, 4)
+    val readable: List<Int> = growable
+    val outer = readable.subList(0, 3)
+    val inner = outer.subList(1, 2)
+    val walk = outer.iterator()
+    growable.add(5)
+    try {
+        walk.next()
+        return "walk"
+    } catch (e: ConcurrentModificationException) {
+    }
+    try {
+        outer.size
+        return "outer"
+    } catch (e: ConcurrentModificationException) {
+    }
+    try {
+        inner.size
+        return "inner size"
+    } catch (e: ConcurrentModificationException) {
+    }
+    try {
+        inner[0]
+        return "inner get"
+    } catch (e: ConcurrentModificationException) {
+    }
+    return "OK"
+}
+"#;
     every_backend_agrees_with_kotlinc("RootChange", source);
+}
+
+/// Appending a range of the list to the list itself reads the range before the first append.
+#[test]
+fn a_list_takes_a_range_of_itself_before_it_appends() {
+    let source = r#"fun box(): String {
+    val root = ArrayList<Int>()
+    root.add(1)
+    root.add(2)
+    root.add(3)
+    val view = (root as List<Int>).subList(0, 2)
+    root.addAll(view)
+    if (root != listOf(1, 2, 3, 1, 2)) return "aliased"
+    val self = ArrayList<Int>()
+    self.add(7)
+    self.addAll(self)
+    if (self != listOf(7, 7)) return "self"
+    val other = ArrayList<Int>()
+    other.addAll(listOf(4, 5).subList(0, 2))
+    if (other != listOf(4, 5)) return "disjoint"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("AddAllOfView", source);
 }

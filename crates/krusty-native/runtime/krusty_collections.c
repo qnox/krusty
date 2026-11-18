@@ -576,8 +576,25 @@ void kt_mutable_list_add_all(KRef self, KRef elements) {
     if (elements != NULL
         && (kt_is_runtime_list(elements))) {
         kt_int count = kt_list_size(elements);
+        if (kt_raised()) {
+            return;
+        }
+        /* Taken out BEFORE anything is appended, as `ArrayList.addAll` takes `c.toArray()`: the
+           argument may be a range of this very list, which an append would invalidate while it is
+           still being read. The array is a root across the allocations the appends make. */
+        KRef snapshot = kt_array_new(&kt_type_array, count);
         for (kt_int at = 0; at < count; at++) {
-            kt_mutable_list_add(self, kt_list_get(elements, at));
+            KRef element = kt_list_get(elements, at);
+            if (kt_raised()) {
+                return;
+            }
+            kt_elements_of(snapshot)[at] = element;
+        }
+        for (kt_int at = 0; at < count; at++) {
+            kt_mutable_list_add(self, kt_elements_of(snapshot)[at]);
+            if (kt_raised()) {
+                return;
+            }
         }
         return;
     }
