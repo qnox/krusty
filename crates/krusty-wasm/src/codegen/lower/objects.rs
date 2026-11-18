@@ -1352,7 +1352,8 @@ impl Body<'_> {
                 .is_subclassifier(krusty::types::wk::string_builder(), interface),
             array_list: self.runtime_array_list_is_below(interface),
         };
-        self.runtime.builtin_instances(interface, subtypes, laid_out);
+        self.runtime
+            .builtin_instances(interface, subtypes, laid_out);
         self.interface_test(interface, nullable);
     }
 
