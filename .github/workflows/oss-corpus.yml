@@ -164,6 +164,10 @@ jobs:
     needs: [project]
     if: always()
     runs-on: ubuntu-latest
+    # Reading the previous run's summary artifact takes actions: read.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -182,15 +186,41 @@ jobs:
               stars=$(gh api "repos/$repo" --jq 'if .fork then .source.stargazers_count else .stargazers_count end' || true)
               printf '%s\t%s\n' "$name" "$stars"
             done > stars.tsv
+      - name: fetch the previous nightly's summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The newest scheduled master run created before this one whose summary artifact is still
+          # kept; none on the first run or after every earlier artifact expired. Creation time, not
+          # the latest attempt, orders the runs, so a rerun of an older nightly never compares itself
+          # with a later one.
+          created=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)
+          gh run list -R "$GITHUB_REPOSITORY" --workflow oss-corpus.yml --branch master --event schedule \
+            --status completed --limit 60 --json databaseId,createdAt |
+            jq -r --arg created "$created" \
+              '[.[] | select((.createdAt | fromdate) < ($created | fromdate))] | sort_by(.createdAt) | reverse | .[].databaseId' |
+            while read -r id; do
+              kept=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts" \
+                --jq '[.artifacts[] | select(.name == "summary" and (.expired | not))] | length')
+              [ "$kept" -eq 1 ] || continue
+              gh run download -R "$GITHUB_REPOSITORY" "$id" -n summary -D previous
+              break
+            done
       - name: summarize
         run: |
           set -euo pipefail
+          previous=()
+          if [ -f previous/summary.json ]; then
+            previous=(--previous previous/summary.json)
+          fi
           mapfile -t reports < <(find results -name compare.json | sort)
           if [ "${#reports[@]}" -eq 0 ]; then
             echo "no project produced a comparison" >&2
             exit 1
           fi
-          python3 scripts/oss-corpus/summarize.py --stars stars.tsv --plugins results --json summary.json "${reports[@]}" \
+          python3 scripts/oss-corpus/summarize.py --stars stars.tsv --plugins results --json summary.json \
+            "${previous[@]}" "${reports[@]}" \
             | tee summary.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

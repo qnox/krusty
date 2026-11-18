@@ -323,6 +323,11 @@ fn is_c_global_identifier(name: &str) -> bool {
     is_c_identifier(name) && !name.starts_with('_')
 }
 
+#[cfg(feature = "test-support")]
+pub(super) fn valid_driver_symbol(name: &str) -> bool {
+    is_c_global_identifier(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{file_records, Record};

@@ -30,6 +30,7 @@ mod loops;
 mod object_literals;
 mod range_membership;
 mod safe_calls;
+mod sam_conversions;
 use safe_calls::NullProvenRead;
 mod string_templates;
 mod try_catch;
@@ -127,6 +128,14 @@ pub(super) struct UninterceptedSuspensionCall {
 
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
 pub(super) trait CallLinker {
+    /// Read the checked declaration selected for this serialized SAM target, without lookup.
+    fn sam_declaration(
+        &self,
+        _classifier: &KlibPublicIdSignature,
+    ) -> Lowered<crate::ir::CheckedKlibSamDeclaration> {
+        unsupported("a SAM conversion without a checked declaration")
+    }
+
     /// Whether this exact provider-assigned dependency callable is declared `suspend`. A selected
     /// suspend call in a KLIB body keeps its source result type in common IR; the common coroutine
     /// preparation later supplies the target continuation ABI.
@@ -244,6 +253,12 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// Where the code of the body being lowered stands, for a SAM conversion in it. A template
+    /// is expanded into the file being compiled, whose placement is its own.
+    fn sam_placement(&self) -> Lowered<crate::ir::IrSamPlacement> {
+        Ok(crate::ir::IrSamPlacement::ThisFile)
+    }
+
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 
@@ -284,6 +299,16 @@ pub(super) trait CallLinker {
     /// library of the body being lowered. Such a call links as a file-local one does.
     fn links_privately(&self, _callee: &crate::metadata::klib_ir::KlibIrSignature) -> bool {
         false
+    }
+
+    /// The classifier of the object a non-public object read names, installed in the unit with
+    /// its one instance. Template linkers keep the refusal.
+    fn link_local_object(
+        &mut self,
+        _ir: &mut IrFile,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<crate::types::TypeName> {
+        unsupported("a file-private object value")
     }
 
     /// The constructor a file-local construction invokes. Template linkers keep the refusal.
@@ -697,7 +722,18 @@ impl<'a> BodyLowering<'a> {
                 }
                 let ty = self.ty(expression, "closure")?;
                 let crate::types::TyKind::Fun(signature) = ty.kind() else {
-                    return unsupported("a closure of a non-function type");
+                    // A lambda converted to a functional interface implements the interface's
+                    // one abstract method, the declaration the reference overrides.
+                    let ty_id = expression
+                        .ty
+                        .ok_or_else(|| mismatch("a converted lambda has no serialized type"))?;
+                    return self.converted_closure(
+                        ty_id,
+                        *invoke,
+                        overridden,
+                        ty,
+                        origin.as_deref(),
+                    );
                 };
                 // A suspend lambda overrides `SuspendFunctionN.invoke`, any other `FunctionN.invoke`.
                 let invocation = match &overridden.signature {
