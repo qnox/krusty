@@ -141,6 +141,9 @@ struct LibraryMember {
     name: String,
     /// Whether the member is `KCallable.name`, which every callable-reference object answers.
     reference_name: bool,
+    /// The published body an interface declares for the member: the implementation of every
+    /// class that does not override it.
+    interface_default: Option<u32>,
 }
 
 /// Whether `property` is `KCallable.name`, which every callable-reference object implements
@@ -311,6 +314,7 @@ impl Body<'_> {
                 role,
                 name,
                 reference_name: property.is_some_and(is_reference_name),
+                interface_default: self.calls.interface_default(target),
             },
             receiver,
             args,
@@ -372,6 +376,7 @@ impl Body<'_> {
             role,
             name,
             reference_name,
+            interface_default,
         } = member;
         let params = fact.declared_params.as_deref().unwrap_or(&fact.params);
         let result = fact.declared_ret.unwrap_or(fact.ret);
@@ -386,6 +391,12 @@ impl Body<'_> {
             self.record_char_sequence_reads(false)?;
         }
         let member = self.library_member_of(&fact, identity, role, &name)?;
+        if let Some(function) = interface_default {
+            self.runtime
+                .objects
+                .interfaces
+                .interface_default(member, function)?;
+        }
         if reference_name {
             self.runtime.reference_name_member(self.module, member)?;
         }
