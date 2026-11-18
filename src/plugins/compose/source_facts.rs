@@ -898,7 +898,7 @@ fn omitted_parameters(callee: &Callee) -> &[u32] {
 /// parameters, are what `ComposerParamTransformer` appends: the composer, one `$changed` word,
 /// and, for a declaration with defaults, one `$default` word. The pass passes a library call no
 /// more than ten parameters, which one word of each covers.
-fn takes_composer_frame(synthetic: &[Ty], defaults: bool) -> bool {
+pub(super) fn takes_composer_frame(synthetic: &[Ty], defaults: bool) -> bool {
     let words = if defaults { 2 } else { 1 };
     matches!(synthetic, [composer, rest @ ..]
         if composer.obj_internal().is_some_and(|name| name.matches(super::runtime::COMPOSER))
