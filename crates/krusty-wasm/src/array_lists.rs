@@ -191,8 +191,9 @@ pub(super) struct RangeOperations {
     /// `(list) -> ()`: throws `UnsupportedOperationException` for a range, for the operations that
     /// cannot be written through a range yet (`removeAll` and `retainAll`).
     pub(super) reject_write: u32,
-    /// `(iterator) -> ()`: throws `ConcurrentModificationException` when the shape of the iterator's
-    /// list is not the one the iterator was taken with.
+    /// `(iterator) -> ()`: throws `ConcurrentModificationException` when the iterator's range has
+    /// lost its root's shape, or the shape of the iterator's list is not the one the iterator was
+    /// taken with.
     pub(super) check_walk: u32,
     /// `(list, from, to) -> range`. Like the JVM's, it checks the bounds against the size the range
     /// was taken with and does not look at the root: a range of a stale range is itself stale.
@@ -1169,6 +1170,8 @@ impl ArrayLists {
             .ref_cast(false, HeapType::Concrete(layout.iterator))
             .struct_get(layout.iterator, ITER_LIST)
             .local_set(1);
+        // A range answers for its root's actual shape, not the one it cached when it was taken.
+        code.local_get(1).call(self.ranges.validate);
         layout.shape(&mut code, 1);
         code.local_get(0)
             .ref_cast(false, HeapType::Concrete(layout.iterator))
