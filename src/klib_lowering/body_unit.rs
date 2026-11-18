@@ -2588,12 +2588,8 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
-        // The selected root is lowered as the declaration it is; a call of an inline callee is
-        // expanded.
         let root = self.root.is_some_and(|root| root.identity() == identity);
-        if !root && inline_functions::declares_inline(function) {
-            inline_functions::declare(ir, declared, function, &header)?;
-        }
+        inline_functions::declare_callee(ir, declared, function, &header, root)?;
         self.functions.insert(identity.clone(), declared);
         if let Some(receiver) = header.value_receiver() {
             self.member_receivers.insert(identity.clone(), receiver);

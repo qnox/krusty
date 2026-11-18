@@ -14,8 +14,23 @@ use super::super::decline::KlibBodyDeclineReason;
 use super::super::function_lowering::FunctionHeader;
 
 /// Whether the serialized `function` is inline: every call of it is expanded, never made.
-pub(super) fn declares_inline(function: &KlibIrFunction) -> bool {
+fn declares_inline(function: &KlibIrFunction) -> bool {
     function.base.flags & crate::metadata::function_flags::IS_INLINE != 0
+}
+
+/// Declare `function` as an inline callee when it is inline, unless it is the selected `root`:
+/// the root is lowered as the declaration it is, and a call of an inline callee is expanded.
+pub(super) fn declare_callee(
+    ir: &mut IrFile,
+    function: FunId,
+    declaration: &KlibIrFunction,
+    header: &FunctionHeader,
+    root: bool,
+) -> Result<(), KlibBodyDeclineReason> {
+    if root || !declares_inline(declaration) {
+        return Ok(());
+    }
+    declare(ir, function, declaration, header)
 }
 
 /// Declare `function`, lowered from the serialized inline `declaration` with `header`, as one the
