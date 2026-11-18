@@ -408,6 +408,42 @@ fn a_lambda_parameter_the_inline_body_keeps_as_a_value_declines() {
 }
 
 #[test]
+fn a_call_of_an_inline_function_leaving_an_argument_to_its_default_declines() {
+    let demo = demo_inlining(
+        &[
+            ("g", &[T::Int, T::Int], T::Int),
+            ("caller", &[T::Int], T::Int),
+        ],
+        &["g"],
+        |name, body| match name {
+            "g" => {
+                let earlier = body.param(0);
+                body.default(1, earlier);
+                let result = body.param(1);
+                Some(vec![body.ret(result)])
+            }
+            _ => {
+                let argument = body.param(0);
+                let call = body.call_omitting("g", vec![Some(argument), None], T::Int);
+                Some(vec![body.ret(call)])
+            }
+        },
+    );
+    let mut unit = DependencyBodyUnit::default();
+    let decline = demo
+        .lower(&mut unit, "caller", &["caller", "g"])
+        .expect_err("the defaulted call would escape expansion");
+    assert_eq!(
+        decline.reason(),
+        &crate::klib_lowering::KlibBodyDeclineReason::UnsupportedOperation(
+            "a call of an inline function that leaves arguments to its defaults"
+        )
+    );
+    assert!(unit.ir().inline_fns.is_empty());
+    assert!(unit.ir().inline_only_fns.is_empty());
+}
+
+#[test]
 fn a_declined_inline_expansion_leaves_its_function_id_free_for_an_ordinary_callable() {
     let demo = demo_inlining(
         &[
@@ -504,6 +540,67 @@ fn a_generic_inline_function_is_expanded_at_the_call_s_type_arguments() {
             .collect::<Vec<_>>(),
         vec![caller]
     );
+}
+
+#[test]
+fn a_nested_generic_inline_call_binds_the_outer_formals_to_the_calls_type_arguments() {
+    // caller(String) -> outer<P>(x) -> id<P>(x): the inner call binds id's formal to outer's formal,
+    // which the outer splice must specialize to String before the inner call is expanded.
+    let demo = demo_inlining(
+        &[
+            ("id", &[T::P], T::P),
+            ("outer", &[T::P], T::P),
+            ("caller", &[T::String], T::String),
+        ],
+        &["id", "outer"],
+        |name, body| match name {
+            "id" => sole_return(body),
+            "outer" => {
+                let argument = body.param(0);
+                let call = body.generic_call("id", vec![argument], T::P, T::P);
+                Some(vec![body.ret(call)])
+            }
+            _ => {
+                let argument = body.param(0);
+                let call = body.generic_call("outer", vec![argument], T::String, T::String);
+                Some(vec![body.ret(call)])
+            }
+        },
+    );
+    let mut unit = DependencyBodyUnit::default();
+    demo.lower(&mut unit, "caller", &["caller", "outer", "id"])
+        .expect("the nested generic inline calls expand");
+    let ir = unit.ir();
+    validated(ir);
+    let caller = function_named(ir, "caller");
+    let opaque = |ty: &crate::types::Ty| matches!(ty.kind(), crate::types::TyKind::TyParam(..));
+    let unspecialized = reached(ir, caller)
+        .into_iter()
+        .filter(|expression| matches!(expression, IrExpr::Variable { ty, .. } if opaque(ty)))
+        .count();
+    assert_eq!(unspecialized, 0, "no copied operand keeps an opaque formal");
+    let bound = ir
+        .inline_call_type_arguments
+        .values()
+        .flatten()
+        .map(|(_, ty)| *ty)
+        .collect::<Vec<_>>();
+    // `outer`'s own lowered body keeps the one binding written in terms of its formal; the copies in
+    // `caller` bind String, including the nested call's.
+    let (strings, opaque_bindings): (Vec<_>, Vec<_>) = bound
+        .iter()
+        .partition(|ty| **ty == crate::types::Ty::String);
+    assert_eq!(
+        strings.len(),
+        2,
+        "the call and its nested call bind String: {bound:?}"
+    );
+    assert_eq!(
+        opaque_bindings.len(),
+        1,
+        "only the inline callee's own body is opaque: {bound:?}"
+    );
+    assert!(opaque_bindings.iter().all(|ty| opaque(ty)));
 }
 
 #[test]
