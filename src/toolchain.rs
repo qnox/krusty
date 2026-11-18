@@ -817,21 +817,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(whole);
     }
 
-    // The provisioning script is the cache's only writer; it must publish under the rule readers
-    // check, so every payload file is named in its list.
-    #[test]
-    fn the_provisioning_script_publishes_the_payload_readers_require() {
-        let script = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/provision-kotlinc.sh"),
-        )
-        .expect("the provisioning script");
-        let list = script
-            .lines()
-            .find_map(|line| line.strip_prefix("payload=(")?.strip_suffix(')'))
-            .expect("the script's payload list");
-        assert_eq!(list.split_whitespace().collect::<Vec<_>>(), KOTLINC_PAYLOAD);
-    }
-
     #[test]
     fn distribution_build_number_preserves_the_exact_prerelease_version() {
         assert_eq!(

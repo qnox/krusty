@@ -28,7 +28,13 @@ complete() {
   done
 }
 
-if complete "$dest"; then
+# What this script returns is the launcher, so it also has to run: a cache with the whole server
+# payload but no executable launcher is repaired rather than handed back.
+usable() {
+  complete "$1" && [ -x "$1/kotlinc/bin/kotlinc" ]
+}
+
+if usable "$dest"; then
   echo "$dest/kotlinc/bin/kotlinc"
   exit 0
 fi
@@ -36,7 +42,10 @@ fi
 mkdir -p "$dest"
 if [ "${KRUSTY_KOTLINC_LOCKED:-}" != "$dest" ]; then
   # Re-run under an exclusive lock on the release directory. `flock` is not on every host, so the
-  # fallback takes the same advisory lock through Python and keeps it across the exec.
+  # fallback takes the same advisory lock through Python. Python opens descriptors non-inheritable,
+  # so the descriptor is made inheritable first: the lock belongs to the open file description,
+  # and it is released only when the last descriptor on it closes, which `execv` would otherwise
+  # do immediately.
   export KRUSTY_KOTLINC_LOCKED="$dest"
   if command -v flock >/dev/null 2>&1; then
     exec flock "$dest/.provision.lock" "$0" "$@"
@@ -44,13 +53,14 @@ if [ "${KRUSTY_KOTLINC_LOCKED:-}" != "$dest" ]; then
   exec python3 -c '
 import fcntl, os, sys
 fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR)
+os.set_inheritable(fd, True)
 fcntl.flock(fd, fcntl.LOCK_EX)
 os.execv(sys.argv[2], sys.argv[2:])
 ' "$dest/.provision.lock" "$0" "$@"
 fi
 
 # Another process may have finished while this one waited for the lock.
-if complete "$dest"; then
+if usable "$dest"; then
   echo "$dest/kotlinc/bin/kotlinc"
   exit 0
 fi
@@ -73,9 +83,8 @@ elif command -v python3 >/dev/null 2>&1; then
 else
   (cd "$staging/tree" && jar xf "$staging/kotlinc.zip")
 fi
-complete "$staging/tree/.." 2>/dev/null || true
-if ! complete "$staging/tree"; then
-  echo "the kotlinc ${ver} archive at $url lacks part of its payload (${payload[*]})" >&2
+if ! complete "$staging/tree" || [ ! -f "$staging/tree/kotlinc/bin/kotlinc" ]; then
+  echo "the kotlinc ${ver} archive at $url lacks part of its payload (${payload[*]}, bin/kotlinc)" >&2
   exit 1
 fi
 chmod +x "$staging/tree/kotlinc/bin/kotlinc"

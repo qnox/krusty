@@ -882,6 +882,130 @@ mod provisioning_tests {
         assert!(kotlinc_distribution_complete(&dest.join("kotlinc")));
         let _ = std::fs::remove_dir_all(&work);
     }
+
+    // The script returns the launcher, so a cache holding the whole server payload but no
+    // executable launcher is repaired rather than handed back.
+    #[test]
+    fn a_cache_without_a_launcher_is_repaired() {
+        let work = super::super::scratch_dir().expect("allocate a directory");
+        let url = archive(&work);
+        let dest = work.join("cache/9.9.6");
+        for file in KOTLINC_PAYLOAD {
+            let path = dest.join("kotlinc").join(file);
+            std::fs::create_dir_all(path.parent().expect("a payload file has a directory"))
+                .expect("create the payload directory");
+            std::fs::write(&path, "stale").expect("write the stale payload file");
+        }
+        assert!(kotlinc_distribution_complete(&dest.join("kotlinc")));
+        assert!(!dest.join("kotlinc/bin/kotlinc").exists());
+        provision_distribution(&dest, "9.9.6", Some(&url)).expect("provision");
+        let launcher = dest.join("kotlinc/bin/kotlinc");
+        assert!(launcher.is_file());
+        assert_eq!(
+            std::fs::read_to_string(dest.join("kotlinc/lib/kotlin-compiler.jar"))
+                .expect("read the jar"),
+            "lib/kotlin-compiler.jar"
+        );
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    // A host without `flock` takes the lock through Python, which must still hold it while the
+    // script provisions. Four provisioners race for one release; the archive server answers slowly,
+    // so a provisioner that did not wait for the lock would download as well. Exactly one request
+    // reaches the server, and every provisioner returns a usable launcher.
+    #[test]
+    fn provisioners_without_flock_still_download_once() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let work = super::super::scratch_dir().expect("allocate a directory");
+        let url = archive(&work);
+        let body = std::fs::read(url.trim_start_matches("file://")).expect("read the archive");
+        let tools = work.join("tools");
+        std::fs::create_dir_all(&tools).expect("create the tool directory");
+        let path = std::env::var_os("PATH").expect("PATH");
+        for tool in [
+            "bash", "mkdir", "rm", "mv", "chmod", "curl", "unzip", "python3", "jar", "env", "sh",
+        ] {
+            let found = std::env::split_paths(&path)
+                .map(|dir| dir.join(tool))
+                .find(|candidate| candidate.is_file());
+            if let Some(found) = found {
+                std::os::unix::fs::symlink(found, tools.join(tool)).expect("link the tool");
+            }
+        }
+        assert!(tools.join("python3").exists(), "the fallback needs python3");
+        assert!(!tools.join("flock").exists());
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the archive server");
+        let address = listener.local_addr().expect("server address");
+        let requests = AtomicUsize::new(0);
+        let dest = work.join("cache/9.9.7");
+        let served_url = format!("http://{address}/kotlin-compiler.zip");
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    let mut request = [0u8; 1024];
+                    let read = stream.read(&mut request).expect("read the request");
+                    if read == 0 {
+                        continue;
+                    }
+                    if requests.fetch_add(1, Ordering::SeqCst) + 1 > 4 {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(800));
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(&body);
+                }
+            });
+            let provisioners: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        Command::new(
+                            Path::new(env!("CARGO_MANIFEST_DIR"))
+                                .join("scripts/provision-kotlinc.sh"),
+                        )
+                        .args(["9.9.7"])
+                        .arg(&dest)
+                        .arg(&served_url)
+                        .env("PATH", &tools)
+                        .env("NO_PROXY", "127.0.0.1")
+                        .env("no_proxy", "127.0.0.1")
+                        .output()
+                        .expect("run the provisioning script")
+                    })
+                })
+                .collect();
+            let outputs: Vec<_> = provisioners
+                .into_iter()
+                .map(|provisioner| provisioner.join().expect("provisioner"))
+                .collect();
+            let downloads = requests.load(Ordering::SeqCst);
+            // Wake the accept loop first, so a failed assertion below cannot hang the scope.
+            requests.store(usize::MAX / 2, Ordering::SeqCst);
+            let _ =
+                std::net::TcpStream::connect(address).and_then(|mut stream| stream.write_all(b"x"));
+            for output in outputs {
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    dest.join("kotlinc/bin/kotlinc").to_string_lossy()
+                );
+            }
+            assert_eq!(downloads, 1, "one download in all");
+        });
+        assert!(kotlinc_distribution_complete(&dest.join("kotlinc")));
+        let _ = std::fs::remove_dir_all(&work);
+    }
 }
 
 #[cfg(test)]
