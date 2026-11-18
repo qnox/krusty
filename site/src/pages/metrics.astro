@@ -229,6 +229,49 @@ const slot = plotW / Math.max(1, runs.length - 1);
     </section>
   )}
 
+  {corpus?.changes && (
+    <section class="band" id="changes">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">Since the previous run</p>
+          <h2>What changed</h2>
+          <p>The newest corpus run against the <a href={corpus.changes.since.run}>run of {day(corpus.changes.since.date)}</a> (krusty <a href={commitUrl(corpus.changes.since.commit)}>{short(corpus.changes.since.commit)}</a>): every project whose built compilations or identical classes moved, each compilation krusty no longer builds with the reason, and each one it now builds.</p>
+        </div>
+        {corpus.changes.projects.length === 0 ? <p class="na">Nothing changed.</p> : (
+          <div class="table-scroll">
+            <table class="table-compact">
+              <thead>
+                <tr><th>Project</th><th class="num">Built</th><th class="num">Identical classes</th><th>Compilations</th></tr>
+              </thead>
+              <tbody>
+                {corpus.changes.projects.map((c) => {
+                  const moved = ([before, now]: (number | null)[], of: number) =>
+                    c.status === "new" ? `new: ${share(now ?? 0, of)}`
+                    : c.status === "not measured" ? `not measured (was ${share(before ?? 0, of)})`
+                    : before === now ? share(now ?? 0, of)
+                    : `${n(before ?? 0)} → ${share(now ?? 0, of)}`;
+                  const delta = (before: number | null, now: number | null) =>
+                    before !== null && now !== null && before !== now ? <div class={`sub ${now > before ? "good" : "bad"}`}>{now > before ? "+" : "−"}{n(Math.abs(now - before))}</div> : null;
+                  return (
+                    <tr>
+                      <td>{c.name}</td>
+                      <td class="num">{moved(c.built, c.compilations)}{delta(c.built[0], c.built[1])}</td>
+                      <td class="num">{moved(c.identical, c.classes)}{delta(c.identical[0], c.identical[1])}</td>
+                      <td class="reasons">
+                        {c.lost.map((l) => <div class="bad"><code>{l.task}</code> no longer built: {l.reason}</div>)}
+                        {c.gained.map((task) => <div class="good"><code>{task}</code> now built</div>)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
+  )}
+
   <section class="band" id="trend">
     <div class="wrap">
       <div class="section-head">
