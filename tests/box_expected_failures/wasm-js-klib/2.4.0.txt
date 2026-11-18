@@ -1801,7 +1801,6 @@ ranges/evaluationOrder/stepped/forInUntil/forInUntilStepReversed.kt
 ranges/evaluationOrder/stepped/forInUntil/forInUntilStepReversedStep.kt
 ranges/evaluationOrder/stepped/forInUntil/forInUntilStepReversedStepReversed.kt
 ranges/evaluationOrder/stepped/forInUntil/forInUntilStepStep.kt
-ranges/expression/emptyDownto.kt
 ranges/expression/emptyRange.kt
 ranges/expression/inexactDownToMinValue.kt
 ranges/expression/inexactSteppedDownTo.kt
@@ -1815,7 +1814,6 @@ ranges/expression/oneElementRange.kt
 ranges/expression/openRange.kt
 ranges/expression/openRangeUntil.kt
 ranges/expression/overflowZeroDownToMaxValue.kt
-ranges/expression/overflowZeroToMinValue.kt
 ranges/expression/progressionDownToMinValue.kt
 ranges/expression/progressionMaxValueMinusTwoToMaxValue.kt
 ranges/expression/progressionMaxValueToMaxValue.kt
@@ -1894,7 +1892,6 @@ ranges/forInUntil/kt42533.kt
 ranges/forNullableIntInRangeWithImplicitReceiver.kt
 ranges/kt37370a.kt
 ranges/kt47492.kt
-ranges/literal/emptyDownto.kt
 ranges/literal/emptyRange.kt
 ranges/literal/inexactDownToMinValue.kt
 ranges/literal/inexactSteppedDownTo.kt
@@ -1908,7 +1905,6 @@ ranges/literal/oneElementRange.kt
 ranges/literal/openRange.kt
 ranges/literal/openRangeUntil.kt
 ranges/literal/overflowZeroDownToMaxValue.kt
-ranges/literal/overflowZeroToMinValue.kt
 ranges/literal/progressionDownToMinValue.kt
 ranges/literal/progressionMaxValueMinusTwoToMaxValue.kt
 ranges/literal/progressionMaxValueToMaxValue.kt
@@ -2506,7 +2502,6 @@ reflection/typeOf/typeAliasedType.kt
 reflection/typeOf/typeOfCapturedStar.kt
 regressions/Kt1619Test.kt
 regressions/Kt2495Test.kt
-regressions/collectionSizeOrDefault.kt
 regressions/inlineCallsInInitializerLambda.kt
 regressions/kt15196.kt
 regressions/kt1800.kt
