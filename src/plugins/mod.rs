@@ -965,6 +965,8 @@ pub struct DependencyCallableShape {
     /// a plugin's transformation appended (Compose's composer, `$changed` and `$default`). Empty
     /// when it takes none, or when its entry does not begin with the source parameters.
     pub synthetic_parameters: Box<[Ty]>,
+    /// Per logical parameter, whether its declared type is a `@Composable` function type.
+    pub composable_parameters: crate::libraries::ParamFlags,
 }
 
 /// A construct a native plugin does not implement, reported as an error at `span`.
