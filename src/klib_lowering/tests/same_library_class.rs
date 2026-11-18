@@ -1220,9 +1220,25 @@ fn lower_fixture(
     let [function] = symbols.callables.functions() else {
         panic!("one producer declaration {name}")
     };
-    let selected = libraries
-        .external_callable(function.callable.external_identity.unwrap())
-        .unwrap();
+    lower_selected(
+        unit,
+        libraries,
+        name,
+        function.callable.external_identity.unwrap(),
+        externals,
+        declarations,
+    );
+}
+
+fn lower_selected(
+    unit: &mut DependencyBodyUnit,
+    libraries: &crate::klib_libraries::KlibLibraries,
+    name: &str,
+    identity: crate::fir::ExternalCallableId,
+    externals: &ProducedExternals,
+    declarations: &dyn SymbolSource,
+) {
+    let selected = libraries.external_callable(identity).unwrap();
     let callable = selected.klib_body_callable().unwrap();
     // The checker freezes the selected body graph, the class hierarchy above each class included,
     // before lowering reads it.
@@ -1698,5 +1714,49 @@ fn a_declined_secondary_constructor_leaves_its_materialized_class_as_it_was() {
         .unwrap_or_else(|decline| panic!("again: {decline}"));
     assert_eq!(again, primary);
     assert_eq!(unit_inventory(&unit), before);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+const PRIVATE_COMPANION: &str = "\
+package fixture
+private class Box {
+    private companion object {
+        val Shared = Box()
+    }
+    fun shared(): Box = Shared
+}
+fun make(): Any = Box().shared()
+";
+
+/// An object private to its enclosing class is linked as a class private to its enclosing class
+/// is: installed in the unit that lowers the library's bodies, its value one shared instance.
+#[test]
+fn a_body_reads_the_value_of_an_object_private_to_its_enclosing_class() {
+    let Some((directory, libraries)) = produce_library("private-companion", PRIVATE_COMPANION)
+    else {
+        return;
+    };
+    let mut unit = DependencyBodyUnit::default();
+    let externals = ProducedExternals::default();
+    lower_fixture(&mut unit, &libraries, "make", &externals, &libraries);
+    validated(unit.ir());
+    let ir = unit.ir();
+    let objects = ir
+        .classes
+        .iter()
+        .filter(|class| class.is_object)
+        .map(|class| class.fq_name.render())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        objects.len(),
+        1,
+        "the companion is the one installed object: {objects:?}"
+    );
+    let values = ir
+        .exprs
+        .iter()
+        .filter(|expression| matches!(expression, IrExpr::SingletonValue { .. }))
+        .count();
+    assert_eq!(values, 1, "one read of the companion's value");
     let _ = std::fs::remove_dir_all(&directory);
 }

@@ -1501,10 +1501,19 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.static_storage(ir, field)
     }
 
+    fn local_object(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<TypeName, KlibBodyDeclineReason> {
+        self.link_local_object(ir, signature)
+    }
+
     fn singleton(
         &mut self,
         ir: &mut IrFile,
         classifier: TypeName,
+        signature: &KlibPublicIdSignature,
     ) -> Result<(), KlibBodyDeclineReason> {
         // The target realizes the value of an object whose representation it owns, as it does for
         // a source reference of that object.
@@ -1518,12 +1527,13 @@ impl<'s> CallLinker for Linker<'_, 's> {
         // Any other library object is materialized with its instance, created by its own private
         // primary constructor, as a call of one of its members materializes it.
         let callees: &'s super::KlibCalleeFacts<'s> = self.sources.callees;
-        let class =
-            callees
-                .read_object(classifier)
-                .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
-                    "an object value",
-                ))?;
+        let Some(class) = callees.read_object(classifier) else {
+            // An object private to its enclosing class is no provider's: this library's own
+            // bodies link it as they link a class private to its enclosing class.
+            return self
+                .link_local_object(ir, &KlibIrSignature::Public(signature.clone()))
+                .map(|_| ());
+        };
         let primary = class.primary_constructor.clone().ok_or(
             KlibBodyDeclineReason::UnsupportedOperation("an object value"),
         )?;

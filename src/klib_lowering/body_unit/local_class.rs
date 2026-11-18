@@ -314,6 +314,43 @@ impl<'s> Linker<'_, 's> {
         self.linked_local_member(ir, &key)
     }
 
+    /// Install the object private to its enclosing class that `signature` names, so a read of its
+    /// value shares the one instance its members are called on, and name its classifier.
+    pub(super) fn link_local_object(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<crate::types::TypeName, KlibBodyDeclineReason> {
+        let Some((arena, class)) = self
+            .sources
+            .bodies
+            .module_local_class(&self.active_module, signature)
+        else {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "an object value",
+            ));
+        };
+        if crate::metadata::semantic::class_kind(class.base.flags)
+            != crate::libraries::TypeKind::Object
+        {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an object value names another kind of class".to_owned(),
+            ));
+        }
+        let constructor = class_constructor(arena, class)?;
+        self.link_local_constructor(ir, &constructor)?;
+        let key = super::super::same_library_class::LocalIdentity {
+            module: self.active_module.clone(),
+            signature: signature.clone(),
+        };
+        self.local_classes
+            .get(&key)
+            .map(|class| class.classifier)
+            .ok_or(KlibBodyDeclineReason::SignatureMismatch(
+                "an object was linked without being installed".to_owned(),
+            ))
+    }
+
     pub(super) fn linked_installed_member(
         &self,
         ir: &IrFile,

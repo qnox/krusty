@@ -599,10 +599,21 @@ impl CallLinker for TemplateCalls<'_> {
         }
     }
 
+    fn local_object(
+        &mut self,
+        _ir: &mut IrFile,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Result<crate::types::TypeName, KlibBodyDeclineReason> {
+        Err(KlibBodyDeclineReason::UnsupportedOperation(
+            "a file-private object value",
+        ))
+    }
+
     fn singleton(
         &mut self,
         _ir: &mut IrFile,
         classifier: crate::types::TypeName,
+        _signature: &crate::metadata::id_signature::KlibPublicIdSignature,
     ) -> Result<(), KlibBodyDeclineReason> {
         match self.callees.source.classifier(classifier) {
             Some(record) if record.is_object() => Ok(()),

@@ -414,6 +414,8 @@ pub(super) struct PreparedLocalClass<'a> {
     /// The same-library superclass the constructor delegates to; `Any` otherwise.
     pub(super) superclass: Option<LocalSuperclass<'a>>,
     pub(super) open: bool,
+    /// Whether the class is an object, whose one instance every read of its value shares.
+    pub(super) object: bool,
     /// How Kotlin names a top-level class private to its file: in its file's package, by its
     /// declared name. Any other file-local class has no name of its own here.
     pub(super) naming: Option<crate::ir::IrLocalClassNameProvenance>,
@@ -487,7 +489,7 @@ pub(super) fn classifier(
         return Err(unsupported("a non-public value class"));
     }
     match class_kind(class.base.flags) {
-        TypeKind::Class => Ok(Some(name)),
+        TypeKind::Class | TypeKind::Object => Ok(Some(name)),
         _ => Err(unsupported("a non-public classifier other than a class")),
     }
 }
@@ -964,6 +966,7 @@ fn prepare_class<'a>(
         outer: outer_instance,
         superclass,
         open: declaration_modality(class.base.flags) != KotlinModality::Final,
+        object: class_kind(class.base.flags) == TypeKind::Object,
         naming,
     })
 }
@@ -1742,6 +1745,7 @@ pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
     class.ctor_param_count = 0;
     class.explicit_param_stores = true;
     class.is_open = prepared.open;
+    class.is_object = prepared.object;
     if let Some(outer) = &prepared.outer {
         class.is_inner_class = true;
         class.constructor_prefix_count = 1;
