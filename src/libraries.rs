@@ -1033,9 +1033,10 @@ pub struct LibraryCallable {
     /// [`Self::default_call`] set; no platform `$default` symbol is named.
     pub defaults_from_declaration: bool,
     /// [`Self::defaults_from_declaration`] holds because the declaration's compiled entry takes
-    /// the mask of omitted arguments after synthetic parameters a compiler plugin's transformation
-    /// appended. Only an enabled plugin that owns that calling convention can pass the mask.
-    pub defaults_by_transformed_entry: bool,
+    /// the mask of omitted arguments after these synthetic parameters, which a compiler plugin's
+    /// transformation appended. The provider only reports the tail; whether it is a calling
+    /// convention the call can pass is for an enabled plugin to authenticate.
+    pub transformed_entry_tail: Option<Box<[Ty]>>,
     /// For a generic `vararg` callable resolved with a bound element type (`listOf<Long>(…)` →
     /// `Long`): the *logical* element type the trailing arguments adapt to. `None` for a non-vararg
     /// call or when the element type is not recovered. The backend uses it to coerce each packed
