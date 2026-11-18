@@ -116,9 +116,6 @@ fn plan(declaration: &PropertyDeclaration) -> Result<PropertyAbi, Unsupported> {
     if flags.has(DeclarationFlags::EXPECT) {
         return Err("a cross-file `expect` property".into());
     }
-    if declaration.visibility == krusty::types::Visibility::Private {
-        return Err("a private property of another file".into());
-    }
     let placement = match declaration.owner {
         _ if declaration.companion_block => PropertyPlacement::CompanionBlock,
         None => PropertyPlacement::Package,
