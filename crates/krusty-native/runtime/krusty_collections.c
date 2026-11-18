@@ -146,6 +146,10 @@ typedef struct KMutableList {
        on the unsigned ring, as the JVM's `modCount` wraps: only equality is ever asked of it, and a
        signed count past `Int.MAX_VALUE` would be undefined. */
     uint32_t modifications;
+    /* Set by `ArrayList.build()` (what `buildList` ends with): the list is then read-only, but it
+       is still the `ArrayList` it was, so a cast to `MutableList` holds and a write through it
+       raises `UnsupportedOperationException`, as Kotlin's `isReadOnly` does. */
+    kt_boolean read_only;
 } KMutableList;
 
 static const uint32_t kt_mutable_list_offsets[] = {offsetof(KMutableList, elements)};
@@ -382,6 +386,7 @@ KRef kt_mutable_list_new(void) {
     list->elements = kt_array_new(&kt_type_array, 0);
     list->size = 0;
     list->modifications = 0;
+    list->read_only = false;
     return (KRef)list;
 }
 
@@ -442,7 +447,20 @@ KRef kt_mutable_list_of(KRef elements) {
     return list;
 }
 
+/* Raises `UnsupportedOperationException` for a write to a list `build()` made read-only; true when
+   it did, and the caller then returns without touching the list. */
+static kt_boolean kt_mutable_list_rejects_write(KRef self) {
+    if (!((KMutableList *)self)->read_only) {
+        return false;
+    }
+    kt_throw(kt_throwable_new(&kt_type_unsupported_operation_exception, NULL));
+    return true;
+}
+
 kt_boolean kt_mutable_list_add(KRef self, KRef value) {
+    if (kt_mutable_list_rejects_write(self)) {
+        return false;
+    }
     kt_mutable_list_reserve(self);
     KMutableList *list = (KMutableList *)self;
     kt_elements_of(list->elements)[list->size++] = value;
@@ -465,6 +483,9 @@ void kt_mutable_list_plus_assign(KRef self, KRef value) { kt_mutable_list_add(se
    what makes `xs.addAll(xs)` double the list, where walking `xs` with an iterator while appending
    to it would see its own list modified at the second step. */
 void kt_mutable_list_add_all(KRef self, KRef elements) {
+    if (kt_mutable_list_rejects_write(self)) {
+        return;
+    }
     if (elements != NULL
         && (kt_is_read_only_list(elements) || kt_is_mutable_list(elements))) {
         kt_int count = kt_list_size(elements);
@@ -484,6 +505,9 @@ void kt_mutable_list_add_all(KRef self, KRef elements) {
 }
 
 KRef kt_mutable_list_set(KRef self, kt_int index, KRef value) {
+    if (kt_mutable_list_rejects_write(self)) {
+        return NULL;
+    }
     KMutableList *list = (KMutableList *)self;
     /* Returns straight after raising, as `add(index, e)` and `removeAt` below do: `kt_throw` records
        the exception and comes back, and the write it forbids would land outside the elements --
@@ -500,6 +524,9 @@ KRef kt_mutable_list_set(KRef self, kt_int index, KRef value) {
 }
 
 void kt_mutable_list_add_at(KRef self, kt_int index, KRef value) {
+    if (kt_mutable_list_rejects_write(self)) {
+        return;
+    }
     KMutableList *list = (KMutableList *)self;
     if (index < 0 || index > list->size) {
         kt_index_out_of_bounds(index, list->size);
@@ -516,6 +543,9 @@ void kt_mutable_list_add_at(KRef self, kt_int index, KRef value) {
 }
 
 KRef kt_mutable_list_remove_at(KRef self, kt_int index) {
+    if (kt_mutable_list_rejects_write(self)) {
+        return NULL;
+    }
     KMutableList *list = (KMutableList *)self;
     if (index < 0 || index >= list->size) {
         kt_index_out_of_bounds(index, list->size);
@@ -533,6 +563,9 @@ KRef kt_mutable_list_remove_at(KRef self, kt_int index) {
 }
 
 kt_boolean kt_mutable_list_remove(KRef self, KRef value) {
+    if (kt_mutable_list_rejects_write(self)) {
+        return false;
+    }
     kt_int at = kt_list_index_of(self, value);
     if (at < 0) {
         return false;
@@ -545,6 +578,9 @@ kt_boolean kt_mutable_list_remove(KRef self, KRef value) {
    contain, answering whether the receiver changed. Kotlin asks `contains` of the live argument,
    including when the argument is the receiver itself, so this does not snapshot it. */
 static kt_boolean kt_mutable_list_drop_where(KRef self, KRef elements, kt_boolean drop_contained) {
+    if (kt_mutable_list_rejects_write(self)) {
+        return false;
+    }
     kt_boolean changed = false;
     kt_int at = 0;
     while (at < kt_list_size(self)) {
@@ -578,6 +614,9 @@ kt_boolean kt_mutable_list_retain_all(KRef self, KRef elements) {
 }
 
 void kt_mutable_list_clear(KRef self) {
+    if (kt_mutable_list_rejects_write(self)) {
+        return;
+    }
     KMutableList *list = (KMutableList *)self;
     KRef *elements = kt_elements_of(list->elements);
     for (kt_int at = 0; at < list->size; at++) {
@@ -1790,6 +1829,14 @@ static KRef kt_frozen(KRef growing, kt_boolean reversed) {
         kt_elements_of(elements)[reversed ? size - 1 - at : at] = kt_list_get(growing, at);
     }
     return result;
+}
+
+/* `ArrayList.build()`, which ends `buildList`: the builder itself, marked read-only. It stays the
+   `ArrayList` Kotlin's `build()` answers, so its runtime interfaces (`MutableList` included) and
+   its identity are the library's; only writes through it are refused. */
+KRef kt_mutable_list_build(KRef self) {
+    ((KMutableList *)self)->read_only = true;
+    return self;
 }
 
 /* `xs.filter { … }` and `xs.filterNot { … }`.

@@ -247,6 +247,11 @@ fn list_symbol(
             Ty::Boolean,
         ),
         ("clear", [], Ty::Unit) if mutates => ("kt_mutable_list_clear", vec![any()], Ty::Unit),
+        // `ArrayList.build()`, which `buildList` ends with: the list the builder produced, read-only.
+        // Only the implementation declares it, so a `MutableList` face never selects it.
+        ("build", [], ret) if declaration.is_array_list() && ret.is_reference() => {
+            ("kt_mutable_list_build", vec![any()], any())
+        }
         ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
             "kt_mutable_collection_add_all",
             vec![any(), any()],
