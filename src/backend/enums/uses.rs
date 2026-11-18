@@ -22,12 +22,30 @@ pub(super) fn rewrite(ir: &mut IrFile, realized: &HashMap<TypeName, Realized>) {
     }
 }
 
+/// Every root a use can sit under, before any realization: each emitted body, each default, and
+/// each enum constant's arguments. An orphan or inline-template node sits under none of them.
+pub(in super::super) fn emitted_use_roots(ir: &IrFile) -> Vec<ExprId> {
+    let mut roots = roots(ir);
+    roots.extend(entry_arguments(ir));
+    roots
+}
+
 /// Every root a use can sit under: each emitted body and each default.
 fn roots(ir: &IrFile) -> Vec<ExprId> {
     let mut roots = crate::ir::emitted_body_roots(ir);
     roots.extend(function_defaults(ir));
     roots.extend(constructor_defaults(ir));
     roots
+}
+
+/// Every enum constant's argument prelude and arguments.
+fn entry_arguments(ir: &IrFile) -> Vec<ExprId> {
+    ir.classes
+        .iter()
+        .flat_map(|class| &class.enum_entries)
+        .flat_map(|entry| entry.argument_prelude.iter().chain(&entry.args))
+        .copied()
+        .collect()
 }
 
 /// The defaults of every function this file emits.

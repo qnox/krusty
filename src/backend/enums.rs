@@ -61,6 +61,8 @@ mod initializer;
 mod tests;
 mod uses;
 
+pub(super) use uses::emitted_use_roots;
+
 use crate::fx_hash::HashMap;
 use crate::ir::{Callee, ClassId, FunId, IrClass, IrExpr, IrFile};
 use crate::types::TypeName;
