@@ -110,6 +110,7 @@ mod class_literal_array_of_nothing;
 mod class_literal_receiver;
 mod class_literal_type_arguments;
 mod class_names_aliases;
+mod common_supertype_intersection;
 mod explicit_import_selection;
 pub(crate) use explicit_import_selection::explicit_classifier_selection;
 pub use explicit_import_selection::import_map;
@@ -26744,7 +26745,7 @@ fun box(): String {
     }
 
     #[test]
-    fn applied_common_supertype_keeps_incomparable_owners_at_different_depths_as_an_intersection() {
+    fn applied_common_supertype_keeps_incomparable_depths_as_an_intersection() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(
             "interface First\n\
@@ -29232,11 +29233,7 @@ pub(crate) fn semantic_common_supertype_inner(
     // Kotlin's universal reference upper bound is the result when no single more-specific common
     // classifier can represent the result. Preserve source/flexible nullability: `String?` and
     // `Marker` produce `Any?`, never the unsound non-null `Any`.
-    let has_value_classifier = |ty: Ty| {
-        ty.non_null() == Ty::Unit
-            || ty.kotlin_class_internal().is_some()
-            || matches!(ty.non_null().kind(), TyKind::Intersection(_))
-    };
+    let has_value_classifier = common_supertype_intersection::has_value_classifier;
     if has_value_classifier(a) && has_value_classifier(b) {
         return Some(common_result_nullability(a, b, Ty::obj("kotlin/Any")));
     }
@@ -29286,34 +29283,10 @@ pub(crate) fn applied_common_supertype_unguarded(
     right: Ty,
     visiting: &mut crate::fx_hash::HashSet<(Ty, Ty)>,
 ) -> Option<Ty> {
-    // An intersection operand is a subtype of each of its components, so every supertype common to
-    // one component and the other operand is common to both; the join is their intersection.
-    for (intersected, other, intersected_is_left) in [(left, right, true), (right, left, false)] {
-        let TyKind::Intersection(components) = intersected.non_null().kind() else {
-            continue;
-        };
-        let any = Ty::obj("kotlin/Any");
-        let mut joined = components
-            .iter()
-            .filter_map(|&component| {
-                let (l, r) = if intersected_is_left {
-                    (component, other)
-                } else {
-                    (other, component)
-                };
-                applied_common_supertype_unguarded(source, oracle, l, r, visiting)
-            })
-            .map(Ty::non_null)
-            .collect::<Vec<_>>();
-        if joined.len() > 1 {
-            joined.retain(|part| *part != any);
-        }
-        let joined = match joined.as_slice() {
-            [] => return None,
-            [single] => *single,
-            parts => Ty::intersection(parts),
-        };
-        return Some(common_result_nullability(left, right, joined));
+    if let Some(joined) = common_supertype_intersection::join_intersection_operand(
+        source, oracle, left, right, visiting,
+    ) {
+        return joined;
     }
     // Nullability does not change a classifier's hierarchy. Restore the operands' result
     // nullability after finding their common classifier.
@@ -29346,19 +29319,12 @@ pub(crate) fn applied_common_supertype_unguarded(
         .copied()
         .filter(|(candidate, _, _)| !dominated.contains(candidate))
         .collect::<Vec<_>>();
-    // Several unrelated most-specific classifiers (a shared superclass and a shared interface)
-    // are all supertypes of both operands, and kotlinc keeps every one as an intersection.
-    let joined = most_specific
-        .iter()
-        .map(|&(owner, left_applied, right_applied)| {
-            join_applied_classifier(source, oracle, owner, left_applied, right_applied, visiting)
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let joined = match joined.as_slice() {
-        [] => return None,
-        [single] => *single,
-        parts => Ty::intersection(parts),
-    };
+    let joined = common_supertype_intersection::join_most_specific(
+        source,
+        oracle,
+        &most_specific,
+        visiting,
+    )?;
     Some(common_result_nullability(left, right, joined))
 }
 
