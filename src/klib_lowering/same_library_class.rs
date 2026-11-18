@@ -1448,7 +1448,7 @@ fn member_overrides(
     Ok(overrides)
 }
 
-/// Every supertype above a class's written interfaces and library superclass, at the
+/// Every supertype from a class's written interfaces and its library superclass up, at the
 /// application the walk from them reaches it with, through the hierarchy the checker froze.
 /// Without that evidence only the written supertypes themselves are known.
 fn applied_supertypes(scope: &MemberScope<'_>) -> Vec<(TypeName, Ty)> {
