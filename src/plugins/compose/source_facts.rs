@@ -276,7 +276,7 @@ pub(super) fn record(
             .filter(|&statement| calls.contains_key(&statement) || invoked(statement).is_some())
             .collect::<Vec<_>>();
         direct_calls.extend(direct.iter().copied());
-        let lambda_arguments = lambda_arguments(ir, &direct, composable);
+        let lambda_arguments = lambda_arguments(ir, source, &direct, composable);
         if let Some(what) = unsupported_body_expression(ir, body.block, &lambda_arguments, &lambdas)
         {
             rejections.push(PluginRejection {
@@ -342,6 +342,20 @@ pub(super) fn record(
                 span,
                 rejections,
             ) {
+                // The applier scheme a library callee's parameter takes is not inferred yet, so a
+                // composable lambda parameter cannot be passed on to one.
+                let forwarded = site.arguments.iter().any(|argument| {
+                    matches!(*argument, ArgumentState::Forwarded(parameter) if lambdas[parameter as usize])
+                });
+                if forwarded && matches!(calls[&call].origin, CalleeOrigin::Library(_)) {
+                    rejections.push(PluginRejection {
+                        span: calls[&call].span.unwrap_or(span),
+                        message: unsupported(
+                            "a composable lambda parameter passed to a library composable",
+                        ),
+                    });
+                    continue;
+                }
                 // A remembered lambda's `rememberComposableLambda` call is a group of its own,
                 // which the function's source information lists before the call it is passed to.
                 locations.extend(
@@ -423,11 +437,11 @@ pub(super) fn record(
             file_name: source.file_name,
         };
         for argument in &lambda_arguments {
-            let callee = callee_name(ir, argument.call);
+            let callee = callee_name(ir, source, argument.call);
             let sibling = direct
                 .iter()
                 .take_while(|&&call| call != argument.call)
-                .filter(|&&call| callee.is_some() && callee_name(ir, call) == callee)
+                .filter(|&&call| callee.is_some() && callee_name(ir, source, call) == callee)
                 .count() as u32;
             let key = path.lambda_key(callee.unwrap_or_default(), sibling, argument.parameter);
             let memoization = if argument.captures {
@@ -841,14 +855,17 @@ pub(super) struct LambdaArgument {
     parameter: u32,
 }
 
-/// The lambdas `direct`'s calls pass to composable lambda parameters of the file's functions.
-fn lambda_arguments(ir: &IrFile, direct: &[ExprId], composable: TypeName) -> Vec<LambdaArgument> {
+/// The lambdas `direct`'s calls pass to composable lambda parameters of a function of the file or of
+/// a library.
+fn lambda_arguments(
+    ir: &IrFile,
+    source: &PluginSourceView<'_>,
+    direct: &[ExprId],
+    composable: TypeName,
+) -> Vec<LambdaArgument> {
     let mut arguments = Vec::new();
     for &call in direct {
         let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
-            continue;
-        };
-        let Some(function) = callee.source_function() else {
             continue;
         };
         for (parameter, argument) in supplied_arguments(callee, args) {
@@ -856,7 +873,7 @@ fn lambda_arguments(ir: &IrFile, direct: &[ExprId], composable: TypeName) -> Vec
                 impl_fn, captures, ..
             } = &ir.exprs[argument as usize]
             {
-                if is_composable_lambda(ir, function, parameter as usize, composable) {
+                if composable_lambda_parameter(ir, source, callee, parameter, composable) {
                     arguments.push(LambdaArgument {
                         call,
                         lambda: argument,
@@ -869,6 +886,38 @@ fn lambda_arguments(ir: &IrFile, direct: &[ExprId], composable: TypeName) -> Vec
         }
     }
     arguments
+}
+
+/// Whether parameter `parameter` of the function `callee` selects is a `@Composable () -> Unit`, in
+/// the file or in a library the Compose compiler plugin compiled.
+fn composable_lambda_parameter(
+    ir: &IrFile,
+    source: &PluginSourceView<'_>,
+    callee: &Callee,
+    parameter: u32,
+    composable: TypeName,
+) -> bool {
+    if let Some(function) = callee.source_function() {
+        return is_composable_lambda(ir, function, parameter as usize, composable);
+    }
+    let Callee::External { target, params, .. } = callee else {
+        return false;
+    };
+    let Some(shape) = source.checked.dependency_shape(*target) else {
+        return false;
+    };
+    shape.composable_parameters.get(parameter as usize) == Some(&true)
+        && params.get(parameter as usize).is_some_and(|ty| {
+            matches!(
+                ty.kind(),
+                TyKind::Fun(signature)
+                    if signature.params.is_empty()
+                        && matches!(signature.ret.kind(), TyKind::Unit)
+                        && signature.context_count == 0
+                        && !signature.has_receiver
+                        && !signature.suspend
+            )
+        })
 }
 
 /// Each argument a call supplies, with the callee parameter it is passed to; the parameters it
@@ -909,11 +958,21 @@ pub(super) fn takes_composer_frame(synthetic: &[Ty], parameters: usize, defaults
             && rest.iter().all(|word| *word == Ty::Int))
 }
 
-/// The source name of the file's function a call calls.
-fn callee_name(ir: &IrFile, call: ExprId) -> Option<&str> {
+/// The Kotlin name of the function a call calls, of the file or of a library.
+fn callee_name<'a>(
+    ir: &'a IrFile,
+    source: &'a PluginSourceView<'_>,
+    call: ExprId,
+) -> Option<&'a str> {
     let IrExpr::Call { callee, .. } = &ir.exprs[call as usize] else {
         return None;
     };
+    if let Callee::External { target, .. } = &**callee {
+        return source
+            .checked
+            .dependency_callable(*target)
+            .map(|declaration| declaration.name);
+    }
     let function = callee.source_function()?;
     Some(
         ir.fn_source_names
@@ -1026,12 +1085,6 @@ impl BodyScope<'_> {
         let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
             unreachable!("a composable call is a call");
         };
-        // A library callee takes no function value, so only the file's own callee is passed one.
-        let function = (found.origin == CalleeOrigin::File).then(|| {
-            callee
-                .source_function()
-                .expect("a call of the file's composable function names it")
-        });
         let omitted = omitted_parameters(callee);
         let mut supplied = supplied_arguments(callee, args).peekable();
         let arguments = (0..(args.len() + omitted.len()) as u32)
@@ -1042,11 +1095,14 @@ impl BodyScope<'_> {
                 let (_, argument) = supplied.next()?;
                 // A composable lambda is memoized, the same value in every execution.
                 if matches!(ir.exprs[argument as usize], IrExpr::Lambda { .. }) {
-                    return function
-                        .is_some_and(|function| {
-                            is_composable_lambda(ir, function, parameter as usize, self.composable)
-                        })
-                        .then_some(ArgumentState::Static);
+                    return composable_lambda_parameter(
+                        ir,
+                        self.source,
+                        callee,
+                        parameter,
+                        self.composable,
+                    )
+                    .then_some(ArgumentState::Static);
                 }
                 // A captured local's state is its declaration's, which a lambda's body cannot see.
                 if values.reads_captured_local(ir, argument) {
@@ -1124,11 +1180,20 @@ impl BodyScope<'_> {
             || extension_receiver_parameter.is_some()
         {
             Some("a call to a library composable function with a receiver")
-        } else if params
-            .iter()
-            .any(|param| matches!(param.kind(), TyKind::Fun(_)))
-        {
-            Some("a call to a library composable function with a function-typed parameter")
+        } else if (0..params.len()).any(|index| {
+            matches!(params[index].kind(), TyKind::Fun(_))
+                && !composable_lambda_parameter(
+                    ir,
+                    self.source,
+                    callee,
+                    index as u32,
+                    self.composable,
+                )
+        }) {
+            Some(
+                "a call to a library composable function with a function-typed parameter other \
+                 than `@Composable () -> Unit`",
+            )
         } else if !matches!(ret.kind(), TyKind::Unit) {
             Some("a call to a library composable function with a result")
         } else if !takes_composer_frame(&shape.synthetic_parameters, params.len(), shape.defaults) {
