@@ -25,7 +25,11 @@ use crate::ir::{
 };
 use crate::types::{Ty, TyKind};
 
-/// Realize every source `KProperty` reference of `ir` as a function value.
+/// Realize every emitted source `KProperty` reference of `ir` as a function value.
+///
+/// Only a reference some emitted body, default or enum argument structurally reaches is realized:
+/// an orphan node, or one a retained inline template still holds, is never executed, so it gets no
+/// adapter bodies and none of their dependency roots.
 ///
 /// A delegated property's `KProperty` argument is the delegate's metadata, not a source value,
 /// and stays checked.
@@ -34,7 +38,13 @@ use crate::types::{Ty, TyKind};
 /// unit's to know: a delegated property's `setValue` body is a dependency unit that calls it, so a
 /// reference that advertises `KMutableProperty` implements `set` wherever it is created.
 pub fn realize(ir: &mut IrFile) {
-    for id in 0..ir.exprs.len() as ExprId {
+    let mut seen = crate::fx_hash::HashSet::default();
+    let emitted: Vec<ExprId> = super::enums::emitted_use_roots(ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+        .filter(|&expression| seen.insert(expression))
+        .collect();
+    for id in emitted {
         let IrExpr::Checked(checked) = ir.expr(id) else {
             continue;
         };
