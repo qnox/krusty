@@ -655,6 +655,11 @@ static KRef kt_sub_list_set(KSubList *view, kt_int index, KRef value) {
 }
 
 static void kt_sub_list_clear(KSubList *view) {
+    /* An empty range still answers to its list: `AbstractList.clear` is `removeRange(0, size)`, whose
+       `size` validates the view before there is anything to remove. */
+    if (!kt_sub_list_may_write(view)) {
+        return;
+    }
     while (view->size > 0) {
         (void)kt_sub_list_remove_at(view, view->size - 1);
         if (kt_pending_exception() != NULL) {

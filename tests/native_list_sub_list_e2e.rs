@@ -112,6 +112,25 @@ fn a_write_through_a_range_invalidates_its_walks_and_its_ranges() {
     every_backend_agrees_with_kotlinc("InvalidatedByWrite", source);
 }
 
+/// An empty range still answers to its list: clearing one after the list changed raises, as the
+/// JVM's `AbstractList.clear` does by reading the range's size.
+#[test]
+fn clearing_an_empty_range_of_a_changed_list_raises() {
+    let source = r#"fun box(): String {
+    val root = mutableListOf(1)
+    val empty = root.subList(0, 0)
+    root.add(2)
+    try {
+        empty.clear()
+        return "missing concurrent modification"
+    } catch (e: ConcurrentModificationException) {
+        return "OK"
+    }
+}
+"#;
+    every_backend_agrees_with_kotlinc("EmptyRangeClear", source);
+}
+
 /// A change of the list at the root ends every walk and every range taken from it, nested ones
 /// too.
 #[test]
