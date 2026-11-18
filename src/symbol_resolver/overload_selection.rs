@@ -91,11 +91,11 @@ pub(super) fn unique_most_specific_with_conflicts<T>(
 }
 
 // Declaration-priority tiers, tried in this order and falling through whenever the tier holds no
-// applicable candidate. Kotlin resolves a `@kotlin.internal.HidesMembers` extension above members
-// (the annotation exists so `Iterable<T>.forEach` wins over `java.lang.Iterable.forEach(Consumer)`)
-// and, as measured against kotlinc 2.4.10, above every ordinary extension level as well, whatever
-// its receiver specificity or lexical distance. Members still precede ordinary extensions.
-const HIDES_MEMBERS_PRIORITY: u8 = 0;
+// applicable candidate. A `@kotlin.internal.HidesMembers` extension shares the members' tier, above
+// every ordinary extension level whatever its receiver specificity or lexical distance, so the
+// more specific declaration wins: `Iterable<T>.forEach((T) -> Unit)` beats
+// `java.lang.Iterable.forEach(Consumer)` for a lambda, and a member taking `String` beats an
+// extension taking `String?`, as kotlinc 2.4.21 selects.
 const MEMBER_PRIORITY: u8 = 1;
 const EXTENSION_PRIORITY: u8 = 2;
 
@@ -119,7 +119,7 @@ pub(crate) fn extension_tower_rank(
             .annotations
             .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
     {
-        (HIDES_MEMBERS_PRIORITY, (0, 0), receiver_rank)
+        (MEMBER_PRIORITY, (0, 0), receiver_rank)
     } else {
         (
             EXTENSION_PRIORITY,
