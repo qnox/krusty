@@ -1468,7 +1468,7 @@ impl<'a> Body<'a> {
             } if let Callee::External {
                 target,
                 defaults,
-                extension_receiver_parameter: None,
+                extension_receiver_parameter,
                 ..
             } = &**call_callee
                 && defaults.is_empty()
@@ -1477,12 +1477,19 @@ impl<'a> Body<'a> {
                         == Some(krusty::backend::BackendCompilerIntrinsic::StringPlus)
                 }) =>
             {
-                let (Some(receiver), [other]) = (dispatch_receiver, args.as_slice()) else {
-                    return Err("an authenticated `String.plus` with malformed operands".into());
-                };
-                // `String.plus(Any?)` is the concatenation a template makes of its two operands.
+                // The member `String.plus(Any?)` and the extension `String?.plus(Any?)` are the
+                // concatenation a template makes of its two operands.
+                let (receiver, other) =
+                    match (dispatch_receiver, args.as_slice(), *extension_receiver_parameter) {
+                        (Some(receiver), [other], None) => (receiver, *other),
+                        (None, [receiver, other], Some(0)) => (*receiver, *other),
+                        _ => {
+                            return Err("an authenticated `String.plus` with malformed operands"
+                                .into())
+                        }
+                    };
                 self.string_of(receiver)?;
-                self.string_of(*other)?;
+                self.string_of(other)?;
                 self.code.call(self.runtime.string_concat);
             }
             IrExpr::Call {
