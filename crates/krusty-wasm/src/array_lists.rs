@@ -604,46 +604,6 @@ impl ArrayLists {
         );
     }
 
-    pub(super) fn define_contains_all(&self, module: &mut Module, bulk: &BulkOperations) {
-        let layout = self.layout;
-        let ty = module.func_type(vec![REFERENCE, REFERENCE], vec![ValType::I32]);
-        let (list, other, count, index) = (0, 1, 2, 3);
-        let mut code = Code::default();
-        code.local_get(other)
-            .call(bulk.elements_of)
-            .local_set(other);
-        layout.length(&mut code, other);
-        code.local_set(count);
-        code.block(BlockType::Empty).loop_(BlockType::Empty);
-        code.local_get(index).local_get(count).op(GE_S32).br_if(1);
-        code.local_get(list)
-            .local_get(other)
-            .local_get(index)
-            .call(self.get)
-            .call(self.contains);
-        code.op(EQZ32)
-            .if_(BlockType::Empty)
-            .i32_const(0)
-            .return_()
-            .end();
-        code.local_get(index)
-            .i32_const(1)
-            .op(ADD32)
-            .local_set(index)
-            .br(0)
-            .end()
-            .end()
-            .i32_const(1);
-        module.define(
-            bulk.contains_all,
-            Function {
-                ty,
-                locals: vec![ValType::I32, ValType::I32],
-                code,
-            },
-        );
-    }
-
     /// `removeAll` when `drop_contained` is set, otherwise `retainAll`. Both walk the receiver and
     /// ask the argument whether it contains each element.
     pub(super) fn define_remove_where(
