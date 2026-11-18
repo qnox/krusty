@@ -1909,7 +1909,16 @@ fn conditional_numeric_lub_is_not_arithmetic_promotion() {
             _ => None,
         })
         .expect("assertEquals must remain an applicable checked call");
-    assert_eq!(call.substitutions[0].value.get(), Ty::obj("kotlin/Any"));
+    assert_eq!(
+        call.substitutions[0].value.get(),
+        Ty::intersection(&[
+            Ty::obj("kotlin/Number"),
+            Ty::obj_args(
+                "kotlin/Comparable",
+                &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
+            )
+        ])
+    );
 }
 
 #[test]

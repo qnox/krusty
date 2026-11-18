@@ -36,7 +36,16 @@ fn elvis_mixed_numeric_branches_retain_their_number_supertype() {
         .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
         .find(|expression| matches!(expression.kind, FirExprKind::Elvis { .. }))
         .expect("checked Elvis expression");
-    assert_eq!(elvis.ty.get(), Ty::obj("kotlin/Number"));
+    assert_eq!(
+        elvis.ty.get(),
+        Ty::intersection(&[
+            Ty::obj("kotlin/Number"),
+            Ty::obj_args(
+                "kotlin/Comparable",
+                &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
+            )
+        ])
+    );
 }
 
 #[test]
