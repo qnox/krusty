@@ -68,6 +68,17 @@ fn a_write_through_a_range_invalidates_its_walks_and_its_ranges() {
     );
 }
 
+/// A walk of a list that changed raises `ConcurrentModificationException` at either end of the
+/// list, before it asks whether the walk is at an end, while a valid exhausted walk still raises
+/// `NoSuchElementException`.
+#[test]
+fn a_stale_walk_at_an_end_raises_before_its_end_guard() {
+    every_backend_agrees_with_kotlinc(
+        "WalkStaleBeforeEnd",
+        include_str!("box_regressions/listSubListWalkStaleBeforeEnd.kt"),
+    );
+}
+
 /// An empty range still answers to its list: clearing one after the list changed raises, as the
 /// JVM's `AbstractList.clear` does by reading the range's size.
 #[test]
