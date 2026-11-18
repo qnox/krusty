@@ -23,3 +23,8 @@ fun diamond(): Diamond = Diamond { it }
 fun specialized(): Specialized = Specialized { it + 1 }
 fun defaulted(): Defaulted<String> = Defaulted<String> { it }
 inline fun inlineSpecialized(): Specialized = Specialized { it + 2 }
+
+fun interface Printable {
+    override fun toString(): String
+}
+fun printable(): Printable = Printable { "printed" }

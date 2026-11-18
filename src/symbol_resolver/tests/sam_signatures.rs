@@ -395,3 +395,38 @@ fn sam_dispatch_retains_erased_parent_and_effective_default_without_selecting_it
         }]
     );
 }
+
+#[test]
+fn direct_object_method_requirement_uses_the_existing_checked_sam_rule() {
+    let mut object = abstract_generic_member("toString", vec![], Ty::String);
+    object.external_identity = Some(crate::fir::ExternalCallableId::from_raw(71));
+    let mut ordinary = abstract_generic_member("toString", vec![Ty::Int], Ty::String);
+    ordinary.external_identity = Some(crate::fir::ExternalCallableId::from_raw(73));
+    let source = SamHierarchySource {
+        classifiers: [
+            (
+                crate::types::type_name("test/ObjectMethod"),
+                std::sync::Arc::new(sam_classifier(&[], vec![], vec![object])),
+            ),
+            (
+                crate::types::type_name("test/Ordinary"),
+                std::sync::Arc::new(sam_classifier(&[], vec![], vec![ordinary])),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let selected = semantic_sam_signature(&source, Ty::obj("test/ObjectMethod")).unwrap();
+    assert!(selected.requires_object_dispatch);
+    assert_eq!(
+        selected.declaration,
+        Some(SamMethodDeclaration::External(
+            crate::fir::ExternalCallableId::from_raw(71)
+        ))
+    );
+    assert!(
+        !semantic_sam_signature(&source, Ty::obj("test/Ordinary"))
+            .unwrap()
+            .requires_object_dispatch
+    );
+}

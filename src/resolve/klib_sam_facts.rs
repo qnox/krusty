@@ -94,6 +94,7 @@ pub(super) fn freeze(
         has_receiver: selected.has_receiver,
         suspend: selected.suspend,
         source_suspend: false,
+        requires_object_dispatch: selected.requires_object_dispatch,
         overridden_results: selected.overridden_results,
         dispatch_methods,
         default_methods,
