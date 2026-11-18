@@ -2025,6 +2025,7 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
                 }),
             classifier,
             callables,
+            companion_extensions: crate::libraries::Callables::None,
             importable_declaration: stable_classifier_name.is_some(),
         })
     }

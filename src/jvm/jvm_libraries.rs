@@ -14,6 +14,7 @@ mod collection_canonicalization;
 mod declaration_headers;
 mod declared_members;
 mod facade_package_callables;
+mod package_companion_extensions;
 mod symbol_source;
 use classpath_annotation_classes::{
     annotation_element_defaults, classpath_annotation_targets, java_annotation_parameter_list,
@@ -534,6 +535,7 @@ impl JvmLibraries {
                     inherited_by_delegation: false,
                     return_value_status: None,
                 },
+                associated_classifier: meta.associated_classifier,
                 ..FunctionInfo::plain(kind, None, callable)
             };
             self.publish_function_deprecation(Some(&mut function), meta.deprecation.as_deref());
@@ -3571,15 +3573,8 @@ impl JvmLibraries {
             self.merge_top_level_field_property(name, field, &mut props);
         }
         let hidden = self.withhold_hidden_declarations(package, name, &mut props);
-        let platform_callables = match (overloads.is_empty(), props.is_empty()) {
-            (false, false) => Callables::Both {
-                functions: FunctionSet { overloads },
-                properties: PropertySet { overloads: props },
-            },
-            (false, true) => Callables::Functions(FunctionSet { overloads }),
-            (true, false) => Callables::Properties(PropertySet { overloads: props }),
-            (true, true) => Callables::None,
-        };
+        let (platform_callables, companion_extensions) =
+            self.split_companion_extensions(package, overloads, props);
         // Language builtin classifiers exist independently of whether the target classpath contains
         // stdlib. Federate that classifier source with the platform record here; platform metadata wins
         // when present, while callables remain exclusively metadata/platform declarations.
@@ -3624,6 +3619,7 @@ impl JvmLibraries {
                 classifier,
                 builtin_classifier,
                 callables,
+                companion_extensions,
                 importable_declaration,
             },
         )

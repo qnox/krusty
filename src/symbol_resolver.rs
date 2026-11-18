@@ -3827,6 +3827,7 @@ mod tests {
                     None
                 };
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(classifier_name),
                 classifier_declaration: classifier
@@ -3897,6 +3898,7 @@ mod tests {
                 classifier
             });
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(classifier_name),
                 classifier_declaration: classifier
@@ -4016,6 +4018,7 @@ mod tests {
                     crate::libraries::Callables::None
                 };
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_declaration: classifier
                     .as_ref()
@@ -5072,6 +5075,7 @@ mod tests {
                     _ => Vec::new(),
                 };
                 std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    companion_extensions: crate::libraries::Callables::None,
                     builtin_classifier: false,
                     classifier_name: None,
                     classifier_declaration: None,
@@ -5122,6 +5126,7 @@ mod tests {
                     _ => Vec::new(),
                 };
                 std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    companion_extensions: crate::libraries::Callables::None,
                     builtin_classifier: false,
                     classifier_name: None,
                     classifier_declaration: None,

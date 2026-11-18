@@ -1743,6 +1743,7 @@ impl SymbolSource for ModuleSymbols<'_> {
             classifier_declaration,
             classifier,
             callables,
+            companion_extensions: crate::libraries::Callables::None,
             importable_declaration,
         });
         if self.syms.module_cache_enabled() {
