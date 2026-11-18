@@ -1456,9 +1456,9 @@ impl ProductionSignatureSemantics<'_> {
             // the tower advances outward. Reuse the property selector and invoke expectation
             // operation used by final call selection so an explicit or lazily inferred member
             // function type can contextualize its arguments without duplicating member lookup.
-            if let Some(callee) = crate::fir::DiagnosticId::probe(
-                self.selected_member_property_type(scope, receiver, spelling, None, demand),
-            )? {
+            if let Some(callee) =
+                self.invoke_callee_property_type(scope, receiver, spelling, demand)?
+            {
                 if let Ok(expectations) = self.invoke_argument_expectations_for_refresh(
                     scope,
                     callee,

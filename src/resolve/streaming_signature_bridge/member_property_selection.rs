@@ -4,6 +4,20 @@ use super::ProductionSignatureSemantics;
 use crate::types::Ty;
 
 impl ProductionSignatureSemantics<'_> {
+    /// The property type call syntax consults for an `invoke` callee: one still being computed has
+    /// no type, so it offers no callee.
+    pub(super) fn invoke_callee_property_type(
+        &self,
+        scope: crate::fir::SignatureScope,
+        receiver: Ty,
+        spelling: &str,
+        demand: &mut crate::fir::SignatureDemand<'_>,
+    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
+        crate::fir::DiagnosticId::probe(
+            self.selected_member_property_type(scope, receiver, spelling, None, demand),
+        )
+    }
+
     pub(super) fn selected_member_property_type(
         &self,
         scope: crate::fir::SignatureScope,
