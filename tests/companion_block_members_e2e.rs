@@ -1359,6 +1359,38 @@ impl ReleaseBuild {
         build
     }
 
+    /// kotlinc's bytes of `class`.
+    fn reference_class(&self, class: &str) -> Vec<u8> {
+        Self::read_class(&self.reference, class)
+    }
+
+    /// krusty's bytes of `class`.
+    fn krusty_class(&self, class: &str) -> Vec<u8> {
+        Self::read_class(&self.krusty, class)
+    }
+
+    fn read_class(dir: &std::path::Path, class: &str) -> Vec<u8> {
+        std::fs::read(dir.join(format!("{class}.class")))
+            .unwrap_or_else(|error| panic!("{class} in {}: {error}", dir.display()))
+    }
+
+    /// The class files one compiler wrote, by name.
+    fn class_files(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("list the output")
+            .map(|entry| {
+                entry
+                    .expect("an output entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.ends_with(".class"))
+            .collect();
+        names.sort();
+        names
+    }
+
     /// `box()`'s result from kotlinc's classes and from krusty's.
     fn box_results(&self) -> (String, String) {
         let run = |dir: &std::path::Path| {
@@ -1448,5 +1480,156 @@ fn hoisted_companion_delegate_initializes_with_its_companion_on_2_5() {
         expected.starts_with("OK:"),
         "kotlinc ran the program: {expected}"
     );
+    assert_eq!(actual, expected);
+}
+
+/// From Kotlin 2.5 an interface's block properties are stored: kotlinc keeps their fields in
+/// synthetic `$$PrivateFields1` (blocks before the companion object) and `$$PrivateFields2`
+/// (blocks after it) classes behind the interface's static accessors, and the interface's
+/// `<clinit>` initializes each class at its place around the companion object.
+#[test]
+fn interface_block_storage_follows_kotlinc_2_5() {
+    const SRC: &str = "var log = \"\"\n\
+        interface Ordered {\n\
+        \x20   companion {\n\
+        \x20       val before: String = run { log += \"A\"; \"a\" }\n\
+        \x20       var counter: Int = run { log += \"B\"; 1 }\n\
+        \x20       fun describe() = before + counter\n\
+        \x20   }\n\
+        \x20   companion object {\n\
+        \x20       val inObject: String = run { log += \"C\"; \"c\" }\n\
+        \x20       init { log += \"I\" }\n\
+        \x20   }\n\
+        \x20   companion {\n\
+        \x20       const val tag = \"t\"\n\
+        \x20       val after: String = run { log += \"D\"; \"d\" }\n\
+        \x20   }\n\
+        }\n\
+        interface AfterObject {\n\
+        \x20   companion object { val o = \"o\" }\n\
+        \x20   companion { val late: String = run { log += \"L\"; \"l\" } }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   Ordered.counter = Ordered.counter + 1\n\
+        \x20   val values = Ordered.describe() + Ordered.inObject + Ordered.after + Ordered.tag\n\
+        \x20   val late = AfterObject.late + AfterObject.o\n\
+        \x20   return if (values == \"a2cdt\" && late == \"lo\") \"OK:$log\" else \"FAIL:$values:$late:$log\"\n\
+        }\n";
+    let build = ReleaseBuild::new(
+        "InterfaceStorage",
+        SRC,
+        "2.5.0-RC",
+        &["+CompanionBlocks", "+CompanionExtensions"],
+    );
+    for class in [
+        "Ordered",
+        "Ordered$$PrivateFields1",
+        "Ordered$$PrivateFields2",
+        "AfterObject",
+        "AfterObject$$PrivateFields2",
+    ] {
+        let (krusty, reference) = (build.krusty_class(class), build.reference_class(class));
+        assert_eq!(
+            common::member_table(&krusty),
+            common::member_table(&reference),
+            "{class}: kotlinc's member table"
+        );
+        assert_eq!(
+            common::raw_kotlin_metadata(&krusty),
+            common::raw_kotlin_metadata(&reference),
+            "{class}: kotlinc's @Metadata"
+        );
+    }
+    assert_eq!(
+        ReleaseBuild::class_files(&build.krusty),
+        ReleaseBuild::class_files(&build.reference),
+        "kotlinc's class files"
+    );
+    let (expected, actual) = build.box_results();
+    assert!(
+        expected.starts_with("OK:"),
+        "kotlinc ran the program: {expected}"
+    );
+    assert_eq!(actual, expected);
+}
+
+/// An interface's block-property storage keeps every fact of the property's field when it moves to
+/// the private-fields class: a `@Volatile` var's `ACC_VOLATILE`, a generic type's `Signature`, and
+/// FIELD-targeted annotations, beside its nullability. A class's own block storage keeps them too.
+#[test]
+fn interface_block_storage_keeps_its_field_facts() {
+    const SRC: &str = "@Target(AnnotationTarget.FIELD)\n\
+        annotation class Marker(val name: String)\n\
+        interface Fielded {\n\
+        \x20   companion {\n\
+        \x20       val items: List<String> = listOf(\"i\")\n\
+        \x20       @field:Marker(\"m\") val marked: String = \"m\"\n\
+        \x20       @Volatile var flag: Int = 1\n\
+        \x20   }\n\
+        \x20   companion object {\n\
+        \x20       val o = \"o\"\n\
+        \x20   }\n\
+        \x20   companion {\n\
+        \x20       val later: Map<String, Int> = mapOf(\"l\" to 1)\n\
+        \x20   }\n\
+        }\n\
+        class Owned {\n\
+        \x20   companion {\n\
+        \x20       @Volatile var count: Int = 0\n\
+        \x20       val names: List<String> = listOf(\"n\")\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   Owned.count = Owned.names.size\n\
+        \x20   Fielded.flag = Fielded.flag + Owned.count\n\
+        \x20   val r = Fielded.items[0] + Fielded.marked + Fielded.flag + Fielded.o + Fielded.later.keys.first()\n\
+        \x20   return if (r == \"im2ol\") \"OK\" else \"FAIL:$r\"\n\
+        }\n";
+    let build = ReleaseBuild::new(
+        "InterfaceFieldFacts",
+        SRC,
+        "2.5.0-RC",
+        &["+CompanionBlocks", "+CompanionExtensions"],
+    );
+    assert_eq!(
+        ReleaseBuild::class_files(&build.krusty),
+        ReleaseBuild::class_files(&build.reference),
+        "kotlinc's class files"
+    );
+    let holders: Vec<String> = ReleaseBuild::class_files(&build.reference)
+        .into_iter()
+        .filter_map(|file| file.strip_suffix(".class").map(str::to_string))
+        .filter(|class| class.starts_with("Fielded$$PrivateFields"))
+        .collect();
+    assert_eq!(
+        holders.len(),
+        2,
+        "kotlinc's private-fields classes: {holders:?}"
+    );
+    // A class stores its own block properties; the same facts reach those fields.
+    for class in holders.iter().map(String::as_str).chain(["Owned"]) {
+        let (krusty, reference) = (build.krusty_class(class), build.reference_class(class));
+        assert_eq!(
+            common::member_table(&krusty),
+            common::member_table(&reference),
+            "{class}: kotlinc's fields, flags and signatures"
+        );
+        let disassembly = |dir: &std::path::Path| {
+            let path = dir.join(format!("{class}.class"));
+            common::javap(&["-v", "-p", &path.to_string_lossy()]).expect("javap is provisioned")
+        };
+        assert_eq!(
+            common::member_blocks(&disassembly(&build.krusty)),
+            common::member_blocks(&disassembly(&build.reference)),
+            "{class}: kotlinc's field attributes and annotations"
+        );
+        assert_eq!(
+            common::raw_kotlin_metadata(&krusty),
+            common::raw_kotlin_metadata(&reference),
+            "{class}: kotlinc's @Metadata"
+        );
+    }
+    let (expected, actual) = build.box_results();
+    assert_eq!(expected, "OK", "kotlinc ran the program");
     assert_eq!(actual, expected);
 }
