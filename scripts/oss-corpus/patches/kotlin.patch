@@ -1,0 +1,16 @@
+diff --git a/gradle.properties b/gradle.properties
+index e8c82b7d2..099d47c4e 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -39,6 +39,11 @@ kotlinApiVersionForProjectsDependingOnStableStdlib=2.2
+ 
+ #maven.repository.mirror=http://repository.jetbrains.com/remote-repos/
+ #bootstrap.kotlin.version=1.1.50-dev-1451
++# krusty corpus: bootstrap from a Kotlin release on Maven Central (the pin rewrites the version).
++bootstrap.kotlin.version=2.4.21
++bootstrap.kotlin.repo=https://repo1.maven.org/maven2
++# The verification metadata lists only the default bootstrap's artifacts.
++org.gradle.dependency.verification=off
+ bootstrap.kotlin.default.version=2.4.20-dev-7885
+ 
+ kotlin.build.publishing.attempts=20

@@ -665,6 +665,15 @@ KRef kt_int_range(kt_int first, kt_int last);
 KRef kt_long_range(kt_long first, kt_long last);
 KRef kt_char_range(kt_char first, kt_char last);
 
+/* `IntProgression(first, last, step)` and its kin, with Kotlin's constructor checks: a zero step,
+   or the step type's minimum, is its `IllegalArgumentException`. `last` is normalized to the last
+   element on the step, as `IntProgression.last` is. */
+KRef kt_int_progression(kt_int first, kt_int last, kt_int step);
+KRef kt_long_progression(kt_long first, kt_long last, kt_long step);
+KRef kt_char_progression(kt_char first, kt_char last, kt_int step);
+KRef kt_uint_progression(kt_int first, kt_int last, kt_int step);
+KRef kt_ulong_progression(kt_long first, kt_long last, kt_long step);
+
 /* `first..<last` / `first until last`. Kotlin answers the EMPTY range rather than wrapping when
    `last` is the element type's minimum, so the half-open form is a function and not `last - 1`. */
 KRef kt_int_range_until(kt_int first, kt_int last);
