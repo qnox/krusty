@@ -147,6 +147,11 @@ pub(super) fn is_appendable(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/text/Appendable"])
 }
 
+/// `kotlin.reflect.KClass`, whose instances the runtime builds over the descriptor named for it.
+pub(super) fn is_kclass(internal: TypeName) -> bool {
+    is_identity(internal, &["kotlin/reflect/KClass"])
+}
+
 pub(super) fn is_string_builder(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/text/StringBuilder"])
 }
