@@ -8,3 +8,23 @@ fn a_bounded_generic_overload_beats_a_free_generic_overload() {
     const SOURCE: &str = include_str!("box_regressions/genericBoundNarrowsOverloadSpecificity.kt");
     common::expect_box_same_as_kotlinc(SOURCE, "generic-bound-overload-specificity");
 }
+
+/// A bound that narrows one declaration does not make it more specific when the other parameter
+/// is an unrelated fixed classifier: both overloads accept the call, neither accepts the other's
+/// parameters, so kotlinc reports the ambiguity.
+#[test]
+fn an_unrelated_fixed_parameter_keeps_a_bounded_overload_ambiguous() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Main.kt",
+            "interface Source<out T>\n\
+             interface Left\n\
+             interface Right\n\
+             class Both : Left, Right\n\
+             fun <T : Any> choose(source: Source<T>, side: Left): String = \"left\"\n\
+             fun <A : Number> choose(source: Source<A>, side: Right): String = \"right\"\n\
+             fun test(source: Source<Int>, both: Both) = choose(source, both)\n",
+        )],
+        &[],
+    );
+}

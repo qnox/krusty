@@ -44,8 +44,23 @@ pub(crate) fn generic_declaration_accepts_parameters_of(
             .map(|(parameter, actual)| (parameter, *actual, false)),
         None,
     );
+    let admits =
+        |actual, expected| crate::symbol_resolver::resolution_subtype(source, actual, expected);
+    // The constraint system proves no contradiction among the variables, not that every input fits
+    // its formal: a fixed classifier parameter that the specific side's type does not implement
+    // leaves the variables untouched. The substituted parameters are checked as a call checks them.
+    let substituted = call.signature();
     inferred.bound_violations.is_empty()
-        && generic_bindings_satisfy_bounds(call.signature(), &inferred.bindings, |actual, bound| {
-            crate::symbol_resolver::resolution_subtype(source, actual, bound)
-        })
+        && generic_bindings_satisfy_bounds(substituted, &inferred.bindings, admits)
+        && substituted
+            .receiver
+            .zip(specific.receiver)
+            .is_none_or(|(formal, actual)| {
+                admits(actual, formal.substitute_erased(&inferred.bindings))
+            })
+        && substituted
+            .params
+            .iter()
+            .zip(&specific.params)
+            .all(|(formal, actual)| admits(*actual, formal.substitute_erased(&inferred.bindings)))
 }
