@@ -525,6 +525,21 @@ impl CallableRegistry {
                     {
                         continue;
                     }
+                    let dispatch_entry = self.dependency_dispatches.get(identity).copied();
+                    if dispatch_receiver.is_some()
+                        && extension_receiver_parameter.is_some()
+                        && dispatch_entry.is_none()
+                        && super::lower::library_members::is_dispatched_interface_member(callable)
+                    {
+                        // The selected body is the default of a member extension the receiver's
+                        // class may override, and its module exports no entry dispatching on the
+                        // receiver: a direct call to it, emitted or not, would bypass an override.
+                        return Err(Unsupported::from(format!(
+                            "a call through the dependency interface member extension `{}` \
+                             without an entry dispatching on its receiver",
+                            callable.name
+                        )));
+                    }
                     let index = self.dependencies.get(identity).copied().ok_or_else(|| {
                         krusty::trace_compiler!(
                             "lower",
@@ -555,21 +570,6 @@ impl CallableRegistry {
                             callable.compiler_operation(),
                         )
                     })?;
-                    let dispatch_entry = self.dependency_dispatches.get(identity).copied();
-                    if dispatch_receiver.is_some()
-                        && extension_receiver_parameter.is_some()
-                        && dispatch_entry.is_none()
-                        && super::lower::library_members::is_dispatched_interface_member(callable)
-                    {
-                        // The published body is the default of a member extension the receiver's
-                        // class may override, and its module exports no entry dispatching on the
-                        // receiver: calling the body would bypass an override.
-                        return Err(Unsupported::from(format!(
-                            "a call through the dependency interface member extension `{}` \
-                             without an entry dispatching on its receiver",
-                            callable.name
-                        )));
-                    }
                     targets.external.insert(*target, index);
                     if let Some(entry) = default_entry {
                         targets.external_defaults.insert(*target, entry);
