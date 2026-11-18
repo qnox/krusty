@@ -60,6 +60,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     );
     file.custom_equals_in_value_classes = features.has("CustomEqualsInValueClasses");
     file.normalize_nan_in_const_context = features.has("NormalizeNaNValuesInConstContext");
+    file.no_when_branch_matched_with_subject =
+        features.has("NoWhenBranchMatchedExceptionWithMessage");
     file.intrinsic_const_evaluation = features.has("IntrinsicConstEvaluation");
     file.forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
         features.has("ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds");

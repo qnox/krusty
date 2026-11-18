@@ -2006,6 +2006,9 @@ pub struct File {
     /// `+NormalizeNaNValuesInConstContext`: every NaN a compile-time constant evaluates to is the
     /// canonical NaN of its type, whatever sign and payload the arithmetic produced.
     pub normalize_nan_in_const_context: bool,
+    /// `+NoWhenBranchMatchedExceptionWithMessage`: an exhaustive subject `when` without an `else`
+    /// fails through `kotlin.internal.throwNoWhenBranchMatchedException(subject)`.
+    pub no_when_branch_matched_with_subject: bool,
     /// `+IntrinsicConstEvaluation`: a constant context (an annotation argument, a `const val`)
     /// also evaluates the intrinsic-const reads it otherwise rejects, such as an entry's `name`.
     pub intrinsic_const_evaluation: bool,

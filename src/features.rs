@@ -199,6 +199,7 @@ const MODELED_FEATURES: &[&str] = &[
     "MultiPlatformProjects",
     "NameBasedDestructuring",
     "NestedTypeAliases",
+    "NoWhenBranchMatchedExceptionWithMessage",
     "NormalizeNaNValuesInConstContext",
     "NullableNothingInReifiedPosition",
     "PrioritizedEnumEntries",

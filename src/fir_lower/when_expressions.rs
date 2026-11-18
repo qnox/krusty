@@ -8,24 +8,41 @@
 //! backend's bytecode temporaries pass, never to this module.
 
 use crate::fir::{
-    FirExprId, FirExpressionDebugLines, FirWhenBranch, FirWhenCondition,
-    FirWhenSubjectNumericEquality, LocalValueId, ResolvedTy,
+    FirExprId, FirExpressionDebugLines, FirRuntimeFunction, FirWhenBranch, FirWhenCondition,
+    FirWhenSubjectNumericEquality, LocalValueId, OriginId, ResolvedTy,
 };
 use crate::ir::{Callee, ExprId, IrBinOp, IrExpr, IrIntrinsic, IrTypeOp};
 use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure, LoweringState};
 
+/// A checked `when` as lowering consumes it.
+pub(super) struct CheckedWhen<'a> {
+    pub(super) origin: OriginId,
+    pub(super) subject: Option<FirExprId>,
+    pub(super) subject_variable: Option<LocalValueId>,
+    pub(super) branches: &'a [FirWhenBranch],
+    pub(super) result_ty: Ty,
+    pub(super) deeply_exhaustive: bool,
+    pub(super) subject_failure: Option<&'a FirRuntimeFunction>,
+    pub(super) lines: FirExpressionDebugLines,
+}
+
 impl BodyLowering<'_> {
     pub(super) fn when_expression(
         &mut self,
-        subject: Option<FirExprId>,
-        subject_variable: Option<LocalValueId>,
-        branches: &[FirWhenBranch],
-        result_ty: Ty,
-        deeply_exhaustive: bool,
-        lines: FirExpressionDebugLines,
+        checked: CheckedWhen<'_>,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let CheckedWhen {
+            origin,
+            subject,
+            subject_variable,
+            branches,
+            result_ty,
+            deeply_exhaustive,
+            subject_failure,
+            lines,
+        } = checked;
         let line = lines.source;
         let mut prefix = Vec::new();
         let subject_expression = subject;
@@ -143,6 +160,39 @@ impl BodyLowering<'_> {
             lowered_branches.push((condition, self.expression(branch.result)?));
         }
 
+        // fir2ir builds the implicit `else` of an exhaustive subject `when` as a call passing the
+        // subject to the selected failure, at the `when`'s own offsets.
+        let failure = match (subject_failure, subject) {
+            (Some(function), Some(slot)) => {
+                let read = self.when_subject_read(slot, subject_expression, subject_variable);
+                let call = self.ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::External {
+                        target: function.function,
+                        default_provider: None,
+                        params: function.parameters.to_vec(),
+                        ret: function.result,
+                        substitutions: Vec::new(),
+                        defaults: Vec::new(),
+                        extension_receiver_parameter: None,
+                    }),
+                    dispatch_receiver: None,
+                    args: vec![read],
+                });
+                self.ir.set_logical_type(call, function.result);
+                if line != 0 {
+                    self.ir.set_source_line(read, line);
+                    self.ir.set_source_line(call, line);
+                }
+                let failure = crate::ir::complete_bottom_value(self.ir, call, function.result);
+                self.ir.set_logical_type(failure, function.result);
+                lowered_branches.push((None, failure));
+                true
+            }
+            (Some(_), None) => {
+                return Err(FirLoweringFailure::MissingWhenSubject { origin });
+            }
+            (None, _) => false,
+        };
         let when = self.ir.add_expr(IrExpr::When {
             branches: lowered_branches,
         });
@@ -154,7 +204,7 @@ impl BodyLowering<'_> {
         if !lines.positionless {
             self.ir.set_start_offset(when, lines.start_offset);
         }
-        let has_else = branches.iter().any(|branch| branch.conditions.is_empty());
+        let has_else = failure || branches.iter().any(|branch| branch.conditions.is_empty());
         // Every `when` with an `else`, and one the checker proved exhaustive without it (whatever
         // its result, `Unit` included), is exhaustive; the checker also decided whether fir2ir types
         // it by its checked result.
