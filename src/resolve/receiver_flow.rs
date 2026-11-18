@@ -12,6 +12,53 @@ use super::*;
 use crate::types::TyKind;
 
 impl Checker<'_> {
+    /// Applies the flow facts for the unqualified `this` value to the nearest receiver rung.
+    ///
+    /// The facts change that rung's semantic type, not its runtime identity: bare member lookup
+    /// sees the narrowed type (`fun A?.bar() = if (this != null) foo() else ...`) while FIR keeps
+    /// materializing the exact receiver depth selected by the tower.
+    pub(super) fn narrow_current_implicit_receiver(
+        &self,
+        scope: &CheckerScope<'_>,
+        receivers: &mut [ImplicitReceiver],
+    ) {
+        let Some(narrowed) = self.actual_this_narrow(scope) else {
+            return;
+        };
+        let Some(current) = receivers.iter_mut().find(|receiver| receiver.current) else {
+            return;
+        };
+        current.ty = narrowed;
+        // An `is B` proof on a receiver of an incomparable declared class keeps both: bare
+        // members of the declaration and of `B` stay visible (`check(this is B); field = x`).
+        let context = crate::assignable::TyCtx::new();
+        let declared = current.declared_ty;
+        // A type-parameter receiver is judged by its bound: `this is B` on `M : A` with
+        // `B : A` narrows `M` toward `B`, it does not introduce an unrelated class.
+        let declared_class = declared
+            .non_null()
+            .ty_param_bound()
+            .map_or(declared, Ty::non_null);
+        let comparable = narrowed.non_null() == Ty::Nothing
+            || crate::assignable::is_subtype(
+                &context,
+                self,
+                declared_class.non_null(),
+                narrowed.non_null(),
+            )
+            || crate::assignable::is_subtype(
+                &context,
+                self,
+                narrowed.non_null(),
+                declared_class.non_null(),
+            );
+        if !comparable {
+            current.ty = Ty::intersection(&[narrowed, declared]);
+        }
+    }
+}
+
+impl Checker<'_> {
     /// The access path a checked expression denotes: the value its name read selected, followed by
     /// the member properties selected through plain (`.`) and safe (`?.`) reads. `None` for
     /// anything else (a call result, an indexed read, a temporary) — a proof on it says nothing

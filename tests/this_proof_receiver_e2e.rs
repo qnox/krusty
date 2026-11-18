@@ -14,24 +14,14 @@ fn nullable_declared_receiver_stays_nullable_after_a_nullable_proof() {
                   }\n";
     let result = common::compiler_diagnostics(&[("NullableProof.kt", source)], &[]);
     assert_eq!((result.krusty_code, result.reference_code), (1, 1));
-    assert_eq!(
-        errors(&result.krusty_stderr),
-        vec![ObservedError {
-            file: "NullableProof.kt".to_string(),
-            line: 4,
-            column: 28,
-            message: "unresolved reference 'marker'.".to_string(),
-        }]
-    );
-    assert_eq!(
-        errors(&result.reference_stderr),
-        vec![ObservedError {
-            file: "NullableProof.kt".to_string(),
-            line: 4,
-            column: 28,
-            message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable \
+    let expected = vec![ObservedError {
+        file: "NullableProof.kt".to_string(),
+        line: 4,
+        column: 28,
+        message: "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable \
                       receiver of type 'B? & A?'."
-                .to_string(),
-        }]
-    );
+            .to_string(),
+    }];
+    assert_eq!(errors(&result.reference_stderr), expected);
+    assert_eq!(errors(&result.krusty_stderr), expected);
 }
