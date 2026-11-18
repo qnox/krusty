@@ -39,6 +39,11 @@ impl Linker<'_, '_> {
     ) -> Result<Option<KlibIrSignature>, KlibBodyDeclineReason> {
         let module = &self.active_module;
         let bodies = self.sources.bodies;
+        // A getter the module declares carries a counter id, whatever its container chain: only a
+        // call no declaration of the module defines can be a fake override.
+        if bodies.module_local_function(module, callee).is_some() {
+            return Ok(None);
+        }
         let Some(KlibFileLocalOrigin {
             container: property,
             id: getter_id,
@@ -57,7 +62,7 @@ impl Linker<'_, '_> {
             return Ok(None);
         };
         let enclosing = self.enclosing_function_mangle(class_signature)?;
-        let mut found: Option<KlibIrSignature> = None;
+        let mut matching: Vec<Candidate> = Vec::new();
         let mut pending = supertype_signatures(arena, class);
         let mut seen = crate::fx_hash::HashSet::default();
         while let Some(owner) = pending.pop() {
@@ -92,23 +97,19 @@ impl Linker<'_, '_> {
                 }
                 let ids = enclosed_ids(&enclosing, &declared.name);
                 if ids == (*property_id as u64, *getter_id as u64) {
-                    match &found {
-                        Some(previous) if *previous != getter.base.symbol.signature => {
-                            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                                "a fake override names two inherited properties".to_owned(),
-                            ))
-                        }
-                        _ => found = Some(getter.base.symbol.signature.clone()),
-                    }
+                    matching.push(Candidate {
+                        getter: getter.base.symbol.signature.clone(),
+                        overridden: getter
+                            .overridden
+                            .iter()
+                            .map(|symbol| symbol.signature.clone())
+                            .collect(),
+                    });
                 }
             }
             pending.extend(supertype_signatures(owner_arena, owner_class));
         }
-        found
-            .map(Some)
-            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
-                "a fake override that no inherited property getter matches",
-            ))
+        most_specific_getter(&matching).map(Some)
     }
 
     /// The mangled signature of the function the local class `class` is declared in, found by
@@ -161,6 +162,53 @@ impl Linker<'_, '_> {
     }
 }
 
+/// An inherited getter whose enclosed mangle has the id of the call, with the getters it overrides.
+struct Candidate {
+    getter: KlibIrSignature,
+    overridden: Vec<KlibIrSignature>,
+}
+
+/// The getter at the bottom of the override group the candidates form: the one no other candidate
+/// overrides, directly or through other candidates. Candidates that do not form one group are
+/// ambiguous.
+fn most_specific_getter(
+    candidates: &[Candidate],
+) -> Result<KlibIrSignature, KlibBodyDeclineReason> {
+    let overrides = |upper: &Candidate, lower: &Candidate| {
+        let mut pending: Vec<&KlibIrSignature> = lower.overridden.iter().collect();
+        let mut seen = crate::fx_hash::HashSet::default();
+        while let Some(next) = pending.pop() {
+            if !seen.insert(next) {
+                continue;
+            }
+            if *next == upper.getter {
+                return true;
+            }
+            if let Some(through) = candidates
+                .iter()
+                .find(|candidate| candidate.getter == *next)
+            {
+                pending.extend(through.overridden.iter());
+            }
+        }
+        false
+    };
+    let mut bottoms = candidates.iter().filter(|candidate| {
+        !candidates
+            .iter()
+            .any(|other| other.getter != candidate.getter && overrides(candidate, other))
+    });
+    match (bottoms.next(), bottoms.next()) {
+        (Some(only), None) => Ok(only.getter.clone()),
+        (None, _) => Err(KlibBodyDeclineReason::UnsupportedOperation(
+            "a fake override that no inherited property getter matches",
+        )),
+        (Some(_), Some(_)) => Err(KlibBodyDeclineReason::SignatureMismatch(
+            "a fake override names two inherited properties".to_owned(),
+        )),
+    }
+}
+
 /// The serialized signatures of the direct supertypes of a class.
 fn supertype_signatures(arena: &KlibIrArena, class: &KlibIrClass) -> Vec<KlibIrSignature> {
     class
@@ -198,4 +246,76 @@ fn enclosed_ids(enclosing: &str, name: &str) -> (u64, u64) {
         mangled_id(&format!("{enclosing}{property}")),
         mangled_id(&format!("{enclosing}{getter}")),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn getter(slot: u32) -> KlibIrSignature {
+        KlibIrSignature::FileLocal { file: 0, slot }
+    }
+
+    fn candidate(slot: u32, overridden: &[u32]) -> Candidate {
+        Candidate {
+            getter: getter(slot),
+            overridden: overridden.iter().map(|&slot| getter(slot)).collect(),
+        }
+    }
+
+    #[test]
+    fn an_override_chain_resolves_to_its_most_specific_getter() {
+        // `Derived.text` overrides `Middle.text`, which overrides `Base.text`; the scan meets them
+        // in any order.
+        let derived = candidate(3, &[2]);
+        let middle = candidate(2, &[1]);
+        let base = candidate(1, &[]);
+        for group in [
+            [&base, &middle, &derived],
+            [&derived, &base, &middle],
+            [&middle, &derived, &base],
+        ] {
+            let group: Vec<Candidate> = group
+                .iter()
+                .map(|member| candidate(slot_of(member), &slots(&member.overridden)))
+                .collect();
+            assert_eq!(most_specific_getter(&group).unwrap(), getter(3));
+        }
+    }
+
+    #[test]
+    fn getters_of_unrelated_properties_are_ambiguous() {
+        let group = [candidate(1, &[]), candidate(2, &[])];
+        assert_eq!(
+            most_specific_getter(&group),
+            Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a fake override names two inherited properties".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn no_candidate_is_no_match() {
+        assert!(matches!(
+            most_specific_getter(&[]),
+            Err(KlibBodyDeclineReason::UnsupportedOperation(_))
+        ));
+    }
+
+    fn slot_of(candidate: &Candidate) -> u32 {
+        match candidate.getter {
+            KlibIrSignature::FileLocal { slot, .. } => slot,
+            _ => unreachable!("the fixture uses file-local getters"),
+        }
+    }
+
+    fn slots(signatures: &[KlibIrSignature]) -> Vec<u32> {
+        signatures
+            .iter()
+            .map(|signature| match signature {
+                KlibIrSignature::FileLocal { slot, .. } => *slot,
+                _ => unreachable!("the fixture uses file-local getters"),
+            })
+            .collect()
+    }
 }
