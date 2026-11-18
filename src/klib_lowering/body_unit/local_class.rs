@@ -80,6 +80,19 @@ impl<'s> Linker<'_, 's> {
             None => None,
         };
         let mut class = super::super::same_library_class::installed_class(&prepared);
+        // A class private to its file prints as the package-qualified name its source gives it.
+        if let KlibIrSignature::FileLocal { file, .. } = &prepared.key.signature {
+            class.site_name = self
+                .sources
+                .bodies
+                .module_file_package(&prepared.key.module, *file)
+                .map(|package| crate::ir::IrSiteClassName {
+                    container: crate::ir::IrSiteClassContainer::Package(
+                        super::super::klib_types::package_name(package),
+                    ),
+                    name: prepared.name.into(),
+                });
+        }
         if let Some((name, params, args)) = superclass {
             class.superclass = name;
             class.super_ctor_params = params;

@@ -401,6 +401,8 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) constructor_symbol: &'a KlibIrSymbol,
     /// The serialized declaration of the class.
     pub(super) declaring: &'a KlibIrSymbol,
+    /// The class's own serialized name.
+    pub(super) name: &'a str,
     pub(super) arena: &'a KlibIrArena,
     pub(super) receiver_symbol: &'a KlibIrSymbol,
     pub(super) receiver_ty: Ty,
@@ -949,6 +951,7 @@ fn prepare_class<'a>(
         class_type_parameter_bounds,
         constructor_symbol: &function.base.symbol,
         declaring: &class.base.symbol,
+        name: class.name.as_str(),
         arena,
         receiver_symbol: &receiver.base.symbol,
         receiver_ty: self_type,
