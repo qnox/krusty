@@ -870,7 +870,15 @@ impl JvmLibraries {
                 let setter_inline = property_accessor_inline(setter_public);
                 let (params, ret) = parse_method_desc(&setter_sig.desc)?;
                 (params.len() == 2 && ret == Ty::Unit).then(|| {
-                    accessor(
+                    let receiver = property_gsig
+                        .as_ref()
+                        .and_then(|gsig| gsig.receiver)
+                        .unwrap_or_else(|| {
+                            property
+                                .receiver_class
+                                .map_or(getter_params[0], Ty::obj_name)
+                        });
+                    let mut setter = accessor(
                         crate::names::property_setter_name(&property.name),
                         &setter_sig.name,
                         &setter_sig.desc,
@@ -878,7 +886,9 @@ impl JvmLibraries {
                         Ty::Unit,
                         ret,
                         setter_inline,
-                    )
+                    );
+                    setter.declared_params = Some(Box::new([receiver, property_ty]));
+                    setter
                 })
             });
             props.push(PropertyInfo {
@@ -2808,6 +2818,7 @@ impl JvmLibraries {
                             .copied()
                             .chain([receiver, ty])
                             .collect();
+                        callable.declared_params = Some(callable.params.clone().into_boxed_slice());
                         callable.source_receiver = Some(receiver);
                         callable.context_count = context_count;
                         callable.owner_is_interface = ci.is_interface();
@@ -2969,6 +2980,7 @@ impl JvmLibraries {
                         .copied()
                         .chain(std::iter::once(ty))
                         .collect();
+                    setter.declared_params = Some(setter.params.clone().into_boxed_slice());
                     setter.context_count = context_count;
                     setter.owner_is_interface = ci.is_interface();
                     setter.is_abstract = mp.is_abstract;
@@ -3117,6 +3129,7 @@ impl JvmLibraries {
                     );
                     setter.physical_name = setter_physical_name;
                     setter.params = vec![field_ty];
+                    setter.declared_params = Some(setter.params.clone().into_boxed_slice());
                     setter.external_identity = Some(self.cp.intern_external_callable(
                         &setter,
                         super::classpath::ExternalCallableKind::InstanceFieldWrite,
