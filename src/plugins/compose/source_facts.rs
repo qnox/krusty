@@ -416,6 +416,7 @@ refusal: true,
                 });
                 if forwarded && matches!(calls[&call].origin, CalleeOrigin::Library(_)) {
                     rejections.push(PluginRejection {
+                        refusal: true,
                         span: calls[&call].span.unwrap_or(span),
                         message: unsupported(
                             "a composable lambda parameter passed to a library composable",
