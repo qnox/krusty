@@ -547,12 +547,6 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          with a default argument that is not a constant yet",
     );
     assert_compose_rejects(
-        "compose-inferred-stability",
-        "@Composable fun Greeting(names: List<String>) {}\n",
-        &[],
-        "3:13: error: krusty's Compose compiler plugin does not support a composable function \
-         parameter whose stability kotlinc infers yet",
-    );
     assert_compose_rejects(
         "compose-file-extension-call",
         "@Composable fun String.Show() {}\n@Composable fun Greeting() {\n\"a\".Show()\n}\n",
@@ -566,6 +560,13 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "6:1: error: krusty's Compose compiler plugin does not support a composable call argument \
          that is not a constant, a parameter, or computed from a parameter yet",
+    );
+    assert_compose_rejects(
+        "compose-computed-argument-of-runtime-stability",
+        "@Composable fun Show(items: List<Int>) {}\n@Composable fun Greeting(n: Int) {\nShow(listOf(n))\n}\n",
+        &[],
+        "5:1: error: krusty's Compose compiler plugin does not support a call argument whose type's \
+         stability is decided when it runs yet",
     );
     assert_compose_rejects(
         "compose-lambda-value",
@@ -624,14 +625,14 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          `@NonSkippableComposable` function yet",
     );
     assert_compose_rejects(
-        "compose-cross-file",
+        "compose-cross-file-defaults",
         "@Composable fun Greeting() {\nOther()\n}\n",
         &[(
             "Other.kt",
-            "package probe\nimport androidx.compose.runtime.Composable\n@Composable fun Other() {}\n",
+            "package probe\nimport androidx.compose.runtime.Composable\n@Composable fun Other(size: Int = 1) {}\n",
         )],
         "4:1: error: krusty's Compose compiler plugin does not support a call to a composable \
-         function from another file yet",
+         function of another file with default arguments yet",
     );
     assert_compose_rejects(
         "compose-library-call-result",
@@ -712,6 +713,40 @@ fn a_library_composable_default_is_unavailable_without_the_compose_plugin() {
     );
     assert_eq!(compiled.code, Some(1));
     assert_eq!(compiled.classes, Vec::<String>::new());
+}
+
+/// A call to a composable function of another file compiles through krusty's partial pass: the
+/// class set is the one kotlinc emits for the same two files.
+#[test]
+fn the_compose_pass_compiles_a_call_to_a_composable_function_of_another_file() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let probe = Probe::new(
+        "compose-cross-file",
+        "package probe\nimport androidx.compose.runtime.Composable\n\
+         @Composable fun Greeting() {\nOther()\n}\n",
+    );
+    let other = probe.dir.join("Other.kt");
+    std::fs::write(
+        &other,
+        "package probe\nimport androidx.compose.runtime.Composable\n@Composable fun Other() {}\n",
+    )
+    .expect("write the other source");
+    let switches = vec![
+        format!("-Xplugin={}", compose.display()),
+        other.display().to_string(),
+    ];
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let compiled = probe.krusty(&classpath, &switches);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+    }
+    .message();
+    assert_eq!(compiled.stderr, format!("info: {partial}\n"));
+    assert_eq!(compiled.code, Some(0));
+    let reference = probe.kotlinc_classes(&classpath, &switches);
+    assert_eq!(compiled.classes, reference);
 }
 
 /// Compose's metrics and reports name files krusty does not write yet: a nonempty destination fails

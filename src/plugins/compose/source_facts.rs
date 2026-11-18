@@ -12,6 +12,7 @@ use crate::plugins::{PluginRejection, PluginSourceView};
 use crate::types::{Ty, TyKind, TypeName};
 
 use super::applier_targets::{self, LambdaCall, TargetConstraints};
+use super::class_stability::ParameterStability;
 use super::durable_keys::{package_hash, radix_string, KeyPath};
 use super::runtime::ComposeRuntime;
 use super::{ComposeOptions, COMPOSABLE};
@@ -29,6 +30,9 @@ pub struct ComposeFileFacts {
 /// A composable function the transform turns into a restartable group.
 pub(super) struct RestartableFunction {
     pub(super) function: FunId,
+    /// Whether the function is a restartable group. A composable function with a result and no
+    /// composable call has no group: it takes the composer parameters and its trace markers only.
+    pub(super) restartable: bool,
     /// The durable group key, `DurableFunctionKeyTransformer`'s hash of the function's path.
     pub(super) key: i32,
     /// The declaration's UTF-16 start and end offsets, which `@FunctionKeyMeta` records.
@@ -109,6 +113,8 @@ pub(super) struct TrackedParameter {
     /// Whether it is a composable `() -> Unit` value, which takes the caller's composer when called
     /// and is compared by identity.
     pub(super) lambda: bool,
+    /// What kotlinc infers of its type's stability, which decides how the function compares it.
+    pub(super) stability: ParameterStability,
 }
 
 /// A composable call directly in a restartable body, and what the caller knows about each argument
@@ -125,6 +131,9 @@ pub(super) struct ComposableCallSite {
     /// The first of `arguments` is the receiver of an extension function. It takes the first
     /// `$changed` slot but no `$default` bit, and is the call's dispatch receiver, not an argument.
     pub(super) receiver: bool,
+    /// For each argument, the classes whose `$stable` the callee's `$changed` takes the argument's
+    /// stability from, when its type's stability is decided when the caller runs.
+    pub(super) stability: Vec<Vec<TypeName>>,
 }
 
 /// What kotlinc's `argumentMetaOf` finds about one argument of a composable call.
@@ -139,9 +148,6 @@ pub(super) enum ArgumentState {
     /// An argument the call omits, which the callee's default supplies.
     Omitted,
 }
-
-/// The most value parameters one `$changed` int tracks; a function with more takes several.
-const SLOTS_PER_INT: usize = 10;
 
 /// Why a construct is outside what krusty's Compose pass compiles yet.
 fn unsupported(what: &str) -> String {
@@ -233,8 +239,22 @@ pub(super) fn record(
         let lambdas = (0..declaration.params.len())
             .map(|index| is_composable_lambda(ir, declaration.function, index, composable))
             .collect::<Vec<_>>();
+        // An extension receiver is the first value of the frame, ahead of the declared parameters.
+        let receiver_stability = declaration
+            .receiver
+            .map(|ty| super::class_stability::parameter_stability(ir, &*runtime, ty));
+        let stabilities =
+            receiver_stability
+                .into_iter()
+                .chain(declaration.params.iter().zip(&lambdas).map(
+                    |((_, ty), &lambda)| match lambda {
+                        true => Ok(ParameterStability::Stable),
+                        false => super::class_stability::parameter_stability(ir, &*runtime, *ty),
+                    },
+                ))
+                .collect::<Vec<_>>();
         if let Some(what) = unsupported_group_annotation(ir, declaration.function)
-            .or_else(|| unsupported_declaration(declaration, &lambdas))
+            .or_else(|| unsupported_declaration(declaration, &stabilities))
             .or_else(|| unsupported_defaults(ir, declaration.function))
             .or_else(|| {
                 (options.source_information
@@ -254,14 +274,25 @@ pub(super) fn record(
             });
             continue;
         }
-        let Some(body) = function_body(ir, declaration.function) else {
+        let plain = !matches!(declaration.ret.kind(), TyKind::Unit);
+        let Some(body) = function_body(ir, declaration.function).or_else(|| {
+            plain
+                .then(|| expression_body(ir, declaration.function))
+                .flatten()
+        }) else {
             rejections.push(PluginRejection {
                 span,
                 message: unsupported("a composable function without a block body"),
             });
             continue;
         };
-        let Some(body_span) = source.expression_span(ir, body.block) else {
+        let Some(body_span) = source.expression_span(ir, body.block).or_else(|| {
+            // An expression body has no block of its own: its expression is the body.
+            let IrExpr::Return(Some(value)) = ir.exprs[*body.statements.last()? as usize] else {
+                return None;
+            };
+            source.expression_span(ir, value)
+        }) else {
             rejections.push(PluginRejection {
                 span,
                 message: unsupported("a composable function whose body has no source position"),
@@ -273,6 +304,17 @@ pub(super) fn record(
             .chain(lambdas)
             .collect::<Vec<_>>();
         let parameter_count = lambdas.len() as u32;
+        if plain {
+            if let Some(what) =
+                unsupported_plain_body(ir, declaration.function, &body, &calls, &lambdas)
+            {
+                rejections.push(PluginRejection {
+                    span,
+                    message: unsupported(what),
+                });
+                continue;
+            }
+        }
         let invoked = |statement: ExprId| match &ir.exprs[statement as usize] {
             IrExpr::InvokeFunction { func, .. } => match ir.exprs[*func as usize] {
                 IrExpr::GetValue(index) if index < parameter_count && lambdas[index as usize] => {
@@ -290,7 +332,9 @@ pub(super) fn record(
             .collect::<Vec<_>>();
         direct_calls.extend(direct.iter().copied());
         let lambda_arguments = lambda_arguments(ir, source, &direct, composable);
-        if let Some(what) = unsupported_body_expression(ir, body.block, &lambda_arguments, &lambdas)
+        if let Some(what) = (!plain)
+            .then(|| unsupported_body_expression(ir, body.block, &lambda_arguments, &lambdas))
+            .flatten()
         {
             rejections.push(PluginRejection {
                 span,
@@ -345,6 +389,7 @@ pub(super) fn record(
                     arguments: vec![ArgumentState::Forwarded(index)],
                     library_mask: false,
                     receiver: false,
+                    stability: Vec::new(),
                 });
                 locations.push(call_location(&positions, call_span));
                 continue;
@@ -399,7 +444,12 @@ pub(super) fn record(
                 target_constraints(ir, &lambdas, &sites),
             );
         }
-        let used = used_parameters(ir, body.block, parameter_count);
+        // A function without a group decides nothing on its parameters.
+        let used = if plain {
+            vec![false; parameter_count as usize]
+        } else {
+            used_parameters(ir, body.block, parameter_count)
+        };
         let defaults = ir
             .param_defaults(declaration.function)
             .cloned()
@@ -417,6 +467,7 @@ pub(super) fn record(
                 used,
                 default: defaults.get(frame).copied().flatten(),
                 lambda: lambdas[frame],
+                stability: stabilities[frame].unwrap_or(ParameterStability::Undecided),
             })
             .collect::<Vec<_>>();
         let signature = format!(
@@ -490,6 +541,7 @@ pub(super) fn record(
         }
         functions.push(RestartableFunction {
             function: declaration.function,
+            restartable: !plain,
             key: path.key(),
             offsets: (
                 positions.unit(span.lo) as i32,
@@ -576,6 +628,30 @@ pub(super) fn record(
         span,
         message: unsupported("a composable call outside the statements of a composable body"),
     }));
+    // The function whose parameters a site's forwarded arguments are: a restartable function, or
+    // the implementation of a composable lambda.
+    let sites = functions
+        .iter_mut()
+        .flat_map(|function| {
+            let caller = function.function;
+            function.calls.iter_mut().map(move |site| (caller, site))
+        })
+        .chain(composable_lambdas.iter_mut().flat_map(|lambda| {
+            let caller = lambda.implementation;
+            lambda.calls.iter_mut().map(move |site| (caller, site))
+        }));
+    for (caller, site) in sites {
+        match argument_stability(ir, &*runtime, site, caller) {
+            Ok(stability) => site.stability = stability,
+            Err(what) => rejections.push(PluginRejection {
+                span: calls
+                    .get(&site.call)
+                    .and_then(|call| call.span)
+                    .unwrap_or(crate::diag::Span::new(0, 0)),
+                message: unsupported(what),
+            }),
+        }
+    }
     let Some(first) = functions.first() else {
         return;
     };
@@ -586,8 +662,11 @@ pub(super) fn record(
         .chain(composable_lambdas.iter().flat_map(|lambda| &lambda.calls));
     for site in sites {
         if let Some(CalleeOrigin::Library(target)) = calls.get(&site.call).map(|call| call.origin) {
-            let mut appended = vec![Ty::nullable(super::runtime::composer()), Ty::Int];
-            // The `$default` mask of a declaration with defaults follows its `$changed`.
+            let mut appended = vec![Ty::nullable(super::runtime::composer())];
+            appended.extend(
+                (0..super::restart_groups::changed_ints(site.arguments.len())).map(|_| Ty::Int),
+            );
+            // The `$default` mask of a declaration with defaults follows its `$changed` ints.
             if site.library_mask {
                 appended.push(Ty::Int);
             }
@@ -748,29 +827,18 @@ fn call_location(positions: &Utf16Offsets, span: crate::diag::Span) -> String {
     format!("{}@{start}L{}", positions.line(span.lo), end - start)
 }
 
-/// The declaration shapes the restart-group transform does not handle yet. `lambdas` says which
-/// parameters are composable `() -> Unit` values, which are stable.
+/// The declaration shapes the restart-group transform does not handle yet. `stabilities` is what
+/// kotlinc infers of each tracked value's type, the receiver's first, or why it is not decided.
 fn unsupported_declaration(
     declaration: &crate::ir::IrPackageFunction,
-    lambdas: &[bool],
+    stabilities: &[Result<ParameterStability, &'static str>],
 ) -> Option<&'static str> {
     if declaration.context_count != 0 {
         Some("a composable function with a context parameter")
     } else if declaration.vararg_index.is_some() {
         Some("a composable function with a vararg parameter")
-    } else if declaration.params.len() + usize::from(declaration.receiver.is_some()) > SLOTS_PER_INT
-    {
-        Some("a composable function with more than ten parameters")
-    } else if declaration
-        .params
-        .iter()
-        .zip(lambdas)
-        .any(|((_, ty), &lambda)| !lambda && !is_known_stable(*ty))
-        || declaration.receiver.is_some_and(|ty| !is_known_stable(ty))
-    {
-        Some("a composable function parameter whose stability kotlinc infers")
-    } else if !matches!(declaration.ret.kind(), TyKind::Unit) {
-        Some("a composable function with a result")
+    } else if let Some(&Err(what)) = stabilities.iter().find(|stability| stability.is_err()) {
+        Some(what)
     } else if declaration.inline {
         Some("an inline composable function")
     } else if declaration.suspend {
@@ -780,6 +848,54 @@ fn unsupported_declaration(
     } else {
         None
     }
+}
+
+/// What a composable function with a result does that the pass does not cover yet. The function
+/// has no group, so its body makes no composable call and writes no lambda, takes no default
+/// argument, and its one `return` ends the body.
+fn unsupported_plain_body(
+    ir: &IrFile,
+    function: FunId,
+    body: &FunctionBody,
+    calls: &HashMap<ExprId, ComposableCall>,
+    lambdas: &[bool],
+) -> Option<&'static str> {
+    if lambdas.contains(&true) {
+        return Some("a composable function with a result and a composable lambda parameter");
+    }
+    if ir
+        .param_defaults(function)
+        .is_some_and(|defaults| defaults.iter().any(Option::is_some))
+    {
+        return Some("a composable function with a result and a default argument");
+    }
+    let Some((&last, leading)) = body.statements.split_last() else {
+        return Some("a composable function with a result and no `return`");
+    };
+    if !matches!(ir.exprs[last as usize], IrExpr::Return(Some(_))) {
+        return Some("a composable function with a result that does not end in a `return`");
+    }
+    let mut pending = leading.to_vec();
+    pending.extend(match &ir.exprs[last as usize] {
+        IrExpr::Return(value) => *value,
+        _ => None,
+    });
+    while let Some(expression) = pending.pop() {
+        if calls.contains_key(&expression) {
+            return Some("a composable function with a result that makes a composable call");
+        }
+        match &ir.exprs[expression as usize] {
+            IrExpr::Return(_) => {
+                return Some("a composable function with a result and an early `return`")
+            }
+            IrExpr::Lambda { .. } => {
+                return Some("a composable function with a result that writes a lambda")
+            }
+            _ => {}
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    None
 }
 
 /// An expression in a composable body the transform does not handle yet: an early `return`, which
@@ -966,16 +1082,162 @@ fn omitted_parameters(callee: &Callee) -> &[u32] {
     }
 }
 
-/// Whether `synthetic`, the parameters a library composable's entry takes after its source
-/// parameters, are what `ComposerParamTransformer` appends: the composer, one `$changed` word,
-/// and, for a declaration with defaults, one `$default` word. The pass passes a library call no
-/// more than ten parameters, which one word of each covers.
-pub(super) fn takes_composer_frame(synthetic: &[Ty], defaults: bool) -> bool {
-    let words = if defaults { 2 } else { 1 };
+/// Whether `synthetic`, the parameters a library composable's entry takes after its `parameters`
+/// source parameters, are what `ComposerParamTransformer` appends: the composer, a `$changed` word
+/// for every ten parameters and, for a declaration with defaults, a `$default` word. The pass
+/// passes one `$default` word, which covers at most 31 parameters.
+pub(super) fn takes_composer_frame(synthetic: &[Ty], parameters: usize, defaults: bool) -> bool {
+    let default_words = match (defaults, parameters <= 31) {
+        (false, _) => 0,
+        (true, true) => 1,
+        (true, false) => return false,
+    };
+    let words = super::restart_groups::changed_ints(parameters) as usize + default_words;
     matches!(synthetic, [composer, rest @ ..]
         if composer.obj_internal().is_some_and(|name| name.matches(super::runtime::COMPOSER))
             && rest.len() == words
             && rest.iter().all(|word| *word == Ty::Int))
+}
+
+/// What each argument of `site` tells its callee of its stability: the classes whose `$stable` the
+/// call reads, or why the call cannot say yet.
+fn argument_stability(
+    ir: &IrFile,
+    runtime: &dyn PluginRuntime,
+    site: &ComposableCallSite,
+    caller: FunId,
+) -> Result<Vec<Vec<TypeName>>, &'static str> {
+    let none = vec![Vec::new(); site.arguments.len()];
+    let IrExpr::Call { callee, .. } = &ir.exprs[site.call as usize] else {
+        return Ok(none);
+    };
+    let params = match &**callee {
+        Callee::External { params, .. } => params.to_vec(),
+        Callee::Local(function) => ir.functions[*function as usize].params.clone(),
+        _ => return Ok(none),
+    };
+    // A library extension's receiver is its dispatch receiver, which the callee's parameters do
+    // not include; its type is not known here, so only the caller's own parameter or a
+    // constant says what it is.
+    let receivers = usize::from(site.receiver && matches!(&**callee, Callee::External { .. }));
+    let (receiver, declared) = site.arguments.split_at(receivers);
+    receiver
+        .iter()
+        .map(|argument| match argument {
+            ArgumentState::Static | ArgumentState::Omitted => Ok(Vec::new()),
+            ArgumentState::Forwarded(parameter) => {
+                forwarded_stability(ir, runtime, caller, *parameter)
+            }
+            ArgumentState::Uncertain => {
+                Err("a call argument whose type's stability is decided when it runs")
+            }
+        })
+        .chain(
+            declared
+                .iter()
+                .zip(&params)
+                .map(|(argument, &ty)| match argument {
+                    ArgumentState::Static | ArgumentState::Omitted => Ok(Vec::new()),
+                    ArgumentState::Forwarded(parameter) => {
+                        forwarded_stability(ir, runtime, caller, *parameter)
+                    }
+                    ArgumentState::Uncertain => {
+                        // The argument's own type may be narrower than the formal one, so only a formal
+                        // type whose stability is certain says what the argument's is.
+                        match super::class_stability::parameter_stability(ir, runtime, ty)? {
+                            ParameterStability::Undecided => Err(
+                                "a call argument whose type's stability is decided when it runs",
+                            ),
+                            ParameterStability::Stable | ParameterStability::Unstable => {
+                                Ok(Vec::new())
+                            }
+                        }
+                    }
+                }),
+        )
+        .collect()
+}
+
+/// The classes whose `$stable` a call reads for an argument that forwards `parameter` of `caller`:
+/// the stability of what is passed is that of the caller's own parameter, which may be a subtype of
+/// the callee's formal type.
+fn forwarded_stability(
+    ir: &IrFile,
+    runtime: &dyn PluginRuntime,
+    caller: FunId,
+    parameter: u32,
+) -> Result<Vec<TypeName>, &'static str> {
+    super::class_stability::parameter_stability_reads(
+        ir,
+        runtime,
+        ir.functions[caller as usize].params[parameter as usize],
+    )
+}
+
+/// What a call to a composable function of another file of the module does that the pass does not
+/// cover yet. The callee's own file gives it its composer parameters, so the call is covered
+/// where the callee's declaration shape is one that pass transforms and the call selects it
+/// directly.
+fn unsupported_module_call(ir: &IrFile, call: ExprId) -> Option<&'static str> {
+    let IrExpr::Call {
+        callee,
+        dispatch_receiver,
+        ..
+    } = &ir.exprs[call as usize]
+    else {
+        unreachable!("a composable call is a call");
+    };
+    let (Callee::Module { target, .. }
+    | Callee::CrossFile {
+        module_target: Some(target),
+        module_default_call: false,
+        ..
+    }) = &**callee
+    else {
+        return Some(match &**callee {
+            Callee::ModuleWithDefaults { .. }
+            | Callee::ModuleDefaultEntry { .. }
+            | Callee::CrossFile {
+                module_default_call: true,
+                ..
+            } => "a call to a composable function of another file with default arguments",
+            _ => "a call to a composable member of another file",
+        });
+    };
+    let Some(callable) = ir.referenced_module_callables.get(target) else {
+        return Some("a call to a composable function of another file the module does not declare");
+    };
+    if dispatch_receiver.is_some() || callable.owner.is_some() {
+        Some("a call to a composable member of another file")
+    } else if callable
+        .parameter_identities
+        .iter()
+        .any(|identity| identity.role != crate::ir::IrParameterRole::Value)
+    {
+        Some("a call to a composable function of another file with a receiver")
+    } else if callable.parameters.len() > super::restart_groups::SLOTS_PER_INT {
+        Some("a call to a composable function of another file with more than ten parameters")
+    } else if !callable.default_parameters.is_empty() {
+        Some("a call to a composable function of another file with default arguments")
+    } else if !callable.type_parameters.is_empty() {
+        Some("a call to a generic composable function of another file")
+    } else if callable.is_inline() {
+        Some("a call to an inline composable function of another file")
+    } else if callable.is_suspend() {
+        Some("a call to a suspend composable function of another file")
+    } else if !matches!(callable.result.kind(), TyKind::Unit) {
+        Some("a call to a composable function of another file with a result")
+    } else if callable.parameters.iter().any(|&ty| !is_known_stable(ty)) {
+        Some("a call to a composable function of another file with a parameter whose stability kotlinc infers")
+    } else {
+        None
+    }
+}
+
+/// The parameter types the stability inferencer knows are stable without looking further: the
+/// primitives and `String`.
+fn is_known_stable(ty: Ty) -> bool {
+    ty == Ty::String || super::runtime::PRIMITIVES.contains(&ty)
 }
 
 /// The Kotlin name of the function a call calls, of the file or of a library.
@@ -1085,7 +1347,7 @@ impl BodyScope<'_> {
         let found = &self.calls[&call];
         let declined = match found.origin {
             CalleeOrigin::File => self.unsupported_file_call(ir, call),
-            CalleeOrigin::Module => Some("a call to a composable function from another file"),
+            CalleeOrigin::Module => unsupported_module_call(ir, call),
             CalleeOrigin::Library(target) => self.unsupported_library_call(ir, call, target),
         };
         if let Some(what) = declined {
@@ -1183,6 +1445,7 @@ impl BodyScope<'_> {
                 arguments,
                 library_mask,
                 receiver: receiver.is_some(),
+                stability: Vec::new(),
             },
             call_location(self.positions, found.own_span.unwrap_or(call_span)),
         ))
@@ -1256,11 +1519,9 @@ impl BodyScope<'_> {
                 "a call to a library composable function with a function-typed parameter other \
                  than `@Composable () -> Unit`",
             )
-        } else if params.len() > 10 {
-            Some("a call to a library composable function with more than ten parameters")
         } else if !matches!(ret.kind(), TyKind::Unit) {
             Some("a call to a library composable function with a result")
-        } else if !takes_composer_frame(&shape.synthetic_parameters, shape.defaults) {
+        } else if !takes_composer_frame(&shape.synthetic_parameters, params.len(), shape.defaults) {
             Some(
                 "a call to a library composable function whose entry does not take the composer, \
                  `$changed` and `$default` parameters",
@@ -1481,18 +1742,16 @@ fn is_composable_lambda(ir: &IrFile, function: FunId, index: usize, composable: 
 /// evaluates in a defaults group of its own.
 fn unsupported_defaults(ir: &IrFile, function: FunId) -> Option<&'static str> {
     let defaults = ir.param_defaults(function)?;
+    // One `$default` int holds a bit per parameter.
+    if defaults.len() > 31 {
+        return Some("a composable function with default arguments and more than 31 parameters");
+    }
     (ir.param_defaults_stub_only(function)
         || defaults
             .iter()
             .flatten()
             .any(|&default| !matches!(ir.exprs[default as usize], IrExpr::Const(_))))
     .then_some("a composable function with a default argument that is not a constant")
-}
-
-/// The parameter types the stability inferencer knows are stable without looking further: the
-/// primitives and `String`.
-fn is_known_stable(ty: Ty) -> bool {
-    ty == Ty::String || super::runtime::PRIMITIVES.contains(&ty)
 }
 
 /// Which of the first `count` values — the function's parameters — `block` reads.
@@ -1607,6 +1866,22 @@ pub(super) fn function_body(ir: &IrFile, function: FunId) -> Option<FunctionBody
     Some(FunctionBody {
         block: *block,
         statements: stmts.iter().copied().chain(*value).collect(),
+    })
+}
+
+/// The body of a function written `= expression`: the function's root block, which holds only the
+/// `return` of that expression.
+pub(super) fn expression_body(ir: &IrFile, function: FunId) -> Option<FunctionBody> {
+    let root = ir.functions[function as usize].body?;
+    let IrExpr::Block { stmts, value: None } = &ir.exprs[root as usize] else {
+        return None;
+    };
+    let [statement] = stmts.as_slice() else {
+        return None;
+    };
+    matches!(ir.exprs[*statement as usize], IrExpr::Return(Some(_))).then(|| FunctionBody {
+        block: root,
+        statements: vec![*statement],
     })
 }
 
@@ -1765,7 +2040,13 @@ fn spelled_mentions(spelled: &crate::ir::Spelled, annotation: TypeName) -> bool 
 
 /// `IrType.asString()` of a declared type: its classifier's simple name.
 fn simple_type_name(ty: Ty) -> String {
-    match ty.kind() {
+    match ty.non_null().kind() {
+        // A function type is the class kotlinc names by its arity.
+        TyKind::Fun(signature) => format!(
+            "{}Function{}",
+            if signature.suspend { "Suspend" } else { "" },
+            signature.params.len()
+        ),
         TyKind::Unit => "Unit".to_string(),
         TyKind::Nothing => "Nothing".to_string(),
         TyKind::TyParam(name, _) => name.as_str().to_string(),
@@ -1787,30 +2068,66 @@ mod composer_frame_tests {
 
     #[test]
     fn the_composer_and_its_words_are_the_frame() {
-        assert!(takes_composer_frame(&[composer(), Ty::Int], false));
-        assert!(takes_composer_frame(&[composer(), Ty::Int, Ty::Int], true));
+        assert!(takes_composer_frame(&[composer(), Ty::Int], 3, false));
+        assert!(takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int],
+            3,
+            true
+        ));
     }
 
     #[test]
     fn a_missing_or_extra_word_is_not() {
-        assert!(!takes_composer_frame(&[composer(), Ty::Int], true));
+        assert!(!takes_composer_frame(&[composer(), Ty::Int], 3, true));
         assert!(!takes_composer_frame(
             &[composer(), Ty::Int, Ty::Int],
+            3,
             false
         ));
-        assert!(!takes_composer_frame(&[], false));
+        assert!(!takes_composer_frame(&[], 3, false));
+    }
+
+    #[test]
+    fn a_changed_word_follows_every_ten_parameters() {
+        assert!(takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int],
+            11,
+            false
+        ));
+        assert!(!takes_composer_frame(&[composer(), Ty::Int], 11, false));
+        assert!(takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int, Ty::Int],
+            12,
+            true
+        ));
+        // One `$default` word covers 31 parameters.
+        assert!(!takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int, Ty::Int, Ty::Int],
+            32,
+            true
+        ));
     }
 
     #[test]
     fn a_wrong_role_is_not() {
-        assert!(!takes_composer_frame(&[Ty::Long, Ty::Int, Ty::Int], true));
         assert!(!takes_composer_frame(
-            &[composer(), Ty::Long, Ty::Int],
+            &[Ty::Long, Ty::Int, Ty::Int],
+            3,
             true
         ));
-        assert!(!takes_composer_frame(&[Ty::Int, composer(), Ty::Int], true));
+        assert!(!takes_composer_frame(
+            &[composer(), Ty::Long, Ty::Int],
+            3,
+            true
+        ));
+        assert!(!takes_composer_frame(
+            &[Ty::Int, composer(), Ty::Int],
+            3,
+            true
+        ));
         assert!(!takes_composer_frame(
             &[Ty::String, Ty::Long, Ty::Int],
+            3,
             true
         ));
     }
