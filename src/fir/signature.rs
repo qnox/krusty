@@ -1312,28 +1312,10 @@ fn resolve_signature(
     match states.get(&declaration) {
         Some(SignatureState::Resolved(signature)) => return Ok(signature.clone()),
         Some(SignatureState::Failed(diagnostic)) => return Err(*diagnostic),
-        Some(SignatureState::Computing) => {
-            crate::trace_compiler!(
-                "fir",
-                "signature cycle: re-entered {declaration:?} with stack {computing:?}",
-            );
-            let cycle_start = computing
-                .iter()
-                .position(|candidate| *candidate == declaration)
-                .unwrap_or(computing.len());
-            let cycle = computing[cycle_start..].to_vec();
-            let mut requested = None;
-            for member in cycle {
-                let diagnostic = evaluator.recursive_inference_diagnostic(member);
-                if member == declaration {
-                    requested = Some(diagnostic);
-                }
-                states.insert(member, SignatureState::Failed(diagnostic));
-            }
-            let diagnostic =
-                requested.unwrap_or_else(|| evaluator.recursive_inference_diagnostic(declaration));
-            return Err(diagnostic);
-        }
+        // Re-entry is not a decision: a declaration still being computed has no known type. A
+        // caller that merely probes it may move on; one that commits to it decides the cycle in
+        // `decide_cycle` below.
+        Some(SignatureState::Computing) => return Err(DiagnosticId::in_progress(declaration)),
         Some(SignatureState::Uncomputed) | None => {}
     }
 
@@ -1351,10 +1333,14 @@ fn resolve_signature(
     let evaluated = evaluator.evaluate(declaration, constraint.result, graph, &mut |dependency| {
         resolve_signature(graph, states, computing, dependency, evaluator)
     });
+    let evaluated = evaluated.map_err(|failure| match failure.in_progress_declaration() {
+        Some(target) => decide_cycle(states, computing, declaration, target, evaluator),
+        None => failure,
+    });
     let popped = computing.pop();
     debug_assert_eq!(popped, Some(declaration));
 
-    // Re-entry may already have marked this declaration as a cycle member. Never overwrite that
+    // A committed re-entry already marked this declaration as a cycle member. Never overwrite that
     // diagnostic with a value computed on top of the recursive failure.
     if let Some(SignatureState::Failed(diagnostic)) = states.get(&declaration) {
         return Err(*diagnostic);
@@ -1381,6 +1367,32 @@ fn resolve_signature(
             Err(diagnostic)
         }
     }
+}
+
+/// `declaration`'s evaluation committed to `target`, which is still being computed: every
+/// declaration on the stack from `target` up is one loop, and each is a recursive problem. Returns
+/// `declaration`'s own diagnostic. `target` finished in between only if the stack was unwound past
+/// it, which an in-progress outcome cannot survive, so it names `declaration` alone then.
+fn decide_cycle(
+    states: &mut HashMap<DeclarationId, SignatureState>,
+    computing: &[DeclarationId],
+    declaration: DeclarationId,
+    target: DeclarationId,
+    evaluator: &impl SignatureConstraintEvaluator,
+) -> DiagnosticId {
+    crate::trace_compiler!(
+        "fir",
+        "signature cycle: {declaration:?} committed to {target:?} with stack {computing:?}",
+    );
+    let cycle_start = computing
+        .iter()
+        .position(|candidate| *candidate == target)
+        .unwrap_or_else(|| computing.len() - 1);
+    for &member in &computing[cycle_start..] {
+        let diagnostic = evaluator.recursive_inference_diagnostic(member);
+        states.insert(member, SignatureState::Failed(diagnostic));
+    }
+    evaluator.recursive_inference_diagnostic(declaration)
 }
 
 #[derive(Debug, Default, PartialEq)]
