@@ -32,7 +32,6 @@ struct PropertyDeclaration {
     /// with no receiver.
     companion_block: bool,
     flags: DeclarationFlags,
-    visibility: krusty::types::Visibility,
 }
 
 #[derive(Clone, Copy)]
@@ -203,7 +202,6 @@ impl FileLowering<'_> {
                 || !record.context_parameters.is_empty(),
             companion_block,
             flags: record.flags,
-            visibility: record.visibility,
         };
         plan(&declaration)
     }
@@ -257,7 +255,6 @@ impl FileLowering<'_> {
             receiver_parameters,
             companion_block: checked.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER),
             flags: checked.flags,
-            visibility: checked.visibility,
         })
     }
 
