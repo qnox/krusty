@@ -196,9 +196,12 @@ fn setup_runner(java_home: &str) -> Option<PathBuf> {
         .clone()
 }
 
+/// The classes of a jar: internal name and bytes.
+type JarClasses = Arc<Vec<(String, Vec<u8>)>>;
+
 /// The classes of `jar`, read once per process.
-fn jar_classes(jar: &Path) -> Option<Arc<Vec<(String, Vec<u8>)>>> {
-    type Memo = Mutex<std::collections::HashMap<PathBuf, Arc<Vec<(String, Vec<u8>)>>>>;
+fn jar_classes(jar: &Path) -> Option<JarClasses> {
+    type Memo = Mutex<std::collections::HashMap<PathBuf, JarClasses>>;
     static MEMO: OnceLock<Memo> = OnceLock::new();
     let memo = MEMO.get_or_init(Default::default);
     if let Some(hit) = memo.lock().unwrap_or_else(|e| e.into_inner()).get(jar) {
