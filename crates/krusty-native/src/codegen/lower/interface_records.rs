@@ -535,16 +535,8 @@ impl FileLowering<'_> {
             else {
                 continue;
             };
-            if model::representation(self.values, edge.declared_type)
-                != model::representation(self.values, edge.implementation_type)
-            {
-                return Err(declined!(
-                    "a property of a dependency's interface implemented with another carrier \
-                     (`{}.{}`)",
-                    self.kotlin_name(owner),
-                    edge.name
-                ));
-            }
+            let carried_alike = model::representation(self.values, edge.declared_type)
+                == model::representation(self.values, edge.implementation_type);
             let roles = [false, true]
                 .into_iter()
                 .filter(|setter| !setter || edge.overridden_setter_value.is_some());
@@ -572,6 +564,15 @@ impl FileLowering<'_> {
                     krusty::fir::ResolvedPropertyOverrideTarget::External(_) => None,
                 };
                 let implementation = if let Some(number) = interface_number {
+                    // The interface table holds the default itself, which no bridge adapts.
+                    if !carried_alike {
+                        return Err(declined!(
+                            "a default accessor of this module's interface implementing a \
+                             dependency's property with another carrier (`{}.{}`)",
+                            self.kotlin_name(owner),
+                            edge.name
+                        ));
+                    }
                     Some(DependencyImplementation::Interface(number))
                 } else {
                     let key = if setter {
@@ -579,9 +580,30 @@ impl FileLowering<'_> {
                     } else {
                         crate::classes::SlotKey::Getter(edge.overridden)
                     };
-                    self.model
-                        .slot(owner, &key)
-                        .map(DependencyImplementation::Slot)
+                    self.model.slot(owner, &key).map(|slot| {
+                        if carried_alike {
+                            DependencyImplementation::Slot(slot)
+                        } else {
+                            // The accessor carries the override's type where the interface
+                            // declares its own (`start: Int` implementing `ClosedRange<T>.start`).
+                            let (declared, implemented) = if setter {
+                                (
+                                    (vec![edge.declared_type], Ty::Unit),
+                                    (vec![edge.implementation_type], Ty::Unit),
+                                )
+                            } else {
+                                (
+                                    (Vec::new(), edge.declared_type),
+                                    (Vec::new(), edge.implementation_type),
+                                )
+                            };
+                            DependencyImplementation::Bridge {
+                                slot,
+                                declared,
+                                implemented,
+                            }
+                        }
+                    })
                 }
                 .ok_or_else(|| {
                     declined!(
