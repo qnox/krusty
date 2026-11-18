@@ -855,6 +855,10 @@ jobs:
           # A cold lane compiles every missing kotlinc reference before it can publish the cache.
           # The full JVM corpus can exceed 30 minutes on slower self-hosted workers.
           KRUSTY_CONFORMANCE_TIMEOUT_SECONDS: "2400"
+          # The restored conformance inputs hold the reference plugin jars a corpus fetches from
+          # Maven (atomicfu's is not in the distribution); without this a run downloads them into
+          # an empty HOME and one slow transfer spends the process's whole download budget.
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
