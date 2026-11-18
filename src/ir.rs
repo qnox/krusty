@@ -112,6 +112,7 @@ pub mod referenced_classifiers;
 mod references;
 mod reified_markers;
 mod reified_templates;
+mod sam_function_value_adapter;
 mod sam_target;
 mod type_tests;
 pub(crate) use type_tests::admits_null_at_runtime;
@@ -1378,6 +1379,10 @@ pub struct IrSpecializedAnonymousClass {
     /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
     /// it, and so does an object nested in the copy that is specialized later.
     pub crossinline_operands: Vec<Option<u32>>,
+    /// The call-site copy whose body regenerated this copy, when the object is nested in another
+    /// regenerated anonymous object. A target names it under that copy rather than as another
+    /// expansion of the inline call.
+    pub parent: Option<ClassId>,
     /// Source function → the function on this copy. Accessor functions materialized after the
     /// copy are added here before bridges and metadata read the copy.
     pub method_clones: crate::fx_hash::HashMap<FunId, FunId>,
@@ -2890,6 +2895,7 @@ pub use generated_members::{
 };
 mod checked_operation;
 pub use checked_operation::{IrCheckedOperation, IrModulePropertyReference};
+mod construction_entries;
 mod exported_entries;
 mod function_parameters;
 pub use function_parameters::*;

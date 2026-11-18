@@ -4202,7 +4202,7 @@ pub(crate) fn finalized_streamed_signature_index(
         let Some(visibility) = generated_member_header::visibility(&semantics, stub) else {
             stop_with_failure!(stub.id);
         };
-        index.publish_declaration_header(
+        index.publish_compact_declaration(
             stub.id,
             crate::fir::ResolvedDeclarationHeader {
                 kind: stub.kind,
@@ -4214,10 +4214,9 @@ pub(crate) fn finalized_streamed_signature_index(
             },
             stub.lookup_name
                 .and_then(|name| headers.lookup_names.get(name)),
+            headers.classifier_source_spelling(stub.id),
+            (stub.kind == DeclarationKind::Classifier).then(|| classifier_types[&stub.id]),
         );
-        if stub.kind == DeclarationKind::Classifier {
-            index.publish_classifier_identity(stub.id, classifier_types[&stub.id]);
-        }
         if let Some(&ordinal) = headers.continuation_ordinals.get(&stub.id) {
             index.publish_continuation_ordinal(stub.id, ordinal);
         }

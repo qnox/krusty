@@ -176,6 +176,7 @@ impl<'s> Linker<'_, 's> {
         let constructor = super::super::same_library_class::LocalConstructor {
             declaration: prepared.declaration.clone(),
             access: prepared.access,
+            object: prepared.object,
         };
         self.local_classes.insert(
             prepared.key,
@@ -189,6 +190,7 @@ impl<'s> Linker<'_, 's> {
                 supertypes: prepared.supertypes,
                 self_type: prepared.self_type,
                 class_type_parameters: prepared.class_type_parameters,
+                object: prepared.object,
             },
         );
         Ok(constructor)
@@ -238,6 +240,36 @@ impl<'s> Linker<'_, 's> {
         let constructor = class_constructor(class_arena, class)?;
         self.link_local_constructor(ir, &constructor)?;
         self.linked_local_member(ir, &key)
+    }
+
+    /// The object a body of this library reads under the non-public `signature`, installed in
+    /// this unit by its private constructor, which creates its one instance.
+    pub(super) fn install_local_object(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<crate::types::TypeName, KlibBodyDeclineReason> {
+        let module = self.active_module.clone();
+        let Some(classifier) =
+            super::super::same_library_class::classifier(self.sources.bodies, &module, signature)?
+        else {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a file-private object value",
+            ));
+        };
+        let Some((arena, class)) = self.sources.bodies.module_local_class(&module, signature)
+        else {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a file-private object value",
+            ));
+        };
+        let constructor = class_constructor(arena, class)?;
+        if !self.link_local_constructor(ir, &constructor)?.object {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an object value names a class other than an object".to_owned(),
+            ));
+        }
+        Ok(classifier)
     }
 
     pub(super) fn linked_installed_member(
@@ -335,9 +367,9 @@ fn publish_overrides(
                 implementation_owner: owner,
                 overridden: crate::fir::ResolvedFunctionOverrideTarget::External(external.target()),
                 overridden_owner: edge.owner,
-                overridden_semantic_role: None,
+                overridden_semantic_role: edge.semantic_role,
                 collection_barrier: None,
-                overridden_is_interface: true,
+                overridden_is_interface: edge.is_interface,
                 name: name.clone(),
                 declared_parameters: edge.declared_parameters.clone(),
                 declared_result: edge.declared_result,

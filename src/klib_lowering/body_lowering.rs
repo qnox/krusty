@@ -30,6 +30,7 @@ mod loops;
 mod object_literals;
 mod range_membership;
 mod safe_calls;
+use safe_calls::NullProvenRead;
 mod string_templates;
 mod try_catch;
 mod type_operators;
@@ -244,6 +245,16 @@ pub(super) trait CallLinker {
         false
     }
 
+    /// The classifier of the object a non-public object read names, installed in the unit with
+    /// its one instance. Template linkers keep the refusal.
+    fn link_local_object(
+        &mut self,
+        _ir: &mut IrFile,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<crate::types::TypeName> {
+        unsupported("a file-private object value")
+    }
+
     /// The constructor a file-local construction invokes. Template linkers keep the refusal.
     fn link_local_constructor(
         &mut self,
@@ -281,8 +292,9 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
-    /// Proves that `classifier` is a dependency object, whose value a body may read.
-    fn singleton(&self, classifier: TypeName) -> Lowered<()>;
+    /// Proves that `classifier` is a dependency object, whose value a body may read, and
+    /// materializes it in `ir` when its instance is the linker's to create.
+    fn singleton(&mut self, ir: &mut IrFile, classifier: TypeName) -> Lowered<()>;
 
     /// Whether the target owns the representation of `classifier`, which a class of this unit
     /// extends without the unit materializing it. A linker that knows no such class says no.
@@ -436,8 +448,9 @@ pub(super) struct BodyLowering<'a> {
     /// Compiler temporaries that name another immutable value, by the initializer each read of
     /// them lowers as.
     compiler_aliases: HashMap<KlibIrSymbol, KlibIrExprId>,
-    /// Safe-call receiver temporaries, inside the selector their `null` test guards.
-    null_proven: HashSet<KlibIrSymbol>,
+    /// Reads proven non-null where they are lowered: safe-call receiver temporaries inside the
+    /// selector their `null` test guards, and fields a compiler-generated `when` tests.
+    null_proven: HashSet<NullProvenRead>,
     /// All enclosing return-target declarations, including tail-only blocks without a frame.
     returnable_targets: Vec<KlibIrSymbol>,
     /// Enclosing serialized returnable blocks, whose exact symbols own their local exits.
@@ -874,12 +887,7 @@ impl<'a> BodyLowering<'a> {
         if actual.is_nullable() && !expected.is_nullable() {
             return false;
         }
-        let Some(name) = actual.non_null().kotlin_class_internal() else {
-            return false;
-        };
-        let Some(class) = self.ir.classes.iter().find(|class| {
-            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
-        }) else {
+        let Some(class) = self.local_class(actual) else {
             return false;
         };
         let parameters = self.header.type_parameters();
@@ -890,6 +898,14 @@ impl<'a> BodyLowering<'a> {
             || self
                 .linker
                 .is_subtype(parameters, Ty::obj_name(class.superclass), expected)
+    }
+
+    /// The anonymous or local class lowered in this body that `ty` names.
+    fn local_class(&self, ty: Ty) -> Option<&crate::ir::IrClass> {
+        let name = ty.non_null().kotlin_class_internal()?;
+        self.ir.classes.iter().find(|class| {
+            class.fq_name == name && (class.is_anonymous_object || class.is_local_class)
+        })
     }
 
     /// Whether `supertype` counts as a supertype of `subtype`: one recorded for a local or
@@ -915,6 +931,9 @@ impl<'a> BodyLowering<'a> {
         }
         if let Some(widened) = self.nullable_widening(lowered, actual, expected) {
             return Ok(widened);
+        }
+        if let Some(narrowed) = self.null_proven_field(id, lowered, actual, expected) {
+            return Ok(narrowed);
         }
         self.upcast(lowered, actual, expected)
             .ok_or(KlibBodyDeclineReason::ImplicitConversion)

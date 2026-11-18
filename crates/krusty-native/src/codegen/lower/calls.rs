@@ -890,28 +890,6 @@ impl BodyLowering<'_, '_, '_> {
                             };
                             return self.convert(produced, Some(answer), *ret);
                         }
-                        // A companion member the runtime realizes takes its arguments alone:
-                        // the receiver is an object carrying nothing, and it is not evaluated.
-                        if let Some(symbol) =
-                            super::super::super::intrinsics::runtime_companion_member(
-                                owner, &name, params,
-                            )
-                        {
-                            let mut arguments = Vec::with_capacity(args.len());
-                            for argument in args {
-                                arguments.push(self.reference(*argument)?);
-                            }
-                            if self.terminated {
-                                return Ok(None);
-                            }
-                            let signature = vec![any(); arguments.len()];
-                            let produced =
-                                self.runtime_call(symbol, &signature, any(), &arguments)?;
-                            let Some(produced) = produced else {
-                                return Ok(None);
-                            };
-                            return self.convert(produced, Some(any()), *ret);
-                        }
                         let Some(symbol) =
                             super::super::super::intrinsics::runtime_member(signature)
                         else {

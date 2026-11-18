@@ -672,6 +672,7 @@ interface View<T> {
 }
 private class Hidden(private val value: String) : View<CharSequence> {
     override fun get(): String = value
+    override fun toString(): String = \"value=$value\"
 }
 fun make(value: String): View<CharSequence> = Hidden(value)
 ";
@@ -956,6 +957,37 @@ fn applied_interface_signature_substitutes_the_supertype() {
     assert_ne!(edge.declared_result, edge.applied_result);
     assert!(edge.applied_parameters.is_empty());
     assert!(edge.declared_parameters.is_empty());
+    let any_to_string = unit
+        .ir()
+        .function_overrides
+        .values()
+        .flatten()
+        .find(|edge| edge.overridden_owner == crate::types::wk::any() && edge.name == "toString")
+        .expect("Hidden publishes its Any.toString override");
+    let any = libraries
+        .classifier(crate::types::wk::any())
+        .expect("kotlin.Any");
+    let any_members = any
+        .declared_callables
+        .get("toString")
+        .expect("kotlin.Any.toString");
+    let [any_declaration] = any_members.functions() else {
+        panic!("one kotlin.Any.toString declaration")
+    };
+    let any_to_string_id = any_declaration
+        .callable
+        .external_identity
+        .expect("kotlin.Any.toString has a provider identity");
+    assert_eq!(
+        any_to_string.overridden,
+        crate::fir::ResolvedFunctionOverrideTarget::External(any_to_string_id)
+    );
+    assert!(!any_to_string.overridden_is_interface);
+    assert!(any_to_string.implementation_function.is_some());
+    assert_eq!(
+        any_to_string.overridden_semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinAnyToString)
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }
 
@@ -1568,4 +1600,90 @@ fn a_declined_secondary_constructor_leaves_its_materialized_class_as_it_was() {
     assert_eq!(again, primary);
     assert_eq!(unit_inventory(&unit), before);
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+const PROCESS_OBJECT: &str = r#"package fixture
+
+private object Counter {
+    private val count: Int = 1
+    override fun toString(): String = "Counter $count"
+}
+
+fun counter(): Any = Counter
+"#;
+
+const PER_THREAD_OBJECT: &str = r#"package fixture
+
+@kotlin.native.concurrent.ThreadLocal
+private object Counter {
+    private val count: Int = 1
+    override fun toString(): String = "Counter $count"
+}
+
+fun counter(): Any = Counter
+"#;
+
+fn lower_counter(
+    name: &str,
+    source_text: &str,
+) -> Option<(
+    DependencyBodyUnit,
+    Result<(), super::super::KlibBodyDeclineReason>,
+)> {
+    let (directory, libraries) = produce_library(name, source_text)?;
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+        "counter",
+    );
+    let [function] = symbols.callables.functions() else {
+        panic!("one producer declaration counter")
+    };
+    let selected = libraries
+        .external_callable(function.callable.external_identity.unwrap())
+        .unwrap();
+    let callable = selected.klib_body_callable().unwrap();
+    let callees = super::super::KlibCalleeFacts::new([callable]);
+    let mut unit = DependencyBodyUnit::default();
+    let lowered = unit
+        .lower_function_with_declarations(
+            callable,
+            libraries.declaration_bodies(),
+            &callees,
+            libraries.intrinsic_facts(),
+            &ProducedExternals::default(),
+            &libraries,
+        )
+        .map(|_| ())
+        .map_err(|decline| decline.reason().clone());
+    let _ = std::fs::remove_dir_all(directory);
+    Some((unit, lowered))
+}
+
+/// A private object is installed as the one process-wide instance only when its declaration
+/// proves that storage. The same object marked per-thread needs an instance and state on every
+/// thread, which the installed class does not carry, so the body stays refused.
+#[test]
+fn official_klib_private_object_storage_is_authenticated() {
+    let Some((unit, lowered)) = lower_counter("process-object", PROCESS_OBJECT) else {
+        return;
+    };
+    assert_eq!(lowered, Ok(()));
+    validated(unit.ir());
+    let objects = unit
+        .ir()
+        .classes
+        .iter()
+        .filter(|class| class.is_object)
+        .count();
+    assert_eq!(objects, 1);
+
+    let (unit, lowered) =
+        lower_counter("per-thread-object", PER_THREAD_OBJECT).expect("the producer ran above");
+    assert_eq!(
+        lowered,
+        Err(super::super::KlibBodyDeclineReason::UnsupportedOperation(
+            "a non-public per-thread object"
+        ))
+    );
+    assert!(unit.ir().classes.iter().all(|class| !class.is_object));
 }
