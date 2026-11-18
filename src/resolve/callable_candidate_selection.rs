@@ -1522,6 +1522,37 @@ impl Checker<'_> {
                 .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
                 .collect();
         }
+        if maximal.len() > 1 {
+            // A generic declaration whose parameters another's accept, and not the reverse, is the
+            // more general one: `reference(Column<T>)` over a free `T` accepts
+            // `reference(Column<E>)` over `E : EntityID<T>`, which is the more specific.
+            let source = self.fed_source();
+            let accepts = |general: &crate::libraries::GenericSig, specific| {
+                crate::symbol_resolver::generic_declaration_accepts_parameters_of(
+                    &source, general, specific,
+                )
+            };
+            let dominated = maximal
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (_, _, _, _, _, candidate, _, _))| {
+                    let general = candidate.info.generic_sig.as_ref()?;
+                    maximal
+                        .iter()
+                        .any(|(_, _, _, _, _, other, _, _)| {
+                            other.info.generic_sig.as_ref().is_some_and(|specific| {
+                                accepts(general, specific) && !accepts(specific, general)
+                            })
+                        })
+                        .then_some(index)
+                })
+                .collect::<crate::fx_hash::HashSet<_>>();
+            maximal = maximal
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
+                .collect();
+        }
         crate::symbol_resolver::retain_most_specific_declarations(
             &self.fed_source(),
             extension_receiver,
