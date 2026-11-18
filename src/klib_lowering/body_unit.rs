@@ -1328,10 +1328,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         }
     }
 
-    fn inherited_getter(
-        &self,
-        callee: &KlibIrSignature,
-    ) -> Result<Option<KlibIrSignature>, KlibBodyDeclineReason> {
+    fn inherited_getter(&self, callee: &KlibIrSignature) -> fake_overrides::Inherited {
         fake_overrides::inherited_getter(self, callee)
     }
 

@@ -20,12 +20,13 @@ use crate::metadata::klib_ir::{KlibFileLocalOrigin, KlibIrSignature};
 use crate::metadata::semantic::KotlinType;
 use enclosing_function::enclosing_function_mangle;
 
+/// The outcome of resolving a fake override: the inherited getter's signature, or `None` when the
+/// call names no fake override.
+pub(super) type Inherited = Result<Option<KlibIrSignature>, KlibBodyDeclineReason>;
+
 /// The getter of the inherited property that the file-local `callee` of the active module is a
 /// fake override of, or `None` when `callee` is no fake override of a local class.
-pub(super) fn inherited_getter(
-    linker: &Linker<'_, '_>,
-    callee: &KlibIrSignature,
-) -> Result<Option<KlibIrSignature>, KlibBodyDeclineReason> {
+pub(super) fn inherited_getter(linker: &Linker<'_, '_>, callee: &KlibIrSignature) -> Inherited {
     linker.resolve_inherited_getter(callee)
 }
 
