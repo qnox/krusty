@@ -1019,6 +1019,7 @@ mod tests {
         let provider = GradleProvider::new(tree.root()).with_jvm_search(
             super::super::gradle_daemon_jvm::JvmSearch {
                 daemon_home: Some(java_21),
+                explicit_home: None,
                 install_roots: vec![tree.path("jvms")],
             },
         );

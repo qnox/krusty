@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 pub(super) struct JvmSearch {
     /// JVM the daemon would use before this selection.
     pub(super) daemon_home: Option<PathBuf>,
+    /// `org.gradle.java.home` after Gradle's precedence. Empty when the build did not set one.
+    pub(super) explicit_home: Option<PathBuf>,
     /// Directories whose children are JVM installations.
     pub(super) install_roots: Vec<PathBuf>,
 }
@@ -75,17 +77,27 @@ impl JvmSearch {
         install_roots: Vec<PathBuf>,
         user_gradle_home: Option<&Path>,
     ) -> Self {
+        let explicit_home = explicit_java_home(project, user_gradle_home);
         Self {
-            daemon_home: explicit_java_home(project, user_gradle_home).or(client_home),
+            daemon_home: explicit_home.clone().or(client_home),
+            explicit_home,
             install_roots,
         }
     }
 }
 
-/// `None` when the daemon's current JVM can already run this Gradle. The caller then leaves that
-/// JVM in place. The user Gradle home's `org.gradle.java.home` wins over the project file.
+/// The JVM passed to `BuildLauncher.setJavaHome`.
+///
+/// A compatible `org.gradle.java.home` is kept. The user Gradle home wins over the project file, so
+/// an incompatible project value cannot replace a user JVM the release can run. `None` means the
+/// client JVM can already run this Gradle and the build did not name another.
 pub(super) fn daemon_java_home(project: &Path, search: &JvmSearch) -> Option<PathBuf> {
     let version = gradle_version(project)?;
+    if let Some(home) = search.explicit_home.as_deref() {
+        if jvm_major(home).is_some_and(|major| runs_on(version, major)) {
+            return Some(home.to_path_buf());
+        }
+    }
     let current = search.daemon_home.as_deref().and_then(jvm_major)?;
     if runs_on(version, current) {
         return None;
@@ -327,6 +339,7 @@ mod tests {
     fn homes(tree: &TempTree, current: &Path) -> JvmSearch {
         JvmSearch {
             daemon_home: Some(current.to_path_buf()),
+            explicit_home: None,
             install_roots: vec![tree.path("jvms")],
         }
     }
@@ -381,7 +394,10 @@ mod tests {
         );
         let search =
             JvmSearch::for_project(tree.root(), Some(java_21), vec![tree.path("jvms")], None);
-        assert_eq!(daemon_java_home(tree.root(), &search), None);
+        assert_eq!(
+            daemon_java_home(tree.root(), &search).as_deref(),
+            Some(java_17.as_path())
+        );
     }
 
     #[test]
@@ -389,8 +405,8 @@ mod tests {
         let tree = TempTree::new("daemon-jvm-user-home");
         tree.write("gradle/wrapper/gradle-wrapper.properties", &wrapper("8.0"));
         let project_java = write_jvm(&tree, "jvms/21", "21.0.2");
-        let discovered = write_jvm(&tree, "jvms/17", "17.0.13");
-        let user_java = write_jvm(&tree, "outside/17", "17.0.9");
+        let installed = write_jvm(&tree, "jvms/19", "19.0.2");
+        let user_java = write_jvm(&tree, "outside/17", "17.0.13");
         tree.write(
             "gradle.properties",
             &format!("org.gradle.java.home={}\n", project_java.display()),
@@ -406,10 +422,9 @@ mod tests {
             vec![tree.path("jvms")],
             Some(&user_gradle),
         );
-        let selected =
-            daemon_java_home(tree.root(), &search).or_else(|| search.daemon_home.clone());
-        assert_eq!(selected.as_deref(), Some(user_java.as_path()));
-        assert_ne!(selected.as_deref(), Some(discovered.as_path()));
+        let chosen = daemon_java_home(tree.root(), &search);
+        assert_eq!(chosen.as_deref(), Some(user_java.as_path()));
+        assert_ne!(chosen.as_deref(), Some(installed.as_path()));
     }
 
     #[test]
