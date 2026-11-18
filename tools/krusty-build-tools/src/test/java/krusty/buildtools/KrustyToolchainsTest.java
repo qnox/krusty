@@ -127,12 +127,28 @@ class KrustyToolchainsTest {
         assertEquals(null, built.get(ExecutionPolicy.WithDaemon.JVM_ARGUMENTS));
         assertEquals(null, built.get(ExecutionPolicy.WithDaemon.SHUTDOWN_DELAY_MILLIS));
         // An option the policy does not declare has neither a value nor a default.
-        ExecutionPolicy.WithDaemon.Option<String> undeclared =
-            new ExecutionPolicy.WithDaemon.Option<>("UNDECLARED", new org.jetbrains.kotlin.buildtools.api.KotlinReleaseVersion(2, 3, 0));
+        ExecutionPolicy.WithDaemon.Option<String> undeclared = undeclaredDaemonOption();
         String expected = "UNDECLARED was not set in org.jetbrains.kotlin.buildtools.api.ExecutionPolicy.WithDaemon";
         for (java.util.function.Supplier<Object> read : List.<java.util.function.Supplier<Object>>of(
             () -> fresh.get(undeclared), () -> built.get(undeclared), () -> built.toBuilder().get(undeclared))) {
             assertEquals(expected, assertThrows(IllegalStateException.class, read::get).getMessage());
+        }
+    }
+
+    /** An option of the daemon policy that no policy declares; the constructor differs by API release. */
+    @SuppressWarnings("unchecked")
+    private static ExecutionPolicy.WithDaemon.Option<String> undeclaredDaemonOption() {
+        try {
+            java.lang.reflect.Constructor<?> constructor =
+                ExecutionPolicy.WithDaemon.Option.class.getConstructors()[0];
+            Object[] arguments = new Object[constructor.getParameterCount()];
+            arguments[0] = "UNDECLARED";
+            if (arguments.length > 1) {
+                arguments[1] = new org.jetbrains.kotlin.buildtools.api.KotlinReleaseVersion(2, 3, 0);
+            }
+            return (ExecutionPolicy.WithDaemon.Option<String>) constructor.newInstance(arguments);
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(e);
         }
     }
 
