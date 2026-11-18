@@ -297,7 +297,12 @@ fn validate_sam(sam: &IrSamTarget) -> Result<(), UndeterminedIrType> {
         "SAM declared parameter",
         sam.declared_parameters.iter().copied(),
     )?;
-    reject("SAM declared result", sam.declared_result)
+    reject("SAM declared result", sam.declared_result)?;
+    for frame in sam.dispatch_methods.iter().chain(&sam.default_methods) {
+        reject_all("SAM slot parameter", frame.parameters.iter().copied())?;
+        reject("SAM slot result", frame.result)?;
+    }
+    Ok(())
 }
 
 fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
@@ -926,6 +931,8 @@ mod tests {
             suspend: false,
             source_suspend: false,
             overridden_results: Vec::new(),
+            dispatch_methods: Vec::new(),
+            default_methods: Vec::new(),
             function_adapter: false,
             wraps_function_value: true,
             nullable: true,

@@ -96,6 +96,8 @@ mod tests {
                 suspend: false,
                 source_suspend: false,
                 overridden_results: Vec::new(),
+                dispatch_methods: Vec::new(),
+                default_methods: Vec::new(),
                 function_adapter: false,
                 wraps_function_value: true,
                 nullable: false,

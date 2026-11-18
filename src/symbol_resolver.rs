@@ -149,7 +149,8 @@ pub use resolved_symbol::{
     AmbiguousExtensionProperty, MemberFacets, ResolvedPropertySetter, SymRecv, Symbol,
 };
 pub(crate) use sam::{
-    apply_sam_declaration, semantic_sam_signature, SamMethodDeclaration, SamSignature,
+    apply_sam_declaration, semantic_sam_signature, SamMethodDeclaration, SamMethodFrame,
+    SamSignature,
 };
 use scope_level_callables::{
     callables_from_symbols, fn_in_scope, level_functions, level_properties,

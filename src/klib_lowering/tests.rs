@@ -29,6 +29,7 @@ mod range_membership_producers;
 mod returnable_blocks;
 mod safe_calls;
 mod sam_conversions;
+mod sam_dispatch;
 mod same_library_class;
 mod support;
 mod target_calls;

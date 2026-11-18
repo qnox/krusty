@@ -99,6 +99,8 @@ pub struct FirSamConversion {
     pub source_suspend: bool,
     /// The distinct own results of the declarations the selected method overrides, unspecialized.
     pub overridden_results: Box<[ResolvedTy]>,
+    pub dispatch_methods: Box<[FirSamMethodFrame]>,
+    pub default_methods: Box<[FirSamMethodFrame]>,
     /// A nullable function value converts conditionally: `null` remains `null`; only a non-null
     /// function object is wrapped as the selected SAM classifier.
     pub nullable: bool,
@@ -108,6 +110,15 @@ pub struct FirSamConversion {
     pub parameter_identities: Box<[super::ResolvedParameterIdentity]>,
     /// The interface's own type parameters in declaration order, which the declared shape names.
     pub type_parameters: Box<[FirSamTypeParameter]>,
+}
+
+/// A declaration implemented by the conversion, or a default it inherits. Unknown identities
+/// remain explicit; no lowering pass may reconstruct one from a method spelling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirSamMethodFrame {
+    pub method: Option<FirSamMethod>,
+    pub parameters: Box<[ResolvedTy]>,
+    pub result: ResolvedTy,
 }
 
 /// One type parameter a functional interface declares, with every declared upper bound.
@@ -2895,6 +2906,15 @@ impl FirBody {
                     conversion.method.len()
                         + conversion.parameters.len() * std::mem::size_of::<ResolvedTy>()
                         + conversion.declared_parameters.len() * std::mem::size_of::<ResolvedTy>()
+                        + conversion
+                            .dispatch_methods
+                            .iter()
+                            .chain(conversion.default_methods.iter())
+                            .map(|frame| {
+                                std::mem::size_of::<FirSamMethodFrame>()
+                                    + frame.parameters.len() * std::mem::size_of::<ResolvedTy>()
+                            })
+                            .sum::<usize>()
                 })
                 .sum::<usize>()
             + self.platform_narrowings.len() * std::mem::size_of::<FirPlatformNarrowing>()

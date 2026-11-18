@@ -505,6 +505,8 @@ mod tests {
             has_receiver: false,
             suspend: false,
             overridden_results: Vec::new(),
+            dispatch_methods: Vec::new(),
+            default_methods: Vec::new(),
             kotlin_interface: true,
             parameter_identities: Box::new([]),
             type_parameters: Vec::new(),

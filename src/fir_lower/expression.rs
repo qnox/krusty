@@ -1837,6 +1837,12 @@ impl BodyLowering<'_> {
                             .iter()
                             .map(|ty| ty.get())
                             .collect(),
+                        dispatch_methods: super::sam_conversions::ir_sam_frames(
+                            &conversion.dispatch_methods,
+                        ),
+                        default_methods: super::sam_conversions::ir_sam_frames(
+                            &conversion.default_methods,
+                        ),
                         function_adapter: false,
                         wraps_function_value: false,
                         // The lambda object is created here. A null check applies to a captured
