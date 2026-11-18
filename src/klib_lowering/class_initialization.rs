@@ -17,7 +17,7 @@ use crate::metadata::klib_ir::tree::{
     KlibIrMember, KlibIrStatement,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
-use crate::metadata::semantic::KotlinModality;
+use crate::metadata::semantic::{class_kind, KotlinModality};
 use crate::types::Ty;
 
 pub(super) enum InitializationStep<'a> {
@@ -837,10 +837,18 @@ fn dispatched_members(
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    // The bodies the class inherits and implements interface members with are reached by
-    // dispatch as its own overrides are.
+    // A member the class inherits implements the interface declarations it reaches only through
+    // its supertypes (`Itr.remove` for `MutableIterator.remove` under a subclass), so dispatch
+    // through the interface runs the inherited body, which is emitted with the class.
     for (body, _) in inherited_implementations(plan, bodies)? {
-        if !members.contains(&body) {
+        // Only a body a superclass declares: an interface's default is inherited by its own
+        // mechanism.
+        let from_class = matches!(
+            bodies.member_owner(&body),
+            crate::klib_libraries::LocatedMember::One { class, .. }
+                if class_kind(class.base.flags) == TypeKind::Class
+        );
+        if from_class && !members.contains(&body) {
             members.push(body);
         }
     }

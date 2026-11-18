@@ -816,6 +816,26 @@ impl<'u, 's> Linker<'u, 's> {
             .inherited_implementations(module, arena, declaration)
             .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
         for (body, implemented) in &inherited {
+            // The inherited body belongs to a superclass this unit materialized; its member may
+            // not be declared yet when no body calls it (`Itr.remove` under `KeysItr`).
+            let from_class = matches!(
+                self.sources.bodies.member_owner(body),
+                crate::klib_libraries::LocatedMember::One { class, .. }
+                    if crate::metadata::semantic::class_kind(class.base.flags)
+                        == crate::libraries::TypeKind::Class
+            );
+            if from_class && self.declared_member(body).is_none() {
+                if let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) {
+                    let selected = callables[0];
+                    let (arena, function) =
+                        self.sources.bodies.function(body).ok_or_else(|| {
+                            KlibBodyDeclineReason::SignatureMismatch(
+                                "an inherited body has no serialized declaration".to_owned(),
+                            )
+                        })?;
+                    self.declare(ir, body, Some(selected), arena, function)?;
+                }
+            }
             self.record_inherited_implementation(ir, owner, body, implemented);
         }
         Ok(())
