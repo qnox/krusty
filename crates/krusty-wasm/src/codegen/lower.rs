@@ -69,6 +69,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageCopy
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
+        || operation == krusty::backend::BackendCompilerIntrinsic::StringPlus
         || operation
             == krusty::backend::BackendCompilerIntrinsic::StartCoroutineUninterceptedOrReturn
         || matches!(
@@ -1459,6 +1460,30 @@ impl<'a> Body<'a> {
                 self.value(*other, Ty::String)?;
                 let function = self.runtime.string_compare(self.module);
                 self.code.call(function);
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::StringPlus)
+                }) =>
+            {
+                let (Some(receiver), [other]) = (dispatch_receiver, args.as_slice()) else {
+                    return Err("an authenticated `String.plus` with malformed operands".into());
+                };
+                // `String.plus(Any?)` is the concatenation a template makes of its two operands.
+                self.string_of(receiver)?;
+                self.string_of(*other)?;
+                self.code.call(self.runtime.string_concat);
             }
             IrExpr::Call {
                 callee: ref call_callee,
