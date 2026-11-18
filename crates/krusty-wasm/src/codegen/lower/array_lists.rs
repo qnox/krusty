@@ -148,6 +148,12 @@ impl Body<'_> {
             // The index the member takes, its only argument, must stay within `bound`.
             let size = self.runtime.array_lists.size;
             let (list, index) = (self.local(REFERENCE), self.local(ValType::I32));
+            // `set` takes the element after the index: set it aside while the index is checked.
+            let element = (operation == crate::array_lists::ListOperation::Set)
+                .then(|| self.local(REFERENCE));
+            if let Some(element) = element {
+                self.code.local_set(element);
+            }
             self.code
                 .local_set(index)
                 .local_tee(list)
@@ -159,6 +165,9 @@ impl Body<'_> {
             }
             self.throw_unless_index_below()?;
             self.code.local_get(index);
+            if let Some(element) = element {
+                self.code.local_get(element);
+            }
         }
         self.code.call(function);
         // An element is carried as a reference, whatever the list's element type.
@@ -224,13 +233,14 @@ impl Body<'_> {
         }
         self.runtime.record_collection_members(
             self.module,
+            self.classifiers,
             crate::collection_arguments::CollectionMembers {
                 iterator: members[0],
                 has_next: members[1],
                 next: members[2],
                 contains: members[3],
             },
-        );
+        )?;
         let role = super::library_members::MemberRole::Function;
         for (fact, identity) in facts {
             let name = fact.name.clone();

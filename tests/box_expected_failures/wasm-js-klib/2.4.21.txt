@@ -47,8 +47,6 @@ arithmetic/division.kt
 arithmetic/github1856.kt
 arrays/arrayConstructorWithNonInlineLambda.kt
 arrays/arrayConstructorsSimple.kt
-arrays/collectionAssignGetMultiIndex.kt
-arrays/collectionGetMultiIndex.kt
 arrays/forInReversed/reversedArrayOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedArrayReversedArrayOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedOriginalUpdatedInLoopBody.kt
@@ -57,7 +55,6 @@ arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
 arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
 arrays/hashMap.kt
 arrays/indices.kt
-arrays/kt33.kt
 arrays/kt47483.kt
 arrays/kt950.kt
 arrays/multiArrayConstructors.kt
@@ -854,7 +851,6 @@ exceptions/throw_from_catch.kt
 extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
-extensionFunctions/kt475.kt
 extensionFunctions/thisMethodInObjectLiteral.kt
 extensionProperties/contextPropertyInInterface.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
@@ -1454,9 +1450,6 @@ operatorConventions/kt44647.kt
 operatorConventions/plusAssignWithComplexRHS.kt
 optimizations/kt20844.kt
 package/packageLocalClassNotImportedWithDefaultImport.kt
-platformTypes/primitives/dec.kt
-platformTypes/primitives/inc.kt
-platformTypes/primitives/plusAssign.kt
 platformTypes/primitives/rangeTo.kt
 primitiveTypes/booleanHashCode.kt
 primitiveTypes/conversions.kt

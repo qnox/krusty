@@ -10,12 +10,14 @@
 //! list is read directly. The operations reading an argument exist once those members are
 //! recorded, which the code generator does before anything reaches a runtime list's member.
 
-use super::array_lists::BulkOperations;
+use super::array_lists::{BulkOperations, RangeExceptions};
 use super::encode::ValType;
 use super::encode::{BlockType, Code, Function, HeapType, Module};
 use super::interface_dispatch::MemberRef;
 use super::objects::REFERENCE;
 use super::runtime::{Runtime, ADD32, AND32, EQZ32, GE_S32, MUL32, NE32};
+use krusty::backend::BackendClassifierSource;
+use krusty::libraries::RuntimeExceptionKind;
 
 /// The checked members a collection argument is read through.
 #[derive(Clone, Copy)]
@@ -45,11 +47,13 @@ impl Runtime {
     pub(super) fn record_collection_members(
         &mut self,
         module: &mut Module,
+        classifiers: &dyn BackendClassifierSource,
         members: CollectionMembers,
-    ) {
+    ) -> Result<(), String> {
         if self.collection_arguments.members.is_some() {
-            return;
+            return Ok(());
         }
+        self.define_list_ranges(module, classifiers)?;
         self.collection_arguments.members = Some(members);
         let bulk = BulkOperations {
             add_all: module.declare(),
@@ -68,6 +72,32 @@ impl Runtime {
         lists.define_remove_where(module, &bulk, true);
         lists.define_remove_where(module, &bulk, false);
         self.array_lists.bulk = Some(bulk);
+        Ok(())
+    }
+
+    /// The operations answering a range of a list, which throw the runtime exceptions the checked
+    /// classes give.
+    fn define_list_ranges(
+        &mut self,
+        module: &mut Module,
+        classifiers: &dyn BackendClassifierSource,
+    ) -> Result<(), String> {
+        let mut class = |kind: RuntimeExceptionKind| {
+            self.exception_class(module, classifiers, kind.classifier())
+        };
+        let exceptions = RangeExceptions {
+            concurrent_modification: class(RuntimeExceptionKind::ConcurrentModification)?,
+            unsupported_operation: class(RuntimeExceptionKind::UnsupportedOperation)?,
+            index_out_of_bounds: class(RuntimeExceptionKind::IndexOutOfBounds)?,
+            illegal_argument: class(RuntimeExceptionKind::IllegalArgument)?,
+        };
+        let (runtime_exceptions, string) = (&self.exceptions, self.string);
+        let throw = |code: &mut Code, class: u32| -> Result<(), String> {
+            runtime_exceptions.construct_class(code, class, None, string)?;
+            code.throw(runtime_exceptions.tag);
+            Ok(())
+        };
+        self.array_lists.define_ranges(module, &throw, exceptions)
     }
 
     /// `elements_of(collection)`: a runtime list as it is, any other collection copied into a new
@@ -88,6 +118,8 @@ impl Runtime {
         code.local_get(collection)
             .ref_test(false, HeapType::Concrete(lists.list))
             .if_(BlockType::Empty)
+            .local_get(collection)
+            .call(lists.ranges.validate)
             .local_get(collection)
             .return_()
             .end()
@@ -415,6 +447,7 @@ impl Runtime {
         if self.collection_arguments.has_members() {
             return;
         }
+        self.array_lists.define_unreachable_ranges(module);
         for (slot, ty) in self
             .array_lists
             .value_slots
