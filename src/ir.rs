@@ -18,7 +18,9 @@ use crate::kt_string::KtString;
 use crate::types::{Ty, TypeName, TypeNameList};
 
 mod checked_klib_facts;
+mod checked_klib_sam;
 pub(crate) use checked_klib_facts::{CheckedKlibDependencyFacts, CheckedKlibTypeFacts};
+pub(crate) use checked_klib_sam::{CheckedKlibSamDeclaration, KlibSamKey};
 mod checked_member_call_edge;
 pub(crate) use checked_member_call_edge::CheckedMemberCallEdge;
 
@@ -207,7 +209,9 @@ pub use references::{
     IrConstructorReferenceDeclaration, IrPropertyFunctionReference, IrReferencedProperty, PropRef,
     ReflectedCallable,
 };
-pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
+pub use sam_target::{
+    IrSamMethod, IrSamMethodFrame, IrSamPlacement, IrSamTarget, IrSamTypeParameter,
+};
 pub use site_class_names::{IrSiteClassContainer, IrSiteClassName};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;

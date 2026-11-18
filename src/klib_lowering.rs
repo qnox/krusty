@@ -18,6 +18,7 @@ mod body_unit;
 mod callable_references;
 mod callee_facts;
 mod class_headers;
+mod class_hierarchies;
 mod class_initialization;
 mod class_storage;
 mod closure_forms;
@@ -66,6 +67,7 @@ pub(crate) const EMITTED_CALL_FORMS: crate::metadata::klib_ir::tree::EmittedCall
         folded_call: range_membership::folds_range_literal_membership,
         folded_calls: for_loops::folded_loop_calls,
         implied_callee: array_content_members::implied_callee,
+        converted_closure: closure_forms::converted_closure,
     };
 pub use decline::{KlibBodyDecline, KlibBodyDeclineReason};
 pub use inline_templates::{lower_inline_template, KlibInlineTemplate, TemplateCallees};
