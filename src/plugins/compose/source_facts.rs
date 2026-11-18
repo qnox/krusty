@@ -225,7 +225,7 @@ pub(super) fn record(
             .map(|index| is_composable_lambda(ir, declaration.function, index, composable))
             .collect::<Vec<_>>();
         if let Some(what) = unsupported_group_annotation(ir, declaration.function)
-            .or_else(|| unsupported_declaration(declaration, &lambdas))
+            .or_else(|| unsupported_declaration(ir, declaration, &lambdas, composable))
             .or_else(|| unsupported_defaults(ir, declaration.function))
             .or_else(|| {
                 (options.source_information
@@ -710,8 +710,10 @@ fn call_location(positions: &Utf16Offsets, span: crate::diag::Span) -> String {
 /// The declaration shapes the restart-group transform does not handle yet. `lambdas` says which
 /// parameters are composable `() -> Unit` values, which are stable.
 fn unsupported_declaration(
+    ir: &IrFile,
     declaration: &crate::ir::IrPackageFunction,
     lambdas: &[bool],
+    composable: TypeName,
 ) -> Option<&'static str> {
     if declaration.receiver.is_some() || declaration.context_count != 0 {
         Some("a composable function with a receiver")
@@ -719,12 +721,13 @@ fn unsupported_declaration(
         Some("a composable function with a vararg parameter")
     } else if declaration.params.len() > SLOTS_PER_INT {
         Some("a composable function with more than ten parameters")
-    } else if declaration
-        .params
-        .iter()
-        .zip(lambdas)
-        .any(|((_, ty), &lambda)| !lambda && !is_known_stable(*ty))
-    {
+    } else if declaration.params.iter().zip(lambdas).enumerate().any(
+        |(index, ((_, ty), &lambda))| {
+            !lambda
+                && !is_known_stable(*ty)
+                && !is_plain_function_type(ir, declaration.function, index, composable)
+        },
+    ) {
         Some("a composable function parameter whose stability kotlinc infers")
     } else if !matches!(declaration.ret.kind(), TyKind::Unit) {
         Some("a composable function with a result")
@@ -1312,6 +1315,31 @@ fn is_composable_lambda(ir: &IrFile, function: FunId, index: usize, composable: 
             .any(|argument| spelled_mentions(argument, composable))
 }
 
+/// Whether parameter `index` of `function` is declared a function type that is not
+/// `@Composable`, however its parameters and result are spelled; kotlinc infers every function type
+/// stable.
+fn is_plain_function_type(
+    ir: &IrFile,
+    function: FunId,
+    index: usize,
+    composable: TypeName,
+) -> bool {
+    let Some(&ty) = ir.functions[function as usize].params.get(index) else {
+        return false;
+    };
+    // A parameter type with no retained spelling carries no annotation at all.
+    let spelled = ir
+        .fn_declared_spellings
+        .get(&function)
+        .and_then(|spellings| spellings.params.get(index));
+    matches!(ty.kind(), TyKind::Fun(signature) if !signature.suspend)
+        && spelled.is_none_or(|spelled| {
+            spelled.annotations.is_empty()
+                && spelled.expansion_annotations.is_empty()
+                && !spelled_mentions(spelled, composable)
+        })
+}
+
 /// A default argument the pass does not apply yet: one that is not a constant, which kotlinc
 /// evaluates in a defaults group of its own.
 fn unsupported_defaults(ir: &IrFile, function: FunId) -> Option<&'static str> {
@@ -1601,6 +1629,7 @@ fn simple_type_name(ty: Ty) -> String {
         TyKind::Unit => "Unit".to_string(),
         TyKind::Nothing => "Nothing".to_string(),
         TyKind::TyParam(name, _) => name.as_str().to_string(),
+        TyKind::Fun(signature) => format!("Function{}", signature.params.len()),
         _ => ty
             .kotlin_class_internal()
             .map(|classifier| classifier.nested_segment_ref().to_string())

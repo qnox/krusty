@@ -9,7 +9,7 @@ use crate::ir::{
 use crate::plugins::runtime_declarations::{
     BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
 };
-use crate::types::{type_name, Ty};
+use crate::types::{type_name, Ty, TyKind};
 
 const RUNTIME: &str = "androidx/compose/runtime";
 const INTERNAL: &str = "androidx/compose/runtime/internal";
@@ -135,9 +135,13 @@ impl ComposeRuntime {
         })
     }
 
-    /// The `changed` overload kotlinc's `irChanged` calls for a value of the stable type `ty`: the
-    /// primitive one that type has, or the one taking `Any?`.
+    /// The comparison kotlinc's `irChanged` calls for a value of the stable type `ty`: the
+    /// primitive `changed` overload that type has, `changedInstance` for a function value, which
+    /// is compared by identity, or the `changed` taking `Any?`.
     pub(super) fn changed_for(&self, ty: Ty) -> &BoundRuntimeFunction {
+        if matches!(ty.kind(), TyKind::Fun(_)) {
+            return &self.changed_instance;
+        }
         let compared = if PRIMITIVES.contains(&ty) {
             ty
         } else {
