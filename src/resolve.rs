@@ -39898,22 +39898,21 @@ impl<'a> Checker<'a> {
                     } else {
                         self.null_branch_narrowings(scope, operand, &mut out);
                     }
-                } else if (op == BinOp::Eq) != for_else {
-                    // `x?.p == true` (or any non-null literal) holds only when every `?.` held:
+                } else if matches!(op, BinOp::Eq | BinOp::RefEq) != for_else {
+                    // `x?.p == v` holds only when every `?.` held, as long as `v` cannot be null:
                     // the safe-call chain's receivers are non-null where the equality is known.
-                    let literal = |expression: ExprId| {
-                        matches!(
-                            self.file.expr(expression),
-                            Expr::BoolLit(_)
-                                | Expr::IntLit(_)
-                                | Expr::LongLit(_)
-                                | Expr::StringLit(_)
-                                | Expr::CharLit(_)
-                        )
+                    let never_null = |expression: ExprId| {
+                        self.expr_types
+                            .get(expression.0 as usize)
+                            .is_some_and(|ty| {
+                                !ty.mentions_error()
+                                    && !ty.admits_null()
+                                    && !ty.upper_bound_admits_null()
+                            })
                     };
                     let safe_call = match (self.file.expr(lhs), self.file.expr(rhs)) {
-                        (Expr::SafeCall { .. }, _) if literal(rhs) => Some(lhs),
-                        (_, Expr::SafeCall { .. }) if literal(lhs) => Some(rhs),
+                        (Expr::SafeCall { .. }, _) if never_null(rhs) => Some(lhs),
+                        (_, Expr::SafeCall { .. }) if never_null(lhs) => Some(rhs),
                         _ => None,
                     };
                     if let Some(safe_call) = safe_call {
