@@ -57,6 +57,7 @@ impl LoweringCheckpoint {
         ir.local_class_name_provenance
             .retain(|class, _| *class < first_class);
         for class in removed {
+            ir.classifier_hierarchies.remove(&class);
             ir.function_overrides.remove(&class);
             ir.property_overrides.remove(&class);
             ir.classifier_hierarchies.remove(&class);

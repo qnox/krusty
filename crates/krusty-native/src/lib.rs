@@ -34,6 +34,8 @@ mod prebuilt;
 mod runtime;
 mod symbols;
 
+#[cfg(feature = "test-support")]
+pub use codegen::DriverEntry;
 pub use codegen::{CraneliftBackend, Entry, BOX_RESULT_FRAME};
 pub use compiler_tool::{compile_native, NativeCompileError, NativeCompileOptions, NativeCompiled};
 pub use interop_libraries::{NativeKlibInputs, NativeKlibInputsOpenError};
