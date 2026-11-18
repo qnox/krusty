@@ -64,6 +64,7 @@ impl CheckedSourceFacts for HandoffSourceFacts<'_> {
             context_parameters: fact.context_count > 0,
             defaults: fact.declares_parameter_defaults,
             synthetic_parameters: synthetic_parameters(&fact.descriptor, &fact.physical_params),
+            composable_parameters: fact.composable_parameters,
         })
     }
 }
