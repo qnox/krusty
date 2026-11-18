@@ -62,6 +62,9 @@ pub(super) struct InterfaceDispatch {
     /// Each runtime representation with no interface table, by its struct, and the interfaces
     /// its values are instances of.
     representations: Vec<(u32, Vec<TypeName>)>,
+    /// The function that throws the Kotlin `NullPointerException`, which every stub calls on a
+    /// `null` receiver once a call site has recorded it; until then a `null` receiver traps.
+    null_receiver: Option<u32>,
 }
 
 struct Member {
@@ -234,6 +237,16 @@ impl InterfaceDispatch {
     /// The function type `member` is carried as.
     pub(super) fn ty(&self, member: MemberRef) -> u32 {
         self.members[member.0 as usize].ty
+    }
+
+    /// Record the function a stub calls on a `null` receiver.
+    pub(super) fn throw_on_null_receiver(&mut self, thrower: u32) {
+        self.null_receiver.get_or_insert(thrower);
+    }
+
+    /// Whether a stub's `null` receiver already throws.
+    pub(super) fn throws_on_null_receiver(&self) -> bool {
+        self.null_receiver.is_some()
     }
 
     /// The stub a call through `member` goes to.
@@ -439,7 +452,7 @@ impl InterfaceDispatch {
             stubs.push((stub, member, shape));
         }
         for (stub, member, shape) in stubs {
-            let code = stub_body(member, &shape, objects);
+            let code = stub_body(member, &shape, objects, self.null_receiver);
             module.define(
                 stub,
                 Function {
@@ -569,8 +582,19 @@ fn forward(code: &mut Code, member: &Member) {
     }
 }
 
-fn stub_body(member: &Member, shape: &Shape, objects: &ObjectRoot) -> Code {
+fn stub_body(
+    member: &Member,
+    shape: &Shape,
+    objects: &ObjectRoot,
+    null_receiver: Option<u32>,
+) -> Code {
     let mut code = Code::default();
+    // A call on `null` throws the Kotlin NPE, as an invocation on the JVM does, once every
+    // argument has been evaluated.
+    if let Some(thrower) = null_receiver {
+        code.local_get(0).ref_is_null().if_(BlockType::Empty);
+        code.call(thrower).end();
+    }
     if member.protocol_arity.is_some() {
         // Invocation evaluates every argument before checking the receiver, including when one
         // implementation lets the dispatch use a direct call and never reads its receiver.
