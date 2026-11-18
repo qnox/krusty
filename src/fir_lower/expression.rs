@@ -1832,6 +1832,7 @@ impl BodyLowering<'_> {
                         has_receiver: conversion.has_receiver,
                         suspend: conversion.suspend,
                         source_suspend: conversion.source_suspend,
+                        requires_object_dispatch: conversion.requires_object_dispatch,
                         overridden_results: conversion
                             .overridden_results
                             .iter()

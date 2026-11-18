@@ -2042,6 +2042,7 @@ mod tests {
                 has_receiver: false,
                 suspend: false,
                 source_suspend: false,
+                requires_object_dispatch: true,
                 overridden_results: vec![source_ty],
                 dispatch_methods: vec![crate::ir::IrSamMethodFrame {
                     method: Some(IrSamMethod::External(
@@ -2069,6 +2070,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(sam.classifier, target);
+        assert!(sam.requires_object_dispatch);
         assert_eq!(sam.overridden_results, vec![target_ty]);
         assert_eq!(
             sam.dispatch_methods[0].method,
