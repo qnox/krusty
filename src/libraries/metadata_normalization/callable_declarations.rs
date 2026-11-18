@@ -6,7 +6,7 @@
 
 use super::parameter_identities::{FunctionParameterIdentities, PropertyParameterIdentities};
 use super::type_signatures::{
-    declared_function_generic_sig, declared_property_generic_sig,
+    declared_function_equality_bound, declared_function_generic_sig, declared_property_generic_sig,
     only_input_type_formals_with_identities, reified_type_parameter_ordinals, EnclosingBounds,
 };
 use super::TypeParameterIdentities;
@@ -164,6 +164,8 @@ pub(crate) fn declared_function(
         .contract
         .as_ref()
         .map(|contract| type_parameters.normalize_contract(contract));
+    callable.equality_bound =
+        declared_function_equality_bound(function, enclosing, type_parameters);
 
     let mut normalized = FunctionInfo::plain(kind, generic_sig.receiver, callable);
     (
