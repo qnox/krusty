@@ -2,7 +2,7 @@
 // WITH_STDLIB
 // WITH_COMPOSE
 // A composable receiver function value is located where its selector starts, whatever separates
-// the selector from its receiver: a comment that spells the name, a line break, or parentheses.
+// the selector from its receiver: a comment that spells the name, a line break, parentheses, or backticks.
 // FILE: receiverInvokeTrivia.kt
 package screens
 
@@ -28,10 +28,16 @@ fun Wrapped(content: @Composable String.() -> Unit) {
 }
 
 @Composable
+fun Escaped(content: @Composable String.() -> Unit) {
+    "x".`content`()
+}
+
+@Composable
 fun Screen() {
     Commented { Leaf() }
     Broken { Leaf() }
     Wrapped { Leaf() }
+    Escaped { Leaf() }
 }
 
 fun box(): String = "OK"

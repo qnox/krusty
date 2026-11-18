@@ -50,6 +50,21 @@ impl BodyFirChecker<'_> {
         Ok(self.origins.source(self.source, span))
     }
 
+    /// Record the selector a function value's invoke call was written with, for the checked facts
+    /// a plugin reads the call's source position from.
+    pub(super) fn record_invoke_selector(
+        &mut self,
+        call: ExprId,
+        selector: Span,
+    ) -> Result<(), BodyCheckFailure> {
+        let span = self
+            .file
+            .expr_span(call)
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        self.origins.record_selector(self.source, span, selector);
+        Ok(())
+    }
+
     pub(super) fn statement_origin(
         &mut self,
         statement: StmtId,

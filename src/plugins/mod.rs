@@ -878,12 +878,28 @@ impl PluginSourceView<'_> {
     ) -> Option<crate::diag::Span> {
         self.checked.expression_span(ir, expression)
     }
+
+    /// The span of the selector `expression`, a call of a function value, was written with.
+    pub fn selector_span(
+        &self,
+        ir: &IrFile,
+        expression: crate::ir::ExprId,
+    ) -> Option<crate::diag::Span> {
+        self.checked.selector_span(ir, expression)
+    }
 }
 
 /// The checked facts behind a file's common IR that only the frontend/backend handoff holds.
 pub trait CheckedSourceFacts {
     /// The span in this file that `expression` was lowered from, when it has one.
     fn expression_span(
+        &self,
+        ir: &IrFile,
+        expression: crate::ir::ExprId,
+    ) -> Option<crate::diag::Span>;
+    /// The span of the selector a call of a function value was written with (`content` in
+    /// `receiver.content()`), when the call has one.
+    fn selector_span(
         &self,
         ir: &IrFile,
         expression: crate::ir::ExprId,

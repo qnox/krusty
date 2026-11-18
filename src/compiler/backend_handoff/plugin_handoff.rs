@@ -28,6 +28,11 @@ impl CheckedSourceFacts for HandoffSourceFacts<'_> {
         (file == self.source).then_some(span)
     }
 
+    fn selector_span(&self, ir: &IrFile, expression: ExprId) -> Option<Span> {
+        let call = self.expression_span(ir, expression)?;
+        self.origins.selector_span(self.source, call)
+    }
+
     fn dependency_annotations(&self, callable: ExternalCallableId) -> &[TypeName] {
         self.callables
             .callable(callable)
