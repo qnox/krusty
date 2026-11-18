@@ -966,9 +966,13 @@ fn argument_stability(
                 super::class_stability::parameter_stability_reads(ir, runtime, ty)
             }
             ArgumentState::Uncertain => {
-                match super::class_stability::parameter_stability_reads(ir, runtime, ty)? {
-                    reads if reads.is_empty() => Ok(reads),
-                    _ => Err("a call argument whose type's stability is decided when it runs"),
+                // The argument's own type may be narrower than the formal one, so only a formal
+                // type whose stability is certain says what the argument's is.
+                match super::class_stability::parameter_stability(ir, runtime, ty)? {
+                    ParameterStability::Undecided => {
+                        Err("a call argument whose type's stability is decided when it runs")
+                    }
+                    ParameterStability::Stable | ParameterStability::Unstable => Ok(Vec::new()),
                 }
             }
         })

@@ -554,6 +554,13 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          that is not a constant, a parameter, or computed from a parameter yet",
     );
     assert_compose_rejects(
+        "compose-computed-argument-of-runtime-stability",
+        "@Composable fun Show(items: List<Int>) {}\n@Composable fun Greeting(n: Int) {\nShow(listOf(n))\n}\n",
+        &[],
+        "5:1: error: krusty's Compose compiler plugin does not support a call argument whose type's \
+         stability is decided when it runs yet",
+    );
+    assert_compose_rejects(
         "compose-lambda-value",
         "@Composable fun Greeting(content: @Composable () -> Unit) {\nval saved = content\n}\n",
         &[],
