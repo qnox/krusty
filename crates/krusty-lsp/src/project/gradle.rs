@@ -15,7 +15,8 @@ use super::runner::{CommandRunner, BUILD_TOOL_TIMEOUT, SCAN_PROBE_TIMEOUT};
 use super::tooling::{self, Distribution, GradleBuildAction};
 
 const PROBE_VERSION: &str = "9";
-const ISOLATED_PROJECTS: &str = "org.gradle.unsafe.isolated-projects";
+const UNSAFE_ISOLATED_PROJECTS: &str = "org.gradle.unsafe.isolated-projects";
+const CANONICAL_ISOLATED_PROJECTS: &str = "org.gradle.isolated-projects";
 /// `GradleConnector.newConnector`. Failures name this entry point.
 const TOOLING_ENTRY: &str = "org.gradle.tooling.GradleConnector";
 /// Cold `krustyModel` configuration of a repository the size of the Kotlin compiler. Used only by
@@ -534,14 +535,26 @@ impl GradleProvider {
     }
 
     fn isolated_projects_enabled(&self) -> bool {
-        if let Some(enabled) = self
-            .probe_gradle_user_home()
-            .as_deref()
-            .and_then(|home| isolated_projects_property(&home.join("gradle.properties")))
-        {
-            return enabled;
+        let version = gradle_wrapper_release(&self.root);
+        let user = self.probe_gradle_user_home();
+        let mut enabled = None;
+        // Gradle 8.5 introduced the unsafe name. A wrapper we cannot read keeps that name, which
+        // is the property the existing probes set.
+        if version.is_none_or(|release| release >= GRADLE_UNSAFE_ISOLATED_PROJECTS) {
+            record_isolated_projects(
+                &mut enabled,
+                effective_property(user.as_deref(), &self.root, UNSAFE_ISOLATED_PROJECTS),
+            );
         }
-        isolated_projects_property(&self.root.join("gradle.properties")).unwrap_or(false)
+        // Gradle 9.7 adds `org.gradle.isolated-projects`. An explicit false from either name
+        // disables the feature.
+        if version.is_some_and(|release| release >= GRADLE_CANONICAL_ISOLATED_PROJECTS) {
+            record_isolated_projects(
+                &mut enabled,
+                effective_property(user.as_deref(), &self.root, CANONICAL_ISOLATED_PROJECTS),
+            );
+        }
+        enabled == Some(true)
     }
 
     #[cfg(test)]
@@ -624,9 +637,49 @@ fn init_script_path(root: &Path) -> PathBuf {
     ))
 }
 
-/// The user Gradle home wins over the project file. Within one file the last assignment wins.
-/// A commented line is not a setting.
-fn isolated_projects_property(file: &Path) -> Option<bool> {
+/// First release that reads `org.gradle.unsafe.isolated-projects`.
+const GRADLE_UNSAFE_ISOLATED_PROJECTS: GradleRelease = GradleRelease::new(8, 5, 0);
+/// First release that reads `org.gradle.isolated-projects`.
+const GRADLE_CANONICAL_ISOLATED_PROJECTS: GradleRelease = GradleRelease::new(9, 7, 0);
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct GradleRelease {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl GradleRelease {
+    const fn new(major: u32, minor: u32, patch: u32) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+}
+
+/// An explicit `false` from either recognized name disables isolated projects.
+fn record_isolated_projects(enabled: &mut Option<bool>, value: Option<bool>) {
+    match value {
+        Some(false) => *enabled = Some(false),
+        Some(true) if *enabled != Some(false) => *enabled = Some(true),
+        _ => {}
+    }
+}
+
+/// The user Gradle home wins over the project file for this property name.
+fn effective_property(user_home: Option<&Path>, project: &Path, key: &str) -> Option<bool> {
+    if let Some(home) = user_home {
+        if let Some(value) = property_assignment(&home.join("gradle.properties"), key) {
+            return Some(value);
+        }
+    }
+    property_assignment(&project.join("gradle.properties"), key)
+}
+
+/// Within one file the last assignment wins. A commented line is not a setting.
+fn property_assignment(file: &Path, key: &str) -> Option<bool> {
     let text = std::fs::read_to_string(file).ok()?;
     let mut found = None;
     for line in text.lines() {
@@ -637,11 +690,56 @@ fn isolated_projects_property(file: &Path) -> Option<bool> {
         let Some((name, value)) = line.split_once('=') else {
             continue;
         };
-        if name.trim() == ISOLATED_PROJECTS {
+        if name.trim() == key {
             found = Some(value.trim().trim_matches('"').eq_ignore_ascii_case("true"));
         }
     }
     found
+}
+
+fn gradle_wrapper_release(project: &Path) -> Option<GradleRelease> {
+    let text =
+        std::fs::read_to_string(project.join("gradle/wrapper/gradle-wrapper.properties")).ok()?;
+    release_from_wrapper(&text)
+}
+
+fn release_from_wrapper(text: &str) -> Option<GradleRelease> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "distributionUrl" {
+            return release_in_distribution_url(value.trim());
+        }
+    }
+    None
+}
+
+fn release_in_distribution_url(url: &str) -> Option<GradleRelease> {
+    let marker = "gradle-";
+    let start = url.rfind(marker)? + marker.len();
+    let mut parts = [0u32; 3];
+    let mut index = 0usize;
+    let mut number: Option<u32> = None;
+    for byte in url[start..].bytes() {
+        if byte.is_ascii_digit() {
+            let slot = number.get_or_insert(0);
+            *slot = slot
+                .saturating_mul(10)
+                .saturating_add(u32::from(byte - b'0'));
+        } else if byte == b'.' && index < 2 {
+            parts[index] = number.take()?;
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    parts[index] = number?;
+    Some(GradleRelease::new(parts[0], parts[1], parts[2]))
 }
 
 fn is_gradle_build_file(path: &Path) -> bool {
@@ -1162,6 +1260,131 @@ mod tests {
                 .any(|argument| argument == "--no-configuration-cache"),
             "a later true enables isolated projects: {:?}",
             enabled.arguments
+        );
+    }
+
+    #[test]
+    fn the_canonical_isolated_projects_name_follows_the_gradle_version() {
+        let current = TempTree::new("gradle-isolated-canonical");
+        current.write("settings.gradle.kts", "");
+        write_wrapper(&current, "9.7.0");
+        current.write("gradle.properties", "org.gradle.isolated-projects=true\n");
+        let (_, action) = probe_action(
+            &GradleProvider::new(current.root()),
+            FakeRunner::stdout(&recorded_output()),
+        );
+        assert!(
+            !action
+                .arguments
+                .iter()
+                .any(|argument| argument == "--no-configuration-cache"),
+            "Gradle 9.7 honors the canonical name: {:?}",
+            action.arguments
+        );
+
+        let older = TempTree::new("gradle-isolated-canonical-old");
+        older.write("settings.gradle.kts", "");
+        write_wrapper(&older, "8.14.4");
+        older.write("gradle.properties", "org.gradle.isolated-projects=true\n");
+        let (_, action) = probe_action(
+            &GradleProvider::new(older.root()),
+            FakeRunner::stdout(&recorded_output()),
+        );
+        assert!(
+            action
+                .arguments
+                .iter()
+                .any(|argument| argument == "--no-configuration-cache"),
+            "Gradle 8.14 does not recognize the canonical name: {:?}",
+            action.arguments
+        );
+
+        older.write(
+            "gradle.properties",
+            "org.gradle.unsafe.isolated-projects=true\n",
+        );
+        let (_, action) = probe_action(
+            &GradleProvider::new(older.root()),
+            FakeRunner::stdout(&recorded_output()),
+        );
+        assert!(
+            !action
+                .arguments
+                .iter()
+                .any(|argument| argument == "--no-configuration-cache"),
+            "Gradle 8.14 still honors the unsafe name: {:?}",
+            action.arguments
+        );
+    }
+
+    #[test]
+    fn an_explicit_false_from_either_isolated_projects_name_keeps_the_flag() {
+        let tree = TempTree::new("gradle-isolated-aliases");
+        tree.write("settings.gradle.kts", "");
+        write_wrapper(&tree, "9.7.0");
+        tree.write(
+            "gradle.properties",
+            "org.gradle.unsafe.isolated-projects=true\norg.gradle.isolated-projects=false\n",
+        );
+        let (_, legacy_true) = probe_action(
+            &GradleProvider::new(tree.root()),
+            FakeRunner::stdout(&recorded_output()),
+        );
+        assert!(
+            legacy_true
+                .arguments
+                .iter()
+                .any(|argument| argument == "--no-configuration-cache"),
+            "canonical false disables isolation: {:?}",
+            legacy_true.arguments
+        );
+
+        tree.write(
+            "gradle.properties",
+            "org.gradle.isolated-projects=true\norg.gradle.unsafe.isolated-projects=false\n",
+        );
+        let (_, canonical_true) = probe_action(
+            &GradleProvider::new(tree.root()),
+            FakeRunner::stdout(&recorded_output()),
+        );
+        assert!(
+            canonical_true
+                .arguments
+                .iter()
+                .any(|argument| argument == "--no-configuration-cache"),
+            "legacy false disables isolation: {:?}",
+            canonical_true.arguments
+        );
+
+        tree.write(
+            "gradle.properties",
+            "org.gradle.unsafe.isolated-projects=true\n",
+        );
+        let user = tree.directory("user-gradle");
+        tree.write(
+            "user-gradle/gradle.properties",
+            "org.gradle.isolated-projects=false\n",
+        );
+        let (_, user_false) = probe_action(
+            &GradleProvider::new(tree.root()).with_gradle_user_home(user),
+            FakeRunner::stdout(&recorded_output()),
+        );
+        assert!(
+            user_false
+                .arguments
+                .iter()
+                .any(|argument| argument == "--no-configuration-cache"),
+            "the user home's canonical false wins for that name: {:?}",
+            user_false.arguments
+        );
+    }
+
+    fn write_wrapper(tree: &TempTree, version: &str) {
+        tree.write(
+            "gradle/wrapper/gradle-wrapper.properties",
+            &format!(
+                "distributionUrl=https\\://services.gradle.org/distributions/gradle-{version}-bin.zip\n"
+            ),
         );
     }
 
