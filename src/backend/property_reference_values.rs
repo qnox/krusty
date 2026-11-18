@@ -210,6 +210,16 @@ fn writer(
     let receivers = receivers(ir, shape);
     let slot = u32::from(shape.receiver.is_some());
     let mut value = ir.add_expr(IrExpr::GetValue(slot));
+    // The reference is called through the erased `KMutableProperty.set(Any?)`, so the written value
+    // reaches this adapter unchecked. Kotlin/Wasm's own bridge casts it to the declared parameter
+    // type before the setter body runs: a value of another class fails here, before the write.
+    if shape.ty.obj_internal().is_some() {
+        value = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: value,
+            type_operand: shape.ty,
+        });
+    }
     let declared = shape.declared.map_or(shape.ty, |(_, declared)| declared);
     if declared != shape.ty {
         value = ir.add_expr(IrExpr::TypeOp {
