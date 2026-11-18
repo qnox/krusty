@@ -63,3 +63,29 @@ fn a_range_that_writes_through_declines_by_name() {
         "the member `java.util.List.subList`",
     );
 }
+
+/// A walk of a range whose list changed ends with `ConcurrentModificationException`, and a range
+/// of a range is invalidated by a change of the list at the root.
+#[test]
+fn a_change_of_the_root_list_invalidates_every_range_and_walk() {
+    let source = "fun box(): String {\n\
+         \x20   val growable = mutableListOf(1, 2, 3, 4)\n\
+         \x20   val readable: List<Int> = growable\n\
+         \x20   val outer = readable.subList(0, 3)\n\
+         \x20   val inner = outer.subList(0, 1)\n\
+         \x20   val walk = outer.iterator()\n\
+         \x20   growable.add(5)\n\
+         \x20   try {\n\
+         \x20       walk.next()\n\
+         \x20       return \"fail walk\"\n\
+         \x20   } catch (e: ConcurrentModificationException) {\n\
+         \x20   }\n\
+         \x20   try {\n\
+         \x20       inner.size\n\
+         \x20       return \"fail inner\"\n\
+         \x20   } catch (e: ConcurrentModificationException) {\n\
+         \x20   }\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("RootChange", source);
+}
