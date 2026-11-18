@@ -813,12 +813,11 @@ pub trait IrPlugin {
         &[]
     }
 
-    /// Whether `synthetic`, the parameters a library declaration's compiled entry takes after its
-    /// source parameters and ending with the mask of omitted default arguments, are exactly what
-    /// this plugin's transformation appends, so its calls pass that mask (Compose's composer,
-    /// `$changed` and `$default`). A declaration of another shape has nothing to realize an
-    /// omitted default, whatever plugins are enabled.
-    fn passes_transformed_entry_defaults(&self, _synthetic: &[Ty]) -> bool {
+    /// Whether this plugin's transformation owns `entry`, so its calls pass the mask of omitted
+    /// default arguments the entry ends with (Compose's `@Composable` declarations, whose entry
+    /// takes the composer, `$changed` and `$default`). A declaration of another role or shape has
+    /// nothing to realize an omitted default, whatever plugins are enabled.
+    fn passes_transformed_entry_defaults(&self, _entry: &TransformedEntry<'_>) -> bool {
         false
     }
 
@@ -942,6 +941,15 @@ pub trait CheckedSourceFacts {
 pub struct DependencyDeclaration<'a> {
     pub owner: TypeName,
     pub name: &'a str,
+}
+
+/// A selected library declaration whose compiled entry ends with the mask of omitted default
+/// arguments after parameters a compiler plugin's transformation appended.
+pub struct TransformedEntry<'a> {
+    /// The annotations the declaration carries, which say what role it has.
+    pub annotations: &'a [TypeName],
+    /// The parameters its compiled entry takes after its source parameters.
+    pub synthetic: &'a [Ty],
 }
 
 /// What a plugin reads of a dependency function's declaration besides its parameter types.
@@ -1433,10 +1441,10 @@ impl PluginHost {
 
     /// Whether a registered plugin [passes the default mask of a transformed library
     /// entry](IrPlugin::passes_transformed_entry_defaults).
-    pub fn passes_transformed_entry_defaults(&self, synthetic: &[Ty]) -> bool {
+    pub fn passes_transformed_entry_defaults(&self, entry: &TransformedEntry<'_>) -> bool {
         self.plugins
             .iter()
-            .any(|plugin| plugin.passes_transformed_entry_defaults(synthetic))
+            .any(|plugin| plugin.passes_transformed_entry_defaults(entry))
     }
 
     /// Every registered plugin's [`IrPlugin::sam_with_receiver_annotations`].
