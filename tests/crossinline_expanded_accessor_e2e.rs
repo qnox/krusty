@@ -29,3 +29,15 @@ fn an_expanded_crossinline_literal_reaches_private_declarations_through_accessor
         );
     }
 }
+
+#[test]
+fn an_expanded_crossinline_literal_keeps_the_inlined_call_inside_its_body() {
+    // `Char.code` is an inline getter: the body of the literal ends in an inlined call, whose
+    // debug-line boundary survives the crossinline scope wrapped around the spliced body.
+    let source = "inline fun h(crossinline f: () -> Int) = f()\n\
+        fun a(c: Char) = h(fun() = c.code)\n";
+    let classes =
+        common::classes_against_kotlinc_module(&[("CrossinlineExpandedInlinedCall.kt", source)]);
+    let (reference, krusty) = classes.class_listing("CrossinlineExpandedInlinedCallKt");
+    assert_eq!(krusty, reference, "kotlinc's code and debug tables");
+}

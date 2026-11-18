@@ -991,7 +991,10 @@ impl BodyLowering<'_> {
                     value: Some(body), ..
                 } = *self.ir.expr(invocation)
                 {
-                    self.ir.mark_crossinline_body(body);
+                    let wrapper = self.ir.wrap_crossinline_body(body);
+                    if let IrExpr::Block { value, .. } = &mut self.ir.exprs[invocation as usize] {
+                        *value = Some(wrapper);
+                    }
                 }
             }
             if let Some((implementation, body, inline_only)) = consumed {
