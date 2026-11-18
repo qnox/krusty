@@ -933,7 +933,7 @@ fn materialize_top_level_property(
 
 /// The class whose `companion { … }` block declared this top-level-shaped property, if any: the
 /// same-file class its [`super::companion_blocks::static_placement`] names.
-fn companion_block_owner(
+pub(super) fn companion_block_owner(
     index: &ResolvedModuleIndex,
     property_id: crate::fir::PropertyId,
     property: &IrCheckedProperty,
@@ -950,7 +950,7 @@ fn companion_block_owner(
 }
 
 /// A companion-block property's accessors are static methods of its class, like its functions.
-fn place_companion_block_accessors(
+pub(super) fn place_companion_block_accessors(
     ir: &mut IrFile,
     owner: crate::ir::ClassId,
     accessors: impl Iterator<Item = FunId>,
@@ -963,14 +963,14 @@ fn place_companion_block_accessors(
 
 /// Where a `companion { … }` block property was realized on its class: its static storage (absent
 /// for an accessor-only property), its generated accessors, and its source position.
-struct CompanionBlockRealization {
-    storage: Option<u32>,
-    getter: Option<FunId>,
-    setter: Option<FunId>,
-    source_order: u32,
+pub(super) struct CompanionBlockRealization {
+    pub(super) storage: Option<u32>,
+    pub(super) getter: Option<FunId>,
+    pub(super) setter: Option<FunId>,
+    pub(super) source_order: u32,
 }
 
-fn record_companion_block_property(
+pub(super) fn record_companion_block_property(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
     owner: crate::ir::ClassId,
