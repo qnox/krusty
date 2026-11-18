@@ -1399,6 +1399,7 @@ mod tests {
             annotation_applications: vec![annotation],
             return_value_status: Default::default(),
             contract: None,
+            equality_bound: None,
         }
     }
 
