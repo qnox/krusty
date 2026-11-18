@@ -28,6 +28,17 @@ fun box(): String {
     } catch (e: ConcurrentModificationException) {
     }
 
+    val outer = mutableListOf(1)
+    val view = outer.subList(0, 1)
+    val sub = view.iterator()
+    sub.next()
+    outer.add(2)
+    try {
+        sub.next()
+        return "stale range at the end after a change of its root"
+    } catch (e: ConcurrentModificationException) {
+    }
+
     val whole = mutableListOf(1, 2, 3).subList(0, 2).iterator()
     whole.next()
     whole.next()
