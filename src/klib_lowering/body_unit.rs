@@ -39,8 +39,10 @@ use crate::types::{Ty, TypeName};
 mod class_construction;
 pub(crate) use class_construction::superclass_constructor_ordinal;
 mod enum_materialization;
+mod fake_overrides;
 #[cfg(test)]
 mod initializer_capability_tests;
+mod inline_functions;
 mod local_class;
 mod static_properties;
 
@@ -717,7 +719,10 @@ impl DependencyBodyUnit {
     ) -> impl Iterator<Item = (&KlibDependencyCallable, FunId)> + '_ {
         self.functions
             .iter()
-            .filter(|(identity, _)| !self.private_members.contains(*identity))
+            .filter(|(identity, function)| {
+                !self.private_members.contains(*identity)
+                    && !self.ir.inline_only_fns.contains(*function)
+            })
             .map(|(identity, &function)| (identity, function))
     }
 
@@ -884,6 +889,7 @@ impl DependencyBodyUnit {
         sources: Sources<'a>,
         seed: impl FnOnce(&mut Linker<'_, 'a>, &mut IrFile) -> Result<T, KlibBodyDeclineReason>,
     ) -> Result<T, KlibBodyDecline> {
+        let (first_class, classes) = (self.ir.classes.len(), sources.callees.class_type_oracle());
         let mut pending = VecDeque::new();
         let mut linker = Linker {
             functions: &mut self.functions,
@@ -1016,6 +1022,9 @@ impl DependencyBodyUnit {
             })?;
             self.ir.functions[body.function as usize].body = Some(lowered);
         }
+        let decline = |reason| KlibBodyDecline::new(identity.declaration.clone(), reason);
+        super::class_hierarchies::publish(&mut self.ir, first_class, classes).map_err(decline)?;
+        inline_functions::expand_calls(&mut self.ir).map_err(decline)?;
         Ok(root)
     }
 }
@@ -1308,6 +1317,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             super::same_library_class::LocalClassSource {
                 bodies,
                 declarations: self.sources.declarations,
+                classes: callees.class_type_oracle(),
                 module: &module,
                 validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
             },
@@ -1319,6 +1329,10 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 self.install_local_class(ir, prepared)
             }
         }
+    }
+
+    fn inherited_getter(&self, callee: &KlibIrSignature) -> fake_overrides::Inherited {
+        fake_overrides::inherited_getter(self, callee)
     }
 
     fn link_local_function(
@@ -1769,7 +1783,8 @@ impl<'s> CallLinker for Linker<'_, 's> {
         let identity = self.callee_identity(callee)?;
         // The active selection decides every call, including one of a function an earlier
         // lowering already put in the unit.
-        let selected = if let Some(root) = self.root.filter(|root| &identity == root.identity()) {
+        let root = self.root.filter(|root| &identity == root.identity());
+        let selected = if let Some(root) = &root {
             Some(SelectedKlibCallables::One(root))
         } else {
             match self.sources.callees.get(&identity) {
@@ -1926,7 +1941,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             // member of that class. A member of a class realized outside the unit is called
             // through its frozen declaration, as a source call of it is.
             let candidates = match &selected {
-                Some(SelectedKlibCallables::One(candidate)) => std::slice::from_ref(candidate),
+                Some(SelectedKlibCallables::One(candidate)) => std::slice::from_ref(*candidate),
                 Some(SelectedKlibCallables::Variants(candidates)) => *candidates,
                 None => &[],
             };
@@ -2561,6 +2576,20 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
+        // The selected root is lowered as the declaration it is; a call of an inline callee is
+        // expanded.
+        let root = self.root.is_some_and(|root| root.identity() == identity);
+        if !root && inline_functions::declares_inline(function) {
+            let mut is_interface = |name| self.is_interface(name);
+            inline_functions::declare(
+                ir,
+                declared,
+                function,
+                &header,
+                selected,
+                &mut is_interface,
+            )?;
+        }
         self.functions.insert(identity.clone(), declared);
         if let Some(receiver) = header.value_receiver() {
             self.member_receivers.insert(identity.clone(), receiver);
@@ -2694,7 +2723,7 @@ fn body_header(
 /// authenticate the call. Declaration-shape conflicts remain ambiguous in `KlibCalleeFacts`.
 #[derive(Clone, Copy)]
 enum SelectedKlibCallables<'callable, 'facts> {
-    One(KlibBodyCallable<'callable>),
+    One(&'facts KlibBodyCallable<'callable>),
     Variants(&'facts [KlibBodyCallable<'callable>]),
 }
 
@@ -2747,7 +2776,7 @@ fn selected_callable_for_header_purpose<'callable>(
         None
     };
     match candidates {
-        SelectedKlibCallables::One(candidate) => {
+        SelectedKlibCallables::One(&candidate) => {
             if let Some(reason) = consider(candidate) {
                 return Err(reason);
             }
