@@ -408,6 +408,42 @@ fn a_lambda_parameter_the_inline_body_keeps_as_a_value_declines() {
 }
 
 #[test]
+fn a_call_of_an_inline_function_leaving_an_argument_to_its_default_declines() {
+    let demo = demo_inlining(
+        &[
+            ("g", &[T::Int, T::Int], T::Int),
+            ("caller", &[T::Int], T::Int),
+        ],
+        &["g"],
+        |name, body| match name {
+            "g" => {
+                let earlier = body.param(0);
+                body.default(1, earlier);
+                let result = body.param(1);
+                Some(vec![body.ret(result)])
+            }
+            _ => {
+                let argument = body.param(0);
+                let call = body.call_omitting("g", vec![Some(argument), None], T::Int);
+                Some(vec![body.ret(call)])
+            }
+        },
+    );
+    let mut unit = DependencyBodyUnit::default();
+    let decline = demo
+        .lower(&mut unit, "caller", &["caller", "g"])
+        .expect_err("the defaulted call would escape expansion");
+    assert_eq!(
+        decline.reason(),
+        &crate::klib_lowering::KlibBodyDeclineReason::UnsupportedOperation(
+            "a call of an inline function that leaves arguments to its defaults"
+        )
+    );
+    assert!(unit.ir().inline_fns.is_empty());
+    assert!(unit.ir().inline_only_fns.is_empty());
+}
+
+#[test]
 fn a_declined_inline_expansion_leaves_its_function_id_free_for_an_ordinary_callable() {
     let demo = demo_inlining(
         &[

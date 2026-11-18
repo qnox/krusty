@@ -97,11 +97,12 @@ pub(super) fn declare(
 /// Expand every call of an inline function of the unit in `ir`, including the calls a copied body
 /// itself makes.
 pub(super) fn expand_calls(ir: &mut IrFile) -> Result<(), KlibBodyDeclineReason> {
-    let mut sites = (0..ir.exprs.len())
-        .map(|site| site as ExprId)
-        .filter(|&site| inline_callee(ir, site).is_some())
-        .collect::<Vec<_>>();
-    sites.sort_unstable();
+    let mut sites = Vec::new();
+    for site in 0..ir.exprs.len() as ExprId {
+        if inline_callee(ir, site)?.is_some() {
+            sites.push(site);
+        }
+    }
     if sites.is_empty() {
         return Ok(());
     }
@@ -116,14 +117,20 @@ pub(super) fn expand_calls(ir: &mut IrFile) -> Result<(), KlibBodyDeclineReason>
     Ok(())
 }
 
-/// The inline function of the unit `site` calls directly, when it is such a call.
-fn inline_callee(ir: &IrFile, site: ExprId) -> Option<FunId> {
+/// The inline function of the unit `site` calls, when it is such a call. A call that leaves
+/// arguments to an inline function's defaults is not expanded, so it declines.
+fn inline_callee(ir: &IrFile, site: ExprId) -> Result<Option<FunId>, KlibBodyDeclineReason> {
     let IrExpr::Call { callee, .. } = ir.expr(site) else {
-        return None;
+        return Ok(None);
     };
     match **callee {
-        Callee::Local(function) if ir.inline_only_fns.contains(&function) => Some(function),
-        _ => None,
+        Callee::Local(function) => Ok(ir.inline_only_fns.contains(&function).then_some(function)),
+        Callee::LocalWithDefaults { function, .. } if ir.inline_only_fns.contains(&function) => {
+            Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call of an inline function that leaves arguments to its defaults",
+            ))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -148,7 +155,7 @@ impl Expansion {
     /// Expand the call `site` of an inline function, and then the calls and lambda invocations its
     /// copied body makes.
     fn call(&mut self, ir: &mut IrFile, site: ExprId) -> Result<(), KlibBodyDeclineReason> {
-        let Some(function) = inline_callee(ir, site) else {
+        let Some(function) = inline_callee(ir, site)? else {
             return Ok(());
         };
         let IrExpr::Call {
@@ -316,7 +323,7 @@ impl Expansion {
         let mut copies = spliced.copies.into_values().collect::<Vec<_>>();
         copies.sort_unstable();
         for copy in copies {
-            if inline_callee(ir, copy).is_some() {
+            if inline_callee(ir, copy)?.is_some() {
                 self.call(ir, copy)?;
             } else if let Some((lambda, args)) = self.invoked(ir, copy) {
                 self.invocation(ir, copy, lambda, args)?;
