@@ -9,6 +9,7 @@
 krusty_test_modules::declare_test_modules!("_e2e.rs");
 
 mod failure_evidence;
+mod native_klib_driver;
 
 #[path = "common/bytecode_comparison.rs"]
 mod bytecode_comparison_support;
