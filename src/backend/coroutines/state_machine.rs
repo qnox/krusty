@@ -289,7 +289,7 @@ pub(super) fn realize(
         ir.local_class_name_provenance.insert(
             class,
             IrLocalClassNameProvenance {
-                source: IrModuleSource { source, package },
+                source: crate::ir::IrLocalClassNameRoot::Source(IrModuleSource { source, package }),
                 lexical_owner: None,
                 segments: vec![format!("Continuation${}${function}", source.raw())].into(),
                 ordinal: None,

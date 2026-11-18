@@ -368,6 +368,12 @@ impl Body<'_> {
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
+        // A value class is final and none of its members can be overridden, and the receiver
+        // need not be its box: a target-carried one (`UIntArray`) is the target's own value.
+        // Its members are called directly, never through a table.
+        if self.ir.classes[class as usize].is_value {
+            return self.direct_method_call(class, function, receiver, args);
+        }
         let tables = &self.file_classes()?.tables;
         if tables.table(class).direct_methods.contains(&function) {
             return self.direct_method_call(class, function, receiver, args);
@@ -757,6 +763,30 @@ impl Body<'_> {
             .struct_get(object, 0);
     }
 
+    /// A call to member `function` of this file: through its class's dispatch slot when it has
+    /// one, as an override reached through the receiver's own table answers it, and directly
+    /// otherwise.
+    pub(super) fn local_member_call(
+        &mut self,
+        function: FunId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let class = self.ir.functions[function as usize]
+            .dispatch_receiver
+            .and_then(|owner| self.classes.and(self.ir.class_id_by_name(owner)));
+        if let Some(class) = class {
+            let tables = &self.file_classes()?.tables;
+            let key = function_key(self.ir, class, function);
+            if !tables.table(class).direct_methods.contains(&function)
+                && tables.slot(class, &key).is_some()
+            {
+                return self.dispatch_function(class, function, receiver, args);
+            }
+        }
+        self.direct_member_call(function, receiver, args)
+    }
+
     /// A call to member `function` of this file, without dispatch.
     pub(super) fn direct_member_call(
         &mut self,
@@ -1022,12 +1052,15 @@ impl Body<'_> {
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less read of `{}`", property.name))?;
-        let slot = local_property_target(self.ir, class, index).and_then(|target| {
-            self.file_classes()
-                .ok()?
-                .tables
-                .slot(class, &SlotKey::Getter(target))
-        });
+        // A value class's property is final: it is accessed directly, as its members are called.
+        let slot = local_property_target(self.ir, class, index)
+            .filter(|_| !self.ir.classes[class as usize].is_value)
+            .and_then(|target| {
+                self.file_classes()
+                    .ok()?
+                    .tables
+                    .slot(class, &SlotKey::Getter(target))
+            });
         if let Some(slot) = slot {
             return self.dispatch(class, slot, receiver, &[], &[], None);
         }
@@ -1106,12 +1139,15 @@ impl Body<'_> {
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less write of `{}`", property.name))?;
-        let slot = local_property_target(self.ir, class, index).and_then(|target| {
-            self.file_classes()
-                .ok()?
-                .tables
-                .slot(class, &SlotKey::Setter(target))
-        });
+        // A value class's property is final: it is accessed directly, as its members are called.
+        let slot = local_property_target(self.ir, class, index)
+            .filter(|_| !self.ir.classes[class as usize].is_value)
+            .and_then(|target| {
+                self.file_classes()
+                    .ok()?
+                    .tables
+                    .slot(class, &SlotKey::Setter(target))
+            });
         if let Some(slot) = slot {
             return self.dispatch(class, slot, receiver, &[value], &[property.ty], None);
         }
@@ -1239,30 +1275,34 @@ impl Body<'_> {
         self.laid_out_classes.published_structure(&identity)
     }
 
-    /// `x as C`: the value, cast to an array classifier, to class `C` of this file or to an
-    /// interface of the module.
+    /// `x as C`: the value, cast to a class `C` with a physical layout, or to an interface of the
+    /// module or of a library. Kotlin checks the cast, so a value that is no `C` throws the
+    /// runtime `ClassCastException` through the Kotlin exception tag instead of trapping, and,
+    /// with `non_null`, a null throws the Kotlin NPE as any other cast to a non-null type does.
+    /// A class cast then reads the checked reference as the class's structure.
     pub(super) fn cast(&mut self, arg: u32, target: Ty, non_null: bool) -> Result<(), Unsupported> {
-        self.value(arg, any())?;
-        if target.non_null().is_array() {
-            // An array's values are its array form's objects, as its type test reads them, even
-            // where a library lays the array class out as a class of its own.
-            let (form, _) = self.array_form(target)?;
-            self.code
-                .ref_cast(!non_null, HeapType::Concrete(form.object));
-        } else if let Some(interface) = self.interface_of_type(target) {
-            let value = self.local(REFERENCE);
-            self.code.local_tee(value);
-            self.interface_test(interface, !non_null);
-            self.code
-                .if_(BlockType::Value(REFERENCE))
-                .local_get(value)
-                .else_()
-                .unreachable()
-                .end();
+        let tested = target.non_null();
+        let structure = if tested.is_array() {
+            // An array's values are its array form's objects, even where a library also
+            // materializes the array classifier as an ordinary class.
+            let (form, _) = self.array_form(tested)?;
+            Some(form.object)
         } else {
-            let structure = self
-                .class_structure(target)?
-                .ok_or_else(|| "a class cast without its selected physical layout".to_owned())?;
+            match self.interface_of_type(tested) {
+                Some(_) => None,
+                None => self.class_structure(tested)?,
+            }
+        };
+        self.value(arg, any())?;
+        let value = self.local(REFERENCE);
+        self.code.local_tee(value);
+        self.reference_type_test(tested, true)?;
+        self.throw_class_cast_unless()?;
+        self.code.local_get(value);
+        if non_null {
+            self.require_nonnull_reference(REFERENCE)?;
+        }
+        if let Some(structure) = structure {
             self.code.ref_cast(!non_null, HeapType::Concrete(structure));
         }
         Ok(())
@@ -1281,7 +1321,7 @@ impl Body<'_> {
     }
 
     /// The library interface `ty` names, which no file of the program declares.
-    fn library_interface_of_type(&self, ty: Ty) -> Option<TypeName> {
+    pub(super) fn library_interface_of_type(&self, ty: Ty) -> Option<TypeName> {
         let TyKind::Obj(name, _) = ty.non_null().kind() else {
             return None;
         };
@@ -1289,6 +1329,15 @@ impl Body<'_> {
             .classifier(name)
             .is_some_and(|fact| !fact.source && fact.is_interface() && !fact.is_annotation())
             .then_some(name)
+    }
+
+    /// Whether the runtime's `ArrayList`, whose class the program does not declare, is below the
+    /// library interface `interface`, by the frontend's supertype traversal.
+    fn runtime_array_list_is_below(&self, interface: TypeName) -> bool {
+        let Some(array_list) = Ty::obj("kotlin/collections/ArrayList").obj_internal() else {
+            return false;
+        };
+        self.classifiers.is_subclassifier(array_list, interface)
     }
 
     /// Replace the reference on the stack with whether it is an instance of the library interface
@@ -1300,7 +1349,14 @@ impl Body<'_> {
             return;
         }
         let subtypes = self.classifiers.builtin_subtypes(interface);
-        self.runtime.builtin_instances(interface, subtypes);
+        let laid_out = crate::builtin_instances::RuntimeLayouts {
+            string_builder: self
+                .classifiers
+                .is_subclassifier(krusty::types::wk::string_builder(), interface),
+            array_list: self.runtime_array_list_is_below(interface),
+        };
+        self.runtime
+            .builtin_instances(interface, subtypes, laid_out);
         self.interface_test(interface, nullable);
     }
 
