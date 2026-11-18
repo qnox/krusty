@@ -28804,18 +28804,24 @@ impl<'a> Checker<'a> {
                 // members of the declaration and of `B` stay visible (`check(this is B); field = x`).
                 let context = crate::assignable::TyCtx::new();
                 let declared = current.declared_ty;
+                // A type-parameter receiver is judged by its bound: `this is B` on `M : A` with
+                // `B : A` narrows `M` toward `B`, it does not introduce an unrelated class.
+                let declared_class = declared
+                    .non_null()
+                    .ty_param_bound()
+                    .map_or(declared, Ty::non_null);
                 let comparable = narrowed.non_null() == Ty::Nothing
                     || crate::assignable::is_subtype(
                         &context,
                         self,
-                        declared.non_null(),
+                        declared_class.non_null(),
                         narrowed.non_null(),
                     )
                     || crate::assignable::is_subtype(
                         &context,
                         self,
                         narrowed.non_null(),
-                        declared.non_null(),
+                        declared_class.non_null(),
                     );
                 if !comparable {
                     current.ty = Ty::intersection(&[declared.non_null(), narrowed]);
