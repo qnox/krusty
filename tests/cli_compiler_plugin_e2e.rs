@@ -547,7 +547,6 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          with a default argument that is not a constant yet",
     );
     assert_compose_rejects(
-    assert_compose_rejects(
         "compose-file-extension-call",
         "@Composable fun String.Show() {}\n@Composable fun Greeting() {\n\"a\".Show()\n}\n",
         &[],
