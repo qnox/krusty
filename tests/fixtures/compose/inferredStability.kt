@@ -31,10 +31,18 @@ fun ShowCounter(c: Counter) {
 }
 
 @Composable
-fun Screen(p: Point, c: Counter, named: Named?, pair: Pair<Int, String>) {
+fun ShowAction(action: () -> Unit, cb: (Int) -> String, maybe: (() -> Unit)?) {
+    action()
+    maybe?.invoke()
+    println(cb(1))
+}
+
+@Composable
+fun Screen(p: Point, c: Counter, named: Named?, pair: Pair<Int, String>, action: () -> Unit, cb: (Int) -> String, maybe: (() -> Unit)?) {
     ShowPoint(p)
     ShowCounter(c)
     ShowNamed(named, pair)
+    ShowAction(action, cb, maybe)
 }
 
 // FILE: box.kt
@@ -74,15 +82,20 @@ fun box(): String {
             else -> throw IllegalStateException(name)
         }
     }
+    val action: () -> Unit = { }
+    val callback: (Int) -> String = { value -> "v" + value }
     Class.forName("screens.InferredStabilityKt").getMethod(
         "Screen",
         Point::class.java,
         Counter::class.java,
         Named::class.java,
         Pair::class.java,
+        Function0::class.java,
+        Function1::class.java,
+        Function0::class.java,
         Composer::class.java,
         Integer.TYPE,
-    ).invoke(null, Point(3, 4), Counter(5), Named("n", Point(1, 2)), Pair(1, "a"), composer, 0)
-    val expected = "changed;changedInstance;changed;changed;execute true;execute true;execute true;execute true;"
+    ).invoke(null, Point(3, 4), Counter(5), Named("n", Point(1, 2)), Pair(1, "a"), action, callback, action, composer, 0)
+    val expected = "changed;changedInstance;changed;changed;changedInstance;changedInstance;changedInstance;execute true;execute true;execute true;execute true;execute true;"
     return if (log.toString() == expected) "OK" else log.toString()
 }

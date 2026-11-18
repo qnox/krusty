@@ -1702,7 +1702,13 @@ fn spelled_mentions(spelled: &crate::ir::Spelled, annotation: TypeName) -> bool 
 
 /// `IrType.asString()` of a declared type: its classifier's simple name.
 fn simple_type_name(ty: Ty) -> String {
-    match ty.kind() {
+    match ty.non_null().kind() {
+        // A function type is the class kotlinc names by its arity.
+        TyKind::Fun(signature) => format!(
+            "{}Function{}",
+            if signature.suspend { "Suspend" } else { "" },
+            signature.params.len()
+        ),
         TyKind::Unit => "Unit".to_string(),
         TyKind::Nothing => "Nothing".to_string(),
         TyKind::TyParam(name, _) => name.as_str().to_string(),
