@@ -129,6 +129,18 @@ gradle.projectsEvaluated { g ->
             }.join('')
         }
     }
+    // The build's task graph, in `$CORPUS_TASK_DEPS` when it is set: one line per task Gradle
+    // scheduled, its path and the comma-separated paths of the tasks it depends on directly. The
+    // comparison follows it from each compilation that did not run back to the failed tasks that
+    // stopped it.
+    def taskDeps = System.getenv('CORPUS_TASK_DEPS')
+    if (taskDeps != null) {
+        g.taskGraph.whenReady { graph ->
+            new File(taskDeps).text = graph.allTasks.collect { t ->
+                "${t.path}\t${graph.getDependencies(t)*.path.sort().join(',')}\n"
+            }.join('')
+        }
+    }
     // One line per Kotlin source file of a picked task, the task's path and the file's absolute
     // path: the warm benchmark (`bench.py`) picks the file its edit loop changes from here.
     def sources = System.getenv('CORPUS_SOURCES')
