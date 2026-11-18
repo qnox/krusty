@@ -76,3 +76,13 @@ fn a_type_of_object_compares_beside_class_literals() {
         .expect("kotlinc must run the class-literal fixture");
     super::expect_wasm_box(source, "wasmClassLiterals");
 }
+
+/// `is` and `as?` against `KClass`: a class literal's token is one, nothing else is. The JVM
+/// oracle answers first; both Wasm hosts run the same whole program every other lane runs.
+#[test]
+fn a_class_token_is_a_kclass_to_an_erased_test() {
+    let source = include_str!("box_regressions/kClassTypeChecks.kt");
+    super::super::box_reference_classes::checked_box(source, "kClassTypeChecks")
+        .expect("kotlinc must run the KClass type-check fixture");
+    super::expect_wasm_box(source, "kClassTypeChecks");
+}

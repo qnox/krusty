@@ -115,26 +115,10 @@ fn a_literals_own_to_string_names_the_class() {
 
 /// `is`/`as?` against `KClass`: a class literal is one, an instance or a string or null is not.
 /// kotlinc answers it first (the JVM oracle), then the runtime's own class descriptor must agree.
-///
-/// PLATFORM-SPECIFIC: the Wasm lanes answer `Plain::class is KClass<*>` false today, so this
-/// program cannot yet sit in the shared `tests/box_regressions` inventory without a Wasm fix.
+/// The whole program is shared with every other lane in `tests/box_regressions`.
 #[test]
 fn a_class_literal_is_a_kclass_to_an_erased_test() {
-    let source = "import kotlin.reflect.KClass\n\
-         class Plain\n\
-         fun isKClass(value: Any?): Boolean = value is KClass<*>\n\
-         fun asKClass(value: Any?): KClass<*>? = value as? KClass<*>\n\
-         fun box(): String {\n\
-         \x20   if (!isKClass(Plain::class)) return \"fail class literal\"\n\
-         \x20   if (!isKClass(String::class)) return \"fail String literal\"\n\
-         \x20   if (isKClass(Plain())) return \"fail instance\"\n\
-         \x20   if (isKClass(\"text\")) return \"fail String value\"\n\
-         \x20   if (isKClass(null)) return \"fail null\"\n\
-         \x20   if (asKClass(Plain::class) != Plain::class) return \"fail safe cast\"\n\
-         \x20   if (asKClass(Plain()) != null) return \"fail safe cast instance\"\n\
-         \x20   if (asKClass(null) != null) return \"fail safe cast null\"\n\
-         \x20   return \"OK\"\n\
-         }\n";
+    let source = include_str!("box_regressions/kClassTypeChecks.kt");
     expect_box_ok_with_stdlib(source, "KClassTypeChecks");
     expect_native_box(source, "KClassTypeChecks", "OK");
 }
