@@ -506,6 +506,8 @@ pub(super) struct ClassModel {
     /// The methods of a dependency class its table does not dispatch, called directly
     /// ([`class_tables::ClassTable::direct_methods`]).
     direct_methods: HashSet<FunId>,
+    /// The module's interface numbers, extended with the interfaces this file installed.
+    numbers: ModuleInterfaces,
 }
 
 /// Which table a member dispatches through, and at which index.
@@ -522,6 +524,12 @@ impl ClassModel {
     /// directly.
     pub(super) fn is_direct(&self, function: FunId) -> bool {
         self.direct_methods.contains(&function)
+    }
+
+    /// The interface numbers of this file: the module's, then those of the interfaces the file
+    /// installed.
+    pub(super) fn numbers(&self) -> &ModuleInterfaces {
+        &self.numbers
     }
 
     pub(super) fn layout(&self, class: ClassId) -> &ClassLayout {
@@ -550,7 +558,12 @@ impl ClassModel {
             return Some(Dispatch::Class(slot));
         }
         let plan_key = match key {
-            SlotKey::Function(fid) => PlanKey::Callable(*self.callables.get(fid)?),
+            SlotKey::Function(fid) => match self.callables.get(fid) {
+                Some(&callable) => PlanKey::Callable(callable),
+                // An interface a KLIB unit installed has no checked callable: its numbers are
+                // the file's own.
+                None => PlanKey::Installed(*fid),
+            },
             SlotKey::Getter(ResolvedPropertyOverrideTarget::Module(property)) => {
                 PlanKey::Getter(*property)
             }
@@ -665,6 +678,7 @@ pub(super) fn build(
         order: numbered.order,
         interfaces: numbered.interfaces,
         implemented: numbered.interface_tables.implemented,
+        numbers: numbered.numbers,
         callables: ir
             .checked_callable_functions
             .iter()

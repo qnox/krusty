@@ -194,7 +194,7 @@ impl<'a> FileLowering<'a> {
         key: &model::SlotKey,
     ) -> Option<model::Dispatch> {
         self.model
-            .dispatch(self.ir, self.slot_plan.interfaces(), class, key)
+            .dispatch(self.ir, self.model.numbers(), class, key)
     }
 
     pub(super) fn class_of(&self, internal: TypeName, what: &str) -> Result<ClassId, Unsupported> {
