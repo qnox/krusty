@@ -226,7 +226,11 @@ pub(super) fn transform(ir: &mut IrFile) {
         for site in &function.calls {
             pass_composer(ir, slots, &callees, site);
         }
-        restart_group(ir, &facts.runtime, function);
+        if function.restartable {
+            restart_group(ir, &facts.runtime, function);
+        } else {
+            traced_result(ir, &facts.runtime, function);
+        }
         annotate_key(ir, function);
     }
 }
@@ -1058,6 +1062,103 @@ fn restart_group(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableF
     mark_line(ir, end, facts.closing_line);
     statements.push(end);
 
+    ir.exprs[body.block as usize] = IrExpr::Block {
+        stmts: statements,
+        value: None,
+    };
+}
+
+/// The body of a composable function with a result and no group: its source statements between
+/// the trace markers, with the value of the closing `return` held across the end marker.
+///
+/// ```text
+/// if (isTraceInProgress()) traceEventStart(key, $changed, -1, "pkg.F (F.kt:3)")
+/// … the source statements …
+/// val tmp = <value>
+/// if (isTraceInProgress()) traceEventEnd()
+/// return tmp
+/// ```
+///
+/// A constant or a value read is returned without the temporary. When the plugin writes source
+/// information, a marker pair brackets the whole body in place of a group's `sourceInformation`.
+fn traced_result(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableFunction) {
+    let body = function_body(ir, facts.function)
+        .or_else(|| super::source_facts::expression_body(ir, facts.function))
+        .expect("a result function has a block or an expression body");
+    let slots = Slots::of(facts);
+    let (&last, leading) = body
+        .statements
+        .split_last()
+        .expect("a result function ends in a return");
+    let IrExpr::Return(Some(value)) = ir.exprs[last as usize] else {
+        unreachable!("a result function ends in a return");
+    };
+    let mut statements = Vec::new();
+    if let Some(information) = &facts.source_information {
+        let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
+        let key = ir.add_expr(IrExpr::Const(IrConst::Int(facts.key)));
+        let text = ir.add_expr(IrExpr::Const(IrConst::String(information.as_str().into())));
+        // kotlinc builds the marker's arguments without offsets, so its line begins at the call.
+        for argument in [composer, key, text] {
+            ir.mark_positionless(argument);
+        }
+        let start = runtime::call(
+            ir,
+            &runtime.source_information_marker_start,
+            None,
+            vec![composer, key, text],
+        );
+        ir.set_source_line(start, facts.opening_line);
+        statements.push(start);
+    }
+    if let Some(trace) = facts.trace.as_deref() {
+        let key = ir.add_expr(IrExpr::Const(IrConst::Int(facts.key)));
+        let changed = ir.add_expr(IrExpr::GetValue(slots.changed));
+        let unused = ir.add_expr(IrExpr::Const(IrConst::Int(-1)));
+        let text = ir.add_expr(IrExpr::Const(IrConst::String(trace.into())));
+        let event = runtime::call(
+            ir,
+            &runtime.trace_event_start,
+            None,
+            vec![key, changed, unused, text],
+        );
+        statements.push(if_trace_in_progress(ir, runtime, event));
+    }
+    statements.extend(leading.iter().copied());
+    let ty = ir.functions[facts.function as usize].ret;
+    let returned = if matches!(
+        ir.exprs[value as usize],
+        IrExpr::Const(_) | IrExpr::GetValue(_)
+    ) {
+        value
+    } else {
+        let temporary = next_value_slot(ir, facts.function);
+        statements.push(ir.add_expr(IrExpr::Variable {
+            index: temporary,
+            ty,
+            init: Some(value),
+            named: false,
+        }));
+        ir.add_expr(IrExpr::GetValue(temporary))
+    };
+    if facts.trace.is_some() {
+        let event = runtime::call(ir, &runtime.trace_event_end, None, Vec::new());
+        statements.push(if_trace_in_progress(ir, runtime, event));
+    }
+    if facts.source_information.is_some() {
+        let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
+        ir.mark_positionless(composer);
+        let end = runtime::call(
+            ir,
+            &runtime.source_information_marker_end,
+            None,
+            vec![composer],
+        );
+        ir.set_source_line(end, facts.opening_line);
+        statements.push(end);
+    }
+    ir.exprs[last as usize] = IrExpr::Return(Some(returned));
+    statements.push(last);
     ir.exprs[body.block as usize] = IrExpr::Block {
         stmts: statements,
         value: None,
