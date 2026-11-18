@@ -47,14 +47,11 @@ pub(crate) struct PropertyReferenceRealization {
     /// name discards that answer and names a method the declaration does not have.
     pub declared_getter_name: String,
     pub declared_setter_name: Option<String>,
-    /// The referenced property's storage lives on a FILE FACADE and has no accessor of its own:
-    /// the shape whose value-class-typed storage a later pass may realize over the carrier.
-    ///
-    /// Recorded from the selected declaration's own facts, so a reference from another file of the
-    /// module answers the same as the declaration there. Joining the two sides by property
-    /// spelling instead could not see a sibling file's declaration at all, and could match an
-    /// unrelated same-spelled one.
-    pub facade_storage: bool,
+    /// The semantic parameters the selected source accessors declare ahead of a setter's value:
+    /// the context parameters, then the extension receiver. The value-class pass mangles the
+    /// accessor names over exactly these, as the declaration side does; a dependency's names are
+    /// already physical and record none.
+    pub declared_accessor_parameters: Vec<Ty>,
     pub accessor_role: PropertyAccessorRole,
     /// The PRIVATE static storage whose synthetic `access$…$p` bridges on its static owner the
     /// getter and setter are, each side on its own; the reference still reflects the declared
@@ -64,6 +61,10 @@ pub(crate) struct PropertyReferenceRealization {
     /// The reflected owner is a package (a file facade), which kotlinc flags as top-level. A
     /// companion-block property is a static member of its declaring class instead.
     pub package_owner: bool,
+    /// The accessors are written on this module's file facade: a top-level property, an extension
+    /// property included, and not a member whose placement merely has no dispatch owner. kotlinc
+    /// exempts a value-class RESULT from the mangling hash only there.
+    pub declared_on_file_facade: bool,
     /// The exact module functions the selected accessors ARE, when this module declares them.
     ///
     /// This is the accessor's identity. The `access$…` bridge a private member is reached through
@@ -116,6 +117,9 @@ pub(crate) struct PropertyReferenceRealization {
     /// The reference receiver is this value class's boxed object while the selected static
     /// accessor consumes its erased carrier.
     pub unboxed_receiver_value_class: Option<TypeName>,
+    /// For each context argument the carrier binds, the value class whose carrier the selected
+    /// accessor takes in its place, read out of `boundContextArguments` as the boxed object.
+    pub unboxed_context_value_classes: Vec<Option<(TypeName, Ty)>>,
     /// Per-accessor static call owners selected for cross-package protected bridges. These stay
     /// separate because a public getter may be paired with a protected setter.
     pub getter_bridge_owner: Option<TypeName>,

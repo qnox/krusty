@@ -68,3 +68,42 @@ fn inline_getters_of_contextual_properties_read_their_bound_contexts() {
         include_str!("box_regressions/contextParameters/contextualInlinePropertyReferences.kt");
     expect_same_as_kotlinc_release(source, "ContextualInlinePropertyReferences");
 }
+
+/// A value-class context argument travels to the accessor as its carrier, and the accessor's name
+/// takes the value-class hash over its declared contexts and extension receiver: top-level, member
+/// and extension properties, read-only and mutable, give kotlinc's own result.
+#[test]
+fn value_class_context_arguments_reach_their_accessors_as_carriers() {
+    let source =
+        include_str!("box_regressions/contextParameters/valueClassContextPropertyReferences.kt");
+    let reference = kotlinc_release_box_result(source);
+    assert_eq!(reference, "OK", "kotlinc {RELEASE} fixture must succeed");
+    let jdk = common::jdk_modules();
+    let krusty = common::expect_box_run(
+        source,
+        "ValueClassContextPropertyReferences",
+        &[release_stdlib()],
+        Some(jdk.as_path()),
+    );
+    assert_eq!(krusty, reference, "krusty and kotlinc results differ");
+}
+
+/// The accessor's name hashes its result as well when that is a value class, even one over a
+/// scalar that stays boxed, and a value-class extension receiver follows the contexts: a nullable
+/// result, a member of that type, and extension properties on a value class, read and written.
+#[test]
+fn value_class_context_property_results_and_receivers_follow_their_declarations() {
+    let source = include_str!(
+        "box_regressions/contextParameters/valueClassContextPropertyReferenceResults.kt"
+    );
+    let reference = kotlinc_release_box_result(source);
+    assert_eq!(reference, "OK", "kotlinc {RELEASE} fixture must succeed");
+    let jdk = common::jdk_modules();
+    let krusty = common::expect_box_run(
+        source,
+        "ValueClassContextPropertyReferenceResults",
+        &[release_stdlib()],
+        Some(jdk.as_path()),
+    );
+    assert_eq!(krusty, reference, "krusty and kotlinc results differ");
+}
