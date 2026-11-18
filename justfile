@@ -55,6 +55,7 @@ reference-cache-tests:
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
     bash scripts/test-versioning.sh
+    bash scripts/test-install-maven.sh
 
 # The CI runner profile's machine and contention report, against stand-in /proc and /sys trees.
 runner-profile-tests:
