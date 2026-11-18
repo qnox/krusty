@@ -43188,17 +43188,7 @@ impl<'a> Checker<'a> {
                     std::mem::replace(&mut self.static_companion_this, static_this);
                 self.with_this_unavailable(|c| match &sc.delegation {
                     CtorDelegation::This(delegation) => {
-                        for &argument in &delegation.args {
-                            // A delegation lambda or callable reference is contextual: leave its
-                            // initial `Error` placeholder until the shared constructor selector maps
-                            // it to a parameter slot, just like a primary class-header base argument.
-                            if !matches!(
-                                c.file.expr(argument),
-                                Expr::Lambda { .. } | Expr::CallableRef { .. }
-                            ) {
-                                c.expr(delegation_scope, argument);
-                            }
-                        }
+                        c.type_delegation_arguments(delegation_scope, &delegation.args);
                         let candidates = c.this_ctor_delegation_candidates(
                             delegation_scope,
                             cl,
@@ -43236,14 +43226,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                     CtorDelegation::Super(delegation) => {
-                        for &argument in &delegation.args {
-                            if !matches!(
-                                c.file.expr(argument),
-                                Expr::Lambda { .. } | Expr::CallableRef { .. }
-                            ) {
-                                c.expr(delegation_scope, argument);
-                            }
-                        }
+                        c.type_delegation_arguments(delegation_scope, &delegation.args);
                         let candidates = c.super_ctor_delegation_candidates(current_owner);
                         c.select_ctor_delegation(
                             delegation_scope,
