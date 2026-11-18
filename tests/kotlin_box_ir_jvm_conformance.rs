@@ -784,6 +784,16 @@ fn compose_tracked_parameters_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_cross_file_calls_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("crossFileCalls");
+}
+
+#[test]
+fn compose_result_functions_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("resultFunctions");
+}
+
+#[test]
 fn compose_default_arguments_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("defaultArguments");
 }
@@ -841,6 +851,21 @@ fn compose_library_calls_are_byte_identical_to_kotlinc() {
 #[test]
 fn compose_library_default_arguments_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("libraryDefaultArguments");
+}
+
+#[test]
+fn compose_inferred_parameter_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("inferredStability");
+}
+
+#[test]
+fn compose_runtime_parameter_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("runtimeParameterStability");
+}
+
+#[test]
+fn compose_library_calls_with_many_parameters_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("libraryManyParameters");
 }
 
 #[test]
