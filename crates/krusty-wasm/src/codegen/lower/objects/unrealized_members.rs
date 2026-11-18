@@ -23,7 +23,7 @@ use krusty::types::{Ty, TyKind};
 
 use super::super::super::super::boxes::is_boxed_scalar;
 use super::super::super::super::encode::ValType;
-use super::super::super::super::function_value_names::named_shape;
+use super::super::super::super::function_value_names::{named_shape, sam_class_name};
 use super::super::super::any_member_reach::Receiver;
 use super::{carrier, Body, Unsupported};
 
@@ -316,7 +316,7 @@ fn converts_function_values(ir: &IrFile) -> bool {
 }
 
 /// Whether a reference of `ir` can hold a runtime object whose `toString` has no body: a function
-/// value kotlinc-wasm does not name for its shape, which only a lambda or a callable reference the
+/// value kotlinc-wasm does not name for its shape or its `fun interface`, which only a lambda or a callable reference the
 /// file emits creates.
 pub(in super::super) fn holds_unprinted_values(ir: &IrFile) -> bool {
     first_unprinted_value(ir).is_some()
@@ -330,5 +330,6 @@ fn first_unprinted_value(ir: &IrFile) -> Option<u32> {
             let node = ir.expr(expression);
             matches!(node, IrExpr::Lambda { .. } | IrExpr::CallableReference(_))
                 && named_shape(node, ir.checked_type(expression)).is_none()
+                && sam_class_name(ir, expression).is_none()
         })
 }
