@@ -990,7 +990,6 @@ fp/remainderMixedIntFp.kt
 fp/remainderMixedLongFpLargeRatio.kt
 fp/remainderVsModDouble.kt
 fp/remainderVsModFloat.kt
-fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
 fullValueClasses/inapplicableTypes.kt
 fullValueClasses/initializationOrderWithAbstractProperty.kt
