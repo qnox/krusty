@@ -58,6 +58,16 @@ fn wasm_official_dependency_generic_classes_lower_from_their_bodies() {
     );
 }
 
+/// Both the private class and the distinct local SAM implement the same inherited diamond.
+/// The original whole program also retains null, unrelated-object and evaluation-order checks.
+#[test]
+fn wasm_official_inherited_module_sam_members_reach_their_own_implementation() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/selectedDependencyInterfaceCasts.kt"),
+        "SelectedDependencyInterfaceCasts",
+    );
+}
+
 /// Run the shared two-module program through the product producer, then compile its consumer
 /// against the library the exact official Wasm compiler produces and run it, on every target.
 fn run_against_official_producer(source: &str, name: &str) {
