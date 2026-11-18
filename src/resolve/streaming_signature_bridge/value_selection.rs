@@ -109,8 +109,11 @@ impl ProductionSignatureSemantics<'_> {
                     }
                 }
             }
-            if let Ok(value) = self.qualified_receiver_ty(scope, spelling, origin, demand) {
-                return Ok(SelectedValue::plain(value));
+            match self.qualified_receiver_ty(scope, spelling, origin, demand) {
+                Ok(value) => return Ok(SelectedValue::plain(value)),
+                // A selected member read commits to its property: still being inferred is a cycle.
+                Err(failure) if failure.in_progress_declaration().is_some() => return Err(failure),
+                Err(_) => {}
             }
             if let Some((qualifier, name)) = spelling.rsplit_once('.') {
                 let package = crate::types::type_name(&qualifier.replace('.', "/"));

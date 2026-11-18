@@ -1676,8 +1676,25 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         origin,
                         later,
                     } => {
-                        let callee =
-                            evaluate_expression(semantics, callee, graph, demand, memo, computing)?;
+                        // A callee whose type is still being computed has no `invoke`: only a
+                        // selection that commits to it is a recursive problem, so the call moves
+                        // to the lower-priority alternative.
+                        let callee = match evaluate_expression(
+                            semantics, callee, graph, demand, memo, computing,
+                        ) {
+                            Ok(callee) => callee,
+                            Err(failure) if failure.in_progress_declaration().is_some() => {
+                                match later {
+                                    Some(later) => {
+                                        return evaluate_expression(
+                                            semantics, later, graph, demand, memo, computing,
+                                        );
+                                    }
+                                    None => return Err(failure),
+                                }
+                            }
+                            Err(failure) => return Err(failure),
+                        };
                         let probes = graph
                             .call_arguments(arguments)
                             .iter()
