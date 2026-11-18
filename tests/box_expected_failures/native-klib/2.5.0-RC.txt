@@ -116,7 +116,6 @@ boxingOptimization/safeCallWithElvis.kt
 boxingOptimization/safeCallWithElvisMultipleFiles.kt
 boxingOptimization/simple.kt
 boxingOptimization/simpleUninitializedMerge.kt
-boxingOptimization/taintedValues.kt
 boxingOptimization/unsafeRemoving.kt
 boxingOptimization/unsignedArrayForEach.kt
 boxingOptimization/variables.kt
@@ -144,7 +143,6 @@ bridges/test23.kt
 bridges/test24.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/boundReferences.kt
-callableReference/adaptedReferences/genericVarargArrayAgainstTypeVariableReferencedFunctions.kt
 callableReference/adaptedReferences/inlineDefault.kt
 callableReference/adaptedReferences/inlineVararg.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
@@ -207,10 +205,6 @@ casts/mutableCollections/reifiedIsWithMutable.kt
 casts/mutableCollections/reifiedSafeAsWithMutable.kt
 casts/mutableCollections/safeAsWithMutable.kt
 casts/mutableCollections/weirdMutableCasts.kt
-casts/nativeCCEMessage/castAnonymousClass.kt
-casts/nativeCCEMessage/castGlobalClass.kt
-casts/nativeCCEMessage/castLocalClass.kt
-casts/nativeCCEMessage/castToLocalClass.kt
 casts/toNativePointers.kt
 classDelegation/delegationToStarProjectedType.kt
 classDelegation/multipleModules.kt
@@ -304,7 +298,6 @@ contextParameters/callableReferences/contextual/equality.kt
 contextParameters/callableReferences/contextual/fakeOverride.kt
 contextParameters/callableReferences/contextual/funInterfaceEquality.kt
 contextParameters/callableReferences/contextual/generic.kt
-contextParameters/callableReferences/contextual/localFunction.kt
 contextParameters/callableReferences/contextual/nullableContextArg.kt
 contextParameters/callableReferences/contextual/propertyEquality.kt
 contextParameters/callableReferences/contextual/shapes.kt
@@ -315,7 +308,6 @@ contextParameters/contextualCallableReferenceEquality.kt
 contextParameters/contextualCallableReferenceReturnType.kt
 contextParameters/evaluationOrder.kt
 contextParameters/explicitPassing.kt
-contextParameters/genericPropertyWithContextParameters.kt
 contextParameters/inlineAnonymousParameter.kt
 contextParameters/kt51863.kt
 contextParameters/kt53551.kt
@@ -928,7 +920,6 @@ evaluate/intrinsicConst/constTrim.kt
 evaluate/intrinsicConst/equals_after.kt
 evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/serialization/typeAnnotation.kt
-evaluate/thisPlusString.kt
 exceptions/catch1.kt
 exceptions/catch2.kt
 exceptions/rethrow.kt
@@ -964,7 +955,6 @@ funInterface/funInterfaceWithSuspendMethod.kt
 funInterface/implIsNotFunction.kt
 funInterface/inlinedSamWrapper.kt
 funInterface/intersectionTypeToFunInterfaceConversion.kt
-funInterface/kt46512_indyFunInterfaceOverCallableReference.kt
 funInterface/kt49384.kt
 funInterface/kt49384_getSame.kt
 funInterface/kt77685-sam.kt
@@ -1033,7 +1023,6 @@ inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inference/pcla/substituteStubTypeIntoCR.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt
 inference/pcla/topDownCompletionBreakedByNonBuilderInferenceSession.kt
-inference/pcla/withoutAnnotation.kt
 inference/plusAssignInsideLambda.kt
 inference/selfBoundedVariableFromFunctionTypeBeforeElvisThrow.kt
 initializers/correctOrder1.kt
@@ -1210,7 +1199,6 @@ inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClas
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypes.kt
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypesGeneric.kt
 inlineClasses/kt27113.kt
-inlineClasses/kt28405.kt
 inlineClasses/kt32793.kt
 inlineClasses/kt70461.kt
 inlineClasses/privateConstructorFunInterfaceMultiModule.kt
@@ -1536,7 +1524,6 @@ ranges/forInCharSequenceLengthDecreasedInLoopBody.kt
 ranges/forInCharSequenceLengthIncreasedInLoopBody.kt
 ranges/forInCharSequenceWithCustomIterator.kt
 ranges/forInCharSequenceWithMultipleGetFunctions.kt
-ranges/forInDoubleRangeWithCustomIterator.kt
 ranges/forInDownTo/forIntInDownTo.kt
 ranges/forInDownTo/forIntInDownToWithNonConstBounds.kt
 ranges/forInDownTo/forIntInNonOptimizedDownTo.kt
@@ -1594,7 +1581,6 @@ ranges/forInUntil/kt42533.kt
 ranges/forNullableIntInRangeWithImplicitReceiver.kt
 ranges/kt37370a.kt
 ranges/kt47492.kt
-ranges/safeCallRangeTo.kt
 ranges/stepped/expression/downTo/emptyProgression.kt
 ranges/stepped/expression/downTo/illegalStepNegative.kt
 ranges/stepped/expression/downTo/illegalStepNonConst.kt
@@ -2117,7 +2103,6 @@ reflection/types/typeArguments.kt
 reflection/types/useSiteVariance.kt
 regressions/directInvokeNameBasedDestructuring.kt
 regressions/floatingRangeContainsMixedWidths.kt
-regressions/generic.kt
 regressions/kt15196.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
@@ -2289,7 +2274,6 @@ volatile/intrinsicsOnCompanionBlocks.kt
 volatile/intrinsicsOnCompanionExtensions.kt
 volatile/intrinsicsOnGlobal.kt
 volatile/messagePassing.kt
-when/NoWhenBranchMatchedExceptionAfterAnonymous.kt
 when/enumOptimization/bigEnum.kt
 when/enumOptimization/duplicatingItems.kt
 when/enumOptimization/enumInsideClassObject.kt
