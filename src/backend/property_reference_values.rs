@@ -23,25 +23,17 @@ use crate::ir::{
     IrCheckedSubstitution, IrExpr, IrFile, IrFunction, IrLocalPropertyLayout, IrPropertyDispatch,
     IrPropertyFunctionReference, IrTypeOp,
 };
-use crate::types::{SemanticCallRole, Ty, TyKind};
+use crate::types::{Ty, TyKind};
 
 /// Realize every source `KProperty` reference of `ir` as a function value.
 ///
 /// A delegated property's `KProperty` argument is the delegate's metadata, not a source value,
 /// and stays checked.
 ///
-/// A mutable reference gets its write adapter only when the unit writes through some mutable
-/// reference. Each `set` member is named by a call through it, as `get` is, so a unit with no
-/// such call has no member a writer could implement, and a writer would make the property's
-/// setter an emission root of its own.
+/// A mutable reference also gets its write adapter. Which unit calls `set` on it is not this
+/// unit's to know: a delegated property's `setValue` body is a dependency unit that calls it, so a
+/// reference that advertises `KMutableProperty` implements `set` wherever it is created.
 pub fn realize(ir: &mut IrFile) {
-    let writes = ir.semantic_call_roles.values().any(|role| {
-        matches!(
-            role,
-            SemanticCallRole::KotlinPropertyReferenceSet(_)
-                | SemanticCallRole::KotlinPropertyReferenceDelegateSet(_)
-        )
-    });
     for id in 0..ir.exprs.len() as ExprId {
         let IrExpr::Checked(checked) = ir.expr(id) else {
             continue;
@@ -75,7 +67,6 @@ pub fn realize(ir: &mut IrFile) {
             binding: *binding,
             bound,
             mutable: *mutable,
-            writable: *mutable && writes,
             substitutions: substitutions.clone(),
             function_type: *function_type,
         };
@@ -92,8 +83,6 @@ struct Reference {
     /// The bound receiver, and whether it is the property's extension receiver.
     bound: Option<(ExprId, bool)>,
     mutable: bool,
-    /// The reference is mutable and the unit writes through some mutable reference.
-    writable: bool,
     substitutions: Vec<IrCheckedSubstitution>,
     function_type: Ty,
 }
@@ -142,7 +131,7 @@ fn function_value(ir: &mut IrFile, reference: Reference) -> Option<IrExpr> {
     params.extend(signature.params.iter().copied());
     let adapter = add_adapter(ir, params, signature.ret, body, captured);
     let writer = reference
-        .writable
+        .mutable
         .then(|| writer(ir, &reference, &shape, captured))
         .flatten();
     Some(IrExpr::CallableReference(Box::new(IrCallableReference {
