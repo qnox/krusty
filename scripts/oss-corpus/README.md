@@ -82,6 +82,14 @@ Each `corpus-<project>` workflow artifact holds that project's comparison and lo
 artifact holds `summary.md` and `summary.json` for the results produced by this run; the job summary
 displays the same Markdown report.
 
+To work on one failure, `repro.sh <project> <compile task path>` (for example
+`repro.sh ktor :ktor-io:compileKotlinJvm`) checks the project out the way the nightly does and
+compiles that one compilation the way the verify build does: kotlinc compiles it and everything it
+depends on, and krusty compiles it beside kotlinc against kotlinc's classes. It then prints every
+error krusty reported. It builds krusty and the plugin from the repository unless
+`$KRUSTY_BINARY` and `$KRUSTY_PLUGIN_REPOSITORY`/`$KRUSTY_PLUGIN_VERSION` name prebuilt ones, and it
+reuses its checkout, so a rerun after a krusty change costs one krusty build and one compilation.
+
 Setup fails fast: a failed fetch, a checkout that is not the pinned commit, a patch that does not
 apply, or a Kotlin version pin that does not match exactly one assignment (`pin.py`) stops the run
 before either build. A reference build that fails is still compared as far as it got, and then
