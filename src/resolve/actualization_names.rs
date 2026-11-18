@@ -378,6 +378,9 @@ fn bind_inherited_dependency_members(
         let dependency_supertypes = base
             .into_iter()
             .chain(headers.syntax.type_operands(supertypes).iter().copied())
+            // A written type argument specializes the supertype's members; the receiver built
+            // below carries only the classifier, so such a supertype contributes nothing.
+            .filter(|supertype| !has_type_arguments(headers, *supertype))
             .filter_map(|supertype| bindings.bound_type(stub.source, supertype))
             .filter(|supertype| !declarations.contains(supertype))
             .map(crate::types::Ty::obj_name)
@@ -394,11 +397,28 @@ fn bind_inherited_dependency_members(
     }
 }
 
+fn has_type_arguments(
+    headers: &crate::fir::StreamedHeaderModule,
+    supertype: crate::fir::HeaderTypeId,
+) -> bool {
+    let Some(crate::fir::HeaderTypeKind::Classifier { detail, .. }) =
+        headers.syntax.ty(supertype).map(|ty| ty.kind)
+    else {
+        return true;
+    };
+    headers
+        .syntax
+        .classifier_type(detail)
+        .is_none_or(|detail| !headers.syntax.type_operands(detail.arguments).is_empty())
+}
+
 /// The members of one name the shared member hierarchy selects for `receiver`, normalized to the
 /// evidence an `expect` member states. The hierarchy has already decided inheritance, overriding
 /// and specialization, so a member a nearer declaration overrides is absent. Private members are
-/// never inherited, and a property realized as a Java field or synthesized from Java accessors is
-/// not a declared Kotlin property, so it implements no `expect` property.
+/// never inherited. A member the `expect` side cannot state is excluded here, with its evidence
+/// intact, rather than projected into a record it would then equal: one with a receiver, context
+/// parameters, type parameters, `suspend` or `vararg`, an accessor with its own availability or
+/// visibility, or a property that is a Java field or synthesized from Java accessors.
 fn inherited_members(
     platform: &dyn SemanticPlatform,
     receiver: crate::types::Ty,
@@ -411,6 +431,13 @@ fn inherited_members(
         .filter(|function| {
             function.kind == crate::libraries::FnKind::Member
                 && crate::symbol_resolver::member_is_inheritable(function.callable.visibility)
+                && function.context_count == 0
+                && !function.flags.suspend
+                && !function.call_sig.vararg
+                && function
+                    .generic_sig
+                    .as_ref()
+                    .is_none_or(|signature| signature.formals.is_empty())
         })
         .map(|function| crate::fir::InheritedDependencyMember {
             kind: crate::fir::DeclarationKind::Function,
@@ -426,6 +453,13 @@ fn inherited_members(
             property.kind == crate::libraries::PropKind::Member
                 && property.producer == crate::libraries::PropertyProducer::KotlinAccessor
                 && crate::symbol_resolver::member_is_inheritable(property.visibility)
+                && property.context_count == 0
+                && property.formals.is_empty()
+                && property.readable()
+                && property.setter.as_ref().is_none_or(|_| {
+                    property.accessor_availability.setter
+                        && property.setter_visibility == property.visibility
+                })
         })
         .map(|property| crate::fir::InheritedDependencyMember {
             kind: crate::fir::DeclarationKind::Property,
