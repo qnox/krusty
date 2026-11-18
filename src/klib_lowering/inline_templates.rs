@@ -335,7 +335,7 @@ fn sign_template(
 /// How a call expands each parameter, as checked FIR publishes it for a source inline function:
 /// the extension receiver is a receiver, and a value or context parameter splices when it is a
 /// non-null function type that did not write `noinline`.
-fn expansion_modes(
+pub(super) fn expansion_modes(
     params: &[Ty],
     receiver: Option<usize>,
     modifiers: &[InlineParameterModifier],
@@ -359,7 +359,7 @@ fn expansion_modes(
 }
 
 /// The modifiers aligned with every parameter: the extension receiver writes none.
-fn modifiers_with_receiver(
+pub(super) fn modifiers_with_receiver(
     modifiers: &[InlineParameterModifier],
     receiver: Option<usize>,
 ) -> Vec<InlineParameterModifier> {

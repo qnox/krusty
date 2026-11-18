@@ -584,6 +584,9 @@ impl Backend for CraneliftBackend {
         for (identity, symbol) in lowered.class_descriptors {
             state.laid_out.publish_descriptor(identity, symbol);
         }
+        for (identity, entries) in lowered.value_boxes {
+            state.laid_out.publish_value_boxes(identity, entries);
+        }
         state.abi.extend(lowered.abi);
         for (class, record) in lowered.laid_out {
             state.laid_out.insert(class, record);
