@@ -1570,6 +1570,10 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.active_sam_placement()
     }
 
+    fn sam_placement(&self) -> Result<crate::ir::IrSamPlacement, KlibBodyDeclineReason> {
+        self.active_sam_placement()
+    }
+
     fn dependency_override(
         &self,
         symbol: &KlibIrSymbol,
