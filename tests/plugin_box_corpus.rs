@@ -332,10 +332,12 @@ fn run_corpus(corpus: &PluginCorpus) {
         );
         return;
     }
-    if std::env::var_os("KRUSTY_PLUGIN_CORPUS_REPORT").is_some() {
-        for (key, reason) in &reasons {
-            eprintln!("{} corpus: not passing: {key}: {reason}", corpus.plugin);
-        }
+    for line in not_passing_report(
+        &corpus.plugin,
+        &reasons,
+        std::env::var_os("KRUSTY_PLUGIN_CORPUS_REPORT").is_some(),
+    ) {
+        eprintln!("{line}");
     }
     let root = boxes_dir(corpus);
     let included = box_ratchet::load_path(
@@ -395,6 +397,34 @@ fn run_corpus(corpus: &PluginCorpus) {
 }
 
 /// Every compiler plugin's box corpus matches its committed inventories.
+/// The lines `KRUSTY_PLUGIN_CORPUS_REPORT` prints: one per case that does not pass, with its reason;
+/// nothing unless the report is enabled.
+fn not_passing_report(plugin: &str, reasons: &BTreeMap<&str, &str>, enabled: bool) -> Vec<String> {
+    if !enabled {
+        return Vec::new();
+    }
+    reasons
+        .iter()
+        .map(|(key, reason)| format!("{plugin} corpus: not passing: {key}: {reason}"))
+        .collect()
+}
+
+#[test]
+fn the_report_names_each_non_passing_case_with_its_reason_only_when_enabled() {
+    let reasons = BTreeMap::from([("a.kt", "box() returned None"), ("b.kt", "no box()")]);
+    assert_eq!(
+        not_passing_report("demo", &reasons, true),
+        [
+            "demo corpus: not passing: a.kt: box() returned None",
+            "demo corpus: not passing: b.kt: no box()",
+        ]
+    );
+    assert_eq!(
+        not_passing_report("demo", &reasons, false),
+        Vec::<String>::new()
+    );
+}
+
 #[test]
 fn plugin_box_corpora_match_their_inventories() {
     let runnable: Vec<&PluginCorpus> = plugin_corpus::all()
