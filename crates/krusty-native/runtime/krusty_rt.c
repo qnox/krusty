@@ -70,6 +70,12 @@ KT_MARKER_TYPE(kt_type_comparable, "kotlin.", "Comparable")
 KT_MARKER_TYPE(kt_type_char_sequence, "kotlin.", "CharSequence")
 KT_MARKER_TYPE(kt_type_appendable, "kotlin.text.", "Appendable")
 
+/* `kotlin.ranges.ClosedRange` has no instances of its own either: each of the runtime's ranges
+   (`IntRange`, `LongRange`, ...) points at it, so a cast or `is` against the interface asks the
+   one marker, as it does of a class of the program that implements the interface. */
+KT_MARKER_TYPE(kt_type_closed_range, "kotlin.ranges.", "ClosedRange")
+static const KType *const kt_range_interfaces[] = {&kt_type_closed_range};
+
 /* `kotlin.Function` and each arity of it. A function value is an object of a type of its own —
    the generator emits one per lambda and per callable reference — so an `is` against a function
    type has no single descriptor to compare against. These are that descriptor: each function
@@ -2205,6 +2211,16 @@ static const kt_fn kt_range_vtable[] = {(kt_fn)kt_range_equals, (kt_fn)kt_range_
                               .vtable = table,                                                     \
                               .vtable_length = 3};
 
+/* A range proper, as against its progression: it is a `ClosedRange` of its element kind too. */
+#define KT_CLOSED_RANGE_TYPE(identifier, simple, parent)                                           \
+    const KType identifier = {KT_NAMED("kotlin.ranges.", simple),                                  \
+                              .instance_size = sizeof(KRange),                                     \
+                              .super = parent,                                                     \
+                              .vtable = kt_range_vtable,                                           \
+                              .vtable_length = 3,                                                  \
+                              .interfaces = kt_range_interfaces,                                   \
+                              .interface_count = 1};
+
 /* Each range subclasses its element's progression, as Kotlin's `IntRange : IntProgression` does, so
    an `is IntProgression` walk of the super chain finds it. Kotlin declares only two UNSIGNED pairs
    — `UByte.rangeTo` and `UShort.rangeTo` both answer a `UIntRange`. */
@@ -2217,16 +2233,11 @@ KT_RANGE_TYPE(kt_type_uint_progression, "kotlin.ranges.", "UIntProgression", KRa
               kt_range_vtable)
 KT_RANGE_TYPE(kt_type_ulong_progression, "kotlin.ranges.", "ULongProgression", KRange,
               kt_range_vtable)
-KT_RANGE_SUBTYPE(kt_type_int_range, "kotlin.ranges.", "IntRange", KRange, kt_range_vtable,
-                 &kt_type_int_progression)
-KT_RANGE_SUBTYPE(kt_type_long_range, "kotlin.ranges.", "LongRange", KRange, kt_range_vtable,
-                 &kt_type_long_progression)
-KT_RANGE_SUBTYPE(kt_type_char_range, "kotlin.ranges.", "CharRange", KRange, kt_range_vtable,
-                 &kt_type_char_progression)
-KT_RANGE_SUBTYPE(kt_type_uint_range, "kotlin.ranges.", "UIntRange", KRange, kt_range_vtable,
-                 &kt_type_uint_progression)
-KT_RANGE_SUBTYPE(kt_type_ulong_range, "kotlin.ranges.", "ULongRange", KRange, kt_range_vtable,
-                 &kt_type_ulong_progression)
+KT_CLOSED_RANGE_TYPE(kt_type_int_range, "IntRange", &kt_type_int_progression)
+KT_CLOSED_RANGE_TYPE(kt_type_long_range, "LongRange", &kt_type_long_progression)
+KT_CLOSED_RANGE_TYPE(kt_type_char_range, "CharRange", &kt_type_char_progression)
+KT_CLOSED_RANGE_TYPE(kt_type_uint_range, "UIntRange", &kt_type_uint_progression)
+KT_CLOSED_RANGE_TYPE(kt_type_ulong_range, "ULongRange", &kt_type_ulong_progression)
 
 /* The five element kinds, which index the tables below: a kind's range, its progression, and the
    iterator either hands out (defined with the iterator). */
@@ -2845,6 +2856,7 @@ static KRef kt_floating_range_to_string(KRef self) {
 
 #undef KT_RANGE_TYPE
 #undef KT_RANGE_SUBTYPE
+#undef KT_CLOSED_RANGE_TYPE
 
 /* ---- comparable ranges ----------------------------------------------------------------------
 
