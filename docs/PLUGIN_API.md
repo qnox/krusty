@@ -202,7 +202,7 @@ result, any other composable function type or use of a composable lambda paramet
 through lambda parameters, an explicit applier target, a call argument the pass cannot classify as constant, passed on or computed, a grouping annotation (`@NonRestartableComposable`, `@NonSkippableComposable`,
 `@ReadOnlyComposable`, `@ExplicitGroupsComposable`), a call to a composable of another file of
 the module, a call to a library composable that takes a receiver, declares default arguments, a
-function-typed parameter, returns a result or is `inline`, a composable
+function-typed parameter other than `@Composable () -> Unit`, returns a result or is `inline`, a composable
 lambda that captures a composable lambda parameter or passes a captured local to a composable call, holds
 another lambda or is empty, a composable
 whose lambda numbering another lambda or overload shares, and a class whose stability its file

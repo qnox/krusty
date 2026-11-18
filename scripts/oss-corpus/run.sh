@@ -78,12 +78,14 @@ build() {
   local root=$checkout/$gradle_root
   local manifest=$logs/$name.$mode.compilations.tsv
   local start code=0 offline=()
+  local deps=$logs/$name.$mode.deps.tsv
   [ "$mode" = warmup ] || offline=(--offline)
-  rm -f "$manifest"
+  rm -f "$manifest" "$deps"
   start=$(date +%s)
   (
     cd "$root"
     CORPUS_COMPILATIONS=$manifest CORPUS_TASK_TIMES=$logs/$name.$mode.tasks.tsv \
+      CORPUS_TASK_DEPS=$deps \
       python3 "$here/measure.py" "$logs/$name.$mode.metrics.json" \
       timeout 5400 ./gradlew --no-daemon -I "$here/corpus.init.gradle" \
       "${toolchains[@]}" "${offline[@]}" "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand \
