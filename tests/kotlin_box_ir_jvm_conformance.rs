@@ -884,6 +884,11 @@ fn compose_file_extension_calls_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_extension_receiver_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("extensionReceiverStability");
+}
+
+#[test]
 fn compose_captured_locals_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("capturedLocals");
 }
