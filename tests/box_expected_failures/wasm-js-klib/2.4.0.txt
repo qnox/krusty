@@ -155,7 +155,6 @@ bridges/internalMethodOverridePublishedApi.kt
 bridges/multipleModules1.kt
 bridges/overridesTwoDeclarations/abstractDeclarationOverridesAbstractAndConcreteDeclarations.kt
 bridges/propertyDiamondFakeOverride.kt
-bridges/special.kt
 bridges/specialGeneric.kt
 bridges/test10.kt
 bridges/test11.kt
@@ -2548,13 +2547,10 @@ size/helloWorld.kt
 size/helloWorldPromise.kt
 size/objectsOptimization.kt
 smartCasts/smartcastFromGenericToString.kt
-specialBuiltins/bridgeNotEmptyMap.kt
 specialBuiltins/bridges.kt
 specialBuiltins/emptyList.kt
 specialBuiltins/enumAsOrdinaled.kt
 specialBuiltins/exceptionCause.kt
-specialBuiltins/notEmptyListAny.kt
-specialBuiltins/notEmptyMap.kt
 specialBuiltins/throwable.kt
 specialBuiltins/throwableCause.kt
 specialBuiltins/throwableComplex.kt
