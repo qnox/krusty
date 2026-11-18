@@ -555,6 +555,21 @@ impl CallableRegistry {
                             callable.compiler_operation(),
                         )
                     })?;
+                    let dispatch_entry = self.dependency_dispatches.get(identity).copied();
+                    if dispatch_receiver.is_some()
+                        && extension_receiver_parameter.is_some()
+                        && dispatch_entry.is_none()
+                        && super::lower::library_members::is_dispatched_interface_member(callable)
+                    {
+                        // The published body is the default of a member extension the receiver's
+                        // class may override, and its module exports no entry dispatching on the
+                        // receiver: calling the body would bypass an override.
+                        return Err(Unsupported::from(format!(
+                            "a call through the dependency interface member extension `{}` \
+                             without an entry dispatching on its receiver",
+                            callable.name
+                        )));
+                    }
                     targets.external.insert(*target, index);
                     if let Some(entry) = default_entry {
                         targets.external_defaults.insert(*target, entry);
@@ -568,7 +583,7 @@ impl CallableRegistry {
                             .external_default_signatures
                             .insert(*target, signature.clone());
                     }
-                    if let Some(&entry) = self.dependency_dispatches.get(identity) {
+                    if let Some(entry) = dispatch_entry {
                         targets.external_dispatches.insert(*target, entry);
                     }
                     targets.signatures.insert(

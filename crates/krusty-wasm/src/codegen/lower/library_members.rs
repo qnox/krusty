@@ -152,6 +152,14 @@ fn is_reference_name(property: &BackendPropertyFact) -> bool {
     &*property.name == "name" && property.owner.matches("kotlin/reflect/KCallable")
 }
 
+/// Whether `fact` is a member of a library interface that dispatches on its receiver, which a
+/// class implementing the interface may override.
+pub(in crate::codegen) fn is_dispatched_interface_member(fact: &BackendCallableFact) -> bool {
+    fact.owner_is_interface
+        && fact.kind == ExternalCallableKind::Member
+        && fact.member_realization == MemberRealization::Dispatch
+}
+
 /// Whether `fact` is an abstract member of a library class: no body of its own runs, only the
 /// overrides the receiver's class and its superclasses supply, as an interface's member.
 pub(in crate::codegen) fn is_abstract_class_member(fact: &BackendCallableFact) -> bool {
