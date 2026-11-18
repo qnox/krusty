@@ -959,8 +959,10 @@ pub struct TransformedEntry<'a> {
 pub struct DependencyCallableShape {
     /// An `inline` function, whose body a call splices.
     pub inline: bool,
-    /// An extension or a function with context parameters, which takes a receiver value.
-    pub receiver: bool,
+    /// An extension function, whose receiver is its first source parameter.
+    pub extension: bool,
+    /// A function with context parameters, which take values ahead of its source parameters.
+    pub context_parameters: bool,
     /// A source parameter declares a default value.
     pub defaults: bool,
     /// The parameters the declaration's compiled entry takes after its source parameters, which

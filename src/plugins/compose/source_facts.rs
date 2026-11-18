@@ -52,8 +52,11 @@ pub(super) struct RestartableFunction {
     pub(super) declaration_line: u32,
     /// The 1-based line of the body's closing brace, where the group ends.
     pub(super) closing_line: u32,
-    /// The function's value parameters, which its `$changed` bits track slot by slot.
+    /// The function's value parameters, which its `$changed` bits track slot by slot. An extension
+    /// function's receiver is the first, and `$default` bits number the parameters after it.
     pub(super) parameters: Vec<TrackedParameter>,
+    /// Whether the first tracked parameter is the extension receiver.
+    pub(super) receiver: bool,
     /// The function's direct composable calls, in source order.
     pub(super) calls: Vec<ComposableCallSite>,
     /// The lifting sequence the function's recompose lambda is numbered in, and the function's
@@ -125,6 +128,9 @@ pub(super) struct ComposableCallSite {
     /// A library callee declares parameter defaults, so it takes a `$default` mask after its
     /// `$changed`, whether or not the call omits an argument.
     pub(super) library_mask: bool,
+    /// The first of `arguments` is the receiver of an extension function. It takes the first
+    /// `$changed` slot but no `$default` bit, and is the call's dispatch receiver, not an argument.
+    pub(super) receiver: bool,
     /// For each argument, the classes whose `$stable` the callee's `$changed` takes the argument's
     /// stability from, when its type's stability is decided when the caller runs.
     pub(super) stability: Vec<Vec<TypeName>>,
@@ -233,15 +239,20 @@ pub(super) fn record(
         let lambdas = (0..declaration.params.len())
             .map(|index| is_composable_lambda(ir, declaration.function, index, composable))
             .collect::<Vec<_>>();
-        let stabilities = declaration
-            .params
-            .iter()
-            .zip(&lambdas)
-            .map(|((_, ty), &lambda)| match lambda {
-                true => Ok(ParameterStability::Stable),
-                false => super::class_stability::parameter_stability(ir, &*runtime, *ty),
-            })
-            .collect::<Vec<_>>();
+        // An extension receiver is the first value of the frame, ahead of the declared parameters.
+        let receiver_stability = declaration
+            .receiver
+            .map(|ty| super::class_stability::parameter_stability(ir, &*runtime, ty));
+        let stabilities =
+            receiver_stability
+                .into_iter()
+                .chain(declaration.params.iter().zip(&lambdas).map(
+                    |((_, ty), &lambda)| match lambda {
+                        true => Ok(ParameterStability::Stable),
+                        false => super::class_stability::parameter_stability(ir, &*runtime, *ty),
+                    },
+                ))
+                .collect::<Vec<_>>();
         if let Some(what) = unsupported_group_annotation(ir, declaration.function)
             .or_else(|| unsupported_declaration(declaration, &stabilities))
             .or_else(|| unsupported_defaults(ir, declaration.function))
@@ -288,7 +299,11 @@ pub(super) fn record(
             });
             continue;
         };
-        let parameter_count = declaration.params.len() as u32;
+        // An extension receiver is the first value of the frame, ahead of the declared parameters.
+        let lambdas = std::iter::repeat_n(false, usize::from(declaration.receiver.is_some()))
+            .chain(lambdas)
+            .collect::<Vec<_>>();
+        let parameter_count = lambdas.len() as u32;
         if plain {
             if let Some(what) =
                 unsupported_plain_body(ir, declaration.function, &body, &calls, &lambdas)
@@ -373,6 +388,7 @@ pub(super) fn record(
                     call,
                     arguments: vec![ArgumentState::Forwarded(index)],
                     library_mask: false,
+                    receiver: false,
                     stability: Vec::new(),
                 });
                 locations.push(call_location(&positions, call_span));
@@ -438,21 +454,29 @@ pub(super) fn record(
             .param_defaults(declaration.function)
             .cloned()
             .unwrap_or_default();
-        let parameters = (0..)
-            .zip(&declaration.params)
+        // The recompose lambda names its captured receiver `this_<function>`.
+        let receiver = declaration.receiver.map(|ty| (format!("this_{name}"), ty));
+        let parameters = receiver
+            .iter()
+            .chain(&declaration.params)
             .zip(used)
-            .map(|((index, (name, ty)), used)| TrackedParameter {
+            .enumerate()
+            .map(|(frame, ((name, ty), used))| TrackedParameter {
                 name: name.clone(),
                 ty: *ty,
                 used,
-                default: defaults.get(index).copied().flatten(),
-                lambda: lambdas[index],
-                stability: stabilities[index].unwrap_or(ParameterStability::Undecided),
+                default: defaults.get(frame).copied().flatten(),
+                lambda: lambdas[frame],
+                stability: stabilities[frame].unwrap_or(ParameterStability::Undecided),
             })
             .collect::<Vec<_>>();
         let signature = format!(
-            "{name}({}){}",
-            parameters
+            "{}{name}({}){}",
+            declaration
+                .receiver
+                .map(|receiver| format!("{}.", simple_type_name(receiver)))
+                .unwrap_or_default(),
+            parameters[usize::from(declaration.receiver.is_some())..]
                 .iter()
                 .map(|parameter| {
                     // The frontend's type for a composable `() -> Unit` value.
@@ -468,12 +492,13 @@ pub(super) fn record(
         );
         // `parameterNameInformation`: the source parameters' names, which the runtime's tooling
         // maps the tracked slots back to.
-        let names = if parameters.is_empty() {
+        let declared = &parameters[usize::from(declaration.receiver.is_some())..];
+        let names = if declared.is_empty() {
             String::new()
         } else {
             format!(
                 "N({})",
-                parameters
+                declared
                     .iter()
                     .map(|parameter| parameter.name.as_str())
                     .collect::<Vec<_>>()
@@ -538,6 +563,7 @@ pub(super) fn record(
             declaration_line: positions.line(span.lo) + 1,
             closing_line: positions.line(body_span.hi.saturating_sub(1)) + 1,
             parameters,
+            receiver: declaration.receiver.is_some(),
             calls: sites,
             lifting: (lifting, declaration.source_order),
         });
@@ -801,14 +827,14 @@ fn call_location(positions: &Utf16Offsets, span: crate::diag::Span) -> String {
     format!("{}@{start}L{}", positions.line(span.lo), end - start)
 }
 
-/// The declaration shapes the restart-group transform does not handle yet. `lambdas` says which
-/// parameters are composable `() -> Unit` values, which are stable.
+/// The declaration shapes the restart-group transform does not handle yet. `stabilities` is what
+/// kotlinc infers of each tracked value's type, the receiver's first, or why it is not decided.
 fn unsupported_declaration(
     declaration: &crate::ir::IrPackageFunction,
     stabilities: &[Result<ParameterStability, &'static str>],
 ) -> Option<&'static str> {
-    if declaration.receiver.is_some() || declaration.context_count != 0 {
-        Some("a composable function with a receiver")
+    if declaration.context_count != 0 {
+        Some("a composable function with a context parameter")
     } else if declaration.vararg_index.is_some() {
         Some("a composable function with a vararg parameter")
     } else if let Some(&Err(what)) = stabilities.iter().find(|stability| stability.is_err()) {
@@ -1090,32 +1116,62 @@ fn argument_stability(
         Callee::Local(function) => ir.functions[*function as usize].params.clone(),
         _ => return Ok(none),
     };
-    site.arguments
+    // A library extension's receiver is its dispatch receiver, which the callee's parameters do
+    // not include; its type is not known here, so only the caller's own parameter or a
+    // constant says what it is.
+    let receivers = usize::from(site.receiver && matches!(&**callee, Callee::External { .. }));
+    let (receiver, declared) = site.arguments.split_at(receivers);
+    receiver
         .iter()
-        .zip(&params)
-        .map(|(argument, &ty)| match argument {
+        .map(|argument| match argument {
             ArgumentState::Static | ArgumentState::Omitted => Ok(Vec::new()),
-            // The stability of what is passed is that of the caller's own parameter, which may be
-            // a subtype of the callee's formal type.
             ArgumentState::Forwarded(parameter) => {
-                super::class_stability::parameter_stability_reads(
-                    ir,
-                    runtime,
-                    ir.functions[caller as usize].params[*parameter as usize],
-                )
+                forwarded_stability(ir, runtime, caller, *parameter)
             }
             ArgumentState::Uncertain => {
-                // The argument's own type may be narrower than the formal one, so only a formal
-                // type whose stability is certain says what the argument's is.
-                match super::class_stability::parameter_stability(ir, runtime, ty)? {
-                    ParameterStability::Undecided => {
-                        Err("a call argument whose type's stability is decided when it runs")
-                    }
-                    ParameterStability::Stable | ParameterStability::Unstable => Ok(Vec::new()),
-                }
+                Err("a call argument whose type's stability is decided when it runs")
             }
         })
+        .chain(
+            declared
+                .iter()
+                .zip(&params)
+                .map(|(argument, &ty)| match argument {
+                    ArgumentState::Static | ArgumentState::Omitted => Ok(Vec::new()),
+                    ArgumentState::Forwarded(parameter) => {
+                        forwarded_stability(ir, runtime, caller, *parameter)
+                    }
+                    ArgumentState::Uncertain => {
+                        // The argument's own type may be narrower than the formal one, so only a formal
+                        // type whose stability is certain says what the argument's is.
+                        match super::class_stability::parameter_stability(ir, runtime, ty)? {
+                            ParameterStability::Undecided => Err(
+                                "a call argument whose type's stability is decided when it runs",
+                            ),
+                            ParameterStability::Stable | ParameterStability::Unstable => {
+                                Ok(Vec::new())
+                            }
+                        }
+                    }
+                }),
+        )
         .collect()
+}
+
+/// The classes whose `$stable` a call reads for an argument that forwards `parameter` of `caller`:
+/// the stability of what is passed is that of the caller's own parameter, which may be a subtype of
+/// the callee's formal type.
+fn forwarded_stability(
+    ir: &IrFile,
+    runtime: &dyn PluginRuntime,
+    caller: FunId,
+    parameter: u32,
+) -> Result<Vec<TypeName>, &'static str> {
+    super::class_stability::parameter_stability_reads(
+        ir,
+        runtime,
+        ir.functions[caller as usize].params[parameter as usize],
+    )
 }
 
 /// What a call to a composable function of another file of the module does that the pass does not
@@ -1290,7 +1346,7 @@ impl BodyScope<'_> {
     ) -> Option<(ComposableCallSite, String)> {
         let found = &self.calls[&call];
         let declined = match found.origin {
-            CalleeOrigin::File => None,
+            CalleeOrigin::File => self.unsupported_file_call(ir, call),
             CalleeOrigin::Module => unsupported_module_call(ir, call),
             CalleeOrigin::Library(target) => self.unsupported_library_call(ir, call, target),
         };
@@ -1308,13 +1364,36 @@ impl BodyScope<'_> {
             });
             return None;
         };
-        let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
+        let IrExpr::Call {
+            callee,
+            args,
+            dispatch_receiver,
+            ..
+        } = &ir.exprs[call as usize]
+        else {
             unreachable!("a composable call is a call");
+        };
+        // A library extension's receiver is its dispatch receiver, the first tracked value.
+        let receiver = match (found.origin, dispatch_receiver) {
+            (CalleeOrigin::Library(_), &Some(receiver)) => Some(receiver),
+            _ => None,
         };
         let omitted = omitted_parameters(callee);
         let mut supplied = supplied_arguments(callee, args).peekable();
-        let arguments = (0..(args.len() + omitted.len()) as u32)
-            .map(|parameter| {
+        let arguments = receiver
+            .into_iter()
+            .map(|receiver| {
+                if matches!(ir.exprs[receiver as usize], IrExpr::Lambda { .. })
+                    || values.reads_captured_local(ir, receiver)
+                {
+                    return None;
+                }
+                Some(match argument_state(ir, receiver, values.count())? {
+                    ArgumentState::Forwarded(_) if !values.forwards() => ArgumentState::Uncertain,
+                    state => state,
+                })
+            })
+            .chain((0..(args.len() + omitted.len()) as u32).map(|parameter| {
                 if omitted.contains(&parameter) {
                     return Some(ArgumentState::Omitted);
                 }
@@ -1340,7 +1419,7 @@ impl BodyScope<'_> {
                     ArgumentState::Forwarded(_) if !values.forwards() => ArgumentState::Uncertain,
                     state => state,
                 })
-            })
+            }))
             .collect::<Option<Vec<_>>>();
         let Some(arguments) = arguments else {
             rejections.push(PluginRejection {
@@ -1365,10 +1444,29 @@ impl BodyScope<'_> {
                 call,
                 arguments,
                 library_mask,
+                receiver: receiver.is_some(),
                 stability: Vec::new(),
             },
             call_location(self.positions, found.own_span.unwrap_or(call_span)),
         ))
+    }
+
+    /// What a call to a composable function of the file does that the pass does not cover yet.
+    fn unsupported_file_call(&self, ir: &IrFile, call: ExprId) -> Option<&'static str> {
+        let IrExpr::Call {
+            callee,
+            dispatch_receiver,
+            ..
+        } = &ir.exprs[call as usize]
+        else {
+            unreachable!("a composable call is a call");
+        };
+        let function = callee.source_function()?;
+        (dispatch_receiver.is_some()
+            || ir.package_functions.iter().any(|declaration| {
+                declaration.function == function && declaration.receiver.is_some()
+            }))
+        .then_some("a call to a composable function of the file with a receiver")
     }
 
     /// What a call to the library composable `target` does that the pass does not cover yet.
@@ -1402,9 +1500,9 @@ impl BodyScope<'_> {
         };
         if shape.inline {
             Some("a call to an inline library composable function")
-        } else if shape.receiver
-            || dispatch_receiver.is_some()
+        } else if shape.context_parameters
             || extension_receiver_parameter.is_some()
+            || dispatch_receiver.is_some() != shape.extension
         {
             Some("a call to a library composable function with a receiver")
         } else if (0..params.len()).any(|index| {
@@ -1607,9 +1705,11 @@ fn push_body_children(ir: &IrFile, expression: ExprId, pending: &mut Vec<ExprId>
 }
 
 /// Whether parameter `index` of `function` is declared `@Composable () -> Unit`, the one composable
-/// function type whose calling convention the transform implements.
+/// function type whose calling convention the transform implements. `index` counts the declared
+/// value parameters, so an extension receiver ahead of them in the physical parameters is skipped.
 fn is_composable_lambda(ir: &IrFile, function: FunId, index: usize, composable: TypeName) -> bool {
-    let Some(&ty) = ir.functions[function as usize].params.get(index) else {
+    let receiver = usize::from(ir.extension_receiver_fns.contains(&function));
+    let Some(&ty) = ir.functions[function as usize].params.get(index + receiver) else {
         return false;
     };
     let TyKind::Fun(signature) = ty.kind() else {
