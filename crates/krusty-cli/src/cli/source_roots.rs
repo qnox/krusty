@@ -59,17 +59,22 @@ fn folded(file: &str) -> PathBuf {
             other => folded.push(other),
         }
     }
+    if folded.as_os_str().is_empty() {
+        folded.push(Component::CurDir);
+    }
     folded
 }
 
-/// The file a spelling names, as kotlinc compares source files: its folded path made absolute.
+/// The file a spelling names, as kotlinc compares source files: the absolute path with `.` and
+/// `..` folded lexically, so one file has one identity however it is spelled.
 fn identity(file: &str) -> PathBuf {
-    let folded = folded(file);
-    if folded.is_absolute() {
-        folded
-    } else {
-        std::env::current_dir().map_or(folded.clone(), |cwd| cwd.join(&folded))
+    let path = Path::new(file);
+    if path.is_absolute() {
+        return folded(file);
     }
+    let absolute =
+        std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path));
+    folded(&absolute.to_string_lossy())
 }
 
 fn walk(path: &str, out: &mut Vec<String>) {
@@ -149,6 +154,30 @@ mod tests {
                 vec![Some(vec![g]), Some(vec![aliased])]
             )
         );
+    }
+
+    #[test]
+    fn a_path_that_folds_away_names_the_current_directory() {
+        assert_eq!(
+            ["", ".", "./.", "src/..", "./src/../."].map(folded),
+            [
+                PathBuf::from("."),
+                PathBuf::from("."),
+                PathBuf::from("."),
+                PathBuf::from("."),
+                PathBuf::from(".")
+            ]
+        );
+        assert_eq!(identity("."), std::env::current_dir().unwrap());
+    }
+
+    #[test]
+    fn a_leading_parent_is_resolved_against_the_working_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        let name = cwd.file_name().unwrap().to_string_lossy().into_owned();
+        let up_and_down = format!("../{name}/Cargo.toml");
+        assert_eq!(identity(&up_and_down), cwd.join("Cargo.toml"));
+        assert_eq!(folded("../x/./y/.."), PathBuf::from("../x"));
     }
 
     #[test]
