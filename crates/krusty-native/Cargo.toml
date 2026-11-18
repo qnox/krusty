@@ -6,6 +6,11 @@ description = "Kotlin/Native backend for krusty: Cranelift code generation, a pr
 license = "Apache-2.0"
 repository = "https://github.com/qnox/krusty"
 
+[features]
+# Owned C-driver fixtures may select checked entries, including raw Any? safety boundaries.
+# This is deliberately separate from the module's production public C ABI.
+test-support = ["krusty/test-support"]
+
 [dependencies]
 krusty = { path = "../.." }
 # Reading the relocatable ELF objects krusty's linker takes in (the prebuilt runtime's and the
