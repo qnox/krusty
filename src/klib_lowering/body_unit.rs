@@ -1321,6 +1321,24 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.install_local_object(ir, signature)
     }
 
+    fn is_local_interface(&self, signature: &KlibIrSignature) -> bool {
+        self.sources
+            .bodies
+            .module_local_class(&self.active_module, signature)
+            .is_some_and(|(_, class)| {
+                crate::metadata::semantic::class_kind(class.base.flags)
+                    == crate::libraries::TypeKind::Interface
+            })
+    }
+
+    fn link_local_interface(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        self.install_local_interface(ir, signature)
+    }
+
     fn link_local_constructor(
         &mut self,
         ir: &mut IrFile,
