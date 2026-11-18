@@ -1515,39 +1515,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         classifier: TypeName,
         signature: &KlibPublicIdSignature,
     ) -> Result<(), KlibBodyDeclineReason> {
-        // The target realizes the value of an object whose representation it owns, as it does for
-        // a source reference of that object.
-        // An object an earlier unit materialized is read through that unit's export, as its own
-        // members are called.
-        if self.sources.callees.target_represents(classifier)
-            || self.realized_classes.contains(&classifier)
-        {
-            return Ok(());
-        }
-        // Any other library object is materialized with its instance, created by its own private
-        // primary constructor, as a call of one of its members materializes it.
-        let callees: &'s super::KlibCalleeFacts<'s> = self.sources.callees;
-        let Some(class) = callees.read_object(classifier) else {
-            // An object private to its enclosing class is no provider's: this library's own
-            // bodies link it as they link a class private to its enclosing class.
-            return self
-                .link_local_object(ir, &KlibIrSignature::Public(signature.clone()))
-                .map(|_| ());
-        };
-        let primary = class.primary_constructor.clone().ok_or(
-            KlibBodyDeclineReason::UnsupportedOperation("an object value"),
-        )?;
-        let identity = KlibDependencyCallable {
-            module: class.module.clone(),
-            declaration: KlibDeclarationSignature::Public(primary),
-        };
-        self.materialize_object(ir, &identity, class)?;
-        if !self.classes.contains_key(&identity) {
-            return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                "an object value",
-            ));
-        }
-        Ok(())
+        self.link_object_value(ir, classifier, signature)
     }
 
     fn target_represents(&self, classifier: TypeName) -> bool {

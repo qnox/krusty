@@ -314,6 +314,49 @@ impl<'s> Linker<'_, 's> {
         self.linked_local_member(ir, &key)
     }
 
+    /// Link a read of an object's value: the target's own, an earlier unit's, a provider's
+    /// materialized with its instance, or the object private to its enclosing class.
+    pub(super) fn link_object_value(
+        &mut self,
+        ir: &mut IrFile,
+        classifier: TypeName,
+        signature: &KlibPublicIdSignature,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        // The target realizes the value of an object whose representation it owns, as it does for
+        // a source reference of that object.
+        // An object an earlier unit materialized is read through that unit's export, as its own
+        // members are called.
+        if self.sources.callees.target_represents(classifier)
+            || self.realized_classes.contains(&classifier)
+        {
+            return Ok(());
+        }
+        // Any other library object is materialized with its instance, created by its own private
+        // primary constructor, as a call of one of its members materializes it.
+        let callees: &'s super::super::KlibCalleeFacts<'s> = self.sources.callees;
+        let Some(class) = callees.read_object(classifier) else {
+            // An object private to its enclosing class is no provider's: this library's own
+            // bodies link it as they link a class private to its enclosing class.
+            return self
+                .link_local_object(ir, &KlibIrSignature::Public(signature.clone()))
+                .map(|_| ());
+        };
+        let primary = class.primary_constructor.clone().ok_or(
+            KlibBodyDeclineReason::UnsupportedOperation("an object value"),
+        )?;
+        let identity = KlibDependencyCallable {
+            module: class.module.clone(),
+            declaration: KlibDeclarationSignature::Public(primary),
+        };
+        self.materialize_object(ir, &identity, class)?;
+        if !self.classes.contains_key(&identity) {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "an object value",
+            ));
+        }
+        Ok(())
+    }
+
     /// Install the object private to its enclosing class that `signature` names, so a read of its
     /// value shares the one instance its members are called on, and name its classifier.
     pub(super) fn link_local_object(
