@@ -36991,7 +36991,14 @@ impl<'a> Checker<'a> {
                     .callable
                     .transformed_entry_tail
                     .as_deref()
-                    .is_none_or(|tail| self.native_plugins.passes_transformed_entry_defaults(tail))
+                    .is_none_or(|tail| {
+                        self.native_plugins.passes_transformed_entry_defaults(
+                            &crate::plugins::TransformedEntry {
+                                annotations: &selected.callable.annotations,
+                                synthetic: tail,
+                            },
+                        )
+                    })
             {
                 selected.callable.default_call = true;
             } else {
