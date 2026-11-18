@@ -958,8 +958,59 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let property = self.file.callables.property(target)?;
-        let role = self.file.callables.callable(property.getter)?.semantic_role;
-        self.reference_member(role, receiver, &[], property.result)
+        let getter = self.file.callables.callable(property.getter)?;
+        let slot = reference_slot(getter.semantic_role, 0)?;
+        let owner = getter.physical_owner;
+        Some(self.reference_property_read(slot, owner, property.getter, receiver, property.result))
+    }
+
+    /// A reflection property read whose receiver may be a class of this file rather than a
+    /// reference object: `KCallable.name` on a class that implements `KProperty` by delegation or
+    /// override. Such a class lays its table out as a class, so the reference-object slot means
+    /// something else in it. Each implementor of the getter's owner is tested first and enters its
+    /// own getter; any other object is a reference object and answers from its fixed slot.
+    fn reference_property_read(
+        &mut self,
+        slot: u32,
+        owner: krusty::types::TypeName,
+        getter: krusty::fir::ExternalCallableId,
+        receiver: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let declared = self.file.implementors_of(owner);
+        if declared.is_empty() {
+            return self.reference_call(slot, receiver, &[], ret);
+        }
+        if self
+            .file
+            .module_facts
+            .dependency_implementors(owner)
+            .iter()
+            .any(|&file| file != self.file.source)
+        {
+            return Err(declined!(
+                "a read of `{}` where another file implements it",
+                owner.render().replace('/', ".")
+            ));
+        }
+        let implementors: Vec<_> = declared
+            .iter()
+            .filter_map(|&class| self.external_property_getter_slot(class, getter, ret))
+            .collect();
+        if implementors.len() != declared.len() {
+            return Err(declined!(
+                "a read of a `{}` member where this file implements it with a class whose \
+                 override cannot be dispatched to",
+                owner.render().replace('/', ".")
+            ));
+        }
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.dispatch_by_implementor_with(&implementors, object, &[], ret, false, |body, object| {
+            body.reference_slot_call(slot, object, Vec::new(), ret)
+        })
     }
 
     /// `p.getValue(thisRef, property)` and `p.setValue(thisRef, property, value)`.
@@ -1056,6 +1107,17 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
+        self.reference_slot_call(slot, object, arguments, ret)
+    }
+
+    /// Enter `slot` of the reference object `object` with `arguments`, each already a reference.
+    fn reference_slot_call(
+        &mut self,
+        slot: u32,
+        object: Value,
+        mut arguments: Vec<Value>,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
         // `get()` on a BOUND reference passes no receiver and the body ignores the slot anyway; a
         // null keeps one signature for both shapes.
         let expected = usize::from(slot == SET) + 1;
