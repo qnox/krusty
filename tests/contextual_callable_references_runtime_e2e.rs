@@ -59,7 +59,7 @@ fn expect_same_as_kotlinc_release(source: &str, stem: &str) {
 /// at the reference rather than at the call, and a reference whose type is left to inference.
 #[test]
 fn function_references_bind_their_context_arguments() {
-    let source = include_str!("contextual_references/contextualFunctionReferences.kt");
+    let source = include_str!("box_regressions/contextParameters/contextualFunctionReferences.kt");
     expect_same_as_kotlinc_release(source, "ContextualFunctionReferences");
 }
 
