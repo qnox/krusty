@@ -111,3 +111,21 @@ fun named() {}
 ";
     common::assert_sources_accepted_like_kotlinc(&[("A.java", java), ("test.kt", source)], &[]);
 }
+
+/// An expected `Array<out E>` only bounds an array factory's element: the array keeps the
+/// argument's own element type, whether the expectation is a projection, an inferred spread, or a
+/// plain literal.
+#[test]
+fn a_projected_array_expectation_keeps_the_arguments_element_type() {
+    let source = "\
+fun box(): String {
+    val projected: Array<out CharSequence> = arrayOf(*arrayOf(\"x\"))
+    val inferred = arrayOf(*arrayOf(\"x\"))
+    val literal: Array<out CharSequence> = arrayOf(\"x\")
+    val names = projected.javaClass.componentType.name + inferred.javaClass.componentType.name +
+        literal.javaClass.componentType.name
+    return if (names == \"java.lang.Stringjava.lang.Stringjava.lang.String\") \"OK\" else \"fail $names\"
+}
+";
+    common::expect_box_same_as_kotlinc(source, "projected_array_expectation");
+}

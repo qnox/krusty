@@ -54540,13 +54540,9 @@ impl<'a> Checker<'a> {
                 Some(self.type_ref_ty(scope, argument))
             }
         });
-        // An expected `Array<out E>` (a vararg parameter's array) bounds the element by `E`.
-        let expected_element = expected
-            .and_then(Ty::array_elem)
-            .and_then(|element| match element.kind() {
-                TyKind::OutProjection(inner) => Some(inner),
-                _ => element.projection_inner().is_none().then_some(element),
-            });
+        // An expected `Array<out E>` (a vararg parameter's array) reaches the array builtin as the
+        // projection: it bounds a spread array without selecting the invariant element type.
+        let expected_element = expected.and_then(Ty::array_elem);
         let element_hint = explicit_element.or(expected_element);
         let candidate = candidates.into_iter().next()?;
         let result = self.check_array_builtin(
