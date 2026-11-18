@@ -1618,6 +1618,15 @@ impl<'s> CallLinker for Linker<'_, 's> {
         .map(|handle| handle.target())
     }
 
+    fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
+        let record = self.sources.declarations.classifier(name);
+        record.map(|record| record.is_interface()).ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(format!(
+                "an object literal's supertype {name:?} is not a selected classifier"
+            ))
+        })
+    }
+
     fn link_accessor(
         &mut self,
         ir: &mut IrFile,
@@ -2580,9 +2589,8 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
-        let root = self.root.is_some_and(|root| root.identity() == identity);
         let callee = inline_functions::Candidate::new(declared, function, &header, selected);
-        callee.declare(ir, root, &mut |name| self.is_interface(name))?;
+        callee.declare(ir, self.root, identity, &mut |name| self.is_interface(name))?;
         self.functions.insert(identity.clone(), declared);
         if let Some(receiver) = header.value_receiver() {
             self.member_receivers.insert(identity.clone(), receiver);
