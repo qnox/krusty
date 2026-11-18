@@ -84,3 +84,30 @@ fn a_range_of_a_read_only_list_refuses_a_write() {
          }\n";
     every_backend_agrees_with_kotlinc("ReadOnlyRange", source);
 }
+
+/// A walk of a range, and a range of a range, see a write made through the range as a change of
+/// shape, as a growable list's own do.
+#[test]
+fn a_write_through_a_range_invalidates_its_walks_and_its_ranges() {
+    let source = "fun box(): String {\n\
+         \x20   val growable = mutableListOf(1, 2, 3, 4, 5)\n\
+         \x20   val outer = growable.subList(0, 4)\n\
+         \x20   val walk = outer.iterator()\n\
+         \x20   walk.next()\n\
+         \x20   outer.add(0, 9)\n\
+         \x20   try {\n\
+         \x20       walk.next()\n\
+         \x20       return \"fail walk\"\n\
+         \x20   } catch (e: ConcurrentModificationException) {\n\
+         \x20   }\n\
+         \x20   val inner = outer.subList(1, 3)\n\
+         \x20   outer.add(0, 8)\n\
+         \x20   try {\n\
+         \x20       inner[0]\n\
+         \x20       return \"fail inner\"\n\
+         \x20   } catch (e: ConcurrentModificationException) {\n\
+         \x20   }\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("InvalidatedByWrite", source);
+}
