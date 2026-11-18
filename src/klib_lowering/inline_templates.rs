@@ -764,6 +764,17 @@ impl CallLinker for TemplateCalls<'_> {
         }
     }
 
+    fn sam_signature(
+        &self,
+        target: Ty,
+    ) -> Result<crate::symbol_resolver::SamSignature, KlibBodyDeclineReason> {
+        crate::symbol_resolver::semantic_sam_signature(self.callees.source, target).ok_or(
+            KlibBodyDeclineReason::UnsupportedOperation(
+                "a SAM conversion to a non-functional type",
+            ),
+        )
+    }
+
     fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool {
         self.callees.constructor_bound(parameters, argument, bound)
     }

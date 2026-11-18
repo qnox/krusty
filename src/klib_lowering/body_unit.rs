@@ -1600,6 +1600,17 @@ impl<'s> CallLinker for Linker<'_, 's> {
         }
     }
 
+    fn sam_signature(
+        &self,
+        target: Ty,
+    ) -> Result<crate::symbol_resolver::SamSignature, KlibBodyDeclineReason> {
+        crate::symbol_resolver::semantic_sam_signature(self.sources.declarations, target).ok_or(
+            KlibBodyDeclineReason::UnsupportedOperation(
+                "a SAM conversion to a non-functional type",
+            ),
+        )
+    }
+
     fn link_accessor(
         &mut self,
         ir: &mut IrFile,

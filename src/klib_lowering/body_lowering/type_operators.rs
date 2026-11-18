@@ -59,6 +59,7 @@ impl BodyLowering<'_> {
                     IrTypeOp::CastNonNull
                 }
             }
+            KlibIrTypeOperator::SamConversion => return self.sam_conversion(target, argument, ty),
             other => return unsupported(type_operator_name(other)),
         };
         let arg = self.expression(argument)?;

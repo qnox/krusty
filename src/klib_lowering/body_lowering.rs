@@ -30,6 +30,7 @@ mod loops;
 mod object_literals;
 mod range_membership;
 mod safe_calls;
+mod sam_conversions;
 use safe_calls::NullProvenRead;
 mod string_templates;
 mod try_catch;
@@ -387,6 +388,12 @@ pub(super) trait CallLinker {
     fn is_interface(&self, name: TypeName) -> Lowered<bool> {
         let _ = name;
         unsupported("an object literal supertype")
+    }
+
+    /// The functional-interface shape a function converts to when it becomes a `target`.
+    fn sam_signature(&self, target: Ty) -> Lowered<crate::symbol_resolver::SamSignature> {
+        let _ = target;
+        unsupported("a SAM conversion")
     }
 }
 
