@@ -568,7 +568,7 @@ fn a_plugin_refusal_has_its_own_exit_status_and_verify_records_it_as_unsupported
 
     let refused = Probe::new(
         "refusal-status",
-        "package probe\nimport androidx.compose.runtime.Composable\n@Composable fun Greeting(names: List<String>) {}\n",
+        "package probe\nimport androidx.compose.runtime.Composable\nimport androidx.compose.runtime.ReusableContent\n@Composable fun Greeting() {\nReusableContent(1) { }\n}\n",
     );
     let compiled = refused.krusty(&classpath, &switches);
     assert_eq!(compiled.code, Some(3), "{}", compiled.stderr);
