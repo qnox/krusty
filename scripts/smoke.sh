@@ -135,6 +135,17 @@ while IFS='=' read -r name home; do
   export "$name=$home"
 done < <(scripts/provision-jdks.sh 8 11 17 21 25)
 
+export KRUSTY_BOX_CASE_TIMEOUT_MS="${KRUSTY_BOX_CASE_TIMEOUT_MS:-8000}"
+export KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE=1
+export KRUSTY_BOX_TIMEOUT_MS="${KRUSTY_BOX_TIMEOUT_MS:-60000}"
+export KRUSTY_KLIB_REFERENCE_CACHE="${KRUSTY_KLIB_REFERENCE_CACHE:-$PWD/target/cache/klib-references}"
+
+diagnostics=0
+[ "${KRUSTY_SMOKE_DIAGNOSTICS:-}" = 1 ] && diagnostics=1
+if [ -n "$(changed 'tests/diagnostics_false_accepts/**' 'tests/diagnostics_not_scored/**' 'tests/kotlin_diagnostics_jvm_conformance.rs')" ]; then
+  diagnostics=1
+fi
+
 # One lane of one version: the sampled corpus slice, then owned regressions. JVM, wasm-js and
 # wasm-wasi run every owned regression; their inventory keeps only the ones that apply to the
 # release under test. Native runs only the regressions this branch changes, because each
