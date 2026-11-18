@@ -24,6 +24,7 @@
 # KRUSTY_SMOKE_VERSIONS (default: newest, then the rest on failure; "all" runs every version,
 # or list versions), KRUSTY_SMOKE_JOBS (parallel jobs, default nproc),
 # KRUSTY_SMOKE_DIAGNOSTICS=1 (always run the diagnostics lane),
+# KRUSTY_JDK_CACHE (where missing JDK 8, 11, 17, 21 and 25 are downloaded),
 # KRUSTY_SMOKE_SKIP_CLIPPY=1 (skip step 2's clippy run, which is the slowest static check).
 set -euo pipefail
 
@@ -128,39 +129,11 @@ export KRUSTY_CONFORMANCE_TIMEOUT_SECONDS="${KRUSTY_SMOKE_CONFORMANCE_TIMEOUT_SE
 export KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS="${KRUSTY_SMOKE_TARGET_TIMEOUT_SECONDS:-1800}"
 export KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS="${KRUSTY_SMOKE_TARGET_TIMEOUT_SECONDS:-1800}"
 
-# The JDK feature releases the CLI corpus names that no home provides (the same places the test
-# looks: KRUSTY_JDK_<n>_HOME, JAVA_HOME_<n>_X64/ARM64, JAVA_HOME and /usr/lib/jvm). Without them
-# the CLI corpus cannot match CI. Only a warning here: a failing job stays a failure, whatever its
-# cause, and its log shows the cases.
-missing_jdks=()
-for n in 8 11 17 21; do
-  found=0
-  for var in "KRUSTY_JDK_${n}_HOME" "JAVA_HOME_${n}_X64" "JAVA_HOME_${n}_ARM64" JAVA_HOME; do
-    h="${!var:-}"
-    [ -n "$h" ] && [ -f "$h/release" ] && grep -qE "^JAVA_VERSION=\"($n|1\.$n)[.\"]" "$h/release" && found=1
-  done
-  for h in /usr/lib/jvm/*/; do
-    [ -f "$h/release" ] && grep -qE "^JAVA_VERSION=\"($n|1\.$n)[.\"]" "$h/release" && found=1
-  done
-  [ "$found" = 1 ] || missing_jdks+=("$n")
-done
-
-export KRUSTY_BOX_CASE_TIMEOUT_MS="${KRUSTY_BOX_CASE_TIMEOUT_MS:-8000}"
-export KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE=1
-export KRUSTY_BOX_TIMEOUT_MS="${KRUSTY_BOX_TIMEOUT_MS:-60000}"
-export KRUSTY_KLIB_REFERENCE_CACHE="${KRUSTY_KLIB_REFERENCE_CACHE:-$PWD/target/cache/klib-references}"
-
-diagnostics=0
-[ "${KRUSTY_SMOKE_DIAGNOSTICS:-}" = 1 ] && diagnostics=1
-if [ -n "$(changed 'tests/diagnostics_false_accepts/**' 'tests/diagnostics_not_scored/**' 'tests/kotlin_diagnostics_jvm_conformance.rs')" ]; then
-  diagnostics=1
-fi
-
-declare -A kotlinc_of box_of native_of
-
-if [ "${#missing_jdks[@]}" -gt 0 ]; then
-  step "warning: no JDK ${missing_jdks[*]} home found; the CLI corpus in the nonbox jobs will not match CI (set KRUSTY_JDK_<n>_HOME)"
-fi
+# The JDKs the CLI corpus names (8, 11, 17, 21) and the box runner's 25, downloaded into
+# target/cache/jdks when no installed home provides them (scripts/provision-jdks.sh).
+while IFS='=' read -r name home; do
+  export "$name=$home"
+done < <(scripts/provision-jdks.sh 8 11 17 21 25)
 
 # One lane of one version: the sampled corpus slice, then owned regressions. JVM, wasm-js and
 # wasm-wasi run every owned regression; their inventory keeps only the ones that apply to the
