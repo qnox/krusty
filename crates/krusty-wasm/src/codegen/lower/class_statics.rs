@@ -20,25 +20,47 @@ struct ClassInitializer {
 pub(super) struct ClassInitializers {
     plan: ClassStaticPlan,
     classes: HashMap<ClassId, ClassInitializer>,
+    /// Initializers another file reserved for a class of this file that runs no statics of its own:
+    /// they stay callable and do nothing.
+    unused: Vec<u32>,
 }
 
 impl ClassInitializers {
     /// Plan the file's class statics and reserve each class's initializer.
-    pub(super) fn declare(ir: &IrFile, module: &mut Module) -> Result<Self, Unsupported> {
+    pub(super) fn declare(
+        ir: &IrFile,
+        module: &mut Module,
+        properties: &mut PropertyRegistry,
+    ) -> Result<Self, Unsupported> {
         let plan = ClassStaticPlan::new(ir)
             .map_err(|unordered| format!("a static property of `{}`", unordered.owner.render()))?;
         let classes = plan
             .classes()
             .iter()
             .map(|group| {
+                // A file that reads this class's statics before this file is lowered reserved the
+                // function, which this file defines.
+                let owner = ir.classes[group.class as usize].fq_name;
                 let initializer = ClassInitializer {
-                    function: module.declare(),
+                    function: properties.owner_initializer(owner, || module.declare()),
                     flag: module.global(ValType::I32),
                 };
                 (group.class, initializer)
             })
             .collect();
-        Ok(Self { plan, classes })
+        let unused = properties
+            .reserved_owner_initializers()
+            .filter(|(owner, _)| {
+                ir.class_id_by_name(*owner)
+                    .is_some_and(|class| !plan.has_statics(class))
+            })
+            .map(|(_, function)| function)
+            .collect();
+        Ok(Self {
+            plan,
+            classes,
+            unused,
+        })
     }
 
     pub(super) fn plan(&self) -> &ClassStaticPlan {
@@ -79,6 +101,12 @@ impl ClassInitializers {
             let Body { code, locals, .. } = body;
             module.define(initializer.function, Function { ty, locals, code });
         }
+        for &function in &self.unused {
+            let ty = module.func_type(Vec::new(), Vec::new());
+            let Body { code, locals, .. } =
+                Body::new(context, module, runtime, &[], Default::default(), Ty::Unit);
+            module.define(function, Function { ty, locals, code });
+        }
         Ok(())
     }
 }
@@ -107,7 +135,26 @@ impl Body<'_> {
             Some(krusty::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. }) => {
                 self.initialize_static_owner(*storage)
             }
-            _ => Ok(()),
+            // A `companion { }` block property of another file: its owner's initializer, which
+            // that file defines, runs the owner's statics once.
+            _ => {
+                let owner =
+                    self.ir
+                        .referenced_module_properties
+                        .get(&target)
+                        .and_then(|reference| match reference.placement {
+                            krusty::ir::IrStaticPlacement::CompanionBlock { declaring_class } => {
+                                Some(declaring_class)
+                            }
+                            krusty::ir::IrStaticPlacement::Package => None,
+                        });
+                if let Some(function) =
+                    owner.and_then(|owner| self.properties.reserved_owner_initializer(owner))
+                {
+                    self.code.call(function);
+                }
+                Ok(())
+            }
         }
     }
 
