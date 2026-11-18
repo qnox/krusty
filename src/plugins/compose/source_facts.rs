@@ -1059,9 +1059,15 @@ fn unsupported_module_call(ir: &IrFile, call: ExprId) -> Option<&'static str> {
         ..
     }) = &**callee
     else {
-        return Some(
-            "a call to a composable function of another file with default arguments or a receiver",
-        );
+        return Some(match &**callee {
+            Callee::ModuleWithDefaults { .. }
+            | Callee::ModuleDefaultEntry { .. }
+            | Callee::CrossFile {
+                module_default_call: true,
+                ..
+            } => "a call to a composable function of another file with default arguments",
+            _ => "a call to a composable member of another file",
+        });
     };
     let Some(callable) = ir.referenced_module_callables.get(target) else {
         return Some("a call to a composable function of another file the module does not declare");
