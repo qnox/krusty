@@ -260,8 +260,12 @@ static uint32_t kt_list_version(KRef list) {
 static uint32_t kt_shape_of(KRef parent) { return kt_list_version(parent); }
 
 /* Whether the view's parent has changed shape since the view was made: the check every read of a
-   view makes first. It raises and answers true when so. */
+   view makes first. It raises and answers true when so. A view of a view asks the view above it
+   first, so a change of the list at the root reaches every range taken from it. */
 static kt_boolean kt_sub_list_is_stale(const KSubList *view) {
+    if (kt_is_sub_list(view->parent) && kt_sub_list_is_stale((const KSubList *)view->parent)) {
+        return true;
+    }
     if (kt_shape_of(view->parent) != view->modifications) {
         kt_throw(kt_throwable_new(&kt_type_concurrent_modification_exception, NULL));
         return true;
@@ -690,8 +694,25 @@ void kt_mutable_list_add_all(KRef self, KRef elements) {
     if (elements != NULL
         && (kt_is_runtime_list(elements))) {
         kt_int count = kt_list_size(elements);
+        if (kt_raised()) {
+            return;
+        }
+        /* Taken out BEFORE anything is appended, as `ArrayList.addAll` takes `c.toArray()`: the
+           argument may be a range of this very list, which an append would invalidate while it is
+           still being read. The array is a root across the allocations the appends make. */
+        KRef snapshot = kt_array_new(&kt_type_array, count);
         for (kt_int at = 0; at < count; at++) {
-            kt_mutable_list_add(self, kt_list_get(elements, at));
+            KRef element = kt_list_get(elements, at);
+            if (kt_raised()) {
+                return;
+            }
+            kt_elements_of(snapshot)[at] = element;
+        }
+        for (kt_int at = 0; at < count; at++) {
+            kt_mutable_list_add(self, kt_elements_of(snapshot)[at]);
+            if (kt_raised()) {
+                return;
+            }
         }
         return;
     }
@@ -938,7 +959,13 @@ KRef kt_list_iterator_next(KRef iterator) {
         kt_throw(kt_throwable_new(&kt_type_concurrent_modification_exception, NULL));
         return NULL;
     }
-    if (self->at >= kt_list_size(self->list)) {
+    kt_int size = kt_list_size(self->list);
+    /* A range whose list changed raised `ConcurrentModificationException` and answered no size;
+       that exception is the one the walk ends with, not an exhausted list's. */
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    if (self->at >= size) {
         kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
         return NULL;
     }
