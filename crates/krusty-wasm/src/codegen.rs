@@ -157,31 +157,19 @@ impl Backend for WasmBackend {
             || classifier == krusty::types::wk::kotlin_enum()
             || classifier == krusty::types::wk::unit()
             || lower::is_string_builder(classifier)
-            || lower::is_array_list(classifier)
             || lower::runtime_lays_out(classifier)
     }
 
     /// The runtime's `StringBuilder` answers the `Appendable` and `CharSequence` members it
-    /// overrides, and its `ArrayList` the collection members (`crate::builtin_members`).
+    /// overrides (`crate::builtin_members`).
     fn dispatched_dependency_classes(&self) -> Vec<krusty::backend::DependencyClassifier> {
-        vec![
-            crate::string_builders::class(),
-            krusty::types::Ty::obj("kotlin/collections/ArrayList")
-                .obj_internal()
-                .expect("a classifier type"),
-        ]
+        vec![crate::string_builders::class()]
     }
 
     /// The WASI stdlib's `StringBuilder.append(CharSequence?)` copies the sequence's `length`
     /// indexed `Char`s; the JS one appends its `toString` (`crate::string_builders`).
     fn appends_char_sequences_by_index(&self) -> bool {
         self.target == WasmTarget::Wasi
-    }
-
-    /// The runtime's `ArrayList` walks a collection argument with its `iterator()` and asks it
-    /// `contains`, whatever class it is (`crate::array_lists`).
-    fn reads_collections_through_interfaces(&self) -> bool {
-        true
     }
 
     fn realizes_dependency_intrinsic(

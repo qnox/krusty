@@ -821,7 +821,8 @@ fn dispatched_members(
     plan: &ClassInitialization<'_, '_>,
     bodies: &KlibDeclarationBodies,
 ) -> Result<Vec<KlibDependencyCallable>, KlibBodyDeclineReason> {
-    plan.dispatched
+    let mut members = plan
+        .dispatched
         .iter()
         .filter(|function| function.body.is_some())
         .map(|function| {
@@ -835,7 +836,29 @@ fn dispatched_members(
                 }
             }
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    // The bodies the class inherits and implements interface members with are reached by
+    // dispatch as its own overrides are.
+    for (body, _) in inherited_implementations(plan, bodies)? {
+        if !members.contains(&body) {
+            members.push(body);
+        }
+    }
+    Ok(members)
+}
+
+/// The inherited bodies of an admitted class with the interface declarations each implements.
+fn inherited_implementations(
+    plan: &ClassInitialization<'_, '_>,
+    bodies: &KlibDeclarationBodies,
+) -> Result<Vec<(KlibDependencyCallable, Vec<KlibDependencyCallable>)>, KlibBodyDeclineReason> {
+    bodies
+        .inherited_implementations(
+            &plan.header.contract.module,
+            plan.header.arena,
+            plan.header.class,
+        )
+        .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))
 }
 
 /// The declarations an admitted class initialization names without emitting their bodies: the
@@ -886,6 +909,9 @@ fn overridden_declarations(
                 .overridden_closure(&plan.header.contract.module, &signature)
                 .map_err(mismatch)?,
         );
+    }
+    for (_, implemented) in inherited_implementations(plan, bodies)? {
+        declarations.extend(implemented);
     }
     Ok(declarations)
 }
