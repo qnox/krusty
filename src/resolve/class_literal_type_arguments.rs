@@ -158,7 +158,7 @@ impl Checker<'_> {
             return None;
         }
         let list = self.file.call_type_args.get(&receiver.0)?.span;
-        let forbid = self.file.forbid_useless_type_arguments;
+        let forbid = self.file.language.forbid_useless_type_arguments;
         if self.qualifier_root_is_value(scope, name) {
             return None;
         }
@@ -166,6 +166,7 @@ impl Checker<'_> {
             let message = "Type arguments are not allowed for type parameters.";
             let warning = self
                 .file
+                .language
                 .useless_type_arguments_warning_format
                 .as_ref()
                 .map(|format| format.message(message));
@@ -233,7 +234,7 @@ impl Checker<'_> {
             .get(&receiver.0)
             .map(|arguments| arguments.span)
             .expect("written class-literal type arguments retain their list span");
-        let forbid = self.file.forbid_useless_type_arguments;
+        let forbid = self.file.language.forbid_useless_type_arguments;
         let alias = WrittenAlias::selected(source_name, alias);
         let source = self.fed_source();
         let useless_type = useless_alias_type(&alias.formals, alias.expansion, &mut |owner| {
@@ -249,6 +250,7 @@ impl Checker<'_> {
             );
             let warning = self
                 .file
+                .language
                 .useless_type_arguments_warning_format
                 .as_ref()
                 .map(|format| format.message(&message));
@@ -279,6 +281,7 @@ impl Checker<'_> {
         });
         let warning = self
             .file
+            .language
             .useless_type_arguments_warning_format
             .as_ref()
             .map(|format| format.message(NOT_A_CLASS));

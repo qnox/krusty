@@ -66,7 +66,7 @@ impl Checker<'_> {
                     Err(missing) => {
                         let context_count = candidate.context_count.min(initial_params.len());
                         let explicitly_named = |parameter: usize| {
-                            self.file.explicit_context_arguments
+                            self.file.language.explicit_context_arguments
                                 && candidate.call_sig.param_names.get(parameter).is_some_and(
                                     |parameter| {
                                         argument_names.is_some_and(|names| {

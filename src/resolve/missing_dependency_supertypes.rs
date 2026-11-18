@@ -107,7 +107,12 @@ impl Checker<'_> {
         let warning = match severity {
             Severity::Error => false,
             Severity::Warning => true,
-            Severity::Eager => !self.file.allow_eager_supertype_accessibility_checks,
+            Severity::Eager => {
+                !self
+                    .file
+                    .language
+                    .allow_eager_supertype_accessibility_checks
+            }
         };
         for supertype in &missing {
             let supertype = access_control::owner_display(*supertype);
@@ -371,7 +376,7 @@ impl Checker<'_> {
         let mut checked = Vec::new();
         let mut reported_receiver = false;
         if access.sam_constructor {
-            let severity = if self.file.sam_constructor_missing_dependency == Some(true) {
+            let severity = if self.file.language.sam_constructor_missing_dependency == Some(true) {
                 Severity::Error
             } else {
                 Severity::Warning
@@ -420,7 +425,12 @@ impl Checker<'_> {
                 if let Some(ExprLowering::SamConstructor { sam, .. }) =
                     self.expr_lowers.get(&expression)
                 {
-                    if self.file.sam_constructor_missing_dependency.is_some() {
+                    if self
+                        .file
+                        .language
+                        .sam_constructor_missing_dependency
+                        .is_some()
+                    {
                         return Some(SelectedAccess {
                             owner: Some(sam.internal),
                             sam_constructor: true,
@@ -615,7 +625,7 @@ impl Checker<'_> {
     /// A SAM conversion whose interface is missing a dependency supertype, at the converted
     /// expression. The operand of a SAM constructor is reported on the constructor name instead.
     fn check_sam_conversion_missing_supertypes(&mut self, expression: ExprId) {
-        let Some(policy) = self.file.sam_constructor_missing_dependency else {
+        let Some(policy) = self.file.language.sam_constructor_missing_dependency else {
             return;
         };
         let Some(conversion) = self.resolved_sam_conversions.get(&expression) else {

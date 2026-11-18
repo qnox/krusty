@@ -1184,7 +1184,7 @@ impl Source<'_> {
             KspDeclaration::Function(values),
             KspDeclaration::Function(value_of),
         ];
-        if self.file.enum_entries_enabled {
+        if self.file.language.enum_entries_enabled {
             let mut entries = KspProperty {
                 name: "entries".to_string(),
                 is_mutable: false,

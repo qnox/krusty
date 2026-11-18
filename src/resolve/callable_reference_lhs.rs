@@ -30,7 +30,7 @@ impl Checker<'_> {
             .call_type_args
             .get(&expression.0)
             .is_some_and(|arguments| !arguments.is_empty());
-        if self.file.bare_array_class_literal && !explicit_arguments {
+        if self.file.language.bare_array_class_literal && !explicit_arguments {
             let internal = self.select_classifier(scope, name).found()?;
             // A parameterless typealias may expand to a fully applied reference-array type. Keep
             // that expansion intact; only the raw classifier selected directly from this scope

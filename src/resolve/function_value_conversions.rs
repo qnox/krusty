@@ -64,7 +64,7 @@ impl Checker<'_> {
     /// through unit conversion. Some releases know the feature but convert no arbitrary value
     /// ([`crate::kotlin_version::Quirk::UnitConversionRejectsNonUnitResult`]).
     pub(super) fn unit_conversion_admits_result(&self, expected: Ty) -> bool {
-        self.file.unit_conversions_on_arbitrary_expressions
+        self.file.language.unit_conversions_on_arbitrary_expressions
             && !crate::kotlin_version::Quirks::target()
                 .has(crate::kotlin_version::Quirk::UnitConversionRejectsNonUnitResult)
             && expected == Ty::Unit

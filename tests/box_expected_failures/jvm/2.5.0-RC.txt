@@ -44,8 +44,6 @@ contextParameters/evaluationOrder.kt
 inference/selfBoundedVariableFromFunctionTypeBeforeElvisThrow.kt
 inlineClasses/contextParameterPropertyDeserialization.kt
 multiplatform/k2/complexInheritanceWithDelegation.kt
-strictEquals/dataClass.kt
-strictEquals/dataObject.kt
 suspendConversion/suspendConversionNullableNpe2.kt
 topLevelInitializtion/failInInitializer2.kt
 when/NoWhenBranchMatchedExceptionAfter.kt
