@@ -470,8 +470,6 @@ coroutines/asyncIterator_1_3.kt
 coroutines/await.kt
 coroutines/beginWithException.kt
 coroutines/beginWithExceptionNoHandleException.kt
-coroutines/bridges/interfaceGenericDefault.kt
-coroutines/bridges/interfaceSpecialization.kt
 coroutines/bridges/mapSuspendAbstractClear.kt
 coroutines/bridges/mapSuspendClear.kt
 coroutines/builderInferenceAndGenericArrayAcessCall.kt
@@ -543,7 +541,6 @@ coroutines/featureIntersection/funInterface/kt47549_1.kt
 coroutines/featureIntersection/funInterface/kt49294.kt
 coroutines/featureIntersection/funInterface/kt50950.kt
 coroutines/featureIntersection/inlineSuspendFinally.kt
-coroutines/featureIntersection/overrideInInlineClass.kt
 coroutines/featureIntersection/safeCallOnTwoReceivers.kt
 coroutines/featureIntersection/safeCallOnTwoReceiversLong.kt
 coroutines/featureIntersection/suspendFunctionAsSupertypeIsCheckWithArity.kt
@@ -760,7 +757,6 @@ coroutines/suspendConversion/onNullableArgument.kt
 coroutines/suspendConversion/subtypeOfFunctionalTypeToSuspendConversion.kt
 coroutines/suspendConversion/suspendConversionBetweenFunInterfaces.kt
 coroutines/suspendCoroutineFromStateMachine.kt
-coroutines/suspendDefaultImpl.kt
 coroutines/suspendFunImportedFromObject.kt
 coroutines/suspendFunctionAsCoroutine/handleException.kt
 coroutines/suspendFunctionAsCoroutine/ifExpressionInsideCoroutine_1_3.kt
