@@ -212,7 +212,6 @@ selfUpperBoundInference.args
 sourcesCommonChecks/dirWithKotlinScript.args
 sourcesCommonChecks/dirWithKotlinScriptPsi.args
 sourcesCommonChecks/dirWithOnlyNonKotlinFile.args
-sourcesCommonChecks/duplicateSources.args
 sourcesCommonChecks/duplicateSourcesInModule.args
 sourcesCommonChecks/emptySources.args
 sourcesCommonChecks/emptySourcesWithModuleInfo.args
