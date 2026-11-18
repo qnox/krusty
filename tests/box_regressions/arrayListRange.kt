@@ -19,6 +19,20 @@ fun box(): String {
     val inner = range.subList(1, 2)
     if (inner.size != 1 || inner[0] != 3) return "nested"
 
+    val root = ints(1, 2, 3, 4, 5)
+    val view = root.subList(1, 4)
+    val old = view.set(0, 20)
+    if (old != 2 || root[1] != 20 || view[0] != 20) return "set through a range"
+    val deeper = view.subList(1, 3)
+    if (deeper.set(1, 40) != 4 || view[2] != 40 || root[3] != 40) return "set through a nested range"
+    if (root != ints(1, 20, 3, 40, 5)) return "range writes $root"
+    try {
+        view.set(3, 0)
+        return "set past the range"
+    } catch (e: IndexOutOfBoundsException) {
+    }
+    if (root[4] != 5) return "set past the range wrote"
+
     growable.add(5)
     val fresh = readable.subList(0, 5)
     try {

@@ -503,18 +503,21 @@ impl ArrayLists {
         );
     }
 
-    /// `set(index, element)`: the element it replaces. The caller has checked the index.
+    /// `set(index, element)`: the element it replaces. The caller has checked the index. An
+    /// overwrite resizes nothing, so a range takes it at its offset in the shared elements; `get`
+    /// first answers a range whose root changed shape with `ConcurrentModificationException`.
     fn define_set(&self, module: &mut Module, layout: Layout) {
         let ty = module.func_type(vec![REFERENCE, ValType::I32, REFERENCE], vec![REFERENCE]);
         let (list, index, element, old) = (0, 1, 2, 3);
         let mut code = Code::default();
-        code.local_get(list).call(self.ranges.reject_write);
         code.local_get(list)
             .local_get(index)
             .call(self.get)
             .local_set(old);
         layout.elements(&mut code, list);
-        code.local_get(index)
+        code.local_get(index);
+        layout.offset(&mut code, list);
+        code.op(ADD32)
             .local_get(element)
             .array_set(layout.elements)
             .local_get(old);
