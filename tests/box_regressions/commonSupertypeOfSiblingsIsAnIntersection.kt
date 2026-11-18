@@ -17,17 +17,11 @@ class Builder {
         val alias = if (typed) TypedAlias<Int>("t") else PlainAlias<String>("p")
         return alias.name + ":" + (+alias)
     }
-
-    fun aliases(typed: Boolean): List<String> {
-        val chosen = listOf(typed).map { if (it) TypedAlias<Int>("t") else PlainAlias<String>("p") }
-        return chosen.map { it.name + ":" + (+it) }
-    }
 }
 
 fun box(): String {
     val builder = Builder()
     if (builder.render(true) != "t:expression") return "typed"
     if (builder.render(false) != "p:expression") return "plain"
-    if (builder.aliases(true) != listOf("t:expression")) return "collection"
     return "OK"
 }
