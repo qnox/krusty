@@ -6,6 +6,7 @@
 //! type the body declares, calls the body and hands its result back as a reference.
 
 use super::*;
+use crate::callable_references::{AccessorShape, PropertyAccess};
 use crate::encode::{CompositeType, SubType};
 use crate::function_value_names;
 use crate::objects::immutable;
@@ -16,6 +17,16 @@ pub(super) struct FunctionValueClass {
     pub(super) class: crate::interface_dispatch::ClassRef,
     pub(super) entry: u32,
     pub(super) arity: usize,
+    pub(super) captures: CaptureLayout,
+}
+
+/// Where a function value's struct holds its captures, which another entry over the same value
+/// unpacks the same way.
+#[derive(Clone)]
+pub(super) struct CaptureLayout {
+    structure: u32,
+    first: u32,
+    carriers: Vec<ValType>,
 }
 
 /// What `==` on a function value compares.
@@ -50,7 +61,6 @@ impl Body<'_> {
             return Err("a function value whose body is a member".into());
         }
         let params = declaration.params.clone();
-        let ret = declaration.ret;
         let own = params
             .get(captures.len()..)
             .ok_or("a function value capturing more than its body takes")?
@@ -63,7 +73,6 @@ impl Body<'_> {
         {
             return Err("a function value with a shared parameter outside its captures".into());
         }
-        let body = self.emitted_function(function)?;
         let shape = self.runtime.function_shape(self.module, own.len());
 
         let mut fields = vec![
@@ -99,31 +108,12 @@ impl Body<'_> {
             open: false,
         });
 
-        // The entry: `(this, arguments…) -> result`, every operand a reference.
-        let mut entry = Code::default();
-        let mut locals = Vec::new();
-        for field in 0..captures.len() as u32 {
-            entry
-                .local_get(0)
-                .ref_cast(false, HeapType::Concrete(structure))
-                .struct_get(structure, field + first_capture);
-        }
-        for (index, &param) in own.iter().enumerate() {
-            entry.local_get(index as u32 + 1);
-            self.unpack_argument(&mut entry, param)?;
-        }
-        entry.call(body);
-        let scratch = own.len() as u32 + 1;
-        self.pack_result(&mut entry, &mut locals, scratch, ret)?;
-        let invoke = self.module.declare();
-        self.module.define(
-            invoke,
-            Function {
-                ty: shape.invoke,
-                locals,
-                code: entry,
-            },
-        );
+        let layout = CaptureLayout {
+            structure,
+            first: first_capture,
+            carriers: captured_types.clone(),
+        };
+        let invoke = self.function_value_entry(function, &layout)?;
 
         let [_, _, to_string_ty] = self.runtime.objects.any_slot_types;
         let equals = match equality {
@@ -246,7 +236,63 @@ impl Body<'_> {
             class,
             entry: invoke,
             arity: own.len(),
+            captures: layout,
         })
+    }
+
+    /// The entry calling `function` on a function value whose captures `layout` places:
+    /// `(this, arguments…) -> result`, every operand a reference. It unpacks the captures as
+    /// `function`'s leading arguments, converts each other argument to the type `function`
+    /// declares, calls it and hands its result back as a reference.
+    fn function_value_entry(
+        &mut self,
+        function: FunId,
+        layout: &CaptureLayout,
+    ) -> Result<u32, Unsupported> {
+        let declaration = self
+            .ir
+            .functions
+            .get(function as usize)
+            .ok_or("a function value with an invalid body identity")?;
+        let own = declaration
+            .params
+            .get(layout.carriers.len()..)
+            .ok_or("a function value capturing more than its body takes")?
+            .to_vec();
+        let ret = declaration.ret;
+        for (parameter, &carrier) in layout.carriers.iter().enumerate() {
+            if parameter_carrier(self.module, self.ir, function, parameter as u32)? != Some(carrier)
+            {
+                return Err("a function value entry whose captures differ from its value's".into());
+            }
+        }
+        let body = self.emitted_function(function)?;
+        let shape = self.runtime.function_shape(self.module, own.len());
+        let mut entry = Code::default();
+        let mut locals = Vec::new();
+        for field in 0..layout.carriers.len() as u32 {
+            entry
+                .local_get(0)
+                .ref_cast(false, HeapType::Concrete(layout.structure))
+                .struct_get(layout.structure, field + layout.first);
+        }
+        for (index, &param) in own.iter().enumerate() {
+            entry.local_get(index as u32 + 1);
+            self.unpack_argument(&mut entry, param)?;
+        }
+        entry.call(body);
+        let scratch = own.len() as u32 + 1;
+        self.pack_result(&mut entry, &mut locals, scratch, ret)?;
+        let invoke = self.module.declare();
+        self.module.define(
+            invoke,
+            Function {
+                ty: shape.invoke,
+                locals,
+                code: entry,
+            },
+        );
+        Ok(invoke)
     }
 
     /// A new function value for the callable reference `id`. Its adapter takes the referenced
@@ -267,6 +313,7 @@ impl Body<'_> {
             class,
             entry,
             arity,
+            captures: layout,
         } = self.function_value(
             id,
             reference.adapter,
@@ -286,13 +333,34 @@ impl Body<'_> {
         ) {
             self.runtime.reference_name(self.module, class, &name)?;
         }
-        // A `KProperty` value reads its property through `get` as its entry does.
-        if matches!(
-            &reference.target,
-            krusty::ir::IrCallableReferenceTarget::Property(property) if property.reflective
-        ) {
-            self.runtime
-                .property_reference_read(self.module, class, arity, entry)?;
+        // A `KProperty` value reads its property through `get` as its entry does. A mutable one
+        // writes it through `set` with the entry of its write adapter, over the same captures.
+        let krusty::ir::IrCallableReferenceTarget::Property(property) = &reference.target else {
+            return Ok(());
+        };
+        if !property.reflective {
+            return Ok(());
+        }
+        self.runtime.property_reference_accessor(
+            self.module,
+            class,
+            AccessorShape {
+                access: PropertyAccess::Read,
+                operands: arity,
+            },
+            entry,
+        )?;
+        if let Some(writer) = property.writer {
+            let write = self.function_value_entry(writer, &layout)?;
+            self.runtime.property_reference_accessor(
+                self.module,
+                class,
+                AccessorShape {
+                    access: PropertyAccess::Write,
+                    operands: arity + 1,
+                },
+                write,
+            )?;
         }
         Ok(())
     }
