@@ -1024,6 +1024,15 @@ fn selected_delegate_call(
                 }
                 None => (Box::new([]) as Box<[FirTypeSubstitution]>, parameters),
             };
+            // The selected result is the declared one at the same bindings, so the recorded
+            // substitutions and the recorded result describe one instantiation.
+            let result = match callable.generic_sig.as_deref() {
+                Some(generic) => resolved(crate::types::ty_subst_applied_arguments(
+                    generic.ret,
+                    bindings,
+                ))?,
+                None => resolved(callable.ret)?,
+            };
             Ok(FirDelegateCall {
                 target: FirCallTarget::External {
                     declaration,
@@ -1036,7 +1045,7 @@ fn selected_delegate_call(
                     declared_receiver: callable.source_receiver.map(resolved).transpose()?,
                     declaring_receiver: None,
                     parameters: parameters.clone(),
-                    result: resolved(callable.ret)?,
+                    result,
                     declared_result: callable.declared_ret.map(resolved).transpose()?,
                     overridden_results: callable
                         .overridden_results
@@ -1066,7 +1075,7 @@ fn selected_delegate_call(
                 substitutions,
                 parameters,
                 declared_parameters,
-                result: resolved(callable.ret)?,
+                result,
                 extension: true,
                 dispatch_receiver: None,
                 receiver,
