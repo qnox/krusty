@@ -1522,6 +1522,20 @@ impl Checker<'_> {
                 .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
                 .collect();
         }
+        crate::symbol_resolver::retain_most_specific_declarations(
+            &self.fed_source(),
+            extension_receiver,
+            &mut maximal,
+            |(_, generic, _, _, _, candidate, _, parameters)| {
+                let receiver = declared_receiver(candidate);
+                let member_owner = (candidate.kind == crate::libraries::FnKind::Member)
+                    .then_some(candidate.callable.owner);
+                (receiver, parameters, *generic, member_owner)
+            },
+        );
+        call_applicability::refine_lambda_tie(self.file, (args, arg_tys), &mut maximal, |t| {
+            (&t.5.info, &t.6, !misfits.contains(&t.2))
+        });
         if maximal.len() > 1 {
             // A generic declaration whose parameters another's accept, and not the reverse, is the
             // more general one: `reference(Column<T>)` over a free `T` accepts
@@ -1564,20 +1578,64 @@ impl Checker<'_> {
                 .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
                 .collect();
         }
-        crate::symbol_resolver::retain_most_specific_declarations(
-            &self.fed_source(),
-            extension_receiver,
-            &mut maximal,
-            |(_, generic, _, _, _, candidate, _, parameters)| {
-                let receiver = declared_receiver(candidate);
-                let member_owner = (candidate.kind == crate::libraries::FnKind::Member)
-                    .then_some(candidate.callable.owner);
-                (receiver, parameters, *generic, member_owner)
-            },
-        );
-        call_applicability::refine_lambda_tie(self.file, (args, arg_tys), &mut maximal, |t| {
-            (&t.5.info, &t.6, !misfits.contains(&t.2))
-        });
+        if maximal.len() > 1 {
+            // Generic overloads of which neither accepts the other's parameters are incomparable:
+            // kotlinc ranks declarations by exactly that solve, so they are ambiguous. Only the
+            // overloads that take the arguments with their type parameters at their bounds take
+            // part: an argument whose type is not final yet is left to the ordinary selection.
+            let source = self.fed_source();
+            let no_bindings = crate::types::TyParamBindings::default();
+            let viable = maximal
+                .iter()
+                .filter(|(_, _, _, _, _, candidate, _, _)| {
+                    candidate.info.generic_sig.as_ref().is_some_and(|sig| {
+                        sig.params.len() == arg_tys.len()
+                            && sig.params.iter().zip(arg_tys).all(|(parameter, argument)| {
+                                crate::symbol_resolver::resolution_subtype(
+                                    &source,
+                                    *argument,
+                                    parameter.substitute_erased(&no_bindings),
+                                )
+                            })
+                    })
+                })
+                .collect::<Vec<_>>();
+            // Only a parameter that mentions a type parameter is compared by the solve; a
+            // constructor's class parameters do not make `(Int)` and `(Long)` incomparable.
+            let signatures = viable
+                .iter()
+                .map(|(_, _, _, _, _, candidate, _, _)| {
+                    candidate.info.generic_sig.as_ref().filter(|sig| {
+                        candidate.call_sig.vararg_index.is_none()
+                            && sig
+                                .params
+                                .iter()
+                                .any(|parameter| parameter.mentions_ty_param())
+                    })
+                })
+                .collect::<Option<Vec<_>>>();
+            if viable.len() > 1
+                && signatures.is_some_and(|signatures| {
+                    signatures.iter().enumerate().all(|(index, general)| {
+                        signatures.iter().skip(index + 1).all(|specific| {
+                            !crate::symbol_resolver::generic_declaration_accepts_parameters_of(
+                                &source, general, specific,
+                            ) && !crate::symbol_resolver::generic_declaration_accepts_parameters_of(
+                                &source, specific, general,
+                            )
+                        })
+                    })
+                })
+            {
+                return Some(CallableCandidateSelection::Ambiguous(
+                    viable
+                        .iter()
+                        .map(|(_, _, _, _, _, candidate, _, _)| candidate.info.clone())
+                        .collect(),
+                    viable.iter().filter_map(|t| t.5.candidate_index).collect(),
+                ));
+            }
+        }
         // Distinct SAM target types do not make an overload family inherently ambiguous. The
         // ordinary most-specific relation below must still compare them: if one SAM interface
         // inherits the other, its overload wins (`MyRunnable : Runnable`; `foo(MyRunnable)` beats

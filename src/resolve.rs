@@ -11634,7 +11634,10 @@ impl<'a> Checker<'a> {
     /// the argument is there to bind. So a function-typed parameter is matched on ARITY, and only its
     /// components that are NOT the erased top are judged.
     fn member_argument_score(&self, expected: Ty, actual: Ty) -> Option<usize> {
-        if expected == actual {
+        // An argument of exactly the parameter's classifier outranks one that is merely assignable.
+        // A type parameter is not such evidence: whether `X` fits better than its bound is decided
+        // by comparing the declarations, so two overloads over `X` and `Right` stay tied.
+        if expected == actual && !matches!(expected.kind(), TyKind::TyParam(..) | TyKind::Var(..)) {
             return Some(4);
         }
         if actual == Ty::Null {
