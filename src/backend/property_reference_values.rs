@@ -23,13 +23,25 @@ use crate::ir::{
     IrCheckedSubstitution, IrExpr, IrFile, IrFunction, IrLocalPropertyLayout, IrPropertyDispatch,
     IrPropertyFunctionReference, IrTypeOp,
 };
-use crate::types::{Ty, TyKind};
+use crate::types::{SemanticCallRole, Ty, TyKind};
 
 /// Realize every source `KProperty` reference of `ir` as a function value.
 ///
 /// A delegated property's `KProperty` argument is the delegate's metadata, not a source value,
 /// and stays checked.
+///
+/// A mutable reference gets its write adapter only when the unit writes through some mutable
+/// reference. Each `set` member is named by a call through it, as `get` is, so a unit with no
+/// such call has no member a writer could implement, and a writer would make the property's
+/// setter an emission root of its own.
 pub fn realize(ir: &mut IrFile) {
+    let writes = ir.semantic_call_roles.values().any(|role| {
+        matches!(
+            role,
+            SemanticCallRole::KotlinPropertyReferenceSet(_)
+                | SemanticCallRole::KotlinPropertyReferenceDelegateSet(_)
+        )
+    });
     for id in 0..ir.exprs.len() as ExprId {
         let IrExpr::Checked(checked) = ir.expr(id) else {
             continue;
@@ -59,6 +71,7 @@ pub fn realize(ir: &mut IrFile) {
             binding: *binding,
             bound,
             mutable: *mutable,
+            writable: *mutable && writes,
             substitutions: substitutions.clone(),
             function_type: *function_type,
         };
@@ -75,6 +88,8 @@ struct Reference {
     /// The bound receiver, and whether it is the property's extension receiver.
     bound: Option<(ExprId, bool)>,
     mutable: bool,
+    /// The reference is mutable and the unit writes through some mutable reference.
+    writable: bool,
     substitutions: Vec<IrCheckedSubstitution>,
     function_type: Ty,
 }
@@ -113,30 +128,7 @@ fn function_value(ir: &mut IrFile, reference: Reference) -> Option<IrExpr> {
         }
         _ => return None,
     };
-    let operand = shape.receiver.map(|receiver| {
-        let value = ir.add_expr(IrExpr::GetValue(0));
-        match shape.declared {
-            Some((Some(declared), _)) if shape.extension && declared != receiver => {
-                ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: value,
-                    type_operand: declared,
-                })
-            }
-            _ => value,
-        }
-    });
-    let receivers = if shape.extension {
-        Receivers {
-            dispatch: None,
-            extension: operand,
-        }
-    } else {
-        Receivers {
-            dispatch: operand,
-            extension: None,
-        }
-    };
+    let receivers = receivers(ir, &shape);
     let read = read(ir, &reference, &shape, receivers)?;
     let body = ir.callable_reference_adapter_body(read, shape.ty, signature.ret);
     let mut params = Vec::new();
@@ -144,18 +136,11 @@ fn function_value(ir: &mut IrFile, reference: Reference) -> Option<IrExpr> {
         params.extend(shape.receiver);
     }
     params.extend(signature.params.iter().copied());
-    let adapter = ir.add_fun(IrFunction {
-        name: format!("$property_ref_{}", ir.functions.len()),
-        params,
-        ret: crate::types::stored_value_ty(signature.ret),
-        body: Some(body),
-        is_static: true,
-        dispatch_receiver: None,
-        param_checks: Vec::new(),
-    });
-    ir.set_method_visibility(adapter, crate::types::Visibility::Private);
-    ir.lambda_own_params_from
-        .insert(adapter, u32::from(captured));
+    let adapter = add_adapter(ir, params, signature.ret, body, captured);
+    let writer = reference
+        .writable
+        .then(|| writer(ir, &reference, &shape, captured))
+        .flatten();
     Some(IrExpr::CallableReference(Box::new(IrCallableReference {
         target: IrCallableReferenceTarget::Property(Box::new(IrPropertyFunctionReference {
             target: reference.target,
@@ -163,6 +148,7 @@ fn function_value(ir: &mut IrFile, reference: Reference) -> Option<IrExpr> {
             bound_extension_receiver: reference.bound.is_some_and(|(_, extension)| extension),
             mutable: reference.mutable,
             reflective: true,
+            writer,
             substitutions: reference.substitutions,
         })),
         adapter,
@@ -181,6 +167,100 @@ fn function_value(ir: &mut IrFile, reference: Reference) -> Option<IrExpr> {
         adaptation: None,
         reflection_owner: None,
     })))
+}
+
+/// A private static adapter taking `params` and answering `ret` with `body`, whose leading
+/// parameter is the reference's capture when `captured`.
+fn add_adapter(
+    ir: &mut IrFile,
+    params: Vec<Ty>,
+    ret: Ty,
+    body: ExprId,
+    captured: bool,
+) -> crate::ir::FunId {
+    let adapter = ir.add_fun(IrFunction {
+        name: format!("$property_ref_{}", ir.functions.len()),
+        params,
+        ret: crate::types::stored_value_ty(ret),
+        body: Some(body),
+        is_static: true,
+        dispatch_receiver: None,
+        param_checks: Vec::new(),
+    });
+    ir.set_method_visibility(adapter, crate::types::Visibility::Private);
+    ir.lambda_own_params_from
+        .insert(adapter, u32::from(captured));
+    adapter
+}
+
+/// The adapter writing the property of a mutable reference: it takes the receiver operand in the
+/// read adapter's slot, captured or not, then the written value, and answers `Unit`. `None` for a
+/// property whose write this does not realize: a dependency property's.
+fn writer(
+    ir: &mut IrFile,
+    reference: &Reference,
+    shape: &ReadShape,
+    captured: bool,
+) -> Option<crate::ir::FunId> {
+    let property = reference.target.module()?;
+    let substitutions = match &reference.target {
+        FirPropertyReferenceTarget::SpecializedModule { .. } => reference.substitutions.clone(),
+        _ => Vec::new(),
+    };
+    let receivers = receivers(ir, shape);
+    let slot = u32::from(shape.receiver.is_some());
+    let mut value = ir.add_expr(IrExpr::GetValue(slot));
+    let declared = shape.declared.map_or(shape.ty, |(_, declared)| declared);
+    if declared != shape.ty {
+        value = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: value,
+            type_operand: declared,
+        });
+    }
+    let write = ir.add_expr(IrExpr::Checked(Box::new(
+        IrCheckedOperation::PropertyWrite {
+            target: property,
+            dispatch_receiver: receivers.dispatch,
+            extension_receiver: receivers.extension,
+            context_arguments: Vec::new(),
+            value,
+            substitutions,
+        },
+    )));
+    // As a read does, the write records the type a source write's producer does.
+    ir.set_logical_type(write, Ty::Unit);
+    let body = ir.callable_reference_adapter_body(write, Ty::Unit, Ty::Unit);
+    let params = shape.receiver.into_iter().chain([shape.ty]).collect();
+    Some(add_adapter(ir, params, Ty::Unit, body, captured))
+}
+
+/// The adapter's receiver operand, its first parameter, in the slot an access takes it in.
+fn receivers(ir: &mut IrFile, shape: &ReadShape) -> Receivers {
+    let operand = shape.receiver.map(|receiver| {
+        let value = ir.add_expr(IrExpr::GetValue(0));
+        match shape.declared {
+            Some((Some(declared), _)) if shape.extension && declared != receiver => {
+                ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: value,
+                    type_operand: declared,
+                })
+            }
+            _ => value,
+        }
+    });
+    if shape.extension {
+        Receivers {
+            dispatch: None,
+            extension: operand,
+        }
+    } else {
+        Receivers {
+            dispatch: operand,
+            extension: None,
+        }
+    }
 }
 
 /// The receiver a read of `target` takes, and the property's type. `None` for a property whose
@@ -256,7 +336,7 @@ fn read_shape(ir: &IrFile, target: &FirPropertyReferenceTarget) -> Option<ReadSh
     }
 }
 
-/// The adapter's receiver operand, in the slot the read takes it in.
+/// The adapter's receiver operand, in the slot an access takes it in.
 struct Receivers {
     dispatch: Option<ExprId>,
     extension: Option<ExprId>,

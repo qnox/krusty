@@ -266,30 +266,30 @@ impl BodyLowering<'_> {
             .map(|receiver| receiver.get())
             .into_iter()
             .collect();
-        Ok(Some(
-            self.ir
-                .add_expr(IrExpr::CallableReference(Box::new(IrCallableReference {
-                    target: IrCallableReferenceTarget::Property(Box::new(
-                        IrPropertyFunctionReference {
-                            target: target.clone(),
-                            binding,
-                            bound_extension_receiver: extension_capture.is_some(),
-                            mutable,
-                            reflective: false,
-                            substitutions: super::checked::lower_substitutions(substitutions),
-                        },
-                    )),
-                    adapter: function,
-                    captures: Vec::new(),
-                    bound_receiver: captured,
-                    bound_contexts: 0,
-                    function_type: reference_ty,
-                    declaration_parameters,
-                    declaration_result: property_type.get(),
-                    declaration_suspend: false,
-                    adaptation: adaptation.cloned().map(Box::new),
-                    reflection_owner: None,
-                }))),
-        ))
+        Ok(Some(self.ir.add_expr(IrExpr::CallableReference(Box::new(
+            IrCallableReference {
+                target: IrCallableReferenceTarget::Property(Box::new(
+                    IrPropertyFunctionReference {
+                        target: target.clone(),
+                        binding,
+                        bound_extension_receiver: extension_capture.is_some(),
+                        mutable,
+                        reflective: false,
+                        writer: None,
+                        substitutions: super::checked::lower_substitutions(substitutions),
+                    },
+                )),
+                adapter: function,
+                captures: Vec::new(),
+                bound_receiver: captured,
+                bound_contexts: 0,
+                function_type: reference_ty,
+                declaration_parameters,
+                declaration_result: property_type.get(),
+                declaration_suspend: false,
+                adaptation: adaptation.cloned().map(Box::new),
+                reflection_owner: None,
+            },
+        )))))
     }
 }
