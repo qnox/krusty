@@ -13,15 +13,62 @@ use crate::inline_expansion::{InlineBodySplice, InlineOperand, SplicedResult};
 use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
 use crate::libraries::KlibBodyCallable;
 use crate::metadata::klib_ir::tree::KlibIrFunction;
-use crate::types::{stored_value_ty, InlineExpansionMode, InlineParameterModifier, Ty, TyKind};
+use crate::types::{
+    stored_value_ty, InlineExpansionMode, InlineParameterModifier, Ty, TyKind, TypeName,
+};
 
 use super::super::decline::KlibBodyDeclineReason;
 use super::super::function_lowering::FunctionHeader;
 use super::super::inline_templates::{expansion_modes, modifiers_with_receiver};
 
 /// Whether the serialized `function` is inline: every call of it is expanded, never made.
-pub(super) fn declares_inline(function: &KlibIrFunction) -> bool {
+fn declares_inline(function: &KlibIrFunction) -> bool {
     function.base.flags & crate::metadata::function_flags::IS_INLINE != 0
+}
+
+/// A function the unit lowered from its serialized body, with the selected declaration it was
+/// lowered for, that is declared as an inline callee when it is inline.
+pub(super) struct Candidate<'a, 's> {
+    declared: FunId,
+    function: &'a KlibIrFunction,
+    header: &'a FunctionHeader,
+    selected: Option<KlibBodyCallable<'s>>,
+}
+
+impl<'a, 's> Candidate<'a, 's> {
+    pub(super) fn new(
+        declared: FunId,
+        function: &'a KlibIrFunction,
+        header: &'a FunctionHeader,
+        selected: Option<KlibBodyCallable<'s>>,
+    ) -> Self {
+        Self {
+            declared,
+            function,
+            header,
+            selected,
+        }
+    }
+
+    /// Declare it as one the unit expands at each call, unless it is the selected `root`: the root
+    /// is lowered as the declaration it is, and a call of an inline callee is expanded.
+    pub(super) fn declare(
+        &self,
+        ir: &mut IrFile,
+        root: bool,
+        is_interface: &mut dyn FnMut(TypeName) -> Result<bool, KlibBodyDeclineReason>,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        if root || !declares_inline(self.function) {
+            return Ok(());
+        }
+        let Self {
+            declared,
+            function,
+            header,
+            selected,
+        } = *self;
+        declare(ir, declared, function, header, selected, is_interface)
+    }
 }
 
 /// Declare `function`, lowered from the serialized inline `declaration` with `header`, as one the
@@ -34,7 +81,7 @@ pub(super) fn declare(
     declaration: &KlibIrFunction,
     header: &FunctionHeader,
     selected: Option<KlibBodyCallable<'_>>,
-    is_interface: &mut dyn FnMut(crate::types::TypeName) -> Result<bool, KlibBodyDeclineReason>,
+    is_interface: &mut dyn FnMut(TypeName) -> Result<bool, KlibBodyDeclineReason>,
 ) -> Result<(), KlibBodyDeclineReason> {
     if declaration.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0 {
         return Err(KlibBodyDeclineReason::UnsupportedOperation(
@@ -84,7 +131,7 @@ fn sign_type_parameters(
     declaration: &KlibIrFunction,
     header: &FunctionHeader,
     selected: Option<KlibBodyCallable<'_>>,
-    is_interface: &mut dyn FnMut(crate::types::TypeName) -> Result<bool, KlibBodyDeclineReason>,
+    is_interface: &mut dyn FnMut(TypeName) -> Result<bool, KlibBodyDeclineReason>,
 ) -> Result<(), KlibBodyDeclineReason> {
     let Some(selected) = selected else {
         return Err(KlibBodyDeclineReason::UnsupportedOperation(
@@ -448,4 +495,16 @@ fn reads(ir: &IrFile, root: ExprId, slot: u32) -> bool {
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
     false
+}
+
+impl super::Linker<'_, '_> {
+    /// Whether the selected classifier `name` is an interface.
+    pub(super) fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
+        match self.sources.declarations.classifier(name) {
+            Some(record) => Ok(record.is_interface()),
+            None => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "an object literal's supertype {name:?} is not a selected classifier"
+            ))),
+        }
+    }
 }
