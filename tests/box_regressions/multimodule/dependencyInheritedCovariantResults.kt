@@ -70,6 +70,38 @@ class FirstBoxed(private val text: String) : FirstBoxes() {
     override fun box(): Box<String> = Box(text)
 }
 
+// A bound: `T` is a subtype of `Base` only through its declared bound `Sub`, so
+// `NarrowRead<T>.read()`, whose result `Cov<T>` is a subtype of `Cov<Base>`, is selected although
+// `WideRead` comes first. The bound's own supertype `Base` is named by no result or supertype.
+open class Base
+
+class Sub(val name: String) : Base()
+
+interface WideRead {
+    fun read(): Cov<Base>
+}
+
+interface NarrowRead<T : Sub> {
+    fun read(): Cov<T>
+}
+
+abstract class BoundedReads<T : Sub> : WideRead, NarrowRead<T> {
+    fun name(): String = read().get().name
+}
+
+class BoundedRead(private val name: String) : BoundedReads<Sub>() {
+    override fun read(): Cov<Sub> = Value(Sub(name))
+}
+
+// The same bounded result with the narrower declaration first.
+abstract class NarrowFirstReads<T : Sub> : NarrowRead<T>, WideRead {
+    fun name(): String = read().get().name
+}
+
+class NarrowFirstRead(private val name: String) : NarrowFirstReads<Sub>() {
+    override fun read(): Cov<Sub> = Value(Sub(name))
+}
+
 // MODULE: main(lib)
 // FILE: Consumer.kt
 package fixture
@@ -78,5 +110,7 @@ fun box(): String {
     if (Text("text").text() != "text") return "text ${Text("text").text()}"
     if (Boxed("item").item() != "item") return "item ${Boxed("item").item()}"
     if (FirstBoxed("first").first() != "first") return "first ${FirstBoxed("first").first()}"
+    if (BoundedRead("bound").name() != "bound") return "bound ${BoundedRead("bound").name()}"
+    if (NarrowFirstRead("narrow").name() != "narrow") return "narrow ${NarrowFirstRead("narrow").name()}"
     return "OK"
 }
