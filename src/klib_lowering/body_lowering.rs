@@ -706,7 +706,18 @@ impl<'a> BodyLowering<'a> {
                 }
                 let ty = self.ty(expression, "closure")?;
                 let crate::types::TyKind::Fun(signature) = ty.kind() else {
-                    return unsupported("a closure of a non-function type");
+                    // A lambda converted to a functional interface implements the interface's
+                    // one abstract method, the declaration the reference overrides.
+                    let ty_id = expression
+                        .ty
+                        .ok_or_else(|| mismatch("a converted lambda has no serialized type"))?;
+                    return self.converted_closure(
+                        ty_id,
+                        *invoke,
+                        overridden,
+                        ty,
+                        origin.as_deref(),
+                    );
                 };
                 // A suspend lambda overrides `SuspendFunctionN.invoke`, any other `FunctionN.invoke`.
                 let invocation = match &overridden.signature {
