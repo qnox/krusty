@@ -996,6 +996,17 @@ fn proven_context_lambda_and_callable_receivers_are_ordinary_references() {
         .remove(&(class, parameter));
     assert_eq!(check_supported(&unchecked, class), Ok(()));
 
+    // A support unit's `suspend () -> T` extension receiver is a function value, an ordinary
+    // reference of the same kind as an object.
+    let mut function_value = copy_transport(&unchecked);
+    let function = Ty::fun(Vec::new(), Ty::String);
+    let field = function_value.classes[class as usize].ctor_args[parameter as usize]
+        .field_index
+        .unwrap();
+    function_value.classes[class as usize].ctor_args[parameter as usize].ty = function;
+    function_value.classes[class as usize].fields[field as usize].ty = function;
+    assert_eq!(check_supported(&function_value, class), Ok(()));
+
     let mut unregistered = copy_transport(&callable);
     unregistered
         .class_capture_identities
