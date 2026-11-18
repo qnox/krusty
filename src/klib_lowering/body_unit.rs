@@ -39,6 +39,7 @@ use crate::types::{Ty, TypeName};
 mod class_construction;
 pub(crate) use class_construction::superclass_constructor_ordinal;
 mod enum_materialization;
+mod fake_overrides;
 #[cfg(test)]
 mod initializer_capability_tests;
 mod inline_functions;
@@ -1325,6 +1326,13 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 self.install_local_class(ir, prepared)
             }
         }
+    }
+
+    fn inherited_getter(
+        &self,
+        callee: &KlibIrSignature,
+    ) -> Result<Option<KlibIrSignature>, KlibBodyDeclineReason> {
+        fake_overrides::inherited_getter(self, callee)
     }
 
     fn link_local_function(
