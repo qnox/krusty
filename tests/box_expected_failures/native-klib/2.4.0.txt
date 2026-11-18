@@ -51,7 +51,6 @@ bce/forWithIndex.kt
 bce/inheritance.kt
 bce/withGetter.kt
 boxing/kt84727_if.kt
-boxingOptimization/maxMinByOrNull.kt
 bridges/delegationComplexWithList.kt
 bridges/internalMethodOverrideInFriendModule.kt
 bridges/internalMethodOverrideInOtherModule.kt
