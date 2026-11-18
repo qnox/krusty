@@ -10,7 +10,7 @@
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
 use super::common::{
-    expect_box_ok_with_stdlib, expect_native_box, expect_native_decline, kotlinc_box_result,
+    expect_box_ok_with_stdlib, expect_native_box, kotlin_native_box, kotlinc_box_result,
 };
 
 /// Require kotlinc's answer, krusty's JVM answer and the NATIVE answer to agree.
@@ -144,17 +144,22 @@ fn a_growable_lists_class_literal_keeps_its_own_name() {
     expect_box_ok_with_stdlib(source, "GrowableListClassLiteral");
 }
 
-/// The MUTABLE spellings decline rather than answering from the marker: both kinds of list the
-/// runtime builds wear it, the immutable one included, so `listOf(1) is MutableList<*>` would have
-/// answered `true` where Kotlin/Native answers false.
+/// A read-only list is no `MutableList` on Kotlin/Native: `listOf` answers `Array.asList`'s
+/// anonymous `AbstractList`, which implements `List` alone. The runtime's immutable list does not
+/// wear the mutable marker, so the check answers from it, and the answer is Kotlin/Native's, not
+/// the JVM's (where `java.util.List` makes every list a `MutableList` for `is`): the reference is
+/// the Native compiler, not kotlinc.
 #[test]
-fn a_mutable_list_check_declines_rather_than_answering_from_the_marker() {
-    expect_native_decline(
-        "fun box(): String {\n\
+fn a_read_only_list_is_no_mutable_list_on_kotlin_native() {
+    let source = "fun box(): String {\n\
          \x20   val x: Any = listOf(1, 2, 3)\n\
          \x20   return if (x is MutableList<*>) \"fail\" else \"OK\"\n\
-         }\n",
-        "MutableListCheckDeclines",
-        "MutableList",
-    );
+         }\n";
+    if let Some(reference) = kotlin_native_box(source) {
+        assert_eq!(
+            reference, "OK",
+            "MutableListCheck: the Kotlin/Native reference"
+        );
+    }
+    expect_native_box(source, "MutableListCheck", "OK");
 }
