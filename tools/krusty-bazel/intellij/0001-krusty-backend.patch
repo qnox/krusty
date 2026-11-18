@@ -1,32 +1,34 @@
 diff --git a/build/jvm-rules/MODULE.bazel b/build/jvm-rules/MODULE.bazel
-index 0a4bb04fc8..64fca20b5a 100644
+index 97c5ad5608..9332f75af0 100644
 --- a/build/jvm-rules/MODULE.bazel
 +++ b/build/jvm-rules/MODULE.bazel
-@@ -116,6 +116,12 @@ backend_config_repo = use_repo_rule("//:backend_config.bzl", "backend_config_rep
--
-+
- backend_config_repo(name = "ij_backend_config")
--
-+
-+# Kotlin-only targets compile with krusty when KRUSTY_BINARY names a built executable.
-+# See krusty_compiler.bzl. Unset, this is a stub and the JPS builder is unchanged.
+@@ -121,6 +121,16 @@ backend_config_repo(name = "ij_backend_config")
+ # `KOTLIN_COMPOSE_COMPILER_PLUGIN` path macro). If you rename this variable, update both regexes too.
+ _KOTLIN_VERSION = "2.4.20"
+ 
++# Kotlin-only targets compile with krusty when KRUSTY_BINARY names a built executable, reproducing
++# kotlinc of the release above. See krusty_compiler.bzl. Unset, this is a stub and the JPS builder is
++# unchanged.
 +krusty_compiler = use_repo_rule("//:krusty_compiler.bzl", "krusty_compiler")
 +
-+krusty_compiler(name = "krusty_compiler")
++krusty_compiler(
++    name = "krusty_compiler",
++    kotlin_version = _KOTLIN_VERSION,
++)
 +
- # Parsed by `BazelProjectStructureTest` (to assert alignment with `.idea/kotlinc.xml`) and by
- # `com.intellij.monorepo.devkit.bazel.ComposeCompilerPluginProjectPathMacroContributor` (to resolve the
- # `KOTLIN_COMPOSE_COMPILER_PLUGIN` path macro). If you rename this variable, update both regexes too.
+ python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+ python.toolchain(
+     is_default = True,
 diff --git a/build/jvm-rules/krusty_compiler.bzl b/build/jvm-rules/krusty_compiler.bzl
 new file mode 100644
-index 0000000000..708b799ddb
+index 0000000000..c0c19a5f3c
 --- /dev/null
 +++ b/build/jvm-rules/krusty_compiler.bzl
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,40 @@
 +"""Optional krusty compiler binary, selected by `KRUSTY_BINARY`.
 +
 +Unset, the repository holds a stub and `KRUSTY_ENABLED` is false, so `jvm_library` keeps the
-+JPS builder. Set to an absolute path of a built `krusty` executable and the same rules compile
++JPS builder. `KRUSTY_KOTLIN_VERSION` is the build's Kotlin release, which krusty reproduces. Set to an absolute path of a built `krusty` executable and the same rules compile
 +Kotlin-only, plugin-free targets with that binary. Java sources, source jars, and compiler
 +plugins stay on the JPS builder: krusty has no Java front end and does not load build-supplied
 +plugins.
@@ -53,12 +55,13 @@ index 0000000000..708b799ddb
 +        )
 +        enabled = False
 +
-+    rctx.file("defs.bzl", "KRUSTY_ENABLED = %s\n" % enabled)
++    rctx.file("defs.bzl", "KRUSTY_ENABLED = %s\nKRUSTY_KOTLIN_VERSION = %r\n" % (enabled, rctx.attr.kotlin_version))
 +    rctx.file("BUILD.bazel", "exports_files([\"krusty.bin\"])\n")
 +    return rctx.repo_metadata(reproducible = not enabled)
 +
 +krusty_compiler = repository_rule(
 +    implementation = _krusty_compiler_impl,
++    attrs = {"kotlin_version": attr.string(mandatory = True)},
 +    environ = ["KRUSTY_BINARY"],
 +    local = True,
 +)
@@ -81,18 +84,18 @@ index 317fedc286..90774d920b 100644
          "_trace": attr.label(default = "//:trace"),
      },
 diff --git a/build/jvm-rules/rules/impl/compile.bzl b/build/jvm-rules/rules/impl/compile.bzl
-index e68fed938c..730e9aba6e 100644
+index e68fed938c..31fb2d4379 100644
 --- a/build/jvm-rules/rules/impl/compile.bzl
 +++ b/build/jvm-rules/rules/impl/compile.bzl
 @@ -24,6 +24,7 @@ load(
  load("@rules_kotlin//kotlin/internal:opts.bzl", "JavacOptions")
  load("//:rules/common-attrs.bzl", "add_dicts")
  load("//:rules/impl/associates.bzl", "get_associates")
-+load("@krusty_compiler//:defs.bzl", "KRUSTY_ENABLED")
++load("@krusty_compiler//:defs.bzl", "KRUSTY_ENABLED", "KRUSTY_KOTLIN_VERSION")
  load("//:rules/impl/builder-args.bzl", "init_builder_args")
  load("//:rules/impl/compiler-plugins.bzl", "collect_compiler_plugins_for_export", "compiler_plugins_from", "exported_compiler_plugins_from")
  load("//:rules/resource.bzl", "ResourceGroupInfo")
-@@ -234,30 +235,64 @@ def _run_jvm_builder(
+@@ -234,30 +235,66 @@ def _run_jvm_builder(
  
      java_runtime = ctx.attr._tool_java_runtime[java_common.JavaRuntimeInfo]
  
@@ -133,6 +136,8 @@ index e68fed938c..730e9aba6e 100644
 +        # checkout that can locate a Kotlin distribution, so the implicit lookup would fail
 +        # the action before any source is read.
 +        args.add("--kotlinc-arg", "-no-stdlib")
++        # The build's own Kotlin release, so krusty reproduces the kotlinc the JPS builder embeds.
++        args.add("--kotlinc-arg", "-Xkotlin-reference-version=" + KRUSTY_KOTLIN_VERSION)
 +        ctx.actions.run(
 +            mnemonic = "KrustyCompile",
 +            env = {
