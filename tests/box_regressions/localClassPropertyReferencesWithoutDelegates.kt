@@ -21,6 +21,12 @@ fun box(): String {
     val b = B("b")
     B<String>::p.set(b, "c")
     val q = B<String>::q
-    val result = fromExpressionBody() + b.p + q.get(b).first + b.viaMember() + B<String>::p.name
-    return if (result == "acccp") "OK" else result
+    // Each value is compared where it is read: a generic member's value is not rendered into a
+    // string, which not every backend can do for a local class's instances.
+    if (fromExpressionBody() != "a") return "FAIL expression body"
+    if (b.p != "c") return "FAIL set"
+    if (q.get(b).first != "c") return "FAIL composite"
+    if (b.viaMember() != "c") return "FAIL member"
+    if (B<String>::p.name != "p") return "FAIL name"
+    return "OK"
 }
