@@ -839,6 +839,11 @@ fn compose_library_calls_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_library_default_arguments_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("libraryDefaultArguments");
+}
+
+#[test]
 fn compose_captured_locals_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("capturedLocals");
 }

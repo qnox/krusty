@@ -332,6 +332,12 @@ impl NativePlugins {
         self.enabled.iter().map(|native| native.plugin_id).collect()
     }
 
+    /// Whether an enabled plugin [passes the default mask of a transformed library
+    /// entry](IrPlugin::passes_transformed_entry_defaults).
+    pub fn passes_transformed_entry_defaults(&self, entry: &super::TransformedEntry<'_>) -> bool {
+        !self.enabled.is_empty() && self.host("").passes_transformed_entry_defaults(entry)
+    }
+
     /// Build this compilation's plugin host. `module_name` reaches plugins whose output is
     /// module-mangled (serialization's `write$Self$<module>`).
     pub fn host(&self, module_name: &str) -> PluginHost {

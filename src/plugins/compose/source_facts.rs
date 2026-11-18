@@ -116,6 +116,9 @@ pub(super) struct ComposableCallSite {
     /// The callee's parameters in order, the omitted ones included; an `invoke`'s one slot is the
     /// called value itself.
     pub(super) arguments: Vec<ArgumentState>,
+    /// A library callee declares parameter defaults, so it takes a `$default` mask after its
+    /// `$changed`, whether or not the call omits an argument.
+    pub(super) library_mask: bool,
 }
 
 /// What kotlinc's `argumentMetaOf` finds about one argument of a composable call.
@@ -330,6 +333,7 @@ pub(super) fn record(
                 sites.push(ComposableCallSite {
                     call,
                     arguments: vec![ArgumentState::Forwarded(index)],
+                    library_mask: false,
                 });
                 locations.push(call_location(&positions, call_span));
                 continue;
@@ -561,10 +565,12 @@ pub(super) fn record(
         .chain(composable_lambdas.iter().flat_map(|lambda| &lambda.calls));
     for site in sites {
         if let Some(CalleeOrigin::Library(target)) = calls.get(&site.call).map(|call| call.origin) {
-            runtime.appended_parameters(
-                target,
-                vec![Ty::nullable(super::runtime::composer()), Ty::Int],
-            );
+            let mut appended = vec![Ty::nullable(super::runtime::composer()), Ty::Int];
+            // The `$default` mask of a declaration with defaults follows its `$changed`.
+            if site.library_mask {
+                appended.push(Ty::Int);
+            }
+            runtime.appended_parameters(target, appended);
         }
     }
     match ComposeRuntime::bind(runtime) {
@@ -932,8 +938,21 @@ fn supplied_arguments<'a>(
 fn omitted_parameters(callee: &Callee) -> &[u32] {
     match callee {
         Callee::LocalWithDefaults { defaults, .. } => defaults,
+        Callee::External { defaults, .. } => defaults,
         _ => &[],
     }
+}
+
+/// Whether `synthetic`, the parameters a library composable's entry takes after its source
+/// parameters, are what `ComposerParamTransformer` appends: the composer, one `$changed` word,
+/// and, for a declaration with defaults, one `$default` word. The pass passes a library call no
+/// more than ten parameters, which one word of each covers.
+pub(super) fn takes_composer_frame(synthetic: &[Ty], defaults: bool) -> bool {
+    let words = if defaults { 2 } else { 1 };
+    matches!(synthetic, [composer, rest @ ..]
+        if composer.obj_internal().is_some_and(|name| name.matches(super::runtime::COMPOSER))
+            && rest.len() == words
+            && rest.iter().all(|word| *word == Ty::Int))
 }
 
 /// The Kotlin name of the function a call calls, of the file or of a library.
@@ -1104,8 +1123,20 @@ impl BodyScope<'_> {
             });
             return None;
         };
+        let library_mask = match found.origin {
+            CalleeOrigin::Library(target) => self
+                .source
+                .checked
+                .dependency_shape(target)
+                .is_some_and(|shape| shape.defaults),
+            _ => false,
+        };
         Some((
-            ComposableCallSite { call, arguments },
+            ComposableCallSite {
+                call,
+                arguments,
+                library_mask,
+            },
             call_location(self.positions, call_span),
         ))
     }
@@ -1128,7 +1159,6 @@ impl BodyScope<'_> {
         let Callee::External {
             params,
             ret,
-            defaults,
             extension_receiver_parameter,
             ..
         } = &**callee
@@ -1147,8 +1177,6 @@ impl BodyScope<'_> {
             || extension_receiver_parameter.is_some()
         {
             Some("a call to a library composable function with a receiver")
-        } else if shape.defaults || !defaults.is_empty() {
-            Some("a call to a library composable function with default arguments")
         } else if (0..params.len()).any(|index| {
             matches!(params[index].kind(), TyKind::Fun(_))
                 && !composable_lambda_parameter(
@@ -1167,6 +1195,11 @@ impl BodyScope<'_> {
             Some("a call to a library composable function with more than ten parameters")
         } else if !matches!(ret.kind(), TyKind::Unit) {
             Some("a call to a library composable function with a result")
+        } else if !takes_composer_frame(&shape.synthetic_parameters, shape.defaults) {
+            Some(
+                "a call to a library composable function whose entry does not take the composer, \
+                 `$changed` and `$default` parameters",
+            )
         } else {
             None
         }
@@ -1670,5 +1703,45 @@ fn simple_type_name(ty: Ty) -> String {
             .kotlin_class_internal()
             .map(|classifier| classifier.nested_segment_ref().to_string())
             .unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod composer_frame_tests {
+    use super::takes_composer_frame;
+    use crate::types::Ty;
+
+    fn composer() -> Ty {
+        Ty::obj("androidx/compose/runtime/Composer")
+    }
+
+    #[test]
+    fn the_composer_and_its_words_are_the_frame() {
+        assert!(takes_composer_frame(&[composer(), Ty::Int], false));
+        assert!(takes_composer_frame(&[composer(), Ty::Int, Ty::Int], true));
+    }
+
+    #[test]
+    fn a_missing_or_extra_word_is_not() {
+        assert!(!takes_composer_frame(&[composer(), Ty::Int], true));
+        assert!(!takes_composer_frame(
+            &[composer(), Ty::Int, Ty::Int],
+            false
+        ));
+        assert!(!takes_composer_frame(&[], false));
+    }
+
+    #[test]
+    fn a_wrong_role_is_not() {
+        assert!(!takes_composer_frame(&[Ty::Long, Ty::Int, Ty::Int], true));
+        assert!(!takes_composer_frame(
+            &[composer(), Ty::Long, Ty::Int],
+            true
+        ));
+        assert!(!takes_composer_frame(&[Ty::Int, composer(), Ty::Int], true));
+        assert!(!takes_composer_frame(
+            &[Ty::String, Ty::Long, Ty::Int],
+            true
+        ));
     }
 }

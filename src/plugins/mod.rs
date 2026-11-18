@@ -813,6 +813,14 @@ pub trait IrPlugin {
         &[]
     }
 
+    /// Whether this plugin's transformation owns `entry`, so its calls pass the mask of omitted
+    /// default arguments the entry ends with (Compose's `@Composable` declarations, whose entry
+    /// takes the composer, `$changed` and `$default`). A declaration of another role or shape has
+    /// nothing to realize an omitted default, whatever plugins are enabled.
+    fn passes_transformed_entry_defaults(&self, _entry: &TransformedEntry<'_>) -> bool {
+        false
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
@@ -917,8 +925,17 @@ pub struct DependencyDeclaration<'a> {
     pub name: &'a str,
 }
 
+/// A selected library declaration whose compiled entry ends with the mask of omitted default
+/// arguments after parameters a compiler plugin's transformation appended.
+pub struct TransformedEntry<'a> {
+    /// The annotations the declaration carries, which say what role it has.
+    pub annotations: &'a [TypeName],
+    /// The parameters its compiled entry takes after its source parameters.
+    pub synthetic: &'a [Ty],
+}
+
 /// What a plugin reads of a dependency function's declaration besides its parameter types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DependencyCallableShape {
     /// An `inline` function, whose body a call splices.
     pub inline: bool,
@@ -926,6 +943,10 @@ pub struct DependencyCallableShape {
     pub receiver: bool,
     /// A source parameter declares a default value.
     pub defaults: bool,
+    /// The parameters the declaration's compiled entry takes after its source parameters, which
+    /// a plugin's transformation appended (Compose's composer, `$changed` and `$default`). Empty
+    /// when it takes none, or when its entry does not begin with the source parameters.
+    pub synthetic_parameters: Box<[Ty]>,
     /// Per logical parameter, whether its declared type is a `@Composable` function type.
     pub composable_parameters: crate::libraries::ParamFlags,
 }
@@ -1400,6 +1421,14 @@ impl PluginHost {
     /// Names of the registered plugins, in run order (introspection / tests).
     pub fn plugin_names(&self) -> Vec<&str> {
         self.plugins.iter().map(|p| p.name()).collect()
+    }
+
+    /// Whether a registered plugin [passes the default mask of a transformed library
+    /// entry](IrPlugin::passes_transformed_entry_defaults).
+    pub fn passes_transformed_entry_defaults(&self, entry: &TransformedEntry<'_>) -> bool {
+        self.plugins
+            .iter()
+            .any(|plugin| plugin.passes_transformed_entry_defaults(entry))
     }
 
     /// Every registered plugin's [`IrPlugin::sam_with_receiver_annotations`].
