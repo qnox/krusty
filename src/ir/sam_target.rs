@@ -43,6 +43,10 @@ pub struct IrSamTarget {
     /// The distinct own results of the declarations the method overrides, unspecialized. A target
     /// whose method result or bridges depend on the overridden results realizes them from these.
     pub overridden_results: Vec<Ty>,
+    /// Exact declarations in the implemented override family, including inherited aliases.
+    pub dispatch_methods: Vec<IrSamMethodFrame>,
+    /// Effective inherited default declarations; header evidence alone does not call their bodies.
+    pub default_methods: Vec<IrSamMethodFrame>,
     /// A fun-interface conversion of a callable reference delegates equality/hashCode through
     /// Kotlin's `FunctionAdapter` contract. Ordinary lambdas remain identity objects.
     pub function_adapter: bool,
@@ -62,6 +66,15 @@ pub struct IrSamTarget {
     /// The interface's own type parameters in declaration order, which the declared shape names.
     /// A target that writes a class implementing the interface declares them on that class.
     pub type_parameters: Vec<IrSamTypeParameter>,
+}
+
+/// An exact checked declaration and the unspecialized frame its interface slot carries.
+/// `None` retains unavailable declaration evidence rather than guessing a nominal member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrSamMethodFrame {
+    pub method: Option<IrSamMethod>,
+    pub parameters: Vec<Ty>,
+    pub result: Ty,
 }
 
 /// One type parameter a functional interface declares: its semantic identity, and each declared

@@ -122,15 +122,17 @@ fn assert_function_value_sam_frame(ir: &IrFile, method: crate::fir::ExternalCall
     validated(ir);
 }
 
-#[test]
-fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frames() {
+pub(super) fn wasm_library(
+    library_source: &str,
+    module: &str,
+) -> Option<(std::path::PathBuf, KlibLibraries)> {
     let target = crate::compilation_target::CompilationTarget::WasmWasi;
     let Some(stdlib) = crate::toolchain::kotlin_stdlib_klib(target) else {
         assert!(
             std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
             "selected Wasm stdlib required"
         );
-        return;
+        return None;
     };
     let compiler = crate::toolchain::kotlinc_lib_dir()
         .expect("selected producer distribution")
@@ -150,7 +152,7 @@ fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frame
         }
     };
     let source = work.join("Library.kt");
-    std::fs::write(&source, LIBRARY).unwrap();
+    std::fs::write(&source, library_source).unwrap();
     let library = work.join("sam");
     let output = std::process::Command::new(compiler)
         .args([
@@ -161,7 +163,7 @@ fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frame
         .arg(&stdlib)
         .arg("-ir-output-dir")
         .arg(&library)
-        .args(["-ir-output-name", "selected_sam"])
+        .args(["-ir-output-name", module])
         .arg(&source)
         .output()
         .expect("run exact Wasm selected-SAM KLIB producer");
@@ -175,6 +177,14 @@ fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frame
         KlibLibraryInput::dependency(library),
     ])
     .expect("read complete official selected-SAM artifact");
+    Some((work, libraries))
+}
+
+#[test]
+fn official_sam_conversions_freeze_and_lower_file_initializer_and_prepared_frames() {
+    let Some((work, libraries)) = wasm_library(LIBRARY, "selected_sam") else {
+        return;
+    };
     let classifier = libraries
         .classifier(type_name("fixture/Action"))
         .expect("selected interface");

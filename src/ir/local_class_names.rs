@@ -593,6 +593,14 @@ fn sam_target(sam: &mut crate::ir::IrSamTarget, names: &IdentityRemap<'_>) {
     tys(&mut sam.declared_parameters, names);
     sam.declared_result = ty(sam.declared_result, names);
     tys(&mut sam.overridden_results, names);
+    for frame in sam
+        .dispatch_methods
+        .iter_mut()
+        .chain(&mut sam.default_methods)
+    {
+        tys(&mut frame.parameters, names);
+        frame.result = ty(frame.result, names);
+    }
     for parameter in &mut sam.type_parameters {
         for (bound, _) in &mut parameter.bounds {
             *bound = ty(*bound, names);
@@ -2035,6 +2043,18 @@ mod tests {
                 suspend: false,
                 source_suspend: false,
                 overridden_results: vec![source_ty],
+                dispatch_methods: vec![crate::ir::IrSamMethodFrame {
+                    method: Some(IrSamMethod::External(
+                        crate::fir::ExternalCallableId::from_raw(71),
+                    )),
+                    parameters: vec![source_ty],
+                    result: source_ty,
+                }],
+                default_methods: vec![crate::ir::IrSamMethodFrame {
+                    method: None,
+                    parameters: vec![source_ty],
+                    result: source_ty,
+                }],
                 function_adapter: false,
                 wraps_function_value: false,
                 nullable: false,
@@ -2050,6 +2070,16 @@ mod tests {
         };
         assert_eq!(sam.classifier, target);
         assert_eq!(sam.overridden_results, vec![target_ty]);
+        assert_eq!(
+            sam.dispatch_methods[0].method,
+            Some(IrSamMethod::External(
+                crate::fir::ExternalCallableId::from_raw(71)
+            ))
+        );
+        for frame in sam.dispatch_methods.iter().chain(&sam.default_methods) {
+            assert_eq!(frame.parameters, vec![target_ty]);
+            assert_eq!(frame.result, target_ty);
+        }
 
         let runtime = || IrRuntimeFunction {
             function: crate::fir::ExternalCallableId::from_raw(1),
