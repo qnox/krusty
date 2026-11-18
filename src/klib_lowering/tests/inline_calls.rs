@@ -507,6 +507,67 @@ fn a_generic_inline_function_is_expanded_at_the_call_s_type_arguments() {
 }
 
 #[test]
+fn a_nested_generic_inline_call_binds_the_outer_formals_to_the_calls_type_arguments() {
+    // caller(String) -> outer<P>(x) -> id<P>(x): the inner call binds id's formal to outer's formal,
+    // which the outer splice must specialize to String before the inner call is expanded.
+    let demo = demo_inlining(
+        &[
+            ("id", &[T::P], T::P),
+            ("outer", &[T::P], T::P),
+            ("caller", &[T::String], T::String),
+        ],
+        &["id", "outer"],
+        |name, body| match name {
+            "id" => sole_return(body),
+            "outer" => {
+                let argument = body.param(0);
+                let call = body.generic_call("id", vec![argument], T::P, T::P);
+                Some(vec![body.ret(call)])
+            }
+            _ => {
+                let argument = body.param(0);
+                let call = body.generic_call("outer", vec![argument], T::String, T::String);
+                Some(vec![body.ret(call)])
+            }
+        },
+    );
+    let mut unit = DependencyBodyUnit::default();
+    demo.lower(&mut unit, "caller", &["caller", "outer", "id"])
+        .expect("the nested generic inline calls expand");
+    let ir = unit.ir();
+    validated(ir);
+    let caller = function_named(ir, "caller");
+    let opaque = |ty: &crate::types::Ty| matches!(ty.kind(), crate::types::TyKind::TyParam(..));
+    let unspecialized = reached(ir, caller)
+        .into_iter()
+        .filter(|expression| matches!(expression, IrExpr::Variable { ty, .. } if opaque(ty)))
+        .count();
+    assert_eq!(unspecialized, 0, "no copied operand keeps an opaque formal");
+    let bound = ir
+        .inline_call_type_arguments
+        .values()
+        .flatten()
+        .map(|(_, ty)| *ty)
+        .collect::<Vec<_>>();
+    // `outer`'s own lowered body keeps the one binding written in terms of its formal; the copies in
+    // `caller` bind String, including the nested call's.
+    let (strings, opaque_bindings): (Vec<_>, Vec<_>) = bound
+        .iter()
+        .partition(|ty| **ty == crate::types::Ty::String);
+    assert_eq!(
+        strings.len(),
+        2,
+        "the call and its nested call bind String: {bound:?}"
+    );
+    assert_eq!(
+        opaque_bindings.len(),
+        1,
+        "only the inline callee's own body is opaque: {bound:?}"
+    );
+    assert!(opaque_bindings.iter().all(|ty| opaque(ty)));
+}
+
+#[test]
 fn a_declined_generic_inline_expansion_leaves_no_signature_on_a_reused_function_id() {
     let demo = demo_inlining(
         &[
