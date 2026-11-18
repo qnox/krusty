@@ -104,6 +104,34 @@ class KrustyToolchainsTest {
     }
 
     @Test
+    void aNewDaemonPolicyAnswersTheDaemonsDefaultsAndRefusesWhatHasNone() {
+        ExecutionPolicy.WithDaemon.Builder fresh = toolchains.daemonExecutionPolicyBuilder();
+        ExecutionPolicy.WithDaemon built = fresh.build();
+        for (ExecutionPolicy.WithDaemon.Builder builder : List.of(fresh, built.toBuilder())) {
+            assertEquals(1048576L, builder.get(ExecutionPolicy.WithDaemon.LOGS_FILE_SIZE_LIMIT));
+            assertEquals(3, builder.get(ExecutionPolicy.WithDaemon.LOGS_FILE_COUNT_LIMIT));
+            assertEquals(
+                java.nio.file.Paths.get(System.getProperty("java.io.tmpdir")),
+                builder.get(ExecutionPolicy.WithDaemon.LOGS_PATH));
+            assertTrue(builder.get(ExecutionPolicy.WithDaemon.DAEMON_RUN_DIR_PATH).endsWith(
+                java.nio.file.Paths.get("kotlin", "daemon")) || builder.get(
+                ExecutionPolicy.WithDaemon.DAEMON_RUN_DIR_PATH).endsWith(
+                java.nio.file.Paths.get(".kotlin", "daemon")));
+        }
+        assertEquals(1048576L, built.get(ExecutionPolicy.WithDaemon.LOGS_FILE_SIZE_LIMIT));
+        for (ExecutionPolicy.WithDaemon.Option<?> option : List.of(
+            ExecutionPolicy.WithDaemon.JVM_ARGUMENTS, ExecutionPolicy.WithDaemon.SHUTDOWN_DELAY_MILLIS)) {
+            String expected = option.getId() + " was not set in "
+                + "org.jetbrains.kotlin.buildtools.api.ExecutionPolicy.WithDaemon";
+            for (java.util.function.Supplier<Object> read : List.<java.util.function.Supplier<Object>>of(
+                () -> fresh.get(option), () -> built.get(option), () -> built.toBuilder().get(option))) {
+                IllegalStateException refused = assertThrows(IllegalStateException.class, read::get);
+                assertEquals(expected, refused.getMessage());
+            }
+        }
+    }
+
+    @Test
     void reportsEachErrorThroughTheCallersRenderer() throws IOException {
         Path source = write("Broken.kt", "fun broken(): Int = missing()\n");
         List<String> rendered = new ArrayList<>();
