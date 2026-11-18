@@ -50,6 +50,8 @@ pub(super) struct LocalIdentity {
 pub(super) struct LocalConstructor {
     pub(super) declaration: ConstructorDeclaration,
     pub(super) access: IrConstructorAccess,
+    /// Whether the constructor creates the one instance of an object.
+    pub(super) object: bool,
 }
 
 /// One file-local class materialized in the unit that lowers its library's bodies.
@@ -64,6 +66,8 @@ pub(super) struct MaterializedLocalClass {
     pub(super) supertypes: Vec<Ty>,
     pub(super) self_type: Ty,
     pub(super) class_type_parameters: Vec<String>,
+    /// Whether [`Self::class`] is an object.
+    pub(super) object: bool,
 }
 
 /// A field the class initializer and its members store through, in declaration order.
@@ -417,6 +421,8 @@ pub(super) struct PreparedLocalClass<'a> {
     /// How Kotlin names a top-level class private to its file: in its file's package, by its
     /// declared name. Any other file-local class has no name of its own here.
     pub(super) naming: Option<crate::ir::IrLocalClassNameProvenance>,
+    /// Whether the class is an object, whose one instance its singleton value reads.
+    pub(super) object: bool,
 }
 
 /// A same-library superclass constructor a class's constructor delegates to, and the slot of the
@@ -487,8 +493,10 @@ pub(super) fn classifier(
         return Err(unsupported("a non-public value class"));
     }
     match class_kind(class.base.flags) {
-        TypeKind::Class => Ok(Some(name)),
-        _ => Err(unsupported("a non-public classifier other than a class")),
+        TypeKind::Class | TypeKind::Object => Ok(Some(name)),
+        _ => Err(unsupported(
+            "a non-public classifier other than a class or an object",
+        )),
     }
 }
 
@@ -663,6 +671,7 @@ pub(super) fn link<'bodies>(
         return Ok(LocalLink::Ready(LocalConstructor {
             declaration: known.declaration.clone(),
             access: known.access,
+            object: known.object,
         }));
     }
     let Some((class_arena, class)) = source
@@ -748,6 +757,28 @@ fn prepare<'a>(
     )
 }
 
+/// Authenticates that `object` keeps the one process-wide instance its installed class is
+/// realized as. Each annotation is joined to its declared classifier; one of unknown identity
+/// cannot prove the storage role. A per-thread object needs its own identity and state on every
+/// thread, which installed objects do not carry, so it stays refused.
+fn object_storage(object: &KlibIrClass) -> Result<(), KlibBodyDeclineReason> {
+    let per_thread = crate::types::type_name("kotlin/native/concurrent/ThreadLocal");
+    for annotation in &object.base.annotations {
+        match super::klib_types::annotation_classifier(annotation) {
+            None => {
+                return Err(unsupported(
+                    "a non-public object annotation of unknown identity",
+                ))
+            }
+            Some(classifier) if classifier == per_thread => {
+                return Err(unsupported("a non-public per-thread object"))
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
 /// One class declaration and the constructor that builds it, with the identity it is cached by.
 struct ClassDeclaration<'a> {
     arena: &'a KlibIrArena,
@@ -803,6 +834,20 @@ fn prepare_class<'a>(
     }
     let delegation =
         superclass_delegation(arena, &class.base.symbol, function, source.validate_root)?;
+    // An object's private constructor creates its one instance, which no call constructs again.
+    let object = class_kind(class.base.flags) == TypeKind::Object;
+    if object
+        && (declaration_visibility(function.base.flags) != Visibility::Private
+            || !function.regular_parameters.is_empty()
+            || !class.type_parameters.is_empty())
+    {
+        return Err(mismatch(
+            "an object is not created by its private constructor alone",
+        ));
+    }
+    if object {
+        object_storage(class)?;
+    }
     let resolve = |signature: &KlibIrSignature| classifier(source.bodies, source.module, signature);
     let ClassFormals {
         types,
@@ -965,6 +1010,7 @@ fn prepare_class<'a>(
         superclass,
         open: declaration_modality(class.base.flags) != KotlinModality::Final,
         naming,
+        object,
     })
 }
 
@@ -1463,7 +1509,7 @@ fn member_overrides(
     Ok(overrides)
 }
 
-/// Every supertype above a class's written interfaces and library superclass, at the
+/// Every supertype from a class's written interfaces and its library superclass up, at the
 /// application the walk from them reaches it with, through the hierarchy the checker froze.
 /// Without that evidence only the written supertypes themselves are known.
 fn applied_supertypes(scope: &MemberScope<'_>) -> Vec<(TypeName, Ty)> {
@@ -1747,5 +1793,6 @@ pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
         class.constructor_prefix_count = 1;
         class.pre_super_param_fields.push((0, outer.field));
     }
+    class.is_object = prepared.object;
     class
 }

@@ -281,9 +281,9 @@ impl Checker<'_> {
                                         "\0flow-intersection:{}:{}:{}",
                                         call.0, argument, formal
                                     ));
-                                    let primary = intersection[0];
+                                    let proven = Ty::intersection(&intersection);
                                     flow_intersections.insert(identity, intersection);
-                                    actual = Ty::ty_param(identity, primary);
+                                    actual = Ty::ty_param(identity, proven);
                                 }
                             }
                         }
@@ -941,8 +941,8 @@ impl Checker<'_> {
                         let runtime = actual
                             .non_null()
                             .ty_param_name()
-                            .filter(|identity| flow_intersections.contains_key(identity))
-                            .and_then(|_| actual.non_null().ty_param_bound())
+                            .and_then(|identity| flow_intersections.get(identity))
+                            .and_then(|constituents| constituents.first().copied())
                             .unwrap_or(actual);
                         (*formal, runtime)
                     })

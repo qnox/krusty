@@ -43,6 +43,7 @@ mod enum_materialization;
 mod initializer_capability_tests;
 mod local_class;
 mod private_members;
+mod sam_placement;
 mod static_properties;
 
 pub(crate) use private_members::is_private_class_member;
@@ -1130,6 +1131,19 @@ impl<'s> CallLinker for Linker<'_, 's> {
         })
     }
 
+    fn sam_declaration(
+        &self,
+        classifier: &KlibPublicIdSignature,
+    ) -> Result<crate::ir::CheckedKlibSamDeclaration, KlibBodyDeclineReason> {
+        self.sources
+            .callees
+            .sam_declaration(&self.active_module, classifier)
+            .cloned()
+            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a SAM conversion without a checked declaration",
+            ))
+    }
+
     fn declares_implementation(
         &self,
         callee: &KlibPublicIdSignature,
@@ -1310,6 +1324,14 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .bodies
             .module_local_function(&self.active_module, callee)
             .is_some()
+    }
+
+    fn link_local_object(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<TypeName, KlibBodyDeclineReason> {
+        self.install_local_object(ir, signature)
     }
 
     fn link_local_constructor(
@@ -1563,6 +1585,10 @@ impl<'s> CallLinker for Linker<'_, 's> {
             owner,
             &|sub, owner| callees.applied_supertype(sub, owner),
         )
+    }
+
+    fn sam_placement(&self) -> Result<crate::ir::IrSamPlacement, KlibBodyDeclineReason> {
+        self.active_sam_placement()
     }
 
     fn dependency_override(

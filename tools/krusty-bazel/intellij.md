@@ -235,7 +235,11 @@ the JPS builder, so a mixed module still builds.
 
 The action sets `JAVA_HOME` from the build's tool Java runtime and passes `-no-stdlib`. The
 module classpath already contains `kotlin-stdlib`; the copied binary cannot walk up to a Kotlin
-distribution of its own. Further checkout fixes (a module dependency the compiler cannot see, a
+distribution of its own. It also passes `-Xkotlin-reference-version` with the build's own Kotlin
+release (`_KOTLIN_VERSION` in `build/jvm-rules/MODULE.bazel`), so krusty reproduces the kotlinc the
+JPS builder embeds; a release krusty does not support fails the action. CI checks that the
+patch applies at `1608e029bb2c`, the last revision built with Kotlin 2.4.20 exactly
+(`scripts/check-intellij-patch.sh`). Further checkout fixes (a module dependency the compiler cannot see, a
 repository that fails to fetch) are additional patches in the same directory, applied in name
 order by `scripts/intellij-krusty.sh`.
 
