@@ -102,42 +102,13 @@ fn a_local_intersection_reaches_the_generic_call_result() {
     common::expect_box_same_as_kotlinc(LOCAL_SOURCE, "LocalIntersectionArgumentRun");
 }
 
-/// The vararg collection factory takes the same flow-narrowed intersection.
-///
-/// PLATFORM-SPECIFIC: this is the quarkdown shape with the real `listOf`, whose KLIB body the
-/// wasm lanes cannot yet lower. The same overload shapes (a single-element overload beside a
-/// vararg one) run on every backend in `LocalIntersectionArgument.kt`, which is not cropped.
+const LIST_OF_SOURCE: &str = include_str!("box_regressions/LocalIntersectionListOf.kt");
+
+/// The vararg collection factory takes the same flow-narrowed intersection: the real `listOf`
+/// (a single-element overload beside a vararg one) accepts an intersection-proved local as a
+/// `List<Node>` element. The program runs on every backend from the shared box inventory; this
+/// driver compares its result with kotlinc.
 #[test]
 fn a_local_intersection_reaches_a_vararg_collection() {
-    const PRELUDE: &str = "\
-interface Node
-interface Styled : Node
-interface Backed : Node
-class Paragraph : Styled, Backed
-class Link : Styled, Backed
-class Items : Node
-fun render(nodes: List<Node>): Int = nodes.size
-";
-    for (name, body, expected) in [
-        (
-            "Initializer",
-            "fun run(): Int { val x = if (true) Paragraph() else Link(); return render(listOf(x, Items())) }",
-            2,
-        ),
-        (
-            "Narrowing",
-            "fun run(): Int { val v: Any = Paragraph(); if (v is Styled && v is Backed) return render(listOf(v, Items())); return 0 }",
-            2,
-        ),
-        (
-            "Single",
-            "fun run(): Int { val v: Any = Paragraph(); if (v is Styled && v is Backed) return render(listOf(v)); return 0 }",
-            1,
-        ),
-    ] {
-        let source = format!(
-            "{PRELUDE}{body}\nfun box(): String = if (run() == {expected}) \"OK\" else \"Fail\"\n"
-        );
-        common::expect_box_same_as_kotlinc(&source, &format!("LocalIntersectionVararg{name}Run"));
-    }
+    common::expect_box_same_as_kotlinc(LIST_OF_SOURCE, "LocalIntersectionListOfRun");
 }
