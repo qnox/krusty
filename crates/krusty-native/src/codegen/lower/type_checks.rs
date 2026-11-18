@@ -211,6 +211,12 @@ impl<'a> FileLowering<'a> {
             {
                 "kt_type_closed_range"
             }
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_closed_floating_range) =>
+            {
+                "kt_type_closed_floating_point_range"
+            }
             // `EnumEntries` is sealed, so the runtime's `EnumEntriesList` is every instance there
             // is, and it names this descriptor among its interfaces.
             _ if target

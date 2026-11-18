@@ -74,7 +74,11 @@ KT_MARKER_TYPE(kt_type_appendable, "kotlin.text.", "Appendable")
    (`IntRange`, `LongRange`, ...) points at it, so a cast or `is` against the interface asks the
    one marker, as it does of a class of the program that implements the interface. */
 KT_MARKER_TYPE(kt_type_closed_range, "kotlin.ranges.", "ClosedRange")
+KT_MARKER_TYPE(kt_type_closed_floating_point_range, "kotlin.ranges.", "ClosedFloatingPointRange")
+/* Flattened, as `KType.interfaces` requires: a `ClosedFloatingPointRange` is a `ClosedRange` too. */
 static const KType *const kt_range_interfaces[] = {&kt_type_closed_range};
+static const KType *const kt_floating_range_interfaces[] = {&kt_type_closed_range,
+                                                            &kt_type_closed_floating_point_range};
 
 /* `kotlin.Function` and each arity of it. A function value is an object of a type of its own —
    the generator emits one per lambda and per callable reference — so an `is` against a function
@@ -2211,15 +2215,17 @@ static const kt_fn kt_range_vtable[] = {(kt_fn)kt_range_equals, (kt_fn)kt_range_
                               .vtable = table,                                                     \
                               .vtable_length = 3};
 
-/* A range proper, as against its progression: it is a `ClosedRange` of its element kind too. */
-#define KT_CLOSED_RANGE_TYPE(identifier, simple, parent)                                           \
-    const KType identifier = {KT_NAMED("kotlin.ranges.", simple),                                  \
-                              .instance_size = sizeof(KRange),                                     \
-                              .super = parent,                                                     \
-                              .vtable = kt_range_vtable,                                           \
-                              .vtable_length = 3,                                                  \
-                              .interfaces = kt_range_interfaces,                                   \
-                              .interface_count = 1};
+/* A range proper, as against its progression: it is a `ClosedRange` of its element kind too, and
+   a floating-point one a `ClosedFloatingPointRange` as well. */
+#define KT_CLOSED_RANGE_TYPE(identifier, simple, shape, table, parent, ifaces)                     \
+    const KType identifier = {                                                                     \
+        KT_NAMED("kotlin.ranges.", simple),                                                        \
+        .instance_size = sizeof(shape),                                                            \
+        .super = parent,                                                                           \
+        .vtable = table,                                                                           \
+        .vtable_length = 3,                                                                        \
+        .interfaces = ifaces,                                                                      \
+        .interface_count = (uint32_t)(sizeof(ifaces) / sizeof((ifaces)[0]))};
 
 /* Each range subclasses its element's progression, as Kotlin's `IntRange : IntProgression` does, so
    an `is IntProgression` walk of the super chain finds it. Kotlin declares only two UNSIGNED pairs
@@ -2233,11 +2239,16 @@ KT_RANGE_TYPE(kt_type_uint_progression, "kotlin.ranges.", "UIntProgression", KRa
               kt_range_vtable)
 KT_RANGE_TYPE(kt_type_ulong_progression, "kotlin.ranges.", "ULongProgression", KRange,
               kt_range_vtable)
-KT_CLOSED_RANGE_TYPE(kt_type_int_range, "IntRange", &kt_type_int_progression)
-KT_CLOSED_RANGE_TYPE(kt_type_long_range, "LongRange", &kt_type_long_progression)
-KT_CLOSED_RANGE_TYPE(kt_type_char_range, "CharRange", &kt_type_char_progression)
-KT_CLOSED_RANGE_TYPE(kt_type_uint_range, "UIntRange", &kt_type_uint_progression)
-KT_CLOSED_RANGE_TYPE(kt_type_ulong_range, "ULongRange", &kt_type_ulong_progression)
+KT_CLOSED_RANGE_TYPE(kt_type_int_range, "IntRange", KRange, kt_range_vtable,
+                     &kt_type_int_progression, kt_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_long_range, "LongRange", KRange, kt_range_vtable,
+                     &kt_type_long_progression, kt_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_char_range, "CharRange", KRange, kt_range_vtable,
+                     &kt_type_char_progression, kt_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_uint_range, "UIntRange", KRange, kt_range_vtable,
+                     &kt_type_uint_progression, kt_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_ulong_range, "ULongRange", KRange, kt_range_vtable,
+                     &kt_type_ulong_progression, kt_range_interfaces)
 
 /* The five element kinds, which index the tables below: a kind's range, its progression, and the
    iterator either hands out (defined with the iterator). */
@@ -2773,10 +2784,10 @@ static const kt_fn kt_floating_range_vtable[] = {(kt_fn)kt_floating_range_equals
 /* Kotlin's own names for these: the class a `rangeTo` on a floating-point receiver answers with is
    private to the stdlib, and `ClosedFloatingPointRange` is the interface it is seen through. The
    name here is the CLASS's, because it is what `toString` on the object would report. */
-KT_RANGE_TYPE(kt_type_double_range, "kotlin.ranges.", "ClosedDoubleRange", KFloatingRange,
-              kt_floating_range_vtable)
-KT_RANGE_TYPE(kt_type_float_range, "kotlin.ranges.", "ClosedFloatRange", KFloatingRange,
-              kt_floating_range_vtable)
+KT_CLOSED_RANGE_TYPE(kt_type_double_range, "ClosedDoubleRange", KFloatingRange,
+                     kt_floating_range_vtable, &kt_type_any, kt_floating_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_float_range, "ClosedFloatRange", KFloatingRange,
+                     kt_floating_range_vtable, &kt_type_any, kt_floating_range_interfaces)
 
 static KRef kt_floating_range_new(const KType *type, kt_double start, kt_double end) {
     KFloatingRange *range =
@@ -2897,6 +2908,8 @@ const KType kt_type_comparable_range = {
     .super = &kt_type_any,
     .vtable = kt_comparable_range_vtable,
     .vtable_length = 3,
+    .interfaces = kt_range_interfaces,
+    .interface_count = 1,
 };
 
 KRef kt_comparable_range(KRef start, KRef end, kt_compare_fn compare) {

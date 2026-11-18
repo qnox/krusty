@@ -208,6 +208,8 @@ fn standard_interface_descriptor(internal: TypeName) -> Option<&'static str> {
         "kt_type_appendable"
     } else if is_closed_range(internal) {
         "kt_type_closed_range"
+    } else if is_closed_floating_range(internal) {
+        "kt_type_closed_floating_point_range"
     } else if is_identity(internal, &["kotlin/reflect/KCallable"]) {
         "kt_type_kcallable"
     } else if is_identity(internal, &["kotlin/reflect/KProperty"]) {
