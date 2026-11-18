@@ -1039,6 +1039,72 @@ fn argument_stability(
         .collect()
 }
 
+/// What a call to a composable function of another file of the module does that the pass does not
+/// cover yet. The callee's own file gives it its composer parameters, so the call is covered
+/// where the callee's declaration shape is one that pass transforms and the call selects it
+/// directly.
+fn unsupported_module_call(ir: &IrFile, call: ExprId) -> Option<&'static str> {
+    let IrExpr::Call {
+        callee,
+        dispatch_receiver,
+        ..
+    } = &ir.exprs[call as usize]
+    else {
+        unreachable!("a composable call is a call");
+    };
+    let (Callee::Module { target, .. }
+    | Callee::CrossFile {
+        module_target: Some(target),
+        module_default_call: false,
+        ..
+    }) = &**callee
+    else {
+        return Some(match &**callee {
+            Callee::ModuleWithDefaults { .. }
+            | Callee::ModuleDefaultEntry { .. }
+            | Callee::CrossFile {
+                module_default_call: true,
+                ..
+            } => "a call to a composable function of another file with default arguments",
+            _ => "a call to a composable member of another file",
+        });
+    };
+    let Some(callable) = ir.referenced_module_callables.get(target) else {
+        return Some("a call to a composable function of another file the module does not declare");
+    };
+    if dispatch_receiver.is_some() || callable.owner.is_some() {
+        Some("a call to a composable member of another file")
+    } else if callable
+        .parameter_identities
+        .iter()
+        .any(|identity| identity.role != crate::ir::IrParameterRole::Value)
+    {
+        Some("a call to a composable function of another file with a receiver")
+    } else if callable.parameters.len() > super::restart_groups::SLOTS_PER_INT {
+        Some("a call to a composable function of another file with more than ten parameters")
+    } else if !callable.default_parameters.is_empty() {
+        Some("a call to a composable function of another file with default arguments")
+    } else if !callable.type_parameters.is_empty() {
+        Some("a call to a generic composable function of another file")
+    } else if callable.is_inline() {
+        Some("a call to an inline composable function of another file")
+    } else if callable.is_suspend() {
+        Some("a call to a suspend composable function of another file")
+    } else if !matches!(callable.result.kind(), TyKind::Unit) {
+        Some("a call to a composable function of another file with a result")
+    } else if callable.parameters.iter().any(|&ty| !is_known_stable(ty)) {
+        Some("a call to a composable function of another file with a parameter whose stability kotlinc infers")
+    } else {
+        None
+    }
+}
+
+/// The parameter types the stability inferencer knows are stable without looking further: the
+/// primitives and `String`.
+fn is_known_stable(ty: Ty) -> bool {
+    ty == Ty::String || super::runtime::PRIMITIVES.contains(&ty)
+}
+
 /// The Kotlin name of the function a call calls, of the file or of a library.
 fn callee_name<'a>(
     ir: &'a IrFile,
@@ -1146,7 +1212,7 @@ impl BodyScope<'_> {
         let found = &self.calls[&call];
         let declined = match found.origin {
             CalleeOrigin::File => None,
-            CalleeOrigin::Module => Some("a call to a composable function from another file"),
+            CalleeOrigin::Module => unsupported_module_call(ir, call),
             CalleeOrigin::Library(target) => self.unsupported_library_call(ir, call, target),
         };
         if let Some(what) = declined {

@@ -784,6 +784,11 @@ fn compose_tracked_parameters_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_cross_file_calls_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("crossFileCalls");
+}
+
+#[test]
 fn compose_default_arguments_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("defaultArguments");
 }

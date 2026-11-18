@@ -598,6 +598,31 @@ fn pass_composer(
         *args = physical;
         return;
     }
+    // Another file's composable takes them too, once that file's own pass gives it them: the call
+    // names the physical signature that pass produces.
+    if matches!(
+        **callee,
+        Callee::Module { .. }
+            | Callee::CrossFile {
+                module_target: Some(_),
+                ..
+            }
+    ) {
+        let composer = ir.add_expr(IrExpr::GetValue(caller.composer));
+        let changed = changed_argument(ir, caller, arguments, stability);
+        ir.mark_positionless(composer);
+        ir.mark_positionless(changed);
+        let IrExpr::Call { callee, args, .. } = &mut ir.exprs[call as usize] else {
+            unreachable!("a composable call is a call");
+        };
+        let (Callee::Module { params, .. } | Callee::CrossFile { params, .. }) = &mut **callee
+        else {
+            unreachable!("a module call is still a module call");
+        };
+        params.extend([runtime::composer(), Ty::Int]);
+        args.extend([composer, changed]);
+        return;
+    }
     let function = callee
         .source_function()
         .expect("a composable call in the file calls one of its functions");
