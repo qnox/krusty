@@ -1209,6 +1209,9 @@ pub enum FirExprKind {
         binding: FirCallableReferenceBinding,
         dispatch_receiver: Option<FirReceiver>,
         extension_receiver: Option<FirReceiver>,
+        /// Values the reference site selected for the declaration's leading context parameters
+        /// (`CallableReferencesToContextual`); empty for any other reference.
+        context_arguments: Box<[FirReceiver]>,
         mutable: bool,
         substitutions: Box<[FirTypeSubstitution]>,
         adaptation: Option<Box<FirReferenceAdaptation>>,
@@ -1474,11 +1477,13 @@ impl FirExprKind {
             }
             FirExprKind::PropertyReference {
                 target,
+                context_arguments,
                 substitutions,
                 adaptation,
                 ..
             } => {
                 target.storage_payload_bytes()
+                    + context_arguments.len() * std::mem::size_of::<FirReceiver>()
                     + substitutions.len() * std::mem::size_of::<FirTypeSubstitution>()
                     + adaptation.as_deref().map_or(0, |adaptation| {
                         std::mem::size_of::<FirReferenceAdaptation>()

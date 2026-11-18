@@ -44,6 +44,9 @@ impl BodyFirChecker<'_> {
             match &mut kind {
                 FirExprKind::CallableReference {
                     context_arguments, ..
+                }
+                | FirExprKind::PropertyReference {
+                    context_arguments, ..
                 } => *context_arguments = materialized,
                 _ => return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)),
             }
@@ -1272,6 +1275,7 @@ impl BodyFirChecker<'_> {
             binding,
             dispatch_receiver,
             extension_receiver,
+            context_arguments: Box::new([]),
             mutable,
             substitutions,
             adaptation: adaptation.map(Box::new),
@@ -1333,6 +1337,7 @@ impl BodyFirChecker<'_> {
             binding,
             dispatch_receiver,
             extension_receiver,
+            context_arguments: Box::new([]),
             mutable,
             substitutions: self.external_reference_substitutions(
                 expression,
@@ -1367,6 +1372,7 @@ impl BodyFirChecker<'_> {
             binding: FirCallableReferenceBinding::Static,
             dispatch_receiver: None,
             extension_receiver: None,
+            context_arguments: Box::new([]),
             mutable: false,
             substitutions: Box::new([]),
             adaptation: adaptation.map(Box::new),
