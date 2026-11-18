@@ -231,6 +231,7 @@ fn property_plan(
         mutable,
         substitutions,
         adaptation,
+        function_type: _,
     } = &**checked_op
     else {
         return Err(None);
