@@ -82,8 +82,8 @@ impl JvmSearch {
     }
 }
 
-/// `None` when the daemon's current JVM can already run this Gradle. The caller then leaves the
-/// Tooling API's default in place, including an `org.gradle.java.home` the project set itself.
+/// `None` when the daemon's current JVM can already run this Gradle. The caller then leaves that
+/// JVM in place. The user Gradle home's `org.gradle.java.home` wins over the project file.
 pub(super) fn daemon_java_home(project: &Path, search: &JvmSearch) -> Option<PathBuf> {
     let version = gradle_version(project)?;
     let current = search.daemon_home.as_deref().and_then(jvm_major)?;
@@ -230,10 +230,9 @@ fn version_in_distribution_url(url: &str) -> Option<GradleVersion> {
 }
 
 fn explicit_java_home(project: &Path, user_gradle_home: Option<&Path>) -> Option<PathBuf> {
-    property_path(&project.join("gradle.properties"), "org.gradle.java.home").or_else(|| {
-        let home = user_gradle_home?;
-        property_path(&home.join("gradle.properties"), "org.gradle.java.home")
-    })
+    user_gradle_home
+        .and_then(|home| property_path(&home.join("gradle.properties"), "org.gradle.java.home"))
+        .or_else(|| property_path(&project.join("gradle.properties"), "org.gradle.java.home"))
 }
 
 fn property_path(file: &Path, key: &str) -> Option<PathBuf> {
@@ -383,6 +382,34 @@ mod tests {
         let search =
             JvmSearch::for_project(tree.root(), Some(java_21), vec![tree.path("jvms")], None);
         assert_eq!(daemon_java_home(tree.root(), &search), None);
+    }
+
+    #[test]
+    fn daemon_jvm_prefers_the_user_java_home_over_an_incompatible_project_file() {
+        let tree = TempTree::new("daemon-jvm-user-home");
+        tree.write("gradle/wrapper/gradle-wrapper.properties", &wrapper("8.0"));
+        let project_java = write_jvm(&tree, "jvms/21", "21.0.2");
+        let discovered = write_jvm(&tree, "jvms/17", "17.0.13");
+        let user_java = write_jvm(&tree, "outside/17", "17.0.9");
+        tree.write(
+            "gradle.properties",
+            &format!("org.gradle.java.home={}\n", project_java.display()),
+        );
+        let user_gradle = tree.directory("gradle-user");
+        tree.write(
+            "gradle-user/gradle.properties",
+            &format!("org.gradle.java.home={}\n", user_java.display()),
+        );
+        let search = JvmSearch::for_project(
+            tree.root(),
+            Some(project_java),
+            vec![tree.path("jvms")],
+            Some(&user_gradle),
+        );
+        let selected =
+            daemon_java_home(tree.root(), &search).or_else(|| search.daemon_home.clone());
+        assert_eq!(selected.as_deref(), Some(user_java.as_path()));
+        assert_ne!(selected.as_deref(), Some(discovered.as_path()));
     }
 
     #[test]
