@@ -226,3 +226,69 @@ fn a_parent_component_after_a_symlink_folds_before_the_read_like_kotlinc() {
     );
     assert_eq!(program("krusty"), kotlinc, "krusty");
 }
+
+/// A relative spelling that climbs out of the working directory and back in names the same file as
+/// its absolute spelling, so kotlinc compiles it once; a directory spelled with a trailing `..`
+/// folds to the directory itself and is read.
+#[test]
+fn a_leading_parent_spelling_is_the_same_file_as_its_absolute_one_like_kotlinc() {
+    let dir = common::scratch_dir().expect("allocate a scratch directory");
+    let src = dir.join("src");
+    std::fs::create_dir_all(src.join("inner")).unwrap();
+    std::fs::write(src.join("G.kt"), "fun g() = 1\n").unwrap();
+    let working = std::env::current_dir().expect("the working directory");
+    let name = working.file_name().expect("a named working directory");
+    let up_and_down = Path::new("..")
+        .join(name)
+        .join(
+            src.strip_prefix(&working)
+                .expect("the scratch directory is under the working directory"),
+        )
+        .join("G.kt");
+    let folding_away = src.join("inner").join("..");
+    let cases: [(&str, Vec<String>); 2] = [
+        (
+            "climbs",
+            vec![
+                up_and_down.display().to_string(),
+                src.join("G.kt").display().to_string(),
+            ],
+        ),
+        ("folds-away", vec![folding_away.display().to_string()]),
+    ];
+    for (tag, sources) in cases {
+        let arguments = |compiler: &str| {
+            let mut all = sources.clone();
+            all.push("-d".into());
+            all.push(dir.join(tag).join(compiler).display().to_string());
+            all
+        };
+        let (kotlinc_code, kotlinc_stderr) =
+            common::kotlinc_server::kotlinc_compile_unrecorded(&arguments("kotlinc"))
+                .expect("the reference kotlinc is available");
+        let krusty = Command::new(common::krusty_binary())
+            .args(arguments("krusty"))
+            .output()
+            .expect("run krusty");
+        assert_eq!(
+            (kotlinc_code, kotlinc_stderr.as_str()),
+            (0, ""),
+            "{tag}: kotlinc"
+        );
+        assert_eq!(
+            (
+                krusty.status.code(),
+                String::from_utf8_lossy(&krusty.stderr).as_ref()
+            ),
+            (Some(0), ""),
+            "{tag}: krusty"
+        );
+        let produced = output_files(&dir.join(tag).join("kotlinc"));
+        assert!(produced.contains("GKt.class"), "{tag}: {produced:?}");
+        assert_eq!(
+            output_files(&dir.join(tag).join("krusty")),
+            produced,
+            "{tag}"
+        );
+    }
+}
