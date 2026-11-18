@@ -813,11 +813,12 @@ pub trait IrPlugin {
         &[]
     }
 
-    /// Whether the plugin's transformation gives a library declaration a compiled entry that takes
-    /// the mask of omitted default arguments, and its calls pass that mask (Compose's
-    /// composables). Without such a plugin a call that omits one of those arguments has nothing
-    /// to realize the default.
-    fn passes_transformed_entry_defaults(&self) -> bool {
+    /// Whether `synthetic`, the parameters a library declaration's compiled entry takes after its
+    /// `parameters` source parameters and ending with the mask of omitted default arguments, are exactly what
+    /// this plugin's transformation appends, so its calls pass that mask (Compose's composer,
+    /// `$changed` and `$default`). A declaration of another shape has nothing to realize an
+    /// omitted default, whatever plugins are enabled.
+    fn passes_transformed_entry_defaults(&self, _synthetic: &[Ty], _parameters: usize) -> bool {
         false
     }
 
@@ -1414,10 +1415,10 @@ impl PluginHost {
 
     /// Whether a registered plugin [passes the default mask of a transformed library
     /// entry](IrPlugin::passes_transformed_entry_defaults).
-    pub fn passes_transformed_entry_defaults(&self) -> bool {
+    pub fn passes_transformed_entry_defaults(&self, synthetic: &[Ty], parameters: usize) -> bool {
         self.plugins
             .iter()
-            .any(|plugin| plugin.passes_transformed_entry_defaults())
+            .any(|plugin| plugin.passes_transformed_entry_defaults(synthetic, parameters))
     }
 
     /// Every registered plugin's [`IrPlugin::sam_with_receiver_annotations`].

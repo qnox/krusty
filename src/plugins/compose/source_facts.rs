@@ -896,7 +896,7 @@ fn omitted_parameters(callee: &Callee) -> &[u32] {
 /// source parameters, are what `ComposerParamTransformer` appends: the composer, a `$changed` word
 /// for every ten parameters and, for a declaration with defaults, a `$default` word. The pass
 /// passes one `$default` word, which covers at most 31 parameters.
-fn takes_composer_frame(synthetic: &[Ty], parameters: usize, defaults: bool) -> bool {
+pub(super) fn takes_composer_frame(synthetic: &[Ty], parameters: usize, defaults: bool) -> bool {
     let default_words = match (defaults, parameters <= 31) {
         (false, _) => 0,
         (true, true) => 1,
