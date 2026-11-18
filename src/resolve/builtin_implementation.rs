@@ -100,26 +100,16 @@ pub(crate) fn record_override_edges(
             continue;
         }
         for edge in index.function_overrides(declaration) {
-            for (target, owner) in [
-                (edge.implementation, edge.implementation_owner),
-                (edge.overridden, edge.overridden_owner),
-            ] {
+            for target in [edge.implementation, edge.overridden] {
                 if let crate::fir::ResolvedFunctionOverrideTarget::External(identity) = target {
-                    facts.entry(identity).or_insert_with(|| {
-                        builtin_implementation_facts(source, owner, &edge.name, identity)
-                    });
+                    record_member(facts, source, identity)?;
                 }
             }
         }
         for edge in index.property_overrides(declaration) {
-            for (target, owner) in [
-                (edge.implementation, edge.implementation_owner),
-                (edge.overridden, edge.overridden_owner),
-            ] {
+            for target in [edge.implementation, edge.overridden] {
                 if let crate::fir::ResolvedPropertyOverrideTarget::External(identity) = target {
-                    facts.entry(identity).or_insert_with(|| {
-                        builtin_implementation_facts(source, owner, &edge.name, identity)
-                    });
+                    record_member(facts, source, identity)?;
                 }
             }
         }

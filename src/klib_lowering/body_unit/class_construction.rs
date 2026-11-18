@@ -751,7 +751,7 @@ impl<'u, 's> Linker<'u, 's> {
                     .and_then(|signature| {
                         self.sources
                             .bodies
-                            .overridden_declarations(module, &signature)
+                            .overridden_closure(module, &signature)
                             .ok()
                     })
                     .is_some_and(|declarations| declarations.iter().all(selected))
@@ -813,7 +813,7 @@ impl<'u, 's> Linker<'u, 's> {
             .map(|symbol| {
                 self.sources
                     .bodies
-                    .overridden_declarations(module, &member_signature(symbol)?)
+                    .overridden_closure(module, &member_signature(symbol)?)
                     .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))
             })
             .collect::<Result<Vec<_>, _>>()?;
