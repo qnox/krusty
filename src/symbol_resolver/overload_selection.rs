@@ -91,13 +91,24 @@ pub(super) fn unique_most_specific_with_conflicts<T>(
 }
 
 // Declaration-priority tiers, tried in this order and falling through whenever the tier holds no
-// applicable candidate. A `@kotlin.internal.HidesMembers` extension shares the members' tier, above
-// every ordinary extension level whatever its receiver specificity or lexical distance, so the
-// more specific declaration wins: `Iterable<T>.forEach((T) -> Unit)` beats
-// `java.lang.Iterable.forEach(Consumer)` for a lambda, and a member taking `String` beats an
-// extension taking `String?`, as kotlinc 2.4.21 selects.
+// applicable candidate. Kotlin resolves a `@kotlin.internal.HidesMembers` extension above members
+// (the annotation exists so `Iterable<T>.forEach` wins over `java.lang.Iterable.forEach(Consumer)`)
+// and, as measured against kotlinc 2.4.10, above every ordinary extension level as well, whatever
+// its receiver specificity or lexical distance. Members still precede ordinary extensions.
+const HIDES_MEMBERS_PRIORITY: u8 = 0;
 const MEMBER_PRIORITY: u8 = 1;
 const EXTENSION_PRIORITY: u8 = 2;
+
+/// Whether `callable` is prioritized above members by `@kotlin.internal.HidesMembers`. kotlinc
+/// honors the annotation only for calls named by its resolve-annotation name set (`forEach` and
+/// `addSuppressed`, `annotationsForResolve.kt`); any other annotated extension is an ordinary
+/// extension, so a member that applies still wins over it.
+pub(crate) fn hides_members(callable: &crate::libraries::LibraryCallable) -> bool {
+    matches!(callable.name.as_str(), "forEach" | "addSuppressed")
+        && callable
+            .annotations
+            .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
+}
 
 /// The [`OverloadTowerRank`] of a candidate whose `receiver_rank` is already recorded.
 pub(crate) fn callable_tower_rank(overload: &FunctionInfo) -> OverloadTowerRank {
@@ -113,13 +124,8 @@ pub(crate) fn extension_tower_rank(
     receiver_rank: u32,
     overload: &FunctionInfo,
 ) -> OverloadTowerRank {
-    if overload.is_extension()
-        && overload
-            .callable
-            .annotations
-            .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
-    {
-        (MEMBER_PRIORITY, (0, 0), receiver_rank)
+    if overload.is_extension() && hides_members(&overload.callable) {
+        (HIDES_MEMBERS_PRIORITY, (0, 0), receiver_rank)
     } else {
         (
             EXTENSION_PRIORITY,
