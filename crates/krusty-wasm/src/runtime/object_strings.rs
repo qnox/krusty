@@ -76,8 +76,8 @@ impl Runtime {
     }
 
     /// The `toString` slot body of `kotlin.Any`'s default for a function value, an instance of a
-    /// class kotlinc-wasm names for its shape (`crate::function_value_names`), printed by that
-    /// simple name.
+    /// class kotlinc-wasm names for its shape or its `fun interface` (`crate::function_value_names`),
+    /// printed by that name.
     pub(crate) fn function_value_to_string(&mut self, module: &mut Module, name: &str) -> u32 {
         self.named_slot(module, name, Rendering::Identity)
     }

@@ -43,6 +43,7 @@ mod enum_materialization;
 mod initializer_capability_tests;
 mod inline_functions;
 mod local_class;
+mod sam_placement;
 mod static_properties;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
@@ -888,6 +889,7 @@ impl DependencyBodyUnit {
         sources: Sources<'a>,
         seed: impl FnOnce(&mut Linker<'_, 'a>, &mut IrFile) -> Result<T, KlibBodyDeclineReason>,
     ) -> Result<T, KlibBodyDecline> {
+        let (first_class, classes) = (self.ir.classes.len(), sources.callees.class_type_oracle());
         let mut pending = VecDeque::new();
         let mut linker = Linker {
             functions: &mut self.functions,
@@ -1020,8 +1022,9 @@ impl DependencyBodyUnit {
             })?;
             self.ir.functions[body.function as usize].body = Some(lowered);
         }
-        inline_functions::expand_calls(&mut self.ir)
-            .map_err(|reason| KlibBodyDecline::new(identity.declaration.clone(), reason))?;
+        let decline = |reason| KlibBodyDecline::new(identity.declaration.clone(), reason);
+        super::class_hierarchies::publish(&mut self.ir, first_class, classes).map_err(decline)?;
+        inline_functions::expand_calls(&mut self.ir).map_err(decline)?;
         Ok(root)
     }
 }
@@ -1118,6 +1121,19 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.primitive_at(signature, false, |facts, identity, bodies| {
             facts.range_literal_bounds(identity, bodies)
         })
+    }
+
+    fn sam_declaration(
+        &self,
+        classifier: &KlibPublicIdSignature,
+    ) -> Result<crate::ir::CheckedKlibSamDeclaration, KlibBodyDeclineReason> {
+        self.sources
+            .callees
+            .sam_declaration(&self.active_module, classifier)
+            .cloned()
+            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a SAM conversion without a checked declaration",
+            ))
     }
 
     fn declares_implementation(
@@ -1314,6 +1330,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             super::same_library_class::LocalClassSource {
                 bodies,
                 declarations: self.sources.declarations,
+                classes: callees.class_type_oracle(),
                 module: &module,
                 validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
             },
@@ -1546,6 +1563,10 @@ impl<'s> CallLinker for Linker<'_, 's> {
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
         self.sources.callees.applied_supertype(sub, owner)
+    }
+
+    fn sam_placement(&self) -> Result<crate::ir::IrSamPlacement, KlibBodyDeclineReason> {
+        self.active_sam_placement()
     }
 
     fn dependency_override(
