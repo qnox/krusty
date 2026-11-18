@@ -1066,7 +1066,6 @@ fn unsupported_module_call(ir: &IrFile, call: ExprId) -> Option<&'static str> {
     let Some(callable) = ir.referenced_module_callables.get(target) else {
         return Some("a call to a composable function of another file the module does not declare");
     };
-    let flags = callable.flags;
     if dispatch_receiver.is_some() || callable.owner.is_some() {
         Some("a call to a composable member of another file")
     } else if callable
@@ -1081,9 +1080,9 @@ fn unsupported_module_call(ir: &IrFile, call: ExprId) -> Option<&'static str> {
         Some("a call to a composable function of another file with default arguments")
     } else if !callable.type_parameters.is_empty() {
         Some("a call to a generic composable function of another file")
-    } else if flags.has(crate::fir::DeclarationFlags::INLINE) {
+    } else if callable.is_inline() {
         Some("a call to an inline composable function of another file")
-    } else if flags.has(crate::fir::DeclarationFlags::SUSPEND) {
+    } else if callable.is_suspend() {
         Some("a call to a suspend composable function of another file")
     } else if !matches!(callable.result.kind(), TyKind::Unit) {
         Some("a call to a composable function of another file with a result")
