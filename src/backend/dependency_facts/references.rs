@@ -19,12 +19,35 @@ use crate::ir::{
 pub struct ReferencedDependencies {
     pub callables: BTreeSet<ExternalCallableId>,
     pub properties: BTreeSet<ExternalPropertyId>,
+    /// Implemented/inherited SAM declarations are header evidence, not calls of their bodies.
+    pub sam_declarations: BTreeSet<ExternalCallableId>,
 }
 
 pub fn referenced_dependencies(ir: &IrFile) -> ReferencedDependencies {
     let mut referenced = ReferencedDependencies::default();
     for expression in &ir.exprs {
         referenced.expression(ir, expression);
+    }
+    for expression in crate::ir::emitted_body_roots(ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+    {
+        if let IrExpr::Lambda {
+            sam: Some(target), ..
+        } = ir.expr(expression)
+        {
+            for method in std::iter::once(Some(target.method_target)).chain(
+                target
+                    .dispatch_methods
+                    .iter()
+                    .chain(&target.default_methods)
+                    .map(|frame| frame.method),
+            ) {
+                if let Some(crate::ir::IrSamMethod::External(identity)) = method {
+                    referenced.sam_declarations.insert(identity);
+                }
+            }
+        }
     }
     referenced.callables.extend(
         ir.external_super_constructors

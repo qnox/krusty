@@ -69,6 +69,32 @@ impl KlibDeclarationBodies {
         Ok(found)
     }
 
+    /// `EmptyList.isEmpty` overrides `List.isEmpty` and, through it, `Collection.isEmpty`.
+    pub(crate) fn overridden_closure(
+        &self,
+        body_module: &str,
+        declaration: &KlibDeclarationSignature,
+    ) -> Result<Vec<KlibDependencyCallable>, &'static str> {
+        let mut found = self.overridden_declarations(body_module, declaration)?;
+        let mut next = 0;
+        while let Some(identity) = found.get(next).cloned() {
+            next += 1;
+            let Some((_, function)) = self.function(&identity) else {
+                continue;
+            };
+            for symbol in &function.overridden {
+                let overridden = member_signature(&symbol.signature)
+                    .ok_or("an override names a declaration that is not a member")?;
+                for overridden in self.overridden_declarations(&identity.module, &overridden)? {
+                    if !found.contains(&overridden) {
+                        found.push(overridden);
+                    }
+                }
+            }
+        }
+        Ok(found)
+    }
+
     /// Every serialized declaration the fake override `declaration` inherits, through each
     /// direct supertype of its declaring class until a serialized declaration is reached.
     fn inherited(
