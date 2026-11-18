@@ -1536,13 +1536,24 @@ impl Checker<'_> {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, (_, _, _, _, _, candidate, _, _))| {
-                    let general = candidate.info.generic_sig.as_ref()?;
+                    // A vararg parameter stands for its element type at a call, which the declaration
+                    // comparison does not model; those overloads keep ordinary specificity.
+                    let general = candidate
+                        .info
+                        .generic_sig
+                        .as_ref()
+                        .filter(|_| candidate.call_sig.vararg_index.is_none())?;
                     maximal
                         .iter()
                         .any(|(_, _, _, _, _, other, _, _)| {
-                            other.info.generic_sig.as_ref().is_some_and(|specific| {
-                                accepts(general, specific) && !accepts(specific, general)
-                            })
+                            other
+                                .info
+                                .generic_sig
+                                .as_ref()
+                                .filter(|_| other.call_sig.vararg_index.is_none())
+                                .is_some_and(|specific| {
+                                    accepts(general, specific) && !accepts(specific, general)
+                                })
                         })
                         .then_some(index)
                 })
