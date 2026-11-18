@@ -208,7 +208,7 @@ impl Checker<'_> {
     /// entry named directly, and otherwise the receiver's own diagnostic, which a template or
     /// operator around the `String` read keeps.
     fn non_constant_enum_name(&self, receiver: ExprId) -> Option<NonConstantArgument> {
-        if !self.file.intrinsic_const_evaluation {
+        if !self.file.language.intrinsic_const_evaluation {
             return Some(NonConstantArgument::NotConst);
         }
         if constant_evaluation::intrinsic_const_enum_entry(

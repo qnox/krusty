@@ -117,9 +117,9 @@ pub fn record(
 
 pub fn load(platform: Platform, version: KotlinVersion) -> Baseline {
     Baseline {
-        // JVM has no failure ratchet: absence means exactly the required empty set. Every other
-        // lane's failure inventory is part of its committed baseline and may never disappear
-        // silently.
+        // A JVM release without a failure inventory of its own or inherited requires no failures;
+        // every other lane's failure inventory is part of its committed baseline and may never
+        // disappear silently.
         failures: load_path(&failure_path(platform, version), platform != Platform::Jvm),
         not_applicable: load_path(&not_applicable_path(platform, version), true),
     }
@@ -230,20 +230,6 @@ pub fn write(
         version,
         &not_applicable,
         &render_not_applicable(platform, version, &not_applicable),
-    )
-}
-
-pub fn write_not_applicable(
-    platform: Platform,
-    version: KotlinVersion,
-    paths: &BTreeSet<String>,
-) -> std::io::Result<()> {
-    record(
-        NOT_APPLICABLE,
-        platform.name(),
-        version,
-        paths,
-        &render_not_applicable(platform, version, paths),
     )
 }
 

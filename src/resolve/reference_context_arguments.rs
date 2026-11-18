@@ -7,16 +7,41 @@
 
 use super::*;
 
+/// What a diagnostic about a reference to a property with context parameters shows of it.
+pub(super) struct ContextualPropertyDisplay<'a> {
+    pub(super) context_names: &'a [String],
+    pub(super) context_types: &'a [Ty],
+    pub(super) extension_receiver: Option<Ty>,
+    pub(super) property_type: Ty,
+    pub(super) mutable: bool,
+}
+
+/// How many of a declaration's `context_count` leading context parameters a reference fills from its
+/// own site: all of them when the file binds reference contexts (`CallableReferencesToContextual`),
+/// otherwise none, and they stay ordinary leading inputs of the reference's function type.
+pub(super) fn bound_reference_contexts(
+    binds_reference_contexts: bool,
+    context_count: usize,
+) -> usize {
+    if binds_reference_contexts {
+        context_count
+    } else {
+        0
+    }
+}
+
 impl Checker<'_> {
     /// Apply an expected callable shape to one generic declaration before reference adaptation.
     /// An extension contributes its already-selected receiver as inference evidence; references
-    /// hide any leading context parameters selected at this call-reference site.
+    /// hide any leading context parameters selected at this call-reference site, and the values
+    /// selected for them (`context_arguments`) are inference evidence too.
     pub(super) fn specialize_callable_ref_candidate(
         &self,
         function: &mut crate::libraries::FunctionInfo,
         extension_receiver: Option<Ty>,
         expected_params: Option<&[Ty]>,
         expected_ret: Option<Ty>,
+        context_arguments: Option<&[Ty]>,
     ) -> Result<Vec<Ty>, CallableRefSpecialization> {
         let source = self.fed_source();
         let bound_contexts = self.reference_bound_context_count(function);
@@ -28,6 +53,7 @@ impl Checker<'_> {
                 params: expected_params,
                 ret: expected_ret,
                 bound_contexts,
+                context_arguments,
                 type_variable_inputs: self.active_reference_type_variable_inputs(),
             },
             |actual, bound| self.generic_bound_admits(actual, bound),
@@ -91,7 +117,7 @@ impl Checker<'_> {
         candidates: &CallableRefCandidates,
         unbound_receiver: Option<Ty>,
     ) -> Option<Ty> {
-        if expected.is_some() || !self.file.callable_references_to_contextual {
+        if expected.is_some() || !self.file.language.callable_references_to_contextual {
             return expected;
         }
         let member = candidates.method.as_ref()?;
@@ -145,6 +171,26 @@ impl Checker<'_> {
         ))
     }
 
+    /// The types of the values the reference site supplies for a generic `function`'s bound context
+    /// parameters, selected against their declared types exactly as the reference later binds them.
+    /// `None` when the reference binds none, the declaration is not generic, or the site supplies no
+    /// value for one of them; binding then reports the missing value.
+    pub(super) fn reference_context_argument_types(
+        &self,
+        scope: &CheckerScope<'_>,
+        function: &crate::libraries::FunctionInfo,
+    ) -> Option<Vec<Ty>> {
+        let bound = self.reference_bound_context_count(function);
+        let declared = function.generic_sig.as_ref()?.params.get(..bound)?;
+        if declared.is_empty() {
+            return None;
+        }
+        let selected = self
+            .select_context_arguments_with_types(scope, declared)
+            .ok()?;
+        Some(selected.into_iter().map(|(_, actual)| actual).collect())
+    }
+
     /// How many leading context parameters a reference to `function` fills from its own site.
     /// Without `CallableReferencesToContextual` they stay ordinary leading inputs of the
     /// reference's function type.
@@ -152,11 +198,10 @@ impl Checker<'_> {
         &self,
         function: &crate::libraries::FunctionInfo,
     ) -> usize {
-        if self.file.callable_references_to_contextual {
-            function.context_count
-        } else {
-            0
-        }
+        bound_reference_contexts(
+            self.file.language.callable_references_to_contextual,
+            function.context_count,
+        )
     }
 
     /// Without `CallableReferencesToContextual` a declaration with context parameters cannot be
@@ -178,6 +223,41 @@ impl Checker<'_> {
         Ty::Error
     }
 
+    /// Without `CallableReferencesToContextual` a property with context parameters cannot be
+    /// referenced either.
+    pub(super) fn report_context_property_reference(
+        &mut self,
+        expression: ExprId,
+        name: &str,
+        property: ContextualPropertyDisplay<'_>,
+    ) -> Ty {
+        let ContextualPropertyDisplay {
+            context_names,
+            context_types,
+            extension_receiver,
+            property_type,
+            mutable,
+        } = property;
+        let contexts = context_names
+            .iter()
+            .zip(context_types)
+            .map(|(name, ty)| format!("{name}: {}", ty.source_name()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let receiver = extension_receiver
+            .map(|receiver| format!("{}.", receiver.source_name()))
+            .unwrap_or_default();
+        self.diags.error(
+            self.member_name_span(expression, name),
+            format!(
+                "callable reference to 'context({contexts}) {} {receiver}{name}: {}' is unsupported because it has context parameters.",
+                if mutable { "var" } else { "val" },
+                property_type.source_name(),
+            ),
+        );
+        Ty::Error
+    }
+
     /// Select and record the reference-site context arguments of the declaration `e` now resolves
     /// to. A reference whose adaptation plan has no leading `Context` entry binds nothing.
     pub(super) fn bind_reference_context_arguments(
@@ -186,7 +266,7 @@ impl Checker<'_> {
         e: ExprId,
         ty: Ty,
     ) -> Ty {
-        if ty == Ty::Error || !self.file.callable_references_to_contextual {
+        if ty == Ty::Error || !self.file.language.callable_references_to_contextual {
             return ty;
         }
         let Some(context_types) = self.reference_context_types(e) else {
@@ -195,13 +275,14 @@ impl Checker<'_> {
         };
         match self.select_context_arguments_with_types(scope, &context_types) {
             Ok(arguments) => {
-                self.context_args.insert(
-                    e,
-                    arguments
-                        .into_iter()
-                        .map(|(argument, _)| argument)
-                        .collect(),
-                );
+                let arguments = arguments
+                    .into_iter()
+                    .map(|(argument, _)| argument)
+                    .collect::<Vec<_>>();
+                // A receiver passed as a context argument is a use of it, exactly as for a call:
+                // a local classifier or callable enclosing the reference captures it.
+                self.mark_context_extension_receiver_used(scope, e, &arguments);
+                self.context_args.insert(e, arguments);
                 ty
             }
             Err(missing) => {
@@ -245,6 +326,19 @@ impl Checker<'_> {
                     | CallableReferenceTarget::TopLevelProperty(_) => return None,
                 };
                 (parameters, argument_mapping)
+            }
+            ExprLowering::CallableReference { target, .. } => {
+                let (property_parameters, count) = match target {
+                    CallableReferenceTarget::Property(property) => {
+                        (property.context_types(), property.context_count)
+                    }
+                    CallableReferenceTarget::TopLevelProperty(property) => (
+                        &property.getter.params[..property.context_count],
+                        property.context_count,
+                    ),
+                    _ => return None,
+                };
+                return (count > 0).then(|| property_parameters.to_vec());
             }
             _ => return None,
         };

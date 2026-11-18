@@ -5,12 +5,13 @@
 
 use crate::ast::{ExprId, ForRange, StmtId};
 use crate::diag::Span;
-use crate::fir::{ExternalCallableId, ExternalPropertyId};
+use crate::fir::ExternalPropertyId;
 use crate::fx_hash::HashMap;
 use crate::libraries::TypeEnhancement;
 use crate::symbol_source::SymbolSource;
 use crate::types::{wk, Ty};
 
+use super::runtime_functions::RuntimeFunction;
 use super::{
     operator_calls::{range_operator, OperatorCall, SelectedBuiltinOperatorAccess},
     scope::ScopeKind,
@@ -149,14 +150,6 @@ impl super::TypeInfo {
 pub struct ProtocolEnhancement {
     pub iterator: TypeEnhancement,
     pub element: TypeEnhancement,
-}
-
-/// A stdlib function a counted loop calls on its own, selected from the provider's declarations.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RuntimeFunction {
-    pub function: ExternalCallableId,
-    pub parameters: Box<[Ty]>,
-    pub result: Ty,
 }
 
 /// A selected member property a counted loop reads on a receiver of the declaring class.
@@ -807,36 +800,6 @@ impl Checker<'_> {
         let (Some(selected), None) = (candidates.next(), candidates.next()) else {
             return None;
         };
-        let callable = selected.callable;
-        Some(RuntimeFunction {
-            function: callable.external_identity?,
-            parameters: callable.params.into_boxed_slice(),
-            result: callable.ret,
-        })
-    }
-
-    /// Selects the stdlib function `name` of `package` a compiler-inserted call with `arguments`
-    /// reaches, through the same candidate collection and overload selection as a source call to
-    /// it. The call is kotlinc's own, so the declaration's visibility (`@PublishedApi internal`)
-    /// does not restrict it; an ambiguous or inapplicable family selects nothing.
-    fn select_runtime_function(
-        &self,
-        package: crate::types::TypeName,
-        name: &str,
-        arguments: &[Ty],
-    ) -> Option<RuntimeFunction> {
-        let scope = [package];
-        let resolver = self.resolver_in_scope(&scope);
-        let arguments = arguments
-            .iter()
-            .map(|argument| crate::symbol_resolver::CallArgKind::Typed(*argument))
-            .collect::<Vec<_>>();
-        let (selected, _) = resolver.select_top_level_function_candidates_ignoring_visibility(
-            name,
-            resolver.top_level_candidates(name),
-            &arguments,
-            &[],
-        )?;
         let callable = selected.callable;
         Some(RuntimeFunction {
             function: callable.external_identity?,

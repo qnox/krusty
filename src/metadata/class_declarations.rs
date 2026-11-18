@@ -11,7 +11,8 @@
 //! a declaration, so it reads every declaration as source declared it.
 
 use crate::ir::{
-    IrClass, IrDataClassMemberRole, IrFile, IrProperty, IrSecondaryCtor, IrValueClassAnyMember,
+    FunId, IrClass, IrDataClassMemberRole, IrFile, IrProperty, IrSecondaryCtor,
+    IrValueClassAnyMember,
 };
 use crate::metadata::builder::TypeAliasMeta;
 use crate::metadata::class_builder::{
@@ -1409,15 +1410,39 @@ fn structural_functions(ir: &IrFile, c: &IrClass) -> Vec<(FnMeta, FunctionOrigin
         ),
     ]
     .into_iter()
-    .filter(|(role, _)| ir.data_class_member(c.fq_name_id(), *role).is_some())
-    .map(|(role, member)| (any_override(member), FunctionOrigin::DataMember(role)))
+    .filter_map(|(role, member)| {
+        let function = ir.data_class_member(c.fq_name_id(), role)?;
+        Some((
+            generated_any_override(ir, member, function),
+            FunctionOrigin::DataMember(role),
+        ))
+    })
     .collect()
+}
+
+/// A generated `Any` override's record, with the equality bound its `equals` carries under
+/// `StrictEquals`.
+fn generated_any_override(ir: &IrFile, member: IrValueClassAnyMember, function: FunId) -> FnMeta {
+    let mut record = any_override(member);
+    record.equality_bound = ir.declared_parameters(function).equality_bound;
+    record
 }
 
 /// The `equals`/`hashCode`/`toString` an inline value class generates, in kotlinc's order.
 fn value_class_functions(ir: &IrFile, c: &IrClass) -> Vec<(FnMeta, FunctionOrigin)> {
     any_members_not_overridden(ir, c)
-        .map(|member| (any_override(member), FunctionOrigin::ValueClassAny(member)))
+        .map(|member| {
+            let role = match member {
+                IrValueClassAnyMember::Equals => IrDataClassMemberRole::Equals,
+                IrValueClassAnyMember::HashCode => IrDataClassMemberRole::HashCode,
+                IrValueClassAnyMember::ToString => IrDataClassMemberRole::ToString,
+            };
+            let record = match ir.data_class_member(c.fq_name_id(), role) {
+                Some(function) => generated_any_override(ir, member, function),
+                None => any_override(member),
+            };
+            (record, FunctionOrigin::ValueClassAny(member))
+        })
         .collect()
 }
 

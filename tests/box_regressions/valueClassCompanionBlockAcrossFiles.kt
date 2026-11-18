@@ -1,5 +1,5 @@
 // FILE: W.kt
-// LANGUAGE: +CompanionBlocksAndExtensions
+// LANGUAGE: +CompanionBlocks
 OPTIONAL_JVM_INLINE_ANNOTATION
 value class W(val value: Int) {
     companion {
@@ -11,7 +11,7 @@ value class W(val value: Int) {
     fun sum() = plain(one) + takes(this) + makes().value
 }
 // FILE: Main.kt
-// LANGUAGE: +CompanionBlocksAndExtensions
+// LANGUAGE: +CompanionBlocks
 fun box(): String {
     val r = W.plain(W.takes(W.makes())) + W.one
     return if (r == 4 + 1) "OK" else "r = $r"

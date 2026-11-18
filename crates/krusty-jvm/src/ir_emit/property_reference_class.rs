@@ -51,6 +51,37 @@ struct PropertyCallTarget<'a> {
     /// The receiver is a value class's boxed object while the accessor takes its carrier.
     unboxed_receiver_value_class: Option<TypeName>,
     field_access: Option<&'a crate::property_references::PropertyFieldAccess>,
+    /// The carrier and the declared types of the context arguments it holds.
+    contexts: BoundContexts<'a>,
+}
+
+/// The context arguments a carrier holds in `boundContextArguments`, read back at each accessor
+/// call (`CallableReferencesToContextual`).
+#[derive(Clone, Copy)]
+struct BoundContexts<'a> {
+    carrier: &'a str,
+    types: &'a [Ty],
+}
+
+impl BoundContexts<'_> {
+    /// Push each context from `this.boundContextArguments`, cast or unboxed to its declared type.
+    fn emit(&self, cw: &mut ClassWriter, code: &mut CodeBuilder) {
+        for (index, ty) in self.types.iter().enumerate() {
+            code.aload(0);
+            let field = cw.fieldref(self.carrier, "boundContextArguments", "[Ljava/lang/Object;");
+            code.getfield(field, 1);
+            code.push_int(index as i32, cw);
+            code.array_load(0x32, 1);
+            emit_object_as(cw, code, *ty);
+        }
+    }
+
+    fn words(&self) -> i32 {
+        self.types
+            .iter()
+            .map(|ty| slot_words(ir_ty_to_jvm(ty)) as i32)
+            .sum()
+    }
 }
 
 struct PropertyReferenceTarget {
@@ -73,6 +104,7 @@ struct PropertyReferenceTarget {
     setter_field: Option<crate::property_references::PropertyFieldAccess>,
     boxed_value_class: Option<TypeName>,
     unboxed_receiver_value_class: Option<TypeName>,
+    carrier: String,
 }
 
 impl PropertyReferenceTarget {
@@ -80,6 +112,7 @@ impl PropertyReferenceTarget {
         property: &krusty::ir::PropRef,
         realization: &crate::property_references::PropertyReferenceRealization,
         facade: &str,
+        carrier: &str,
     ) -> Self {
         let semantic_owner = property.owner().expect("property reference owner");
         let array_owner = krusty::jvm::names::array_class_descriptor(&semantic_owner);
@@ -135,6 +168,7 @@ impl PropertyReferenceTarget {
             setter_field: realization.setter_field.clone(),
             boxed_value_class: realization.boxed_value_class,
             unboxed_receiver_value_class: realization.unboxed_receiver_value_class,
+            carrier: carrier.to_owned(),
         }
     }
 
@@ -154,6 +188,10 @@ impl PropertyReferenceTarget {
             boxed_value_class: self.boxed_value_class,
             unboxed_receiver_value_class: self.unboxed_receiver_value_class,
             field_access: self.getter_field.as_ref(),
+            contexts: BoundContexts {
+                carrier: &self.carrier,
+                types: &property.context_types,
+            },
         }
     }
 
@@ -175,6 +213,10 @@ impl PropertyReferenceTarget {
             boxed_value_class: self.boxed_value_class,
             unboxed_receiver_value_class: self.unboxed_receiver_value_class,
             field_access: self.setter_field.as_ref(),
+            contexts: BoundContexts {
+                carrier: &self.carrier,
+                types: &property.context_types,
+            },
         }
     }
 }
@@ -188,16 +230,23 @@ fn emit_property_reference_constructor(
     bound: bool,
     public: bool,
 ) {
-    let own_descriptor = if bound {
-        "(Ljava/lang/Object;)V"
+    let contextual = !property.context_types.is_empty();
+    let object_array = if contextual {
+        "[Ljava/lang/Object;"
     } else {
-        "()V"
+        ""
     };
-    seed_method_header(cw, "<init>", own_descriptor);
-    let mut code = CodeBuilder::new(if bound { 2 } else { 1 });
+    let object = if bound { "Ljava/lang/Object;" } else { "" };
+    let own_descriptor = format!("({object_array}{object})V");
+    let own_slots = u16::from(contextual) + u16::from(bound) + 1;
+    seed_method_header(cw, "<init>", &own_descriptor);
+    let mut code = CodeBuilder::new(own_slots);
     code.aload(0);
-    if bound {
+    if contextual {
         code.aload(1);
+    }
+    if bound {
+        code.aload(own_slots - 1);
     }
     code.ldc_class(
         target.reflection_facade.as_deref().unwrap_or(&target.owner),
@@ -206,28 +255,27 @@ fn emit_property_reference_constructor(
     code.push_string(&property.prop_name, cw);
     code.push_string(&target.signature, cw);
     code.push_int(target.reflection_facade.is_some() as i32, cw);
-    let descriptor = if bound {
-        "(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
-    } else {
-        "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
-    };
-    let constructor = cw.methodref(superclass, "<init>", descriptor);
-    code.invokespecial(constructor, if bound { 5 } else { 4 }, 0);
+    let descriptor =
+        format!("({object_array}{object}Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V");
+    let constructor = cw.methodref(superclass, "<init>", &descriptor);
+    code.invokespecial(constructor, 4 + i32::from(contextual) + i32::from(bound), 0);
     code.ret_void();
     // Public in an inline function's scope, whose callers construct the class from anywhere.
-    let locals = if bound { 2 } else { 1 };
     if public {
-        finish_code::<0x0001>(cw, "<init>", own_descriptor, &mut code, locals);
+        finish_code::<0x0001>(cw, "<init>", &own_descriptor, &mut code, own_slots);
     } else {
-        finish_code::<0x0000>(cw, "<init>", own_descriptor, &mut code, locals);
+        finish_code::<0x0000>(cw, "<init>", &own_descriptor, &mut code, own_slots);
     }
-    let receiver: &[(&str, &str)] = if bound {
-        &[("receiver", "Ljava/lang/Object;")]
-    } else {
-        &[]
-    };
+    let mut receiver: Vec<(&str, &str)> = Vec::new();
+    if contextual {
+        receiver.push(("boundContextArguments", "[Ljava/lang/Object;"));
+    }
+    if bound {
+        receiver.push(("receiver", "Ljava/lang/Object;"));
+    }
+    let receiver = &receiver[..];
     let locals = function_reference_invoke::reference_constructor_locals(cw, class, receiver);
-    cw.set_method_debug("<init>", own_descriptor, None, &locals);
+    cw.set_method_debug("<init>", &own_descriptor, None, &locals);
 }
 
 impl PropertyCallTarget<'_> {
@@ -257,16 +305,18 @@ impl PropertyCallTarget<'_> {
                 let method = cw.methodref(facade, self.name, self.descriptor);
                 code.invokestatic(method, 0, slot_words(ret) as i32);
             } else {
+                // The contexts were pushed ahead of the receiver; the receiver follows them.
+                let receiver = self.contexts.types.len();
                 adapt_property_reference_value(
                     cw,
                     code,
                     self.unboxed_receiver_value_class,
-                    self.params[0],
+                    self.params[receiver],
                 );
                 let method = cw.methodref(facade, self.name, self.descriptor);
                 code.invokestatic(
                     method,
-                    slot_words(ir_ty_to_jvm(&self.params[0])) as i32,
+                    self.contexts.words() + slot_words(ir_ty_to_jvm(&self.params[receiver])) as i32,
                     slot_words(ret) as i32,
                 );
             }
@@ -282,12 +332,13 @@ impl PropertyCallTarget<'_> {
             );
         } else {
             emit_object_as(cw, code, Ty::obj(self.owner));
+            self.contexts.emit(cw, code);
             if self.owner_is_interface {
                 let method = cw.interface_methodref(self.owner, self.name, self.descriptor);
-                code.invokeinterface(method, 0, slot_words(ret) as i32);
+                code.invokeinterface(method, self.contexts.words(), slot_words(ret) as i32);
             } else {
                 let method = cw.methodref(self.owner, self.name, self.descriptor);
-                code.invokevirtual(method, 0, slot_words(ret) as i32);
+                code.invokevirtual(method, self.contexts.words(), slot_words(ret) as i32);
             }
         }
     }
@@ -319,14 +370,15 @@ impl PropertyCallTarget<'_> {
                 code.aload(value_local);
                 self.emit_property_value(cw, code, self.params[0]);
             } else {
+                let receiver = self.contexts.types.len();
                 adapt_property_reference_value(
                     cw,
                     code,
                     self.unboxed_receiver_value_class,
-                    self.params[0],
+                    self.params[receiver],
                 );
                 code.aload(value_local);
-                self.emit_property_value(cw, code, self.params[1]);
+                self.emit_property_value(cw, code, self.params[receiver + 1]);
             }
             let arg_words = self
                 .params
@@ -348,9 +400,12 @@ impl PropertyCallTarget<'_> {
             code.invokestatic(method, arg_words, 0);
         } else {
             emit_object_as(cw, code, Ty::obj(self.owner));
+            self.contexts.emit(cw, code);
+            let value = self.contexts.types.len();
             code.aload(value_local);
-            self.emit_property_value(cw, code, self.params[0]);
-            let value_words = slot_words(ir_ty_to_jvm(&self.params[0])) as i32;
+            self.emit_property_value(cw, code, self.params[value]);
+            let value_words =
+                self.contexts.words() + slot_words(ir_ty_to_jvm(&self.params[value])) as i32;
             if self.owner_is_interface {
                 let method = cw.interface_methodref(self.owner, self.name, self.descriptor);
                 code.invokeinterface(method, value_words, 0);
@@ -413,7 +468,7 @@ pub(super) fn emit_prop_ref_class(
     let superclass = c.superclass();
     let mut cw = property_reference_writer(ir, c, facade, env, opts);
 
-    let target = PropertyReferenceTarget::new(pr, realization, facade);
+    let target = PropertyReferenceTarget::new(pr, realization, facade, &fq);
     emit_property_reference_constructor(
         &mut cw,
         &fq,
@@ -444,6 +499,14 @@ pub(super) fn emit_prop_ref_class(
         if let Some(constant) = target.getter_constant.as_ref() {
             constant_emission::emit(constant, &mut get, &mut cw);
         } else {
+            // An extension accessor takes the contexts ahead of its receiver.
+            if target.getter_facade.is_some() {
+                BoundContexts {
+                    carrier: &fq,
+                    types: &pr.context_types,
+                }
+                .emit(&mut cw, &mut get);
+            }
             get.aload(1);
             target
                 .getter(pr)
@@ -479,6 +542,13 @@ pub(super) fn emit_prop_ref_class(
             parse_physical_method_desc(&setter_desc).expect("validated property setter descriptor");
         seed_method_header(&mut cw, "set", "(Ljava/lang/Object;Ljava/lang/Object;)V");
         let mut set = CodeBuilder::new(3);
+        if target.setter_facade.is_some() {
+            BoundContexts {
+                carrier: &fq,
+                types: &pr.context_types,
+            }
+            .emit(&mut cw, &mut set);
+        }
         set.aload(1);
         target
             .setter(pr, &setter, &setter_desc, &setter_params)
@@ -500,9 +570,12 @@ pub(super) fn emit_prop_ref_class(
         );
     }
 
-    emit_singleton_instance_clinit(&mut cw, &fq);
-    // kotlinc visits a carrier's fields after its methods.
-    add_singleton_instance_field(&mut cw, &fq);
+    // A carrier with bound contexts is constructed per use; it has no singleton.
+    if pr.context_types.is_empty() {
+        emit_singleton_instance_clinit(&mut cw, &fq);
+        // kotlinc visits a carrier's fields after its methods.
+        add_singleton_instance_field(&mut cw, &fq);
+    }
     super::metadata_policy::finish_reference_class(cw, env, ir, c)
 }
 
@@ -526,7 +599,7 @@ fn emit_bound_prop_ref_class(
         .property_reference_realizations
         .get(c.fq_name_id())
         .expect("a synthesized property reference must retain its JVM realization");
-    let target = PropertyReferenceTarget::new(pr, realization, facade);
+    let target = PropertyReferenceTarget::new(pr, realization, facade, &fq);
     emit_property_reference_constructor(
         &mut cw,
         &fq,
@@ -559,6 +632,13 @@ fn emit_bound_prop_ref_class(
         if let Some(constant) = target.getter_constant.as_ref() {
             constant_emission::emit(constant, &mut get, &mut cw);
         } else {
+            if target.getter_facade.is_some() {
+                BoundContexts {
+                    carrier: &fq,
+                    types: &pr.context_types,
+                }
+                .emit(&mut cw, &mut get);
+            }
             get.aload(0);
             // kotlinc names the inherited field through the carrier itself.
             let recv_f = cw.fieldref(&fq, "receiver", "Ljava/lang/Object;");
@@ -587,6 +667,13 @@ fn emit_bound_prop_ref_class(
             parse_physical_method_desc(&setter_desc).expect("validated property setter descriptor");
         seed_method_header(&mut cw, "set", "(Ljava/lang/Object;)V");
         let mut set = CodeBuilder::new(2);
+        if target.setter_facade.is_some() {
+            BoundContexts {
+                carrier: &fq,
+                types: &pr.context_types,
+            }
+            .emit(&mut cw, &mut set);
+        }
         set.aload(0);
         let recv_f = cw.fieldref(&fq, "receiver", "Ljava/lang/Object;");
         set.getfield(recv_f, 1);
@@ -633,7 +720,13 @@ fn emit_toplevel_prop_ref_class(
     // boxed convention this path used to keep named `getTopLevel()LZ;` where the declaration is
     // `getTopLevel()I`.
     let carrier = realization.boxed_value_class.is_some();
-    let getter_desc = match (&pr.getter_descriptor, carrier) {
+    // A property with bound contexts has its context-typed descriptor on the PropRef.
+    let explicit_descriptor = carrier || !pr.context_types.is_empty();
+    let contexts = BoundContexts {
+        carrier: &fq,
+        types: &pr.context_types,
+    };
+    let getter_desc = match (&pr.getter_descriptor, explicit_descriptor) {
         (Some(descriptor), true) => descriptor.clone(),
         _ => format!("(){prop_desc}"),
     };
@@ -655,10 +748,21 @@ fn emit_toplevel_prop_ref_class(
     };
     let signature = format!("{reflected_getter}{getter_desc}");
 
-    // `<init>()V`: super(owner.class, "name", "getName()desc", 1).
-    seed_method_header(&mut cw, "<init>", "()V");
-    let mut ctor = CodeBuilder::new(1);
+    // `<init>()V` (`<init>([Object)V` with bound contexts):
+    // super([contexts,] owner.class, "name", "getName()desc", 1).
+    let contextual = !pr.context_types.is_empty();
+    let own_descriptor = if contextual {
+        "([Ljava/lang/Object;)V"
+    } else {
+        "()V"
+    };
+    let own_slots = 1 + u16::from(contextual);
+    seed_method_header(&mut cw, "<init>", own_descriptor);
+    let mut ctor = CodeBuilder::new(own_slots);
     ctor.aload(0);
+    if contextual {
+        ctor.aload(1);
+    }
     ctor.ldc_class(&owner, &mut cw);
     ctor.push_string(&pr.prop_name, &mut cw);
     ctor.push_string(&signature, &mut cw);
@@ -666,18 +770,28 @@ fn emit_toplevel_prop_ref_class(
     let sup = cw.methodref(
         &superclass,
         "<init>",
-        "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V",
+        if contextual {
+            "([Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
+        } else {
+            "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
+        },
     );
-    ctor.invokespecial(sup, 4, 0);
+    ctor.invokespecial(sup, 4 + i32::from(contextual), 0);
     ctor.ret_void();
     // Public in an inline function's scope, whose callers construct the class from anywhere.
     if super::enclosure::in_inline_function_scope(ir, c) {
-        finish_code::<0x0001>(&mut cw, "<init>", "()V", &mut ctor, 1);
+        finish_code::<0x0001>(&mut cw, "<init>", own_descriptor, &mut ctor, own_slots);
     } else {
-        finish_code::<0x0000>(&mut cw, "<init>", "()V", &mut ctor, 1);
+        finish_code::<0x0000>(&mut cw, "<init>", own_descriptor, &mut ctor, own_slots);
     }
-    let locals = function_reference_invoke::reference_constructor_locals(&mut cw, &fq, &[]);
-    cw.set_method_debug("<init>", "()V", None, &locals);
+    let bound_contexts: &[(&str, &str)] = if contextual {
+        &[("boundContextArguments", "[Ljava/lang/Object;")]
+    } else {
+        &[]
+    };
+    let locals =
+        function_reference_invoke::reference_constructor_locals(&mut cw, &fq, bound_contexts);
+    cw.set_method_debug("<init>", own_descriptor, None, &locals);
 
     // `get()Object`: a compile-time constant directly, otherwise
     // `invokestatic <facade>.getName()`. Boxed if primitive.
@@ -701,12 +815,13 @@ fn emit_toplevel_prop_ref_class(
         if let Some(constant) = realization.getter_constant.as_ref() {
             constant_emission::emit(constant, &mut get, &mut cw);
         } else {
+            contexts.emit(&mut cw, &mut get);
             let gref = if call_owner_is_interface {
                 cw.interface_methodref(&call_owner, &pr.getter_name, &getter_desc)
             } else {
                 cw.methodref(&call_owner, &pr.getter_name, &getter_desc)
             };
-            get.invokestatic(gref, 0, slot_words(getter_jvm) as i32);
+            get.invokestatic(gref, contexts.words(), slot_words(getter_jvm) as i32);
         }
         if carrier {
             box_property_reference_value(
@@ -740,7 +855,7 @@ fn emit_toplevel_prop_ref_class(
             .setter_name
             .clone()
             .unwrap_or_else(|| property_setter_name(&pr.prop_name));
-        let setter_desc = match (&pr.setter_descriptor, carrier) {
+        let setter_desc = match (&pr.setter_descriptor, explicit_descriptor) {
             (Some(descriptor), true) => descriptor.clone(),
             _ => format!("({prop_desc})V"),
         };
@@ -755,6 +870,7 @@ fn emit_toplevel_prop_ref_class(
         };
         seed_method_header(&mut cw, "set", "(Ljava/lang/Object;)V");
         let mut set = CodeBuilder::new(2);
+        contexts.emit(&mut cw, &mut set);
         set.aload(1);
         if carrier {
             // The argument arrives as the BOXED value class through the erased `set(Object)`; the
@@ -787,15 +903,18 @@ fn emit_toplevel_prop_ref_class(
         } else {
             cw.methodref(&call_owner, &setter, &setter_desc)
         };
-        set.invokestatic(sref, slot_words(setter_jvm) as i32, 0);
+        set.invokestatic(sref, contexts.words() + slot_words(setter_jvm) as i32, 0);
         set.ret_void();
         finish_code::<0x0001>(&mut cw, "set", "(Ljava/lang/Object;)V", &mut set, 2);
         attach_accessor_debug(&mut cw, c, "set", "(Ljava/lang/Object;)V", &["value"]);
     }
 
-    emit_singleton_instance_clinit(&mut cw, &fq);
-    // kotlinc visits a carrier's fields after its methods.
-    add_singleton_instance_field(&mut cw, &fq);
+    // A carrier with bound contexts is constructed per use; it has no singleton.
+    if pr.context_types.is_empty() {
+        emit_singleton_instance_clinit(&mut cw, &fq);
+        // kotlinc visits a carrier's fields after its methods.
+        add_singleton_instance_field(&mut cw, &fq);
+    }
     super::metadata_policy::finish_reference_class(cw, env, ir, c)
 }
 

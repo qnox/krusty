@@ -899,10 +899,12 @@ jobs:
         if: matrix.target == 'native'
         id: native_box
         continue-on-error: true
-        # Complete migration runs exceeded the former 600-second corpus budget. Keep ordinary
-        # and focused deadlines unchanged; a corpus timeout still fails this row.
+        # Complete migration runs exceeded the former 600-second corpus budget. A cold lane (a
+        # Kotlin version master has not yet cached) also compiles every missing kotlinc reference,
+        # so it gets the JVM row's cold-lane budget. Keep ordinary and focused deadlines unchanged;
+        # a corpus timeout still fails this row.
         env:
-          KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
+          KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "2400"
           KRUSTY_NATIVE_BYTE_REPORT: ${{ github.workspace }}/native-byte-equality.txt
           KRUSTY_KLIB_REFERENCE_CACHE: ${{ github.workspace }}/target/cache/klib-references
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
@@ -955,7 +957,7 @@ jobs:
         # Each case now also compiles kotlinc's KLIB reference, so the corpus step gets the same
         # budget the Native corpus step has.
         env:
-          KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
+          KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "2400"
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_WASM_JS_BYTE_REPORT: ${{ github.workspace }}/wasm-js-byte-equality.txt
           KRUSTY_WASM_WASI_BYTE_REPORT: ${{ github.workspace }}/wasm-wasi-byte-equality.txt

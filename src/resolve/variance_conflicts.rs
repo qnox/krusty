@@ -216,7 +216,10 @@ impl Checker<'_> {
         let walk = Walk {
             scope,
             variances: &variances,
-            dnn_and_flexible: self.file.report_type_variance_conflicts_in_dnn_and_flexible,
+            dnn_and_flexible: self
+                .file
+                .language
+                .report_type_variance_conflicts_in_dnn_and_flexible,
         };
         let mut occurrences = Vec::new();
         for (_, bound) in cl.type_param_bounds() {

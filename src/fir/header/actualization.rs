@@ -7,6 +7,11 @@
 
 use super::*;
 
+mod dependency_members;
+
+pub(crate) use dependency_members::inherited_members;
+use dependency_members::InheritedDependencyMember;
+
 /// Match top-level multiplatform headers using compact Pass-1 facts and resolver-published
 /// classifier identities. The returned stable ids identify expect declarations shadowed by a
 /// same-package, same-shape non-expect declaration or type alias. No parser declaration id
@@ -90,6 +95,9 @@ pub struct UnactualizedMembers {
 pub struct ActualizationTypeBindings {
     by_type: crate::fx_hash::HashMap<(SourceFileId, HeaderTypeId), crate::types::TypeName>,
     by_declaration: crate::fx_hash::HashMap<DeclarationId, crate::types::TypeName>,
+    /// Per source classifier, the members its dependency supertypes declare.
+    inherited_dependency_members:
+        crate::fx_hash::HashMap<DeclarationId, Vec<InheritedDependencyMember>>,
 }
 
 impl ActualizationTypeBindings {
@@ -108,6 +116,28 @@ impl ActualizationTypeBindings {
         classifier: crate::types::TypeName,
     ) {
         self.by_declaration.insert(declaration, classifier);
+    }
+
+    pub(crate) fn bind_inherited_dependency_members(
+        &mut self,
+        classifier: DeclarationId,
+        members: Vec<InheritedDependencyMember>,
+    ) {
+        if !members.is_empty() {
+            self.inherited_dependency_members
+                .entry(classifier)
+                .or_default()
+                .extend(members);
+        }
+    }
+
+    /// The classifier a header type of `source` was bound to.
+    pub(crate) fn bound_type(
+        &self,
+        source: SourceFileId,
+        syntax: HeaderTypeId,
+    ) -> Option<crate::types::TypeName> {
+        self.type_classifier(source, syntax)
     }
 
     fn type_classifier(
@@ -1249,7 +1279,18 @@ pub fn actualization(
                 continue;
             };
             let Some(candidates) = actual_children.get(&key) else {
-                owed.push(child.id);
+                // No source member implements it; a member inherited from a dependency supertype
+                // of the actual classifier or of a source supertype may.
+                let inherited = actual_member_owners(headers, bindings, pair.actual)
+                    .into_iter()
+                    .filter_map(|owner| bindings.inherited_dependency_members.get(&owner))
+                    .flatten()
+                    .any(|member| {
+                        dependency_members::implements(headers, bindings, child, &key.1, member)
+                    });
+                if !inherited {
+                    owed.push(child.id);
+                }
                 continue;
             };
             // The child key is deliberately coarse — kind, name, receiver and arity — so members

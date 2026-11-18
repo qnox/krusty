@@ -156,6 +156,7 @@ fn applicable_extension(
             params: expected_values.as_deref(),
             ret: expected.map(|expected| expected.ret),
             bound_contexts,
+            context_arguments: None,
             type_variable_inputs: if unbound {
                 rules.type_variable_inputs().without(expected_receiver)
             } else {
@@ -327,7 +328,7 @@ impl ExtensionReferenceRules for super::Checker<'_> {
     }
 
     fn binds_reference_contexts(&self) -> bool {
-        self.file.callable_references_to_contextual
+        self.file.language.callable_references_to_contextual
     }
 
     fn type_variable_inputs(&self) -> TypeVariableInputs {

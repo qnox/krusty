@@ -448,6 +448,7 @@ impl BodyLowering<'_> {
                                 source_ty,
                                 signature_parameters[parameter as usize],
                             ),
+                            context: Default::default(),
                         }
                     }
                     crate::fir::FirAdaptedReferenceArgument::Context => {
@@ -457,6 +458,7 @@ impl BodyLowering<'_> {
                         IrCheckedArgument::Expression {
                             parameter,
                             value: self.ir.add_expr(IrExpr::GetValue(slot)),
+                            context: Default::default(),
                         }
                     }
                     crate::fir::FirAdaptedReferenceArgument::Default => {
@@ -512,6 +514,7 @@ impl BodyLowering<'_> {
                             source_type,
                             signature_parameters[parameter],
                         ),
+                        context: Default::default(),
                     },
                 )
                 .collect::<Vec<_>>()
@@ -613,8 +616,7 @@ impl BodyLowering<'_> {
     pub(super) fn checked_property_reference(
         &mut self,
         reference: super::property_references::CheckedPropertyReference<'_>,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
+        receivers: CheckedPropertyReceivers<'_>,
         reflective: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
         match reference.target {
@@ -639,13 +641,22 @@ impl BodyLowering<'_> {
                 }
             }
         }
-        let dispatch_receiver = self.receiver(dispatch_receiver)?;
-        let extension_receiver = self.receiver(extension_receiver)?;
+        let dispatch_receiver = self.receiver(receivers.dispatch_receiver)?;
+        let extension_receiver = self.receiver(receivers.extension_receiver)?;
+        let context_arguments = receivers
+            .context_arguments
+            .iter()
+            .map(|argument| self.receiver(Some(*argument)))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         if !reflective {
             if let Some(function) = self.materialize_property_function_reference(
                 &reference,
                 dispatch_receiver,
                 extension_receiver,
+                &context_arguments,
             )? {
                 return Ok(function);
             }
@@ -657,6 +668,7 @@ impl BodyLowering<'_> {
                 binding: reference.binding,
                 dispatch_receiver,
                 extension_receiver,
+                context_arguments,
                 mutable: reference.mutable,
                 substitutions: lower_substitutions(reference.substitutions),
                 adaptation: reference.adaptation.cloned().map(Box::new),
@@ -1079,7 +1091,9 @@ impl BodyLowering<'_> {
         if reordered {
             for argument in &mut arguments {
                 match argument {
-                    IrCheckedArgument::Expression { parameter, value } => {
+                    IrCheckedArgument::Expression {
+                        parameter, value, ..
+                    } => {
                         if super::constructors::is_forwarded_super_argument(self.ir, *value)
                             || self.passes_reordered_operand_in_place(*value)
                         {
@@ -1420,7 +1434,7 @@ impl BodyLowering<'_> {
         })
     }
 
-    fn module_substitution_bindings(
+    pub(super) fn module_substitution_bindings(
         &self,
         substitutions: &[FirTypeSubstitution],
     ) -> crate::fx_hash::HashMap<String, crate::types::Ty> {
@@ -1461,10 +1475,21 @@ impl BodyLowering<'_> {
                     parameter,
                     value,
                     conversion,
-                } => Ok(IrCheckedArgument::Expression {
-                    parameter: *parameter,
-                    value: self.expression_with_conversion(*value, *conversion)?,
-                }),
+                } => {
+                    let lowered = self.expression_with_conversion(*value, *conversion)?;
+                    let context = if self.body.is_implicit_context_argument(*value) {
+                        crate::ir::IrContextArgumentRole::Implicit
+                    } else if self.body.is_receiver_ordered_context_argument(*value) {
+                        crate::ir::IrContextArgumentRole::AfterReceiver
+                    } else {
+                        crate::ir::IrContextArgumentRole::Ordinary
+                    };
+                    Ok(IrCheckedArgument::Expression {
+                        parameter: *parameter,
+                        value: lowered,
+                        context,
+                    })
+                }
                 FirCallArgument::Default { parameter, .. } => Ok(IrCheckedArgument::Default {
                     parameter: *parameter,
                 }),

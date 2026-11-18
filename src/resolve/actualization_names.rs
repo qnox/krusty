@@ -346,7 +346,42 @@ pub(crate) fn actualization_type_bindings(
             );
         }
     }
+    bind_inherited_dependency_members(headers, platform, &declarations, &mut bindings);
     bindings
+}
+
+/// Publish, for each source classifier, the members its dependency supertypes declare: the header
+/// matcher has no headers for them, but they belong to the classifier's member scope.
+fn bind_inherited_dependency_members(
+    headers: &crate::fir::StreamedHeaderModule,
+    platform: &dyn SemanticPlatform,
+    declarations: &crate::fx_hash::HashSet<TypeName>,
+    bindings: &mut crate::fir::ActualizationTypeBindings,
+) {
+    for stub in headers
+        .stubs
+        .iter()
+        .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
+    {
+        let Some(crate::fir::HeaderDeclarationKind::Classifier {
+            supertypes, base, ..
+        }) = headers.syntax.declaration(stub.id).map(|value| value.kind)
+        else {
+            continue;
+        };
+        let members = base
+            .into_iter()
+            .chain(headers.syntax.type_operands(supertypes).iter().copied())
+            .filter_map(|supertype| bindings.bound_type(stub.source, supertype))
+            .filter(|supertype| !declarations.contains(supertype))
+            .flat_map(|supertype| {
+                crate::fir::inherited_dependency_members(supertype, |classifier| {
+                    platform.classifier(classifier)
+                })
+            })
+            .collect();
+        bindings.bind_inherited_dependency_members(stub.id, members);
+    }
 }
 
 #[cfg(test)]
