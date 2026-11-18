@@ -1373,15 +1373,15 @@ impl Checker<'_> {
         // Applicability is evaluated one callable-tower rung at a time. A declaration from a
         // farther import/lexical rung must not beat an applicable nearer extension merely because
         // its receiver or value parameters are more specific. Likewise, receiver distance only
-        // orders candidates *inside* one extension scope rung. Keep `HidesMembers` above members,
-        // members above ordinary extensions, and skip a rung whose only candidates lack context.
+        // orders candidates *inside* one extension scope rung. Keep `HidesMembers` extensions in the
+        // members' tier (the more specific wins), members above ordinary extensions, and skip a rung whose only candidates lack context.
         // Later rules share one rung. Argument score there is type fit and omitted defaults;
         // a vararg loses only after element specificity, as a tie-break among equal shapes.
         let hides_members = crate::types::type_name("kotlin/internal/HidesMembers");
         let tower_rank = |candidate: &SelectedCallable| {
-            if candidate.is_extension() && candidate.callable.annotations.contains(&hides_members) {
-                (0_u8, (0_u8, 0_u32), candidate.receiver_rank)
-            } else if candidate.kind == crate::libraries::FnKind::Member {
+            if (candidate.is_extension() && candidate.callable.annotations.contains(&hides_members))
+                || candidate.kind == crate::libraries::FnKind::Member
+            {
                 (1_u8, (0_u8, 0_u32), candidate.receiver_rank)
             } else {
                 (
