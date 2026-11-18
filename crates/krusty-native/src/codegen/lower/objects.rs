@@ -2600,6 +2600,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .map(|value| (value, property.ty)))
     }
 
+    /// Write a property of a value class through its declared setter. The receiver is the carrier,
+    /// which that setter takes directly exactly as the getter does; a value class has no dispatch
+    /// slot or object header to write through.
+    pub(super) fn value_property_write_of(
+        &mut self,
+        class: ClassId,
+        index: usize,
+        carrier: Value,
+        value: Value,
+    ) -> Result<(), Unsupported> {
+        let property = self.file.ir.classes[class as usize].properties[index].clone();
+        let Some(setter) = property.setter else {
+            return Err(declined!(
+                "a value-class property written without a setter (`{}`)",
+                property.name
+            ));
+        };
+        let id = self.file.functions[setter as usize].expect("a setter has a body");
+        let func_ref = self.func_ref(id);
+        self.emit_call(func_ref, &[carrier, value])?;
+        Ok(())
+    }
+
     /// [`Self::property_read`] with the receiver already evaluated — what a synthesized body has.
     pub(super) fn property_read_of(
         &mut self,
