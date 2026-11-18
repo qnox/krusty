@@ -1184,6 +1184,10 @@ pub struct CallSig {
     /// argument is checked for applicability after inference but contributes no type-variable
     /// constraint itself.
     pub no_infer_params: ParamFlags,
+    /// Per logical parameter: the declared type carries the Compose runtime's `@Composable` type
+    /// annotation, so a function value passed for it is compiled with the composer and `$changed`
+    /// parameters after its own.
+    pub composable_params: ParamFlags,
     /// Per logical parameter, the resolved declaration carries
     /// `kotlin.internal.ImplicitIntegerCoercion`.
     pub implicit_integer_coercion: ParamFlags,
