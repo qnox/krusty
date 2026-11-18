@@ -716,7 +716,6 @@ delegatedProperty/callableReferenceAsSecondArgumentOfDelegate.kt
 delegatedProperty/correctFieldsOrder.kt
 delegatedProperty/delegateToConstVal.kt
 delegatedProperty/delegateToSingleton/delegateToSingleton.kt
-delegatedProperty/delegatedByExtensionMemberProperty.kt
 delegatedProperty/delegatedByExtensionProperty.kt
 delegatedProperty/delegatedOverride.kt
 delegatedProperty/genericDelegateUncheckedCast1.kt

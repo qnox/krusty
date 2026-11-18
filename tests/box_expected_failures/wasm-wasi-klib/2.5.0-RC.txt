@@ -1083,7 +1083,6 @@ delegatedProperty/delegateToFailingCastReceiver.kt
 delegatedProperty/delegateToSingleton/delegateToSingleton.kt
 delegatedProperty/delegateToSmartCastReceiver.kt
 delegatedProperty/delegateWithPrivateSet.kt
-delegatedProperty/delegatedByExtensionMemberProperty.kt
 delegatedProperty/delegatedByExtensionProperty.kt
 delegatedProperty/delegatedOverride.kt
 delegatedProperty/functionRefDelefate.kt

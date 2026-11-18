@@ -727,7 +727,6 @@ delegatedProperty/delegateToAnother/withSideEffectsFromFileClass.kt
 delegatedProperty/delegateToConstVal.kt
 delegatedProperty/delegateToConstructorParameter.kt
 delegatedProperty/delegateToSingleton/delegateToSingleton.kt
-delegatedProperty/delegatedByExtensionMemberProperty.kt
 delegatedProperty/delegatedByExtensionProperty.kt
 delegatedProperty/delegatedOverride.kt
 delegatedProperty/genericDelegateUncheckedCast1.kt
