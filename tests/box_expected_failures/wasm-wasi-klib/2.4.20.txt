@@ -1665,10 +1665,7 @@ ranges/expression/inexactSteppedDownTo.kt
 ranges/expression/inexactSteppedRange.kt
 ranges/expression/inexactToMaxValue.kt
 ranges/expression/maxValueMinusTwoToMaxValue.kt
-ranges/expression/maxValueToMaxValue.kt
 ranges/expression/maxValueToMinValue.kt
-ranges/expression/oneElementDownTo.kt
-ranges/expression/oneElementRange.kt
 ranges/expression/openRange.kt
 ranges/expression/openRangeUntil.kt
 ranges/expression/overflowZeroDownToMaxValue.kt
@@ -1754,10 +1751,7 @@ ranges/literal/inexactSteppedDownTo.kt
 ranges/literal/inexactSteppedRange.kt
 ranges/literal/inexactToMaxValue.kt
 ranges/literal/maxValueMinusTwoToMaxValue.kt
-ranges/literal/maxValueToMaxValue.kt
 ranges/literal/maxValueToMinValue.kt
-ranges/literal/oneElementDownTo.kt
-ranges/literal/oneElementRange.kt
 ranges/literal/openRange.kt
 ranges/literal/openRangeUntil.kt
 ranges/literal/overflowZeroDownToMaxValue.kt
@@ -1776,7 +1770,6 @@ ranges/literal/simpleRange.kt
 ranges/literal/simpleRangeWithNonConstantEnds.kt
 ranges/literal/simpleSteppedDownTo.kt
 ranges/literal/simpleSteppedRange.kt
-ranges/multiAssignmentIterationOverIntRange.kt
 ranges/stepped/expression/downTo/emptyProgression.kt
 ranges/stepped/expression/downTo/illegalStepNegative.kt
 ranges/stepped/expression/downTo/illegalStepNonConst.kt
