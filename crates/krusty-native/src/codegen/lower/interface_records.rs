@@ -535,16 +535,15 @@ impl FileLowering<'_> {
             else {
                 continue;
             };
-            if model::representation(self.values, edge.declared_type)
-                != model::representation(self.values, edge.implementation_type)
-            {
-                return Err(declined!(
-                    "a property of a dependency's interface implemented with another carrier \
-                     (`{}.{}`)",
-                    self.kotlin_name(owner),
-                    edge.name
-                ));
-            }
+            let carried_alike = [
+                (Some(edge.declared_type), Some(edge.implementation_type)),
+                (edge.declared_receiver, edge.implementation_receiver),
+            ]
+            .into_iter()
+            .all(|(declared, implementation)| {
+                declared.map(|ty| model::representation(self.values, ty))
+                    == implementation.map(|ty| model::representation(self.values, ty))
+            });
             let roles = [false, true]
                 .into_iter()
                 .filter(|setter| !setter || edge.overridden_setter_value.is_some());
@@ -571,6 +570,16 @@ impl FileLowering<'_> {
                     }
                     krusty::fir::ResolvedPropertyOverrideTarget::External(_) => None,
                 };
+                // An interface's table entry cannot convert between carriers; only a class's
+                // accessor, reached through its slot, is bridged.
+                if interface_number.is_some() && !carried_alike {
+                    return Err(declined!(
+                        "a property of a dependency's interface implemented with another carrier \
+                         (`{}.{}`)",
+                        self.kotlin_name(owner),
+                        edge.name
+                    ));
+                }
                 let implementation = if let Some(number) = interface_number {
                     Some(DependencyImplementation::Interface(number))
                 } else {
@@ -579,9 +588,35 @@ impl FileLowering<'_> {
                     } else {
                         crate::classes::SlotKey::Getter(edge.overridden)
                     };
-                    self.model
-                        .slot(owner, &key)
-                        .map(DependencyImplementation::Slot)
+                    self.model.slot(owner, &key).map(|slot| {
+                        if carried_alike {
+                            DependencyImplementation::Slot(slot)
+                        } else {
+                            // The accessor takes its member extension's receiver, if any, then
+                            // (for a setter) the written value; its getter answers the value.
+                            let operands = |value: Ty, receiver: Option<Ty>| {
+                                receiver
+                                    .into_iter()
+                                    .chain(setter.then_some(value))
+                                    .collect::<Vec<Ty>>()
+                            };
+                            let result = |value: Ty| if setter { Ty::Unit } else { value };
+                            DependencyImplementation::Bridge {
+                                slot,
+                                declared: (
+                                    operands(edge.declared_type, edge.declared_receiver),
+                                    result(edge.declared_type),
+                                ),
+                                implemented: (
+                                    operands(
+                                        edge.implementation_type,
+                                        edge.implementation_receiver,
+                                    ),
+                                    result(edge.implementation_type),
+                                ),
+                            }
+                        }
+                    })
                 }
                 .ok_or_else(|| {
                     declined!(
