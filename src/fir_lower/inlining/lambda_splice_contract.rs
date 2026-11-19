@@ -149,7 +149,7 @@ fn local_count(
         if !seen.insert(expression) {
             continue;
         }
-        for index in value_indices(ir.expr(expression)) {
+        for index in crate::inline_expansion::value_indices(ir.expr(expression)) {
             if index < formal_count {
                 continue;
             }
@@ -164,19 +164,4 @@ fn local_count(
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
     Some(local_count)
-}
-
-pub(super) fn value_indices(expression: &IrExpr) -> Vec<u32> {
-    match expression {
-        IrExpr::GetValue(index)
-        | IrExpr::SetValue { var: index, .. }
-        | IrExpr::Variable { index, .. } => vec![*index],
-        IrExpr::Try { catches, .. } => catches.iter().map(|catch| catch.var).collect(),
-        IrExpr::Checked(checked_op)
-            if let crate::ir::IrCheckedOperation::RangeLoop { variable, .. } = &**checked_op =>
-        {
-            vec![*variable]
-        }
-        _ => Vec::new(),
-    }
 }

@@ -1,11 +1,12 @@
 //! Declaration-owned formals of ordinary (not prepared-inline) serialized function bodies.
 
-use super::super::klib_types::{semantic_type, KlibTypeParameters};
+use super::super::klib_types::{semantic_type, semantic_type_in, KlibTypeParameters};
 use super::{mismatch, KlibBodyCallable, KlibBodyDeclineReason, KlibIrArena, KlibIrFunction};
 use crate::fx_hash::HashSet;
 use crate::metadata::klib_ir::tree::KlibIrVariance;
+use crate::metadata::klib_ir::KlibIrSignature;
 use crate::metadata::klib_ir::KlibIrSymbolKind;
-use crate::types::{Ty, TyKind};
+use crate::types::{Ty, TyKind, TypeName};
 
 pub(super) fn bind(
     selected: Option<KlibBodyCallable<'_>>,
@@ -17,13 +18,18 @@ pub(super) fn bind(
         // A header-only generic declaration needs its producer-qualified provider formals before
         // it can be emitted, or the declaration-owned formals a file-private declaration's own
         // identity mints (`file_private_formals`). Never manufacture semantic identities from
-        // serialized source names.
+        // serialized source names for it. A private member has no provider record: its formals
+        // are its own.
         return if function
             .type_parameters
             .iter()
             .all(|parameter| types.binds(&parameter.base.symbol))
         {
             Ok(types)
+        } else if crate::metadata::semantic::declaration_visibility(function.base.flags)
+            == crate::types::Visibility::Private
+        {
+            own(function, arena, types, &|_| Ok(None))
         } else {
             Err(KlibBodyDeclineReason::UnsupportedDeclaration(
                 "type parameters",
@@ -150,6 +156,54 @@ fn normalized_bounds(bounds: &[Ty]) -> Vec<Ty> {
     } else {
         bounds.to_vec()
     }
+}
+
+/// `types` with the own type parameters of `function`, a declaration no provider records (a
+/// private declaration, or a member of a non-public class), bound to fresh formals with their
+/// declared bounds. `local_class` admits the non-public classifiers its bounds may name.
+pub(in super::super) fn own(
+    function: &KlibIrFunction,
+    arena: &KlibIrArena,
+    mut types: KlibTypeParameters,
+    local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
+) -> Result<KlibTypeParameters, KlibBodyDeclineReason> {
+    let mut formals = Vec::with_capacity(function.type_parameters.len());
+    for parameter in &function.type_parameters {
+        if parameter.is_reified() {
+            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                "a reified type parameter of an unrecorded declaration",
+            ));
+        }
+        if parameter.base.symbol.kind != KlibIrSymbolKind::TypeParameter {
+            return Err(mismatch(
+                "an unrecorded declaration's type parameter has no symbol".to_owned(),
+            ));
+        }
+        let formal = Ty::ty_param(
+            crate::types::metadata_type_parameter(&parameter.name),
+            Ty::nullable(Ty::obj("kotlin/Any")),
+        );
+        if !types.bind(&parameter.base.symbol, formal) {
+            return Err(mismatch(
+                "an unrecorded declaration repeats a type parameter".to_owned(),
+            ));
+        }
+        formals.push(formal);
+    }
+    // Bounds may name any formal, so all are bound before any is read.
+    for (parameter, formal) in function.type_parameters.iter().zip(formals) {
+        let bounds = parameter
+            .supertypes
+            .iter()
+            .map(|bound| semantic_type_in(arena, &types, *bound, local_class))
+            .collect::<Result<Vec<_>, _>>()?;
+        if !types.record_bounds(formal, bounds) {
+            return Err(mismatch(
+                "an unrecorded declaration's type parameter repeats an enclosing formal".to_owned(),
+            ));
+        }
+    }
+    Ok(types)
 }
 
 /// The formal identity minted for each (file-private declaration, ordinal).

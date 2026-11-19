@@ -242,8 +242,35 @@ pub fn callable_signature<T: SignatureType>(
     container: DeclarationContainer<'_, T>,
     callable: &CallableShape<'_, T>,
 ) -> Result<KlibPublicIdSignature, ManglingError> {
-    let mangled = mangle_callable(&container.scopes(&callable.type_parameters), callable)?;
+    let mangled = callable_mangled(container, callable)?;
     Ok(container.signature(callable.name, Some(&mangled), callable.expect))
+}
+
+/// The mangled signature of a function or constructor, the text its id is the hash of.
+pub fn callable_mangled<T: SignatureType>(
+    container: DeclarationContainer<'_, T>,
+    callable: &CallableShape<'_, T>,
+) -> Result<String, ManglingError> {
+    mangle_callable(&container.scopes(&callable.type_parameters), callable)
+}
+
+/// The mangled signature of `callable` as kotlinc writes it inside the mangle of a declaration
+/// nested in it: the nested declaration, and each local class between them, is a type-parameter
+/// container met before `callable`, so `callable`'s own parameters are referenced by the container
+/// index `outer_containers`. Such a class declares no type parameter of its own.
+pub fn enclosing_callable_mangled<T: SignatureType>(
+    callable: &CallableShape<'_, T>,
+    outer_containers: usize,
+) -> Result<String, ManglingError> {
+    let none: &[TypeParameterShape<'_, T>] = &[];
+    let mut scopes = vec![none; outer_containers];
+    scopes.push(callable.type_parameters.as_slice());
+    mangle_callable(&scopes, callable)
+}
+
+/// The hash a mangled signature is identified by.
+pub fn mangled_id(mangled: &str) -> u64 {
+    city_hash::city_hash64(mangled.as_bytes())
 }
 
 /// The identity of a property.
@@ -251,8 +278,16 @@ pub fn property_signature<T: SignatureType>(
     container: DeclarationContainer<'_, T>,
     property: &PropertyShape<'_, T>,
 ) -> Result<KlibPublicIdSignature, ManglingError> {
-    let mangled = mangle_property(&container.scopes(&property.type_parameters), property)?;
+    let mangled = property_mangled(container, property)?;
     Ok(container.signature(property.name, Some(&mangled), property.expect))
+}
+
+/// The mangled signature of a property, the text its id is the hash of.
+pub fn property_mangled<T: SignatureType>(
+    container: DeclarationContainer<'_, T>,
+    property: &PropertyShape<'_, T>,
+) -> Result<String, ManglingError> {
+    mangle_property(&container.scopes(&property.type_parameters), property)
 }
 
 /// The identity of a property's getter or setter. An accessor is mangled as a function named
@@ -263,6 +298,24 @@ pub fn accessor_signature<T: SignatureType>(
     property: &PropertyShape<'_, T>,
     accessor: Accessor<'_, T>,
 ) -> Result<KlibAccessorIdSignature, ManglingError> {
+    let (name, mangled) = accessor_mangled(container, property, accessor)?;
+    let property_signature = property_signature(container, property)?;
+    let mask = property_signature.mask;
+    Ok(KlibAccessorIdSignature::new(
+        property_signature,
+        name,
+        city_hash::city_hash64(mangled.as_bytes()),
+        mask,
+    ))
+}
+
+/// The name and mangled signature of a property's getter or setter, the text its id is the hash
+/// of.
+pub fn accessor_mangled<T: SignatureType>(
+    container: DeclarationContainer<'_, T>,
+    property: &PropertyShape<'_, T>,
+    accessor: Accessor<'_, T>,
+) -> Result<(String, String), ManglingError> {
     let (name, params) = match accessor {
         Accessor::Getter => (format!("<get-{}>", property.name), Vec::new()),
         Accessor::Setter { value } => (format!("<set-{}>", property.name), vec![value]),
@@ -278,14 +331,7 @@ pub fn accessor_signature<T: SignatureType>(
         placement: property.placement,
     };
     let mangled = mangle_callable(&container.scopes(&function.type_parameters), &function)?;
-    let property_signature = property_signature(container, property)?;
-    let mask = property_signature.mask;
-    Ok(KlibAccessorIdSignature::new(
-        property_signature,
-        name,
-        city_hash::city_hash64(mangled.as_bytes()),
-        mask,
-    ))
+    Ok((name, mangled))
 }
 
 type Scopes<'s, 'a, T> = [&'s [TypeParameterShape<'a, T>]];
