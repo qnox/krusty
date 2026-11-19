@@ -37,6 +37,8 @@ pub struct IrNodePosition {
     /// only with another expression of the same file, for a decision kotlinc makes by visiting a
     /// file's declarations in source order.
     pub start_offset: Option<u32>,
+    /// Where a qualified call's selector name starts, which kotlinc's call offsets begin at.
+    pub selector_offset: Option<u32>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -98,6 +100,7 @@ impl InheritedFacts for IrNodePositions {
             statement_line,
             factory_line,
             start_offset,
+            selector_offset,
         } = self.get(source);
         let copy = self.settle(target);
         for (copied, line) in [
@@ -117,6 +120,9 @@ impl InheritedFacts for IrNodePositions {
         }
         if start_offset.is_some() {
             copy.start_offset = start_offset;
+        }
+        if selector_offset.is_some() {
+            copy.selector_offset = selector_offset;
         }
     }
 
@@ -245,6 +251,15 @@ impl IrFile {
         self.positions.settle(expression).start_offset = Some(offset);
     }
 
+    /// Where the selector name of the qualified call `expression` starts in its file.
+    pub fn selector_offset(&self, expression: ExprId) -> Option<u32> {
+        self.positions.get(expression).selector_offset
+    }
+
+    pub fn set_selector_offset(&mut self, expression: ExprId, offset: u32) {
+        self.positions.settle(expression).selector_offset = Some(offset);
+    }
+
     pub fn set_end_line(&mut self, expression: ExprId, line: u32) {
         self.positions.settle(expression).end_line = Some(line);
     }
@@ -340,6 +355,7 @@ mod tests {
             statement_line: None,
             factory_line: None,
             start_offset: None,
+            selector_offset: None,
         }
     }
 
@@ -367,6 +383,7 @@ mod tests {
                 statement_line: None,
                 factory_line: None,
                 start_offset: None,
+                selector_offset: None,
             }
         );
         assert_eq!(ir.position(positionless as u32), IrNodePosition::default());

@@ -64,7 +64,7 @@ pub(super) fn select_constructor(
             release,
         )
         .into_iter()
-        .map(|message| FrontendPluginDiagnostic { span, message }),
+        .map(|message| FrontendPluginDiagnostic::error(span, message)),
     );
     None
 }
