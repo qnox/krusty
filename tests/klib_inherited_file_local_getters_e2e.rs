@@ -15,6 +15,7 @@ fun box(): String {
     if (readThroughIntermediate() != \"r/3/7/21\") return \"through an intermediate class\"
     if (readDeclared() != 5) return \"declared\"
     if (readDeclaredAndInherited() != \"33\") return \"declared and inherited\"
+    if (readOverridden() != \"21\") return \"overridden\"
     return \"OK\"
 }
 ";

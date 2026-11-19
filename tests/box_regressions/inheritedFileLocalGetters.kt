@@ -7,6 +7,14 @@ abstract class Base {
     protected val seed: Int get() = 7
 }
 
+open class Level {
+    protected open val level: Int get() = 7
+}
+
+open class Refined : Level() {
+    protected override val level: Int get() = 21
+}
+
 abstract class Middle : Base() {
     protected val extra: Int get() = seed * 3
 }
@@ -41,10 +49,18 @@ fun readDeclaredAndInherited(): String {
     return o.run()
 }
 
+fun readOverridden(): String {
+    val o = object : Refined() {
+        fun run(): String = "$level"
+    }
+    return o.run()
+}
+
 fun box(): String {
     if (readInherited() != "r/null/3/7") return "inherited ${readInherited()}"
     if (readThroughIntermediate() != "r/3/7/21") return "through an intermediate class ${readThroughIntermediate()}"
     if (readDeclared() != 5) return "declared ${readDeclared()}"
     if (readDeclaredAndInherited() != "33") return "declared and inherited ${readDeclaredAndInherited()}"
+    if (readOverridden() != "21") return "overridden ${readOverridden()}"
     return "OK"
 }
