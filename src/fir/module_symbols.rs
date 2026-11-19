@@ -737,6 +737,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             inline: InlineKind::None,
             default_call: false,
             defaults_from_declaration: false,
+            transformed_entry_tail: None,
             vararg_elem: None,
             vararg_index: None,
             signature: None,

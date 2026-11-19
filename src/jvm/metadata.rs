@@ -24,6 +24,7 @@ pub use serialization_program_order::SerialElementName;
 mod since_kotlin;
 mod string_table;
 mod type_aliases;
+mod type_facts;
 mod type_parameter_bodies;
 mod value_parameter;
 
@@ -43,6 +44,9 @@ use string_table::{
     decode_d1, parse_string_table, resolve_class_name, resolve_string, split_d1, Rec,
 };
 use type_aliases::decode_type_aliases;
+#[cfg(test)]
+use type_facts::ParsedTypeFacts;
+use type_facts::{parse_type_facts, parse_type_nullable};
 
 pub use enclosing_type_parameters::{RawMetadata, ScopedTypeParameter};
 pub use property_declarations::MetaProp;
@@ -613,44 +617,6 @@ fn annotation_jvm_name(bodies: &[Vec<u8>], records: &[Rec], d2: &[String]) -> Op
         }
     }
     None
-}
-
-/// The declaration facts carried directly by one Kotlin metadata `Type` message.
-///
-/// Nullability and suspend-function identity live in the same protobuf node. Decode them in one walk
-/// so a value-parameter consumer cannot accidentally read one from an inline type and the other from
-/// a type-table entry, or duplicate the wire parser as new type flags are added.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct ParsedTypeFacts {
-    nullable: bool,
-    suspend_fun: bool,
-}
-
-fn parse_type_facts(body: &[u8]) -> ParsedTypeFacts {
-    let mut pb = Pb::new(body);
-    let mut facts = ParsedTypeFacts::default();
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            // `Type.flags` bit zero is `SUSPEND_TYPE`. A suspend function type otherwise has the
-            // same CPS-erased `FunctionN+1<..., Continuation<R>, Any?>` signature as an ordinary
-            // continuation-taking function, so this bit is the semantic discriminator.
-            (1, 0) => facts.suspend_fun = pb.varint().is_some_and(|v| v & 1 != 0),
-            (3, 0) => facts.nullable = pb.varint().is_some_and(|v| v != 0),
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    facts
-}
-
-/// Whether a `Type` message is nullable (`Type.nullable = 3`, a varint bool). Kept as the small
-/// query used throughout the decoder; the wire interpretation itself remains centralized above.
-fn parse_type_nullable(body: &[u8]) -> bool {
-    parse_type_facts(body).nullable
 }
 
 /// Resolve a value parameter's declared `Type` through the one representation chosen by its
@@ -1667,17 +1633,13 @@ fn decode_functions(
                                 facts
                             })
                             .unwrap_or_default();
-                        let no_infer = resolved_type.is_some_and(|(body, _)| {
-                            parse_type_node(body).is_some_and(|node| {
-                                node.annotations.into_iter().any(|annotation| {
-                                    annotation.class_id().is_some_and(|id| {
-                                        resolve_class_name(records, d2, id as usize).is_some_and(
-                                            |annotation| annotation == "kotlin/internal/NoInfer",
-                                        )
-                                    })
-                                })
+                        let annotated = |annotation: &str| {
+                            resolved_type.is_some_and(|(body, _)| {
+                                type_facts::is_annotated_with(body, records, d2, annotation)
                             })
-                        });
+                        };
+                        let no_infer = annotated("kotlin/internal/NoInfer");
+                        let composable_fun = annotated(type_facts::COMPOSABLE_ANNOTATION);
                         let declared = crate::metadata::DeclaredValueParameter::of_flags(p.flags);
                         MetaValueParam {
                             ty: decoded_type.and_then(declared_classifier),
@@ -1694,7 +1656,8 @@ fn decode_functions(
                                 .with_nullable(type_facts.nullable)
                                 .with_suspend_fun(type_facts.suspend_fun)
                                 .with_has_type_facts(resolved_type.is_some())
-                                .with_no_infer(no_infer),
+                                .with_no_infer(no_infer)
+                                .with_composable_fun(composable_fun),
                             recv_fun_receiver,
                         }
                     };

@@ -12,6 +12,7 @@ mod call_sig;
 mod callable_scope_rung;
 mod class_identity;
 mod class_name_property;
+mod classifier_application;
 mod classifier_callables;
 mod classifier_declaration;
 mod classifier_kind;
@@ -44,6 +45,7 @@ mod property_producer;
 mod provider_override;
 mod result_nullability;
 mod runtime_exception;
+mod sam_application;
 mod scalar_instruction;
 mod singleton_dispatch;
 mod source_inputs;
@@ -65,6 +67,7 @@ pub use call_realization::{
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub use class_identity::KlibClassIdentity;
+pub(crate) use classifier_application::{classifier_bindings, classifier_type_parameter_bounds};
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
     ConstructorCallConstraints,
@@ -103,6 +106,7 @@ pub use property_producer::PropertyProducer;
 pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
 pub use runtime_exception::{RuntimeExceptionKind, RuntimeExceptionLayout};
+pub(crate) use sam_application::{sam_application_bindings, sam_substitute};
 pub use singleton_dispatch::SingletonDispatch;
 pub(crate) use source_inputs::{ReceiverInputBounds, SourceInputDeclaration};
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
@@ -1032,6 +1036,11 @@ pub struct LibraryCallable {
     /// default to such a declaration keeps the declaration's identity, with
     /// [`Self::default_call`] set; no platform `$default` symbol is named.
     pub defaults_from_declaration: bool,
+    /// [`Self::defaults_from_declaration`] holds because the declaration's compiled entry takes
+    /// the mask of omitted arguments after these synthetic parameters, which a compiler plugin's
+    /// transformation appended. The provider only reports the tail; whether it is a calling
+    /// convention the call can pass is for an enabled plugin to authenticate.
+    pub transformed_entry_tail: Option<Box<[Ty]>>,
     /// For a generic `vararg` callable resolved with a bound element type (`listOf<Long>(…)` →
     /// `Long`): the *logical* element type the trailing arguments adapt to. `None` for a non-vararg
     /// call or when the element type is not recovered. The backend uses it to coerce each packed
@@ -1180,6 +1189,10 @@ pub struct CallSig {
     /// argument is checked for applicability after inference but contributes no type-variable
     /// constraint itself.
     pub no_infer_params: ParamFlags,
+    /// Per logical parameter: the declared type carries the Compose runtime's `@Composable` type
+    /// annotation, so a function value passed for it is compiled with the composer and `$changed`
+    /// parameters after its own.
+    pub composable_params: ParamFlags,
     /// Per logical parameter, the resolved declaration carries
     /// `kotlin.internal.ImplicitIntegerCoercion`.
     pub implicit_integer_coercion: ParamFlags,

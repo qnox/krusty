@@ -318,11 +318,17 @@ pub(in crate::resolve) fn source_type_universe(
         let mut imports_by_file = Vec::with_capacity(source_count);
         let enclosing_names = bootstrap_enclosing_names(&user_defined, &source_aliases);
         for file_index in 0..source_count {
-            let imap = source_imports[file_index]
+            let mut imap: HashMap<String, Vec<String>> = HashMap::default();
+            for import in source_imports[file_index]
                 .iter()
                 .filter(|import| !import.wildcard)
-                .map(|import| (import.visible_name.clone(), import.path.replace('.', "/")))
-                .collect::<HashMap<_, _>>();
+            {
+                let path = import.path.replace('.', "/");
+                let paths = imap.entry(import.visible_name.clone()).or_default();
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
             let source = BootstrapSymbolSource {
                 declarations: &user_defined,
                 aliases: &source_aliases,
@@ -390,51 +396,61 @@ pub(in crate::resolve) fn source_type_universe(
                 // `Metadata` leaves the default-imported classifier `kotlin.Metadata` visible in a
                 // type position (kotlinc 2.4.21). Only an import that names a classifier is a
                 // classifier root.
-                let explicit_classifier = imap
-                    .get(&source_name)
-                    .and_then(|path| Some((path, classifier_path(path, &source, None).ok()?)));
-                let (full, unresolved, classifier_segment) =
-                    if let Some((_, classifier)) = explicit_classifier {
-                        (Some(classifier), None, Some(0))
-                    } else if source_name.contains('.') {
-                        let root = source_name.split('.').next().unwrap_or_default();
-                        match classifier_from_imports(root, &imap, &levels, &source) {
-                            InheritedNestedClassifier::Ambiguous => {
-                                (None, Some(root.to_string()), None)
-                            }
-                            scoped_root => {
-                                match classifier_path_with_binding_identity(
-                                    &source_name,
-                                    &source,
-                                    scoped_root.found(),
-                                ) {
-                                    Ok((classifier, _, segment)) => {
-                                        (Some(classifier), None, Some(segment))
-                                    }
-                                    Err(QualifierError::UnresolvedSegment { name, .. })
-                                    | Err(QualifierError::AmbiguousRoot { name, .. }) => {
-                                        (None, Some(name), None)
-                                    }
-                                    Err(QualifierError::NotANameChain { .. }) => {
-                                        (None, Some(root.to_string()), None)
-                                    }
+                let explicit_classifiers = crate::resolve::explicit_classifier_selection(
+                    &source_name,
+                    imap.get(&source_name).map(Vec::as_slice),
+                    &source,
+                );
+                let explicit_classifier = match explicit_classifiers.as_slice() {
+                    [selected] => Some(selected),
+                    _ => None,
+                };
+                let (full, unresolved, classifier_segment) = if explicit_classifiers.len() > 1 {
+                    // Two imports of distinct classifiers under one name conflict; the import
+                    // list reports it and a use of the name is ambiguous.
+                    file_ambiguous.insert(name.clone());
+                    (None, None, None)
+                } else if let Some(selected) = explicit_classifier {
+                    (Some(selected.classifier), None, Some(0))
+                } else if source_name.contains('.') {
+                    let root = source_name.split('.').next().unwrap_or_default();
+                    match classifier_from_imports(root, &imap, &levels, &source) {
+                        InheritedNestedClassifier::Ambiguous => {
+                            (None, Some(root.to_string()), None)
+                        }
+                        scoped_root => {
+                            match classifier_path_with_binding_identity(
+                                &source_name,
+                                &source,
+                                scoped_root.found(),
+                            ) {
+                                Ok((classifier, _, segment)) => {
+                                    (Some(classifier), None, Some(segment))
+                                }
+                                Err(QualifierError::UnresolvedSegment { name, .. })
+                                | Err(QualifierError::AmbiguousRoot { name, .. }) => {
+                                    (None, Some(name), None)
+                                }
+                                Err(QualifierError::NotANameChain { .. }) => {
+                                    (None, Some(root.to_string()), None)
                                 }
                             }
                         }
-                    } else {
-                        match classifier_from_imports(&source_name, &imap, &levels, &source) {
-                            InheritedNestedClassifier::Ambiguous => {
-                                file_ambiguous.insert(name.clone());
-                                (None, None, None)
-                            }
-                            selected => {
-                                let classifier = selected.found();
-                                let unresolved = classifier.is_none().then(|| source_name.clone());
-                                let classifier_segment = classifier.map(|_| 0);
-                                (classifier, unresolved, classifier_segment)
-                            }
+                    }
+                } else {
+                    match classifier_from_imports(&source_name, &imap, &levels, &source) {
+                        InheritedNestedClassifier::Ambiguous => {
+                            file_ambiguous.insert(name.clone());
+                            (None, None, None)
                         }
-                    };
+                        selected => {
+                            let classifier = selected.found();
+                            let unresolved = classifier.is_none().then(|| source_name.clone());
+                            let classifier_segment = classifier.map(|_| 0);
+                            (classifier, unresolved, classifier_segment)
+                        }
+                    }
+                };
                 let full = full.map(|full| libraries.canonical_source_type_name(full));
                 if let Some(identity) = full.filter(|identity| source_aliases.contains(identity)) {
                     file_source_aliases.insert(name.clone(), identity);
@@ -463,9 +479,8 @@ pub(in crate::resolve) fn source_type_universe(
                 // fully-qualified spelling names the alias directly, and star/default levels are
                 // consulted in precedence order rather than flattened. Whether the template APPLIES
                 // is decided at the use site, against the classifier that actually resolved.
-                let expansion = if let Some((path, _)) = explicit_classifier {
-                    Ok(Some(crate::types::type_name(path))
-                        .and_then(|identity| libraries.type_alias_expansion(identity)))
+                let expansion = if let Some(selected) = explicit_classifier {
+                    Ok(selected.alias.clone())
                 } else if source_name.contains('.') {
                     Ok(Some(super::super::source_package::identity(Some(
                         source_name.as_str(),
