@@ -2544,7 +2544,6 @@ syntheticAccessors/kt10047.kt
 syntheticAccessors/kt9958.kt
 syntheticAccessors/kt9958Interface.kt
 syntheticAccessors/protectedMemberReferenceAccessor/kt46597_property.kt
-toArray/kt3177-toTypedArray.kt
 traits/kt5393_property.kt
 traits/multiple.kt
 try/catch3.kt
