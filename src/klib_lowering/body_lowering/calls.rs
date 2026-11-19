@@ -45,7 +45,8 @@ impl BodyLowering<'_> {
         if access.symbol.kind != KlibIrSymbolKind::Function {
             return Err(mismatch("a call target's symbol is not a function"));
         }
-        let signature = &access.symbol.signature;
+        let inherited = self.linker.inherited_getter(&access.symbol.signature)?;
+        let signature = inherited.as_ref().unwrap_or(&access.symbol.signature);
         let callee = match signature {
             KlibIrSignature::Public(callee) if !self.linker.links_privately(signature) => callee,
             KlibIrSignature::Accessor(accessor) if !self.linker.links_privately(signature) => {
@@ -751,15 +752,18 @@ impl BodyLowering<'_> {
                 declaration: Some((&declared_parameters, &declared_formals)),
             },
         )?;
-        self.linked_call_with_operands(linked, operands, dispatch)
+        self.linked_call_with_operands(linked, operands, dispatch, Some(access))
     }
 
     /// A call of `linked` with the operands its call site supplies, dispatched as `dispatch`.
+    /// `access` is the serialized call whose type arguments an expanded inline callee binds; a
+    /// call the lowering synthesizes has none.
     fn linked_call_with_operands(
         &mut self,
         linked: LinkedCallee,
         operands: CallOperands,
         dispatch: CallDispatch,
+        access: Option<&KlibIrMemberAccess>,
     ) -> Lowered<ExprId> {
         let mut callee = linked.callee;
         if let Callee::External { params, ret, .. } = &mut callee {
@@ -799,6 +803,12 @@ impl BodyLowering<'_> {
             }
         }
         let singleton_dispatch = linked.singleton_dispatch;
+        let expanded = match &callee {
+            Callee::Local(function) if self.ir.inline_only_fns.contains(function) => {
+                Some(*function)
+            }
+            _ => None,
+        };
         let external = match &callee {
             Callee::External { target, .. } => Some(*target),
             _ => None,
@@ -833,6 +843,9 @@ impl BodyLowering<'_> {
                 args,
             }),
         };
+        if let (Some(function), Some(access)) = (expanded, access) {
+            self.record_inline_type_arguments(call, function, access)?;
+        }
         if let Some(result) = suspend_result {
             self.ir.suspend_calls.insert(call, result);
         }
@@ -1074,6 +1087,7 @@ impl BodyLowering<'_> {
                 ret: intercepted_type,
             },
             CallDispatch::Virtual,
+            None,
         )?;
         let intercepted = self.coercion(intercepted, operands.ret);
         let unchanged = self.ir.add_expr(IrExpr::GetValue(slot));
@@ -1375,6 +1389,47 @@ impl BodyLowering<'_> {
             ));
         }
         Ok(applied)
+    }
+
+    /// The type arguments `call` of the inline function `function` binds, under the selected
+    /// semantic identities of the function's type parameters, which its body's types name, for the
+    /// expansion to specialize that body with.
+    fn record_inline_type_arguments(
+        &mut self,
+        call: ExprId,
+        function: crate::ir::FunId,
+        access: &KlibIrMemberAccess,
+    ) -> Lowered<()> {
+        let Some(signature) = self.ir.signatures.get(&function) else {
+            return Ok(());
+        };
+        if signature.type_params.len() != access.type_arguments.len() {
+            return Err(mismatch(
+                "a call passes another number of type arguments than its inline callee declares",
+            ));
+        }
+        let formals = signature
+            .type_params
+            .iter()
+            .map(|formal| (formal.semantic_name.clone(), formal.reified))
+            .collect::<Vec<_>>();
+        let mut bound = Vec::with_capacity(formals.len());
+        let mut reified = Vec::new();
+        for ((name, is_reified), argument) in formals.into_iter().zip(&access.type_arguments) {
+            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call that leaves a type argument unset",
+            ))?;
+            let value = self.semantic(argument)?;
+            if is_reified {
+                reified.push((name.clone(), value));
+            }
+            bound.push((name, value));
+        }
+        if !reified.is_empty() {
+            self.ir.reified_call_subst.insert(call, reified);
+        }
+        self.ir.inline_call_type_arguments.insert(call, bound);
+        Ok(())
     }
 
     /// `linked` at the call's type arguments: each of the callee's type parameters bound to the

@@ -626,6 +626,43 @@ impl KlibDeclarationBodies {
         self.libraries[library].file_package(file)
     }
 
+    /// The class `module` itself serializes under `signature`, whichever kind of signature names
+    /// it. `None` unless exactly one class has it.
+    pub(crate) fn module_declared_class<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
+        let library = *self.modules.get(module)?;
+        let mut found = None;
+        for class in self.libraries[library].classes_with_signature(signature) {
+            if found.replace(class).is_some() {
+                return None;
+            }
+        }
+        found.or_else(|| self.libraries[library].local_class(signature))
+    }
+
+    /// What the serialized file-local `signature` of `module` records beside its table slot.
+    pub(crate) fn module_file_local_origin(
+        &self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<&crate::metadata::klib_ir::KlibFileLocalOrigin> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].file_local_origin(signature)
+    }
+
+    /// The public function `module` itself serializes under `signature`.
+    pub(crate) fn module_public_function<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a KlibIrArena, &'a KlibIrFunction)> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].function(signature)
+    }
+
     /// The file-local function `module` itself serializes under `signature`.
     pub(crate) fn module_local_function<'a>(
         &'a self,
