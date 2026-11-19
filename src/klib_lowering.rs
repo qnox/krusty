@@ -23,6 +23,7 @@ mod class_initialization;
 mod class_storage;
 mod closure_forms;
 mod constructor_calls;
+mod continuation_intrinsics;
 mod decline;
 mod enum_classes;
 mod for_loops;
@@ -35,6 +36,7 @@ mod lowering_checkpoint;
 mod primitive_calls;
 mod range_membership;
 mod same_library_class;
+mod site_containers;
 #[cfg(test)]
 mod tests;
 mod type_evidence;
@@ -65,6 +67,7 @@ pub(crate) const EMITTED_CALL_FORMS: crate::metadata::klib_ir::tree::EmittedCall
         folded_call: range_membership::folds_range_literal_membership,
         folded_calls: for_loops::folded_loop_calls,
         implied_callee: array_content_members::implied_callee,
+        converted_closure: closure_forms::converted_closure,
     };
 pub use decline::{KlibBodyDecline, KlibBodyDeclineReason};
 pub use inline_templates::{lower_inline_template, KlibInlineTemplate, TemplateCallees};

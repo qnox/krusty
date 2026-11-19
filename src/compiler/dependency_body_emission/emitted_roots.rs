@@ -64,6 +64,9 @@ pub(super) struct FrozenClosure {
         HashMap<KlibDependencyCallable, crate::klib_lowering::CallEdge>,
     /// The library objects whose values the closure's bodies read, which the unit materializes.
     pub(super) read_objects: Vec<crate::libraries::KlibBodyClassContract>,
+    /// Members of a materialized class or object that dispatch reaches, whose bodies the unit
+    /// emits although no walked body calls them directly.
+    pub(super) dispatched: Vec<KlibDependencyCallable>,
 }
 
 /// Where a unit's closure starts: the callables the emitted source selects, and the library
@@ -138,8 +141,9 @@ pub(super) fn declarations(
         }
         // A top-level function private to its file, or a member of a class private to its
         // library, has no provider declaration either; only a body of its own module calls it, and
-        // it is emitted with that body.
-        if bodies.is_library_private(&identity) {
+        // it is emitted with that body. One an earlier unit already emitted is that unit's export
+        // instead, an exact external edge which keeps its declaration authentication below.
+        if bodies.is_library_private(&identity) && !externals.contains_key(&identity) {
             state.pending.extend(
                 bodies
                     .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
@@ -384,6 +388,7 @@ pub(super) fn declarations(
         declarations: state.declarations,
         authorized_member_edges,
         read_objects: state.read_objects,
+        dispatched: state.dispatched.into_iter().collect(),
     })
 }
 
@@ -786,22 +791,6 @@ struct ObjectInitialization {
     objects: Vec<crate::metadata::id_signature::KlibPublicIdSignature>,
 }
 
-/// The initialization edges of each object the closed bodies read, which the unit materializes
-/// with every member dispatch reaches, as it materializes the object of a member it calls.
-pub(super) fn read_object_initializations(
-    platform: &dyn SemanticPlatform,
-    bodies: &KlibDeclarationBodies,
-    callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
-) -> Result<Vec<KlibDependencyCallable>, String> {
-    let mut edges = Vec::new();
-    for class in callees.read_objects() {
-        if let Some(initialization) = object_initialization(platform, bodies, callees, class)? {
-            edges.extend(initialization.callees);
-        }
-    }
-    Ok(edges)
-}
-
 /// The object declaring the member `identity`, when a support unit materializes it.
 pub(super) fn member_object(
     platform: &dyn SemanticPlatform,
@@ -832,6 +821,35 @@ pub(super) fn member_object_initialization(
             .map(|initialization| initialization.callees)),
         None => Ok(None),
     }
+}
+
+/// The initialization edges of the library objects the body or initialization of `identity`
+/// reads as values, which the unit materializes with every member dispatch reaches on them.
+pub(super) fn read_object_initializations(
+    platform: &dyn SemanticPlatform,
+    bodies: &KlibDeclarationBodies,
+    callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
+    identity: &KlibDependencyCallable,
+    constructor: bool,
+) -> Result<Vec<KlibDependencyCallable>, String> {
+    let objects = if constructor {
+        callees
+            .constructor_initialization_objects(identity, bodies)
+            .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
+    } else {
+        bodies.emitted_body_objects(identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+    };
+    let mut edges = Vec::new();
+    for class in objects
+        .iter()
+        .filter_map(crate::klib_lowering::object_classifier)
+        .filter_map(|classifier| callees.read_object(classifier))
+    {
+        if let Some(initialization) = object_initialization(platform, bodies, callees, class)? {
+            edges.extend(initialization.callees);
+        }
+    }
+    Ok(edges)
 }
 
 /// The constructors that initialize the ordinary class `class`, when each one's admitted

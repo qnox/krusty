@@ -53,15 +53,25 @@ impl BodyLowering<'_> {
         if symbol.kind != KlibIrSymbolKind::Class {
             return Err(mismatch("an object value's symbol is not a class"));
         }
-        let KlibIrSignature::Public(object) = &symbol.signature else {
-            return unsupported("a file-private object value");
+        // An object private to this body's library is installed in the unit, as a construction of
+        // a private class is; any other object is the singleton its provider declares.
+        let local = self.linker.local_class(&symbol.signature)?;
+        let classifier = match (local, &symbol.signature) {
+            (Some(classifier), _) => classifier,
+            (None, KlibIrSignature::Public(object)) => {
+                super::super::klib_types::classifier_name(object)?
+            }
+            (None, _) => return unsupported("a file-private object value"),
         };
-        let classifier = super::super::klib_types::classifier_name(object)?;
         let object = crate::types::builtin_semantic(classifier).unwrap_or(Ty::obj_name(classifier));
         if ty != object {
             return Err(mismatch("an object value is typed apart from its object"));
         }
-        self.linker.singleton(self.ir, classifier)?;
+        if local.is_some() {
+            self.linker.link_local_object(self.ir, &symbol.signature)?;
+        } else {
+            self.linker.singleton(self.ir, classifier)?;
+        }
         // Recorded as checked FIR lowering records the source reference: `Unit` is its builtin
         // type rather than its class.
         let value = self.ir.add_expr(IrExpr::SingletonValue { classifier });
@@ -96,6 +106,7 @@ impl BodyLowering<'_> {
         access: &KlibIrMemberAccess,
         constructor_type_arguments: u32,
         ty: Ty,
+        role: super::ConstructorRole,
     ) -> Lowered<ConstructorOperands> {
         if access.symbol.kind != KlibIrSymbolKind::Constructor {
             return Err(mismatch("a constructor call's symbol is not a constructor"));
@@ -116,11 +127,14 @@ impl BodyLowering<'_> {
             KlibIrSignature::Public(callee)
                 if !self.linker.links_privately(&access.symbol.signature) =>
             {
-                let linked = self.linker.link_constructor(self.ir, callee)?;
+                let linked = self.linker.link_constructor(self.ir, callee, role)?;
                 (linked.declaration, Some(linked.target), None)
             }
             signature => {
                 let linked = self.linker.link_local_constructor(self.ir, signature)?;
+                if linked.object {
+                    return Err(mismatch("a constructor call creates an object's instance"));
+                }
                 (linked.declaration, None, Some(linked.access))
             }
         };
@@ -186,7 +200,12 @@ impl BodyLowering<'_> {
             params,
             args,
             defaults,
-        } = self.constructor_operands(access, constructor_type_arguments, ty)?;
+        } = self.constructor_operands(
+            access,
+            constructor_type_arguments,
+            ty,
+            super::ConstructorRole::Allocation,
+        )?;
         match declaration.semantic_role {
             Some(crate::types::SemanticCallRole::KotlinArrayAllocation) => {
                 // The allocated type is the constructed class's application: `Array<T>` with its

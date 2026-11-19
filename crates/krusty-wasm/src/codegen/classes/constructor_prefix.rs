@@ -99,12 +99,6 @@ fn captured_receiver(ir: &IrFile, argument: &IrCtorArg, receiver: &IrCapturedRec
     }
 }
 
-// A captured receiver stored as a reference holds an object, never a scalar this target carries
-// by value.
-fn object_reference(ty: Ty) -> bool {
-    matches!(ty.kind(), TyKind::Obj(_, _)) && !crate::boxes::is_boxed_scalar(ty)
-}
-
 // The parameter's declared type is the entry its rung recorded at `index`. Its closure identity is
 // the receiver id, not a lexical value or an enclosing class.
 fn context_parameter(argument: &IrCtorArg, types: &[Ty], index: u32) -> bool {
@@ -122,7 +116,7 @@ fn receiver_lambda(argument: &IrCtorArg) -> bool {
     matches!(
         argument.capture_identity,
         Some(ClassCaptureIdentity::Receiver(_))
-    ) && object_reference(argument.ty)
+    ) && matches!(argument.ty.kind(), TyKind::Obj(_, _))
 }
 
 // An extension receiver (`this@f`) is the object the named callable received. A checked source
@@ -132,7 +126,7 @@ fn callable_receiver(argument: &IrCtorArg) -> bool {
     matches!(
         argument.capture_identity,
         None | Some(ClassCaptureIdentity::Receiver(_))
-    ) && object_reference(argument.ty)
+    ) && matches!(argument.ty.kind(), TyKind::Obj(_, _))
 }
 
 // A source enclosing receiver is an ordinary reference only after its selected declaration,
@@ -232,8 +226,10 @@ fn delegate_parameter(
         }).count() == 1
 }
 
-/// Every shared-capture field of `id` is one capture parameter of its constructor prefix,
-/// stored at that field, with the field's declared type equal to the recorded element.
+/// Every shared-capture field of `id` holds the recorded element and is one capture parameter of
+/// its constructor prefix, stored at that field. A class that is not a closure (a state machine's
+/// frame) may instead fill such a field itself, or store into it the holder one of its ordinary
+/// constructor parameters passes.
 fn shared_fields_are_captures(ir: &IrFile, id: ClassId) -> bool {
     let class = &ir.classes[id as usize];
     let prefix = class.constructor_prefix_count as usize;
@@ -241,16 +237,40 @@ fn shared_fields_are_captures(ir: &IrFile, id: ClassId) -> bool {
         .iter()
         .filter(|((owner, _), _)| *owner == id)
         .all(|((_, field), element)| {
-            class.ctor_args.iter().take(prefix).any(|argument| {
-                argument.field_index == Some(*field)
-                    && argument.provenance == IrCtorParameterProvenance::Capture
-                    && argument.is_field
-                    && argument.ty == *element
-                    && class
-                        .fields
-                        .get(*field as usize)
-                        .is_some_and(|storage| storage.ty == *element && storage.is_final())
-            })
+            let mut stores = class
+                .ctor_args
+                .iter()
+                .filter(|argument| argument.field_index == Some(*field));
+            let frame_field = prefix == 0
+                && class
+                    .fields
+                    .get(*field as usize)
+                    .is_some_and(|storage| storage.ty == *element)
+                && !class
+                    .pre_super_param_fields
+                    .iter()
+                    .any(|(_, target)| target == field)
+                && match (stores.next(), stores.next()) {
+                    (None, _) => true,
+                    (Some(argument), None) => {
+                        argument.provenance == IrCtorParameterProvenance::Value
+                            && argument.is_field
+                            && argument.capture.is_none()
+                            && argument.ty == *element
+                    }
+                    (Some(_), Some(_)) => false,
+                };
+            frame_field
+                || class.ctor_args.iter().take(prefix).any(|argument| {
+                    argument.field_index == Some(*field)
+                        && argument.provenance == IrCtorParameterProvenance::Capture
+                        && argument.is_field
+                        && argument.ty == *element
+                        && class
+                            .fields
+                            .get(*field as usize)
+                            .is_some_and(|storage| storage.ty == *element && storage.is_final())
+                })
         })
 }
 

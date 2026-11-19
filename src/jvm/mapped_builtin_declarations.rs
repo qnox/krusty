@@ -5,7 +5,7 @@
 //! resolution must receive one ordinary declaration containing both views.
 
 use crate::libraries::LibraryMember;
-use crate::types::{type_name, TypeName};
+use crate::types::{type_name, Ty, TypeName};
 
 mod predefined_enhancements;
 
@@ -476,13 +476,21 @@ pub(super) fn physical_name_for_call(
         .map(|realization| realization.physical_name)
 }
 
-/// Kotlin source name for one exact JVM realization. Publishing `java.lang.Number.intValue`
-/// uses this so the member is `toInt` and the classfile spelling stays on `physical_name`.
+/// Kotlin source name for one exact JVM realization, as the classifier `published` sees it.
+/// Publishing `java.lang.Number.intValue` uses this so the member is `toInt` and the classfile
+/// spelling stays on `physical_name`. A JVM class mapped one way keeps its own names: a Java
+/// `AtomicInteger` has `get`, and only Kotlin's `AtomicInt` calls it `load`.
 pub(super) fn source_name_for_realization(
+    published: TypeName,
     physical_owner: TypeName,
     physical_name: &str,
     descriptor: &str,
 ) -> Option<&'static str> {
+    let kotlin_face = super::jvm_class_map::maps_to_distinct_jvm_internal(published)
+        || super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(published).is_some();
+    if !kotlin_face {
+        return None;
+    }
     special_realizations()
         .iter()
         .find(|realization| {
@@ -512,27 +520,27 @@ pub(super) fn is_property_realization(
 
 /// Overlay source-semantic constructor facts onto the matching physical constructors.
 ///
-/// Constructors that exist only on the JVM remain available: Kotlin's JVM builtins customizer may
-/// expose platform constructors beyond the common builtins declaration. Conversely, a declaration
-/// without a physical match is not published from this path because it has no JVM realization.
+/// Constructors that exist only on the JVM remain available when the JVM class is also a face of
+/// the builtin: Kotlin's JVM builtins customizer may expose platform constructors beyond the common
+/// builtins declaration. A one-way builtin (`AtomicArray`) publishes only its declared constructors,
+/// so `AtomicReferenceArray(int)`, which fills its elements with null, stays out of reach. A
+/// declaration without a physical match is not published from this path because it has no JVM
+/// realization.
 pub(super) fn overlay_constructor_semantics(
-    physical: &mut [LibraryMember],
+    physical: &mut Vec<LibraryMember>,
     semantic: Vec<LibraryMember>,
+    declared_only: bool,
 ) {
+    let mut realized = vec![false; physical.len()];
     for declaration in semantic {
-        let Some(realization) =
-            physical.iter_mut().find(|candidate| {
-                candidate.params.len() == declaration.params.len()
-                    && candidate.params.iter().zip(&declaration.params).all(
-                        |(&physical, &semantic)| {
-                            physical.non_null().canonical_semantic()
-                                == semantic.non_null().canonical_semantic()
-                        },
-                    )
-            })
+        let Some(index) = physical
+            .iter()
+            .position(|candidate| realizes_constructor(candidate, &declaration))
         else {
             continue;
         };
+        realized[index] = true;
+        let realization = &mut physical[index];
 
         // Keep descriptor/owner/physical types from the classfile realization. Everything below is
         // declaration semantics and therefore comes from Kotlin builtins metadata.
@@ -542,6 +550,47 @@ pub(super) fn overlay_constructor_semantics(
         realization.visibility = declaration.visibility;
         realization.call_sig = declaration.call_sig;
     }
+    if declared_only {
+        let mut realized = realized.into_iter();
+        physical.retain(|_| realized.next().unwrap_or(false));
+    }
+}
+
+/// Whether a physical constructor realizes a builtin constructor declaration. A generic one is
+/// compared through its signature, its type parameters matched by position: the JDK's
+/// `AtomicReference(V)` realizes the builtin `AtomicReference<T>(value: T)`.
+fn realizes_constructor(physical: &LibraryMember, declaration: &LibraryMember) -> bool {
+    // Every formal is bound to its slot, so substitution never reads an unbound one as its bound.
+    let positional = |signature: Option<&crate::libraries::GenericSig>| {
+        signature
+            .into_iter()
+            .flat_map(|signature| signature.formals.iter().enumerate())
+            .map(|(index, formal)| {
+                (
+                    *formal,
+                    Ty::ty_param(&format!("#{index}"), Ty::nullable(Ty::obj("kotlin/Any"))),
+                )
+            })
+            .collect::<crate::fx_hash::HashMap<_, _>>()
+    };
+    let parameters = |member: &LibraryMember| {
+        let formals = positional(member.generic_sig.as_ref());
+        member
+            .generic_sig
+            .as_ref()
+            .map_or(&member.params, |signature| &signature.params)
+            .iter()
+            .map(|&parameter| {
+                crate::types::ty_subst(parameter, &formals)
+                    .non_null()
+                    .canonical_semantic()
+            })
+            .collect::<Vec<_>>()
+    };
+    let formal_count =
+        |member: &LibraryMember| member.generic_sig.as_ref().map_or(0, |s| s.formals.len());
+    formal_count(physical) == formal_count(declaration)
+        && parameters(physical) == parameters(declaration)
 }
 
 #[cfg(test)]
@@ -571,7 +620,7 @@ mod tests {
         semantic.call_sig =
             CallSig::metadata_member(1, vec!["message".to_string()], vec![false], None);
 
-        overlay_constructor_semantics(&mut physical, vec![semantic]);
+        overlay_constructor_semantics(&mut physical, vec![semantic], false);
 
         assert_eq!(physical[0].params, [Ty::nullable(Ty::String)]);
         assert_eq!(
@@ -588,7 +637,7 @@ mod tests {
             .iter()
             .copied()
             .collect::<crate::fx_hash::HashSet<_>>();
-        assert_eq!(special_realizations().len(), 16);
+        assert_eq!(special_realizations().len(), 51);
         assert_eq!(rows.len(), special_realizations().len());
 
         assert_eq!(

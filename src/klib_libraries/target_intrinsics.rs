@@ -698,6 +698,11 @@ pub(super) fn authenticate(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
 ) -> Option<KlibIntrinsicShape> {
+    if platform == Some(TargetIntrinsicPlatform::Native) {
+        if let Some(shape) = native_continuation(placement, declaration) {
+            return Some(shape);
+        }
+    }
     if declaration.context_count != 0
         || !declaration.context_kinds.is_empty()
         || declaration.is_suspend
@@ -711,14 +716,103 @@ pub(super) fn authenticate(
     {
         return None;
     }
-    // Only `wasm_array_copy` is generic: its one type parameter is the GC array type both
-    // operands share.
+    // Past the continuation intrinsics above, only `wasm_array_copy` is generic: its one type
+    // parameter is the GC array type both operands share.
     match (platform?, declaration.formals.is_empty()) {
         (TargetIntrinsicPlatform::Native, true) => native(placement, declaration),
         (TargetIntrinsicPlatform::Wasm, true) => wasm(placement, declaration),
         (TargetIntrinsicPlatform::Wasm, false) => wasm_array_copy(placement, declaration),
         (TargetIntrinsicPlatform::Native, false) => None,
     }
+}
+
+/// Native's two continuation intrinsics in `kotlin.native.internal`, which kotlinc's
+/// pre-serialization inliner leaves in a KLIB body that expanded
+/// `suspendCoroutineUninterceptedOrReturn<T>`: the external `getContinuation<T>(): Continuation<T>`
+/// and the external suspend `returnIfSuspended<T>(argument: Any?): T`. Each has exactly one type
+/// parameter, which its result states.
+fn native_continuation(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    if placement
+        != crate::libraries::CallablePlacement::Package(type_name("kotlin/native/internal"))
+        || !declaration.is_external
+        || declaration.is_inline
+        || declaration.is_expect
+        || declaration.receiver.is_some()
+        || declaration.context_count != 0
+        || !declaration.context_kinds.is_empty()
+        || declaration.vararg.is_some()
+        || declaration
+            .param_defaults
+            .iter()
+            .any(|defaulted| *defaulted)
+    {
+        return None;
+    }
+    let [formal] = declaration.formals.as_slice() else {
+        return None;
+    };
+    if formal.reified {
+        return None;
+    }
+    let names_formal = |ty: &KotlinType| matches!(ty, KotlinType::Param { id, nullable: false, .. } if *id == formal.id);
+    let entry = string_annotation(
+        &declaration.annotation_applications,
+        type_name("kotlin/native/internal/TypedIntrinsic"),
+        "kind",
+    )?;
+    let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+    let (operation, params) = match entry {
+        "GET_CONTINUATION"
+            if !declaration.is_suspend
+                && declaration.params.is_empty()
+                && matches!(
+                    &declaration.ret,
+                    KotlinType::Class {
+                        internal,
+                        args,
+                        nullable: false,
+                        shape: KotlinFunctionTypeShape {
+                            receiver: false,
+                            context_count: 0,
+                            suspend: false,
+                        },
+                    } if internal == "kotlin/coroutines/Continuation"
+                        && matches!(args.as_slice(), [argument] if names_formal(argument))
+                ) =>
+        {
+            (CompilerIntrinsic::CurrentContinuation, Vec::new())
+        }
+        "RETURN_IF_SUSPENDED"
+            if declaration.is_suspend
+                && matches!(
+                    declaration.params.as_slice(),
+                    [KotlinType::Class { internal, args, nullable: true, .. }]
+                        if internal == "kotlin/Any" && args.is_empty()
+                )
+                && names_formal(&declaration.ret) =>
+        {
+            (CompilerIntrinsic::ReturnIfSuspended, vec![any])
+        }
+        _ => return None,
+    };
+    // The result names the declaration's own type parameter, which each call binds: the shape
+    // records it as the erased reference a call's type argument substitutes.
+    let ret = match operation {
+        CompilerIntrinsic::CurrentContinuation => {
+            Ty::obj_args("kotlin/coroutines/Continuation", &[any])
+        }
+        _ => any,
+    };
+    Some(KlibIntrinsicShape {
+        operation,
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params,
+        ret,
+    })
 }
 
 fn is_nullable_any(ty: &KotlinType) -> bool {

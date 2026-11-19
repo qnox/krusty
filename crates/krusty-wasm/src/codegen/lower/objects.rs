@@ -109,8 +109,19 @@ impl Body<'_> {
         value: u32,
     ) -> Result<(), Unsupported> {
         let structure = self.object(receiver, class)?;
-        let ty = self.ir.classes[class as usize].fields[index as usize].ty;
-        self.value(value, ty)?;
+        // A shared-capture field stores the holder, never the element it holds.
+        match self
+            .ir
+            .shared_class_capture_fields
+            .get(&(class, index))
+            .copied()
+        {
+            Some(element) => self.shared_field_value(value, element)?,
+            None => {
+                let ty = self.ir.classes[class as usize].fields[index as usize].ty;
+                self.value(value, ty)?;
+            }
+        }
         let field = self.file_classes()?.field(class, index);
         self.code.struct_set(structure, field);
         Ok(())
@@ -300,6 +311,11 @@ impl Body<'_> {
         &mut self,
         classifier: krusty::types::TypeName,
     ) -> Result<(), Unsupported> {
+        if classifier == krusty::types::wk::unit() {
+            let instance = self.runtime.unit_object(self.module);
+            self.code.global_get(instance);
+            return Ok(());
+        }
         if self.ir.class_id_by_name(classifier).is_none() {
             if let Some(entry) =
                 self.calls
@@ -746,17 +762,21 @@ impl Body<'_> {
             .struct_get(object, 0);
     }
 
-    /// A call to member `function` of this file: through its class's dispatch slot when it has
-    /// one, as an override reached through the receiver's own table answers it, and directly
-    /// otherwise.
+    /// A call to member `function` of this file. Common lowering already dispatches an
+    /// overridable function and leaves a `super` call direct, so a function with a body is
+    /// called directly here. A bodiless (abstract) member has nothing to call directly: it is
+    /// reached through its class's dispatch slot, as an override the receiver's own table
+    /// answers.
     pub(super) fn local_member_call(
         &mut self,
         function: FunId,
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
-        let class = self.ir.functions[function as usize]
+        let declaration = &self.ir.functions[function as usize];
+        let class = declaration
             .dispatch_receiver
+            .filter(|_| declaration.body.is_none())
             .and_then(|owner| self.classes.and(self.ir.class_id_by_name(owner)));
         if let Some(class) = class {
             let tables = &self.file_classes()?.tables;
@@ -903,7 +923,7 @@ impl Body<'_> {
                             .dispatch_member_extension_property(
                                 class, *property, false, receiver, args,
                             ),
-                        _ if args.is_empty() => self.property_read(*property, Some(receiver)),
+                        _ if args.is_empty() => self.property_read(None, *property, Some(receiver)),
                         _ => Err("a property getter call with arguments".to_string()),
                     },
                     IrVirtualTarget::PropertySetter(ResolvedPropertyOverrideTarget::Module(
@@ -914,7 +934,7 @@ impl Body<'_> {
                                 class, *property, true, receiver, args,
                             ),
                         _ if args.len() == 1 => {
-                            self.property_write(*property, Some(receiver), args[0])
+                            self.property_write(None, *property, Some(receiver), args[0])
                         }
                         _ => Err("a property setter call with the wrong arguments".to_string()),
                     },
@@ -944,11 +964,24 @@ impl Body<'_> {
     }
 
     /// The class property a checked property identity names, and its index there.
-    fn member_property(&self, target: PropertyId) -> Result<(ClassId, usize), Unsupported> {
-        match self.ir.local_property_layouts.get(&target) {
+    /// The class and property index serving `target`. At a checked operation this is the layout at
+    /// the operation's dispatch class, so a call-site copy of an inline object reaches its own
+    /// storage and accessors; without one it is the declaration's.
+    fn member_property(
+        &self,
+        operation: Option<u32>,
+        target: PropertyId,
+    ) -> Result<(ClassId, usize), Unsupported> {
+        let layout = match operation {
+            Some(operation) => self.ir.property_layout_at(operation, target).map_err(|_| {
+                "a copied property with no projection onto its dispatch class".to_string()
+            })?,
+            None => self.ir.local_property_layouts.get(&target).cloned(),
+        };
+        match layout {
             Some(IrLocalPropertyLayout::Member {
                 class, property, ..
-            }) if self.classes.is_some() => Ok((*class, *property as usize)),
+            }) if self.classes.is_some() => Ok((class, property as usize)),
             Some(_) => Err("a property that is not a class member".to_string()),
             None => Err("a property of another file".to_string()),
         }
@@ -961,7 +994,7 @@ impl Body<'_> {
         receiver: u32,
     ) -> Result<(), Unsupported> {
         let target = self.realized_property(operation)?;
-        self.property_read(target, Some(receiver))
+        self.property_read(Some(operation), target, Some(receiver))
     }
 
     /// A member write common realization left for this backend (`receiver.p = value`).
@@ -972,7 +1005,7 @@ impl Body<'_> {
         value: u32,
     ) -> Result<(), Unsupported> {
         let target = self.realized_property(operation)?;
-        self.property_write(target, Some(receiver), value)
+        self.property_write(Some(operation), target, Some(receiver), value)
     }
 
     fn realized_property(&self, operation: u32) -> Result<PropertyId, Unsupported> {
@@ -983,6 +1016,7 @@ impl Body<'_> {
 
     pub(super) fn property_read(
         &mut self,
+        operation: Option<u32>,
         target: PropertyId,
         receiver: Option<u32>,
     ) -> Result<(), Unsupported> {
@@ -1016,7 +1050,7 @@ impl Body<'_> {
                 return Ok(());
             }
         }
-        let (class, index) = self.member_property(target)?;
+        let (class, index) = self.member_property(operation, target)?;
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less read of `{}`", property.name))?;
@@ -1057,6 +1091,7 @@ impl Body<'_> {
 
     pub(super) fn property_write(
         &mut self,
+        operation: Option<u32>,
         target: PropertyId,
         receiver: Option<u32>,
         value: u32,
@@ -1101,7 +1136,7 @@ impl Body<'_> {
                 return Ok(());
             }
         }
-        let (class, index) = self.member_property(target)?;
+        let (class, index) = self.member_property(operation, target)?;
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less write of `{}`", property.name))?;
@@ -1241,30 +1276,34 @@ impl Body<'_> {
         self.laid_out_classes.published_structure(&identity)
     }
 
-    /// `x as C`: the value, cast to an array classifier, to class `C` of this file or to an
-    /// interface of the module.
+    /// `x as C`: the value, cast to a class `C` with a physical layout, or to an interface of the
+    /// module or of a library. Kotlin checks the cast, so a value that is no `C` throws the
+    /// runtime `ClassCastException` through the Kotlin exception tag instead of trapping, and,
+    /// with `non_null`, a null throws the Kotlin NPE as any other cast to a non-null type does.
+    /// A class cast then reads the checked reference as the class's structure.
     pub(super) fn cast(&mut self, arg: u32, target: Ty, non_null: bool) -> Result<(), Unsupported> {
-        self.value(arg, any())?;
-        if target.non_null().is_array() {
-            // An array's values are its array form's objects, as its type test reads them, even
-            // where a library lays the array class out as a class of its own.
-            let (form, _) = self.array_form(target)?;
-            self.code
-                .ref_cast(!non_null, HeapType::Concrete(form.object));
-        } else if let Some(interface) = self.interface_of_type(target) {
-            let value = self.local(REFERENCE);
-            self.code.local_tee(value);
-            self.interface_test(interface, !non_null);
-            self.code
-                .if_(BlockType::Value(REFERENCE))
-                .local_get(value)
-                .else_()
-                .unreachable()
-                .end();
+        let tested = target.non_null();
+        let structure = if tested.is_array() {
+            // An array's values are its array form's objects, even where a library also
+            // materializes the array classifier as an ordinary class.
+            let (form, _) = self.array_form(tested)?;
+            Some(form.object)
         } else {
-            let structure = self
-                .class_structure(target)?
-                .ok_or_else(|| "a class cast without its selected physical layout".to_owned())?;
+            match self.interface_of_type(tested) {
+                Some(_) => None,
+                None => self.class_structure(tested)?,
+            }
+        };
+        self.value(arg, any())?;
+        let value = self.local(REFERENCE);
+        self.code.local_tee(value);
+        self.reference_type_test(tested, true)?;
+        self.throw_class_cast_unless()?;
+        self.code.local_get(value);
+        if non_null {
+            self.require_nonnull_reference(REFERENCE)?;
+        }
+        if let Some(structure) = structure {
             self.code.ref_cast(!non_null, HeapType::Concrete(structure));
         }
         Ok(())
@@ -1283,7 +1322,7 @@ impl Body<'_> {
     }
 
     /// The library interface `ty` names, which no file of the program declares.
-    fn library_interface_of_type(&self, ty: Ty) -> Option<TypeName> {
+    pub(super) fn library_interface_of_type(&self, ty: Ty) -> Option<TypeName> {
         let TyKind::Obj(name, _) = ty.non_null().kind() else {
             return None;
         };
@@ -1291,6 +1330,15 @@ impl Body<'_> {
             .classifier(name)
             .is_some_and(|fact| !fact.source && fact.is_interface() && !fact.is_annotation())
             .then_some(name)
+    }
+
+    /// Whether the runtime's `ArrayList`, whose class the program does not declare, is below the
+    /// library interface `interface`, by the frontend's supertype traversal.
+    fn runtime_array_list_is_below(&self, interface: TypeName) -> bool {
+        let Some(array_list) = Ty::obj("kotlin/collections/ArrayList").obj_internal() else {
+            return false;
+        };
+        self.classifiers.is_subclassifier(array_list, interface)
     }
 
     /// Replace the reference on the stack with whether it is an instance of the library interface
@@ -1302,7 +1350,14 @@ impl Body<'_> {
             return;
         }
         let subtypes = self.classifiers.builtin_subtypes(interface);
-        self.runtime.builtin_instances(interface, subtypes);
+        let laid_out = crate::builtin_instances::RuntimeLayouts {
+            string_builder: self
+                .classifiers
+                .is_subclassifier(krusty::types::wk::string_builder(), interface),
+            array_list: self.runtime_array_list_is_below(interface),
+        };
+        self.runtime
+            .builtin_instances(interface, subtypes, laid_out);
         self.interface_test(interface, nullable);
     }
 

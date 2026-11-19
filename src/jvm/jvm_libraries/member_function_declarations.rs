@@ -390,6 +390,11 @@ impl JvmLibraries {
                             // Keep the selected member record and callable handle structurally
                             // identical; either lowering seam may consume the declaration.
                             function.callable.inline_body_plan = inline_body_plan;
+                            if !t.is_kotlin {
+                                function.override_inputs = override_slots::java_override_inputs(
+                                    &function.semantic_params(),
+                                );
+                            }
                         }
                     }
                 }

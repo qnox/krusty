@@ -325,6 +325,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             declarations,
             authorized_member_edges,
             read_objects,
+            dispatched,
         } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
@@ -350,7 +351,12 @@ pub(super) fn emit_dependencies<B: Backend>(
             platform,
             bodies,
             intrinsics,
-            &roots,
+            // A member that dispatch reaches is emitted with its class although no walked body
+            // calls it, so its body's leaves are prepared as a root's are.
+            roots
+                .iter()
+                .map(|root| root.identity().clone())
+                .chain(dispatched),
             &capabilities,
             &mut externals,
             diags,
@@ -567,10 +573,27 @@ pub(super) fn emit_dependencies<B: Backend>(
                     return Vec::new();
                 }
             };
-            published.push((
-                identity.clone(),
-                PublishedDependency::Body(singleton_dispatch),
-            ));
+            // A value class's box construction is a function of the unit exported under its
+            // primary constructor's identity: later units allocate a box through it, as they
+            // allocate an ordinary class through its constructor's export.
+            let role = if realization.kind == crate::libraries::ExternalCallableKind::Constructor {
+                if singleton_dispatch.is_some()
+                    || !realization
+                        .klib_body_class_contract
+                        .as_ref()
+                        .is_some_and(|contract| contract.is_value)
+                {
+                    diags.error(
+                        Span::new(0, 0),
+                        "internal error: a constructor emitted as a unit function is not a value class's box construction",
+                    );
+                    return Vec::new();
+                }
+                PublishedDependency::AllocatingConstructor
+            } else {
+                PublishedDependency::Body(singleton_dispatch)
+            };
+            published.push((identity.clone(), role));
         }
         for (identity, _) in &constructors {
             let Some((_, realization)) = platform.external_callable_by_dependency(identity) else {
@@ -936,23 +959,12 @@ fn prepare_bodyless_externals(
     platform: &dyn crate::libraries::SemanticPlatform,
     bodies: &crate::klib_libraries::KlibDeclarationBodies,
     intrinsics: &crate::klib_libraries::KlibIntrinsicFacts,
-    roots: &[crate::libraries::KlibBodyCallable<'_>],
+    walked_from: impl IntoIterator<Item = KlibDependencyCallable>,
     capabilities: &DependencyLeafCapabilities<'_>,
     externals: &mut HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
     diags: &mut DiagSink,
 ) -> bool {
-    let mut pending = roots
-        .iter()
-        .map(|root| root.identity().clone())
-        .collect::<VecDeque<_>>();
-    // An object a body reads is materialized with the members its initialization reaches.
-    match emitted_roots::read_object_initializations(platform, bodies, capabilities.callees) {
-        Ok(edges) => pending.extend(edges),
-        Err(error) => {
-            diags.error(Span::new(0, 0), format!("internal error: {error}"));
-            return false;
-        }
-    }
+    let mut pending = walked_from.into_iter().collect::<VecDeque<_>>();
     let mut visited = HashSet::default();
     while let Some(identity) = pending.pop_front() {
         if !visited.insert(identity.clone()) {
@@ -1015,6 +1027,20 @@ fn prepare_bodyless_externals(
             bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
         };
         let mut edges = edges;
+        // The objects the body reads are materialized with the members dispatch reaches on them.
+        match emitted_roots::read_object_initializations(
+            platform,
+            bodies,
+            capabilities.callees,
+            &identity,
+            constructor,
+        ) {
+            Ok(initializations) => edges.extend(initializations),
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return false;
+            }
+        }
         // A member of a materialized class is lowered with the class its constructors create.
         match emitted_roots::member_class_constructors(
             platform,
@@ -1081,6 +1107,17 @@ fn prepare_bodyless_externals(
                     diags.error(
                         Span::new(0, 0),
                         format!("invalid common KLIB primitive: {reason:?}"),
+                    );
+                    return false;
+                }
+            }
+            match capabilities.callees.continuation_intrinsic(&callee) {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(reason) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("invalid KLIB continuation intrinsic: {reason:?}"),
                     );
                     return false;
                 }

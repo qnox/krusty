@@ -12,6 +12,7 @@ mod call_sig;
 mod callable_scope_rung;
 mod class_identity;
 mod class_name_property;
+mod classifier_application;
 mod classifier_callables;
 mod classifier_declaration;
 mod classifier_kind;
@@ -44,6 +45,7 @@ mod property_producer;
 mod provider_override;
 mod result_nullability;
 mod runtime_exception;
+mod sam_application;
 mod scalar_instruction;
 mod singleton_dispatch;
 mod source_inputs;
@@ -65,6 +67,7 @@ pub use call_realization::{
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub use class_identity::KlibClassIdentity;
+pub(crate) use classifier_application::{classifier_bindings, classifier_type_parameter_bounds};
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
     ConstructorCallConstraints,
@@ -103,6 +106,7 @@ pub use property_producer::PropertyProducer;
 pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
 pub use runtime_exception::{RuntimeExceptionKind, RuntimeExceptionLayout};
+pub(crate) use sam_application::{sam_application_bindings, sam_substitute};
 pub use singleton_dispatch::SingletonDispatch;
 pub(crate) use source_inputs::{ReceiverInputBounds, SourceInputDeclaration};
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
@@ -1410,6 +1414,14 @@ pub struct FunctionInfo {
     /// Provider-owned override-slot identity for declarations whose platform compatibility differs
     /// from their source-language signature. This is distinct from the physical emit handle.
     pub(crate) provider_override_slot: Option<ProviderOverrideSlot>,
+    /// How this declaration's declaring language matches its inputs against an inherited
+    /// declaration's, when that differs from how calls see them. Parallel to
+    /// [`Self::semantic_params`]: a `Some` slot matches an inherited input of exactly that
+    /// classifier, whatever its arguments, as kotlinc's Java override checker matches a raw Java
+    /// `AtomicReference` with a Kotlin `AtomicReference<Int>` by their JVM erasure while callers
+    /// still pass a Java `AtomicReference`; a `None` slot compares as usual. The relation is
+    /// one-directional, so an inherited declaration is always compared by its own inputs.
+    pub(crate) override_inputs: Option<Box<[Option<TypeName>]>>,
     /// The declaring language has no extension receivers (Java), so its provider publishes that
     /// this member overrides an inherited Kotlin extension by taking the receiver as its first
     /// parameter, as kotlinc's Java override checker matches them.
@@ -1698,6 +1710,7 @@ impl FunctionInfo {
             kind,
             source_inputs: None,
             provider_override_slot: None,
+            override_inputs: None,
             receiver_as_first_parameter: false,
             classifier_static: false,
             associated_classifier: None,

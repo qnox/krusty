@@ -10,7 +10,8 @@ use crate::types::{Ty, TypeName};
 
 pub(super) use semantic_types::{
     annotation_classifier, closure_type_arity, function_invocation_arity,
-    reference_invocation_arity, KlibTypeParameters,
+    is_function_classifier_member, package_name, reference_invocation_arity,
+    suspend_function_invocation_arity, KlibTypeParameters,
 };
 
 pub(super) fn semantic_type(

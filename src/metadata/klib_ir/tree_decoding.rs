@@ -56,14 +56,13 @@ pub struct KlibIrModuleTrees {
     /// The serialized file each tree of [`Self::trees`] is a top-level declaration of, by tree
     /// index: the file a file-local signature of that file names.
     files: Vec<u32>,
+    /// The package each serialized file declares, by file index.
+    packages: Vec<Vec<String>>,
     functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
     /// File-local functions, meaningful only inside this library.
     local_functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
     /// File-local classes, meaningful only inside this library.
     local_classes: HashMap<KlibIrSignature, (usize, KlibIrClassId)>,
-    /// The package each file declares, by its index in the KLIB: the index a file-local
-    /// signature of that file carries.
-    file_packages: Vec<Box<[String]>>,
     classes: super::class_index::KlibIrClassIndex,
 }
 
@@ -126,6 +125,11 @@ impl KlibIrModuleTrees {
             .then(|| self.files[tree])
     }
 
+    /// The package segments of the serialized file `file` (`IrFile.fq_name`).
+    pub(crate) fn file_package(&self, file: u32) -> Option<&[String]> {
+        self.packages.get(file as usize).map(Vec::as_slice)
+    }
+
     /// Every tree with the serialized file it is a top-level declaration of, in serialized order.
     pub(crate) fn trees_with_files(
         &self,
@@ -158,7 +162,7 @@ impl KlibIrModuleTrees {
         if tree.declaration != KlibIrMember::Class(class) {
             return None;
         }
-        let package = self.file_packages.get(usize::try_from(*file).ok()?)?;
+        let package = self.file_package(*file)?;
         Some((package, tree.arena.class(class)))
     }
 
@@ -483,8 +487,8 @@ fn read_declaration_trees_from(
                 .map(|tables| entries(&tables[index], FILE_ENTRIES).map(|entries| entries.len()))
                 .transpose()?,
         };
-        let (package, declaration_ids) = ir_file_declarations(&mut file, &files[index])?;
-        module.file_packages.push(package);
+        let (declaration_ids, package) = ir_file_declaration_ids(&mut file, &files[index])?;
+        module.packages.push(package);
         let declarations = declaration_index(&declarations[index])?;
         for id in declaration_ids {
             let bytes = declarations.get(&id).ok_or_else(|| {
@@ -534,21 +538,22 @@ fn read_declaration_trees_from(
 }
 
 /// Validate an `IrFile`'s own provenance before decoding declarations from it, and read its
-/// package (field 3, the segments of its `fq_name`) and declaration ids. Kotlin 2.4.21 requires
-/// one of fields 2 and 7 when consuming a produced KLIB; older inputs may omit both, but an id
-/// that is present must resolve in this file's `fileEntries.knf` table.
-fn ir_file_declarations(
+/// declaration ids and package. Kotlin 2.4.21 requires one of fields 2 and 7 when consuming a
+/// produced KLIB; older inputs may omit both, but an id that is present must resolve in this
+/// file's `fileEntries.knf` table.
+fn ir_file_declaration_ids(
     file: &mut FileTables<'_>,
     bytes: &[u8],
-) -> Result<(Box<[String]>, Vec<u64>), KlibIrDecodeError> {
+) -> Result<(Vec<u64>, Vec<String>), KlibIrDecodeError> {
     let ir_file = Msg::parse(bytes, 0, FILES)?;
-    TreeDecoder::new(file).file_reference(&ir_file, 2, 7)?;
+    let decoder = TreeDecoder::new(file);
+    decoder.file_reference(&ir_file, 2, 7)?;
     let package = ir_file
-        .packed(3, "package name")?
+        .packed(3, "file package")?
         .into_iter()
-        .map(|index| string(file.strings, index, "package name"))
+        .map(|segment| decoder.string(segment, "file package"))
         .collect::<Result<_, _>>()?;
-    Ok((package, ir_file.packed(1, "declaration ids")?))
+    Ok((ir_file.packed(1, "declaration ids")?, package))
 }
 
 /// The identity of the declaration `msg` serializes, read from its base without decoding the rest.
@@ -2159,14 +2164,25 @@ mod tests {
         push_varint(9, &mut declaration_ids);
         let mut valid = bytes_field(1, &declaration_ids);
         valid.extend(varint_field(7, 0));
-        let (package, ids) = ir_file_declarations(&mut file, &valid).unwrap();
-        assert!(package.is_empty());
-        assert_eq!(ids, [9]);
+        assert_eq!(
+            ir_file_declaration_ids(&mut file, &valid).unwrap(),
+            (vec![9], Vec::new())
+        );
+        // `IrFile.fq_name` names the file's package by string-table indices.
+        let mut package = Vec::new();
+        push_varint(0, &mut package);
+        push_varint(3, &mut package);
+        let mut packaged = valid.clone();
+        packaged.extend(bytes_field(3, &package));
+        assert_eq!(
+            ir_file_declaration_ids(&mut file, &packaged).unwrap(),
+            (vec![9], vec!["kotlin".to_string(), "value".to_string()])
+        );
 
         let mut absent = bytes_field(1, &declaration_ids);
         absent.extend(varint_field(7, 1));
         assert_eq!(
-            ir_file_declarations(&mut file, &absent)
+            ir_file_declaration_ids(&mut file, &absent)
                 .unwrap_err()
                 .to_string(),
             "invalid KLIB IR files.knf at byte 0: file entry 1 is absent from fileEntries.knf"
@@ -2192,15 +2208,15 @@ mod tests {
         let mut bytes = bytes_field(1, &declaration_ids);
         bytes.extend(bytes_field(3, &package));
         bytes.extend(varint_field(7, 0));
-        let (package, ids) = ir_file_declarations(&mut file, &bytes).unwrap();
-        assert_eq!(&*package, ["kotlin".to_owned(), "Marker".to_owned()]);
+        let (ids, package) = ir_file_declaration_ids(&mut file, &bytes).unwrap();
+        assert_eq!(package, ["kotlin".to_owned(), "Marker".to_owned()]);
         assert_eq!(ids, [9]);
 
         let mut absent = Vec::new();
         push_varint(7, &mut absent);
         let mut bytes = bytes_field(3, &absent);
         bytes.extend(varint_field(7, 0));
-        assert!(ir_file_declarations(&mut file, &bytes).is_err());
+        assert!(ir_file_declaration_ids(&mut file, &bytes).is_err());
     }
 
     #[test]

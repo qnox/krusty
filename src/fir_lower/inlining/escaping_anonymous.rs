@@ -29,6 +29,9 @@ pub struct CallSite<'a> {
     pub caller: Option<crate::ir::IrEnclosure>,
     pub caller_is_default: bool,
     pub caller_source_name: &'a str,
+    /// The container whose code the call is: an anonymous object the call regenerates is named
+    /// as one the caller declares itself. `None` when the caller's container is unknown.
+    pub caller_site: Option<crate::ir::IrSiteClassContainer>,
     pub inline_callee: crate::ir::IrInlineCallee,
     pub inline_callee_source_name: &'a str,
     /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
@@ -410,6 +413,10 @@ fn specialized_class(
     let mut copy = ir.classes[source as usize].clone();
     copy.fq_name = placeholder;
     copy.is_source_declared = false;
+    copy.site_name = expansion
+        .site
+        .caller_site
+        .map(crate::ir::IrSiteClassName::anonymous_object);
     copy.enclosure = expansion.site.caller.or(copy.enclosure);
     copy.methods = cloned_methods.clone();
     for supertype in &mut copy.supertypes {
@@ -1061,6 +1068,8 @@ fn publish_one_copy(
         caller: spec.caller,
         caller_is_default: spec.caller_is_default,
         caller_source_name: &spec.caller_source_name,
+        // An object regenerated inside this copy is declared by the copy's own code.
+        caller_site: Some(crate::ir::IrSiteClassContainer::Class(copy_id)),
         inline_callee: spec.inline_callee,
         inline_callee_source_name: &spec.inline_callee_source_name,
         crossinline_operands: &spec.crossinline_operands,
@@ -1184,6 +1193,8 @@ fn specialization_descends_from(
 /// Property reads inside the copy still name the declaration's property. That layout's owner is
 /// the declaration class, and the copy does not inherit it, so a virtual call would target the
 /// declaration with the copy as the receiver. The copied accessor is an ordinary method of the copy.
+/// A field-backed access keeps its checked operation and records the copy as its dispatch class,
+/// which projects the declaration's layout onto the copy's own storage in every backend.
 fn retarget_copied_property_calls(
     ir: &mut crate::ir::IrFile,
     copy_id: ClassId,
@@ -1357,9 +1368,6 @@ fn retarget_property_operation(
     }
     let CopiedPropertyLayout::Member {
         backing_field: true,
-        name,
-        ty,
-        interface,
         ..
     } = layout
     else {
@@ -1368,26 +1376,11 @@ fn retarget_property_operation(
     if extension_receiver.is_some() || !context_arguments.is_empty() {
         return Err(malformed(source_name));
     }
+    // A field-backed access stays the checked operation. Its receiver is this copy, so every
+    // backend realizes it through the copy's projection of the declaration's layout, as it does
+    // any other access to a copied property.
     let owner = ir.classes[copy_id as usize].fq_name;
-    ir.exprs[expression as usize] = match value {
-        Some(value) => IrExpr::PropertyWrite {
-            receiver: Some(receiver),
-            owner,
-            name,
-            value,
-            ty,
-            interface,
-            operation: Some(expression),
-        },
-        None => IrExpr::PropertyRead {
-            receiver: Some(receiver),
-            owner,
-            name,
-            ty,
-            interface,
-            operation: Some(expression),
-        },
-    };
+    ir.dispatch_classes.insert(expression, owner);
     Ok(())
 }
 
@@ -1397,9 +1390,6 @@ enum CopiedPropertyLayout {
         backing_field: bool,
         getter: Option<FunId>,
         setter: Option<FunId>,
-        name: String,
-        ty: Ty,
-        interface: bool,
     },
     Extension {
         declaring_class: ClassId,
@@ -1420,9 +1410,6 @@ fn copied_property_layout(
             backing_field,
             getter,
             setter,
-            name,
-            ty,
-            interface,
             ..
         } => {
             let declaring_class = lineage.iter().find_map(|(candidate, name)| {
@@ -1433,9 +1420,6 @@ fn copied_property_layout(
                 backing_field: backing_field.is_some(),
                 getter: *getter,
                 setter: *setter,
-                name: name.clone(),
-                ty: *ty,
-                interface: *interface,
             })
         }
         crate::ir::IrLocalPropertyLayout::MemberExtension {
