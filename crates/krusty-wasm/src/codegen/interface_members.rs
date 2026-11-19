@@ -718,9 +718,17 @@ impl FileRecorder<'_, '_, '_> {
                     code.ref_cast(*nullable, *heap);
                 }
                 (ValType::Ref { .. }, _) => {
-                    adapters.parameters[local]
-                        .ok_or_else(unadapted)?
-                        .emit_unbox(&mut code);
+                    let unbox = adapters.parameters[local].ok_or_else(unadapted)?;
+                    if let Some(rejected) = adapters.rejection {
+                        // A box of another type is not an element either: the bridge answers
+                        // its rejection instead of trapping on the cast to this box.
+                        unbox.emit_is_box(&mut code);
+                        code.if_(BlockType::Empty).else_();
+                        emit_rejection(&mut code, rejected, &signature.1).ok_or_else(unadapted)?;
+                        code.end();
+                        code.local_get(local as u32);
+                    }
+                    unbox.emit_unbox(&mut code);
                 }
                 _ => return Err(unadapted()),
             }
