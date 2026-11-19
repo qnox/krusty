@@ -210,8 +210,14 @@ jobs:
         with:
           path: ~/.cache/krusty/plugin-host
           key: plugin-host-${{ github.job }}-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
+          # A changed adapter or pin must not start from nothing: the newest entry of this job holds
+          # the pinned jars, each verified by its checksum before it is reused, so only what the
+          # change added is downloaded (Central answered 429 to a full download of ~190 MB).
+          restore-keys: |
+            plugin-host-${{ github.job }}-
       - name: plugin host tests
-        run: cargo test --profile gate -p krusty-plugin-host -- --include-ignored
+        # The real-download test provisions into the cache restored above, not a directory of its own.
+        run: KRUSTY_CACHE_DIR="$HOME/.cache/krusty" cargo test --profile gate -p krusty-plugin-host -- --include-ignored
       - &save-plugin-host-runtime
         name: save plugin host runtime
         if: github.ref == 'refs/heads/master' && steps.plugin-host-runtime.outputs.cache-hit != 'true'
