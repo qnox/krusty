@@ -762,17 +762,21 @@ impl Body<'_> {
             .struct_get(object, 0);
     }
 
-    /// A call to member `function` of this file: through its class's dispatch slot when it has
-    /// one, as an override reached through the receiver's own table answers it, and directly
-    /// otherwise.
+    /// A call to member `function` of this file. Common lowering already dispatches an
+    /// overridable function and leaves a `super` call direct, so a function with a body is
+    /// called directly here. A bodiless (abstract) member has nothing to call directly: it is
+    /// reached through its class's dispatch slot, as an override the receiver's own table
+    /// answers.
     pub(super) fn local_member_call(
         &mut self,
         function: FunId,
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
-        let class = self.ir.functions[function as usize]
+        let declaration = &self.ir.functions[function as usize];
+        let class = declaration
             .dispatch_receiver
+            .filter(|_| declaration.body.is_none())
             .and_then(|owner| self.classes.and(self.ir.class_id_by_name(owner)));
         if let Some(class) = class {
             let tables = &self.file_classes()?.tables;
@@ -1328,6 +1332,15 @@ impl Body<'_> {
             .then_some(name)
     }
 
+    /// Whether the runtime's `ArrayList`, whose class the program does not declare, is below the
+    /// library interface `interface`, by the frontend's supertype traversal.
+    fn runtime_array_list_is_below(&self, interface: TypeName) -> bool {
+        let Some(array_list) = Ty::obj("kotlin/collections/ArrayList").obj_internal() else {
+            return false;
+        };
+        self.classifiers.is_subclassifier(array_list, interface)
+    }
+
     /// Replace the reference on the stack with whether it is an instance of the library interface
     /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
     /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
@@ -1337,11 +1350,14 @@ impl Body<'_> {
             return;
         }
         let subtypes = self.classifiers.builtin_subtypes(interface);
-        let string_builder = self
-            .classifiers
-            .is_subclassifier(krusty::types::wk::string_builder(), interface);
+        let laid_out = crate::builtin_instances::RuntimeLayouts {
+            string_builder: self
+                .classifiers
+                .is_subclassifier(krusty::types::wk::string_builder(), interface),
+            array_list: self.runtime_array_list_is_below(interface),
+        };
         self.runtime
-            .builtin_instances(interface, subtypes, string_builder);
+            .builtin_instances(interface, subtypes, laid_out);
         self.interface_test(interface, nullable);
     }
 

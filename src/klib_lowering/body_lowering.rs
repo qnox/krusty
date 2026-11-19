@@ -314,6 +314,16 @@ pub(super) trait CallLinker {
         false
     }
 
+    /// The classifier of the object a non-public object read names, installed in the unit with
+    /// its one instance. Template linkers keep the refusal.
+    fn link_local_object(
+        &mut self,
+        _ir: &mut IrFile,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<crate::types::TypeName> {
+        unsupported("a file-private object value")
+    }
+
     /// The constructor a file-local construction invokes. Template linkers keep the refusal.
     fn link_local_constructor(
         &mut self,
@@ -429,12 +439,11 @@ pub(super) enum ConstructorRole {
 }
 
 /// The dependency constructor a constructor call invokes: the provider's identity, the class it
-/// constructs and its declared value parameters.
+/// constructs and its declared value parameters, and, when the linking unit materializes that
+/// class, the constructor of the materialized class the call selects.
 pub(super) struct LinkedConstructor {
     pub(super) target: crate::fir::ExternalCallableId,
     pub(super) declaration: super::constructor_calls::ConstructorDeclaration,
-    /// The constructor of the class this unit materialized for the call, when it did: the
-    /// construction names it by its place, as a source construction names its selected one.
     pub(super) materialized: Option<crate::ir::IrConstructorTarget>,
 }
 

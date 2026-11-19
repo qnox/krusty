@@ -16,8 +16,9 @@ pub(super) struct ConstructorOperands {
     pub(super) declaration: super::super::constructor_calls::ConstructorDeclaration,
     pub(super) external_target: Option<crate::fir::ExternalCallableId>,
     pub(super) local_access: Option<crate::ir::IrConstructorAccess>,
-    /// The constructor of a class the unit materialized for an external constructor call.
-    pub(super) materialized_target: Option<crate::ir::IrConstructorTarget>,
+    /// The constructor of the class this unit materializes that a dependency constructor call
+    /// selects.
+    pub(super) materialized: Option<crate::ir::IrConstructorTarget>,
     pub(super) params: Vec<Ty>,
     pub(super) args: Vec<ExprId>,
     pub(super) defaults: Vec<u32>,
@@ -55,15 +56,25 @@ impl BodyLowering<'_> {
         if symbol.kind != KlibIrSymbolKind::Class {
             return Err(mismatch("an object value's symbol is not a class"));
         }
-        let KlibIrSignature::Public(object) = &symbol.signature else {
-            return unsupported("a file-private object value");
+        // An object private to this body's library is installed in the unit, as a construction of
+        // a private class is; any other object is the singleton its provider declares.
+        let local = self.linker.local_class(&symbol.signature)?;
+        let classifier = match (local, &symbol.signature) {
+            (Some(classifier), _) => classifier,
+            (None, KlibIrSignature::Public(object)) => {
+                super::super::klib_types::classifier_name(object)?
+            }
+            (None, _) => return unsupported("a file-private object value"),
         };
-        let classifier = super::super::klib_types::classifier_name(object)?;
         let object = crate::types::builtin_semantic(classifier).unwrap_or(Ty::obj_name(classifier));
         if ty != object {
             return Err(mismatch("an object value is typed apart from its object"));
         }
-        self.linker.singleton(self.ir, classifier)?;
+        if local.is_some() {
+            self.linker.link_local_object(self.ir, &symbol.signature)?;
+        } else {
+            self.linker.singleton(self.ir, classifier)?;
+        }
         // Recorded as checked FIR lowering records the source reference: `Unit` is its builtin
         // type rather than its class.
         let value = self.ir.add_expr(IrExpr::SingletonValue { classifier });
@@ -115,7 +126,7 @@ impl BodyLowering<'_> {
                 self.semantic(argument)
             })
             .collect::<Lowered<Vec<_>>>()?;
-        let (declaration, external_target, local_access, materialized_target) =
+        let (declaration, external_target, local_access, materialized) =
             match &access.symbol.signature {
                 KlibIrSignature::Public(callee)
                     if !self.linker.links_privately(&access.symbol.signature) =>
@@ -130,6 +141,9 @@ impl BodyLowering<'_> {
                 }
                 signature => {
                     let linked = self.linker.link_local_constructor(self.ir, signature)?;
+                    if linked.object {
+                        return Err(mismatch("a constructor call creates an object's instance"));
+                    }
                     (linked.declaration, None, Some(linked.access), None)
                 }
             };
@@ -176,7 +190,7 @@ impl BodyLowering<'_> {
             declaration,
             external_target,
             local_access,
-            materialized_target,
+            materialized,
             params,
             args,
             defaults,
@@ -193,7 +207,7 @@ impl BodyLowering<'_> {
             declaration,
             external_target,
             local_access,
-            materialized_target,
+            materialized,
             params,
             args,
             defaults,
@@ -239,9 +253,11 @@ impl BodyLowering<'_> {
             defaults: defaults.into_boxed_slice(),
             default_prefix_count: u32::from(declaration.enclosing_instance),
         });
+        // The construction selects its constructor by place, as a source construction records it:
+        // a generic class's instantiated parameters need not spell its declared ones.
         let target = local_access
             .map(super::super::same_library_class::construction_target)
-            .or(materialized_target);
+            .or(materialized);
         if let Some(target) = target {
             self.ir.construction_targets.insert(site, target);
         }
