@@ -807,17 +807,31 @@ impl FileRecorder<'_, '_, '_> {
                 if self.implements(member.member) {
                     continue;
                 }
-                let implemented = match self.function_edge_implementation(
-                    owner,
-                    edge,
-                    numbered,
-                    (&edge.declared_parameters, edge.declared_result),
-                ) {
-                    Ok(Some(carried)) => self.implement_carried(member.member, carried),
-                    // An abstract class's abstract override implements nothing; each concrete
-                    // subclass's table holds the body.
-                    Ok(None) => continue,
-                    Err(reason) => Err(reason),
+                // A default the interface publishes, which the class does not override, is its own
+                // implementation: the exported body, not a slot of the class.
+                let implemented = if edge.implementation == edge.overridden
+                    && edge.implementation_function.is_some_and(|function| {
+                        ir.functions[function as usize].dispatch_receiver
+                            != Some(ir.classes[owner as usize].fq_name_id())
+                    }) {
+                    self.dependency_default_implementation(
+                        member,
+                        target,
+                        edge.implementation_function,
+                    )
+                } else {
+                    match self.function_edge_implementation(
+                        owner,
+                        edge,
+                        numbered,
+                        (&edge.declared_parameters, edge.declared_result),
+                    ) {
+                        Ok(Some(carried)) => self.implement_carried(member.member, carried),
+                        // An abstract class's abstract override implements nothing; each concrete
+                        // subclass's table holds the body.
+                        Ok(None) => continue,
+                        Err(reason) => Err(reason),
+                    }
                 };
                 self.settle(member, implemented)?;
             }
@@ -838,23 +852,7 @@ impl FileRecorder<'_, '_, '_> {
                 if self.implements(member.member) {
                     continue;
                 }
-                let function = self
-                    .recording
-                    .callables
-                    .callable(declaration)
-                    .and_then(|fact| fact.dependency_callable.as_ref())
-                    .and_then(|identity| self.program.callables.dependency(identity))
-                    .ok_or_else(|| {
-                        self.declined("a default a dependency's interface declares with no body")
-                    });
-                let implemented = match function {
-                    Ok(function) => self.record_implementation(
-                        member.member,
-                        function,
-                        DependencyImplementation::Function(function),
-                    ),
-                    Err(reason) => Err(reason),
-                };
+                let implemented = self.dependency_default_implementation(member, declaration, None);
                 self.settle(member, implemented)?;
             }
             current = self.classes.tables.table(owner).superclass;
@@ -895,6 +893,35 @@ impl FileRecorder<'_, '_, '_> {
             }
         }
         Ok(())
+    }
+
+    /// Record the body of the default `declaration` as what the class implements `member` with:
+    /// the function this file declares for it (`declared`), or else the one an earlier module
+    /// exported.
+    fn dependency_default_implementation(
+        &mut self,
+        member: DependencyMember,
+        declaration: krusty::fir::ExternalCallableId,
+        declared: Option<krusty::ir::FunId>,
+    ) -> Result<(), Unsupported> {
+        let function = declared
+            .and_then(|function| self.recording.functions.get(function as usize).copied())
+            .flatten()
+            .or_else(|| {
+                self.recording
+                    .callables
+                    .callable(declaration)
+                    .and_then(|fact| fact.dependency_callable.as_ref())
+                    .and_then(|identity| self.program.callables.dependency(identity))
+            })
+            .ok_or_else(|| {
+                self.declined("a default a dependency's interface declares with no body")
+            })?;
+        self.record_implementation(
+            member.member,
+            function,
+            DependencyImplementation::Function(function),
+        )
     }
 
     /// The function `owner` implements the dependency member `edge` overrides with: its own or
