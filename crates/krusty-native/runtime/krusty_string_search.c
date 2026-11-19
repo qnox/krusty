@@ -18,10 +18,30 @@ kt_int kt_string_index_of_string(KRef self, KRef other, kt_int from) {
     if (wanted == 0) {
         return from;
     }
+    /* One cursor walks the receiver for the whole search, so a candidate costs the units it
+       compares rather than the prefix before it. Each comparison runs on copies of the walks. */
+    KUnits cursor = kt_units_of(self);
+    KUnits needle = kt_units_of(other);
+    kt_char unit = 0;
+    for (kt_int skipped = 0; skipped < from; skipped++) {
+        (void)kt_units_next(&cursor, &unit);
+    }
     for (kt_int at = from; at + wanted <= length; at++) {
-        if (kt_string_range_equals(self, at, other, 0, wanted)) {
+        KUnits text = cursor;
+        KUnits sought = needle;
+        kt_char have = 0;
+        kt_char want = 0;
+        kt_boolean matches = 1;
+        while (kt_units_next(&sought, &want)) {
+            if (!kt_units_next(&text, &have) || have != want) {
+                matches = 0;
+                break;
+            }
+        }
+        if (matches) {
             return at;
         }
+        (void)kt_units_next(&cursor, &unit);
     }
     return -1;
 }
