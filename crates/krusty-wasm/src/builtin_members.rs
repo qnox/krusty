@@ -101,11 +101,16 @@ enum Operation {
     StringGet,
     /// The order of a string and another (`String.compareTo`).
     StringCompare,
+    /// The characters of a string between two indices (`String.subSequence`).
+    StringSubSequence,
     /// The order of the value a box holds and the value another box of its class holds
     /// (`Int.compareTo(Int)`).
     Compare,
     /// A builder member the runtime realizes (`StringBuilder.append(Char)`).
     Builder(BuilderMember),
+    /// The builder's entry for a member it does not realize while no builder exists: nothing can
+    /// call it, and a program constructing a builder declines a call through the member.
+    Unreachable,
 }
 
 /// A `StringBuilder` override the runtime realizes, as a direct call of it does
@@ -188,7 +193,18 @@ impl Runtime {
                     .interfaces
                     .implement(self.string_builders.class, member, function)?;
             }
-            Some(Err(reason)) => self.unanswered_builder_member(member, reason),
+            Some(Err(reason)) => {
+                let function = self.define_implementation(
+                    module,
+                    member,
+                    Receiver::StringBuilder,
+                    Operation::Unreachable,
+                )?;
+                self.objects
+                    .interfaces
+                    .implement(self.string_builders.class, member, function)?;
+                self.unanswered_builder_member(member, reason);
+            }
             None => {}
         }
         let index = self.builtin_members.members.len();
@@ -291,6 +307,16 @@ impl Runtime {
                     .local_get(1)
                     .ref_cast(false, HeapType::Concrete(self.string))
                     .call(compare);
+            }
+            (Receiver::String, Operation::StringSubSequence) => {
+                let slice = self.string_sub_sequence(module);
+                code.ref_cast(false, HeapType::Concrete(self.string))
+                    .local_get(1)
+                    .local_get(2)
+                    .call(slice);
+            }
+            (Receiver::StringBuilder, Operation::Unreachable) => {
+                code.unreachable();
             }
             (Receiver::Box(form), Operation::Convert(to)) => {
                 form.emit_unbox(&mut code);
@@ -437,6 +463,13 @@ fn operation(
                 && *results == [ValType::I32] =>
         {
             Ok(Operation::StringCompare)
+        }
+        (Representation::String, Some(BackendCompilerIntrinsic::StringSubSequence))
+            if *declaration.params == [Ty::Int, Ty::Int]
+                && params[1..] == [ValType::I32, ValType::I32]
+                && *results == [crate::objects::REFERENCE] =>
+        {
+            Ok(Operation::StringSubSequence)
         }
         (_, Some(operation)) => Err(format!(
             "a library member {} overrides as {operation:?}",
