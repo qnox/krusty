@@ -21,5 +21,20 @@ fun box(): String {
         return "no exception for a negative start"
     } catch (e: IndexOutOfBoundsException) {
     }
+    try {
+        text.subSequence(3, 9)
+        return "no exception past the end through CharSequence"
+    } catch (e: IndexOutOfBoundsException) {
+    }
+    try {
+        text.subSequence(4, 2)
+        return "no exception for a reversed range through CharSequence"
+    } catch (e: IndexOutOfBoundsException) {
+    }
+    try {
+        text.subSequence(-1, 2)
+        return "no exception for a negative start through CharSequence"
+    } catch (e: IndexOutOfBoundsException) {
+    }
     return "OK"
 }

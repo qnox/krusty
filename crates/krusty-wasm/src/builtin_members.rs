@@ -242,6 +242,9 @@ impl Runtime {
             }
         }
         if let Some(operation) = string {
+            if matches!(operation, Operation::StringSubSequence) {
+                self.string_sub_sequence(module, classifiers)?;
+            }
             let function =
                 self.define_implementation(module, member, Receiver::String, operation)?;
             self.objects
@@ -402,7 +405,9 @@ impl Runtime {
                     .call(compare);
             }
             (Receiver::String, Operation::StringSubSequence) => {
-                let slice = self.string_sub_sequence(module);
+                let slice = self
+                    .defined_string_sub_sequence()
+                    .ok_or("a string slice implemented before its function")?;
                 code.ref_cast(false, HeapType::Concrete(self.string))
                     .local_get(1)
                     .local_get(2)
