@@ -64,6 +64,9 @@ pub(super) struct FrozenClosure {
         HashMap<KlibDependencyCallable, crate::klib_lowering::CallEdge>,
     /// The library objects whose values the closure's bodies read, which the unit materializes.
     pub(super) read_objects: Vec<crate::libraries::KlibBodyClassContract>,
+    /// Members of a materialized class or object that dispatch reaches, whose bodies the unit
+    /// emits although no walked body calls them directly.
+    pub(super) dispatched: Vec<KlibDependencyCallable>,
 }
 
 /// Where a unit's closure starts: the callables the emitted source selects, and the library
@@ -385,6 +388,7 @@ pub(super) fn declarations(
         declarations: state.declarations,
         authorized_member_edges,
         read_objects: state.read_objects,
+        dispatched: state.dispatched.into_iter().collect(),
     })
 }
 

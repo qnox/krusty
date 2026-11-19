@@ -175,6 +175,9 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         // `-library` and each non-leaf can name it through `-Xfragment-dependency` below.
         command.arg("-nostdlib").arg("-library").arg(&stdlib);
         command.args(["-module-name", unit.name.as_str()]);
+        // Each module compiles under the graph's `// LANGUAGE:` directives, as the reference
+        // runner compiles every module of the test.
+        command.args(crate::common::language_directives::kotlinc_args(source));
         for library in &libraries {
             command.arg("-library").arg(library);
         }

@@ -45,6 +45,7 @@ impl SymbolSource for HeaderModuleClassifiers<'_> {
                         crate::libraries::LibraryType::declaration_header(),
                     )),
                     callables: crate::libraries::Callables::default(),
+                    companion_extensions: crate::libraries::Callables::None,
                     importable_declaration: true,
                 })
             },
@@ -346,7 +347,172 @@ pub(crate) fn actualization_type_bindings(
             );
         }
     }
+    bind_inherited_dependency_members(headers, platform, &declarations, &mut bindings);
     bindings
+}
+
+/// Publish, for each source classifier with dependency supertypes, the members the shared member
+/// hierarchy selects for them: the header matcher has no headers for those members, but they belong
+/// to the classifier's member scope. Only the names an `expect` declaration lists as a member are
+/// asked for.
+fn bind_inherited_dependency_members(
+    headers: &crate::fir::StreamedHeaderModule,
+    platform: &dyn SemanticPlatform,
+    declarations: &crate::fx_hash::HashSet<TypeName>,
+    bindings: &mut crate::fir::ActualizationTypeBindings,
+) {
+    let expected_names = expected_member_names(headers);
+    if expected_names.is_empty() {
+        return;
+    }
+    for stub in headers
+        .stubs
+        .iter()
+        .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
+    {
+        let Some(crate::fir::HeaderDeclarationKind::Classifier {
+            supertypes, base, ..
+        }) = headers.syntax.declaration(stub.id).map(|value| value.kind)
+        else {
+            continue;
+        };
+        let dependency_supertypes = base
+            .into_iter()
+            .chain(headers.syntax.type_operands(supertypes).iter().copied())
+            // A written type argument specializes the supertype's members; the receiver built
+            // below carries only the classifier, so such a supertype contributes nothing.
+            .filter(|supertype| !has_type_arguments(headers, *supertype))
+            .filter_map(|supertype| bindings.bound_type(stub.source, supertype))
+            .filter(|supertype| !declarations.contains(supertype))
+            .map(crate::types::Ty::obj_name)
+            .collect::<Vec<_>>();
+        if dependency_supertypes.is_empty() {
+            continue;
+        }
+        let receiver = crate::types::Ty::intersection(&dependency_supertypes);
+        let members = expected_names
+            .iter()
+            .flat_map(|name| inherited_members(platform, receiver, name))
+            .collect();
+        bindings.bind_inherited_dependency_members(stub.id, members);
+    }
+}
+
+fn has_type_arguments(
+    headers: &crate::fir::StreamedHeaderModule,
+    supertype: crate::fir::HeaderTypeId,
+) -> bool {
+    let Some(crate::fir::HeaderTypeKind::Classifier { detail, .. }) =
+        headers.syntax.ty(supertype).map(|ty| ty.kind)
+    else {
+        return true;
+    };
+    headers
+        .syntax
+        .classifier_type(detail)
+        .is_none_or(|detail| !headers.syntax.type_operands(detail.arguments).is_empty())
+}
+
+/// The members of one name the shared member hierarchy selects for `receiver`, normalized to the
+/// evidence an `expect` member states. The hierarchy has already decided inheritance, overriding
+/// and specialization, so a member a nearer declaration overrides is absent. Private members are
+/// never inherited. A member the `expect` side cannot state is excluded here, with its evidence
+/// intact, rather than projected into a record it would then equal: one with a receiver, context
+/// parameters, type parameters, a modifier the record cannot carry (`suspend`, `operator`, `infix`, `inline`) or `vararg`, an accessor with its own availability or
+/// visibility, or a property that is a Java field or synthesized from Java accessors.
+fn inherited_members(
+    platform: &dyn SemanticPlatform,
+    receiver: crate::types::Ty,
+    name: &str,
+) -> Vec<crate::fir::InheritedDependencyMember> {
+    let callables = crate::symbol_resolver::members_in_hierarchy(platform, receiver, name);
+    let functions = callables
+        .functions()
+        .iter()
+        .filter(|function| {
+            function.kind == crate::libraries::FnKind::Member
+                && crate::symbol_resolver::member_is_inheritable(function.callable.visibility)
+                && function.context_count == 0
+                && !function.flags.suspend
+                && !function.flags.operator
+                && !function.flags.infix
+                && function.flags.inline == crate::libraries::InlineKind::None
+                && !function.call_sig.vararg
+                && function
+                    .generic_sig
+                    .as_ref()
+                    .is_none_or(|signature| signature.formals.is_empty())
+        })
+        .map(|function| crate::fir::InheritedDependencyMember {
+            kind: crate::fir::DeclarationKind::Function,
+            name: name.to_owned(),
+            parameters: function.callable.params.clone().into_boxed_slice(),
+            result: function.callable.ret,
+            mutable: false,
+        });
+    let properties = callables
+        .properties()
+        .iter()
+        .filter(|property| {
+            property.kind == crate::libraries::PropKind::Member
+                && property.producer == crate::libraries::PropertyProducer::KotlinAccessor
+                && crate::symbol_resolver::member_is_inheritable(property.visibility)
+                && property.context_count == 0
+                && property.formals.is_empty()
+                && property.readable()
+                && property.setter.as_ref().is_none_or(|_| {
+                    property.accessor_availability.setter
+                        && property.setter_visibility == property.visibility
+                })
+        })
+        .map(|property| crate::fir::InheritedDependencyMember {
+            kind: crate::fir::DeclarationKind::Property,
+            name: name.to_owned(),
+            parameters: Box::default(),
+            result: property.ty,
+            mutable: property.setter.is_some(),
+        });
+    functions.chain(properties).collect()
+}
+
+/// The distinct names of the members declared inside an `expect` classifier's body, nested
+/// classifiers' members included.
+fn expected_member_names(headers: &crate::fir::StreamedHeaderModule) -> Vec<String> {
+    let inside_expect = |declaration: crate::fir::DeclarationId| {
+        let mut owner = headers
+            .declarations
+            .anchor(declaration)
+            .and_then(|anchor| anchor.owner);
+        while let Some(current) = owner {
+            if headers.stubs.iter().any(|stub| {
+                stub.id == current && stub.flags.has(crate::fir::DeclarationFlags::EXPECT)
+            }) {
+                return true;
+            }
+            owner = headers
+                .declarations
+                .anchor(current)
+                .and_then(|anchor| anchor.owner);
+        }
+        false
+    };
+    let mut names = std::collections::BTreeSet::new();
+    for stub in headers.stubs.iter().filter(|stub| {
+        matches!(
+            stub.kind,
+            crate::fir::DeclarationKind::Function | crate::fir::DeclarationKind::Property
+        )
+    }) {
+        if let Some(name) = stub
+            .lookup_name
+            .and_then(|name| headers.lookup_names.get(name))
+        {
+            if inside_expect(stub.id) {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    names.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -408,6 +574,7 @@ mod tests {
                 || std::rc::Rc::new(crate::libraries::ResolvedSymbols::default()),
                 |classifier| {
                     std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                        companion_extensions: crate::libraries::Callables::None,
                         builtin_classifier: false,
                         classifier_name: Some(classifier),
                         classifier_declaration: Some(

@@ -737,6 +737,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             inline: InlineKind::None,
             default_call: false,
             defaults_from_declaration: false,
+            transformed_entry_tail: None,
             vararg_elem: None,
             vararg_index: None,
             signature: None,
@@ -2008,6 +2009,7 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
                 }),
             classifier,
             callables,
+            companion_extensions: crate::libraries::Callables::None,
             importable_declaration: stable_classifier_name.is_some(),
         })
     }

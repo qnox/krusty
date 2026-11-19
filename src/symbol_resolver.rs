@@ -95,10 +95,7 @@ pub(crate) use hierarchy_projection::{
     inherited_classifier_shape, member_scope_receiver, supports_member_lookup, with_implicit_any,
     ClassifierCompanionInstance, SupertypeProjectionCache,
 };
-use hierarchy_projection::{
-    classifier_type_parameter_bounds, projected_supertypes, receiver_hierarchy,
-    supertype_with_classifier,
-};
+use hierarchy_projection::{projected_supertypes, receiver_hierarchy, supertype_with_classifier};
 pub use lambda_call_shape::LambdaCallShape;
 pub(crate) use member_hierarchy::{
     apply_inner_alias_outer_in_source, apply_inner_classifier_outer_in_source,
@@ -148,7 +145,7 @@ pub(crate) use resolved_symbol::ErrorReceiverSelection;
 pub use resolved_symbol::{
     AmbiguousExtensionProperty, MemberFacets, ResolvedPropertySetter, SymRecv, Symbol,
 };
-pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
+pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamMethodFrame, SamSignature};
 use scope_level_callables::{
     callables_from_symbols, fn_in_scope, level_functions, level_properties,
     symbol_levels_in_function_scope, symbols_in_function_scope,
@@ -3830,6 +3827,7 @@ mod tests {
                     None
                 };
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(classifier_name),
                 classifier_declaration: classifier
@@ -3900,6 +3898,7 @@ mod tests {
                 classifier
             });
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(classifier_name),
                 classifier_declaration: classifier
@@ -4019,6 +4018,7 @@ mod tests {
                     crate::libraries::Callables::None
                 };
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_declaration: classifier
                     .as_ref()
@@ -5075,6 +5075,7 @@ mod tests {
                     _ => Vec::new(),
                 };
                 std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    companion_extensions: crate::libraries::Callables::None,
                     builtin_classifier: false,
                     classifier_name: None,
                     classifier_declaration: None,
@@ -5125,6 +5126,7 @@ mod tests {
                     _ => Vec::new(),
                 };
                 std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    companion_extensions: crate::libraries::Callables::None,
                     builtin_classifier: false,
                     classifier_name: None,
                     classifier_declaration: None,

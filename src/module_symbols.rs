@@ -1058,6 +1058,7 @@ fn fn_info(
         inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
         default_call: false,
         defaults_from_declaration: false,
+        transformed_entry_tail: None,
         vararg_elem: None,
         vararg_index: None,
         signature: None,
@@ -1188,6 +1189,7 @@ fn source_callable(
         inline: InlineKind::None,
         default_call: false,
         defaults_from_declaration: false,
+        transformed_entry_tail: None,
         vararg_elem: None,
         vararg_index: None,
         signature: None,
@@ -1743,6 +1745,7 @@ impl SymbolSource for ModuleSymbols<'_> {
             classifier_declaration,
             classifier,
             callables,
+            companion_extensions: crate::libraries::Callables::None,
             importable_declaration,
         });
         if self.syms.module_cache_enabled() {

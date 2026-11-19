@@ -478,6 +478,9 @@ impl SymbolSource for CompositeSource<'_> {
                     classifier,
                     builtin_classifier,
                     callables,
+                    companion_extensions: Callables::concat(
+                        records.iter().map(|record| &record.companion_extensions),
+                    ),
                     importable_declaration,
                 })
             }
@@ -878,6 +881,7 @@ mod tests {
                 crate::libraries::Callables::None
             };
             std::rc::Rc::new(ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 classifier_declaration: classifier
                     .as_ref()
                     .and(classifier_name)

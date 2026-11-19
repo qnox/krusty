@@ -232,6 +232,7 @@ fn diagnostic_key(diagnostic: &Diagnostic) -> DiagnosticKey {
             DiagnosticKind::Inspection => 2,
             DiagnosticKind::ValReassignment => 3,
             DiagnosticKind::Actualization => 4,
+            DiagnosticKind::PluginRefusal => 5,
         },
     )
 }
@@ -468,6 +469,7 @@ impl krusty::symbol_source::SymbolSource for StandaloneKotlinSymbols {
         classifier.kind = krusty::libraries::TypeKind::Annotation;
         let identity = krusty::types::type_name("kotlin/Deprecated");
         std::rc::Rc::new(krusty::libraries::ResolvedSymbols {
+            companion_extensions: krusty::libraries::Callables::None,
             classifier_name: Some(identity),
             classifier_declaration: Some(krusty::libraries::ClassifierDeclaration::Ordinary(
                 identity,

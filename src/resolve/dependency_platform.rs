@@ -495,6 +495,10 @@ impl SymbolSource for DependencyPlatform {
                     source_properties,
                 ),
             ),
+            companion_extensions: crate::libraries::Callables::concat([
+                &primary.companion_extensions,
+                &source.companion_extensions,
+            ]),
             importable_declaration: primary.importable_declaration || source.importable_declaration,
         });
         if !merged.is_empty() {

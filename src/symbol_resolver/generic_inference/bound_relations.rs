@@ -288,6 +288,12 @@ pub(crate) fn resolve_bound_violating_bindings(
                 continue;
             };
             for bound in bounds {
+                // A bare formal bound (`U : T`) names no class whose applied supertype could be
+                // read; its erasure (`Any`) would bind `T` before the receiver's own bound
+                // (`C : Poly<T>`) has spoken.
+                if !matches!(bound.non_null().kind(), TyKind::Obj(..)) {
+                    continue;
+                }
                 let Some(target) = bound.kotlin_class_internal() else {
                     continue;
                 };

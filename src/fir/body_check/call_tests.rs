@@ -24,6 +24,7 @@ impl crate::symbol_source::SymbolSource for DependencyDefaultSource {
             == crate::symbol_source::SymbolNamespace::Package(crate::types::TypeName::ROOT)
             && name == self.name;
         std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+            companion_extensions: crate::libraries::Callables::None,
             builtin_classifier: false,
             classifier_name: None,
             classifier_declaration: None,

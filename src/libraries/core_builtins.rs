@@ -377,6 +377,7 @@ impl EmptySymbolSource {
             classifier_declaration: Some(ClassifierDeclaration::Ordinary(internal)),
             classifier: Some(std::sync::Arc::new(classifier)),
             callables,
+            companion_extensions: crate::libraries::Callables::None,
             importable_declaration: false,
         })
     }

@@ -168,9 +168,10 @@ pub(super) fn block_member_placement(classifier: TypeName) -> CallablePlacement 
     }
 }
 
-/// The callables named `name` that are named through `classifier` with no value operand: its
-/// `companion { … }` block members, the companion extensions declared for it, and an enum class's
-/// implicit `values` and `valueOf`.
+/// The callables named `name` that `classifier` declares to be named through it with no value
+/// operand: its `companion { … }` block members and an enum class's implicit `values` and
+/// `valueOf`. A written `companion fun/val C.name` is a package's declaration, published with that
+/// package's record (see `lookup::package_companion_extensions`).
 pub(super) fn associated_callables(
     inventory: &PackageInventory,
     identities: &ExternalIdentities,
@@ -210,24 +211,6 @@ pub(super) fn associated_callables(
                     function
                 }),
         );
-    }
-    for extension in inventory.companion_functions(classifier, name) {
-        let placement = extension.placement(classifier);
-        functions.push(published_function(
-            identities,
-            &extension.signed,
-            placement,
-            &Default::default(),
-        ));
-    }
-    for extension in inventory.companion_properties(classifier, name) {
-        let placement = extension.placement(classifier);
-        properties.push(published_property(
-            identities,
-            &extension.signed,
-            placement,
-            &Default::default(),
-        ));
     }
     (functions, properties)
 }
