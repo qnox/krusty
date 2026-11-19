@@ -983,10 +983,7 @@ fn prepare_class<'a>(
                 declaration
             }
         },
-        access: match declaration_visibility(function.base.flags) {
-            Visibility::Private => IrConstructorAccess::Private,
-            _ => IrConstructorAccess::Unrestricted,
-        },
+        access: constructor_access(function),
         formals,
         class_type_parameters,
         class_type_parameter_bounds,
@@ -1719,6 +1716,14 @@ fn unsupported(form: &'static str) -> KlibBodyDeclineReason {
 
 fn non_public_type() -> KlibBodyDeclineReason {
     KlibBodyDeclineReason::UnsupportedType("a type of a non-public class")
+}
+
+/// Who may call the serialized constructor `function`.
+pub(super) fn constructor_access(function: &KlibIrFunction) -> IrConstructorAccess {
+    match declaration_visibility(function.base.flags) {
+        Visibility::Private => IrConstructorAccess::Private,
+        _ => IrConstructorAccess::Unrestricted,
+    }
 }
 
 /// The construction target recorded for a same-library primary constructor.
