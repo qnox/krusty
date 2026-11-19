@@ -1678,7 +1678,6 @@ ranges/expression/overflowZeroDownToMaxValue.kt
 ranges/expression/overflowZeroToMinValue.kt
 ranges/expression/progressionDownToMinValue.kt
 ranges/expression/progressionMaxValueMinusTwoToMaxValue.kt
-ranges/expression/progressionMaxValueToMaxValue.kt
 ranges/expression/progressionMaxValueToMinValue.kt
 ranges/expression/reversedBackSequence.kt
 ranges/expression/reversedEmptyBackSequence.kt
