@@ -1767,7 +1767,6 @@ ranges/literal/overflowZeroDownToMaxValue.kt
 ranges/literal/overflowZeroToMinValue.kt
 ranges/literal/progressionDownToMinValue.kt
 ranges/literal/progressionMaxValueMinusTwoToMaxValue.kt
-ranges/literal/progressionMaxValueToMaxValue.kt
 ranges/literal/progressionMaxValueToMinValue.kt
 ranges/literal/progressionMinValueToMinValue.kt
 ranges/literal/reversedBackSequence.kt
