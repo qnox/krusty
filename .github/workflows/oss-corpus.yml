@@ -225,8 +225,10 @@ jobs:
             echo "no project produced a comparison" >&2
             exit 1
           fi
-          python3 scripts/oss-corpus/summarize.py --stars stars.tsv --plugins results --json summary.json \
-            "${previous[@]}" "${reports[@]}" \
+          # stars.tsv names every project of the compile lane, so a project whose job left no
+          # comparison is reported as not measured, with why, instead of vanishing from the tables.
+          python3 scripts/oss-corpus/summarize.py --stars stars.tsv --expected stars.tsv --results results \
+            --plugins results --json summary.json "${previous[@]}" "${reports[@]}" \
             | tee summary.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -234,3 +236,13 @@ jobs:
           path: |
             summary.md
             summary.json
+      - name: fail when a project was not measured
+        run: |
+          set -euo pipefail
+          # The summary and its json are published above either way, so the next run still compares
+          # with this one; the run itself is not green while a project has no result.
+          if jq -e '.not_measured | length == 0' summary.json >/dev/null; then
+            exit 0
+          fi
+          jq -r '.not_measured[] | "::error title=\(.name) was not measured::\(.reason)"' summary.json
+          exit 1

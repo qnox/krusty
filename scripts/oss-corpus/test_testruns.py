@@ -126,7 +126,9 @@ class Compare(unittest.TestCase):
             " Not run | Passing, tasks on krusty's classes only |",
             '| --- | --- | ---: | ---: | ---: | ---: | ---: |',
             '| p | 0 / 1 | 2 / 5 (40.0%) | 1 | 1 | 1 | 1 / 4 (25.0%) in 1 / 3 tasks |',
-            '| **Total** | | **2 / 5 (40.0%)** | **1** | **1** | **1** | **1 / 4 (25.0%) in 1 / 3 tasks** |',
+            '',
+            "**Total** over 1 project: 2 / 5 (40.0%) passing on krusty's classes, 1 failing, 1 skipped, 1 not run; "
+            "1 / 4 (25.0%) in 1 / 3 tasks on krusty's classes only.",
             '',
             "First tests that pass on kotlinc's classes and not on krusty's:",
             '',
@@ -218,10 +220,11 @@ class RunScript(unittest.TestCase):
             kotlinc=dict(changed=1, examples=['build/classes/A.class']),
             krusty=dict(changed=1, examples=['build/classes/A.class']))))
         # Nothing the test builds ran is counted.
-        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[8:], [
-            '| p | 0 / 0 | unavailable: the kotlinc test build changed 1 measured output files; '
-            'the krusty test build changed 1 measured output files | | | | |',
-            '| **Total** | | **0 / 0** | **0** | **0** | **0** | **0 / 0 in 0 / 0 tasks** |',
+        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[6:], [
+            'Tests not compared, each with the reason its test builds cannot be compared:',
+            '',
+            '- **p** (test builds 0 / 0): the kotlinc test build changed 1 measured output files; '
+            'the krusty test build changed 1 measured output files',
             '',
         ])
 
@@ -253,10 +256,11 @@ class Inventory(unittest.TestCase):
                                   check=True, capture_output=True, text=True).stdout
         self.assertEqual(project['tests'], dict(exit=dict(kotlinc=1, krusty=1),
                                                 unavailable=dict(kotlinc=dict(inventory='missing'))))
-        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[8:], [
-            '| p | 1 / 1 | unavailable: the kotlinc test build listed no test task '
-            '(it failed before Gradle planned its tasks) | | | | |',
-            '| **Total** | | **0 / 0** | **0** | **0** | **0** | **0 / 0 in 0 / 0 tasks** |',
+        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[6:], [
+            'Tests not compared, each with the reason its test builds cannot be compared:',
+            '',
+            '- **p** (test builds 1 / 1): the kotlinc test build listed no test task '
+            '(it failed before Gradle planned its tasks)',
             '',
         ])
 
