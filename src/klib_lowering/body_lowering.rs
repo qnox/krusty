@@ -425,10 +425,12 @@ pub(super) enum ConstructorRole {
 }
 
 /// The dependency constructor a constructor call invokes: the provider's identity, the class it
-/// constructs and its declared value parameters.
+/// constructs and its declared value parameters, and, when the linking unit materializes that
+/// class, the constructor of the materialized class the call selects.
 pub(super) struct LinkedConstructor {
     pub(super) target: crate::fir::ExternalCallableId,
     pub(super) declaration: super::constructor_calls::ConstructorDeclaration,
+    pub(super) materialized: Option<crate::ir::IrConstructorTarget>,
 }
 
 /// The dependency property a call of one of its accessors reads or writes, as a source access of
