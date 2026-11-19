@@ -200,6 +200,7 @@ mod tests {
                             )],
                         },
                     ),
+                    companion_extensions: crate::libraries::Callables::None,
                     importable_declaration: false,
                 });
             }
@@ -232,6 +233,7 @@ mod tests {
                 }),
                 classifier,
                 callables: crate::libraries::Callables::None,
+                companion_extensions: crate::libraries::Callables::None,
                 importable_declaration: false,
             })
         }
