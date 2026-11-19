@@ -697,16 +697,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// The branch of a collection special bridge on one erased reference argument: it goes to the
     /// first block when the argument is an instance of the override's parameter type (a `null` the
     /// type admits too), and to the second, which the caller fills with the bridge's rejection,
-    /// when it is not. `None` where the override's parameter is the declared one, or has no type
-    /// descriptor to test, so there is nothing to bridge.
+    /// when it is not. A primitive parameter is asked through its box, so a `null` and a value of
+    /// another type are rejected rather than unboxed. `None` where the override's parameter is the
+    /// declared one, or has no type descriptor to test, so there is nothing to bridge.
     pub(super) fn bridge_argument_guard(
         &mut self,
         value: Value,
         boundary: &ParameterBoundary,
     ) -> Result<Option<(Block, Block)>, Unsupported> {
-        if boundary.implementation.non_null() == boundary.declared.non_null()
-            || !boundary.implementation.is_reference()
-        {
+        if boundary.implementation.non_null() == boundary.declared.non_null() {
             return Ok(None);
         }
         let Some(descriptor) = self.file.type_descriptor(boundary.implementation)? else {
