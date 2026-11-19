@@ -18,6 +18,14 @@ pub(crate) fn unify_receiver_from_symbols(
     receiver: Ty,
     bindings: &mut GSigBinds,
 ) {
+    // A value proved to be several types is each of them: every constituent constrains the
+    // declared receiver's formals.
+    if let TyKind::Intersection(parts) = receiver.non_null().kind() {
+        for &part in parts.iter() {
+            unify_receiver_from_symbols(source, declared, part, bindings);
+        }
+        return;
+    }
     let bound_before = bindings.keys().copied().collect::<Vec<_>>();
     unify_ty_from_symbols(source, declared, receiver, bindings);
     let mut occurrences = Vec::new();

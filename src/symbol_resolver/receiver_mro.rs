@@ -189,6 +189,38 @@ pub(crate) fn function_shape_matches(src: &dyn SymbolSource, actual: Ty, declare
 
 impl ReceiverMro {
     pub(crate) fn new(src: &dyn SymbolSource, recv: Ty) -> ReceiverMro {
+        // An intersection is every one of its constituents, in the order the flow proved them
+        // (the declared type first). A declared extension receiver is met through the first
+        // constituent whose supertype closure reaches it: a later constituent starts after every
+        // rung of the earlier ones, so a candidate applicable to the declared type outranks one
+        // that needs the smart cast (`A.cast()` over `B.cast()` for an `A` proved to be `B`).
+        if let TyKind::Intersection(parts) = recv.non_null().kind() {
+            let mut ranks: Vec<(Ty, u32)> = Vec::new();
+            let mut offset = 0u32;
+            for &part in parts.iter() {
+                let closure = ReceiverMro::new(src, part).ranks;
+                let depth = closure
+                    .iter()
+                    .map(|&(_, rung)| rung)
+                    .max()
+                    .map_or(0, |rung| rung + 1);
+                for (applied, rung) in closure {
+                    let internal = applied.kotlin_class_internal();
+                    if !ranks
+                        .iter()
+                        .any(|(seen, _)| seen.kotlin_class_internal() == internal)
+                    {
+                        ranks.push((applied, offset + rung));
+                    }
+                }
+                offset += depth;
+            }
+            return ReceiverMro {
+                recv,
+                ranks,
+                type_variables: Vec::new(),
+            };
+        }
         let mut ranks = Vec::new();
         if let Some(internal) = recv.erased_recv().kotlin_class_internal() {
             let root = if recv.non_null().obj_internal().is_some() {
@@ -232,6 +264,10 @@ impl ReceiverMro {
 
     /// Use the applied supertype unless its classpath signature erased every argument.
     fn binding_receiver_for(&self, applied: Ty) -> Ty {
+        // An intersection receiver binds through the constituent's own applied supertype.
+        if matches!(self.recv.non_null().kind(), TyKind::Intersection(_)) {
+            return applied;
+        }
         let applied_args = applied.type_args();
         let recv_args = self.recv.type_args();
         if !recv_args.is_empty()
@@ -340,7 +376,7 @@ impl ReceiverMro {
         self.match_receiver(src, decl_recv).map(|(rank, _)| rank)
     }
 
-    pub(super) fn binding_receiver(&self, src: &dyn SymbolSource, decl_recv: Ty) -> Option<Ty> {
+    pub(crate) fn binding_receiver(&self, src: &dyn SymbolSource, decl_recv: Ty) -> Option<Ty> {
         self.match_receiver(src, decl_recv)
             .map(|(_, applied)| applied)
     }
