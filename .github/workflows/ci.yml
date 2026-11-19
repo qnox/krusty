@@ -749,7 +749,7 @@ jobs:
             target/cache/ser-corpus/${{ matrix.version }}
             target/cache/ksp-toolchain
             target/cache/krusty-deps
-          key: kotlin-conformance-inputs-${{ matrix.version }}
+          key: kotlin-conformance-inputs-v2-${{ matrix.version }}
       - name: restore Wasm target KLIB dependencies (${{ matrix.version }})
         if: startsWith(matrix.target, 'wasm-')
         id: wasm-klibs
@@ -900,6 +900,10 @@ jobs:
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
+          # The box cases' extra libraries (the atomicfu plugin and runtime, Compose, serialization)
+          # resolve from the restored `krusty-deps` entry; without this they went to
+          # `~/.cache/krusty-deps` and were downloaded from Maven Central on every run.
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: |
           set -euo pipefail
           chmod +x conformance-bin krusty
