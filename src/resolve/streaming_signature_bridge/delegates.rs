@@ -1,10 +1,4 @@
-//! The delegated-property signature boundary.
-//!
-//! A property declared `by` an expression takes its type from the convention that expression
-//! supplies, so signature solving has to select `provideDelegate`/`getValue` before it can answer
-//! what the declaration IS. Everything that selection needs — the `thisRef` the accessors pass,
-//! where the diagnostic points, and the refusal when no convention applies — is one responsibility
-//! and lives here rather than in the signature facade or the general semantics implementation.
+//! Delegated-property signature selection for `provideDelegate` and `getValue`.
 
 use super::*;
 
@@ -21,18 +15,13 @@ impl ProductionSignatureSemantics<'_> {
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let (provide_ref, this_ref) = self.delegate_first_arguments(&site);
-        // The classifier is resolved through the same source that answers applicability, so this
-        // probe and the checked selection agree on which declaration `KProperty` is — and a
-        // dependency set that declares none answers `None` here, exactly as a missing convention
-        // does.
+        // Resolve `KProperty` through the same source as applicability. No declaration is the
+        // same refusal as a missing convention.
         let property_reference = match self.with_resolver(scope, |resolver| {
             Some(crate::resolve::delegated_properties::delegate_property_reference_type(resolver))
         }) {
             Ok(Some(property_reference)) => property_reference,
-            // Without the classifier the accessors pass there is no convention to select against,
-            // which is the same refusal a missing `getValue` is and is reported the same way. The
-            // alternative — manufacturing the spelling — selects against a declaration the
-            // dependency set does not have.
+            // No classifier means no convention to select, reported like a missing `getValue`.
             Ok(None) => {
                 return Err(self.record_delegate_convention_failure(
                     scope,
@@ -303,9 +292,9 @@ impl ProductionSignatureSemantics<'_> {
                                 scope,
                                 site,
                                 stored.get(),
-                                "getValue",
                                 this_ref,
                                 &candidates,
+                                expected.is_none(),
                             ));
                         }
                     }
@@ -356,7 +345,7 @@ impl ProductionSignatureSemantics<'_> {
             source, scope.source,
             "a delegate convention site must belong to its retained signature scope",
         );
-        let convention_site = self.delegate_convention_site(&site, by_span);
+        let convention_site = self.delegate_convention_site(&site, by_span, false);
         // A candidate's own return may still be undetermined here — this phase is what determines
         // it — and rendering the placeholder produces a second, differently worded message for the
         // same mistake once the body check reports it. Ask the solver for the declaration instead,
@@ -408,7 +397,7 @@ impl ProductionSignatureSemantics<'_> {
             source, scope.source,
             "a delegate convention site must belong to its retained signature scope",
         );
-        let convention_site = self.delegate_convention_site(&site, by_span);
+        let convention_site = self.delegate_convention_site(&site, by_span, false);
         let message = match crate::resolve::delegated_properties::delegate_convention_ambiguity_message_with_functions(
             &crate::resolve::delegated_properties::DelegateConventionQuery::for_delegate(
                 convention_site,
@@ -451,7 +440,7 @@ impl ProductionSignatureSemantics<'_> {
             source, scope.source,
             "a delegate convention site must belong to its retained signature scope",
         );
-        let convention_site = self.delegate_convention_site(&site, by_span);
+        let convention_site = self.delegate_convention_site(&site, by_span, false);
         let candidates = match candidates
             .iter()
             .map(|candidate| {
@@ -544,21 +533,21 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         site: crate::fir::ResolvedSignatureDelegateSite,
         delegate: Ty,
-        name: &str,
         this_ref: Ty,
         candidates: &[crate::resolve::delegated_properties::DelegateConventionDiagnosticCandidate],
+        declared_type_failed: bool,
     ) -> crate::fir::DiagnosticId {
         let (source, by_span) = self.delegate_by_location(&site);
         assert_eq!(
             source, scope.source,
             "a delegate convention site must belong to its retained signature scope",
         );
-        let convention_site = self.delegate_convention_site(&site, by_span);
+        let convention_site = self.delegate_convention_site(&site, by_span, declared_type_failed);
         let message =
             crate::resolve::delegated_properties::delegate_convention_message_with_candidates(
                 convention_site,
                 delegate,
-                name,
+                "getValue",
                 this_ref,
                 None,
                 None,
@@ -615,6 +604,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         site: &crate::fir::ResolvedSignatureDelegateSite,
         by_span: crate::diag::Span,
+        declared_type_failed: bool,
     ) -> crate::resolve::delegated_properties::DelegateConventionSite {
         let (dispatch_receiver, extension_receiver) = self.delegate_receivers(site);
         crate::resolve::delegated_properties::DelegateConventionSite {
@@ -628,6 +618,14 @@ impl ProductionSignatureSemantics<'_> {
                     crate::resolve::delegated_properties::DelegateDispatchDiagnosticName::Anonymous,
             }),
             is_var: site.mutable,
+            unresolved_property_name: declared_type_failed
+                .then(|| {
+                    super::super::delegated_properties::property_type_name(
+                        self.headers,
+                        site.diagnostic_owner,
+                    )
+                })
+                .flatten(),
         }
     }
 
