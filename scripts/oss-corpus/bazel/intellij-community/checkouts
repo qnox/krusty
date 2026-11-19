@@ -1,0 +1,3 @@
+# The Android plugin, a repository of its own that intellij-community's project model reads
+# (getPlugins.sh clones it into android/), at its last commit before the pinned revision.
+android	https://github.com/JetBrains/android	229fd88bb752c9c94c0e5f14b287550d8eb628c5

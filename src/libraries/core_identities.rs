@@ -92,6 +92,7 @@ impl CoreRegistry {
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
             declares_parameter_defaults,
+            composable_parameters: Default::default(),
         });
         self.callable_ids.insert(key, identity);
         identity
