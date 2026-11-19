@@ -61,6 +61,11 @@ impl KlibTypeParameters {
             .is_none()
     }
 
+    /// The semantic type parameter the serialized `symbol` is bound to.
+    pub(crate) fn bound(&self, symbol: &KlibIrSymbol) -> Option<Ty> {
+        self.bindings.get(symbol).copied()
+    }
+
     pub(crate) fn declared_bounds(&self, name: &str) -> Option<&[Ty]> {
         self.bounds.get(name).map(Vec::as_slice)
     }
