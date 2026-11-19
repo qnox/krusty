@@ -47,9 +47,8 @@ pub(super) fn missing_initializers<'a>(
                 && !property.has_initializer
                 && !property.is_lateinit
         })
-        .map(|property| FrontendPluginDiagnostic {
-            span: property.declaration_span,
-            message: message.to_string(),
+        .map(|property| {
+            FrontendPluginDiagnostic::error(property.declaration_span, message.to_string())
         })
 }
 
@@ -104,10 +103,10 @@ mod tests {
         ];
         assert_eq!(
             reported(TypeKind::Class, &[], &properties),
-            vec![FrontendPluginDiagnostic {
-                span: Span::new(10, 20),
-                message: transient_missing_initializer(None).to_string(),
-            }]
+            vec![FrontendPluginDiagnostic::error(
+                Span::new(10, 20),
+                transient_missing_initializer(None).to_string(),
+            )]
         );
     }
 
