@@ -1,6 +1,7 @@
 // LANGUAGE: +ContextParameters +CallableReferencesToContextual
 // KOTLINC_VERSION: [2.5.0,)
 // WITH_STDLIB
+import kotlin.jvm.JvmInline
 // A function reference binds a value-class context value at its site. The value travels boxed with
 // the reference and reaches the declaration as the value class it declares.
 

@@ -1,6 +1,7 @@
 // LANGUAGE: +ContextParameters +CallableReferencesToContextual
 // KOTLINC_VERSION: [2.5.0,)
 // WITH_STDLIB
+import kotlin.jvm.JvmInline
 // A function reference binds a nullable value-class context. An inline factory returns the
 // reference, so its copies share one adapter. A non-null value reaches the declaration unboxed and
 // `null` stays `null`; a nullable value class over a scalar stays boxed.
