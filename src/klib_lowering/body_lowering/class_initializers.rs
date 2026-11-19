@@ -64,7 +64,6 @@ impl<'a> BodyLowering<'a> {
         }
         let body = self.ir.add_expr(IrExpr::Block { stmts, value: None });
         self.ir.callable_scopes.insert(body);
-        self.publish_defaults()?;
         Ok(body)
     }
 
