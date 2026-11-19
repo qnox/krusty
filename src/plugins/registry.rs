@@ -38,7 +38,6 @@ use crate::plugins::cli::{
 use crate::plugins::compose::{ComposeOptions, ComposePlugin};
 use crate::plugins::convention::ConventionInstance;
 use crate::plugins::parcelize::ParcelizePlugin;
-use crate::plugins::sam_with_receiver::SamWithReceiverPlugin;
 use crate::plugins::serialization::{SerializationAbi, SerializationPlugin};
 use crate::plugins::{IrPlugin, PluginHost, PluginRelease};
 
@@ -427,7 +426,10 @@ fn build_sam_with_receiver(
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(SamWithReceiverPlugin::from_options(options))
+    Box::new(ConventionInstance::new(
+        &krusty_plugin_sam_with_receiver::PLUGIN,
+        options,
+    ))
 }
 
 /// Build the native atomicfu plugin. Its registrar declares no command-line processor, so it has
