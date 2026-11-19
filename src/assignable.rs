@@ -290,6 +290,22 @@ pub fn is_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> b
     assignable_inner(cx, oracle, sub, sup)
 }
 
+/// The candidates whose result is a subtype of every other candidate's, in the order given: the
+/// declarations kotlinc's fake-override builder may keep when a class inherits several with
+/// different results. Equal results are equally specific and all stay, so the order decides
+/// between them; incomparable results leave none. `subtype(a, b)` tells whether the result of `a`
+/// is a subtype of the result of `b`, in the caller's own class model.
+pub(crate) fn most_specific_results<T: Copy>(
+    candidates: &[T],
+    subtype: impl Fn(T, T) -> bool,
+) -> Vec<T> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|&candidate| candidates.iter().all(|&other| subtype(candidate, other)))
+        .collect()
+}
+
 /// Pure Kotlin SUBTYPING — like [`is_assignable`] but WITHOUT the value/inline-class erasure step (an
 /// `Aid` is NOT a subtype of its underlying `String`). Use where a genuine type-hierarchy relation is
 /// meant (a classpath supertype walk, a `when`-branch reachability), not a JVM-ABI boundary.

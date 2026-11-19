@@ -58,17 +58,14 @@ impl KlibDeclarationBodies {
         let cx = TyCtx::new();
         // Of several equally specific declarations, such as `AbstractCollection.size` and
         // `List.size`, kotlinc keeps the first it inherits.
-        inherited
-            .iter()
-            .zip(&results)
-            .find(|(_, &result)| {
-                results
-                    .iter()
-                    .all(|&other| crate::assignable::is_subtype(&cx, &hierarchy, result, other))
-            })
-            .map_or(KlibCalleeOrigin::Ambiguous, |(one, _)| {
-                KlibCalleeOrigin::Exact(one.clone())
-            })
+        let candidates = inherited.iter().zip(&results).collect::<Vec<_>>();
+        crate::assignable::most_specific_results(&candidates, |(_, &candidate), (_, &other)| {
+            crate::assignable::is_subtype(&cx, &hierarchy, candidate, other)
+        })
+        .first()
+        .map_or(KlibCalleeOrigin::Ambiguous, |&(one, _)| {
+            KlibCalleeOrigin::Exact(one.clone())
+        })
     }
 }
 
