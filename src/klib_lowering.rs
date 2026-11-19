@@ -18,6 +18,7 @@ mod body_unit;
 mod callable_references;
 mod callee_facts;
 mod class_headers;
+mod class_hierarchies;
 mod class_initialization;
 mod class_storage;
 mod closure_forms;
@@ -28,6 +29,7 @@ mod enum_classes;
 mod for_loops;
 mod function_lowering;
 mod inline_templates;
+mod intercepted_continuation;
 mod ir_builtins;
 mod klib_types;
 mod local_values;
@@ -51,6 +53,7 @@ pub(crate) use class_initialization::{
     delegated_superclass_constructor, initializing_constructors, value_class_overrides,
 };
 pub(crate) use closure_forms::emitted_closure_function;
+pub(crate) use intercepted_continuation::expansion_member;
 
 /// The classifier a serialized object symbol names, when its signature names a class.
 pub(crate) fn object_classifier(
@@ -66,6 +69,7 @@ pub(crate) const EMITTED_CALL_FORMS: crate::metadata::klib_ir::tree::EmittedCall
         folded_call: range_membership::folds_range_literal_membership,
         folded_calls: for_loops::folded_loop_calls,
         implied_callee: array_content_members::implied_callee,
+        converted_closure: closure_forms::converted_closure,
     };
 pub use decline::{KlibBodyDecline, KlibBodyDeclineReason};
 pub use inline_templates::{lower_inline_template, KlibInlineTemplate, TemplateCallees};

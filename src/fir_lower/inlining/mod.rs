@@ -1970,6 +1970,14 @@ fn specialize_sam_target(target: &mut IrSamTarget, bindings: &HashMap<String, Ty
     specialize_ty(&mut target.result, bindings);
     specialize_tys(&mut target.declared_parameters, bindings);
     specialize_ty(&mut target.declared_result, bindings);
+    for frame in target
+        .dispatch_methods
+        .iter_mut()
+        .chain(&mut target.default_methods)
+    {
+        specialize_tys(&mut frame.parameters, bindings);
+        specialize_ty(&mut frame.result, bindings);
+    }
 }
 
 fn specialize_reference_adaptation(
@@ -2131,8 +2139,12 @@ fn specialize_checked_operation(
             target,
             substitutions,
             adaptation,
+            function_type,
             ..
         } => {
+            if let Some(function_type) = function_type {
+                specialize_ty(function_type, bindings);
+            }
             specialize_property_reference_target(target, bindings);
             for substitution in substitutions {
                 specialize_checked_substitution(substitution, bindings);

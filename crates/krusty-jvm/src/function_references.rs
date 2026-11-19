@@ -1034,6 +1034,7 @@ pub(super) fn realize(
                 reference.bound_receiver,
                 reference.captures.clone(),
                 reference.adaptation.clone(),
+                reference.function_type,
             );
             ir.exprs[raw] = IrExpr::Checked(Box::new(operation));
             // An inline getter has no accessor method the carrier could call: kotlinc splices it

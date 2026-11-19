@@ -64,7 +64,7 @@ krusty-test-modules = { path = "crates/krusty-test-modules" }
 # The kotlinc command-line conformance test compares the CLI's argument parser with kotlinc's own.
 krusty-cli = { path = "crates/krusty-cli" }
 krusty-jvm = { path = "crates/krusty-jvm" }
-krusty-native = { path = "crates/krusty-native" }
+krusty-native = { path = "crates/krusty-native", features = ["test-support"] }
 krusty-wasm = { path = "crates/krusty-wasm" }
 rayon = "1"
 libc = "0.2"

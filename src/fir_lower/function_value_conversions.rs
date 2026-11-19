@@ -56,7 +56,9 @@ impl BodyLowering<'_> {
         } else {
             erased_result
         };
-        let body = self.callable_reference_adapter_body(invoke, erased_result, adapter_result);
+        let body = self
+            .ir
+            .callable_reference_adapter_body(invoke, erased_result, adapter_result);
         let mut parameters = Vec::with_capacity(target.params.len() + 1);
         parameters.push(from.get());
         parameters.extend(target.params.iter().copied());

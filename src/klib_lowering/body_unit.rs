@@ -38,10 +38,12 @@ use crate::types::{Ty, TypeName};
 
 mod class_construction;
 pub(crate) use class_construction::superclass_constructor_ordinal;
+mod constructor_linking;
 mod enum_materialization;
 #[cfg(test)]
 mod initializer_capability_tests;
 mod local_class;
+mod sam_placement;
 mod static_properties;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
@@ -884,6 +886,7 @@ impl DependencyBodyUnit {
         sources: Sources<'a>,
         seed: impl FnOnce(&mut Linker<'_, 'a>, &mut IrFile) -> Result<T, KlibBodyDeclineReason>,
     ) -> Result<T, KlibBodyDecline> {
+        let (first_class, classes) = (self.ir.classes.len(), sources.callees.class_type_oracle());
         let mut pending = VecDeque::new();
         let mut linker = Linker {
             functions: &mut self.functions,
@@ -1016,6 +1019,8 @@ impl DependencyBodyUnit {
             })?;
             self.ir.functions[body.function as usize].body = Some(lowered);
         }
+        super::class_hierarchies::publish(&mut self.ir, first_class, classes)
+            .map_err(|reason| KlibBodyDecline::new(identity.declaration.clone(), reason))?;
         Ok(root)
     }
 }
@@ -1085,6 +1090,22 @@ impl<'s> CallLinker for Linker<'_, 's> {
         })
     }
 
+    fn intercepted_continuation(
+        &self,
+        signature: &KlibDeclarationSignature,
+    ) -> Result<
+        Option<super::intercepted_continuation::InterceptedContinuationExpansion>,
+        KlibBodyDeclineReason,
+    > {
+        let bodies = self.sources.bodies;
+        match bodies.linked_origin(&self.active_module, signature) {
+            KlibCalleeOrigin::Exact(identity) => {
+                super::intercepted_continuation::expansion(self.sources.callees, bodies, &identity)
+            }
+            KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => Ok(None),
+        }
+    }
+
     fn continuation_intrinsic(
         &self,
         signature: &KlibDeclarationSignature,
@@ -1112,6 +1133,19 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.primitive_at(signature, false, |facts, identity, bodies| {
             facts.range_literal_bounds(identity, bodies)
         })
+    }
+
+    fn sam_declaration(
+        &self,
+        classifier: &KlibPublicIdSignature,
+    ) -> Result<crate::ir::CheckedKlibSamDeclaration, KlibBodyDeclineReason> {
+        self.sources
+            .callees
+            .sam_declaration(&self.active_module, classifier)
+            .cloned()
+            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a SAM conversion without a checked declaration",
+            ))
     }
 
     fn declares_implementation(
@@ -1296,6 +1330,14 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .is_some()
     }
 
+    fn link_local_object(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<TypeName, KlibBodyDeclineReason> {
+        self.install_local_object(ir, signature)
+    }
+
     fn link_local_constructor(
         &mut self,
         ir: &mut IrFile,
@@ -1308,6 +1350,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             super::same_library_class::LocalClassSource {
                 bodies,
                 declarations: self.sources.declarations,
+                classes: callees.class_type_oracle(),
                 module: &module,
                 validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
             },
@@ -1385,78 +1428,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         callee: &KlibPublicIdSignature,
         role: ConstructorRole,
     ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
-        let identity = self.callee_identity(callee)?;
-        let (_, function) = self.sources.bodies.function(&identity).ok_or_else(|| {
-            KlibBodyDeclineReason::SignatureMismatch(
-                "a constructor call has no serialized function header".to_owned(),
-            )
-        })?;
-        super::constructor_calls::require_constructor_kind(function)?;
-        if matches!(self.sources.callees.get(&identity), Some(KlibCalleeFact::Selected(callables))
-            if callables[0].kind() != crate::libraries::ExternalCallableKind::Constructor)
-        {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "a constructor call selected a non-constructor provider declaration".to_owned(),
-            ));
-        }
-        // An earlier unit's retained initializer runs on an instance a subclass allocated; it
-        // never allocates its own class.
-        let retained_initializer = self.sources.externals.get(&identity).filter(|external| {
-            matches!(
-                external.realization,
-                DependencyExternalRealization::ConstructorInitializer
-            )
-        });
-        if retained_initializer.is_some() && role == ConstructorRole::Allocation {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "an initializer-only dependency does not permit class allocation".to_owned(),
-            ));
-        }
-        let declaration = self
-            .sources
-            .callees
-            .constructor(&identity, self.sources.bodies)?
-            // Producer lookup above already proved the serialized declaration exists. Without
-            // exact provider evidence this unit cannot realize construction; that is not a
-            // missing declaration and must not invent a constructor handle.
-            .ok_or_else(|| KlibBodyDeclineReason::UnsupportedCallee(Box::new(callee.clone())))?;
-        if let Some(initializer) = retained_initializer {
-            return Ok(LinkedConstructor {
-                target: initializer.target(),
-                declaration,
-            });
-        }
-        let external = self
-            .sources
-            .externals
-            .get(&identity)
-            .filter(|external| external.is_constructor())
-            .ok_or_else(|| {
-                KlibBodyDeclineReason::SignatureMismatch(
-                    "an authenticated constructor has no exact constructor external handle"
-                        .to_owned(),
-                )
-            })?;
-        let target = external.target();
-        let allocating = matches!(
-            external.realization,
-            DependencyExternalRealization::AllocatingConstructor
-        );
-        let selected = match self.sources.callees.get(&identity) {
-            Some(KlibCalleeFact::Selected(callables)) => callables[0],
-            _ => {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "an authenticated constructor lost its provider declaration".to_owned(),
-                ))
-            }
-        };
-        if !allocating {
-            self.materialize_class(ir, &identity, selected)?;
-        }
-        Ok(LinkedConstructor {
-            target,
-            declaration,
-        })
+        self.link_selected_constructor(ir, callee, role)
     }
 
     fn constructor_bound(
@@ -1539,7 +1511,17 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
-        self.sources.callees.applied_supertype(sub, owner)
+        let callees = self.sources.callees;
+        super::same_library_class::applied_supertype(
+            self.local_classes,
+            sub,
+            owner,
+            &|sub, owner| callees.applied_supertype(sub, owner),
+        )
+    }
+
+    fn sam_placement(&self) -> Result<crate::ir::IrSamPlacement, KlibBodyDeclineReason> {
+        self.active_sam_placement()
     }
 
     fn dependency_override(
@@ -2014,7 +1996,8 @@ impl<'s> CallLinker for Linker<'_, 's> {
 impl<'s> Linker<'_, 's> {
     /// The type parameters of the generic class declaring `selected`, which a call of the member
     /// binds from its dispatch receiver; none for a top-level function or a non-generic class.
-    /// The accessor of a property of a class whose members the unit emits, when it has a body.
+    /// The accessor of a property of a class whose members the unit emits, when it has a body or
+    /// is abstract.
     fn materialized_member_accessor(
         &mut self,
         ir: &mut IrFile,
@@ -2040,7 +2023,12 @@ impl<'s> Linker<'_, 's> {
         let Some((arena, declaration)) = self.sources.bodies.function(identity) else {
             return Ok(None);
         };
-        if !matches!(declaration.body, Some(KlibIrBody::Block(_))) {
+        // An abstract accessor is declared with its class, as an abstract member function is,
+        // and a call of it dispatches to the instance's override.
+        let abstract_ = declaration.body.is_none()
+            && crate::metadata::semantic::declaration_modality(declaration.base.flags)
+                == crate::metadata::semantic::KotlinModality::Abstract;
+        if !abstract_ && !matches!(declaration.body, Some(KlibIrBody::Block(_))) {
             return Ok(None);
         }
         let selected = selected_callable_for_header_purpose(
@@ -2509,7 +2497,10 @@ impl<'s> Linker<'_, 's> {
         let value_member = match (header.value_receiver(), selected) {
             // A builtin type's member reads its receiver as the value the target carries.
             (Some(_), Some(selected))
-                if is_receiver_member(selected, self.sources.bodies, self.sources.callees) =>
+                if is_receiver_member(selected, self.sources.bodies, self.sources.callees)
+                    || selected.class_contract().is_some_and(
+                        crate::libraries::KlibBodyClassContract::emits_default_members,
+                    ) =>
             {
                 None
             }

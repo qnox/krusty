@@ -775,7 +775,8 @@ impl<'a> FileLowering<'a> {
                     }
                     Access::TopLevel { property } => {
                         let ty = body.top_level_written_ty(&property)?;
-                        let Some(value) = body.convert(params[2], Some(any()), ty)? else {
+                        let written = body.check_erased_value(params[2], ty)?;
+                        let Some(value) = body.convert(written, Some(any()), ty)? else {
                             return Err(declined!("a `Unit` value assigned to `{name}`"));
                         };
                         body.top_level_write_value(&property, value)?;
@@ -784,7 +785,8 @@ impl<'a> FileLowering<'a> {
                         let ty = body.written_property_ty(class, index)?;
                         let object = receiver(body, params, receiver_offset);
                         body.null_check(object)?;
-                        let Some(value) = body.convert(params[2], Some(any()), ty)? else {
+                        let written = body.check_erased_value(params[2], ty)?;
+                        let Some(value) = body.convert(written, Some(any()), ty)? else {
                             return Err(declined!("a `Unit` value assigned to `{name}`"));
                         };
                         body.property_write_of(class, index, object, value)?;
@@ -798,7 +800,13 @@ impl<'a> FileLowering<'a> {
                             setter.ok_or_else(|| format!("a write to the read-only `{name}`"))?;
                         let object =
                             takes_receiver.then(|| receiver(body, params, receiver_offset));
-                        body.accessor_of(setter, object, Some(params[2]))?;
+                        let written_ty = body.file.ir.functions[setter as usize]
+                            .params
+                            .last()
+                            .copied()
+                            .ok_or_else(|| format!("a setter of `{name}` without a value"))?;
+                        let written = body.check_erased_value(params[2], written_ty)?;
+                        body.accessor_of(setter, object, Some(written))?;
                     }
                 }
                 body.builder.ins().return_(&[]);
