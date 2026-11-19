@@ -1765,7 +1765,16 @@ impl<'a> Body<'a> {
                 receiver,
                 class,
                 index,
-            } => self.field_read(receiver, class, index)?,
+            } => {
+                self.field_read(receiver, class, index)?;
+                // A field that stores `kotlin.Unit`'s instance and is read where the checked use
+                // is `Unit` has no carrier there: the stored reference is discarded, as any value
+                // converted to a type without a carrier is.
+                let stored = self.ir.classes[class as usize].fields[index as usize].ty;
+                if carrier(stored)?.is_some() && self.carrier_of(id)?.is_none() {
+                    self.code.drop_();
+                }
+            }
             IrExpr::SetField {
                 receiver,
                 class,
