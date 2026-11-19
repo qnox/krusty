@@ -234,6 +234,24 @@ impl Checker<'_> {
         argument.is_expected_type_callable() && !argument.result_is_input_constrained()
     }
 
+    /// Whether the selected nested call took a solution for every one of its type arguments from
+    /// inputs that are themselves determined: an argument that is another call whose result is
+    /// still open (`forward(produce())`) only passes on a provisional completion.
+    pub(super) fn nested_call_type_arguments_solved(&self, expression: ExprId) -> bool {
+        let arguments: &[ExprId] = match self.file.expr(expression) {
+            Expr::Call { args, .. } => args,
+            Expr::SafeCall {
+                args: Some(args), ..
+            } => args,
+            _ => &[],
+        };
+        self.selected_call_type_arguments(expression)
+            .is_some_and(|solved| !solved.is_empty() && solved.iter().all(Option::is_some))
+            && arguments
+                .iter()
+                .all(|&argument| self.unbound_call_result_signature(argument).is_none())
+    }
+
     /// Whether an enclosing parameter may complete this nested result without replacing type
     /// evidence fixed by the nested call's own inputs.
     pub(super) fn argument_result_may_bind_expected(
@@ -244,7 +262,7 @@ impl Checker<'_> {
     ) -> bool {
         let kind = self.call_arg_kind(scope, argument);
         (kind.may_bind_result_during_overload_selection(expected)
-            || self.input_evidence_fits_expected_result(&kind, expected))
+            || self.input_evidence_fits_expected_result(&kind, argument, expected))
             && self.call_result_can_bind_expected(argument, expected)
     }
 
@@ -255,6 +273,7 @@ impl Checker<'_> {
     fn input_evidence_fits_expected_result(
         &self,
         kind: &crate::symbol_resolver::CallArgKind,
+        expression: ExprId,
         expected: Ty,
     ) -> bool {
         let crate::symbol_resolver::CallArgKind::ExpectedTypeCallable {
@@ -285,12 +304,68 @@ impl Checker<'_> {
             |actual, bound| self.receiver_is_assignable(actual, bound),
         )
         .unwrap_or_default();
+        let postponed = self.postponed_argument_formals(expression, generic_sig);
         generic_sig.formals.iter().all(|formal| {
+            if postponed.contains(formal) {
+                return true;
+            }
             match (input_bindings.get(formal), expected_bindings.get(formal)) {
-                (Some(&input), Some(&expected)) => self.receiver_is_assignable(input, expected),
+                // An erased top is a nested call's default completion of a variable its own inputs
+                // left open, not a lower bound the expectation must keep.
+                (Some(&input), Some(&expected)) => {
+                    input.is_erased_top() || self.receiver_is_assignable(input, expected)
+                }
                 _ => true,
             }
         })
+    }
+
+    /// The formals of a nested call that only a lambda or callable-reference argument reaches: that
+    /// argument is postponed, so its provisional shape (`() -> Unit` for `{}`) is not evidence an
+    /// enclosing expectation (`Sh.() -> Unit`) must keep. A formal the receiver or an ordinary
+    /// argument also reaches (`T` of `Node().apply { }`) keeps that evidence.
+    fn postponed_argument_formals(
+        &self,
+        expression: ExprId,
+        generic_sig: &GenericSig,
+    ) -> Vec<crate::types::TyParamName> {
+        let arguments: &[ExprId] = match self.file.expr(expression) {
+            Expr::Call { args, .. } => args,
+            Expr::SafeCall {
+                args: Some(args), ..
+            } => args,
+            _ => &[],
+        };
+        let postponed = |argument: ExprId| {
+            matches!(
+                self.file.expr(argument),
+                Expr::Lambda { .. } | Expr::CallableRef { .. }
+            )
+        };
+        let reaches = |formal: &crate::types::TyParamName, ty: Ty| {
+            ty_mentions_param(ty, std::slice::from_ref(formal))
+        };
+        generic_sig
+            .formals
+            .iter()
+            .filter(|formal| {
+                let through = |wanted: bool| {
+                    arguments.iter().enumerate().any(|(index, &argument)| {
+                        postponed(argument) == wanted
+                            && generic_sig
+                                .params
+                                .get(index)
+                                .is_some_and(|&parameter| reaches(formal, parameter))
+                    })
+                };
+                through(true)
+                    && !through(false)
+                    && !generic_sig
+                        .receiver
+                        .is_some_and(|receiver| reaches(formal, receiver))
+            })
+            .cloned()
+            .collect()
     }
 
     /// Record the type-parameter identities lexically in scope at `call`.
