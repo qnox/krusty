@@ -127,7 +127,6 @@ compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/potential
 compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/samVsDefault.kt
 compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/suspendFunctionTypeVsRunnable.kt
 compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/typeVariableInvariantReturnTypeFeatureDisabled.kt
-compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/typeVariableInvariantReturnTypeFeatureEnabled.kt
 compiler/testData/diagnostics/tests/callResolution/exponentialArraySetWithPlusAssign.kt
 compiler/testData/diagnostics/tests/callResolution/syntheticPropertiesWrongImplicitReceiver.kt
 compiler/testData/diagnostics/tests/callableReference/bound/controlFlow.kt
