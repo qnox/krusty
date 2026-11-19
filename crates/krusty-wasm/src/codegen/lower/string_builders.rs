@@ -275,6 +275,7 @@ impl Body<'_> {
         )?;
         self.runtime.builtin_member(
             self.module,
+            self.classifiers,
             member,
             name,
             &signature,
