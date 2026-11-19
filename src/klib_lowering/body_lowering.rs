@@ -786,6 +786,7 @@ impl<'a> BodyLowering<'a> {
             } if matches!(
                 origin.as_str(),
                 "INLINE_ARGS_CONTAINER"
+                    | "ARGUMENTS_REORDERING_FOR_CALL"
                     | "WHEN"
                     | "PLUSEQ"
                     | "MINUSEQ"
@@ -820,7 +821,7 @@ impl<'a> BodyLowering<'a> {
                 origin: Some(origin),
             } if origin == "OBJECT_LITERAL" => return self.object_literal(statements),
             KlibIrExprKind::Block { .. } => {
-                return unsupported("a block of a compiler-introduced form")
+                return unsupported("a block of a compiler-introduced form");
             }
             KlibIrExprKind::Composite { .. } => return unsupported("a composite block"),
             KlibIrExprKind::ReturnableBlock {
