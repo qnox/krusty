@@ -821,15 +821,18 @@ impl BodyLowering<'_> {
                 declaration: Some((&declared_parameters, &declared_formals)),
             },
         )?;
-        self.linked_call_with_operands(linked, operands, dispatch)
+        self.linked_call_with_operands(linked, operands, dispatch, Some(access))
     }
 
     /// A call of `linked` with the operands its call site supplies, dispatched as `dispatch`.
+    /// `access` is the serialized call whose type arguments an expanded inline callee binds; a
+    /// call the lowering synthesizes has none.
     fn linked_call_with_operands(
         &mut self,
         linked: LinkedCallee,
         operands: CallOperands,
         dispatch: CallDispatch,
+        access: Option<&KlibIrMemberAccess>,
     ) -> Lowered<ExprId> {
         let mut callee = linked.callee;
         if let Callee::External { params, ret, .. } = &mut callee {
@@ -909,7 +912,7 @@ impl BodyLowering<'_> {
                 args,
             }),
         };
-        if let Some(function) = expanded {
+        if let (Some(function), Some(access)) = (expanded, access) {
             self.record_inline_type_arguments(call, function, access)?;
         }
         if let Some(result) = suspend_result {
@@ -1158,6 +1161,7 @@ impl BodyLowering<'_> {
                 ret: intercepted_type,
             },
             CallDispatch::Virtual,
+            None,
         )?;
         let intercepted = self.coercion(intercepted, operands.ret);
         let unchanged = self.ir.add_expr(IrExpr::GetValue(slot));
