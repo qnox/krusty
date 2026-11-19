@@ -1271,7 +1271,7 @@ impl CheckedBackendCallables {
 
     /// Freeze the `CharSequence` members resolution selected for a target whose `StringBuilder`
     /// reads an appended sequence through them
-    /// ([`crate::backend::Backend::appends_char_sequences_by_index`]); no source call need name
+    /// ([`crate::backend::Backend::reads_appended_char_sequences`]); no source call need name
     /// them.
     pub(crate) fn freeze_char_sequence_protocol(
         &mut self,

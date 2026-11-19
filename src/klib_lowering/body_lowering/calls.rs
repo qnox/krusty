@@ -16,8 +16,8 @@ use super::{
 };
 use crate::fir::FirTypeParameterRef;
 use crate::ir::{
-    Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrIntrinsic,
-    IrPropertyDispatch,
+    Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrConst, IrExpr,
+    IrIntrinsic, IrPropertyDispatch,
 };
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{
@@ -139,6 +139,19 @@ impl BodyLowering<'_> {
         ty: Ty,
     ) -> Lowered<ExprId> {
         use super::super::primitive_calls::CommonPrimitive;
+        if primitive.operation == CommonPrimitive::EmptyArray {
+            if access.type_arguments.len() != 1 || !ty.is_reference_array() {
+                return Err(mismatch(
+                    "an empty array factory is called with another shape than its declaration's",
+                ));
+            }
+            let size = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            let array = self.ir.add_expr(IrExpr::NewArray {
+                array_type: ty,
+                size,
+            });
+            return Ok(self.typed(array, ty));
+        }
         if !access.type_arguments.is_empty() {
             return Err(mismatch("a common primitive is called with type arguments"));
         }
@@ -202,7 +215,7 @@ impl BodyLowering<'_> {
                 )))
             }
             // A numeric conversion, as checked FIR lowers the source conversion.
-            CommonPrimitive::ArrayLiteral => {
+            CommonPrimitive::ArrayLiteral | CommonPrimitive::EmptyArray => {
                 return Err(mismatch(
                     "an array factory is called with a dispatch receiver",
                 ))
