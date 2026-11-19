@@ -389,6 +389,23 @@ pub(crate) fn string_compare_intrinsic(
         .then_some(CompilerIntrinsic::StringCompare)
 }
 
+/// `String.subSequence(startIndex: Int, endIndex: Int): CharSequence`, by its exact declaration.
+/// Only a provider whose strings a target lays out itself realizes it as
+/// [`CompilerIntrinsic::StringSubSequence`]; a JVM string is a platform class whose own
+/// `subSequence` a call reaches.
+pub(crate) fn string_sub_sequence_intrinsic(
+    facts: &BuiltinMemberDeclaration<'_>,
+) -> Option<CompilerIntrinsic> {
+    (facts.owner == crate::types::wk::string()
+        && facts.name == "subSequence"
+        && !facts.is_property
+        && !facts.is_infix
+        && !facts.is_operator
+        && facts.params == [Ty::Int, Ty::Int]
+        && facts.ret == Ty::obj_name(crate::types::wk::char_sequence()))
+    .then_some(CompilerIntrinsic::StringSubSequence)
+}
+
 /// The primitive operation implemented by one exact unsigned bitwise member signature.
 ///
 /// This is deliberately the same declaration-to-intrinsic mapping used for signed builtin
@@ -680,6 +697,32 @@ mod tests {
             realization(declaration),
             MemberRealization::Intrinsic(CompilerIntrinsic::StringGet)
         );
+    }
+
+    #[test]
+    fn string_sub_sequence_is_the_exact_string_declaration() {
+        let sequence = Ty::obj_name(crate::types::wk::char_sequence());
+        let mut slice = facts(
+            "kotlin/String",
+            "subSequence",
+            &[Ty::Int, Ty::Int],
+            sequence,
+        );
+        slice.is_operator = false;
+        assert_eq!(
+            string_sub_sequence_intrinsic(&slice),
+            Some(CompilerIntrinsic::StringSubSequence)
+        );
+        let other_owner = BuiltinMemberDeclaration {
+            owner: type_name("kotlin/text/StringBuilder"),
+            ..slice
+        };
+        assert_eq!(string_sub_sequence_intrinsic(&other_owner), None);
+        let other_shape = BuiltinMemberDeclaration {
+            params: &[Ty::Int],
+            ..slice
+        };
+        assert_eq!(string_sub_sequence_intrinsic(&other_shape), None);
     }
 
     #[test]
