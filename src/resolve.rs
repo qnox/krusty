@@ -110,6 +110,10 @@ mod class_literal_array_of_nothing;
 mod class_literal_receiver;
 mod class_literal_type_arguments;
 mod class_names_aliases;
+mod explicit_import_selection;
+pub(crate) use explicit_import_selection::explicit_classifier_selection;
+pub use explicit_import_selection::import_map;
+use explicit_import_selection::{classifier_from_imports, imported_classifier_selection};
 mod expression_finalization;
 mod reference_array_spread;
 mod reference_context_arguments;
@@ -209,6 +213,7 @@ mod if_expression;
 mod implicit_receiver_calls;
 mod implicit_rungs;
 mod inline_access;
+mod inline_parameter_usage;
 mod inner_constructor_calls;
 mod member_call_bindings;
 mod member_slot_calls;
@@ -238,6 +243,7 @@ mod lambda_returns;
 mod lexical_bindings;
 mod lexical_policies;
 mod library_constructor_failure;
+mod library_default_realization;
 mod local_call_applicability;
 mod local_call_arguments;
 mod local_callable_reference_selection;
@@ -4026,23 +4032,6 @@ pub fn builtin_bitwise_ret(recv: Ty, name: &str, n_args: usize) -> Option<Ty> {
     }
 }
 
-/// Map a file's EXPLICIT imports `simple name -> internal name` (e.g. `Calc -> util/Calc`). A
-/// wildcard import (`a.b.*`) has no simple name — those are represented by [`import_levels`].
-pub fn import_map(file: &File) -> HashMap<String, String> {
-    let mut m = HashMap::default();
-    for import in &file.import_paths {
-        if import.wildcard {
-            continue;
-        }
-        let fq = import.path();
-        if let Some(simple) = import.imported_name() {
-            let internal = fq.replace('.', "/");
-            m.insert(simple.to_string(), internal);
-        }
-    }
-    m
-}
-
 /// Kotlin's common default imports, in source package syntax. Target-specific additions are supplied by
 /// the platform symbol source and composed by [`import_levels`].
 pub const KOTLIN_DEFAULT_IMPORT_PACKAGES: &[&str] = &[
@@ -4097,63 +4086,6 @@ fn import_levels(
         .map(|package| source_package::identity(Some(package)))
         .collect();
     [vec![own], explicit_star, kotlin_defaults, platform]
-}
-
-/// Resolve a name to its fully-qualified internal name against a file's import set — the single
-/// kotlinc-conforming resolver both the signature pass and the [`Checker`] use, so a name resolves
-/// identically wherever it appears. A name is ALWAYS an FQN; an unqualified use forms candidate FQNs
-/// `pkg/name` from the in-scope packages. Precedence (spec § resolution): an explicit non-star import
-/// names the FQN directly (highest); otherwise each precedence level (`levels`, descending) supplies
-/// candidates and the FIRST level with any resolving candidate wins. Two or more DISTINCT resolutions
-/// within one level are AMBIGUOUS — kotlinc rejects a name two star-imports both supply — and resolve
-/// to `None` (a genuinely ambiguous name never appears in a compiling program). A classpath `typealias`
-/// candidate resolves to its target internal. Existence is verified via `resolve_type`.
-fn classifier_from_imports<S: SymbolSource + ?Sized>(
-    name: &str,
-    explicit: &HashMap<String, String>,
-    levels: &[crate::symbol_resolver::ClassifierImportLevel],
-    source: &S,
-) -> InheritedNestedClassifier {
-    match imported_classifier_selection(name, explicit, levels, source) {
-        crate::symbol_resolver::CandidateSelectionWithTies::Selected(classifier) => {
-            InheritedNestedClassifier::Found(classifier)
-        }
-        crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(_) => {
-            InheritedNestedClassifier::Ambiguous
-        }
-        crate::symbol_resolver::CandidateSelectionWithTies::None => {
-            InheritedNestedClassifier::NotFound
-        }
-    }
-}
-
-/// The classifier the imports bind `name` to: an explicit import, else the nearest import level
-/// that has any candidate, keeping every candidate of an ambiguous level.
-fn imported_classifier_selection<S: SymbolSource + ?Sized>(
-    name: &str,
-    explicit: &HashMap<String, String>,
-    levels: &[crate::symbol_resolver::ClassifierImportLevel],
-    source: &S,
-) -> crate::symbol_resolver::CandidateSelectionWithTies<TypeName> {
-    use crate::symbol_resolver::CandidateSelectionWithTies;
-    if let Some(fq) = explicit.get(name) {
-        // Imports share syntax but not namespaces. An explicit import of a callable named `Foo`
-        // must not erase a same-file classifier `Foo`; it contributes to classifier lookup only
-        // when the imported path actually resolves to a classifier.
-        if let Ok(classifier) = classifier_path(fq, source, None) {
-            return CandidateSelectionWithTies::Selected(classifier);
-        }
-    }
-    for level in levels {
-        let hits =
-            crate::symbol_resolver::classifier_candidates_at_import_level(source, name, level);
-        match hits.as_slice() {
-            [] => continue,
-            [classifier] => return CandidateSelectionWithTies::Selected(*classifier),
-            _ => return CandidateSelectionWithTies::Ambiguous(hits),
-        }
-    }
-    CandidateSelectionWithTies::None
 }
 
 /// Map a single JVM field descriptor to a krusty `Ty` (the v0 supported set).
@@ -22069,157 +22001,6 @@ fun after(): Int = 2
         );
     }
 
-    struct ClassifierImportSource;
-
-    fn import_test_classifier(alias_target: Option<TypeName>) -> crate::libraries::LibraryType {
-        crate::libraries::LibraryType {
-            is_kotlin: true,
-            alias_target,
-            ..crate::libraries::LibraryType::declaration_header()
-        }
-    }
-
-    fn import_classifier(
-        internal: crate::types::TypeName,
-    ) -> Option<std::sync::Arc<crate::libraries::LibraryType>> {
-        if ["fallback/Thing", "distinct_a/Thing", "distinct_b/Thing"]
-            .iter()
-            .any(|name| internal.matches(name))
-        {
-            Some(std::sync::Arc::new(import_test_classifier(None)))
-        } else if ["alias_a/Thing", "alias_b/Thing"]
-            .iter()
-            .any(|name| internal.matches(name))
-        {
-            Some(std::sync::Arc::new(import_test_classifier(Some(
-                crate::types::type_name("target/Thing"),
-            ))))
-        } else {
-            None
-        }
-    }
-
-    impl crate::symbol_source::SymbolSource for ClassifierImportSource {
-        fn symbols(
-            &self,
-            namespace: crate::symbol_source::SymbolNamespace,
-            name: &str,
-        ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-            if namespace
-                == crate::symbol_source::SymbolNamespace::Package(crate::types::type_name(
-                    "callable",
-                ))
-                && name == "Thing"
-            {
-                let callable = crate::libraries::LibraryCallable::library(
-                    "callable/ThingKt",
-                    "Thing",
-                    Vec::new(),
-                    Ty::Unit,
-                    Ty::Unit,
-                    "()V",
-                );
-                return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
-                    builtin_classifier: false,
-                    classifier_name: None,
-                    classifier_declaration: None,
-                    classifier: None,
-                    callables: crate::libraries::Callables::Functions(
-                        crate::libraries::FunctionSet {
-                            overloads: vec![crate::libraries::FunctionInfo::plain(
-                                crate::libraries::FnKind::TopLevel,
-                                None,
-                                callable,
-                            )],
-                        },
-                    ),
-                    importable_declaration: false,
-                });
-            }
-            // A provider owns the textual index for its declarations. It may intern the identity
-            // after a HIT, but a speculative miss must not pollute the global name tree merely so
-            // `existing_classifier` can find it on a later probe.
-            let internal = match namespace {
-                crate::symbol_source::SymbolNamespace::Package(package)
-                    if name == "Thing"
-                        && ["fallback", "distinct_a", "distinct_b", "alias_a", "alias_b"]
-                            .iter()
-                            .any(|known| package.matches(known)) =>
-                {
-                    Some(crate::types::type_name_child(package, name))
-                }
-                _ => None,
-            };
-            let classifier = internal.and_then(import_classifier);
-            std::rc::Rc::new(crate::libraries::ResolvedSymbols {
-                builtin_classifier: false,
-                classifier_declaration: classifier
-                    .as_ref()
-                    .and(internal)
-                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
-                classifier_name: internal.map(|internal| {
-                    classifier
-                        .as_ref()
-                        .and_then(|classifier| classifier.alias_target)
-                        .unwrap_or(internal)
-                }),
-                classifier,
-                callables: crate::libraries::Callables::None,
-                importable_declaration: false,
-            })
-        }
-    }
-
-    #[test]
-    fn classifier_import_resolution_ignores_callable_only_higher_precedence_candidates() {
-        let resolved = classifier_from_imports(
-            "Thing",
-            &HashMap::default(),
-            &[
-                vec![crate::types::type_name("callable")].into(),
-                vec![crate::types::type_name("fallback")].into(),
-            ],
-            &ClassifierImportSource,
-        );
-        assert_eq!(
-            resolved,
-            InheritedNestedClassifier::Found(crate::types::type_name("fallback/Thing"))
-        );
-    }
-
-    #[test]
-    fn classifier_import_resolution_collapses_aliases_to_the_same_target() {
-        let resolved = classifier_from_imports(
-            "Thing",
-            &HashMap::default(),
-            &[vec![
-                crate::types::type_name("alias_a"),
-                crate::types::type_name("alias_b"),
-            ]
-            .into()],
-            &ClassifierImportSource,
-        );
-        assert_eq!(
-            resolved,
-            InheritedNestedClassifier::Found(crate::types::type_name("target/Thing"))
-        );
-    }
-
-    #[test]
-    fn classifier_import_resolution_rejects_distinct_same_level_candidates() {
-        let resolved = classifier_from_imports(
-            "Thing",
-            &HashMap::default(),
-            &[vec![
-                crate::types::type_name("distinct_a"),
-                crate::types::type_name("distinct_b"),
-            ]
-            .into()],
-            &ClassifierImportSource,
-        );
-        assert_eq!(resolved, InheritedNestedClassifier::Ambiguous);
-    }
-
     fn check(src: &str) -> (Vec<String>, Option<TypeInfo>) {
         let mut d = DiagSink::new();
         let (_, _, info) = crate::frontend::analyze_source_standalone(src, &mut d);
@@ -30395,8 +30176,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         fn_closure_reassigned: Vec::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
-        public_api_inline_depth: 0,
-        public_inline_access_calls: HashSet::default(),
+        inline_access: inline_access::InlineAccessState::default(),
         argument_lambda_inlining: HashMap::default(),
         symbolic_signature_inference: false,
         postponed_call_constraints: Vec::new(),
@@ -32734,7 +32514,7 @@ struct Checker<'a> {
     /// Concrete postponed callable-reference rechecks that already failed. Final selected-argument
     /// commitment consumes this fact instead of entering the same failed reference a third time.
     completed_failed_postponed_callable_rechecks: crate::fx_hash::HashSet<ExprId>,
-    imports: HashMap<String, String>,
+    imports: HashMap<String, Vec<String>>,
     /// Classifier import rungs. Callable lookup uses [`Self::function_import_scope`]'s order.
     import_levels: Vec<crate::symbol_resolver::ClassifierImportLevel>,
     function_import_scope: crate::symbol_resolver::FunctionImportScope,
@@ -33037,12 +32817,8 @@ struct Checker<'a> {
     /// (`forEach`), where a mutable capture is fine because the lambda body is inlined into the caller
     /// (no closure). Suppresses the mutable-capture rejection for that one lambda.
     allow_lambda_mutation: bool,
-    /// How many public or protected `inline` functions are being checked. A call to a
-    /// non-public-API function inside one is rejected. An `internal` or `private` inline body is
-    /// not this boundary.
-    public_api_inline_depth: u32,
-    /// Calls already reported for that rule. Inference may check one call twice.
-    public_inline_access_calls: HashSet<ExprId>,
+    /// The `inline` function rules' checking state: public-API access and inline-parameter usage.
+    inline_access: inline_access::InlineAccessState,
     /// Per lambda argument, whether the selected parameter inlines it into the caller's frame: the
     /// callee is inline and the parameter is neither `crossinline` nor `noinline`. A lambda absent
     /// here was taken by no selected parameter, so its body runs in a frame of its own. Recorded where an argument
@@ -36354,44 +36130,6 @@ impl<'a> Checker<'a> {
         self.file.member_name_span(member, name)
     }
 
-    /// The literal each omitted defaulted parameter takes, or `None` when the provider cannot say.
-    ///
-    /// Every omitted slot must be answered: a call that can fill three of four omitted parameters
-    /// is a call that cannot be made, and half an answer here would pass the callee a value it
-    /// never declared. The value must also FIT the parameter it fills — a provider that decoded a
-    /// constant of the wrong shape is a provider that is wrong about the declaration, and passing
-    /// it would be a silently miscompiled argument rather than a diagnosis.
-    fn library_default_literals(
-        &self,
-        call: ExprId,
-        selected: &crate::libraries::FunctionInfo,
-    ) -> Option<Vec<(usize, crate::libraries::DefaultValue)>> {
-        let slots = self.resolved_call_arg_slots.get(&call)?;
-        // Provider defaults are parallel to VALUE parameters. Context parameters are supplied
-        // independently and must not shift this declaration-owned table.
-        let parameters = selected.value_params();
-        if selected.context_count > selected.call_sig.param_names.len() {
-            return None;
-        }
-        let context_count = selected.context_count;
-        let value_call_sig = selected.call_sig.suffix(context_count);
-        let mut literals = Vec::new();
-        for (parameter, argument) in slots.iter().enumerate() {
-            if argument.is_some() || value_call_sig.vararg_index == Some(parameter) {
-                continue;
-            }
-            let value = selected.default_values.get(parameter)?.clone()?;
-            if !self
-                .resolver()
-                .default_literal_fits(&value, *parameters.get(parameter)?)
-            {
-                return None;
-            }
-            literals.push((parameter, value));
-        }
-        (!literals.is_empty()).then_some(literals)
-    }
-
     fn nullable_receiver_call_span(&self, call: ExprId) -> Span {
         if let Expr::Call { callee, .. } = self.file.expr(call) {
             if let Some((_, span)) = self
@@ -36987,7 +36725,7 @@ impl<'a> Checker<'a> {
                 // arguments, so the call site passes it and no `$default` symbol is named.
                 self.resolved_library_default_literals
                     .insert(call, literals);
-            } else if selected.callable.defaults_from_declaration {
+            } else if self.library_entry_fills_its_own_defaults(&selected.callable) {
                 selected.callable.default_call = true;
             } else {
                 self.diags.error(
@@ -39082,9 +38820,10 @@ impl<'a> Checker<'a> {
                     self.libraries.canonical_source_type_name(expansion.target) == internal
                 })
         };
-        if let Some(path) = self.imports.get(name) {
-            let identity = crate::types::type_name(&path.replace('.', "/"));
-            return matches_selected(identity);
+        if let Some(paths) = self.imports.get(name) {
+            return paths.iter().find_map(|path| {
+                matches_selected(crate::types::type_name(&path.replace('.', "/")))
+            });
         }
         if name.contains(['.', '/']) {
             let identity = crate::types::type_name(&name.replace('.', "/"));
@@ -39695,11 +39434,12 @@ impl<'a> Checker<'a> {
             return Some(identity);
         }
         let declared = |identity: TypeName| self.source_alias_declared(identity);
-        if let Some(path) = self.imports.get(name) {
+        if let Some(paths) = self.imports.get(name) {
             // An explicit import is the selected root; a miss is final (matching classifier
             // resolution — it never reopens same-package or star interpretations).
-            return crate::types::existing_type_name(&path.replace('.', "/"))
-                .filter(|&id| declared(id));
+            return paths.iter().find_map(|path| {
+                crate::types::existing_type_name(&path.replace('.', "/")).filter(|&id| declared(id))
+            });
         }
         for level in &self.import_levels {
             let mut hit: Option<TypeName> = None;
@@ -40122,22 +39862,21 @@ impl<'a> Checker<'a> {
                     } else {
                         self.null_branch_narrowings(scope, operand, &mut out);
                     }
-                } else if (op == BinOp::Eq) != for_else {
-                    // `x?.p == true` (or any non-null literal) holds only when every `?.` held:
+                } else if matches!(op, BinOp::Eq | BinOp::RefEq) != for_else {
+                    // `x?.p == v` holds only when every `?.` held, as long as `v` cannot be null:
                     // the safe-call chain's receivers are non-null where the equality is known.
-                    let literal = |expression: ExprId| {
-                        matches!(
-                            self.file.expr(expression),
-                            Expr::BoolLit(_)
-                                | Expr::IntLit(_)
-                                | Expr::LongLit(_)
-                                | Expr::StringLit(_)
-                                | Expr::CharLit(_)
-                        )
+                    let never_null = |expression: ExprId| {
+                        self.expr_types
+                            .get(expression.0 as usize)
+                            .is_some_and(|ty| {
+                                !ty.mentions_error()
+                                    && !ty.admits_null()
+                                    && !ty.upper_bound_admits_null()
+                            })
                     };
                     let safe_call = match (self.file.expr(lhs), self.file.expr(rhs)) {
-                        (Expr::SafeCall { .. }, _) if literal(rhs) => Some(lhs),
-                        (_, Expr::SafeCall { .. }) if literal(lhs) => Some(rhs),
+                        (Expr::SafeCall { .. }, _) if never_null(rhs) => Some(lhs),
+                        (_, Expr::SafeCall { .. }) if never_null(lhs) => Some(rhs),
                         _ => None,
                     };
                     if let Some(safe_call) = safe_call {
