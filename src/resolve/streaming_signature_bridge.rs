@@ -3617,16 +3617,15 @@ pub(crate) fn finalized_streamed_signature_index(
                 parameters = resolved_parameters;
             }
             if let Some(syntax) = result_type {
-                let resolved = explicit_type_semantics.resolve_explicit_header_type(scope, syntax);
-                super::contract_declarations::unresolved_explicit_result(
-                    resolved,
-                    constructor_property_vararg,
-                    source_contracts
-                        .iter()
-                        .any(|candidate| candidate.declaration == stub.id),
-                    &mut result,
-                    &mut header_resolution_failed,
-                );
+                match explicit_type_semantics.resolve_explicit_header_type(scope, syntax) {
+                    Ok(resolved) => {
+                        result = super::semantic_value_parameter_ty(
+                            resolved,
+                            constructor_property_vararg,
+                        );
+                    }
+                    Err(_) => header_resolution_failed = true,
+                }
             }
             if let Some(syntax) = getter_result_type {
                 match explicit_type_semantics.resolve_explicit_header_type(scope, syntax) {

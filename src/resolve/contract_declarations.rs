@@ -13,7 +13,7 @@ use crate::contracts::{
     CallBinding, Description, DescriptionBinder, DescriptionOwner, InvocationKind, KindBinding,
     TermId, TermKind,
 };
-use crate::types::{semantic_value_parameter_ty, Ty, TypeName};
+use crate::types::{Ty, TypeName};
 
 /// The declaration whose block body begins with a statement.
 enum BodyOwner<'a> {
@@ -394,21 +394,4 @@ fn class_id_parts(classifier: TypeName) -> (String, String) {
         class.push_str(segment);
     }
     (outer.package(), class)
-}
-
-/// An unresolved explicit result is already diagnosed. A function that declares a contract still
-/// needs a published callable signature, so that result is `Unit`: an error-typed return is
-/// assignable to it and does not add another mismatch.
-pub(super) fn unresolved_explicit_result(
-    resolved: Result<Ty, crate::fir::DiagnosticId>,
-    vararg: bool,
-    has_contract: bool,
-    result: &mut Ty,
-    failed: &mut bool,
-) {
-    match resolved {
-        Ok(resolved) => *result = semantic_value_parameter_ty(resolved, vararg),
-        Err(_) if has_contract => *result = Ty::Unit,
-        Err(_) => *failed = true,
-    }
 }
