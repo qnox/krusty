@@ -840,7 +840,6 @@ devirtualization/anonymousObject.kt
 devirtualization/inline_getter.kt
 devirtualization/lateinitInterface.kt
 diagnostics/functions/tailRecursion/whenWithIs.kt
-directInvokeOptimization/unboundMemberRef.kt
 elvis/genericElvisWithMoreSpecificLHS.kt
 elvis/ofNonNullableResultType.kt
 elvis/primitive.kt
@@ -1357,9 +1356,6 @@ innerNested/kt63732.kt
 interfaceCallsNCasts/conservativeItable.kt
 interfaceCallsNCasts/diamond.kt
 interfaceCallsNCasts/finalMethod.kt
-intrinsics/kt10131.kt
-intrinsics/kt10131a.kt
-intrinsics/kt8666.kt
 intrinsics/throwableParamOrder.kt
 intrinsics/tostring.kt
 intrinsics/trimMarginWithBlankString.kt
@@ -1620,7 +1616,6 @@ ranges/contains/generated/ulongRangeTo.kt
 ranges/contains/generated/ulongRangeUntil.kt
 ranges/contains/generated/ulongUntil.kt
 ranges/contains/inComparableRange.kt
-ranges/contains/inCustomObjectRange.kt
 ranges/contains/inDoubleRangeLiteralVsComparableRangeLiteral.kt
 ranges/contains/inExtensionRange.kt
 ranges/contains/inFloatingPointRangeWithNaNBound.kt
