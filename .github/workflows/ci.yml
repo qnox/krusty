@@ -693,9 +693,43 @@ jobs:
           path: test-failures/
           if-no-files-found: ignore
 
+  # Downloads the extra libraries the conformance rows read (the atomicfu compiler plugin of each
+  # Kotlin release and the pinned atomicfu runtimes) once, serially and with retries, and saves them
+  # for the rows that follow. A row whose own cache entry was missing used to download them itself,
+  # and a refused or missing answer from Central failed that row (Native 2.4.20 on master). It saves
+  # on a queue branch too: the rows are in the same run, so they see an entry their own branch saved.
+  conformance-deps:
+    needs: [build-tool-bins]
+    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['conformance-deps'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - *just-on-path
+      - *install-just
+      - name: restore the extra conformance libraries
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: conformance-deps-v1-${{ hashFiles('scripts/fetch-conformance-deps.sh', 'kotlin-versions', 'src/toolchain.rs') }}
+      - name: download the libraries of every Kotlin release
+        if: steps.deps.outputs.cache-hit != 'true'
+        env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+        run: |
+          set -euo pipefail
+          while read -r kotlin; do
+            scripts/fetch-conformance-deps.sh "$kotlin"
+          done < <(just kotlin-versions)
+      - name: save the extra conformance libraries
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    needs: [build-tool-bins]
+    needs: [build-tool-bins, conformance-deps]
     strategy:
       fail-fast: false
       matrix:
@@ -740,6 +774,14 @@ jobs:
         with:
           path: target/cache/kotlinc/${{ matrix.version }}
           key: kotlinc-${{ matrix.version }}
+      # The conformance-deps job downloaded the atomicfu plugin and runtimes of every release and
+      # saved them under this key in this run; a row never fetches them from Central itself.
+      - name: restore the extra conformance libraries
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: conformance-deps-v1-${{ hashFiles('scripts/fetch-conformance-deps.sh', 'kotlin-versions', 'src/toolchain.rs') }}
+          fail-on-cache-miss: true
       # The Native lane's JVM oracle needs the same extra libraries (the atomicfu plugin), so it
       # restores the entry the JVM lane saves; only the JVM lane saves it.
       - name: restore serialization and KSP conformance inputs (${{ matrix.version }})
