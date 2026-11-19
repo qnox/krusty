@@ -28,7 +28,6 @@
 //!     → ERROR. Silently ignoring it would emit wrong bytecode, so a drop-in must fail loudly.
 
 use crate::compilation_target::CompilationTarget;
-use crate::plugins::allopen::AllOpenPlugin;
 use crate::plugins::assignment::AssignmentPlugin;
 use crate::plugins::atomicfu::AtomicfuPlugin;
 use crate::plugins::cli::{
@@ -37,6 +36,7 @@ use crate::plugins::cli::{
     SAM_WITH_RECEIVER_PLUGIN_ID, SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
 };
 use crate::plugins::compose::{ComposeOptions, ComposePlugin};
+use crate::plugins::convention::ConventionInstance;
 use crate::plugins::noarg::NoArgPlugin;
 use crate::plugins::parcelize::ParcelizePlugin;
 use crate::plugins::sam_with_receiver::SamWithReceiverPlugin;
@@ -402,7 +402,10 @@ fn build_allopen(
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(AllOpenPlugin::from_options(options))
+    Box::new(ConventionInstance::new(
+        &krusty_plugin_allopen::PLUGIN,
+        options,
+    ))
 }
 
 /// Build the native no-arg plugin from the compilation's options for it.
