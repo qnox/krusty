@@ -35702,15 +35702,7 @@ impl<'a> Checker<'a> {
 
     fn implicit_receivers(&self, scope: &CheckerScope<'_>) -> Vec<ImplicitReceiver> {
         let mut receivers = self.declared_implicit_receivers(scope);
-        // Flow facts for the unqualified `this` value change the semantic type of the nearest
-        // receiver rung, not its runtime identity. Bare member lookup must see that narrowed type
-        // (`fun A?.bar() = if (this != null) foo() else ...`) while FIR continues to materialize the
-        // exact receiver depth selected above.
-        if let Some(narrowed) = self.actual_this_narrow(scope) {
-            if let Some(current) = receivers.iter_mut().find(|receiver| receiver.current) {
-                current.ty = narrowed;
-            }
-        }
+        self.narrow_current_implicit_receiver(scope, &mut receivers);
         receivers
     }
 
