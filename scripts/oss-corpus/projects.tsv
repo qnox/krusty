@@ -27,5 +27,5 @@ okio	https://github.com/lysine-dev/okio	e84aa17bac2b31e688c8be4f61557779032f7a7c
 nowinandroid	https://github.com/android/nowinandroid	2982e63cb691ad49cd009aab43dc206fee6699c2	.	21	gradle/libs.versions.toml:kotlin	demoDebug
 bitwarden	https://github.com/bitwarden/android	6829b0add474461912f1c817975756011ab68cdd	.	21	-	fdroidDebug,debug
 element-x-android	https://github.com/element-hq/element-x-android	010fe5a25d55214a3c9c764406a67598ad4e6f5f	.	21	-	fdroidDebug,debug
-intellij-community	https://github.com/JetBrains/intellij-community	b2c2e6113bcb04dfa18a73dcffca3de2532f1b6f	.	21	-	-	lsp
+intellij-community	https://github.com/JetBrains/intellij-community	1608e029bb2c308b5c5f81a91a3e3d55830eb804	.	21	-	-	compile,lsp
 kotlin	https://github.com/JetBrains/kotlin	9180ce6a7a7d3627f88b424717583f28ddca052d	.	21	gradle.properties:bootstrap.kotlin.version	-	compile,lsp

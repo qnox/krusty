@@ -66,6 +66,15 @@ impl KlibIrArena {
         &self.functions[id.index()]
     }
 
+    /// The class of this arena that declares `class` as a member.
+    pub(crate) fn enclosing_class(&self, class: &KlibIrClass) -> Option<&KlibIrClass> {
+        self.classes.iter().find(|candidate| {
+            candidate.members.iter().any(|member| {
+                matches!(member, KlibIrMember::Class(id) if std::ptr::eq(self.class(*id), class))
+            })
+        })
+    }
+
     pub fn class(&self, id: KlibIrClassId) -> &KlibIrClass {
         &self.classes[id.index()]
     }
@@ -1226,6 +1235,7 @@ mod tests {
                         folded_call: |_, _| false,
                         folded_calls: |_, _| Vec::new(),
                         implied_callee: |_, _| None,
+                        converted_closure: |_, _| None,
                     }
                 )
                 .into_iter()
@@ -1242,6 +1252,7 @@ mod tests {
                         folded_call: |_, _| false,
                         folded_calls: |_, _| Vec::new(),
                         implied_callee: |_, _| None,
+                        converted_closure: |_, _| None,
                     }
                 )
                 .into_iter()
