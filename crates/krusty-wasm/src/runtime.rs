@@ -161,6 +161,7 @@ impl Runtime {
         let string_builders =
             StringBuilders::declare(module, &mut objects, &identity, chars, string);
         let object_equals = module.declare();
+        let hashing = Hashing::declare(module);
         let array_lists = ArrayLists::declare(
             module,
             &mut objects,
@@ -169,10 +170,10 @@ impl Runtime {
             chars,
             string,
             object_equals,
+            hashing.hash_code,
         );
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
         let string_concat = module.declare();
-        let hashing = Hashing::declare(module);
         let class_tokens = ClassTokens::declare(
             module,
             &mut objects,

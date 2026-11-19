@@ -157,7 +157,7 @@ pub(super) struct BulkOperations {
 impl ArrayLists {
     /// Declare the list and iterator types and define their functions. `elements` is the mutable
     /// reference-array type the list stores into. `equals` is structural equality of two
-    /// references, defined later in the same module.
+    /// references and `hash_code` the hash of one, both defined later in the same module.
     pub(super) fn declare(
         module: &mut Module,
         objects: &mut ObjectRoot,
@@ -166,6 +166,7 @@ impl ArrayLists {
         chars: u32,
         string: u32,
         equals: u32,
+        hash_code: u32,
     ) -> Self {
         let list = module.subtype(SubType {
             composite: CompositeType::Struct(vec![
@@ -190,14 +191,14 @@ impl ArrayLists {
         let list_text = empty_string_function(module, objects, chars, string);
         let iter_text = empty_string_function(module, objects, chars, string);
         let list_equals = module.declare();
+        let list_hash = module.declare();
         let (class, list_table) =
-            dispatch_table(module, objects, identity, list, list_equals, list_text);
+            dispatch_table(module, objects, list, [list_equals, list_hash], list_text);
         let (_, iter_table) = dispatch_table(
             module,
             objects,
-            identity,
             iterator,
-            objects.identity_equals,
+            [objects.identity_equals, identity.hash_code],
             iter_text,
         );
         let layout = Layout {
@@ -231,6 +232,7 @@ impl ArrayLists {
         };
         lists.define_new(module, identity, layout, list_table);
         lists.define_equals(module, objects, layout, list_equals, equals);
+        lists.define_hash_code(module, objects, layout, list_hash, hash_code);
         let reserve = lists.define_reserve(module, layout);
         lists.define_size(module, layout);
         lists.define_is_empty(module);
@@ -478,6 +480,14 @@ impl ArrayLists {
         let ty = objects.any_slot_types[0];
         let (list, other, index) = (0, 1, 2);
         let mut code = Code::default();
+        // A list is equal to itself without reading its elements, which may contain the list.
+        code.local_get(list)
+            .local_get(other)
+            .ref_eq()
+            .if_(BlockType::Empty)
+            .i32_const(1)
+            .return_()
+            .end();
         code.local_get(other)
             .ref_test(false, HeapType::Concrete(layout.list))
             .op(EQZ32)
@@ -520,6 +530,49 @@ impl ArrayLists {
             Function {
                 ty,
                 locals: vec![ValType::I32],
+                code,
+            },
+        );
+    }
+
+    /// `Any.hashCode` of a runtime list: `List.hashCode`, folding `31 * hash + element.hashCode()`
+    /// over the elements from `1`, so lists that are equal hash alike.
+    fn define_hash_code(
+        &self,
+        module: &mut Module,
+        objects: &ObjectRoot,
+        layout: Layout,
+        function: u32,
+        hash_code: u32,
+    ) {
+        let ty = objects.any_slot_types[1];
+        let (list, index, hash) = (0, 1, 2);
+        let mut code = Code::default();
+        code.i32_const(1).local_set(hash);
+        code.block(BlockType::Empty).loop_(BlockType::Empty);
+        code.local_get(index);
+        layout.length(&mut code, list);
+        code.op(GE_S32).br_if(1);
+        code.local_get(hash).i32_const(31).op(super::runtime::MUL32);
+        layout.elements(&mut code, list);
+        code.local_get(index)
+            .array_get(layout.elements)
+            .call(hash_code)
+            .op(ADD32)
+            .local_set(hash);
+        code.local_get(index)
+            .i32_const(1)
+            .op(ADD32)
+            .local_set(index)
+            .br(0)
+            .end()
+            .end()
+            .local_get(hash);
+        module.define(
+            function,
+            Function {
+                ty,
+                locals: vec![ValType::I32, ValType::I32],
                 code,
             },
         );
@@ -906,16 +959,15 @@ impl Layout {
 fn dispatch_table(
     module: &mut Module,
     objects: &mut ObjectRoot,
-    identity: &IdentityObjects,
     structure: u32,
-    equals: u32,
+    [equals, hash_code]: [u32; 2],
     to_string: u32,
 ) -> (ClassRef, u32) {
     let (class, itable) = objects
         .interfaces
         .class(module, objects.itable, vec![structure]);
     let mut init = Code::default();
-    for function in [equals, identity.hash_code, to_string] {
+    for function in [equals, hash_code, to_string] {
         module.reference_function(function);
         init.ref_func(function);
     }
