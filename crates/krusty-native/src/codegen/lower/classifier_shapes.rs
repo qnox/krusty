@@ -142,6 +142,16 @@ pub(super) fn is_char_sequence(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/CharSequence"])
 }
 
+/// `kotlin.text.Appendable`, which the runtime's builder implements.
+pub(super) fn is_appendable(internal: TypeName) -> bool {
+    is_identity(internal, &["kotlin/text/Appendable"])
+}
+
+/// `kotlin.reflect.KClass`, whose instances the runtime builds over the descriptor named for it.
+pub(super) fn is_kclass(internal: TypeName) -> bool {
+    is_identity(internal, &["kotlin/reflect/KClass"])
+}
+
 pub(super) fn is_string_builder(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/text/StringBuilder"])
 }
@@ -199,6 +209,12 @@ fn standard_interface_descriptor(internal: TypeName) -> Option<&'static str> {
         "kt_type_comparable"
     } else if is_char_sequence(internal) {
         "kt_type_char_sequence"
+    } else if is_appendable(internal) {
+        "kt_type_appendable"
+    } else if is_closed_range(internal) {
+        "kt_type_closed_range"
+    } else if is_closed_floating_range(internal) {
+        "kt_type_closed_floating_point_range"
     } else if is_identity(internal, &["kotlin/reflect/KCallable"]) {
         "kt_type_kcallable"
     } else if is_identity(internal, &["kotlin/reflect/KProperty"]) {

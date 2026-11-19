@@ -66,6 +66,15 @@ impl KlibIrArena {
         &self.functions[id.index()]
     }
 
+    /// The class of this arena that declares `class` as a member.
+    pub(crate) fn enclosing_class(&self, class: &KlibIrClass) -> Option<&KlibIrClass> {
+        self.classes.iter().find(|candidate| {
+            candidate.members.iter().any(|member| {
+                matches!(member, KlibIrMember::Class(id) if std::ptr::eq(self.class(*id), class))
+            })
+        })
+    }
+
     pub fn class(&self, id: KlibIrClassId) -> &KlibIrClass {
         &self.classes[id.index()]
     }

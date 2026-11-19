@@ -197,10 +197,7 @@ pub(super) fn lower_file(
             .params
             .iter()
             .enumerate()
-            .map(|(parameter, _)| {
-                parameter_carrier(module, ir, id as FunId, parameter as u32)?
-                    .ok_or_else(|| "a `Unit` parameter".to_string())
-            })
+            .map(|(parameter, _)| parameter_carrier(module, ir, id as FunId, parameter as u32))
             .collect::<Result<Vec<_>, _>>()?;
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
@@ -526,12 +523,11 @@ struct FileContext<'a> {
 /// The wasm value a parameter of type `ty` is passed as. A `Nothing` parameter holds no value any
 /// caller supplies, yet keeps its slot, so an implementation such as `contains(element: Nothing)`
 /// takes the operands its interface member passes: a reference, as an erased type parameter's is.
-/// A `Unit` parameter still has none.
-pub(super) fn parameter_carrier_of(ty: Ty) -> Result<Option<ValType>, Unsupported> {
-    if ty == Ty::Nothing {
-        return Ok(Some(REFERENCE));
-    }
-    carrier(ty)
+/// A `Unit` parameter is passed the `Unit` instance in a reference slot, as kotlinc-wasm passes
+/// it, so an override of a member whose parameter is an erased `T` takes the same operands.
+pub(super) fn parameter_carrier_of(ty: Ty) -> Result<ValType, Unsupported> {
+    // `carrier` has none only for `Unit` and `Nothing`.
+    Ok(carrier(ty)?.unwrap_or(REFERENCE))
 }
 
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
@@ -875,12 +871,20 @@ impl<'a> Body<'a> {
             code: Code::default(),
             locals: Vec::new(),
             next_local: parameters.len() as u32,
+            // A `Unit` parameter's slot holds the `Unit` instance; a read of it is that value, as
+            // a `Unit` local's is, so it needs no load.
             values: parameters
                 .iter()
                 .enumerate()
+                .filter(|(_, ty)| **ty != Ty::Unit)
                 .map(|(slot, ty)| (slot as u32, (slot as u32, *ty)))
                 .collect(),
-            unit_values: HashSet::default(),
+            unit_values: parameters
+                .iter()
+                .enumerate()
+                .filter(|(_, ty)| **ty == Ty::Unit)
+                .map(|(slot, _)| slot as u32)
+                .collect(),
             cells: HashMap::default(),
             declared,
             initializers: HashMap::default(),
@@ -997,6 +1001,24 @@ impl<'a> Body<'a> {
             self.code.drop_();
         }
         Ok(())
+    }
+
+    /// Evaluate the argument `id` of a parameter declared `param` and leave it in the parameter's
+    /// carrier ([`parameter_carrier_of`]): a `Unit` argument is evaluated for its effects and the
+    /// callee receives the `Unit` instance.
+    pub(super) fn argument(&mut self, id: u32, param: Ty) -> Result<(), Unsupported> {
+        self.value(id, param)?;
+        self.unit_argument(param);
+        Ok(())
+    }
+
+    /// Push the `Unit` instance a `Unit` parameter receives, after its argument was evaluated at
+    /// its own type.
+    pub(super) fn unit_argument(&mut self, param: Ty) {
+        if param == Ty::Unit {
+            let unit = self.runtime.unit_object(self.module);
+            self.code.global_get(unit);
+        }
     }
 
     /// Evaluate `id` and convert its value to the carrier of `target`.
@@ -1130,6 +1152,9 @@ impl<'a> Body<'a> {
                     }
                 } else if !self.unit_values.contains(&slot) {
                     return Err(format!("a read of value {slot} before its declaration"));
+                } else if let Some(read) = self.type_of(id)? {
+                    // A `Unit` slot read at a reference type is the `Unit` instance.
+                    self.coerce_emitted_value(Ty::Unit, read)?;
                 }
             }
             IrExpr::Variable {
@@ -1187,6 +1212,8 @@ impl<'a> Body<'a> {
                 // The block's value is delivered at the type the block completes with, which an
                 // inline body's erased generic result is narrower than at its call.
                 if let Some(value) = value {
+                    // A block typed apart from its value (`fun f(): Any = g()` over a `Unit` call)
+                    // leaves its value converted to the block's own type.
                     match self.completing_type(id)? {
                         Some(ty) => self.value(value, ty)?,
                         None => self.expression(value)?,
@@ -1551,7 +1578,7 @@ impl<'a> Body<'a> {
                             && array_lists::realized_array_list_member(fact))
                 }) =>
             {
-                self.array_list_call(*target, receiver, &args)?;
+                self.array_list_call(id, *target, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1941,7 +1968,7 @@ impl<'a> Body<'a> {
                                 .and_then(|property| self.callables.callable(property.getter))
                                 .is_some_and(array_lists::realized_array_list_member))) =>
             {
-                self.array_list_property(*target, *receiver)?;
+                self.array_list_property(id, *target, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::PropertyWrite {
@@ -1961,7 +1988,7 @@ impl<'a> Body<'a> {
                 dispatch_receiver: Some(receiver),
                 args,
             } if let Callee::Local(function) = &**call_callee => {
-                self.direct_member_call(*function, receiver, &args)?
+                self.local_member_call(*function, receiver, &args)?
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -2041,7 +2068,7 @@ impl<'a> Body<'a> {
             return Err("a call whose arguments do not match its parameters".into());
         }
         for (&arg, &param) in args.iter().zip(params) {
-            self.value(arg, param)?;
+            self.argument(arg, param)?;
         }
         self.code.call(function);
         Ok(())

@@ -804,7 +804,7 @@ pub(crate) fn value_class_overrides(
                     })?;
                 overridden.extend(
                     bodies
-                        .overridden_declarations(module, &signature)
+                        .overridden_closure(module, &signature)
                         .map_err(mismatch)?,
                 );
             }
