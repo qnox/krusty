@@ -51,6 +51,26 @@ impl Checker<'_> {
         (result != selected.callable.ret).then_some(result)
     }
 
+    /// The semantic intersection candidate collection sees for `receiver`: the expression's own
+    /// inferred intersection, else the incomparable constituents a smart cast proved for its
+    /// access path, so an extension declared on any one constituent applies (`Msg.toChain()` on a
+    /// value proved to be `Msg` and `Iterable<*>`) instead of only the narrowed read type's.
+    /// The expression keeps its denotable/physical type in its own slot; the selected declaration
+    /// records any required receiver conversion.
+    pub(super) fn receiver_intersection_view(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: ExprId,
+    ) -> Option<Ty> {
+        let inferred = self.inferred_expression_intersection(receiver);
+        if inferred.len() > 1 {
+            return Some(Ty::intersection(&inferred));
+        }
+        let path = self.flow_read_path(receiver)?;
+        let proven = self.lookup_intersection_narrowing(scope, &path);
+        (proven.len() > 1).then(|| Ty::intersection(&proven))
+    }
+
     /// Project a flow intersection onto the constituent that supplies the selected property facet.
     /// A write requires a setter on that constituent; a read accepts the ordinary getter facet.
     pub(super) fn flow_intersection_property_receiver(
