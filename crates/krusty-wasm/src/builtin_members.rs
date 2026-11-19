@@ -15,7 +15,7 @@
 //! is materialized. An actual representation declines when its override cannot be emitted, so no
 //! stub reaches a builtin value without its implementation.
 
-use krusty::backend::{BackendCompilerIntrinsic, BuiltinImplementation};
+use krusty::backend::{BackendClassifierSource, BackendCompilerIntrinsic, BuiltinImplementation};
 use krusty::types::{Ty, TypeName};
 
 use super::boxes::BoxForm;
@@ -135,6 +135,7 @@ impl Runtime {
     pub(super) fn builtin_member(
         &mut self,
         module: &mut Module,
+        source: &dyn BackendClassifierSource,
         member: MemberRef,
         name: &str,
         signature: &Signature,
@@ -179,6 +180,9 @@ impl Runtime {
             }
         }
         if let Some(operation) = string {
+            if matches!(operation, Operation::StringSubSequence) {
+                self.string_sub_sequence(module, source)?;
+            }
             let function =
                 self.define_implementation(module, member, Receiver::String, operation)?;
             self.objects
@@ -309,7 +313,9 @@ impl Runtime {
                     .call(compare);
             }
             (Receiver::String, Operation::StringSubSequence) => {
-                let slice = self.string_sub_sequence(module);
+                let slice = self
+                    .defined_string_sub_sequence()
+                    .ok_or("a string slice implemented before its function")?;
                 code.ref_cast(false, HeapType::Concrete(self.string))
                     .local_get(1)
                     .local_get(2)
