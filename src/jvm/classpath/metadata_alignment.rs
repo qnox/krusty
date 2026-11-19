@@ -10,7 +10,7 @@ use super::value_class_erasure::{
     metadata_value_class_bound_carrier, MetadataFormals,
 };
 use super::{meta_param_compat, ClassMeta};
-use crate::types::{Ty, TyKind, TypeName};
+use crate::types::{type_name, Ty, TyKind, TypeName};
 
 /// Whether metadata callable `c` corresponds to a JVM method with these descriptor parameter types. An
 /// EXTENSION's receiver — a separate attribute, emitted as the leading JVM parameter — must match, then
@@ -21,14 +21,33 @@ use crate::types::{Ty, TyKind, TypeName};
 /// the `Object` descriptor, `plusAssign(elements: Iterable)` the `Iterable` one).
 pub(super) fn function_parameter_erasure_matches(
     signature: &crate::types::FnSig,
+    composable: bool,
     descriptor: Ty,
     classifier_arity: &dyn Fn(Ty) -> Option<usize>,
 ) -> bool {
     // A suspend function value implements Function(N+1): the additional JVM argument is its
     // Continuation. A receiver is already the first semantic parameter, so it needs no separate
     // adjustment (`suspend R.() -> T` has one semantic parameter and erases to Function2).
-    classifier_arity(descriptor) == Some(signature.params.len() + usize::from(signature.suspend))
+    let semantic = signature.params.len() + usize::from(signature.suspend);
+    // A composable function value takes the composer and its `$changed` words after its own
+    // parameters. The Compose compiler counts one changed word per ten slots of the parameters
+    // and the composer (`changedParamCount(parameters, 1)`), so ten parameters need two.
+    let expected = if composable {
+        semantic + 1 + (semantic + 1).div_ceil(10)
+    } else {
+        semantic
+    };
+    // `Function22` is the last arity with a class of its own; wider function values erase to
+    // `FunctionN`, whose `invoke` takes a vararg.
+    if expected > MAX_FUNCTION_CLASS_ARITY {
+        return descriptor.non_null().obj_internal()
+            == Some(type_name("kotlin/jvm/functions/FunctionN"));
+    }
+    classifier_arity(descriptor) == Some(expected)
 }
+
+/// The largest `N` for which `kotlin.jvm.functions.FunctionN` is a distinct class.
+const MAX_FUNCTION_CLASS_ARITY: usize = 22;
 
 /// Descriptor slot of the metadata parameter at `index`, where `parameters()` yields the context
 /// parameters first and the value parameters after them. Kotlin signs a context extension
@@ -79,7 +98,12 @@ fn meta_callable_aligns(
                 if let Some(TyKind::Fun(signature)) =
                     signature_parameter.map(|ty| ty.non_null().kind())
                 {
-                    return function_parameter_erasure_matches(signature, *d, classifier_arity);
+                    return function_parameter_erasure_matches(
+                        signature,
+                        m.composable_fun(),
+                        *d,
+                        classifier_arity,
+                    );
                 }
                 if let Some(carrier) = signature_parameter
                     .zip(f.generic_sig.as_ref())
@@ -124,7 +148,12 @@ fn meta_callable_aligns(
                 .copied();
             if let Some(TyKind::Fun(signature)) = signature_parameter.map(|ty| ty.non_null().kind())
             {
-                return function_parameter_erasure_matches(signature, **d, classifier_arity);
+                return function_parameter_erasure_matches(
+                    signature,
+                    m.composable_fun(),
+                    **d,
+                    classifier_arity,
+                );
             }
             if let Some(carrier) = signature_parameter
                 .zip(f.generic_sig.as_ref())
@@ -210,4 +239,108 @@ pub(super) fn aligned_meta_callable<'a>(
         is_interface,
     )
     .map(|(end, i)| (end, meta.fn_at(i)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::function_parameter_erasure_matches;
+    use crate::types::{Ty, TyKind};
+
+    fn arity(ty: Ty) -> Option<usize> {
+        ty.fun_arity().map(usize::from)
+    }
+
+    /// The erased `FunctionN` value of a function type with `arguments` parameters.
+    fn erased(arguments: usize) -> Ty {
+        if arguments > 22 {
+            return Ty::obj("kotlin/jvm/functions/FunctionN");
+        }
+        Ty::fun(
+            vec![Ty::obj("kotlin/Any"); arguments],
+            Ty::obj("kotlin/Any"),
+        )
+    }
+
+    fn matches(parameters: usize, composable: bool, erased_arguments: usize) -> bool {
+        let TyKind::Fun(signature) = Ty::fun(vec![Ty::Int; parameters], Ty::Unit).kind() else {
+            unreachable!()
+        };
+        function_parameter_erasure_matches(signature, composable, erased(erased_arguments), &arity)
+    }
+
+    #[test]
+    fn suspend_receiver_function_metadata_matches_its_function_interface_erasure() {
+        let TyKind::Fun(metadata) = Ty::fun_with_shape(
+            vec![Ty::obj("kotlin/sequences/SequenceScope")],
+            Ty::Unit,
+            0,
+            true,
+            true,
+        )
+        .kind() else {
+            unreachable!()
+        };
+
+        assert!(function_parameter_erasure_matches(
+            metadata,
+            false,
+            erased(2),
+            &arity,
+        ));
+    }
+
+    /// Each row is the `Function` kotlinc 2.4.21's Compose plugin erases `@Composable (Int × n) ->
+    /// Unit` to: `n` parameters, the composer, and one changed word per ten slots of the
+    /// parameters and the composer.
+    #[test]
+    fn composable_function_metadata_matches_the_producers_erasure() {
+        for (parameters, erased_arguments) in [
+            (0, 2),
+            (1, 3),
+            (8, 10),
+            (9, 11),
+            (10, 13),
+            (11, 14),
+            (18, 21),
+            (19, 22),
+            (20, 24),
+        ] {
+            assert!(
+                matches(parameters, true, erased_arguments),
+                "{parameters} parameters erase to Function{erased_arguments}"
+            );
+            // Neither a neighbouring width nor the plain function value of the same parameters
+            // is the composable erasure. Past `Function22` every width is `FunctionN`, so only
+            // the widest class below it is a wrong width there.
+            assert!(
+                !matches(parameters, true, (erased_arguments - 1).min(22)) || erased_arguments > 23
+            );
+            assert!(!matches(parameters, true, erased_arguments + 1) || erased_arguments > 22);
+            assert!(!matches(parameters, false, erased_arguments));
+        }
+    }
+
+    /// A receiver counts as one of the parameters: `@Composable Int.(Int × n) -> Unit` is
+    /// `Function11`, `Function13` and `Function14` for `n` of 8, 9 and 10.
+    #[test]
+    fn composable_receiver_function_counts_its_receiver_slot() {
+        let TyKind::Fun(receiver) =
+            Ty::fun_with_shape(vec![Ty::Int; 10], Ty::Unit, 0, true, false).kind()
+        else {
+            unreachable!()
+        };
+
+        assert!(function_parameter_erasure_matches(
+            receiver,
+            true,
+            erased(13),
+            &arity
+        ));
+        assert!(!function_parameter_erasure_matches(
+            receiver,
+            true,
+            erased(12),
+            &arity
+        ));
+    }
 }
