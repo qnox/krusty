@@ -14,7 +14,7 @@ use crate::types::{type_name, Ty};
 const RUNTIME: &str = "androidx/compose/runtime";
 const INTERNAL: &str = "androidx/compose/runtime/internal";
 const COMPOSABLE_LAMBDA: &str = "androidx/compose/runtime/internal/ComposableLambda";
-const COMPOSER: &str = "androidx/compose/runtime/Composer";
+pub(super) const COMPOSER: &str = "androidx/compose/runtime/Composer";
 const SCOPE_UPDATE_SCOPE: &str = "androidx/compose/runtime/ScopeUpdateScope";
 const FUNCTION_KEY_META: &str = "androidx/compose/runtime/internal/FunctionKeyMeta";
 const COMPOSABLE_INFERRED_TARGET: &str = "androidx/compose/runtime/ComposableInferredTarget";
@@ -37,6 +37,10 @@ pub(super) struct ComposeRuntime {
     pub(super) skip_to_group_end: BoundRuntimeFunction,
     pub(super) update_scope: BoundRuntimeFunction,
     pub(super) source_information: BoundRuntimeFunction,
+    /// `sourceInformationMarkerStart(composer, key, information)` and
+    /// `sourceInformationMarkerEnd(composer)`, which bracket a function without a group.
+    pub(super) source_information_marker_start: BoundRuntimeFunction,
+    pub(super) source_information_marker_end: BoundRuntimeFunction,
     pub(super) is_trace_in_progress: BoundRuntimeFunction,
     pub(super) trace_event_start: BoundRuntimeFunction,
     pub(super) trace_event_end: BoundRuntimeFunction,
@@ -94,6 +98,18 @@ impl ComposeRuntime {
                 package,
                 "sourceInformation",
                 vec![composer, Ty::String],
+                Ty::Unit,
+            )?,
+            source_information_marker_start: function(
+                package,
+                "sourceInformationMarkerStart",
+                vec![composer, Ty::Int, Ty::String],
+                Ty::Unit,
+            )?,
+            source_information_marker_end: function(
+                package,
+                "sourceInformationMarkerEnd",
+                vec![composer],
                 Ty::Unit,
             )?,
             is_trace_in_progress: function(package, "isTraceInProgress", Vec::new(), Ty::Boolean)?,
