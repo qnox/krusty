@@ -29860,7 +29860,7 @@ pub(crate) fn context_argument_types(
             return true;
         }
         if let Some(bound) = want.ty_param_bound() {
-            return bound.is_erased_top() || arg_assignable_simple(bound, have);
+            return context_argument_selection::value_within_bound(have, bound, oracle);
         }
         match (have.obj_internal(), want.obj_internal()) {
             (Some(h), Some(w)) => crate::assignable::is_subtype(
