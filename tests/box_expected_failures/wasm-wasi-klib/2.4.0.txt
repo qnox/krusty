@@ -2578,7 +2578,6 @@ reified/parameterSwap.kt
 reified/reifiedIntersectionType.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/safecast.kt
-reified/sameIndexRecursive.kt
 reified/spreads.kt
 reified/vararg.kt
 reified/varargs.kt
@@ -2671,7 +2670,6 @@ syntheticAccessors/kt10047.kt
 syntheticAccessors/kt9958.kt
 syntheticAccessors/kt9958Interface.kt
 syntheticAccessors/protectedMemberReferenceAccessor/kt46597_property.kt
-toArray/kt3177-toTypedArray.kt
 traits/kt5393_property.kt
 traits/multiple.kt
 try/catch3.kt
