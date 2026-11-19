@@ -968,7 +968,10 @@ KRef kt_list_list_iterator(KRef list, kt_int index) {
         return NULL;
     }
     KRef iterator = kt_list_iterator(list);
-    if (iterator->header.type == &kt_type_list_iterator) {
+    /* A read-only list's and an enum's entries' iterators implement `Iterator` alone; this one
+       is a `ListIterator` too. The growable list's already is. */
+    if (iterator->header.type == &kt_type_list_iterator ||
+        iterator->header.type == &kt_type_abstract_list_iterator) {
         iterator->header.type = &kt_type_read_only_list_iterator;
     }
     ((KListIterator *)iterator)->at = index;

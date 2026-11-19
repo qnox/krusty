@@ -52,6 +52,11 @@ void kt_program_entry(void) {
     say("\nlistIterator(3) threw ");
     (void)kt_list_list_iterator(list, 3);
     say_flag(raised());
+    say("\nenum entries listIterator is a ListIterator ");
+    KRef entries = kt_enum_entries_of(two);
+    KRef entry_iterator = kt_list_list_iterator(entries, 1);
+    CHECK(kt_pending_exception() == NULL, "entries.listIterator(1) raised\n");
+    say_flag(kt_is_instance(entry_iterator, &kt_type_list_iterator_interface));
     say("\n");
     kt_sys_write(1, "OK\n", 3);
 }
