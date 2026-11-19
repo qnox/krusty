@@ -11,10 +11,10 @@
 //!
 //! A lambda converted to a `fun interface` is an instance of a class named for the interface and
 //! for where the code holding the conversion stands ([`sam_class_name`]). A reference to a property
-//! is not given a name here: it prints the property instead.
+//! is not given a name here: it prints the property instead ([`property_reference_string`]).
 
 use krusty::backend::class_names::{member_class_names, site_container_name};
-use krusty::backend::BackendClassifierSource;
+use krusty::backend::{BackendClassifierSource, CheckedBackendCallables};
 use krusty::ir::{ExprId, IrCallableReferenceTarget, IrExpr, IrFile, IrSamPlacement};
 use krusty::types::{FnSig, Ty, TyKind};
 
@@ -27,6 +27,28 @@ pub(super) struct NamedShape {
     pub(super) suspend: bool,
     /// The function type's parameters, a receiver and context parameters included.
     pub(super) arity: usize,
+}
+
+/// What `toString` prints for the property reference `expression` creates as a `KProperty` value:
+/// `property NAME (Kotlin reflection is not available)`, mutable or not, as the Kotlin/Wasm
+/// standard library's reference classes print it. `None` for every other value, and for a
+/// reference that cannot say its property's name.
+pub(super) fn property_reference_string(
+    ir: &IrFile,
+    callables: &CheckedBackendCallables,
+    expression: &IrExpr,
+) -> Option<String> {
+    let IrExpr::CallableReference(reference) = expression else {
+        return None;
+    };
+    if !matches!(&reference.target, IrCallableReferenceTarget::Property(property) if property.reflective)
+    {
+        return None;
+    }
+    let name = krusty::backend::reference_names::callable_reference_name(ir, callables, reference)?;
+    Some(krusty::backend::reference_names::property_reference_text(
+        &name,
+    ))
 }
 
 /// The shape kotlinc-wasm names the function value `expression` creates, a lambda of the checked
