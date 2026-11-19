@@ -1346,7 +1346,8 @@ impl Body<'_> {
     /// Whether the runtime's list iterator, whose class the program does not declare, is below the
     /// library interface `interface`: it is a `MutableListIterator`, as `ArrayList`'s own is.
     fn runtime_array_list_iterator_is_below(&self, interface: TypeName) -> bool {
-        let Some(iterator) = Ty::obj("kotlin/collections/MutableListIterator").obj_internal() else {
+        let Some(iterator) = Ty::obj("kotlin/collections/MutableListIterator").obj_internal()
+        else {
             return false;
         };
         self.classifiers.is_subclassifier(iterator, interface)
