@@ -63,13 +63,13 @@ impl Parser<'_> {
                 self.parse_annotation();
                 continue;
             }
-            if matches!(self.kind(), TokenKind::KwPackage | TokenKind::KwImport) {
+            if self.at(TokenKind::KwPackage) || self.at_import_directive() {
                 self.diags.error(
                     self.tok().span,
                     "package and import directives must precede script statements",
                 );
                 // Keep the directive whole so its name is not read as a statement.
-                if self.at(TokenKind::KwImport) {
+                if self.at_import_directive() {
                     self.parse_import_directive();
                 } else {
                     self.bump();

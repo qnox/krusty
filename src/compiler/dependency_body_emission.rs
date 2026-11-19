@@ -325,6 +325,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             declarations,
             authorized_member_edges,
             read_objects,
+            dispatched,
         } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
@@ -350,7 +351,12 @@ pub(super) fn emit_dependencies<B: Backend>(
             platform,
             bodies,
             intrinsics,
-            &roots,
+            // A member that dispatch reaches is emitted with its class although no walked body
+            // calls it, so its body's leaves are prepared as a root's are.
+            roots
+                .iter()
+                .map(|root| root.identity().clone())
+                .chain(dispatched),
             &capabilities,
             &mut externals,
             diags,
@@ -672,12 +678,23 @@ pub(super) fn emit_dependencies<B: Backend>(
         };
         if let Some(protocol) = symbols
             .char_sequence_protocol()
-            .filter(|_| backend.appends_char_sequences_by_index())
+            .filter(|_| backend.reads_appended_char_sequences())
         {
             if let Err(error) = callables.freeze_char_sequence_protocol(protocol, platform) {
                 diags.error(
                     Span::new(0, 0),
                     format!("internal error: cannot freeze the CharSequence members: {error:?}"),
+                );
+                return Vec::new();
+            }
+        }
+        if backend.reads_collections_through_interfaces() {
+            if let Err(error) =
+                super::backend_handoff::freeze_collection_protocol(&mut callables, platform)
+            {
+                diags.error(
+                    Span::new(0, 0),
+                    format!("internal error: cannot freeze the collection members: {error:?}"),
                 );
                 return Vec::new();
             }
@@ -942,15 +959,12 @@ fn prepare_bodyless_externals(
     platform: &dyn crate::libraries::SemanticPlatform,
     bodies: &crate::klib_libraries::KlibDeclarationBodies,
     intrinsics: &crate::klib_libraries::KlibIntrinsicFacts,
-    roots: &[crate::libraries::KlibBodyCallable<'_>],
+    walked_from: impl IntoIterator<Item = KlibDependencyCallable>,
     capabilities: &DependencyLeafCapabilities<'_>,
     externals: &mut HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
     diags: &mut DiagSink,
 ) -> bool {
-    let mut pending = roots
-        .iter()
-        .map(|root| root.identity().clone())
-        .collect::<VecDeque<_>>();
+    let mut pending = walked_from.into_iter().collect::<VecDeque<_>>();
     let mut visited = HashSet::default();
     while let Some(identity) = pending.pop_front() {
         if !visited.insert(identity.clone()) {

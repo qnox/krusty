@@ -375,28 +375,14 @@ impl Body<'_> {
         if params.len() != args.len() {
             return Err("a call whose arguments do not match its parameters".into());
         }
-        let signature = library_member_signature(&fact, role)?;
-        let owner = library_member_owner(&fact).ok_or("a library member without its classifier")?;
-        let member = self.runtime.objects.interfaces.library(
-            self.module,
-            owner,
-            &identity,
-            signature.clone(),
-        )?;
         // The builder's `append(CharSequence?)` reads the appended sequence through the checked
         // `CharSequence` members on a target that copies its units.
         if fact.builtin_implementations.iter().any(|implementation| {
             super::string_builders::is_string_builder_type(implementation.receiver)
         }) {
-            self.record_char_sequence_reads()?;
+            self.record_char_sequence_reads(false)?;
         }
-        self.runtime.builtin_member(
-            self.module,
-            member,
-            &name,
-            &signature,
-            &fact.builtin_implementations,
-        )?;
+        let member = self.library_member_of(&fact, identity, role, &name)?;
         if reference_name {
             self.runtime.reference_name_member(self.module, member)?;
         }
@@ -408,17 +394,6 @@ impl Body<'_> {
                     .property_reference_read_member(self.module, member, args.len())?;
             }
             _ => {}
-        }
-        if let Some(step) = super::array_lists::iterator_step(&fact) {
-            let function = match step {
-                super::array_lists::IteratorStep::HasNext => self.runtime.array_lists.has_next,
-                super::array_lists::IteratorStep::Next => self.runtime.array_lists.next,
-            };
-            self.runtime.objects.interfaces.implement_representation(
-                member,
-                self.runtime.array_lists.iterator,
-                function,
-            )?;
         }
         self.value(receiver, objects::any())?;
         for (&arg, &param) in args.iter().zip(params) {
@@ -433,5 +408,71 @@ impl Body<'_> {
                 Ok(())
             }
         }
+    }
+}
+
+impl Body<'_> {
+    /// The library member `fact` declares in `role`, named by its KLIB `identity`, with what the
+    /// builtin classes and the runtime list's iterator run for it recorded: the member a call
+    /// through it, or the runtime reading a collection or a sequence through it, goes to.
+    pub(super) fn library_member_of(
+        &mut self,
+        fact: &BackendCallableFact,
+        identity: Vec<u8>,
+        role: MemberRole,
+        name: &str,
+    ) -> Result<crate::interface_dispatch::MemberRef, Unsupported> {
+        // The runtime list's operations reading a collection argument exist once the members they
+        // read it through are recorded.
+        if fact.builtin_implementations.iter().any(|implementation| {
+            implementation
+                .receiver
+                .obj_internal()
+                .is_some_and(crate::array_lists::lays_out)
+        }) {
+            self.record_collection_arguments()?;
+        }
+        let signature = library_member_signature(fact, role)?;
+        let owner = library_member_owner(fact).ok_or("a library member without its classifier")?;
+        let member = self.runtime.objects.interfaces.library(
+            self.module,
+            owner,
+            &identity,
+            signature.clone(),
+        )?;
+        self.runtime.builtin_member(
+            self.module,
+            self.classifiers,
+            member,
+            name,
+            &signature,
+            &fact.builtin_implementations,
+        )?;
+        if let Some(step) = super::array_lists::iterator_step(fact) {
+            use super::array_lists::IteratorStep;
+            use crate::list_iterator_ends::EndedStep;
+            let lists = &self.runtime.array_lists;
+            let function = match step {
+                IteratorStep::HasNext => lists.has_next,
+                IteratorStep::HasPrevious => lists.has_previous,
+                IteratorStep::NextIndex => lists.next_index,
+                IteratorStep::PreviousIndex => lists.previous_index,
+                IteratorStep::Next | IteratorStep::Previous => {
+                    let ended = if matches!(step, IteratorStep::Next) {
+                        EndedStep::Next
+                    } else {
+                        EndedStep::Previous
+                    };
+                    self.runtime
+                        .checked_list_iterator_step(self.module, self.classifiers, ended)?
+                }
+            };
+            self.runtime.objects.interfaces.implement_representation(
+                member,
+                self.runtime.array_lists.iterator,
+                function,
+            )?;
+        }
+        Ok(member)
     }
 }

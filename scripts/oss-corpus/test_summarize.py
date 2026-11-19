@@ -159,6 +159,50 @@ class Summary(unittest.TestCase):
         ])
         self.assertIsNone(summary['old']['roots'])
 
+    def test_changes_since_the_previous_run_are_listed_per_project(self):
+        with tempfile.TemporaryDirectory() as work:
+            before = [project('zeta', [row(':a:compileKotlin', True, 4, 3),
+                                       row(':b:compileKotlin', True, 2, 2),
+                                       row(':c:compileKotlin', False, 1, 0, error='e: C.kt:1:1 old')]),
+                      project('same', [row(':s:compileKotlin', True, 1, 1)]),
+                      project('gone', [row(':g:compileKotlin', True, 1, 1)])]
+            with open(f'{work}/previous.json', 'w') as f:
+                json.dump(dict(projects=before), f)
+            now = [project('zeta', [row(':a:compileKotlin', True, 4, 4),
+                                    row(':b:compileKotlin', False, 2, 0, error='e: B.kt:1:1 new'),
+                                    row(':c:compileKotlin', True, 1, 1),
+                                    row(':d:compileKotlin', True, 1, 1)]),
+                   project('same', [row(':s:compileKotlin', True, 1, 1)]),
+                   project('fresh', [row(':f:compileKotlin', True, 1, 0)])]
+            reports = []
+            for p in now:
+                reports.append(os.path.join(work, p['name'] + '.json'))
+                with open(reports[-1], 'w') as f:
+                    json.dump(p, f)
+            text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'),
+                                   '--previous', f'{work}/previous.json'] + reports,
+                                  check=True, capture_output=True, text=True).stdout
+        lines = text.splitlines()
+        start = lines.index('## Since the previous run')
+        self.assertEqual(lines[start:lines.index('## Missed compilations')], [
+            '## Since the previous run',
+            '',
+            '| Project | Compilations built by krusty | Identical classes |',
+            '| --- | ---: | ---: |',
+            '| fresh | new: 1 / 1 | new: 0 / 1 |',
+            '| gone | not measured (was 1 / 1) | not measured (was 1 / 1) |',
+            '| zeta | 2 → 3 (+1) / 4 | 5 → 6 (+1) / 8 |',
+            '',
+            'No longer built by krusty:',
+            '',
+            '- **zeta** `:b:compileKotlin`: `e: B.kt:1:1 new`',
+            '',
+            'Newly built by krusty:',
+            '',
+            '- **zeta** `:c:compileKotlin`, `:d:compileKotlin`',
+            '',
+        ])
+
     def test_verify_errors_are_listed_per_project_and_grouped_by_cause(self):
         def verified(task, *errors, status='failed'):
             r = row(task, False, 1, 0, error='not run: a task it depends on failed')

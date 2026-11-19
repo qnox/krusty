@@ -7,7 +7,9 @@
 //!
 //! What makes it more than a lambda is the surface it has to answer. `KProperty` declares `get`,
 //! `KMutableProperty` adds `set`, and `KCallable` declares `name`, so the type carries three slots
-//! beyond `kotlin.Any`'s three and the site's own bodies fill them. Those bodies are emitted here
+//! beyond `kotlin.Any`'s three and the site's own bodies fill them, along with `toString`, which
+//! prints `property NAME (Kotlin reflection is not available)` as the Native standard library does.
+//! Those bodies are emitted here
 //! rather than lowered from IR because there is no IR to lower: common lowering leaves the
 //! reference CHECKED — it names the property and says whether a receiver is bound, and nothing
 //! more — precisely so that each target may choose its own representation.
@@ -371,6 +373,8 @@ impl<'a> FileLowering<'a> {
         let base = format!("kt_local_prop_{ordinal}");
         let instance_size = model::HEADER_SIZE.next_multiple_of(8);
         let name = self.declare_local_function(&format!("{base}_name"), &[any()], any())?;
+        let to_string =
+            self.declare_local_function(&format!("{base}_to_string"), &[any()], any())?;
         let equals =
             self.declare_local_function(&format!("{base}_equals"), &[any(), any()], Ty::Boolean)?;
         let unreachable = self.import("kt_abstract_method_called", &[], Ty::Unit)?;
@@ -378,6 +382,7 @@ impl<'a> FileLowering<'a> {
         let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
         let mut vtable = self.any_vtable()?;
         vtable[0] = equals;
+        vtable[2] = to_string;
         vtable.push(unreachable);
         vtable.push(unreachable);
         vtable.push(name);
@@ -411,6 +416,7 @@ impl<'a> FileLowering<'a> {
         )?;
         self.define_reference_equals(equals, &base, descriptor, None)?;
         self.define_reference_name(name, &base, property)?;
+        self.define_reference_to_string(to_string, &base, property)?;
 
         let instance = self.declare_local_data(&format!("{base}_instance"), false)?;
         let mut description = DataDescription::new();
@@ -536,6 +542,8 @@ impl<'a> FileLowering<'a> {
             })
             .transpose()?;
         let name = self.declare_local_function(&format!("{base}_name"), &[any()], any())?;
+        let to_string =
+            self.declare_local_function(&format!("{base}_to_string"), &[any()], any())?;
 
         let mut vtable = self.any_vtable()?;
         // Kotlin compares two references by the declaration they name and the receiver they bind.
@@ -544,6 +552,7 @@ impl<'a> FileLowering<'a> {
         let marker = self.reference_identity_marker(identity)?;
         vtable[0] = self.runtime_member_import("kt_reference_equals")?;
         vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
+        vtable[2] = to_string;
         vtable.push(getter);
         vtable.push(match setter {
             Some(setter) => setter,
@@ -606,6 +615,7 @@ impl<'a> FileLowering<'a> {
             self.define_reference_set(setter, &base, &site, receiver_offset)?;
         }
         self.define_reference_name(name, &base, &site.name)?;
+        self.define_reference_to_string(to_string, &base, &site.name)?;
 
         let singleton = match site.bound {
             Some(_) => None,
@@ -815,20 +825,36 @@ impl<'a> FileLowering<'a> {
         base: &str,
         property: &str,
     ) -> Result<(), Unsupported> {
+        self.define_reference_text(id, &format!("{base}_name"), property)
+    }
+
+    /// `toString(self)`: what the Kotlin/Native standard library prints for a property reference,
+    /// mutable or not, without the reflection library.
+    fn define_reference_to_string(
+        &mut self,
+        id: FuncId,
+        base: &str,
+        property: &str,
+    ) -> Result<(), Unsupported> {
+        let text = krusty::backend::reference_names::property_reference_text(property);
+        self.define_reference_text(id, &format!("{base}_to_string"), &text)
+    }
+
+    /// A member of the reference object that answers one constant string.
+    fn define_reference_text(
+        &mut self,
+        id: FuncId,
+        symbol: &str,
+        text: &str,
+    ) -> Result<(), Unsupported> {
         let signature = self.signature_of(&[any()], any())?;
-        let text = property.as_bytes().to_vec();
-        self.emit_function(
-            id,
-            signature,
-            any(),
-            &format!("{base}_name"),
-            &mut |body, _| {
-                let value = body.string_literal(&text)?;
-                body.builder.ins().return_(&[value]);
-                body.terminate();
-                Ok(())
-            },
-        )
+        let text = text.as_bytes().to_vec();
+        self.emit_function(id, signature, any(), symbol, &mut |body, _| {
+            let value = body.string_literal(&text)?;
+            body.builder.ins().return_(&[value]);
+            body.terminate();
+            Ok(())
+        })
     }
 }
 
