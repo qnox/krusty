@@ -152,6 +152,7 @@ impl BodyLowering<'_> {
                 context_count: 0,
                 class_type_parameters: &primitive.class_type_parameters,
                 parameter_defaults: &[],
+                declaration: None,
             },
         )?;
         // An array factory is the array its one vararg argument packs, as checked FIR lowers a
@@ -731,6 +732,8 @@ impl BodyLowering<'_> {
         ty: Ty,
         dispatch: CallDispatch,
     ) -> Lowered<ExprId> {
+        let declared_parameters = linked.params.clone();
+        let declared_formals = linked.type_parameters.clone();
         let linked = self.substituted(linked, access)?;
         let operands = self.call_operands(
             access,
@@ -742,6 +745,7 @@ impl BodyLowering<'_> {
                 context_count: linked.context_count,
                 class_type_parameters: &linked.class_type_parameters,
                 parameter_defaults: &linked.parameter_defaults,
+                declaration: Some((&declared_parameters, &declared_formals)),
             },
         )?;
         let mut callee = linked.callee;
@@ -883,6 +887,7 @@ impl BodyLowering<'_> {
                 context_count: 0,
                 class_type_parameters: &[],
                 parameter_defaults: &[],
+                declaration: None,
             },
         )?;
         let logical_result = operands.ret;
@@ -956,6 +961,7 @@ impl BodyLowering<'_> {
                 context_count: 0,
                 class_type_parameters: &[],
                 parameter_defaults: &[],
+                declaration: None,
             },
         )?;
         match (selected.operation, operands.args.as_slice()) {
@@ -1056,6 +1062,7 @@ impl BodyLowering<'_> {
                 class_type_parameters: &linked.class_type_parameters,
                 // An accessor declares no default a call may leave to.
                 parameter_defaults: &[],
+                declaration: None,
             },
         )?;
         // Accessor bounds may mention both accessor formals and declaring-class formals. The
@@ -1211,7 +1218,14 @@ impl BodyLowering<'_> {
             match argument {
                 Some(argument) => {
                     let accepted = argument_expectation(declared, parameter, &bindings);
-                    args.push(self.operand(argument, accepted)?);
+                    let site = callee.declaration.and_then(|(parameters, formals)| {
+                        Some(super::CaptureSite {
+                            declared: *parameters.get(index)?,
+                            parameters,
+                            formals,
+                        })
+                    });
+                    args.push(self.operand_capturing(argument, accepted, site)?);
                 }
                 // A serialized call leaves out exactly the arguments the callee's defaults supply.
                 None if callee.parameter_defaults.get(index).copied() == Some(true) => {
@@ -1477,7 +1491,7 @@ impl BodyLowering<'_> {
 
 /// Whether `ty` names the type parameter `name` anywhere, including through the declared bound
 /// of another type parameter it names.
-fn names(ty: Ty, name: crate::types::TyParamName) -> bool {
+pub(super) fn names(ty: Ty, name: crate::types::TyParamName) -> bool {
     fn walk(
         ty: Ty,
         name: crate::types::TyParamName,
@@ -1526,6 +1540,8 @@ struct CalleeShape<'a> {
     class_type_parameters: &'a [String],
     /// Whether each parameter declares a default a call may leave it to.
     parameter_defaults: &'a [bool],
+    /// The callee's parameters and type parameters as declared, before the call binds them.
+    declaration: Option<(&'a [Ty], &'a [crate::types::TyParamName])>,
 }
 
 /// A call's lowered dispatch receiver and arguments, with the receiver type, parameters and

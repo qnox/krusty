@@ -112,7 +112,8 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
     );
     assert!(!log.exists(), "jvm-target must fail before execing krusty");
 
-    // A compiler plugin krusty does not implement leaves the compile to kotlinc, reported.
+    // A compiler plugin krusty implements only partly no longer leaves the compile to kotlinc: krusty
+    // compiles it, with the plugin.
     clear_invocation_log(log);
     clear_invocation_log(&fixture.probes);
     let output = build()
@@ -120,11 +121,7 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
         .tasks([":compiler:util:compileKotlin"])
         .run_output()
         .unwrap_or_else(|error| panic!("compiler-plugin: {error}"));
-    assert_assignment_left_to_kotlinc(&output, &fixture.probes, ":compiler:util:compileKotlin");
-    assert!(
-        !log.exists(),
-        "kotlinc, not krusty, compiles a refused plugin request"
-    );
+    assert_assignment_compiled_by_krusty(&output, &fixture.probes, log, "Util.kt");
 
     // Free arguments reach krusty verbatim: the plugin keeps no copy of kotlinc's argument
     // table. An argument krusty does not implement leaves the compile to kotlinc, reported.
