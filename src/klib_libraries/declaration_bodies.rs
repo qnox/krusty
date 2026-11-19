@@ -83,13 +83,6 @@ pub(crate) struct KlibClassMember<'a> {
     pub(crate) function: &'a KlibIrFunction,
 }
 
-/// The one serialized class declaring an enum entry, in the module that serializes it.
-pub(crate) struct KlibEnumEntryClass<'a> {
-    pub(crate) module: &'a str,
-    pub(crate) arena: &'a KlibIrArena,
-    pub(crate) class: &'a crate::metadata::klib_ir::tree::KlibIrClass,
-}
-
 /// One decoded KLIB together with the producer graph recorded in its manifest.
 pub struct KlibBodyLibrary {
     module: String,
@@ -212,6 +205,7 @@ impl std::error::Error for KlibDeclarationBodiesError {}
 struct EmittedBodyInventory<'a> {
     callables: Vec<&'a KlibIrSymbol>,
     objects: Vec<&'a KlibIrSymbol>,
+    enum_entries: Vec<&'a KlibIrSymbol>,
     public_hierarchy_roots: Vec<TypeName>,
     sam_declarations: Vec<&'a KlibIrSymbol>,
 }
@@ -275,6 +269,51 @@ impl KlibDeclarationBodies {
         }))
     }
 
+    /// The serialized accessor `identity` names of a top-level property, found only in the `role`
+    /// slot of the top-level property group its accessor signature names. As in
+    /// [`Self::class_member_header`], a slot holds only an accessor of its own shape, so neither a
+    /// function of the same signature elsewhere nor an accessor of another slot or property
+    /// grants authority. `None` when the module serializes no function under the identity.
+    pub(crate) fn top_level_accessor_header(
+        &self,
+        identity: &KlibDependencyCallable,
+        role: crate::libraries::KlibAccessorRole,
+    ) -> Result<Option<(&KlibIrArena, &KlibIrFunction)>, &'static str> {
+        let KlibDeclarationSignature::Accessor(accessor) = &identity.declaration else {
+            return Err("a top-level accessor is selected under a non-accessor signature");
+        };
+        let Some((trees, arena, function)) = self.function_with_trees(identity) else {
+            return Ok(None);
+        };
+        let group = KlibIrSignature::Public(accessor.property().clone());
+        let slots = trees
+            .trees()
+            .iter()
+            .filter_map(|tree| match &tree.declaration {
+                KlibIrMember::Property(property)
+                    if property.base.symbol.kind == KlibIrSymbolKind::Property
+                        && property.base.symbol.signature == group =>
+                {
+                    let (slot, parameters) = match role {
+                        crate::libraries::KlibAccessorRole::Getter => (property.getter, 0),
+                        crate::libraries::KlibAccessorRole::Setter => (property.setter, 1),
+                    };
+                    slot.map(|id| tree.arena.function(id))
+                        .filter(|slot| slot.regular_parameters.len() == parameters)
+                }
+                _ => None,
+            })
+            .filter(|slot| std::ptr::eq(*slot, function))
+            .count();
+        if slots != 1 {
+            return Err(
+                "the serialized accessor is not the unique accessor of its role in its \
+                 top-level property",
+            );
+        }
+        Ok(Some((arena, function)))
+    }
+
     /// The exact serialized class header, independently of any callable it declares.
     pub(crate) fn class_header(
         &self,
@@ -302,7 +341,7 @@ impl KlibDeclarationBodies {
         &self,
         body_module: &str,
         entry: &KlibPublicIdSignature,
-    ) -> Result<Option<KlibEnumEntryClass<'_>>, &'static str> {
+    ) -> Result<Option<&crate::metadata::klib_ir::tree::KlibIrClass>, &'static str> {
         let entry = KlibIrSignature::Public(entry.clone());
         if let Some(found) = self.module_enum_entry_class(body_module, &entry)? {
             return Ok(Some(found));
@@ -325,17 +364,12 @@ impl KlibDeclarationBodies {
         &self,
         module: &str,
         entry: &KlibIrSignature,
-    ) -> Result<Option<KlibEnumEntryClass<'_>>, &'static str> {
-        let Some((module, &library)) = self.modules.get_key_value(module) else {
+    ) -> Result<Option<&crate::metadata::klib_ir::tree::KlibIrClass>, &'static str> {
+        let Some(&library) = self.modules.get(module) else {
             return Ok(None);
         };
         let mut found = None;
-        for (arena, class) in self.libraries[library].classes_declaring_enum_entry(entry) {
-            let class = KlibEnumEntryClass {
-                module: module.as_str(),
-                arena,
-                class,
-            };
+        for (_, class) in self.libraries[library].classes_declaring_enum_entry(entry) {
             if found.replace(class).is_some() {
                 return Err("several serialized classes declare one enum entry");
             }
@@ -819,6 +853,28 @@ impl KlibDeclarationBodies {
         found
     }
 
+    /// Whether the one public class `signature` serialized for `module` declares an enum's
+    /// synthetic `entries` body.
+    pub(crate) fn declares_synthetic_enum_entries(
+        &self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> bool {
+        let wanted = KlibIrSignature::Public(signature.clone());
+        let mut found = None;
+        for owner in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&owner) else {
+                continue;
+            };
+            for (arena, class) in self.libraries[library].classes_with_signature(&wanted) {
+                if found.replace((arena, class)).is_some() {
+                    return false;
+                }
+            }
+        }
+        found.is_some_and(|(arena, class)| class.declares_synthetic_enum_entries(arena))
+    }
+
     /// A public classifier serialized by `module` or a library its manifest depends on.
     pub(crate) fn public_class<'a>(
         &'a self,
@@ -1029,23 +1085,54 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
-    /// The public objects whose values the emitted body of `identity` reads, through the
-    /// closures `forms` lowers with it and the members of the file-local classes it constructs.
+    /// The public classes whose declared instances the emitted body of `identity` reads, through
+    /// the closures `forms` lowers with it and the members of the file-local classes it
+    /// constructs: each object it reads, then the enum class of each entry it reads, resolved in
+    /// the body's producer graph as the read itself is.
     pub(crate) fn emitted_body_objects(
         &self,
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibPublicIdSignature> {
-        let objects = self.emitted_body_symbols(identity, forms).objects;
-        let mut seen = crate::fx_hash::HashSet::default();
-        objects
-            .into_iter()
-            .filter_map(|symbol| match &symbol.signature {
-                KlibIrSignature::Public(signature) => Some(signature.clone()),
-                _ => None,
-            })
-            .filter(|signature| seen.insert(signature.clone()))
-            .collect()
+        let symbols = self.emitted_body_symbols(identity, forms);
+        let mut classes: Vec<KlibPublicIdSignature> = Vec::new();
+        for symbol in symbols.objects {
+            if let KlibIrSignature::Public(signature) = &symbol.signature {
+                if !classes.contains(signature) {
+                    classes.push(signature.clone());
+                }
+            }
+        }
+        for class in self.enum_entry_classes(&identity.module, symbols.enum_entries) {
+            if !classes.contains(&class) {
+                classes.push(class);
+            }
+        }
+        classes
+    }
+
+    /// The enum classes declaring `entries`, read by a body of `body_module`, without repeats. An
+    /// entry no single producer declares names no class here; reading it declines in lowering.
+    pub(crate) fn enum_entry_classes<'a>(
+        &self,
+        body_module: &str,
+        entries: impl IntoIterator<Item = &'a KlibIrSymbol>,
+    ) -> Vec<KlibPublicIdSignature> {
+        let mut classes = Vec::new();
+        for entry in entries {
+            let KlibIrSignature::Public(entry) = &entry.signature else {
+                continue;
+            };
+            let Ok(Some(declared)) = self.enum_entry_class(body_module, entry) else {
+                continue;
+            };
+            if let KlibIrSignature::Public(class) = &declared.base.symbol.signature {
+                if !classes.contains(class) {
+                    classes.push(class.clone());
+                }
+            }
+        }
+        classes
     }
 
     /// Public functional interfaces named by emitted SAM conversions, from the same roots as calls.
@@ -1091,6 +1178,7 @@ impl KlibDeclarationBodies {
         };
         let mut symbols = arena.emitted_callable_symbols(function, forms);
         let mut objects = arena.emitted_object_symbols(function, forms);
+        let mut entries = arena.emitted_enum_entry_symbols(function, forms);
         let mut sams = arena.emitted_sam_classifiers(function, forms);
         // Constructor initialization uses these same serialized roots in
         // `constructor_initializer_callables`, even when its fields call no declaration.
@@ -1116,6 +1204,11 @@ impl KlibDeclarationBodies {
                     initializer
                         .arena
                         .emitted_object_symbols_from(roots.clone(), forms),
+                );
+                entries.extend(
+                    initializer
+                        .arena
+                        .emitted_enum_entry_symbols_from(roots.clone(), forms),
                 );
                 sams.extend(initializer.arena.emitted_sam_classifiers_from(roots, forms));
             }
@@ -1153,12 +1246,14 @@ impl KlibDeclarationBodies {
                 roots.extend(class_arena.class_superclass_delegations(class));
                 symbols.extend(class_arena.emitted_callable_symbols_from(roots.clone(), forms));
                 objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
+                entries.extend(class_arena.emitted_enum_entry_symbols_from(roots.clone(), forms));
                 sams.extend(class_arena.emitted_sam_classifiers_from(roots, forms));
             }
         }
         EmittedBodyInventory {
             callables: symbols,
             objects: read_objects,
+            enum_entries: entries,
             public_hierarchy_roots: classifiers,
             sam_declarations: sams,
         }
@@ -1618,6 +1713,125 @@ mod tests {
                 KlibIrStatement::Expression(initialize),
             ])),
         }
+    }
+
+    /// A module serializing one top-level property `group` whose single accessor, signed as the
+    /// getter of `signed_group`, stands in the `setter` slot when `in_setter_slot`.
+    fn top_level_property(
+        group: &KlibPublicIdSignature,
+        signed_group: &KlibPublicIdSignature,
+        in_setter_slot: bool,
+    ) -> (KlibDeclarationBodies, KlibDependencyCallable) {
+        let accessor = crate::metadata::id_signature::KlibAccessorIdSignature::new(
+            signed_group.clone(),
+            "<get-lastIndex>".to_owned(),
+            1,
+            0,
+        );
+        let mut arena = KlibIrArena::default();
+        let mut getter = empty_constructor(
+            &mut arena,
+            class_symbol("fixture", "Unused"),
+            constructor_symbol("kotlin", "Any"),
+        );
+        getter.base.symbol = KlibIrSymbol {
+            kind: KlibIrSymbolKind::Function,
+            signature: KlibIrSignature::Accessor(accessor.clone()),
+        };
+        getter.name = "<get-lastIndex>".to_owned();
+        getter.constructor = false;
+        getter.body = Some(KlibIrBody::Block(Vec::new()));
+        let getter = arena.push_function(getter);
+        let property = KlibIrMember::Property(crate::metadata::klib_ir::tree::KlibIrProperty {
+            base: KlibIrDeclarationBase {
+                symbol: KlibIrSymbol {
+                    kind: KlibIrSymbolKind::Property,
+                    signature: KlibIrSignature::Public(group.clone()),
+                },
+                origin: "DEFINED".to_owned(),
+                flags: 0,
+                annotations: Vec::new(),
+            },
+            name: "lastIndex".to_owned(),
+            backing_field: None,
+            getter: (!in_setter_slot).then_some(getter),
+            setter: in_setter_slot.then_some(getter),
+        });
+        let trees =
+            KlibIrModuleTrees::from_trees(vec![crate::metadata::klib_ir::KlibIrDeclarationTree {
+                arena,
+                declaration: property,
+            }])
+            .expect("the fixture decodes");
+        let bodies = KlibDeclarationBodies::from_libraries(vec![("fixture".to_owned(), trees)])
+            .expect("the fixture has one module");
+        let identity = KlibDependencyCallable {
+            module: "fixture".to_owned(),
+            declaration: KlibDeclarationSignature::Accessor(accessor),
+        };
+        (bodies, identity)
+    }
+
+    #[test]
+    fn a_top_level_accessor_is_authenticated_by_its_property_group_and_role_slot() {
+        use crate::libraries::KlibAccessorRole::{Getter, Setter};
+        let KlibIrSignature::Public(group) = class_symbol("fixture", "LastIndex").signature else {
+            unreachable!()
+        };
+        let KlibIrSignature::Public(other) = class_symbol("fixture", "Other").signature else {
+            unreachable!()
+        };
+        let (bodies, identity) = top_level_property(&group, &group, false);
+        let (_, getter) = bodies
+            .top_level_accessor_header(&identity, Getter)
+            .expect("the getter holds its slot")
+            .expect("the module serializes the getter");
+        assert!(std::ptr::eq(getter, bodies.function(&identity).unwrap().1));
+        let refused = Err(
+            "the serialized accessor is not the unique accessor of its role in its top-level \
+             property",
+        );
+        assert_eq!(
+            bodies
+                .top_level_accessor_header(&identity, Setter)
+                .map(|found| found.is_some()),
+            refused
+        );
+        // An accessor signed for another property group grants no authority over this one.
+        let (bodies, identity) = top_level_property(&group, &other, false);
+        assert_eq!(
+            bodies
+                .top_level_accessor_header(&identity, Getter)
+                .map(|found| found.is_some()),
+            refused
+        );
+        // A getter-shaped function in the setter slot is neither the getter nor the setter.
+        let (bodies, identity) = top_level_property(&group, &group, true);
+        for role in [Getter, Setter] {
+            assert_eq!(
+                bodies
+                    .top_level_accessor_header(&identity, role)
+                    .map(|found| found.is_some()),
+                refused
+            );
+        }
+        let missing = KlibDependencyCallable {
+            module: "fixture".to_owned(),
+            declaration: KlibDeclarationSignature::Accessor(
+                crate::metadata::id_signature::KlibAccessorIdSignature::new(
+                    group,
+                    "<get-other>".to_owned(),
+                    2,
+                    0,
+                ),
+            ),
+        };
+        assert_eq!(
+            bodies
+                .top_level_accessor_header(&missing, Getter)
+                .map(|found| found.is_some()),
+            Ok(false)
+        );
     }
 
     #[test]

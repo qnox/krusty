@@ -173,9 +173,10 @@ impl Backend for WasmBackend {
     }
 
     /// The WASI stdlib's `StringBuilder.append(CharSequence?)` copies the sequence's `length`
-    /// indexed `Char`s; the JS one appends its `toString` (`crate::string_builders`).
-    fn appends_char_sequences_by_index(&self) -> bool {
-        self.target == WasmTarget::Wasi
+    /// indexed `Char`s, and both stdlibs' `appendRange` checks its range against `length`
+    /// (`crate::string_builders`, `crate::char_sequence_appends`).
+    fn reads_char_sequence_members(&self) -> bool {
+        true
     }
 
     /// The runtime's `ArrayList` walks a collection argument with its `iterator()` and asks it
@@ -196,7 +197,9 @@ impl Backend for WasmBackend {
         &self,
         signature: krusty::backend::DependencyGetterSignature<'_>,
     ) -> bool {
+        // An enum constant answers `kotlin.Enum`'s `name` and `ordinal` from its `$Enum` fields.
         lower::realizes_storage_getter(signature)
+            || krusty::backend::enums::getter_base_member(signature).is_some()
     }
 
     fn emitted_constructor_initializer(
@@ -309,6 +312,8 @@ impl Backend for WasmBackend {
             // The table types are built from the plan, so they are that module's too, except a
             // dependency class's, which is the whole program's.
             started.tables.enter_plan(
+                (file.kind == krusty::backend::CheckedIrUnitKind::Source)
+                    .then_some(file.module_name),
                 file.classifiers.module().classes(),
                 &file.classifiers,
                 &started.classes,

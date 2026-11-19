@@ -29,9 +29,9 @@ pub(super) struct ModuleEmission<'a> {
     /// The dependency classes whose supertype members the backend dispatches itself
     /// ([`crate::backend::Backend::dispatched_dependency_classes`]).
     pub dispatched_classes: &'a [crate::types::TypeName],
-    /// The backend appends a `CharSequence` to a `StringBuilder` through its `length` and `get`
-    /// ([`crate::backend::Backend::appends_char_sequences_by_index`]).
-    pub char_sequences_by_index: bool,
+    /// The backend's `StringBuilder` reads an appended `CharSequence` through its members
+    /// ([`crate::backend::Backend::reads_char_sequence_members`]).
+    pub reads_char_sequence_members: bool,
     /// The backend's own list reads another collection through its interface members
     /// ([`crate::backend::Backend::reads_collections_through_interfaces`]).
     pub collections_through_interfaces: bool,
@@ -60,7 +60,7 @@ pub(super) fn checked_ir_file<'a>(
     // A suspend function's lowering calls two stdlib declarations the source need not name; select
     // them now from the identities resolution stored before backend entry.
     if module.common_ir_coroutines && !ir.suspend_funs.is_empty() {
-        ir.coroutine_runtime = symbols.coroutine_runtime();
+        ir.coroutine_runtime = symbols.runtime().coroutine_runtime;
     }
     let mut callables = match CheckedBackendCallables::freeze_with_class_declarations(
         &ir,
@@ -76,8 +76,8 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     };
-    if module.char_sequences_by_index {
-        if let Some(protocol) = symbols.char_sequence_protocol() {
+    if module.reads_char_sequence_members {
+        if let Some(protocol) = symbols.runtime().char_sequence_protocol {
             if let Err(error) =
                 callables.freeze_char_sequence_protocol(protocol, symbols.semantic_platform())
             {
@@ -226,21 +226,33 @@ pub(super) fn prepare_common_ir(
     file: &mut CheckedIrFile<'_>,
     provider: &dyn crate::libraries::SemanticPlatform,
     preparation: crate::backend::CommonIrPreparation,
-    coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
+    runtime: crate::resolve::runtime_selections::RuntimeSelections,
     represented: &[crate::types::TypeName],
 ) -> Result<(), crate::backend::CommonIrPreparationError> {
     // Resolution selected the coroutine runtime declarations once; a unit whose preparation
     // lowers a suspend function records that saved selection.
     if !file.ir.suspend_funs.is_empty() && file.ir.coroutine_runtime.is_none() {
-        file.ir.coroutine_runtime = coroutine_runtime;
+        file.ir.coroutine_runtime = runtime.coroutine_runtime;
     }
     crate::backend::counted_loops::realize(&mut file.ir, preparation.counted_loops);
     crate::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
+    let entries_factory = runtime.enum_entries_factory.map(|factory| {
+        let identity = provider
+            .external_callable(factory.function)
+            .and_then(|realization| realization.dependency_callable);
+        crate::backend::enums::EntriesFactory::bind(
+            factory,
+            identity.as_ref(),
+            &file.dependency_exports,
+        )
+    });
     crate::backend::enums::realize(
         &mut file.ir,
         preparation.enums,
+        entries_factory,
         &mut file.dependency_exports,
-    );
+    )
+    .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
     let classifiers = file.classifiers.module();
     let module_name = file.module_name;
     crate::backend::default_arguments::realize(

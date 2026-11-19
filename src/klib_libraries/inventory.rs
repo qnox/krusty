@@ -724,6 +724,18 @@ impl PackageInventory {
         Some((classifier, signed, &signed.constructors[position]))
     }
 
+    /// The enum class whose implicit `values`, `valueOf` or `entries` getter is serialized under
+    /// exactly `identity`.
+    pub(super) fn dependency_enum_member(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Option<(TypeName, &SignedClassifier)> {
+        let classifier = self
+            .dependency_identities()
+            .enum_member(&identity.module, &identity.declaration)?;
+        Some((classifier, &self.classifiers[&classifier]))
+    }
+
     /// The property whose getter or setter is serialized under exactly `identity`, at its
     /// placement, with the class that declares it as a member or companion-block member.
     pub(super) fn dependency_property(

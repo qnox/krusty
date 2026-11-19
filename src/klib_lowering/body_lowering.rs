@@ -25,6 +25,7 @@ mod compiler_blocks;
 mod conditionals;
 mod constructions;
 mod elvis_blocks;
+mod enum_members;
 mod instance_storage;
 mod loops;
 mod object_literals;
@@ -37,6 +38,7 @@ mod try_catch;
 mod type_operators;
 
 pub(super) use blocks::publish_parameter_defaults;
+pub(super) use enum_members::ImplicitEnumMember;
 
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::FunctionHeader;
@@ -149,6 +151,17 @@ pub(super) trait CallLinker {
         &self,
         _callee: &crate::libraries::KlibDeclarationSignature,
     ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
+        Ok(None)
+    }
+
+    /// The enum class whose implicit `values`, `valueOf` or `entries` getter a call of
+    /// `callee` names, which the linker has materialized, and that member. Template linkers keep
+    /// the call's ordinary declaration boundary.
+    fn implicit_enum_member(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<(TypeName, ImplicitEnumMember)>> {
         Ok(None)
     }
 
@@ -330,12 +343,13 @@ pub(super) trait CallLinker {
         unsupported("a call of a file-private declaration")
     }
 
-    /// The dependency property a call of its accessor `callee` reads or writes.
+    /// What a call of the property accessor `callee` reaches: the dependency property it reads or
+    /// writes, or the accessor function the unit emits.
     fn link_accessor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibAccessorIdSignature,
-    ) -> Lowered<LinkedAccessor>;
+    ) -> Lowered<LinkedAccessorCall>;
 
     /// The static storage of the top-level property whose backing field is `field`, which a body
     /// of that property's own library reads or writes. `None` leaves the access to the body's
@@ -438,7 +452,7 @@ pub(super) struct LinkedConstructor {
 /// and the accessor's dispatch receiver, parameters (context parameters, extension receiver, and a
 /// setter's value) and result.
 pub(super) struct LinkedAccessor {
-    pub(super) target: LinkedAccessorTarget,
+    pub(super) property: crate::fir::ExternalPropertyId,
     pub(super) write: bool,
     pub(super) receiver: Option<Ty>,
     pub(super) params: Vec<Ty>,
@@ -493,13 +507,12 @@ pub(super) struct StaticField {
 }
 
 /// What an accessor call reaches.
-#[derive(Clone, Copy)]
-pub(super) enum LinkedAccessorTarget {
+pub(super) enum LinkedAccessorCall {
     /// The provider's property, read or written through its accessor.
-    External(crate::fir::ExternalPropertyId),
-    /// The getter this unit emits, for a member of a value class: a member function of its
-    /// class, called on the receiver in place of the property read.
-    Local(FunId),
+    Property(LinkedAccessor),
+    /// The accessor function this unit emits, called as any function of the unit is: a member of
+    /// a class the unit materializes, or a top-level accessor, generic ones among them.
+    Function(LinkedCallee),
 }
 
 /// The function a body is lowered into: its serialized symbol, the only target its `return`s may

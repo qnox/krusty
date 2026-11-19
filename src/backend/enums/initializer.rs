@@ -1,19 +1,28 @@
 //! The storage and functions one enum class is realized as.
 
 use crate::ir::{
-    Callee, ClassId, ExprId, FunId, IrAccessorLines, IrBinOp, IrCatch, IrConst, IrExpr, IrFile,
-    IrFunction, IrIntrinsic, IrStatic, IrStaticAccessors,
+    Callee, ClassId, ExprId, FunId, IrAccessorLines, IrBinOp, IrCatch, IrCheckedSubstitution,
+    IrConst, IrExpr, IrFile, IrFunction, IrIntrinsic, IrStatic, IrStaticAccessors,
 };
 use crate::types::{EqualityMode, Ty, TypeName, Visibility};
 
 use super::{Contract, Realized};
 
-/// Build the slots, initializer, `values()` and `valueOf` of the enum `class`.
+/// How an enum's `entries` list is made.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum EntriesList {
+    /// The target's own list ([`IrExpr::EnumEntriesList`]), built by the initializer.
+    Runtime,
+    /// A call of the stdlib's `enumEntries(Array)`, made by the getter on its first read.
+    Factory(super::EntriesFactory),
+}
+
+/// Build the slots, initializer, `values()`, `valueOf` and `entries` of the enum `class`.
 pub(super) fn build(
     ir: &mut IrFile,
     class: ClassId,
-    reads_entries: bool,
     contract: Contract,
+    entries_list: EntriesList,
 ) -> Realized {
     let declaration = &ir.classes[class as usize];
     let classifier = declaration.fq_name_id();
@@ -30,22 +39,132 @@ pub(super) fn build(
         .collect();
     let flag = static_slot(ir, format!("{owner}$initialized"), Ty::Boolean);
     let entries_ty = entries_type(classifier);
-    let entries = reads_entries
-        .then(|| static_slot(ir, format!("{owner}$entries"), Ty::nullable(entries_ty)));
+    let list = static_slot(ir, format!("{owner}$entries"), Ty::nullable(entries_ty));
+    let built_by_initializer = matches!(entries_list, EntriesList::Runtime);
 
-    let initializer = initializer(ir, class, &slots, flag, entries, contract);
+    let initializer = initializer(
+        ir,
+        class,
+        &slots,
+        flag,
+        built_by_initializer.then_some(list),
+        contract,
+    );
     let values = match contract {
         Contract::KotlinNative => values(ir, classifier, &owner, &names, &slots, initializer),
         Contract::KotlinWasm => current_values(ir, classifier, &owner, &slots, initializer),
     };
     let value_of = value_of(ir, classifier, &owner, &names, &slots, initializer);
+    let entries = entries_getter(
+        ir,
+        classifier,
+        &owner,
+        EntriesStorage {
+            slots: &slots,
+            list,
+            initializer,
+        },
+        entries_list,
+    );
     Realized {
         slots,
-        entries,
         initializer,
         values,
         value_of,
+        entries,
     }
+}
+
+/// Where an enum's `entries` getter reads the list and the constants it is made of.
+struct EntriesStorage<'s> {
+    slots: &'s [u32],
+    list: u32,
+    initializer: FunId,
+}
+
+/// The `entries` getter: run the initializer, then answer the list. Under
+/// [`EntriesList::Factory`] the getter makes it on its first read, `enumEntries(arrayOf(...))` of
+/// the constants as they stand, as kotlinc-js/wasm do, so a read from inside a constant's
+/// construction already finds a list.
+fn entries_getter(
+    ir: &mut IrFile,
+    classifier: TypeName,
+    owner: &str,
+    storage: EntriesStorage<'_>,
+    entries_list: EntriesList,
+) -> FunId {
+    let name = format!("{owner}$entries");
+    let entries_ty = entries_type(classifier);
+    let mut stmts = vec![call(ir, storage.initializer, Vec::new(), Ty::Unit)];
+    if let EntriesList::Factory(factory) = entries_list {
+        let current = read_slot(ir, storage.list, Ty::nullable(entries_ty));
+        let null = constant(ir, IrConst::Null, Ty::Null);
+        let missing = ir.add_expr(IrExpr::Equality {
+            op: IrBinOp::Eq,
+            mode: EqualityMode::Structural,
+            lhs: current,
+            rhs: null,
+        });
+        ir.set_logical_type(missing, Ty::Boolean);
+        let values = values_array(ir, classifier, storage.slots);
+        let list = factory_call(ir, factory, classifier, values);
+        let store = ir.add_expr(IrExpr::SetStatic {
+            index: storage.list,
+            value: list,
+        });
+        ir.set_logical_type(store, Ty::Unit);
+        let when = ir.add_expr(IrExpr::When {
+            branches: vec![(Some(missing), store)],
+        });
+        ir.set_logical_type(when, Ty::Unit);
+        stmts.push(when);
+    }
+    let list = read_slot(ir, storage.list, entries_ty);
+    let answer = ir.add_expr(IrExpr::Return(Some(list)));
+    ir.set_logical_type(answer, Ty::Nothing);
+    stmts.push(answer);
+    let body = unit_block(ir, stmts);
+    function(ir, name, Vec::new(), entries_ty, body)
+}
+
+/// `enumEntries<E>(values)`: the selected stdlib declaration, applied to the enum, or this unit's
+/// own function lowering its body.
+fn factory_call(
+    ir: &mut IrFile,
+    factory: super::EntriesFactory,
+    classifier: TypeName,
+    values: ExprId,
+) -> ExprId {
+    let enum_ty = Ty::obj_name(classifier);
+    let entries_ty = entries_type(classifier);
+    let callee = match factory {
+        super::EntriesFactory::Selected(factory) => Callee::External {
+            target: factory.function,
+            default_provider: None,
+            params: vec![array_type(classifier)],
+            ret: entries_ty,
+            substitutions: vec![IrCheckedSubstitution {
+                parameter: crate::fir::FirTypeParameterRef::External {
+                    callable: factory.function,
+                    ordinal: 0,
+                },
+                reified: false,
+                value: enum_ty,
+                reified_runtime: enum_ty,
+                additional_bounds: Vec::new(),
+            }],
+            defaults: Vec::new(),
+            extension_receiver_parameter: None,
+        },
+        super::EntriesFactory::Own(function) => Callee::Local(function),
+    };
+    let call = ir.add_expr(IrExpr::Call {
+        callee: Box::new(callee),
+        dispatch_receiver: None,
+        args: vec![values],
+    });
+    ir.set_logical_type(call, entries_ty);
+    call
 }
 
 /// `kotlin.enums.EnumEntries<E>`.
@@ -80,7 +199,8 @@ fn static_slot(ir: &mut IrFile, name: String, ty: Ty) -> u32 {
 ///
 /// Under [`Contract::KotlinNative`] every constant is allocated and published before the first is
 /// constructed. Under [`Contract::KotlinWasm`] each is published once constructed (a constant with
-/// a body right after its super call), and `entries` is built on its first read instead.
+/// a body right after its super call). `entries` is the slot the initializer builds the list in,
+/// when the getter does not build it on its first read instead.
 fn initializer(
     ir: &mut IrFile,
     class: ClassId,
@@ -177,7 +297,7 @@ fn initializer(
             }
         }
     }
-    if let Some(entries) = entries.filter(|_| published_first) {
+    if let Some(entries) = entries {
         let array = values_array(ir, classifier, slots);
         let list = ir.add_expr(IrExpr::EnumEntriesList {
             classifier,

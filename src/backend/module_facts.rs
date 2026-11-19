@@ -685,7 +685,7 @@ impl BackendModuleFacts {
     }
 
     /// Whether a file of this module declares `instance`: an object, a constant of an enum or one
-    /// of its `values()` and `valueOf`, or a constructor another file may build through.
+    /// of its `values()`, `valueOf` and `entries`, or a constructor another file may build through.
     pub fn declares_instance(&self, instance: &super::instance_links::InstanceEntry) -> bool {
         match instance {
             super::instance_links::InstanceEntry::Object(classifier) => self

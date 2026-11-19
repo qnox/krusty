@@ -25,10 +25,10 @@ impl<'u, 's> Linker<'u, 's> {
         self.materialize_plan(ir, identity, plan)
     }
 
-    /// Materialize the object `class` with its instance, created by its private primary
-    /// constructor, which `identity` names. The unit publishes the object's instance as the
-    /// object's own file would.
-    pub(super) fn materialize_object(
+    /// Materialize `class`, an object or an enum class, with its instances, created by its private
+    /// primary constructor, which `identity` names. The unit publishes the object's instance, or
+    /// the enum's constants, as the class's own file would.
+    pub(super) fn materialize_declared_instances(
         &mut self,
         ir: &mut IrFile,
         identity: &KlibDependencyCallable,
@@ -37,7 +37,7 @@ impl<'u, 's> Linker<'u, 's> {
         if self.classes.contains_key(identity) {
             return Ok(());
         }
-        let Some(plan) = super::super::class_initialization::object_plan(
+        let Some(plan) = super::super::class_initialization::declared_instances_plan(
             class,
             self.sources.bodies,
             self.sources.callees,
@@ -183,6 +183,21 @@ impl<'u, 's> Linker<'u, 's> {
             properties: super::super::class_storage::backed_properties(&plan.header.class.members),
             contract: plan.header.contract,
         };
+        // An enum's constants are its instances: the arguments each passes to the constructor
+        // are lowered in the enum's own initialization frame.
+        if plan.header.contract.kind == crate::libraries::TypeKind::Enum {
+            self.queue_enum_entry_arguments(class, identity, &plan, function);
+            // Its synthetic `entries` body calls the checked `enumEntries` with its `values()`,
+            // an edge the unit lowers as any body's call, so the enum's entries are built by the
+            // unit's own factory.
+            let factory =
+                super::super::class_initialization::entries_factory(&plan, self.sources.callees);
+            if let Some(KlibDeclarationSignature::Public(factory)) =
+                factory.map(|factory| &factory.declaration)
+            {
+                self.link(ir, factory)?;
+            }
+        }
         if existing.is_none() {
             for function in &plan.dispatched {
                 self.declare_dispatched(ir, member.clone(), plan.header.arena, function)?;
@@ -402,6 +417,13 @@ impl<'u, 's> Linker<'u, 's> {
         let mut class = IrClass::synthetic(classifier);
         class.is_source_declared = true;
         class.is_object = plan.header.contract.kind == crate::libraries::TypeKind::Object;
+        if plan.header.contract.kind == crate::libraries::TypeKind::Enum {
+            class.is_enum = true;
+            class.declaration_name = Some(super::super::klib_types::classifier_declaration(
+                &plan.header.contract.signature,
+            )?);
+            class.enum_entries = super::enum_materialization::declared_entries(plan);
+        }
         class.supertypes.clone_from(&plan.supertypes);
         set_materialized_modality(&mut class, plan.header.contract.modality);
         if let Some(call) = &plan.superclass {
@@ -650,23 +672,24 @@ impl<'u, 's> Linker<'u, 's> {
         header: &super::super::class_headers::ClassMemberHeader<'s, 's>,
     ) -> Result<super::MemberClass<'s>, KlibBodyDeclineReason> {
         let contract = header.contract;
-        let class = if contract.kind == crate::libraries::TypeKind::Object {
-            // An object's instance is the one its own private constructor created.
+        let class = if contract.declares_instances() {
+            // An object's instance, or an enum's constant, is one its own private constructor
+            // created.
             let primary = contract.primary_constructor.as_ref().ok_or(
                 KlibBodyDeclineReason::UnsupportedDeclaration(
-                    "an object member without a primary constructor",
+                    "an object or enum member without a primary constructor",
                 ),
             )?;
             let identity = KlibDependencyCallable {
                 module: contract.module.clone(),
                 declaration: KlibDeclarationSignature::Public(primary.clone()),
             };
-            self.materialize_object(ir, &identity, contract)?;
+            self.materialize_declared_instances(ir, &identity, contract)?;
             *self
                 .classes
                 .get(&identity)
                 .ok_or(KlibBodyDeclineReason::UnsupportedDeclaration(
-                    "a member of an object without ordinary initialization",
+                    "a member of an object or enum without admitted initialization",
                 ))?
         } else {
             self.materialize_initializing_constructors(ir, contract)?
@@ -794,9 +817,13 @@ impl<'u, 's> Linker<'u, 's> {
             };
             let name = ir.functions[method as usize].name.clone();
             for declared in implemented {
+                // The class's declaration evidence froze each of them.
                 let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(declared)
                 else {
-                    continue;
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "an inherited implementation's declaration has no unique provider"
+                            .to_owned(),
+                    ));
                 };
                 let overridden_declaration = callables[0];
                 if !overridden_declaration
@@ -810,9 +837,12 @@ impl<'u, 's> Linker<'u, 's> {
                 else {
                     continue;
                 };
-                let Some(target) = self.sources.callees.reference_target(declared) else {
-                    continue;
-                };
+                let target = self.sources.callees.reference_target(declared).ok_or(
+                    KlibBodyDeclineReason::SignatureMismatch(
+                        "an inherited implementation's declaration has no frozen declaration"
+                            .to_owned(),
+                    ),
+                )?;
                 let overridden = crate::fir::ResolvedFunctionOverrideTarget::External(target);
                 let records = ir.function_overrides.entry(owner).or_default();
                 if records.iter().any(|edge| edge.overridden == overridden) {

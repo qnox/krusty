@@ -1210,7 +1210,9 @@ impl<'a> Body<'a> {
                     self.statement(statement)?;
                 }
                 // The block's value is delivered at the type the block completes with, which an
-                // inline body's erased generic result is narrower than at its call.
+                // inline body's erased generic result is narrower than at its call, and a block
+                // typed apart from its value (`fun f(): Any = g()` over a `Unit` call) leaves its
+                // value converted to the block's own type.
                 if let Some(value) = value {
                     // A block typed apart from its value (`fun f(): Any = g()` over a `Unit` call)
                     // leaves its value converted to the block's own type.
@@ -1795,7 +1797,7 @@ impl<'a> Body<'a> {
                     })?;
                 self.code.call(entry);
             }
-            // So are `values()` and `valueOf`, which read those constants.
+            // So are `values()`, `valueOf` and `entries`, which read those constants.
             IrExpr::EnumValues { classifier } => self.dependency_enum_member(
                 classifier,
                 krusty::backend::enums::StaticMember::Values,
@@ -1807,6 +1809,11 @@ impl<'a> Body<'a> {
                 classifier,
                 krusty::backend::enums::StaticMember::ValueOf,
                 Some(arg),
+            )?,
+            IrExpr::EnumEntries { classifier } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::Entries,
+                None,
             )?,
             IrExpr::PropertyRead {
                 receiver: Some(receiver),

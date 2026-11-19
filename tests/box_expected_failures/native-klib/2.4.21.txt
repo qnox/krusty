@@ -40,7 +40,6 @@ arrays/forInReversed/reversedOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedReversedOriginalUpdatedInLoopBody.kt
 arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
 arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
-arrays/indices.kt
 arrays/kt42932.kt
 arrays/multiArrayConstructors.kt
 arrays/primitiveArrays.kt
@@ -244,7 +243,6 @@ companionBlocksAndExtensions/visibility.kt
 compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
-compileKotlinAgainstKotlin/genericSetter.kt
 compileKotlinAgainstKotlin/inlineClasses/funInterface.kt
 compileKotlinAgainstKotlin/inlineClasses/suspendFunWithDefaultMangling.kt
 compileKotlinAgainstKotlin/interfaceDelegationAndBridgesProcessing.kt
@@ -834,7 +832,6 @@ devirtualization/inline_getter.kt
 devirtualization/lateinitInterface.kt
 elvis/ofNonNullableResultType.kt
 enum/defaultCtor/noPrimaryConstructor.kt
-enum/enumEntriesMultimoduleNoMappings.kt
 enum/enumEntriesNameClashes.kt
 enum/enumEntryMembers.kt
 enum/enumValueOf.kt
@@ -1229,7 +1226,6 @@ ir/enumClass3.kt
 ir/fileClassInitializers.kt
 ir/serializationRegressions/anonFakeOverride.kt
 ir/serializationRegressions/innerClassInEnumEntryClass.kt
-ir/serializationRegressions/useImportedMember.kt
 ir/serializationRegressions/varAsFunctionCall.kt
 jdk/iteratingOverHashMap.kt
 jdk/noStringToCharArray.kt
@@ -1315,7 +1311,6 @@ multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
-multiplatform/k2/hmpp/genericTypealiasSameNameTwoLibs.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
 multiplatform/k2/hmpp/inheritanceFromExpected3-3.kt
@@ -1367,7 +1362,6 @@ properties/accessorForProtectedPropertyWithPrivateSetter.kt
 properties/accessorForProtectedPropertyWithPrivateSetterInObjectLiteral.kt
 properties/accessorForProtectedPropertyWithPrivateSetterViaSuper.kt
 properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
-properties/backingField/backingFieldWithSmartTypeParameters.kt
 properties/complexPropertyInitializer.kt
 properties/eagerInitializationGlobal1.kt
 properties/eagerInitializationGlobal2.kt
@@ -1396,7 +1390,6 @@ ranges/contains/evaluationOrderForRangeLiteral.kt
 ranges/contains/evaluationOrderForRangeLiteralReversed.kt
 ranges/contains/evaluationOrderForUntil.kt
 ranges/contains/evaluationOrderForUntilReversed.kt
-ranges/contains/generated/arrayIndices.kt
 ranges/contains/generated/charDownTo.kt
 ranges/contains/generated/doubleRangeTo.kt
 ranges/contains/generated/floatRangeTo.kt
@@ -2210,7 +2203,6 @@ when/stringOptimization/expression.kt
 when/stringOptimization/nullability.kt
 when/stringOptimization/sameHashCode.kt
 when/stringOptimization/statement.kt
-when/stringOptimization/temporaryVarInWhenByStringIsDisposedProperly.kt
 when/whenSubjectVariable/whenByEnum.kt
 when/whenSubjectVariable/whenByNullableEnum.kt
 when/whenSubjectVariable/whenByString.kt

@@ -234,11 +234,12 @@ pub trait Backend {
         Vec::new()
     }
 
-    /// Whether this target's `StringBuilder` appends a `CharSequence` by reading its `length` and
-    /// each indexed `Char` (Kotlin/Wasm WASI) rather than by rendering it with `toString`
-    /// (Kotlin/Wasm JS). The handoff then freezes those `CharSequence` members for the target to
-    /// call ([`CheckedBackendCallables::char_sequence_protocol`]).
-    fn appends_char_sequences_by_index(&self) -> bool {
+    /// Whether this target's own `StringBuilder` reads an appended `CharSequence` through its
+    /// `length` or indexed `Char` members, which no source call need name: Kotlin/Wasm WASI copies
+    /// a sequence by both, and both Kotlin/Wasm stdlibs check an `appendRange` against `length`.
+    /// The handoff then freezes those `CharSequence` members for the target to call
+    /// ([`CheckedBackendCallables::char_sequence_protocol`]).
+    fn reads_char_sequence_members(&self) -> bool {
         false
     }
 

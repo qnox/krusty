@@ -134,8 +134,6 @@ pub(super) struct PreparedMember<'a> {
     /// Interface members this function overrides, authenticated against the admitted supertypes.
     pub(super) overrides: Vec<MemberOverride>,
     pub(super) visibility: Visibility,
-    /// Whether the function is its property's setter.
-    pub(super) setter: bool,
 }
 
 /// An overridden member, joined by its checked dependency identity.
@@ -1248,15 +1246,12 @@ fn members_and_storage<'a>(
             KlibIrMember::Function(id) => {
                 let function = arena.function(*id);
                 if !function.constructor {
-                    members.push(prepare_member(arena, function, scope, false)?);
+                    members.push(prepare_member(arena, function, scope)?);
                 }
             }
             KlibIrMember::Property(property) => {
-                if let Some(id) = property.getter {
-                    members.push(prepare_member(arena, arena.function(id), scope, false)?);
-                }
-                if let Some(id) = property.setter {
-                    members.push(prepare_member(arena, arena.function(id), scope, true)?);
+                for id in [property.getter, property.setter].into_iter().flatten() {
+                    members.push(prepare_member(arena, arena.function(id), scope)?);
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {}
@@ -1281,7 +1276,6 @@ fn prepare_member<'a>(
     arena: &'a KlibIrArena,
     function: &'a KlibIrFunction,
     scope: &MemberScope<'_>,
-    setter: bool,
 ) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
     let statements = match &function.body {
         Some(KlibIrBody::Block(statements)) => statements.as_slice(),
@@ -1297,7 +1291,6 @@ fn prepare_member<'a>(
         header: local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?,
         overrides: member_overrides(function, scope)?,
         visibility: declaration_visibility(function.base.flags),
-        setter,
     })
 }
 
@@ -1562,12 +1555,25 @@ fn class_formals(
         variances.push(variance);
     }
     let mut bounds = Vec::with_capacity(parameters.len());
-    for parameter in parameters {
+    for &parameter in &parameters {
         let mut parameter_bounds = Vec::with_capacity(parameter.supertypes.len());
         for bound in &parameter.supertypes {
             parameter_bounds.push(semantic_type_in(arena, &types, *bound, resolve)?);
         }
         bounds.push(parameter_bounds);
+    }
+    // Each formal carries its first declared bound, as a provider's formal does: a value of
+    // `T : Enum<T>` is an `Enum`, whose members a body calls on it. A bound naming a formal reads
+    // it unbounded, as the provider decodes a recursive bound.
+    let mut types = KlibTypeParameters::default();
+    for ((&parameter, formal), parameter_bounds) in parameters.iter().zip(&mut formals).zip(&bounds)
+    {
+        if let (Some(&bound), Some(name)) = (parameter_bounds.first(), formal.ty_param_name()) {
+            *formal = Ty::ty_param(name, bound);
+        }
+        if !types.bind(&parameter.base.symbol, *formal) {
+            return Err(mismatch("a non-public class repeats a type parameter"));
+        }
     }
     for ((&formal, &variance), declared) in formals.iter().zip(&variances).zip(&bounds) {
         if !types.record_bounds(formal, declared.clone())
