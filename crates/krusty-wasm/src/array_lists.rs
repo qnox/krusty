@@ -189,8 +189,17 @@ impl ArrayLists {
         });
         let list_text = empty_string_function(module, objects, chars, string);
         let iter_text = empty_string_function(module, objects, chars, string);
-        let (class, list_table) = dispatch_table(module, objects, identity, list, list_text);
-        let (_, iter_table) = dispatch_table(module, objects, identity, iterator, iter_text);
+        let list_equals = module.declare();
+        let (class, list_table) =
+            dispatch_table(module, objects, identity, list, list_equals, list_text);
+        let (_, iter_table) = dispatch_table(
+            module,
+            objects,
+            identity,
+            iterator,
+            objects.identity_equals,
+            iter_text,
+        );
         let layout = Layout {
             list,
             iterator,
@@ -221,6 +230,7 @@ impl ArrayLists {
             layout,
         };
         lists.define_new(module, identity, layout, list_table);
+        lists.define_equals(module, objects, layout, list_equals, equals);
         let reserve = lists.define_reserve(module, layout);
         lists.define_size(module, layout);
         lists.define_is_empty(module);
@@ -447,6 +457,66 @@ impl ArrayLists {
             .i32_const(1);
         module.define(
             self.add,
+            Function {
+                ty,
+                locals: vec![ValType::I32],
+                code,
+            },
+        );
+    }
+
+    /// `Any.equals` of a runtime list: another runtime list of the same size whose elements are
+    /// pairwise equal, as `List.equals` answers. Any other value is not equal to it.
+    fn define_equals(
+        &self,
+        module: &mut Module,
+        objects: &ObjectRoot,
+        layout: Layout,
+        function: u32,
+        equals: u32,
+    ) {
+        let ty = objects.any_slot_types[0];
+        let (list, other, index) = (0, 1, 2);
+        let mut code = Code::default();
+        code.local_get(other)
+            .ref_test(false, HeapType::Concrete(layout.list))
+            .op(EQZ32)
+            .if_(BlockType::Empty)
+            .i32_const(0)
+            .return_()
+            .end();
+        layout.length(&mut code, list);
+        layout.length(&mut code, other);
+        code.op(super::runtime::NE32)
+            .if_(BlockType::Empty)
+            .i32_const(0)
+            .return_()
+            .end();
+        code.block(BlockType::Empty).loop_(BlockType::Empty);
+        code.local_get(index);
+        layout.length(&mut code, list);
+        code.op(GE_S32).br_if(1);
+        layout.elements(&mut code, list);
+        code.local_get(index).array_get(layout.elements);
+        layout.elements(&mut code, other);
+        code.local_get(index)
+            .array_get(layout.elements)
+            .call(equals)
+            .op(EQZ32)
+            .if_(BlockType::Empty)
+            .i32_const(0)
+            .return_()
+            .end();
+        code.local_get(index)
+            .i32_const(1)
+            .op(ADD32)
+            .local_set(index)
+            .br(0)
+            .end()
+            .end()
+            .i32_const(1);
+        module.define(
+            function,
             Function {
                 ty,
                 locals: vec![ValType::I32],
@@ -838,13 +908,14 @@ fn dispatch_table(
     objects: &mut ObjectRoot,
     identity: &IdentityObjects,
     structure: u32,
+    equals: u32,
     to_string: u32,
 ) -> (ClassRef, u32) {
     let (class, itable) = objects
         .interfaces
         .class(module, objects.itable, vec![structure]);
     let mut init = Code::default();
-    for function in [objects.identity_equals, identity.hash_code, to_string] {
+    for function in [equals, identity.hash_code, to_string] {
         module.reference_function(function);
         init.ref_func(function);
     }
