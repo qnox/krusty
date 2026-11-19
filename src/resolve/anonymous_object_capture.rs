@@ -322,12 +322,19 @@ impl Checker<'_> {
                 ContextReceiverKind::LegacyReceiver => CapturedContextKind::LegacyReceiver,
                 ContextReceiverKind::Named => unreachable!("a named context value is no receiver"),
             };
-            let types = context.types.into_iter().map(|ty| {
-                crate::fir::ResolvedTy::new(ty).expect("a context parameter's type is published")
-            });
+            // An unresolved context type is already diagnosed. It cannot be a published capture,
+            // and inventing another type would make the anonymous object check that stand-in.
+            let Ok(types) = context
+                .types
+                .into_iter()
+                .map(crate::fir::ResolvedTy::new)
+                .collect::<Result<Vec<_>, _>>()
+            else {
+                return FirCapturedReceiver::Lambda(None);
+            };
             return FirCapturedReceiver::Context {
                 kind,
-                types: types.collect(),
+                types: types.into_boxed_slice(),
                 index: u32::try_from(context.index).expect("too many context parameters"),
             };
         }
