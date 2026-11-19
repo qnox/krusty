@@ -600,7 +600,7 @@ fn a_nested_generic_inline_call_binds_the_outer_formals_to_the_calls_type_argume
         1,
         "only the inline callee's own body is opaque: {bound:?}"
     );
-    assert!(opaque_bindings.iter().all(|ty| opaque(ty)));
+    assert!(opaque_bindings.iter().all(opaque));
 }
 
 #[test]

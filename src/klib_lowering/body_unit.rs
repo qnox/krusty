@@ -701,7 +701,7 @@ impl DependencyBodyUnit {
     }
 
     /// Whether `identity` is a member of a class this unit installed with all of its members.
-    fn installs_member(&self, identity: &KlibDependencyCallable) -> bool {
+    pub(super) fn installs_member(&self, identity: &KlibDependencyCallable) -> bool {
         self.local_functions
             .contains_key(&local_class::installed_identity(identity))
     }
@@ -1885,6 +1885,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             let purpose = if emitted.target_intrinsic().is_some()
                 || emitted.is_target_member()
                 || declaration.body.is_none()
+                || self.is_published_member(&identity, arena, declaration, selected.is_none())
             {
                 HeaderPurpose::External
             } else {
@@ -2226,29 +2227,6 @@ impl<'s> Linker<'_, 's> {
             }
         }
         Ok(!constructors.is_empty())
-    }
-
-    /// Whether an earlier unit of the program materialized the class of the member `candidate`:
-    /// it published the initialization of each of the class's constructors.
-    fn class_realized_earlier(&self, candidate: KlibBodyCallable<'s>) -> bool {
-        let Some(constructors) = candidate.class_contract().and_then(|class| {
-            super::class_initialization::initializing_constructors(class, self.sources.bodies)
-        }) else {
-            return false;
-        };
-        !constructors.is_empty()
-            && constructors.iter().all(|identity| {
-                self.sources
-                    .externals
-                    .get(identity)
-                    .is_some_and(|external| {
-                        matches!(
-                            external.realization,
-                            DependencyExternalRealization::AllocatingConstructor
-                                | DependencyExternalRealization::ConstructorInitializer
-                        )
-                    })
-            })
     }
 
     /// A call of a member of a class this unit does not materialize, through the member's
