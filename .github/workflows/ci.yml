@@ -710,6 +710,12 @@ jobs:
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['conformance'][format('{0}|{1}', matrix.version, matrix.target)] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     env:
       KRUSTY_BOX_CASE_TIMEOUT_MS: '8000'
+      # Every step of a row resolves its Maven dependencies (kotlinx libraries, compiler plugins,
+      # target KLIBs) into this one directory, restored and saved with the row. A reference cache
+      # entry is keyed by its classpath, so a jar resolved under $HOME on one runner and under the
+      # workspace on another missed every entry it is on; and a jar the cache lacked was fetched
+      # from Maven Central, which answers a busy runner's address with 429.
+      KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
       # Each target row keeps its own kotlinc box reference cache; see its restore step.
       BOX_REFERENCES: box-reference-classes-${{ matrix.target != 'jvm' && format('{0}-', matrix.target) || '' }}${{ matrix.version }}
     steps:
@@ -748,15 +754,22 @@ jobs:
           path: |
             target/cache/ser-corpus/${{ matrix.version }}
             target/cache/ksp-toolchain
-            target/cache/krusty-deps
           key: kotlin-conformance-inputs-${{ matrix.version }}
-      - name: restore Wasm target KLIB dependencies (${{ matrix.version }})
-        if: startsWith(matrix.target, 'wasm-')
-        id: wasm-klibs
+      # The row's Maven dependencies. Files there are named by artifact and version and never
+      # rewritten, so the set grows when a case needs a new one; a master run that added a file
+      # saves the set under its commit, and every later run restores the newest. A key saved only on
+      # a miss never learned a dependency added after it: 2.4.20's lacked the atomicfu plugin.
+      - name: restore Maven dependencies (${{ matrix.version }}, ${{ matrix.target }})
+        id: maven-deps
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/krusty-deps
-          key: wasm-target-klibs-v1-${{ matrix.target }}-${{ matrix.version }}
+          key: conformance-maven-deps-v1-${{ matrix.target }}-${{ matrix.version }}-${{ steps.base.outputs.sha }}
+          restore-keys: |
+            conformance-maven-deps-v1-${{ matrix.target }}-${{ matrix.version }}-
+      - name: list restored Maven dependencies
+        id: maven-deps-restored
+        run: echo "entries=$(scripts/cache-entries.sh target/cache/krusty-deps)" >> "$GITHUB_OUTPUT"
       # Native cases are analyzed against this version's Kotlin/Native stdlib KLIB.
       # `scripts/kotlin-native.sh` re-downloads a restored root whose stdlib payload is incomplete.
       # The ci job restores the same entry for the maximum version.
@@ -967,7 +980,6 @@ jobs:
         # budget the Native corpus step has.
         env:
           KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
-          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_WASM_JS_BYTE_REPORT: ${{ github.workspace }}/wasm-js-byte-equality.txt
           KRUSTY_WASM_WASI_BYTE_REPORT: ${{ github.workspace }}/wasm-wasi-byte-equality.txt
           KRUSTY_KLIB_REFERENCE_CACHE: ${{ github.workspace }}/target/cache/klib-references
@@ -981,8 +993,6 @@ jobs:
       # Focused Wasm checks exercise both targets; run that complete inventory once per version.
       - name: run focused Wasm conformance ${{ matrix.version }}
         if: matrix.target == 'wasm-js'
-        env:
-          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: just wasm-conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       - name: list new KLIB box reference bytes
         if: always() && matrix.target != 'jvm' && github.ref == 'refs/heads/master'
@@ -1021,7 +1031,6 @@ jobs:
           KRUSTY_RECORD_CLASS_DUMPS: "0"
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
-          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: "1"
         run: just conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       # kotlinc's diagnostics test data, scored by false accepts against
@@ -1094,14 +1103,25 @@ jobs:
           path: |
             target/cache/ser-corpus/${{ matrix.version }}
             target/cache/ksp-toolchain
-            target/cache/krusty-deps
           key: ${{ steps.conformance-inputs.outputs.cache-primary-key }}
-      - name: save Wasm target KLIB dependencies (${{ matrix.version }})
-        if: startsWith(matrix.target, 'wasm-') && github.ref == 'refs/heads/master' && steps.wasm-klibs.outputs.cache-hit != 'true'
+      # Also after a failed run: a dependency is renamed into place only once it is complete.
+      - name: list new Maven dependencies
+        if: >-
+          !cancelled() && github.ref == 'refs/heads/master'
+        id: maven-deps-added
+        env:
+          RESTORED: ${{ steps.maven-deps-restored.outputs.entries }}
+        run: |
+          set -euo pipefail
+          entries=$(scripts/cache-entries.sh target/cache/krusty-deps)
+          echo "added=$([ "$entries" != "$RESTORED" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: save Maven dependencies (${{ matrix.version }}, ${{ matrix.target }})
+        if: >-
+          !cancelled() && steps.maven-deps-added.outputs.added == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/krusty-deps
-          key: ${{ steps.wasm-klibs.outputs.cache-primary-key }}
+          key: conformance-maven-deps-v1-${{ matrix.target }}-${{ matrix.version }}-${{ github.sha }}
       - name: save Kotlin/Native ${{ matrix.version }}
         if: matrix.target == 'native' && github.ref == 'refs/heads/master' && steps.kotlin-native.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
