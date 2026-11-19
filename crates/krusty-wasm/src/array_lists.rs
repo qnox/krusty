@@ -154,10 +154,19 @@ pub(super) struct BulkOperations {
     pub(super) argument_contains: u32,
 }
 
+/// The functions a list reads of an element, both defined later in the same module.
+#[derive(Clone, Copy)]
+pub(super) struct ElementFunctions {
+    /// `(Any?, Any?) -> Boolean`: structural equality of two references.
+    pub(super) equals: u32,
+    /// `(Any?) -> Int`: the hash of one reference.
+    pub(super) hash_code: u32,
+}
+
 impl ArrayLists {
     /// Declare the list and iterator types and define their functions. `elements` is the mutable
-    /// reference-array type the list stores into. `equals` is structural equality of two
-    /// references and `hash_code` the hash of one, both defined later in the same module.
+    /// reference-array type the list stores into; `element` are the functions it reads of an
+    /// element.
     pub(super) fn declare(
         module: &mut Module,
         objects: &mut ObjectRoot,
@@ -165,9 +174,9 @@ impl ArrayLists {
         elements: u32,
         chars: u32,
         string: u32,
-        equals: u32,
-        hash_code: u32,
+        element: ElementFunctions,
     ) -> Self {
+        let ElementFunctions { equals, hash_code } = element;
         let list = module.subtype(SubType {
             composite: CompositeType::Struct(vec![
                 immutable(ValType::reference(objects.any_table)),

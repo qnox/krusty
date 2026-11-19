@@ -27,7 +27,7 @@ pub(super) use object_strings::ObjectStrings;
 
 use krusty::fx_hash::HashMap;
 
-use super::array_lists::ArrayLists;
+use super::array_lists::{ArrayLists, ElementFunctions};
 use super::array_objects::ArrayObjects;
 use super::boxes::Boxes;
 use super::builtin_instances::BuiltinInstances;
@@ -169,8 +169,10 @@ impl Runtime {
             references,
             chars,
             string,
-            object_equals,
-            hashing.hash_code,
+            ElementFunctions {
+                equals: object_equals,
+                hash_code: hashing.hash_code,
+            },
         );
         let callable_references = CallableReferences::declare(module, &objects, object_equals);
         let string_concat = module.declare();
