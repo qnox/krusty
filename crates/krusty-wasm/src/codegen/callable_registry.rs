@@ -906,6 +906,7 @@ mod tests {
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
             declares_parameter_defaults: false,
+            composable_parameters: Default::default(),
             annotations: Box::new([]),
         }
     }

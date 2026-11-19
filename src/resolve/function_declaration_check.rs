@@ -531,6 +531,7 @@ impl Checker<'_> {
             } else {
                 self.check_fun_body(scope, f, stable_declaration);
             }
+            self.check_inline_parameter_usages(scope, f);
         }
         if (!self.signature_defaults_only || default_owned_method) && f.ret.is_none() {
             if let (Some(declaration), FunBody::Expr(body)) = (stable_declaration, &f.body) {
@@ -1036,6 +1037,7 @@ impl Checker<'_> {
             } else if check_ordinary_body {
                 self.check_fun_body(scope, f, stable_declaration);
             }
+            self.check_inline_parameter_usages(scope, f);
         }
         if !self.signature_defaults_only && check_ordinary_body && f.ret.is_none() {
             if let (Some(declaration), FunBody::Expr(body)) = (stable_declaration, &f.body) {
