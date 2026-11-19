@@ -17,24 +17,24 @@ import lib.*
 import kotlin.coroutines.*
 class Api(val base: String) {
     suspend fun direct(path: String): String {
-        val trimmed = base + ""
+        val trimmed = base.trim()
         val got = trimmed.load(path)
         return got
     }
     suspend fun inLambda(path: String): String {
-        val trimmed = base + ""
+        val trimmed = base.trim()
         return trimmed.let { value -> value.load(path) }
     }
 }
 class Placed(val base: String) {
     suspend fun inSuspendLambda(path: String): String {
-        val trimmed = base + ""
+        val trimmed = base.trim()
         return around { trimmed.load(path) }
     }
 }
 class Continued(val base: String) {
     suspend fun inSuspendLambda(path: String): String {
-        val trimmed = base + ""
+        val trimmed = base.trim()
         return around { trimmed.load(path); path }
     }
 }
