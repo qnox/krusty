@@ -390,6 +390,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.file.type_descriptor(target)
     }
 
+    /// Check the erased `value` against `ty` as a cast to `ty` does, answering the value itself.
+    ///
+    /// A reference-held target the runtime names is a question about the object, so a value of
+    /// another class raises `ClassCastException` before the caller writes it. Any other target is a
+    /// representation change that the caller's own coercion realizes.
+    pub(super) fn check_erased_value(
+        &mut self,
+        value: Value,
+        ty: Ty,
+    ) -> Result<Value, Unsupported> {
+        let Some(descriptor) = self.checked_cast_target(ty)? else {
+            return Ok(value);
+        };
+        let helper = if ty.is_nullable() {
+            "kt_cast"
+        } else {
+            "kt_cast_non_null"
+        };
+        let descriptor = self.data_address(descriptor);
+        let checked = self.runtime_call(helper, &[any(), any()], any(), &[value, descriptor])?;
+        checked.ok_or_else(|| declined!("a `{helper}` that answers no value"))
+    }
+
     /// The descriptor an `is`/`!is` operation asks the runtime about.
     ///
     /// A checked function type names its semantic arity marker. Keep that substitution at the
