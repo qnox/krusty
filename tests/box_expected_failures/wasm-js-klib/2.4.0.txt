@@ -190,11 +190,7 @@ callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
 callableReference/adaptedReferences/referenceToFakeOverrideWithTypeParameter.kt
 callableReference/adaptedReferences/suspendConversion/extensionTypeProperty.kt
-callableReference/adaptedReferences/suspendConversion/inlineWithContextParameter.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithContextParameterAsAPropertyType.kt
-callableReference/adaptedReferences/suspendConversion/inlineWithContextParameterAsASupertype.kt
-callableReference/adaptedReferences/suspendConversion/inlineWithExtensionAsASuperType.kt
-callableReference/adaptedReferences/suspendConversion/inlineWithExtensionFunction.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithExtensionProperty.kt
 callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction.kt
 callableReference/adaptedReferences/suspendConversion/withContextParameterAsAPropertyType.kt
@@ -295,8 +291,6 @@ classes/kt8011.kt
 classes/nestedInitBlocksWithLambda.kt
 classes/overloadUnaryOperator.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
-closures/capturedVarsOptimization/kt44347.kt
-closures/capturedVarsOptimization/withCoroutines.kt
 closures/closuresAsSingleton.kt
 closures/kt11634_4.kt
 closures/localFunctionInInitBlock.kt
@@ -387,8 +381,6 @@ coroutines/asyncIteratorNullMerge_1_3.kt
 coroutines/asyncIteratorToList_1_3.kt
 coroutines/asyncIterator_1_3.kt
 coroutines/await.kt
-coroutines/beginWithException.kt
-coroutines/beginWithExceptionNoHandleException.kt
 coroutines/bridges/interfaceGenericDefault.kt
 coroutines/bridges/interfaceSpecialization.kt
 coroutines/bridges/mapSuspendAbstractClear.kt
@@ -441,7 +433,6 @@ coroutines/coroutineContext1.kt
 coroutines/coroutineContext2.kt
 coroutines/coroutineContextInInlinedLambda.kt
 coroutines/correctOrder1.kt
-coroutines/createCoroutineSafe.kt
 coroutines/defaultParameterLambdaInSuspend.kt
 coroutines/defaultParametersInSuspend.kt
 coroutines/degenerate1.kt
@@ -455,13 +446,11 @@ coroutines/falseUnitCoercion.kt
 coroutines/featureIntersection/breakWithNonEmptyStack.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/genericCallableReferencesWithNullableTypes.kt
-coroutines/featureIntersection/callableReference/longArgs.kt
 coroutines/featureIntersection/funInterface.kt
 coroutines/featureIntersection/funInterface/kt47549.kt
 coroutines/featureIntersection/funInterface/kt47549_1.kt
 coroutines/featureIntersection/funInterface/kt49294.kt
 coroutines/featureIntersection/funInterface/kt50950.kt
-coroutines/featureIntersection/inlineSuspendFinally.kt
 coroutines/featureIntersection/overrideInInlineClass.kt
 coroutines/featureIntersection/safeCallOnTwoReceivers.kt
 coroutines/featureIntersection/safeCallOnTwoReceiversLong.kt
@@ -496,7 +485,6 @@ coroutines/inlineClasses/direct/covariantOverrideSuspendFunWithNullableInlineCla
 coroutines/inlineClasses/direct/covariantOverrideSuspendFunWithNullableInlineClass_NullableInt_null.kt
 coroutines/inlineClasses/direct/covariantOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/direct/covariantOverrideSuspendFun_Int.kt
-coroutines/inlineClasses/direct/createOverride.kt
 coroutines/inlineClasses/direct/defaultStub.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun_Any.kt
@@ -539,7 +527,6 @@ coroutines/inlineClasses/resume/covariantOverrideSuspendFunWithNullableInlineCla
 coroutines/inlineClasses/resume/covariantOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/resume/covariantOverrideSuspendFun_Int.kt
 coroutines/inlineClasses/resume/createMangling.kt
-coroutines/inlineClasses/resume/createOverride.kt
 coroutines/inlineClasses/resume/defaultStub.kt
 coroutines/inlineClasses/resume/genericOverrideSuspendFun.kt
 coroutines/inlineClasses/resume/genericOverrideSuspendFun_Any.kt
@@ -581,7 +568,6 @@ coroutines/inlineClasses/resumeWithException/covariantOverrideSuspendFunWithNull
 coroutines/inlineClasses/resumeWithException/covariantOverrideSuspendFunWithNullableInlineClass_NullableInt.kt
 coroutines/inlineClasses/resumeWithException/covariantOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/resumeWithException/covariantOverrideSuspendFun_Int.kt
-coroutines/inlineClasses/resumeWithException/createOverride.kt
 coroutines/inlineClasses/resumeWithException/genericOverrideSuspendFun.kt
 coroutines/inlineClasses/resumeWithException/genericOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/resumeWithException/genericOverrideSuspendFun_Any_NullableInlineClassUpperBound.kt
@@ -668,7 +654,6 @@ coroutines/returnsUnit1.kt
 coroutines/simple2.kt
 coroutines/simpleException.kt
 coroutines/simpleWithDefaultValue.kt
-coroutines/simpleWithHandleResult.kt
 coroutines/stackUnwinding/rethrowInFinallyWithSuspension.kt
 coroutines/stopAfter.kt
 coroutines/suspendConversion.kt
@@ -681,9 +666,6 @@ coroutines/suspendDefaultImpl.kt
 coroutines/suspendFunImportedFromObject.kt
 coroutines/suspendFunctionAsCoroutine/handleException.kt
 coroutines/suspendFunctionAsCoroutine/ifExpressionInsideCoroutine_1_3.kt
-coroutines/suspendFunctionAsCoroutine/inline.kt
-coroutines/suspendFunctionAsCoroutine/inlineTwoReceivers.kt
-coroutines/suspendFunctionAsCoroutine/noinlineTwoReceivers.kt
 coroutines/suspendFunctionAsCoroutine/operators.kt
 coroutines/suspendFunctionAsCoroutine/privateFunctions.kt
 coroutines/suspendFunctionAsCoroutine/superCall.kt
@@ -711,7 +693,6 @@ coroutines/unitTypeReturn/suspendReturn.kt
 coroutines/unitTypeReturn/unitSafeCall.kt
 coroutines/unsafeTransform.kt
 coroutines/varSpilling/fakeInlinerVariables.kt
-coroutines/varSpilling/kt19475.kt
 coroutines/varSpilling/kt64139.kt
 coroutines/varSpilling/kt75926.kt
 coroutines/varSpilling/kt79276.kt
@@ -1453,7 +1434,6 @@ multiplatform/k2/internalOverride2.kt
 multiplatform/k2/kt66970.kt
 nameBasedDestructuring/fullFormExtraPropType.kt
 nameBasedDestructuring/shortFormExtraPropType.kt
-nonLocalReturns/suspendConversion.kt
 nothingValue/nothingValueException.kt
 nullCheckOptimization/trivialInstanceOf.kt
 object/constructor0.kt
