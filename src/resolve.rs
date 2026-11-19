@@ -8553,12 +8553,8 @@ impl<'a> Checker<'a> {
                 }
                 let receiver_diag_mark = self.diags.diags.len();
                 let mut rt = self.expr(scope, receiver);
-                let inferred_intersection = self.inferred_expression_intersection(receiver);
-                if inferred_intersection.len() > 1 {
-                    // Keep the expression's denotable/physical type in its own slot. Candidate
-                    // collection sees the complete inferred semantic intersection, and the
-                    // selected declaration records any required receiver conversion.
-                    rt = Ty::intersection(&inferred_intersection);
+                if let Some(view) = self.receiver_intersection_view(scope, receiver) {
+                    rt = view;
                 }
                 if let Some(projected) = self
                     .flow_intersection_member_receiver(scope, receiver, &name)

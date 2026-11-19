@@ -199,6 +199,12 @@ impl Checker<'_> {
                 let actual = if declared.non_null().is_fun() {
                     crate::symbol_resolver::classifier_callable_signature(&source, actual)
                         .unwrap_or(actual)
+                } else if matches!(actual.non_null().kind(), TyKind::Intersection(_)) {
+                    // A proven intersection binds the declared receiver through the constituent
+                    // that reaches it, as any other receiver binds through its applied supertype.
+                    crate::symbol_resolver::ReceiverMro::new(&source, actual)
+                        .binding_receiver(&source, declared)
+                        .unwrap_or(actual)
                 } else {
                     actual
                 };
