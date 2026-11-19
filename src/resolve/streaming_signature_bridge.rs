@@ -3617,15 +3617,16 @@ pub(crate) fn finalized_streamed_signature_index(
                 parameters = resolved_parameters;
             }
             if let Some(syntax) = result_type {
-                match explicit_type_semantics.resolve_explicit_header_type(scope, syntax) {
-                    Ok(resolved) => {
-                        result = super::semantic_value_parameter_ty(
-                            resolved,
-                            constructor_property_vararg,
-                        )
-                    }
-                    Err(_) => header_resolution_failed = true,
-                }
+                let resolved = explicit_type_semantics.resolve_explicit_header_type(scope, syntax);
+                super::contract_declarations::unresolved_explicit_result(
+                    resolved,
+                    constructor_property_vararg,
+                    source_contracts
+                        .iter()
+                        .any(|candidate| candidate.declaration == stub.id),
+                    &mut result,
+                    &mut header_resolution_failed,
+                );
             }
             if let Some(syntax) = getter_result_type {
                 match explicit_type_semantics.resolve_explicit_header_type(scope, syntax) {
@@ -3864,8 +3865,7 @@ pub(crate) fn finalized_streamed_signature_index(
             deferred_local_headers.insert(stub.id);
             continue;
         }
-        // An ordinary local inferred result is published in Pass 2. An enum-entry method is not:
-        // the checker reads its finalized header while walking the entry.
+        // Enum-entry methods are published in Pass 1; other local results wait for Pass 2.
         let deferred_local_signature = stub.signature_inference.is_some()
             && stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
             && !super::enum_entry_method_owner::is_entry_method(headers, stub.id);
