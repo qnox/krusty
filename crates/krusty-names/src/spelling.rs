@@ -1,8 +1,8 @@
 //! Type-name identities from their JVM or source spelling: a package-qualified classifier and its
 //! nested segments, split at `$` or `.`.
 
-use super::{type_name_nested_child, type_names, TypeName};
 use crate::name_tree::{NameId, NameTree};
+use crate::type_name::{type_name_nested_child, type_names, TypeName};
 
 pub fn type_name(internal: &str) -> TypeName {
     if let Some(id) = type_names().get(internal) {
@@ -35,7 +35,7 @@ pub fn type_name_from(names: &NameTree, id: NameId) -> TypeName {
 ///
 /// `CollectionsKt__CollectionsKt` collapses to `CollectionsKt`. The part's parent path is copied
 /// into the global name tree; the `__` suffix is never rendered.
-pub(crate) fn type_name_from_multifile_facade(names: &NameTree, part_id: NameId) -> TypeName {
+pub fn type_name_from_multifile_facade(names: &NameTree, part_id: NameId) -> TypeName {
     let segment = names.segment(part_id);
     let Some((facade_segment, _)) = segment.split_once("__") else {
         return type_name_from(names, part_id);
