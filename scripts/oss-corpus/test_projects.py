@@ -37,7 +37,7 @@ class Projects(unittest.TestCase):
         with self.assertRaises(ValueError):
             projects.parse("p\thttps://example.test/p\tnot-a-sha\t.\t21\t-\n")
 
-    def test_the_checked_in_list_builds_kotlin_and_measures_idea_and_kotlin(self):
+    def test_the_checked_in_list_builds_and_measures_idea_and_kotlin(self):
         rows = projects.load(HERE / "projects.tsv")
         names = [row["name"] for row in rows]
         self.assertIn("okhttp", names)
@@ -46,7 +46,7 @@ class Projects(unittest.TestCase):
         self.assertIn("kotlin", names)
         compile_names = [row["name"] for row in projects.select(rows, "compile")]
         lsp_names = [row["name"] for row in projects.select(rows, "lsp")]
-        self.assertNotIn("intellij-community", compile_names)
+        self.assertIn("intellij-community", compile_names)
         self.assertIn("kotlin", compile_names)
         self.assertIn("okhttp", compile_names)
         self.assertIn("nowinandroid", compile_names)

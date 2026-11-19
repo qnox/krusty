@@ -740,8 +740,10 @@ jobs:
         with:
           path: target/cache/kotlinc/${{ matrix.version }}
           key: kotlinc-${{ matrix.version }}
+      # The Native lane's JVM oracle needs the same extra libraries (the atomicfu plugin), so it
+      # restores the entry the JVM lane saves; only the JVM lane saves it.
       - name: restore serialization and KSP conformance inputs (${{ matrix.version }})
-        if: matrix.target == 'jvm'
+        if: matrix.target == 'jvm' || matrix.target == 'native'
         id: conformance-inputs
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -749,7 +751,7 @@ jobs:
             target/cache/ser-corpus/${{ matrix.version }}
             target/cache/ksp-toolchain
             target/cache/krusty-deps
-          key: kotlin-conformance-inputs-${{ matrix.version }}
+          key: kotlin-conformance-inputs-v2-${{ matrix.version }}
       - name: restore Wasm target KLIB dependencies (${{ matrix.version }})
         if: startsWith(matrix.target, 'wasm-')
         id: wasm-klibs
@@ -900,6 +902,10 @@ jobs:
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
+          # The box cases' extra libraries (the atomicfu plugin and runtime, Compose, serialization)
+          # resolve from the restored `krusty-deps` entry; without this they went to
+          # `~/.cache/krusty-deps` and were downloaded from Maven Central on every run.
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: |
           set -euo pipefail
           chmod +x conformance-bin krusty
@@ -913,6 +919,7 @@ jobs:
         # Complete migration runs exceeded the former 600-second corpus budget. Keep ordinary
         # and focused deadlines unchanged; a corpus timeout still fails this row.
         env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
           KRUSTY_NATIVE_BYTE_REPORT: ${{ github.workspace }}/native-byte-equality.txt
           KRUSTY_KLIB_REFERENCE_CACHE: ${{ github.workspace }}/target/cache/klib-references
@@ -930,6 +937,7 @@ jobs:
         id: native_focused
         continue-on-error: true
         env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
@@ -1428,6 +1436,7 @@ jobs:
             tests="$tests verify_task_reports_a_kotlin_gradle_plugin_older_than_the_plugin_api"
             tests="$tests body_only_dependency_edit_keeps_dependent_compile_up_to_date"
             tests="$tests oss_corpus_init_script_applies_the_packaged_plugin"
+            tests="$tests compose_refusal_is_handed_to_kotlinc_with_its_classes"
           fi
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"
