@@ -2,11 +2,13 @@
 """Aggregates the corpus projects' results into one Markdown report and one JSON document.
 
 usage: summarize.py [--stars <stars.tsv>] [--plugins <dir>] [--json <out.json>] [--title <text>]
-                    <compare.json>...
+                    [--previous <summary.json>] <compare.json>...
 
 `--stars` lists `<name>\t<stars>` per project. `--plugins` is searched for the `<name>.plugins.tsv`
-plugin surveys the reference builds wrote. The report has the per-project table, the failed tasks
-ranked by the compilations they kept from running, the reasons for every missed compilation, every error krusty's verify compiles reported grouped by cause, the
+plugin surveys the reference builds wrote. `--previous` is an earlier run's summary.json, which the
+report compares this run with. The report has the per-project table, the failed tasks ranked by the
+compilations they kept from running, the reasons for every missed compilation, every error krusty's
+verify compiles reported grouped by cause, the
 projects' own tests run on krusty's classes, what each build cost, and the Gradle and Kotlin compiler
 plugins the corpus uses most.
 """
@@ -157,6 +159,52 @@ def roots_section(projects):
     for name, root in ranked:
         error = code(root['error']).replace('|', '\\|') + ' ' if root['error'] else ''
         out.append(f"| {name} | {code(root['task'])} | {error}| {root['blocked']} |")
+    return out
+
+
+def moved(before, now):
+    """`before → now (±change)`, or the number alone when it did not change."""
+    return f'{now}' if before == now else f'{before} → {now} ({now - before:+d})'
+
+
+def changes_section(projects, previous):
+    """What changed since the previous run's `summary.json`: per project that changed, the
+    compilations krusty built and the identical classes, then every compilation krusty no longer
+    builds, with its error, and every one it now builds."""
+    if previous is None:
+        return []
+    before = {p['name']: p for p in previous}
+    now = {p['name']: p for p in projects}
+    table, lost, gained = [], [], []
+    for name in sorted(before.keys() | now.keys(), key=str.lower):
+        p, q = now.get(name), before.get(name)
+        if q is None:
+            table.append(f"| {name} | new: {p['built']} / {p['compilations']} | new: {p['identical']} / {p['classes']} |")
+            continue
+        if p is None:
+            table.append(f"| {name} | not measured (was {q['built']} / {q['compilations']}) | "
+                         f"not measured (was {q['identical']} / {q['classes']}) |")
+            continue
+        was = {r['task']: r['built'] for r in q['rows']}
+        dropped = [r for r in p['rows'] if was.get(r['task']) and not r['built']]
+        added = [r['task'] for r in p['rows'] if r['built'] and not was.get(r['task'])]
+        if dropped:
+            lost += [f"- **{name}** {code(r['task'])}: {code(r.get('error') or r.get('fallback') or 'krusty wrote no class')}"
+                     for r in dropped]
+        if added:
+            gained.append(f"- **{name}** " + ', '.join(code(task) for task in added))
+        if (p['built'], p['compilations'], p['identical'], p['classes']) != \
+                (q['built'], q['compilations'], q['identical'], q['classes']) or dropped or added:
+            table.append(f"| {name} | {moved(q['built'], p['built'])} / {p['compilations']} | "
+                         f"{moved(q['identical'], p['identical'])} / {p['classes']} |")
+    out = ['', '## Since the previous run', '']
+    if not (table or lost or gained):
+        return out + ['Nothing changed.']
+    out += ['| Project | Compilations built by krusty | Identical classes |', '| --- | ---: | ---: |'] + table
+    if lost:
+        out += ['', 'No longer built by krusty:', ''] + lost
+    if gained:
+        out += ['', 'Newly built by krusty:', ''] + gained
     return out
 
 
@@ -382,7 +430,7 @@ def hotspot_section(projects):
     return out
 
 
-def report(projects, stars, surveys, title):
+def report(projects, stars, surveys, title, previous=None):
     out = []
     if title:
         out += [f'# {title}', '']
@@ -408,6 +456,7 @@ def report(projects, stars, surveys, title):
                f'**{identical:,} / {classes:,}{share(identical, classes)}** |' + (' |' if dated else ''))
 
     out += roots_section(projects)
+    out += changes_section(projects, previous)
 
     out += ['', '## Missed compilations', '']
     any_miss = False
@@ -450,6 +499,7 @@ def main():
     parser.add_argument('--plugins')
     parser.add_argument('--json')
     parser.add_argument('--title')
+    parser.add_argument('--previous', help="the previous run's summary.json")
     parser.add_argument('reports', nargs='+')
     args = parser.parse_args()
     projects = []
@@ -459,7 +509,11 @@ def main():
     projects.sort(key=lambda p: p['name'].lower())
     stars = read_stars(args.stars)
     surveys = read_plugins(args.plugins, [p['name'] for p in projects])
-    print(report(projects, stars, surveys, args.title), end='')
+    previous = None
+    if args.previous:
+        with open(args.previous) as f:
+            previous = json.load(f)['projects']
+    print(report(projects, stars, surveys, args.title, previous), end='')
     if args.json:
         with open(args.json, 'w') as f:
             json.dump(dict(projects=[dict(p, stars=stars.get(p['name']), misses=misses(p),

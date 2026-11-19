@@ -96,6 +96,9 @@ impl BodyLowering<'_> {
         if let Some(start) = position.start_line {
             self.ir.set_start_line_if_absent(lowered, start);
         }
+        if let Some(offset) = debug.selector_offset.filter(|_| !debug.positionless) {
+            self.ir.set_selector_offset(lowered, offset);
+        }
         self.ir
             .settle_positions(first_generated..self.ir.exprs.len(), position);
     }

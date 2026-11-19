@@ -600,6 +600,17 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_class(signature)
     }
 
+    /// The top-level class private to its file that `module` itself serializes under the
+    /// file-local `signature`, with the package of that file.
+    pub(crate) fn module_file_private_class<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a [String], &'a KlibIrClass)> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].file_private_class(signature)
+    }
+
     /// The package segments of the serialized file `file` of `module`.
     pub(crate) fn module_file_package(&self, module: &str, file: u32) -> Option<&[String]> {
         let library = *self.modules.get(module)?;
@@ -1142,8 +1153,9 @@ impl KlibDeclarationBodies {
             .public_hierarchy_roots
     }
 
-    /// Callable, object and hierarchy inventories cover exactly the same emitted roots: the
-    /// selected body, its file initialization, and the local classes those roots construct.
+    /// Callable, object, SAM and hierarchy inventories cover exactly the same emitted roots: the
+    /// selected body, its file initialization, and the local classes those roots construct or
+    /// whose object values they read.
     fn emitted_body_symbols<'a>(
         &'a self,
         identity: &KlibDependencyCallable,
@@ -1183,28 +1195,45 @@ impl KlibDeclarationBodies {
                 sams.extend(initializer.arena.emitted_sam_classifiers_from(roots, forms));
             }
         }
-        // A constructed local class is materialized with every member and its superclass
-        // delegation, in the arena that serializes that class.
+        // A constructed local class, or a local object whose value a body reads, is materialized
+        // with every member and its superclass delegation, in the arena that serializes that
+        // class. Its object value is the unit's own, so it leaves the read objects.
         let mut classes = crate::fx_hash::HashSet::default();
-        let mut next = 0;
-        while let Some(symbol) = symbols.get(next).copied() {
-            next += 1;
-            if let Some((class_arena, class)) = constructed_local_class(trees, symbol) {
-                if classes.insert(&class.base.symbol) {
-                    classifiers.extend(public_supertypes(class_arena, class).filter_map(
-                        |signature| class_identity(&KlibIrSignature::Public(signature.clone())),
-                    ));
-                    let mut roots = class_arena.class_member_roots(class);
-                    roots.extend(class_arena.class_superclass_delegations(class));
-                    symbols.extend(class_arena.emitted_callable_symbols_from(roots.clone(), forms));
-                    objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
-                    sams.extend(class_arena.emitted_sam_classifiers_from(roots, forms));
+        let mut read_objects = Vec::new();
+        let (mut next_symbol, mut next_object) = (0, 0);
+        loop {
+            let local = if let Some(symbol) = symbols.get(next_symbol).copied() {
+                next_symbol += 1;
+                constructed_local_class(trees, symbol)
+            } else if let Some(symbol) = objects.get(next_object).copied() {
+                next_object += 1;
+                let local = read_local_object(trees, symbol);
+                if local.is_none() {
+                    read_objects.push(symbol);
                 }
+                local
+            } else {
+                break;
+            };
+            let Some((class_arena, class)) = local else {
+                continue;
+            };
+            if classes.insert(&class.base.symbol) {
+                classifiers.extend(
+                    public_supertypes(class_arena, class).filter_map(|signature| {
+                        class_identity(&KlibIrSignature::Public(signature.clone()))
+                    }),
+                );
+                let mut roots = class_arena.class_member_roots(class);
+                roots.extend(class_arena.class_superclass_delegations(class));
+                symbols.extend(class_arena.emitted_callable_symbols_from(roots.clone(), forms));
+                objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
+                sams.extend(class_arena.emitted_sam_classifiers_from(roots, forms));
             }
         }
         EmittedBodyInventory {
             callables: symbols,
-            objects,
+            objects: read_objects,
             public_hierarchy_roots: classifiers,
             sam_declarations: sams,
         }
@@ -1525,6 +1554,21 @@ fn constructed_local_class<'a>(
     let (class_arena, class) = trees.local_class(&classifier.signature)?;
     (function.constructor && std::ptr::eq(function_arena, class_arena))
         .then_some((class_arena, class))
+}
+
+/// The library-private object whose value `symbol` reads, resolved in `trees`, with the arena
+/// that serializes it.
+fn read_local_object<'a>(
+    trees: &'a KlibIrModuleTrees,
+    symbol: &KlibIrSymbol,
+) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
+    if symbol.kind != KlibIrSymbolKind::Class {
+        return None;
+    }
+    trees.local_class(&symbol.signature).filter(|(_, class)| {
+        crate::metadata::semantic::class_kind(class.base.flags)
+            == crate::libraries::TypeKind::Object
+    })
 }
 
 fn declaration_signature(signature: &KlibIrSignature) -> Option<KlibDeclarationSignature> {

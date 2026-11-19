@@ -450,6 +450,7 @@ impl Checker<'_> {
         coerce_to_unit: bool,
         result_constraint: LambdaResultConstraint,
     ) -> Ty {
+        let has_value_returns = self.lambda_returns.returned_type(lambda).is_some();
         let inferred = self.lambda_ret_ty(scope, lambda, tail, coerce_to_unit);
         let inferred = if !coerce_to_unit
             && result_constraint.is_open()
@@ -480,7 +481,27 @@ impl Checker<'_> {
                     expected
                 }
             }
-            LambdaResultConstraint::Open | LambdaResultConstraint::CallOwned => inferred,
+            LambdaResultConstraint::Open | LambdaResultConstraint::CallOwned => {
+                self.semantic_lambda_result(body, inferred, has_value_returns)
+            }
+        }
+    }
+
+    /// The result a lambda contributes to generic inference. With no value-bearing `return`, the
+    /// result is its tail value, and when that expression proves an intersection which is the
+    /// same value as the denotable `inferred` view, the intersection is the lower bound the
+    /// solver sees. Returns join through their denotable types only, so they keep the view.
+    fn semantic_lambda_result(&self, body: ExprId, inferred: Ty, has_value_returns: bool) -> Ty {
+        let tail = super::conditional_branch::branch_value_expression(self.file, body);
+        match self.inferred_expression_intersection_fact(tail) {
+            Some(fact)
+                if !has_value_returns
+                    && fact.parts.len() > 1
+                    && fact.selected_result == inferred =>
+            {
+                Ty::intersection(&fact.parts)
+            }
+            _ => inferred,
         }
     }
 
