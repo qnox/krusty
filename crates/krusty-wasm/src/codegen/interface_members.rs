@@ -67,6 +67,13 @@ pub(super) fn accessor_types(ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
     }
 }
 
+/// The parameters and result of a property accessor of a value of type `ty` on a member extension
+/// whose receiver is `receiver`: the receiver comes first, then (for a setter) the value.
+fn extension_accessor_types(receiver: Option<Ty>, ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
+    let (value, result) = accessor_types(ty, setter);
+    (receiver.into_iter().chain(value).collect(), result)
+}
+
 /// What every recording of one file reads.
 pub(super) struct Recording<'a> {
     pub(super) ir: &'a IrFile,
@@ -968,7 +975,7 @@ impl FileRecorder<'_, '_, '_> {
             let ResolvedPropertyOverrideTarget::External(target) = edge.overridden else {
                 continue;
             };
-            if !edge.overridden_is_interface || edge.declared_receiver.is_some() {
+            if !edge.overridden_is_interface {
                 continue;
             }
             let roles = [false, true]
@@ -1030,8 +1037,13 @@ impl FileRecorder<'_, '_, '_> {
                 }
             }
         };
-        let declared_types = accessor_types(edge.declared_type, setter);
-        let implemented_types = accessor_types(edge.implementation_type, setter);
+        let declared_types =
+            extension_accessor_types(edge.declared_receiver, edge.declared_type, setter);
+        let implemented_types = extension_accessor_types(
+            edge.implementation_receiver,
+            edge.implementation_type,
+            setter,
+        );
         let declared = member_signature(&declared_types.0, declared_types.1)?;
         let implemented = member_signature(&implemented_types.0, implemented_types.1)?;
         let placed = placed
