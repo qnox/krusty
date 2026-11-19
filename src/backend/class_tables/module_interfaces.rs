@@ -149,11 +149,20 @@ impl ModuleInterfaces {
     /// numbers in the order the IR declares its classes and their methods, so one unit numbers
     /// the same way every run, and they follow every module number, so a call through one never
     /// reads a module member's. An installed interface that extends another numbered interface
-    /// is refused: its members would have to share that interface's numbers.
+    /// is refused, whichever of the two the IR declares first: its members would have to share that
+    /// interface's numbers.
     pub(crate) fn with_installed(&self, ir: &crate::ir::IrFile) -> Result<Self, Unsupported> {
         let mut result = self.clone();
+        // The installed interfaces are all known before any inheritance is checked, so the refusal
+        // does not depend on whether a base is declared before or after the interface extending it.
+        let installed: std::collections::HashSet<_> = ir
+            .classes
+            .iter()
+            .filter(|class| class.is_interface && !self.interfaces.contains_key(&class.fq_name))
+            .map(|class| class.fq_name)
+            .collect();
         for class in &ir.classes {
-            if !class.is_interface || self.interfaces.contains_key(&class.fq_name) {
+            if !installed.contains(&class.fq_name) {
                 continue;
             }
             let name = class.fq_name;
@@ -161,7 +170,7 @@ impl ModuleInterfaces {
             if class
                 .interfaces
                 .iter()
-                .any(|base| result.interfaces.contains_key(&base))
+                .any(|base| self.interfaces.contains_key(&base) || installed.contains(&base))
             {
                 return Err(format!(
                     "an installed interface extending one with module-wide numbers (`{}`)",

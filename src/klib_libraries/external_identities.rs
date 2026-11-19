@@ -88,6 +88,7 @@ impl ExternalIdentities {
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
             declares_parameter_defaults: false,
+            composable_parameters: Default::default(),
         });
         self.language_invokes.borrow_mut().insert(owner, identity);
     }
@@ -395,6 +396,7 @@ impl ExternalIdentities {
             declares_parameter_defaults: body
                 .parameter_defaults
                 .is_some_and(|defaults| defaults.as_slice().contains(&true)),
+            composable_parameters: Default::default(),
         });
         self.by_signature.borrow_mut().insert(key, identity);
     }

@@ -191,6 +191,22 @@ fn an_installed_interface_is_the_only_one_its_itable_implements() {
 }
 
 #[test]
+fn an_installed_interface_declared_before_its_installed_base_is_refused() {
+    let mut ir = IrFile::default();
+    let (derived, _) = installed_interface(&mut ir, "Derived", &["take"]);
+    let (_, _) = installed_interface(&mut ir, "Base", &["put"]);
+    ir.classes[derived as usize]
+        .interfaces
+        .push_name(crate::types::type_name("Base"));
+    assert_eq!(
+        tables(&ir).map(|_| ()),
+        Err(
+            "an installed interface extending one with module-wide numbers (`Derived`)".to_string()
+        )
+    );
+}
+
+#[test]
 fn an_installed_interface_extending_another_installed_one_is_refused() {
     let mut ir = IrFile::default();
     let (_, _) = installed_interface(&mut ir, "Base", &["put"]);

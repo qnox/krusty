@@ -138,8 +138,40 @@ fn main() {
         ),
         Err(error) => {
             eprint!("{error}");
-            std::process::exit(1);
+            std::process::exit(if error.plugin_refusal {
+                EXIT_PLUGIN_REFUSAL
+            } else {
+                1
+            });
         }
+    }
+}
+
+/// The exit status of a compilation that failed only because a native compiler plugin does not
+/// implement a construct of valid source yet. Any other failure exits 1, so a build can hand just
+/// this one to kotlinc without reading the report.
+pub const EXIT_PLUGIN_REFUSAL: i32 = 3;
+
+/// Why [`compile`] failed: the rendered report, and whether every error in it is a native plugin's
+/// refusal of source kotlinc compiles.
+#[derive(Debug)]
+pub struct CompileError {
+    pub report: String,
+    pub plugin_refusal: bool,
+}
+
+impl From<String> for CompileError {
+    fn from(report: String) -> Self {
+        Self {
+            report,
+            plugin_refusal: false,
+        }
+    }
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.report)
     }
 }
 
@@ -235,7 +267,6 @@ fn refusals(opts: &cli::Options) -> Result<Vec<String>, String> {
         .iter()
         .cloned()
         .chain(plugins.errors)
-        .chain(plugins.partial)
         .collect())
 }
 
@@ -299,16 +330,19 @@ fn run_verify_compile(argv: &[String]) {
                 let compiled =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile(&opts)))
                         .unwrap_or_else(|payload| {
-                            Err(format!(
+                            Err(CompileError::from(format!(
                                 "error: internal compiler panic: {}\n",
                                 panic_text(&*payload)
-                            ))
+                            )))
                         });
                 record.krusty_millis = Some(started.elapsed().as_millis() as u64);
                 record.krusty_peak_rss_bytes = verify::peak_rss_bytes();
                 match compiled {
-                    Err(report) => verify::Outcome::Failed {
-                        errors: error_lines(&report),
+                    Err(error) if error.plugin_refusal => verify::Outcome::Unsupported {
+                        reasons: error_lines(&error.report),
+                    },
+                    Err(error) => verify::Outcome::Failed {
+                        errors: error_lines(&error.report),
                     },
                     Ok(_) => match verify::compare_outputs(
                         &arguments.reference,
@@ -503,7 +537,7 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
         if !errors.is_empty() {
             return Err(format!("krusty: {}\n", errors.join("; ")));
         }
-        compile(&opts)?;
+        compile(&opts).map_err(|error| error.report)?;
     }
     krusty_cli::worker::package_resources(&unit.output_jar, &unit.resources)
         .map_err(|error| format!("krusty: {error}\n"))?;
@@ -622,7 +656,7 @@ fn configuration_report(opts: &cli::Options) -> Result<String, String> {
 /// Extracted from `main` so the Bazel persistent worker can run a compilation and REPORT its failure
 /// instead of terminating: a worker that exits on a broken source takes the whole build's worker
 /// process down with it.
-pub fn compile(opts: &cli::Options) -> Result<usize, String> {
+pub fn compile(opts: &cli::Options) -> Result<usize, CompileError> {
     let report = configuration_report(opts)?;
     eprint!("{report}");
 
@@ -661,7 +695,8 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
             .errors
             .iter()
             .map(|error| format!("error: {error}\n"))
-            .collect());
+            .collect::<String>()
+            .into());
     }
     let cp = std::rc::Rc::new(Classpath::new_with_friend_paths(
         effective_classpath,
@@ -764,6 +799,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         .retain_mut(|diagnostic| keep(Some(diagnostic.name), &mut diagnostic.severity));
 
     if diags.has_errors() {
+        let plugin_refusal = diags.failed_only_on_plugin_refusals();
         // Like kotlinc, a failed compilation reports its errors only, unless
         // `-Xreport-all-warnings` keeps its warnings too. `-Werror` adds no summary then: the
         // compilation has already failed on its errors.
@@ -776,10 +812,13 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
                 .retain(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error);
         }
         let errors = diags.error_count();
-        return Err(format!(
-            "{}krusty: {errors} error(s)\n",
-            diags.render_all(&rendered, opts.diagnostic_names)
-        ));
+        return Err(CompileError {
+            report: format!(
+                "{}krusty: {errors} error(s)\n",
+                diags.render_all(&rendered, opts.diagnostic_names)
+            ),
+            plugin_refusal,
+        });
     }
     // The same typed policy owns ordinary compiler and module warnings. Unlike command-line
     // configuration warnings, these are suppressed by `-nowarn`; `-Werror` reports them and fails
@@ -798,7 +837,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         }
         report.push_str("error: warnings found and -Werror specified\n");
         report.push_str(&diags.render_all(&rendered, opts.diagnostic_names));
-        return Err(report);
+        return Err(report.into());
     }
     eprint!("{}", diags.render_all(&rendered, opts.diagnostic_names));
 

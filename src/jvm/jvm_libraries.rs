@@ -48,6 +48,7 @@ mod provider_normalization;
 #[path = "jvm_libraries/tests/provider_normalization.rs"]
 mod provider_normalization_tests;
 mod raw_types;
+mod top_level_defaults;
 use provider_normalization::normalize_tail;
 mod signature_parser;
 mod source_module_headers;
@@ -503,8 +504,7 @@ impl JvmLibraries {
             callable.physical_params = physical_params;
             parameter_plans::source_only(&mut callable);
             if !is_default && call_sig.param_defaults.iter().any(|default| *default) {
-                callable.default_realization =
-                    self.top_level_default_realization(&callable).map(Box::new);
+                self.realize_top_level_defaults(&mut callable);
             }
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
             let generic_sig = generic_sig_for_callable;
@@ -3631,79 +3631,6 @@ impl JvmLibraries {
 }
 
 impl JvmLibraries {
-    fn top_level_default_realization(
-        &self,
-        callable: &LibraryCallable,
-    ) -> Option<crate::libraries::DefaultCallRealization> {
-        let bridge_name = format!("{}$default", callable.physical_name());
-        let (base_params, _) = parse_method_desc(&callable.descriptor)?;
-        let is_continuation = |ty: Ty| {
-            ty.obj_internal()
-                .is_some_and(|name| name.matches("kotlin/coroutines/Continuation"))
-        };
-        let mut owner = Some(callable.owner);
-        let mut seen = crate::fx_hash::HashSet::default();
-        while let Some(current) = owner {
-            if !seen.insert(current) {
-                break;
-            }
-            let class = self.cp.find_name(current)?;
-            crate::trace_compiler!(
-                "default_semantics",
-                "default realization owner={} scan={} bridge={} base={base_params:?} matching={:?}",
-                callable.owner,
-                current,
-                bridge_name,
-                class
-                    .methods
-                    .iter()
-                    .filter(|method| method.name == bridge_name)
-                    .map(|method| method.descriptor.as_str())
-                    .collect::<Vec<_>>(),
-            );
-            if let Some(realization) = class.methods.iter().find_map(|method| {
-                if !method.is_static() || method.name != bridge_name {
-                    return None;
-                }
-                let (params, ret) = parse_method_desc(&method.descriptor)?;
-                if !params.starts_with(&base_params) {
-                    return None;
-                }
-                let mut suffix = &params[base_params.len()..];
-                if callable.suspend {
-                    let (continuation, rest) = suffix.split_first()?;
-                    if !is_continuation(*continuation) {
-                        return None;
-                    }
-                    suffix = rest;
-                }
-                let mask_count = base_params.len().div_ceil(32).max(1);
-                if suffix.len() != mask_count + 1
-                    || !suffix[..suffix.len() - 1]
-                        .iter()
-                        .all(|parameter| *parameter == Ty::Int)
-                    || !suffix.last().copied().is_some_and(Ty::is_reference)
-                {
-                    return None;
-                }
-                Some(crate::libraries::DefaultCallRealization {
-                    owner: callable.owner,
-                    name: bridge_name.clone(),
-                    descriptor: method.descriptor.clone(),
-                    declaration_owner: current,
-                    real_params: callable.physical_params.clone(),
-                    mask_count,
-                    ret,
-                    suspend: callable.suspend,
-                })
-            }) {
-                return Some(realization);
-            }
-            owner = class.super_class;
-        }
-        None
-    }
-
     fn member_default_realization(
         &self,
         owner: TypeName,

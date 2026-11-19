@@ -39,6 +39,10 @@ fn multiline_member_call_keeps_the_selected_call_source_and_end_lines() {
             start_offset: source
                 .find("recorder.save(")
                 .expect("the call is in the source") as u32,
+            // kotlinc's call offsets begin at the selector name.
+            selector_offset: Some(
+                source.find(".save(").expect("the call is in the source") as u32 + 1
+            ),
             positionless: false
         }
     );
