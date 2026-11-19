@@ -11,9 +11,7 @@ use krusty::fir::ExternalCallableId;
 use krusty::libraries::RuntimeExceptionKind;
 use krusty::types::{SemanticCallableOwner, TypeName};
 
-use super::library_members::{
-    library_member_identity, library_member_owner, library_member_signature, MemberRole,
-};
+use super::library_members::{library_member_identity, MemberRole};
 use super::*;
 
 /// Whether `classifier` is `kotlin.text.StringBuilder`.
@@ -379,22 +377,6 @@ impl Body<'_> {
             .clone();
         let identity = library_member_identity(&fact, role)
             .ok_or("a `CharSequence` member without its identity")?;
-        let owner =
-            library_member_owner(&fact).ok_or("a `CharSequence` member without its classifier")?;
-        let signature = library_member_signature(&fact, role)?;
-        let member = self.runtime.objects.interfaces.library(
-            self.module,
-            owner,
-            &identity,
-            signature.clone(),
-        )?;
-        self.runtime.builtin_member(
-            self.module,
-            member,
-            name,
-            &signature,
-            &fact.builtin_implementations,
-        )?;
-        Ok(member)
+        self.library_member_of(&fact, identity, role, name)
     }
 }

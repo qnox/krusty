@@ -92,13 +92,12 @@ pub(super) fn check_class(
             .iter()
             .any(|&annotation| super::is_runtime_annotation(annotation))
         {
-            diagnostics.push(FrontendPluginDiagnostic {
-                span: property.declaration_span,
-                message:
-                    "krusty's Parcelize compiler plugin does not support a property type with \
-                          a Parcelize annotation yet; compile this module with kotlinc"
-                        .to_string(),
-            });
+            diagnostics.push(FrontendPluginDiagnostic::refusal(
+                property.declaration_span,
+                "krusty's Parcelize compiler plugin does not support a property type with a \
+                 Parcelize annotation yet; compile this module with kotlinc"
+                    .to_string(),
+            ));
         }
     }
 }
