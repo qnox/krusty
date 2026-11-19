@@ -8,12 +8,14 @@
 # The test process fetches a missing one lazily, but under a shared 60-second budget a slow
 # transfer exhausts it and every later case fails with "needs the ... compiler plugin jar". This
 # step fetches them once, with retries, before any test runs, and fails loudly when it cannot.
-# Files land where `toolchain::ensure_maven` looks: `$KRUSTY_DEPS_CACHE/<artifact>-<version>.jar`.
+# Files land where `toolchain::ensure_maven` looks: `$KRUSTY_DEPS_CACHE/<artifact>-<version>.jar`,
+# `$HOME/.cache/krusty-deps` when it is unset. Export the same value for this script and the tests.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 version="${1:-$(just max-version)}"
-cache="${KRUSTY_DEPS_CACHE:-$PWD/target/cache/krusty-deps}"
+# The same default `toolchain::ensure_repository_artifact` reads, so a bare run primes what the tests use.
+cache="${KRUSTY_DEPS_CACHE:-$HOME/.cache/krusty-deps}"
 dist_lib="$PWD/target/cache/kotlinc/$version/kotlinc/lib"
 mkdir -p "$cache"
 
