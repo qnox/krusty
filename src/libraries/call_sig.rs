@@ -20,6 +20,11 @@ impl CallSig {
             param_defaults: self.param_defaults.get(start..).unwrap_or_default().into(),
             exact_params: self.exact_params.get(start..).unwrap_or_default().into(),
             no_infer_params: self.no_infer_params.get(start..).unwrap_or_default().into(),
+            composable_params: self
+                .composable_params
+                .get(start..)
+                .unwrap_or_default()
+                .into(),
             implicit_integer_coercion: self
                 .implicit_integer_coercion
                 .get(start..)
@@ -83,6 +88,7 @@ impl CallSig {
             parameter_identities: selected(&self.parameter_identities, parameters),
             exact_params: selected(&self.exact_params, parameters).into(),
             no_infer_params: selected(&self.no_infer_params, parameters).into(),
+            composable_params: selected(&self.composable_params, parameters).into(),
             implicit_integer_coercion: selected(&self.implicit_integer_coercion, parameters).into(),
             lambda_param_types: selected(&self.lambda_param_types, parameters),
             lambda_receivers: selected(&self.lambda_receivers, parameters),

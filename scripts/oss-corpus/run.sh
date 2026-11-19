@@ -18,6 +18,7 @@
 
 # Setup fails fast: a failed fetch, checkout, patch or version-pin rewrite stops the run before
 # anything is measured. Only the two Gradle builds' exit statuses are captured rather than fatal.
+# A failed reference build fails the run once everything has been compared.
 set -euo pipefail
 
 name=$1
@@ -44,6 +45,10 @@ if [ "$lane" = lsp ]; then
   echo "$name is in the language-server metric set; this corpus does not build it" >&2
   exit 2
 fi
+# A Bazel project (one with a `bazel/<name>` target set) builds through `bazel.sh`.
+if [ -d "${CORPUS_BAZEL:-$here/bazel}/$name" ]; then
+  exec "$here/bazel.sh" "$name" "$work" "$krusty"
+fi
 IFS=$'\t' read -r _ _ _ gradle_root jdk _ android_variant <<<"$row"
 checkout=$work/src/$name
 logs=$work/logs
@@ -56,6 +61,15 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 if [ "${android_variant:--}" != - ]; then
   export CORPUS_ANDROID_VARIANT=$android_variant
 fi
+# A project too large to build whole lists its target set in gradle/<name>.targets: the Gradle tasks
+# whose compiles, with everything they depend on, are compared, and the test tasks that are run.
+targets=${CORPUS_TARGETS_DIR:-$here/gradle}/$name.targets
+if [ -f "$targets" ]; then
+  export CORPUS_TARGETS=$targets
+else
+  unset CORPUS_TARGETS
+fi
+. "$here/toolchains.sh"
 
 # One build of the Gradle root. The init scripts read every project of the build, so the
 # configuration cache and isolated projects are off. The Gradle exit status is left in `status`.
@@ -68,15 +82,17 @@ build() {
   local root=$checkout/$gradle_root
   local manifest=$logs/$name.$mode.compilations.tsv
   local start code=0 offline=()
+  local deps=$logs/$name.$mode.deps.tsv
   [ "$mode" = warmup ] || offline=(--offline)
-  rm -f "$manifest"
+  rm -f "$manifest" "$deps"
   start=$(date +%s)
   (
     cd "$root"
     CORPUS_COMPILATIONS=$manifest CORPUS_TASK_TIMES=$logs/$name.$mode.tasks.tsv \
+      CORPUS_TASK_DEPS=$deps \
       python3 "$here/measure.py" "$logs/$name.$mode.metrics.json" \
       timeout 5400 ./gradlew --no-daemon -I "$here/corpus.init.gradle" \
-      "${offline[@]}" "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand \
+      "${toolchains[@]}" "${offline[@]}" "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand \
       --no-configuration-cache -Dorg.gradle.isolated-projects=false
   ) >"$logs/$name.$mode.log" 2>&1 || code=$?
   echo "$name $mode exit $code seconds $(($(date +%s) - start))" >>"$logs/STATUS"
@@ -102,7 +118,7 @@ run_tests() {
     cd "$root"
     CORPUS_TESTS=$manifest python3 "$here/measure.py" "$logs/$name.$mode.tests.metrics.json" \
       timeout "${CORPUS_TEST_TIMEOUT:-3600}" ./gradlew --no-daemon -I "$here/corpus.init.gradle" \
-      "$@" corpusTest --continue --no-configure-on-demand --no-configuration-cache \
+      "${toolchains[@]}" "$@" corpusTest --continue --no-configure-on-demand --no-configuration-cache \
       -Dorg.gradle.isolated-projects=false
   ) >"$logs/$name.$mode.tests.log" 2>&1 || code=$?
   echo "$name $mode tests exit $code seconds $(($(date +%s) - start))" >>"$logs/STATUS"
@@ -211,3 +227,9 @@ verified=$status
 snapshot verify
 rm -rf "$work/out/$name/verify" "$logs/$name.verify.metrics.json" "$logs/$name.verify.tasks.tsv"
 python3 "$here/compare.py" "$work" "$name" "$reference" "$kotlinc_tests" "$krusty_tests" "$verified"
+# A failed reference build is still compared as far as it got, then fails the run: every project is
+# meant to build with kotlinc, and a project that does not measures only what its build reached.
+if [ "$reference" -ne 0 ]; then
+  echo "$name: the reference kotlinc build failed (exit $reference); see $name.kotlinc.log" >&2
+  exit 1
+fi

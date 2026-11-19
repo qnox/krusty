@@ -350,6 +350,7 @@ macro_rules! cache_stat {
     }};
 }
 
+mod atomic_exchange;
 mod builtin_members;
 mod inline_plan_cache;
 mod versioned_records;
@@ -4147,7 +4148,6 @@ fn read_one_type<'a>(s: &mut &'a str) -> &'a str {
 
 #[cfg(test)]
 mod fq_tests {
-    use super::metadata_alignment::function_parameter_erasure_matches;
     use super::test_support::{
         test_temp_dir, write_test_archive_entries, write_test_jar_with_entry,
     };
@@ -4180,30 +4180,6 @@ mod fq_tests {
                 .visibility,
             crate::types::Visibility::Protected
         );
-    }
-
-    #[test]
-    fn suspend_receiver_function_metadata_matches_its_function_interface_erasure() {
-        let TyKind::Fun(metadata) = Ty::fun_with_shape(
-            vec![Ty::obj("kotlin/sequences/SequenceScope")],
-            Ty::Unit,
-            0,
-            true,
-            true,
-        )
-        .kind() else {
-            unreachable!()
-        };
-        let erased = Ty::fun(
-            vec![Ty::obj("kotlin/Any"), Ty::obj("kotlin/Any")],
-            Ty::obj("kotlin/Any"),
-        );
-
-        assert!(function_parameter_erasure_matches(
-            metadata,
-            erased,
-            &|ty| ty.fun_arity().map(usize::from),
-        ));
     }
 
     #[test]

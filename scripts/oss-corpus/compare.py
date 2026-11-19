@@ -14,9 +14,11 @@ call stacks, ranked into the functions krusty spends the most time in). With the
 codes, it also compares the project's tests run on each build's classes (`testruns.py`).
 <work dir>/logs/<name>.verify.records.tsv, written by the verify build, names the record krusty's
 verify compile wrote for each compilation: every error krusty reported when it compiled that
-compilation on its own. Writes
+compilation on its own. <work dir>/logs/<name>.krusty.deps.tsv is the krusty build's task graph:
+each compilation that did not run names the failed tasks that stopped it. Writes
 <work dir>/out/<name>/compare.json and prints one line per compilation.
 """
+import collections
 import glob
 import json
 import os
@@ -211,6 +213,60 @@ def lines_of_code(checkout):
     return counts
 
 
+def compile_task(path):
+    """A krusty replacement task (`<compile task>WithKrusty`) named by the compile task it replaces."""
+    return path.removesuffix('WithKrusty')
+
+
+def failed_tasks(times_path):
+    """The tasks the build ran and failed, from the task times `corpus.init.gradle` records, each
+    replacement task named by its compile task."""
+    failed = set()
+    try:
+        with open(times_path) as f:
+            for line in f:
+                fields = line.rstrip('\n').split('\t')
+                if len(fields) == 4 and fields[3] == 'failed':
+                    failed.add(compile_task(fields[0]))
+    except OSError:
+        pass
+    return failed
+
+
+def task_dependencies(path):
+    """{task: {tasks it depends on directly}} over the build's task graph, which
+    `corpus.init.gradle` writes, replacement tasks merged into the compile tasks they replace."""
+    graph = collections.defaultdict(set)
+    try:
+        with open(path) as f:
+            for line in f:
+                fields = line.rstrip('\n').split('\t')
+                if len(fields) != 2:
+                    continue
+                task = compile_task(fields[0])
+                graph[task].update(compile_task(dep) for dep in fields[1].split(',') if dep)
+                graph[task].discard(task)
+    except OSError:
+        pass
+    return graph
+
+
+def blocked_by(task, graph, failed):
+    """The failed tasks that kept `task` from running: every failed task among its dependencies
+    that is not itself behind another failed one, sorted. The walk stops at a failed task."""
+    roots, seen, stack = set(), {task}, list(graph.get(task, ()))
+    while stack:
+        dep = stack.pop()
+        if dep in seen:
+            continue
+        seen.add(dep)
+        if dep in failed:
+            roots.add(dep)
+        else:
+            stack.extend(graph.get(dep, ()))
+    return sorted(roots)
+
+
 def compare(work, name):
     """The compared compilations, and the listed compile tasks for which kotlinc wrote no class
     (a source set without sources): those are reported apart, with any classes krusty wrote."""
@@ -228,6 +284,8 @@ def compare(work, name):
     times = {mode: task_seconds(os.path.join(work, 'logs', f'{name}.{mode}.tasks.tsv'))
              for mode in ('kotlinc', 'krusty')}
     verify = verified(os.path.join(work, 'logs', name + '.verify.records.tsv'), os.path.join(work, 'src', name))
+    failed = failed_tasks(os.path.join(work, 'logs', name + '.krusty.tasks.tsv'))
+    graph = task_dependencies(os.path.join(work, 'logs', name + '.krusty.deps.tsv'))
     rows, empty = [], []
     for task, rel in compilations(os.path.join(work, 'logs', name + '.kotlinc.compilations.tsv')):
         reference = files(os.path.join(kotlinc, rel))
@@ -251,15 +309,20 @@ def compare(work, name):
                          only_kotlinc=len(set(reference) - set(candidate)) if built else None,
                          only_krusty=len(set(candidate) - set(reference)) if built else None,
                          seconds={mode: compile_seconds(times[mode], task, mode) for mode in times},
-                         verify=verify.get(task)))
-    return rows, empty
+                         verify=verify.get(task),
+                         # A compile that never ran, its own or kotlinc's when it was left to
+                         # kotlinc, names the failed tasks that stopped it.
+                         blocked_by=blocked_by(task, graph, failed) if not built and task not in ran else []))
+    # Every failed task, with the first error it logged when it is a compile: the roots the
+    # summary ranks by the compilations they kept from running.
+    return rows, empty, {task: errors.get(task) for task in sorted(failed)}
 
 
 def main():
     work, name, reference_exit = sys.argv[1], sys.argv[2], int(sys.argv[3])
     test_exits = dict(zip(('kotlinc', 'krusty'), map(int, sys.argv[4:6])))
     verify_exit = int(sys.argv[6]) if len(sys.argv) > 6 else None
-    rows, empty = compare(work, name)
+    rows, empty, failed = compare(work, name)
     summary = dict(
         name=name,
         reference_exit=reference_exit,
@@ -273,6 +336,7 @@ def main():
         hotspots=sampled_hotspots(os.path.join(work, 'logs', f'{name}.krusty.folded')),
         tests=testruns.compare(work, name, rows, test_exits) if test_exits else None,
         rows=rows,
+        failed_tasks=failed,
         no_reference_classes=empty,
     )
     with open(os.path.join(work, 'out', name, 'compare.json'), 'w') as f:

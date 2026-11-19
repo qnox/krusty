@@ -188,6 +188,21 @@ impl PluginFixture {
         self.normalized(&diagnostics)
     }
 
+    /// Build `sources` with the krusty binary, whose native plugin pass must refuse them: valid
+    /// source kotlinc compiles, which krusty reports with its plugin-refusal exit status (3) and
+    /// not as a compile error. Its diagnostics, as [`Self::krusty_rejects`] returns them.
+    pub fn krusty_refuses(
+        &self,
+        unit: &str,
+        sources: &[(&str, &str)],
+        classpath: &[PathBuf],
+        switches: &[String],
+    ) -> String {
+        let (code, diagnostics) = self.run_krusty(unit, sources, classpath, switches);
+        assert_eq!(code, Some(3), "krusty must refuse {unit}: {diagnostics}");
+        self.normalized(&diagnostics)
+    }
+
     fn run_krusty(
         &self,
         unit: &str,

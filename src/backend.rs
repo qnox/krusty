@@ -49,7 +49,10 @@ pub use dependency_metadata::{
 };
 pub(crate) use dependency_metadata::{ExportedConstructor, ExportedPropertyAccessor};
 pub use dependency_metadata::{KlibClassIdentity, KlibDependencyCallable};
-pub use dependency_signature::{instantiate_dependency_signature, DependencyFunctionSignature};
+pub use dependency_signature::{
+    authenticate_dependency_coroutine_call, instantiate_dependency_signature,
+    DependencyFunctionSignature,
+};
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.
 pub use crate::ir::MainEntryParameters;
@@ -236,6 +239,14 @@ pub trait Backend {
     /// (Kotlin/Wasm JS). The handoff then freezes those `CharSequence` members for the target to
     /// call ([`CheckedBackendCallables::char_sequence_protocol`]).
     fn appends_char_sequences_by_index(&self) -> bool {
+        false
+    }
+
+    /// Whether this target's own `ArrayList` reads another collection through its interface
+    /// members: walks it with `Iterable.iterator()` and asks it `Collection.contains`, as the
+    /// stdlib's `addAll`, `containsAll`, `removeAll` and `retainAll` do. The handoff then freezes
+    /// those members for the target to call ([`CheckedBackendCallables::collection_protocol`]).
+    fn reads_collections_through_interfaces(&self) -> bool {
         false
     }
 

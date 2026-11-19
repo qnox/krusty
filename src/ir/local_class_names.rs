@@ -45,11 +45,48 @@ pub enum IrClassDeclarationContext {
     ClassInitializer { owner: TypeName },
 }
 
+/// What starts a local classifier's name when no classifier lexically owns it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrLocalClassNameRoot {
+    /// A source file of this module: its facade on a target with facade classes, its package on
+    /// one without. An inline payload classifier keeps its declaring source's root, not the file
+    /// that realizes the payload.
+    Source(super::IrModuleSource),
+    /// A dependency's file in `package`, whose body a dependency lowering realizes. It is no
+    /// source file of this module and has no facade here: the name starts in its package.
+    Dependency { package: TypeName },
+}
+
+impl IrLocalClassNameRoot {
+    /// The package the name is declared in.
+    pub fn package(&self) -> TypeName {
+        match self {
+            Self::Source(source) => source.package,
+            Self::Dependency { package } => *package,
+        }
+    }
+
+    fn package_mut(&mut self) -> &mut TypeName {
+        match self {
+            Self::Source(source) => &mut source.package,
+            Self::Dependency { package } => package,
+        }
+    }
+
+    /// The classifier the name starts in on a target with facade classes: `facade` of a source
+    /// file, and a dependency file's package, which has none.
+    pub fn facade(&self, facade: impl Fn(super::IrModuleSource) -> TypeName) -> TypeName {
+        match self {
+            Self::Source(source) => facade(*source),
+            Self::Dependency { package } => *package,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrLocalClassNameProvenance {
-    /// Source file whose facade roots the name when there is no lexical owner. An inline payload
-    /// classifier keeps its declaring source's facade, not the file that realizes the payload.
-    pub source: super::IrModuleSource,
+    /// What roots the name when there is no lexical owner.
+    pub source: IrLocalClassNameRoot,
     /// Exact source classifier that lexically owns this executable context, or the file facade.
     pub lexical_owner: Option<IrLocalClassOwner>,
     /// Source declaration identities below the owner (callable/property/local/class names).
@@ -366,6 +403,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             dispatch,
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         }
@@ -373,6 +411,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             dispatch,
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         } => {
@@ -383,6 +422,16 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             *result = ty(*result, names);
             if let Some(receiver) = source_receiver {
                 *receiver = ty(*receiver, names);
+            }
+            for substitution in substitutions {
+                substitution.value = ty(substitution.value, names);
+                substitution.reified_runtime = ty(substitution.reified_runtime, names);
+                substitution.additional_bounds = substitution
+                    .additional_bounds
+                    .iter()
+                    .copied()
+                    .map(|bound| ty(bound, names))
+                    .collect();
             }
             return;
         }
@@ -581,6 +630,14 @@ fn sam_target(sam: &mut crate::ir::IrSamTarget, names: &IdentityRemap<'_>) {
     tys(&mut sam.declared_parameters, names);
     sam.declared_result = ty(sam.declared_result, names);
     tys(&mut sam.overridden_results, names);
+    for frame in sam
+        .dispatch_methods
+        .iter_mut()
+        .chain(&mut sam.default_methods)
+    {
+        tys(&mut frame.parameters, names);
+        frame.result = ty(frame.result, names);
+    }
     for parameter in &mut sam.type_parameters {
         for (bound, _) in &mut parameter.bounds {
             *bound = ty(*bound, names);
@@ -966,7 +1023,7 @@ fn local_class_name_provenance(
     provenance: &mut IrLocalClassNameProvenance,
     names: &IdentityRemap<'_>,
 ) {
-    name(&mut provenance.source.package, names);
+    name(provenance.source.package_mut(), names);
     if let Some(IrLocalClassOwner::External(owner)) = &mut provenance.lexical_owner {
         name(owner, names);
     }
@@ -1711,6 +1768,9 @@ fn remap_expression_facts(ir: &mut super::IrFile, expression: ExprId, names: &Id
     if let Some(parameters) = ir.physical_call_parameters.get_mut(&expression) {
         tys(parameters, names);
     }
+    if let Some(source_callee) = ir.suspend_call_declarations.get_mut(&expression) {
+        callee(source_callee, names);
+    }
     if let Some(access) = ir.module_member_accesses.get_mut(&expression) {
         module_member_access(access, names);
     }
@@ -1807,7 +1867,7 @@ impl super::IrFile {
     /// (`box$Local`).
     pub(crate) fn realize_local_class_names(
         &mut self,
-        root: impl Fn(super::IrModuleSource, &str) -> TypeName,
+        root: impl Fn(IrLocalClassNameRoot, &str) -> TypeName,
     ) {
         let classes = self
             .local_class_name_provenance
@@ -1830,14 +1890,14 @@ impl super::IrFile {
     /// local to a top-level `box` is `box$Local` and its first anonymous object `box$1`.
     pub fn realize_local_class_names_in_packages(&mut self) {
         self.realize_local_class_names(|source, first| {
-            crate::types::type_name_child(source.package, first)
+            crate::types::type_name_child(source.package(), first)
         });
     }
 }
 
 fn physical_name(
     class: ClassId,
-    root: &impl Fn(super::IrModuleSource, &str) -> TypeName,
+    root: &impl Fn(IrLocalClassNameRoot, &str) -> TypeName,
     ir: &super::IrFile,
     cache: &mut HashMap<ClassId, TypeName>,
 ) -> TypeName {
@@ -2019,13 +2079,27 @@ mod tests {
                 has_receiver: false,
                 suspend: false,
                 source_suspend: false,
+                requires_object_dispatch: true,
                 overridden_results: vec![source_ty],
+                dispatch_methods: vec![crate::ir::IrSamMethodFrame {
+                    method: Some(IrSamMethod::External(
+                        crate::fir::ExternalCallableId::from_raw(71),
+                    )),
+                    parameters: vec![source_ty],
+                    result: source_ty,
+                }],
+                default_methods: vec![crate::ir::IrSamMethodFrame {
+                    method: None,
+                    parameters: vec![source_ty],
+                    result: source_ty,
+                }],
                 function_adapter: false,
                 wraps_function_value: false,
                 nullable: false,
                 kotlin_interface: true,
                 parameter_identities: Vec::new(),
                 type_parameters: Vec::new(),
+                placement: crate::ir::IrSamPlacement::ThisFile,
             })),
             inline_body: None,
         };
@@ -2034,7 +2108,18 @@ mod tests {
             unreachable!()
         };
         assert_eq!(sam.classifier, target);
+        assert!(sam.requires_object_dispatch);
         assert_eq!(sam.overridden_results, vec![target_ty]);
+        assert_eq!(
+            sam.dispatch_methods[0].method,
+            Some(IrSamMethod::External(
+                crate::fir::ExternalCallableId::from_raw(71)
+            ))
+        );
+        for frame in sam.dispatch_methods.iter().chain(&sam.default_methods) {
+            assert_eq!(frame.parameters, vec![target_ty]);
+            assert_eq!(frame.result, target_ty);
+        }
 
         let runtime = || IrRuntimeFunction {
             function: crate::fir::ExternalCallableId::from_raw(1),

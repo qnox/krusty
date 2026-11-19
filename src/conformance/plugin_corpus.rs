@@ -73,7 +73,19 @@ impl Artifact {
 
     /// The jar, provisioned on first use.
     pub fn resolve(&self) -> Option<PathBuf> {
-        self.sources.iter().find_map(ArtifactSource::resolve)
+        self.resolve_or_reason().ok()
+    }
+
+    /// [`Self::resolve`] that says why no alternative provided the jar: one reason per source.
+    pub fn resolve_or_reason(&self) -> Result<PathBuf, String> {
+        let mut reasons = Vec::new();
+        for source in &self.sources {
+            match source.resolve_or_reason() {
+                Ok(jar) => return Ok(jar),
+                Err(reason) => reasons.push(reason),
+            }
+        }
+        Err(reasons.join("; "))
     }
 
     /// The pinned version of the Maven source whose artifact is `artifact`.
@@ -146,22 +158,23 @@ impl ArtifactSource {
         }
     }
 
-    fn resolve(&self) -> Option<PathBuf> {
+    fn resolve_or_reason(&self) -> Result<PathBuf, String> {
         use crate::toolchain;
         match self {
-            Self::Dist(jar) => toolchain::dist_jar(jar),
+            Self::Dist(jar) => toolchain::dist_jar(jar)
+                .ok_or_else(|| format!("{jar} is not in the reference distribution")),
             Self::Maven {
                 group,
                 artifact,
                 version,
-            } => toolchain::ensure_maven(group, artifact, version),
+            } => toolchain::fetch_maven_or_reason(group, artifact, version),
             Self::Google {
                 group,
                 artifact,
                 version,
-            } => toolchain::ensure_google_maven(group, artifact, version),
+            } => toolchain::fetch_google_maven_or_reason(group, artifact, version),
             Self::MavenAtKotlin { group, artifact } => {
-                toolchain::ensure_maven(group, artifact, &toolchain::kotlin_version())
+                toolchain::fetch_maven_or_reason(group, artifact, &toolchain::kotlin_version())
             }
         }
     }
@@ -332,9 +345,11 @@ impl PluginCorpus {
             .plugin_jar
             .as_ref()
             .ok_or_else(|| format!("the {name} plugin has no reference compiler plugin jar"))?
-            .resolve()
-            .ok_or_else(|| {
-                format!("box directive `// {directive}` needs the {name} compiler plugin jar")
+            .resolve_or_reason()
+            .map_err(|reason| {
+                format!(
+                    "box directive `// {directive}` needs the {name} compiler plugin jar: {reason}"
+                )
             })?;
         let mut arguments = vec![format!("-Xplugin={}", jar.display())];
         for option in &self.options {

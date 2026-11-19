@@ -1,5 +1,7 @@
 //! Checked member-call facts for declarations selected by serialized KLIB bodies.
 
+#[path = "klib_sam_facts.rs"]
+mod klib_sam_facts;
 #[path = "klib_type_facts.rs"]
 mod klib_type_facts;
 
@@ -20,6 +22,7 @@ pub(crate) fn for_checked_klib_bodies<'a>(
     represented: &[TypeName],
 ) -> Result<CheckedKlibDependencyFacts, ExternalCallableId> {
     let mut builtin_implementations = crate::fx_hash::HashMap::default();
+    let mut sam_declarations = crate::fx_hash::HashMap::default();
     let mut member_edges = crate::fx_hash::HashMap::default();
     #[cfg(test)]
     let mut reached_constructors = crate::fx_hash::HashSet::default();
@@ -41,6 +44,22 @@ pub(crate) fn for_checked_klib_bodies<'a>(
             continue;
         }
         classifier_roots.extend(bodies.type_classifiers_in_body(&identity));
+        classifier_roots.extend(
+            bodies.emitted_body_classifiers(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
+        );
+        for (signature, name) in
+            bodies.emitted_body_sam_classifiers(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+        {
+            let key = (identity.module.clone(), signature.clone());
+            if sam_declarations.contains_key(&key) {
+                continue;
+            }
+            if let Some(declaration) =
+                klib_sam_facts::freeze(source, bodies, &identity.module, &signature, name)
+            {
+                sam_declarations.insert(key, declaration);
+            }
+        }
         pending.extend(bodies.direct_callees(&identity));
         pending.extend(bodies.overridden_callables(&identity));
         pending.extend(
@@ -138,6 +157,20 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         if realization.kind != crate::libraries::ExternalCallableKind::Member {
             continue;
         }
+        // Every instance a member of a materialized ordinary class is called on was created by
+        // that class's primary constructor, so emission materializes the class with the member
+        // and closes its initialization and dispatched members. The walk reaches them the same way.
+        if let Some(class) = selected
+            .class_contract()
+            .filter(|class| !class.is_value && class.emits_members())
+        {
+            if let Some(primary) = class.primary_constructor.clone() {
+                pending.push(crate::libraries::KlibDependencyCallable {
+                    module: class.module.clone(),
+                    declaration: crate::libraries::KlibDeclarationSignature::Public(primary),
+                });
+            }
+        }
         let Some(crate::types::SemanticCallableOwner::Classifier(owner)) =
             selected.declaration_owner()
         else {
@@ -163,7 +196,8 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         builtin_implementations,
         member_edges,
         Some(type_hierarchy),
-    );
+    )
+    .with_sam_declarations(sam_declarations);
     #[cfg(test)]
     let mut facts = facts;
     #[cfg(test)]

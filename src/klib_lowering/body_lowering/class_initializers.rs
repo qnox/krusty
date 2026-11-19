@@ -129,6 +129,7 @@ impl<'a> BodyLowering<'a> {
                 &plan.fields,
             ),
         );
+        self.read_outer_instance(plan.class, plan.outer);
         let mut stmts = Vec::new();
         for step in &plan.steps {
             let statement = match step {
@@ -156,6 +157,27 @@ impl<'a> BodyLowering<'a> {
             member.receiver,
             &member.fields,
         ));
+        self.read_outer_instance(member.class, member.outer);
         self
+    }
+
+    /// An inner class's bodies read the outer class's `this` from the field its constructor
+    /// stores the outer instance in.
+    fn read_outer_instance(
+        &mut self,
+        class: crate::ir::ClassId,
+        outer: Option<super::super::same_library_class::OuterInstance<'a>>,
+    ) {
+        if let Some(outer) = outer {
+            let class_name = self.ir.classes[class as usize].fq_name_id();
+            self.captures.insert(
+                outer.symbol.clone(),
+                super::object_literals::CaptureField {
+                    class,
+                    index: outer.field,
+                    class_name,
+                },
+            );
+        }
     }
 }

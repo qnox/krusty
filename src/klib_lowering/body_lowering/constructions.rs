@@ -21,17 +21,27 @@ pub(super) struct ConstructorOperands {
     pub(super) defaults: Vec<u32>,
 }
 
+/// A constructor call's arguments in its constructor's parameter order: an inner class's outer
+/// instance, its dispatch receiver, comes first, as a flat argument list already orders it.
 fn constructor_arguments(
     access: &KlibIrMemberAccess,
+    enclosing_instance: bool,
 ) -> Lowered<Vec<Option<crate::metadata::klib_ir::tree::KlibIrExprId>>> {
     match &access.arguments {
-        KlibIrArguments::Flat(values)
-        | KlibIrArguments::Split {
+        KlibIrArguments::Flat(values) => Ok(values.clone()),
+        KlibIrArguments::Split {
             dispatch_receiver: None,
             extension_receiver: None,
             values,
-        } => Ok(values.clone()),
-        KlibIrArguments::Split { .. } => Err(mismatch(
+        } if !enclosing_instance => Ok(values.clone()),
+        KlibIrArguments::Split {
+            dispatch_receiver: Some(outer),
+            extension_receiver: None,
+            values,
+        } if enclosing_instance => Ok(std::iter::once(Some(*outer))
+            .chain(values.iter().copied())
+            .collect()),
+        _ => Err(mismatch(
             "a constructor call supplies a dispatch or extension receiver",
         )),
     }
@@ -43,15 +53,25 @@ impl BodyLowering<'_> {
         if symbol.kind != KlibIrSymbolKind::Class {
             return Err(mismatch("an object value's symbol is not a class"));
         }
-        let KlibIrSignature::Public(object) = &symbol.signature else {
-            return unsupported("a file-private object value");
+        // An object private to this body's library is installed in the unit, as a construction of
+        // a private class is; any other object is the singleton its provider declares.
+        let local = self.linker.local_class(&symbol.signature)?;
+        let classifier = match (local, &symbol.signature) {
+            (Some(classifier), _) => classifier,
+            (None, KlibIrSignature::Public(object)) => {
+                super::super::klib_types::classifier_name(object)?
+            }
+            (None, _) => return unsupported("a file-private object value"),
         };
-        let classifier = super::super::klib_types::classifier_name(object)?;
         let object = crate::types::builtin_semantic(classifier).unwrap_or(Ty::obj_name(classifier));
         if ty != object {
             return Err(mismatch("an object value is typed apart from its object"));
         }
-        self.linker.singleton(self.ir, classifier)?;
+        if local.is_some() {
+            self.linker.link_local_object(self.ir, &symbol.signature)?;
+        } else {
+            self.linker.singleton(self.ir, classifier)?;
+        }
         // Recorded as checked FIR lowering records the source reference: `Unit` is its builtin
         // type rather than its class.
         let value = self.ir.add_expr(IrExpr::SingletonValue { classifier });
@@ -86,6 +106,7 @@ impl BodyLowering<'_> {
         access: &KlibIrMemberAccess,
         constructor_type_arguments: u32,
         ty: Ty,
+        role: super::ConstructorRole,
     ) -> Lowered<ConstructorOperands> {
         if access.symbol.kind != KlibIrSymbolKind::Constructor {
             return Err(mismatch("a constructor call's symbol is not a constructor"));
@@ -93,7 +114,7 @@ impl BodyLowering<'_> {
         if constructor_type_arguments != 0 {
             return unsupported("a call of a generic constructor");
         }
-        let type_arguments = access
+        let mut type_arguments = access
             .type_arguments
             .iter()
             .map(|argument| {
@@ -106,19 +127,35 @@ impl BodyLowering<'_> {
             KlibIrSignature::Public(callee)
                 if !self.linker.links_privately(&access.symbol.signature) =>
             {
-                let linked = self.linker.link_constructor(self.ir, callee)?;
+                let linked = self.linker.link_constructor(self.ir, callee, role)?;
                 (linked.declaration, Some(linked.target), None)
             }
             signature => {
                 let linked = self.linker.link_local_constructor(self.ir, signature)?;
+                if linked.object {
+                    return Err(mismatch("a constructor call creates an object's instance"));
+                }
                 (linked.declaration, None, Some(linked.access))
             }
         };
+        // An inner class's type applies its outer class's type arguments after its own; the call
+        // passes only its own, and the outer ones are those of the class type it constructs.
+        if declaration.enclosing_instance {
+            let applied = ty.type_args();
+            if applied.len() < type_arguments.len()
+                || applied[..type_arguments.len()] != type_arguments[..]
+            {
+                return Err(mismatch(
+                    "an inner class construction is typed apart from its type arguments",
+                ));
+            }
+            type_arguments = applied.to_vec();
+        }
         let params = declaration.instantiate(&type_arguments, ty, |argument, bound| {
             self.linker
                 .constructor_bound(self.header.type_parameters(), argument, bound)
         })?;
-        let arguments = constructor_arguments(access)?;
+        let arguments = constructor_arguments(access, declaration.enclosing_instance)?;
         if arguments.len() != params.len() {
             return Err(mismatch(
                 "a constructor call passes another number of arguments than its constructor declares",
@@ -129,7 +166,10 @@ impl BodyLowering<'_> {
         for (ordinal, (argument, parameter)) in arguments.into_iter().zip(&params).enumerate() {
             match argument {
                 Some(argument) => args.push(self.operand(argument, *parameter)?),
-                None if declaration.default_allowed(ordinal) => defaults.push(ordinal as u32),
+                // A default's ordinal counts the value parameters, after an outer instance.
+                None if declaration.default_allowed(ordinal) => {
+                    defaults.push((ordinal - usize::from(declaration.enclosing_instance)) as u32)
+                }
                 None => {
                     return Err(mismatch(
                         "a constructor omits a parameter without a declared default",
@@ -160,7 +200,12 @@ impl BodyLowering<'_> {
             params,
             args,
             defaults,
-        } = self.constructor_operands(access, constructor_type_arguments, ty)?;
+        } = self.constructor_operands(
+            access,
+            constructor_type_arguments,
+            ty,
+            super::ConstructorRole::Allocation,
+        )?;
         match declaration.semantic_role {
             Some(crate::types::SemanticCallRole::KotlinArrayAllocation) => {
                 // The allocated type is the constructed class's application: `Array<T>` with its
@@ -195,7 +240,7 @@ impl BodyLowering<'_> {
             ctor_desc: None,
             external_target,
             defaults: defaults.into_boxed_slice(),
-            default_prefix_count: 0,
+            default_prefix_count: u32::from(declaration.enclosing_instance),
         });
         if let Some(access) = local_access {
             self.ir.construction_targets.insert(
@@ -241,7 +286,7 @@ mod tests {
             };
             assert!(
                 matches!(
-                    constructor_arguments(&access),
+                    constructor_arguments(&access, false),
                     Err(super::super::super::decline::KlibBodyDeclineReason::SignatureMismatch(_))
                 ),
                 "a constructor cannot reinterpret a receiver as a value argument"
@@ -261,7 +306,10 @@ mod tests {
                 type_arguments: Vec::new(),
                 origin: None,
             };
-            assert_eq!(constructor_arguments(&access).unwrap(), [Some(value), None]);
+            assert_eq!(
+                constructor_arguments(&access, false).unwrap(),
+                [Some(value), None]
+            );
         }
     }
 }
