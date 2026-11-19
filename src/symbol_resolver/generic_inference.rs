@@ -51,6 +51,14 @@ pub(crate) fn generic_signature_strictly_more_constrained(
     left: &GenericSig,
     right: &GenericSig,
 ) -> bool {
+    // Only a formal some receiver or value parameter mentions takes part in specificity, and its
+    // slot is the first such position rather than its declaration ordinal, so
+    // `<L : Any, R> f(a: L)` and `<L : Any, R> f(b: R)` compare the formal each passes through
+    // its parameter. A formal only the result mentions is inferred, never compared.
+    let (left, right) = (
+        &parameter_formals_in_mention_order(left),
+        &parameter_formals_in_mention_order(right),
+    );
     if left.formals.len() != right.formals.len() {
         return false;
     }
@@ -125,6 +133,53 @@ pub(crate) fn generic_signature_strictly_more_constrained(
         });
     }
     strict
+}
+
+/// `signature` restricted to the formals its receiver or value parameters mention, ordered by the
+/// first parameter position that mentions each (ties by declaration order), followed by the formals
+/// those formals' bounds reach in turn. A bound's formal keeps a slot, so the same `C<U>` bound on
+/// two overloads canonicalizes to the same shape; a formal only the result mentions has none.
+fn parameter_formals_in_mention_order(signature: &GenericSig) -> GenericSig {
+    let positions = signature
+        .receiver
+        .iter()
+        .chain(&signature.params)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut direct = (0..signature.formals.len())
+        .filter_map(|ordinal| {
+            positions
+                .iter()
+                .position(|ty| crate::types::ty_mentions_param(*ty, &[signature.formals[ordinal]]))
+                .map(|first| (first, ordinal))
+        })
+        .collect::<Vec<_>>();
+    direct.sort_unstable();
+    let mut slots = direct
+        .into_iter()
+        .map(|(_, ordinal)| ordinal)
+        .collect::<Vec<_>>();
+    let mut next = 0;
+    while let Some(&ordinal) = slots.get(next) {
+        next += 1;
+        for bound in signature.formal_bounds.get(ordinal).into_iter().flatten() {
+            for (reached, formal) in signature.formals.iter().enumerate() {
+                if !slots.contains(&reached)
+                    && crate::types::ty_mentions_param(*bound, std::slice::from_ref(formal))
+                {
+                    slots.push(reached);
+                }
+            }
+        }
+    }
+    GenericSig {
+        formals: slots.iter().map(|&i| signature.formals[i]).collect(),
+        formal_bounds: slots
+            .iter()
+            .map(|&i| signature.formal_bounds.get(i).cloned().unwrap_or_default())
+            .collect(),
+        ..signature.clone()
+    }
 }
 
 /// Which declaration type-parameter positions were fixed by written call-site arguments.
@@ -946,8 +1001,11 @@ pub(crate) fn merge_generic_bindings_from(
     // `R := Nothing?` under `C : R`; the solution is `R = C?`). Here, at the common merge funnel,
     // so every selection, realization, and lambda-expectation path sees the same completed map.
     complete_bottom_constraint_bindings(signature, bindings, explicit_type_arguments);
-    complete_dependent_bound_bindings(signature, bindings, explicit_type_arguments);
+    // An applied supertype fixes a formal exactly (`C : Poly<T>` with `C = TaskContainer` makes
+    // `T = Task`); a bare formal bound (`U : T`) only offers its own actual as a stand-in, so the
+    // exact relation runs first.
     resolve_bound_violating_bindings(source, signature, bindings, explicit_type_arguments);
+    complete_dependent_bound_bindings(signature, bindings, explicit_type_arguments);
 }
 
 /// Merge constraints contributed by an expected call result. These are upper bounds: they can fill

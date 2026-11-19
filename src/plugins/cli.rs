@@ -17,9 +17,9 @@
 /// The real kotlinc plugin ids (the `<id>` in `-P plugin:<id>:...`).
 pub const SERIALIZATION_PLUGIN_ID: &str = "org.jetbrains.kotlinx.serialization";
 pub const KSP_PLUGIN_ID: &str = "com.google.devtools.ksp.symbol-processing";
-pub const ALLOPEN_PLUGIN_ID: &str = "org.jetbrains.kotlin.allopen";
-pub const NOARG_PLUGIN_ID: &str = "org.jetbrains.kotlin.noarg";
-pub const SAM_WITH_RECEIVER_PLUGIN_ID: &str = "org.jetbrains.kotlin.samWithReceiver";
+pub const ALLOPEN_PLUGIN_ID: &str = krusty_plugin_allopen::PLUGIN_ID;
+pub const NOARG_PLUGIN_ID: &str = krusty_plugin_noarg::PLUGIN_ID;
+pub const SAM_WITH_RECEIVER_PLUGIN_ID: &str = krusty_plugin_sam_with_receiver::PLUGIN_ID;
 pub const ASSIGNMENT_PLUGIN_ID: &str = "org.jetbrains.kotlin.assignment";
 pub const COMPOSE_PLUGIN_ID: &str = "androidx.compose.compiler.plugins.kotlin";
 pub const ATOMICFU_PLUGIN_ID: &str = "org.jetbrains.kotlinx.atomicfu";
@@ -34,13 +34,7 @@ pub const KAPT_PLUGIN_ID: &str = "org.jetbrains.kotlin.kapt3";
 /// The plugin id kotlinc shows for an `-Xcompiler-plugin` option, which names no plugin.
 pub const MODERN_OPTION_ID: &str = "<NO_ID>";
 
-/// One `-P plugin:<id>:<key>=<value>` option.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PluginOption {
-    pub id: String,
-    pub key: String,
-    pub value: String,
-}
+pub use krusty_plugin_api::PluginOption;
 
 /// One `-Xcompiler-plugin=<jar>,<jar>[=<key>=<value>,<key>=<value>]` registration (kotlinc's modern,
 /// experimental syntax). Its options carry no plugin id: they configure the plugin those jars load.

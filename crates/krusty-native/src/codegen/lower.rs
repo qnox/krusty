@@ -201,6 +201,8 @@ fn isa_for(
 /// One struct rather than a growing parameter list, and BORROWED rather than owned, because the
 /// pass that made them owns them for the whole lowering.
 pub struct FileInput<'a> {
+    #[cfg(feature = "test-support")]
+    pub driver_entries: &'a [super::DriverEntry],
     pub ir: &'a IrFile,
     /// Provider-normalized facts for classifiers whose representation this file needs.
     pub classifiers: &'a dyn krusty::backend::BackendClassifierSource,
@@ -259,6 +261,8 @@ pub fn lower_file(
     verify: bool,
 ) -> Result<Lowered, Unsupported> {
     let FileInput {
+        #[cfg(feature = "test-support")]
+        driver_entries,
         ir,
         classifiers,
         callables,
@@ -436,6 +440,14 @@ pub fn lower_file(
             super::super::c_abi::file_records(ir, abi_symbols)
         }
         krusty::backend::CheckedIrUnitKind::DependencySupport => Vec::new(),
+    };
+    #[cfg(feature = "test-support")]
+    let abi = if unit_kind == krusty::backend::CheckedIrUnitKind::Source {
+        let mut abi = abi;
+        abi.extend(lowering.driver_records(driver_entries, abi_symbols)?);
+        abi
+    } else {
+        abi
     };
     lowering.define_c_exports(file_init, &abi)?;
     lowering.define_dependency_exports(file_init, dependency_exports)?;
@@ -683,16 +695,10 @@ impl<'a> FileLowering<'a> {
         if let Some(owner) = function.dispatch_receiver {
             // A value class's member takes the VALUE as `this`; its box reaches it through a
             // bridge. Every other member takes the object, as a reference.
-            params.push(match self.value_receiver(owner) {
-                Some(value) => value,
-                None if self.ir.class_id_by_name(owner).is_some() => any(),
-                None => {
-                    return Err(declined!(
-                        "a method of `{}`, which is not declared in this file",
-                        owner.render()
-                    ))
-                }
-            });
+            // An owner this file does not declare is a library classifier whose members the
+            // dependency unit lowers as functions of the instance (an interface's default body),
+            // so its receiver is the instance reference too.
+            params.push(self.value_receiver(owner).unwrap_or_else(any));
         }
         params.extend(super::super::captures::carried_parameters(self.ir, id));
         self.signature_of(&params, function.ret)

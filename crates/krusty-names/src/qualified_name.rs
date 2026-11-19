@@ -1,7 +1,7 @@
 //! The dotted Kotlin qualified name of a classifier identity: a boundary spelling for text a
 //! compiler or a program prints, never a lookup key.
 
-use super::TypeName;
+use crate::type_name::TypeName;
 
 impl TypeName {
     /// The name kotlinc prints for this classifier (`ClassId.asFqNameString`): the package and
