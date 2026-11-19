@@ -367,6 +367,12 @@ impl Body<'_> {
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
+        // A value class is final and none of its members can be overridden, and the receiver
+        // need not be its box: a target-carried one (`UIntArray`) is the target's own value.
+        // Its members are called directly, never through a table.
+        if self.ir.classes[class as usize].is_value {
+            return self.direct_method_call(class, function, receiver, args);
+        }
         let tables = &self.file_classes()?.tables;
         if tables.table(class).direct_methods.contains(&function) {
             return self.direct_method_call(class, function, receiver, args);
@@ -756,6 +762,34 @@ impl Body<'_> {
             .struct_get(object, 0);
     }
 
+    /// A call to member `function` of this file. Common lowering already dispatches an
+    /// overridable function and leaves a `super` call direct, so a function with a body is
+    /// called directly here. A bodiless (abstract) member has nothing to call directly: it is
+    /// reached through its class's dispatch slot, as an override the receiver's own table
+    /// answers.
+    pub(super) fn local_member_call(
+        &mut self,
+        function: FunId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let declaration = &self.ir.functions[function as usize];
+        let class = declaration
+            .dispatch_receiver
+            .filter(|_| declaration.body.is_none())
+            .and_then(|owner| self.classes.and(self.ir.class_id_by_name(owner)));
+        if let Some(class) = class {
+            let tables = &self.file_classes()?.tables;
+            let key = function_key(self.ir, class, function);
+            if !tables.table(class).direct_methods.contains(&function)
+                && tables.slot(class, &key).is_some()
+            {
+                return self.dispatch_function(class, function, receiver, args);
+            }
+        }
+        self.direct_member_call(function, receiver, args)
+    }
+
     /// A call to member `function` of this file, without dispatch.
     pub(super) fn direct_member_call(
         &mut self,
@@ -1020,12 +1054,15 @@ impl Body<'_> {
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less read of `{}`", property.name))?;
-        let slot = local_property_target(self.ir, class, index).and_then(|target| {
-            self.file_classes()
-                .ok()?
-                .tables
-                .slot(class, &SlotKey::Getter(target))
-        });
+        // A value class's property is final: it is accessed directly, as its members are called.
+        let slot = local_property_target(self.ir, class, index)
+            .filter(|_| !self.ir.classes[class as usize].is_value)
+            .and_then(|target| {
+                self.file_classes()
+                    .ok()?
+                    .tables
+                    .slot(class, &SlotKey::Getter(target))
+            });
         if let Some(slot) = slot {
             return self.dispatch(class, slot, receiver, &[], &[], None);
         }
@@ -1103,12 +1140,15 @@ impl Body<'_> {
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less write of `{}`", property.name))?;
-        let slot = local_property_target(self.ir, class, index).and_then(|target| {
-            self.file_classes()
-                .ok()?
-                .tables
-                .slot(class, &SlotKey::Setter(target))
-        });
+        // A value class's property is final: it is accessed directly, as its members are called.
+        let slot = local_property_target(self.ir, class, index)
+            .filter(|_| !self.ir.classes[class as usize].is_value)
+            .and_then(|target| {
+                self.file_classes()
+                    .ok()?
+                    .tables
+                    .slot(class, &SlotKey::Setter(target))
+            });
         if let Some(slot) = slot {
             return self.dispatch(class, slot, receiver, &[value], &[property.ty], None);
         }
@@ -1292,6 +1332,15 @@ impl Body<'_> {
             .then_some(name)
     }
 
+    /// Whether the runtime's `ArrayList`, whose class the program does not declare, is below the
+    /// library interface `interface`, by the frontend's supertype traversal.
+    fn runtime_array_list_is_below(&self, interface: TypeName) -> bool {
+        let Some(array_list) = Ty::obj("kotlin/collections/ArrayList").obj_internal() else {
+            return false;
+        };
+        self.classifiers.is_subclassifier(array_list, interface)
+    }
+
     /// Replace the reference on the stack with whether it is an instance of the library interface
     /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
     /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
@@ -1301,11 +1350,14 @@ impl Body<'_> {
             return;
         }
         let subtypes = self.classifiers.builtin_subtypes(interface);
-        let string_builder = self
-            .classifiers
-            .is_subclassifier(krusty::types::wk::string_builder(), interface);
+        let laid_out = crate::builtin_instances::RuntimeLayouts {
+            string_builder: self
+                .classifiers
+                .is_subclassifier(krusty::types::wk::string_builder(), interface),
+            array_list: self.runtime_array_list_is_below(interface),
+        };
         self.runtime
-            .builtin_instances(interface, subtypes, string_builder);
+            .builtin_instances(interface, subtypes, laid_out);
         self.interface_test(interface, nullable);
     }
 
