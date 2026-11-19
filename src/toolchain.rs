@@ -554,6 +554,11 @@ pub fn kotlin_test_jar() -> Option<PathBuf> {
     })
 }
 
+/// The kotlinx.serialization runtime version, for callers that name it as a constant. The
+/// serialization corpus descriptor is the producer; `plugin_runtime_version_constants_match_descriptors`
+/// pins this to it.
+pub const SERIALIZATION_VERSION: &str = "1.9.0";
+
 /// `kotlinx-serialization-core-jvm`, the runtime the serialization plugin emits calls against, at
 /// the version its corpus descriptor pins.
 ///
@@ -568,6 +573,11 @@ pub fn serialization_core_jar() -> Option<PathBuf> {
 pub fn serialization_json_jar() -> Option<PathBuf> {
     crate::conformance::plugin_corpus::named("serialization").runtime[1].resolve()
 }
+
+/// The Compose runtime version, for callers that name it as a constant (the Gradle handoff
+/// fixtures). The compose corpus descriptor is the producer;
+/// `plugin_runtime_version_constants_match_descriptors` pins this to it.
+pub const COMPOSE_RUNTIME_VERSION: &str = "1.12.1";
 
 /// The Compose runtime jars, the runtime's own dependencies included: what a JVM (desktop)
 /// project that applies the Compose compiler plugin compiles and runs against. The compiler plugin
@@ -721,6 +731,25 @@ fn find_exact_jar(dir: &std::path::Path, expected: &str, depth: usize) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_runtime_version_constants_match_descriptors() {
+        use crate::conformance::plugin_corpus::named;
+        assert_eq!(
+            named("compose").runtime_version("runtime-desktop"),
+            Some(COMPOSE_RUNTIME_VERSION)
+        );
+        for artifact in [
+            "kotlinx-serialization-core-jvm",
+            "kotlinx-serialization-json-jvm",
+        ] {
+            assert_eq!(
+                named("serialization").runtime_version(artifact),
+                Some(SERIALIZATION_VERSION),
+                "{artifact}"
+            );
+        }
+    }
 
     #[test]
     fn distribution_build_number_preserves_the_exact_prerelease_version() {
