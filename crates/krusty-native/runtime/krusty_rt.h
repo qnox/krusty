@@ -424,6 +424,7 @@ extern const KType kt_type_list_iterator;
    `MutableList`; its size is fixed, and a growable parent that changes shape after it was made
    makes each read raise `ConcurrentModificationException`. */
 extern const KType kt_type_sub_list;
+extern const KType kt_type_mutable_sub_list;
 
 KRef kt_list_of(KRef elements);
 KRef kt_list_empty(void);

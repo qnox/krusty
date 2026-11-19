@@ -185,14 +185,22 @@ kt_boolean kt_is_mutable_list(KRef value) {
    elements that are no longer where it said. A read-only parent never changes, so it records zero
    and nothing compares.
 
-   It is a `List`, not a `MutableList`: the members that write through a range are not realized, and
-   the generator selects `subList` only for the read-only face (see `list_symbol`). */
+   A view of a growable list (or of a view of one) is writable, as `ArrayList.subList` is: a write
+   through it lands in the parent at the range's offset, the range's size follows, and the range
+   takes the parent's new shape so it stays valid. A view of a read-only list is read-only, like the
+   list. Either face of `subList` reaches the same function, because what the view may do is the
+   parent's to say, not the static type's. */
 typedef struct KSubList {
     KObjectHeader header;
     KRef parent;
     kt_int offset;
     kt_int size;
+    /* The parent's shape when the range last made or saw it, and the structural writes made
+       through this range, which a walk of the range or a view of it compares as `modifications`
+       is compared on a growable list. */
     uint32_t modifications;
+    uint32_t version;
+    kt_boolean writable;
 } KSubList;
 
 static const uint32_t kt_sub_list_offsets[] = {offsetof(KSubList, parent)};
@@ -210,14 +218,46 @@ const KType kt_type_sub_list = {KT_NAMED("kotlin.collections.", "SubList"),
                                 .interface_count = sizeof(kt_list_interfaces) / sizeof(KType *),
                                 .collection_size = kt_sub_list_collection_size};
 
+/* A view of a growable list is also a `MutableList`, which the interface inventory says so that
+   `is` and `as` agree with the mutators it answers. */
+const KType kt_type_mutable_sub_list = {KT_NAMED("kotlin.collections.", "SubList"),
+                                        .instance_size = sizeof(KSubList),
+                                        .reference_count = 1,
+                                        .reference_offsets = kt_sub_list_offsets,
+                                        .super = &kt_type_any,
+                                        .vtable = kt_list_vtable,
+                                        .vtable_length = 3,
+                                        .interfaces = kt_mutable_list_interfaces,
+                                        .interface_count =
+                                            sizeof(kt_mutable_list_interfaces) / sizeof(KType *),
+                                        .collection_size = kt_sub_list_collection_size};
+
 static kt_boolean kt_is_sub_list(KRef value) {
-    return value != NULL && value->header.type == &kt_type_sub_list;
+    return value != NULL && (value->header.type == &kt_type_sub_list ||
+                             value->header.type == &kt_type_mutable_sub_list);
 }
 
 /* Any of the runtime's own lists: the two that hold storage and the view of a range of either. */
 static kt_boolean kt_is_runtime_list(KRef value) {
     return kt_is_read_only_list(value) || kt_is_mutable_list(value) || kt_is_sub_list(value);
 }
+
+/* A list a write may reach: a growable list, or a view of one. */
+static kt_boolean kt_is_writable_list(KRef value) {
+    return kt_is_mutable_list(value) || (kt_is_sub_list(value) && ((const KSubList *)value)->writable);
+}
+
+/* A list's structural version: a growable list's modification count, a view's count of the writes
+   made through it, and zero for a list nothing can change. A view of a list, an iterator of one
+   and a view of a view each record it and compare it later. */
+static uint32_t kt_list_version(KRef list) {
+    if (kt_is_mutable_list(list)) {
+        return ((const KMutableList *)list)->modifications;
+    }
+    return kt_is_sub_list(list) ? ((const KSubList *)list)->version : 0;
+}
+
+static uint32_t kt_shape_of(KRef parent) { return kt_list_version(parent); }
 
 /* Whether the view's parent has changed shape since the view was made: the check every read of a
    view makes first. It raises and answers true when so. A view of a view asks the view above it
@@ -226,8 +266,7 @@ static kt_boolean kt_sub_list_is_stale(const KSubList *view) {
     if (kt_is_sub_list(view->parent) && kt_sub_list_is_stale((const KSubList *)view->parent)) {
         return true;
     }
-    if (kt_is_mutable_list(view->parent) &&
-        ((const KMutableList *)view->parent)->modifications != view->modifications) {
+    if (kt_shape_of(view->parent) != view->modifications) {
         kt_throw(kt_throwable_new(&kt_type_concurrent_modification_exception, NULL));
         return true;
     }
@@ -386,11 +425,13 @@ KRef kt_list_sub_list(KRef list, kt_int from, kt_int to) {
         kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception, message));
         return NULL;
     }
-    KSubList *view = (KSubList *)kt_gc_allocate(&kt_type_sub_list, sizeof(KSubList));
+    KSubList *view = (KSubList *)kt_gc_allocate(
+        kt_is_writable_list(list) ? &kt_type_mutable_sub_list : &kt_type_sub_list, sizeof(KSubList));
     view->parent = list;
     view->offset = from;
     view->size = to - from;
-    view->modifications = kt_is_mutable_list(list) ? ((const KMutableList *)list)->modifications : 0;
+    view->modifications = kt_shape_of(list);
+    view->writable = kt_is_writable_list(list);
     return (KRef)view;
 }
 
@@ -550,7 +591,89 @@ KRef kt_mutable_list_of(KRef elements) {
     return list;
 }
 
+/* ---- writing through a view ------------------------------------------------------------------
+
+   Each write lands in the parent at the range's offset, so the parent stays the one place the
+   elements live. A structural write then moves the range's size and takes the parent's new shape:
+   the range made the change, so it is not stale for it, where a change from anywhere else is. A
+   view of a read-only list refuses every write, as the list does. */
+static kt_boolean kt_sub_list_may_write(KSubList *view) {
+    if (kt_sub_list_is_stale(view)) {
+        return false;
+    }
+    if (!view->writable) {
+        kt_throw(kt_throwable_new(&kt_type_unsupported_operation_exception, NULL));
+        return false;
+    }
+    return true;
+}
+
+static void kt_sub_list_add_at(KSubList *view, kt_int index, KRef value) {
+    if (!kt_sub_list_may_write(view)) {
+        return;
+    }
+    if (index < 0 || index > view->size) {
+        kt_index_out_of_bounds(index, view->size);
+        return;
+    }
+    kt_mutable_list_add_at((KRef)view->parent, view->offset + index, value);
+    if (kt_pending_exception() != NULL) {
+        return;
+    }
+    view->size++;
+    view->version++;
+    view->modifications = kt_shape_of(view->parent);
+}
+
+static KRef kt_sub_list_remove_at(KSubList *view, kt_int index) {
+    if (!kt_sub_list_may_write(view)) {
+        return NULL;
+    }
+    if (index < 0 || index >= view->size) {
+        kt_index_out_of_bounds(index, view->size);
+        return NULL;
+    }
+    KRef removed = kt_mutable_list_remove_at(view->parent, view->offset + index);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    view->size--;
+    view->version++;
+    view->modifications = kt_shape_of(view->parent);
+    return removed;
+}
+
+static KRef kt_sub_list_set(KSubList *view, kt_int index, KRef value) {
+    if (!kt_sub_list_may_write(view)) {
+        return NULL;
+    }
+    if (index < 0 || index >= view->size) {
+        kt_index_out_of_bounds(index, view->size);
+        return NULL;
+    }
+    return kt_mutable_list_set(view->parent, view->offset + index, value);
+}
+
+static void kt_sub_list_clear(KSubList *view) {
+    /* An empty range still answers to its list: `AbstractList.clear` is `removeRange(0, size)`, whose
+       `size` validates the view before there is anything to remove. */
+    if (!kt_sub_list_may_write(view)) {
+        return;
+    }
+    while (view->size > 0) {
+        (void)kt_sub_list_remove_at(view, view->size - 1);
+        if (kt_pending_exception() != NULL) {
+            return;
+        }
+    }
+}
+
 kt_boolean kt_mutable_list_add(KRef self, KRef value) {
+    if (kt_is_sub_list(self)) {
+        KSubList *view = (KSubList *)self;
+        kt_sub_list_add_at(view, view->size, value);
+        return kt_pending_exception() == NULL;
+    }
     kt_mutable_list_reserve(self);
     KMutableList *list = (KMutableList *)self;
     kt_elements_of(list->elements)[list->size++] = value;
@@ -609,6 +732,9 @@ void kt_mutable_list_add_all(KRef self, KRef elements) {
 }
 
 KRef kt_mutable_list_set(KRef self, kt_int index, KRef value) {
+    if (kt_is_sub_list(self)) {
+        return kt_sub_list_set((KSubList *)self, index, value);
+    }
     KMutableList *list = (KMutableList *)self;
     /* Returns straight after raising, as `add(index, e)` and `removeAt` below do: `kt_throw` records
        the exception and comes back, and the write it forbids would land outside the elements --
@@ -625,6 +751,10 @@ KRef kt_mutable_list_set(KRef self, kt_int index, KRef value) {
 }
 
 void kt_mutable_list_add_at(KRef self, kt_int index, KRef value) {
+    if (kt_is_sub_list(self)) {
+        kt_sub_list_add_at((KSubList *)self, index, value);
+        return;
+    }
     KMutableList *list = (KMutableList *)self;
     if (index < 0 || index > list->size) {
         kt_index_out_of_bounds(index, list->size);
@@ -641,6 +771,9 @@ void kt_mutable_list_add_at(KRef self, kt_int index, KRef value) {
 }
 
 KRef kt_mutable_list_remove_at(KRef self, kt_int index) {
+    if (kt_is_sub_list(self)) {
+        return kt_sub_list_remove_at((KSubList *)self, index);
+    }
     KMutableList *list = (KMutableList *)self;
     if (index < 0 || index >= list->size) {
         kt_index_out_of_bounds(index, list->size);
@@ -703,6 +836,10 @@ kt_boolean kt_mutable_list_retain_all(KRef self, KRef elements) {
 }
 
 void kt_mutable_list_clear(KRef self) {
+    if (kt_is_sub_list(self)) {
+        kt_sub_list_clear((KSubList *)self);
+        return;
+    }
     KMutableList *list = (KMutableList *)self;
     KRef *elements = kt_elements_of(list->elements);
     for (kt_int at = 0; at < list->size; at++) {
@@ -719,7 +856,7 @@ void kt_mutable_list_clear(KRef self) {
    the runtime made read-only answers a mutation the way Kotlin's does. */
 
 static kt_boolean kt_read_only_list(KRef value) {
-    if (value->header.type != &kt_type_list && !kt_is_sub_list(value)) {
+    if (value->header.type != &kt_type_list && !(kt_is_sub_list(value) && !kt_is_writable_list(value))) {
         return false;
     }
     kt_throw(kt_throwable_new(&kt_type_unsupported_operation_exception, NULL));
@@ -746,14 +883,14 @@ kt_boolean kt_mutable_collection_add(KRef self, KRef value) {
     if (kt_read_only_list(self)) {
         return false;
     }
-    return kt_is_mutable_list(self) ? kt_mutable_list_add(self, value) : kt_set_add(self, value);
+    return kt_is_writable_list(self) ? kt_mutable_list_add(self, value) : kt_set_add(self, value);
 }
 
 kt_boolean kt_mutable_collection_remove(KRef self, KRef value) {
     if (kt_read_only_list(self)) {
         return false;
     }
-    return kt_is_mutable_list(self) ? kt_mutable_list_remove(self, value)
+    return kt_is_writable_list(self) ? kt_mutable_list_remove(self, value)
                                     : kt_set_remove(self, value);
 }
 
@@ -761,7 +898,7 @@ void kt_mutable_collection_clear(KRef self) {
     if (kt_read_only_list(self)) {
         return;
     }
-    if (kt_is_mutable_list(self)) {
+    if (kt_is_writable_list(self)) {
         kt_mutable_list_clear(self);
     } else {
         kt_map_clear(self);
@@ -774,7 +911,7 @@ kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements) {
     if (kt_read_only_list(self)) {
         return false;
     }
-    if (kt_is_mutable_list(self)) {
+    if (kt_is_writable_list(self)) {
         kt_int before = kt_list_size(self);
         kt_mutable_list_add_all(self, elements);
         return !kt_raised() && kt_list_size(self) != before;
@@ -804,8 +941,7 @@ KRef kt_list_iterator(KRef list) {
     KListIterator *iterator = (KListIterator *)kt_gc_allocate(type, sizeof(KListIterator));
     iterator->list = list;
     iterator->at = 0;
-    iterator->modifications = kt_is_mutable_list(list) ? ((const KMutableList *)list)->modifications
-                                                       : 0;
+    iterator->modifications = kt_list_version(list);
     return (KRef)iterator;
 }
 
@@ -824,8 +960,7 @@ KRef kt_list_iterator_next(KRef iterator) {
     /* Checked BEFORE the bound, because that is the order the difference shows in: a `remove`
        during the walk can leave the cursor inside the shortened list, where the bound says nothing
        is wrong and Kotlin still raises. */
-    if (kt_is_mutable_list(self->list) &&
-        ((const KMutableList *)self->list)->modifications != self->modifications) {
+    if (kt_list_version(self->list) != self->modifications) {
         kt_throw(kt_throwable_new(&kt_type_concurrent_modification_exception, NULL));
         return NULL;
     }
