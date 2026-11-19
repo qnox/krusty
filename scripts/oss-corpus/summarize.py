@@ -27,7 +27,7 @@ def read_names(path):
     if not path:
         return []
     with open(path) as f:
-        return [line.split('\t')[0] for line in f if line.strip()]
+        return [line.rstrip('\n').split('\t')[0] for line in f if line.strip()]
 
 
 def failure_reason(results, name):
@@ -37,16 +37,19 @@ def failure_reason(results, name):
     logs = os.path.join(results, f'corpus-{name}', 'logs')
     try:
         with open(os.path.join(logs, 'STATUS')) as f:
-            statuses = [line.split() for line in f if line.strip()]
+            text = f.read()
     except OSError:
         return 'its job uploaded no logs: it stopped before a build ran, or the artifact is missing'
-    failed = next(((mode, code_, secs) for _, mode, _, code_, _, secs in statuses if code_ != '0'), None)
+    # `<name> <mode> exit <code> seconds <n>` of a build, `<name> <mode> tests exit ...` of its test
+    # build, whose log is `<name>.<mode>.tests.log`.
+    records = re.findall(r'^\S+ (\S+)( tests)? exit (\d+) seconds (\d+)$', text, re.MULTILINE)
+    failed = next(((mode, tests, code_, secs) for mode, tests, code_, secs in records if code_ != '0'), None)
     if failed is None:
         return 'every build exited 0 but the job wrote no comparison'
-    mode, code_, secs = failed
-    reason = f'the {mode} build exited {code_} after {secs} s'
+    mode, tests, code_, secs = failed
+    reason = f"the {mode}{tests} build exited {code_} after {secs} s"
     try:
-        with open(os.path.join(logs, f'{name}.{mode}.log'), errors='replace') as f:
+        with open(os.path.join(logs, f'{name}.{mode}{tests.replace(" ", ".")}.log'), errors='replace') as f:
             lines = f.read().splitlines()
     except OSError:
         return reason + ' and left no log'

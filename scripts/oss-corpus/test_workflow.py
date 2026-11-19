@@ -31,10 +31,12 @@ class Workflow(unittest.TestCase):
                 path = root / "results" / value["name"] / "compare.json"
                 path.parent.mkdir(parents=True)
                 path.write_text(json.dumps(value))
-            # stars.tsv names every project of the corpus; ghost's job left nothing behind.
-            (root / "stars.tsv").write_text("zeta\t\nAlpha\t\nghost\t\n")
+            # The stars lookup lists the whole compile lane; only the projects this run was asked to
+            # measure are expected, and ghost's job left nothing behind.
+            (root / "stars.tsv").write_text("zeta\t\nAlpha\t\nghost\t\nunselected\t\n")
             output = subprocess.run(["bash", "-euo", "pipefail", "-c", script], cwd=root,
-                                    env={**os.environ, "GITHUB_STEP_SUMMARY": str(root / "job-summary.md")},
+                                    env={**os.environ, "GITHUB_STEP_SUMMARY": str(root / "job-summary.md"),
+                                         "EXPECTED": '["Alpha","zeta","ghost"]'},
                                     capture_output=True, timeout=10)
             self.assertEqual(output.returncode, 0, output)
             self.assertEqual((root / "summary.md").read_bytes(), (root / "job-summary.md").read_bytes())

@@ -167,7 +167,7 @@ jobs:
           if-no-files-found: warn
 
   summary:
-    needs: [project]
+    needs: [prepare, project]
     if: always()
     runs-on: ubuntu-latest
     # Reading the previous run's summary artifact takes actions: read.
@@ -214,8 +214,12 @@ jobs:
               break
             done
       - name: summarize
+        env:
+          # The projects this run was asked to measure: a run limited to some projects expects only those.
+          EXPECTED: ${{ needs.prepare.outputs.projects }}
         run: |
           set -euo pipefail
+          jq -r '.[]' <<<"$EXPECTED" > expected.tsv
           previous=()
           if [ -f previous/summary.json ]; then
             previous=(--previous previous/summary.json)
@@ -225,9 +229,9 @@ jobs:
             echo "no project produced a comparison" >&2
             exit 1
           fi
-          # stars.tsv names every project of the compile lane, so a project whose job left no
-          # comparison is reported as not measured, with why, instead of vanishing from the tables.
-          python3 scripts/oss-corpus/summarize.py --stars stars.tsv --expected stars.tsv --results results \
+          # A project of this run whose job left no comparison is reported as not measured, with why,
+          # instead of vanishing from the tables.
+          python3 scripts/oss-corpus/summarize.py --stars stars.tsv --expected expected.tsv --results results \
             --plugins results --json summary.json "${previous[@]}" "${reports[@]}" \
             | tee summary.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

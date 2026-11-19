@@ -351,11 +351,15 @@ No verified compilation reported an error.
                 '      > Received status code 429 from server: Too Many Requests\n')
             log('koin', 'koin warmup exit 0 seconds 20\nkoin kotlinc exit 2 seconds 5\n', 'kotlinc', 'no cause line here\n')
             log('moshi', 'moshi warmup exit 3 seconds 2\n', 'warmup', None)
+            # An interrupted project: its builds passed and its reference test build failed.
+            log('ktor', 'ktor warmup exit 0 seconds 9\nktor kotlinc exit 0 seconds 8\n'
+                        'ktor kotlinc tests exit 1 seconds 7\n', 'kotlinc.tests',
+                '* What went wrong:\nExecution failed for task \':test\'.\n')
             log('Unciv', 'Unciv warmup exit 0 seconds 2\nUnciv kotlinc exit 0 seconds 2\n', 'kotlinc', '')
             with open(f'{work}/zeta.json', 'w') as f:
                 json.dump(project('zeta', [row(':a:compileKotlin', True, 4, 4)]), f)
             with open(f'{work}/stars.tsv', 'w') as f:
-                f.write('zeta\t5\nokio\t\nkoin\t9\nghost\t\nmoshi\t3\nUnciv\t4\n')
+                f.write('zeta\t5\nokio\t\nkoin\t9\nghost\t\nmoshi\t3\nUnciv\t4\nktor\t\n')
             text = subprocess.run(
                 [sys.executable, os.path.join(HERE, 'summarize.py'), '--expected', f'{work}/stars.tsv',
                  '--results', f'{work}/results', '--json', f'{work}/out.json', f'{work}/zeta.json'],
@@ -372,6 +376,7 @@ No verified compilation reported an error.
             '| --- | --- |',
             '| ghost | its job uploaded no logs: it stopped before a build ran, or the artifact is missing |',
             '| koin | the kotlinc build exited 2 after 5 s |',
+            "| ktor | the kotlinc tests build exited 1 after 7 s: Execution failed for task ':test'. |",
             '| moshi | the warmup build exited 3 after 2 s and left no log |',
             "| okio | the warmup build exited 1 after 22 s: A problem occurred configuring project ':build-support'."
             ' (a download answered HTTP 429) |',
@@ -381,6 +386,7 @@ No verified compilation reported an error.
         self.assertEqual(document['not_measured'], [
             dict(name='ghost', reason='its job uploaded no logs: it stopped before a build ran, or the artifact is missing'),
             dict(name='koin', reason='the kotlinc build exited 2 after 5 s'),
+            dict(name='ktor', reason="the kotlinc tests build exited 1 after 7 s: Execution failed for task ':test'."),
             dict(name='moshi', reason='the warmup build exited 3 after 2 s and left no log'),
             dict(name='okio', reason="the warmup build exited 1 after 22 s: A problem occurred configuring project "
                                      "':build-support'. (a download answered HTTP 429)"),
