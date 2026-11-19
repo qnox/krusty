@@ -1066,6 +1066,33 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
+    /// The file-local signatures the emitted body of `identity` calls: each names a declaration of
+    /// its own module, or a fake override of one of its local classes.
+    pub(crate) fn emitted_file_local_callees(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<KlibIrSignature> {
+        self.emitted_body_symbols(identity, forms)
+            .callables
+            .into_iter()
+            .filter(|symbol| matches!(symbol.signature, KlibIrSignature::FileLocal { .. }))
+            .map(|symbol| symbol.signature.clone())
+            .collect()
+    }
+
+    /// [`Self::linked_origin`] of a serialized signature.
+    pub(crate) fn linked_ir_origin(
+        &self,
+        body_module: &str,
+        signature: &KlibIrSignature,
+    ) -> KlibCalleeOrigin {
+        match declaration_signature(signature) {
+            Some(declaration) => self.linked_origin(body_module, &declaration),
+            None => KlibCalleeOrigin::Missing,
+        }
+    }
+
     /// The public objects whose values the emitted body of `identity` reads, through the
     /// closures `forms` lowers with it and the members of the file-local classes it constructs.
     pub(crate) fn emitted_body_objects(

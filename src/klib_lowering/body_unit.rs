@@ -40,6 +40,7 @@ mod class_construction;
 pub(crate) use class_construction::superclass_constructor_ordinal;
 mod enum_materialization;
 mod fake_overrides;
+pub(super) use fake_overrides::inherited_getter_callees;
 #[cfg(test)]
 mod initializer_capability_tests;
 mod inline_functions;

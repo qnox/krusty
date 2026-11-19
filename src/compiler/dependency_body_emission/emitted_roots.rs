@@ -129,8 +129,7 @@ pub(super) fn declarations(
                 && crate::klib_lowering::is_private_class_member(bodies, &identity, class)
         }) {
             state.pending.extend(
-                bodies
-                    .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+                crate::klib_lowering::emitted_callees(bodies, &identity)
                     .into_iter()
                     .map(|callee| (callee, Some(class.clone()))),
             );
@@ -145,8 +144,7 @@ pub(super) fn declarations(
         // instead, an exact external edge which keeps its declaration authentication below.
         if bodies.is_library_private(&identity) && !externals.contains_key(&identity) {
             state.pending.extend(
-                bodies
-                    .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+                crate::klib_lowering::emitted_callees(bodies, &identity)
                     .into_iter()
                     .map(|callee| (callee, None)),
             );
@@ -175,28 +173,26 @@ pub(super) fn declarations(
             .callees
             .target_intrinsic(&identity, bodies, capabilities.target_realizes_intrinsic)
             .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?;
-        let (declaration_target, realization) = match platform
-            .external_callable_by_dependency(&identity)
-        {
-            Some(declaration) => declaration,
-            None if raw_header_capability && known_target.is_none() => {
-                state.pending.extend(
-                    bodies
-                        .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
-                        .into_iter()
-                        .map(|callee| (callee, None)),
-                );
-                let objects = bodies
-                    .emitted_body_objects(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
-                read_values(platform, bodies, capabilities.callees, &objects, &mut state)?;
-                continue;
-            }
-            None => {
-                return Err(format!(
+        let (declaration_target, realization) =
+            match platform.external_callable_by_dependency(&identity) {
+                Some(declaration) => declaration,
+                None if raw_header_capability && known_target.is_none() => {
+                    state.pending.extend(
+                        crate::klib_lowering::emitted_callees(bodies, &identity)
+                            .into_iter()
+                            .map(|callee| (callee, None)),
+                    );
+                    let objects = bodies
+                        .emitted_body_objects(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+                    read_values(platform, bodies, capabilities.callees, &objects, &mut state)?;
+                    continue;
+                }
+                None => {
+                    return Err(format!(
                     "a KLIB dependency has no required exact provider declaration: {identity:?}"
                 ))
-            }
-        };
+                }
+            };
         if realization.dependency_callable.as_ref() != Some(&identity) {
             return Err("an ordinary KLIB body provider changed its exact identity".to_owned());
         }
@@ -378,8 +374,7 @@ pub(super) fn declarations(
                 .filter(|class| class.emits_members())
                 .cloned();
             state.pending.extend(
-                bodies
-                    .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+                crate::klib_lowering::emitted_callees(bodies, &identity)
                     .into_iter()
                     .map(|callee| (callee, member_class.clone())),
             );
