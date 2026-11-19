@@ -97,14 +97,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// The slot of `class`'s getter overriding the dependency property whose getter is
-    /// `overridden`, answering `declared`: the class registers the overridden declaration's
-    /// identity at the slot of its own accessor. `None` where the override's representation is not the declaration's, which a
-    /// direct dispatch could not reconcile.
+    /// `overridden`: the class registers the overridden declaration's identity at the slot of its
+    /// own accessor, which answers the override's own type; the call site converts it to the one
+    /// the declaration states.
     pub(super) fn external_property_getter_slot(
         &self,
         class: ClassId,
         overridden: krusty::fir::ExternalCallableId,
-        declared: Ty,
     ) -> Option<ImplementorArm> {
         let target = krusty::fir::ResolvedPropertyOverrideTarget::External(overridden);
         let ir = self.file.ir;
@@ -122,9 +121,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
             at = self.file.model.layout(id).superclass;
         };
-        if self.carrier(implementation) != self.carrier(declared) {
-            return None;
-        }
         let slot = self
             .file
             .model
