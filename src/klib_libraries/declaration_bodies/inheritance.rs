@@ -11,7 +11,7 @@ use super::{KlibCalleeOrigin, KlibDeclarationBodies};
 use crate::fx_hash::HashSet;
 use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
-use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrClass, KlibIrType};
+use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrClass, KlibIrMember, KlibIrType};
 use crate::metadata::klib_ir::KlibIrSignature;
 
 impl KlibDeclarationBodies {
@@ -69,6 +69,8 @@ impl KlibDeclarationBodies {
         Ok(found)
     }
 
+    /// The declarations an override edge of a body in `body_module` overrides, as
+    /// [`Self::overridden_declarations`], and every declaration those override in turn:
     /// `EmptyList.isEmpty` overrides `List.isEmpty` and, through it, `Collection.isEmpty`.
     pub(crate) fn overridden_closure(
         &self,
@@ -139,6 +141,104 @@ impl KlibDeclarationBodies {
         Ok(found)
     }
 
+    /// The members the class `class` (serialized at `signature` in `arena`) inherits from its
+    /// direct interface supertypes without overriding them, each with the one inherited
+    /// declaration that has a body and the bodyless declarations it implements with it:
+    /// `AbstractList` implements `List.contains` with `AbstractCollection.contains`.
+    pub(crate) fn inherited_implementations(
+        &self,
+        body_module: &str,
+        arena: &KlibIrArena,
+        class: &KlibIrClass,
+    ) -> Result<Vec<(KlibDependencyCallable, Vec<KlibDependencyCallable>)>, &'static str> {
+        let KlibIrSignature::Public(signature) = &class.base.symbol.signature else {
+            return Ok(Vec::new());
+        };
+        let declared = class
+            .members
+            .iter()
+            .flat_map(|member| member_functions(arena, member))
+            .map(|function| function.base.symbol.signature.clone())
+            .collect::<HashSet<_>>();
+        let mut found = Vec::new();
+        for &supertype in &class.supertypes {
+            let KlibIrType::Simple { classifier, .. } = arena.ty(supertype) else {
+                continue;
+            };
+            let KlibIrSignature::Public(supertype) = &classifier.signature else {
+                continue;
+            };
+            let Some((interface_arena, interface)) = self
+                .declaring_class_of(body_module, supertype)
+                .map_err(|()| "an interface supertype is serialized twice")?
+            else {
+                continue;
+            };
+            for function in interface
+                .members
+                .iter()
+                .flat_map(|member| member_functions(interface_arena, member))
+            {
+                let Some(member) = member_signature(&function.base.symbol.signature) else {
+                    continue;
+                };
+                let Some(inherited) = as_member_of(&member, signature) else {
+                    continue;
+                };
+                if declared.contains(&ir_signature(&inherited)) {
+                    continue;
+                }
+                let declarations = self.overridden_closure(body_module, &inherited)?;
+                let mut bodies = declarations
+                    .iter()
+                    .filter(|identity| self.function_has_body(identity) == Some(true));
+                let (Some(body), None) = (bodies.next(), bodies.next()) else {
+                    continue;
+                };
+                let body = body.clone();
+                let implemented = declarations
+                    .into_iter()
+                    .filter(|identity| *identity != body)
+                    .collect::<Vec<_>>();
+                if !implemented.is_empty() && !found.iter().any(|(known, _)| *known == body) {
+                    found.push((body, implemented));
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// The one class in the producer graph rooted at `body_module` serialized at `signature`.
+    fn declaring_class_of(
+        &self,
+        body_module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> Result<Option<(&KlibIrArena, &KlibIrClass)>, ()> {
+        let wanted = KlibIrSignature::Public(signature.clone());
+        let mut found = None;
+        for module in self.body_provider_modules(body_module) {
+            let Some(&library) = self.modules.get(&module) else {
+                continue;
+            };
+            for tree in self.libraries[library].trees() {
+                let mut pending = vec![&tree.declaration];
+                while let Some(declaration) = pending.pop() {
+                    let KlibIrMember::Class(id) = declaration else {
+                        continue;
+                    };
+                    let class = tree.arena.class(*id);
+                    pending.extend(class.members.iter());
+                    if class.base.symbol.signature == wanted
+                        && found.replace((&tree.arena, class)).is_some()
+                    {
+                        return Err(());
+                    }
+                }
+            }
+        }
+        Ok(found)
+    }
+
     /// The one class in the producer graph rooted at `body_module` that declares `member`.
     fn declaring_class(
         &self,
@@ -183,6 +283,34 @@ fn declaring_member(declaration: &KlibDeclarationSignature) -> Option<&KlibPubli
         KlibDeclarationSignature::FileLocal { .. } => return None,
     };
     (member.declaration().segments().len() > 1).then_some(member)
+}
+
+/// The functions a class member declares: itself, or a property's accessors.
+fn member_functions<'a>(
+    arena: &'a KlibIrArena,
+    member: &KlibIrMember,
+) -> Vec<&'a crate::metadata::klib_ir::tree::KlibIrFunction> {
+    match member {
+        KlibIrMember::Function(function) => vec![arena.function(*function)],
+        KlibIrMember::Property(property) => [property.getter, property.setter]
+            .into_iter()
+            .flatten()
+            .map(|function| arena.function(function))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The serialized symbol signature of the member declaration `declaration`.
+fn ir_signature(declaration: &KlibDeclarationSignature) -> KlibIrSignature {
+    match declaration {
+        KlibDeclarationSignature::Public(signature) => KlibIrSignature::Public(signature.clone()),
+        KlibDeclarationSignature::Accessor(accessor) => KlibIrSignature::Accessor(accessor.clone()),
+        KlibDeclarationSignature::FileLocal { file, slot } => KlibIrSignature::FileLocal {
+            file: *file,
+            slot: *slot,
+        },
+    }
 }
 
 /// `declaration` as the same member of `class`.

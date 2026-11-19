@@ -79,6 +79,7 @@ impl Classpath {
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
             declares_parameter_defaults: false,
+            composable_parameters: Default::default(),
         });
         self.external_callable_ids
             .borrow_mut()
@@ -231,6 +232,20 @@ impl Classpath {
             .get_mut(identity.raw() as usize)
             .expect("parameter defaults name an interned external callable")
             .declares_parameter_defaults = true;
+    }
+
+    /// Record which logical parameters of the interned callable `identity` are `@Composable`
+    /// function types.
+    pub(crate) fn publish_external_callable_composable_parameters(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+        composable: crate::libraries::ParamFlags,
+    ) {
+        self.external_callables
+            .borrow_mut()
+            .get_mut(identity.raw() as usize)
+            .expect("composable parameters name an interned external callable")
+            .composable_parameters = composable;
     }
 
     pub(crate) fn publish_external_callable_parameter_identities(
