@@ -226,6 +226,17 @@ pub fn declared_class(ir: &IrFile, class: ClassId) -> ReflectionNames {
             qualified: None,
         };
     }
+    // A dependency's file-private classifier keeps its declared name, which its naming provenance
+    // records; its physical identity is a synthetic local one.
+    if let Some(provenance) = ir.local_class_name_provenance.get(&class) {
+        let names = source_class_names(ir, class);
+        return ReflectionNames {
+            // Boundary conversion: the package path is spelled with `/` in the name tree.
+            package: provenance.source.package().render().replace('/', "."),
+            simple: names.as_ref().map(|names| names.simple.clone()),
+            qualified: names.map(|names| names.qualified),
+        };
+    }
     let ClassNames { qualified, simple } = member_class_names(declaration.fq_name);
     ReflectionNames {
         package,

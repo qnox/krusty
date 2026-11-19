@@ -710,6 +710,8 @@ impl Body<'_> {
         if call.params.len() != args.len() {
             return Err("a call whose arguments do not match its parameters".into());
         }
+        self.runtime
+            .null_receiver_throws(self.module, self.classifiers)?;
         self.value(receiver, any())?;
         for (arg, param) in args.iter().zip(&call.params) {
             self.value(*arg, *param)?;
@@ -763,17 +765,21 @@ impl Body<'_> {
             .struct_get(object, 0);
     }
 
-    /// A call to member `function` of this file: through its class's dispatch slot when it has
-    /// one, as an override reached through the receiver's own table answers it, and directly
-    /// otherwise.
+    /// A call to member `function` of this file. Common lowering already dispatches an
+    /// overridable function and leaves a `super` call direct, so a function with a body is
+    /// called directly here. A bodiless (abstract) member has nothing to call directly: it is
+    /// reached through its class's dispatch slot, as an override the receiver's own table
+    /// answers.
     pub(super) fn local_member_call(
         &mut self,
         function: FunId,
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
-        let class = self.ir.functions[function as usize]
+        let declaration = &self.ir.functions[function as usize];
+        let class = declaration
             .dispatch_receiver
+            .filter(|_| declaration.body.is_none())
             .and_then(|owner| self.classes.and(self.ir.class_id_by_name(owner)));
         if let Some(class) = class {
             let tables = &self.file_classes()?.tables;
@@ -954,7 +960,11 @@ impl Body<'_> {
                 params,
                 ret,
                 ..
-            } => self.dependency_super_call(*target, params.len(), *ret, receiver, args),
+            } => match self.ir.dependency_methods.get(target) {
+                // The dependency member is a method of a class this file materializes.
+                Some(&function) => self.direct_member_call(function, receiver, args),
+                None => self.dependency_super_call(*target, params.len(), *ret, receiver, args),
+            },
             Callee::Super { .. } => Err("a `super` call to a library member".to_string()),
             _ => Err("a member call through this calling convention".to_string()),
         }

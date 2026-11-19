@@ -45,6 +45,10 @@ if [ "$lane" = lsp ]; then
   echo "$name is in the language-server metric set; this corpus does not build it" >&2
   exit 2
 fi
+# A Bazel project (one with a `bazel/<name>` target set) builds through `bazel.sh`.
+if [ -d "${CORPUS_BAZEL:-$here/bazel}/$name" ]; then
+  exec "$here/bazel.sh" "$name" "$work" "$krusty"
+fi
 IFS=$'\t' read -r _ _ _ gradle_root jdk _ android_variant <<<"$row"
 checkout=$work/src/$name
 logs=$work/logs

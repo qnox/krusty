@@ -162,15 +162,20 @@ pub(super) fn declarations(
                 && !externals.contains_key(&identity)
                 && crate::klib_lowering::is_private_class_member(bodies, &identity, class)
         }) {
+            let emitted = bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
             state.pending.extend(
-                bodies
-                    .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+                emitted
+                    .callables
                     .into_iter()
                     .map(|callee| (callee, Some(class.clone()))),
             );
-            let objects =
-                bodies.emitted_body_objects(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
-            read_values(platform, bodies, capabilities.callees, &objects, &mut state)?;
+            read_values(
+                platform,
+                bodies,
+                capabilities.callees,
+                &emitted.objects,
+                &mut state,
+            )?;
             continue;
         }
         // A top-level function private to its file, or a member of a class private to its
@@ -178,15 +183,17 @@ pub(super) fn declarations(
         // it is emitted with that body. One an earlier unit already emitted is that unit's export
         // instead, an exact external edge which keeps its declaration authentication below.
         if bodies.is_library_private(&identity) && !externals.contains_key(&identity) {
-            state.pending.extend(
-                bodies
-                    .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
-                    .into_iter()
-                    .map(|callee| (callee, None)),
-            );
-            let objects =
-                bodies.emitted_body_objects(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
-            read_values(platform, bodies, capabilities.callees, &objects, &mut state)?;
+            let emitted = bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+            state
+                .pending
+                .extend(emitted.callables.into_iter().map(|callee| (callee, None)));
+            read_values(
+                platform,
+                bodies,
+                capabilities.callees,
+                &emitted.objects,
+                &mut state,
+            )?;
             continue;
         }
         // Positive common-lowering capability, never a missing-provider fallback. Earlier emitted
@@ -209,28 +216,30 @@ pub(super) fn declarations(
             .callees
             .target_intrinsic(&identity, bodies, capabilities.target_realizes_intrinsic)
             .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?;
-        let (declaration_target, realization) = match platform
-            .external_callable_by_dependency(&identity)
-        {
-            Some(declaration) => declaration,
-            None if raw_header_capability && known_target.is_none() => {
-                state.pending.extend(
-                    bodies
-                        .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
-                        .into_iter()
-                        .map(|callee| (callee, None)),
-                );
-                let objects = bodies
-                    .emitted_body_objects(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
-                read_values(platform, bodies, capabilities.callees, &objects, &mut state)?;
-                continue;
-            }
-            None => {
-                return Err(format!(
+        let (declaration_target, realization) =
+            match platform.external_callable_by_dependency(&identity) {
+                Some(declaration) => declaration,
+                None if raw_header_capability && known_target.is_none() => {
+                    let emitted =
+                        bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+                    state
+                        .pending
+                        .extend(emitted.callables.into_iter().map(|callee| (callee, None)));
+                    read_values(
+                        platform,
+                        bodies,
+                        capabilities.callees,
+                        &emitted.objects,
+                        &mut state,
+                    )?;
+                    continue;
+                }
+                None => {
+                    return Err(format!(
                     "a KLIB dependency has no required exact provider declaration: {identity:?}"
                 ))
-            }
-        };
+                }
+            };
         if realization.dependency_callable.as_ref() != Some(&identity) {
             return Err("an ordinary KLIB body provider changed its exact identity".to_owned());
         }
@@ -415,16 +424,15 @@ pub(super) fn declarations(
             if let Some(class) = member_object(platform, &identity) {
                 walk_object(platform, bodies, &facts, class, &mut state)?;
             }
-            let objects =
-                bodies.emitted_body_objects(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
-            read_values(platform, bodies, &facts, &objects, &mut state)?;
+            let emitted = bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+            read_values(platform, bodies, &facts, &emitted.objects, &mut state)?;
             let member_class = selected
                 .class_contract()
                 .filter(|class| class.emits_members())
                 .cloned();
             state.pending.extend(
-                bodies
-                    .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+                emitted
+                    .callables
                     .into_iter()
                     .map(|callee| (callee, member_class.clone())),
             );
@@ -997,7 +1005,7 @@ fn with_realized_declarations<'a>(
         .iter()
         .filter_map(crate::libraries::ExternalCallableRealization::klib_body_callable)
     {
-        facts = facts.with_declaration(selected);
+        facts.add_declaration(selected);
     }
     facts
 }

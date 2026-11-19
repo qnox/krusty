@@ -525,8 +525,13 @@ impl<'a> KlibCalleeFacts<'a> {
 
     pub(crate) fn with_declaration(&self, declaration: KlibBodyCallable<'a>) -> Self {
         let mut facts = self.clone();
-        facts.record(declaration, false);
+        facts.add_declaration(declaration);
         facts
+    }
+
+    /// Record `declaration` in these facts, as [`Self::with_declaration`] does in a copy.
+    pub(crate) fn add_declaration(&mut self, declaration: KlibBodyCallable<'a>) {
+        self.record(declaration, false);
     }
 
     pub(crate) fn target_getter(
