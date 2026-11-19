@@ -420,6 +420,8 @@ coroutines/asyncIteratorNullMerge_1_3.kt
 coroutines/asyncIteratorToList_1_3.kt
 coroutines/asyncIterator_1_3.kt
 coroutines/await.kt
+coroutines/beginWithException.kt
+coroutines/beginWithExceptionNoHandleException.kt
 coroutines/bridges/interfaceGenericDefault.kt
 coroutines/bridges/interfaceSpecialization.kt
 coroutines/bridges/mapSuspendAbstractClear.kt
@@ -469,6 +471,7 @@ coroutines/coroutineContext1.kt
 coroutines/coroutineContext2.kt
 coroutines/coroutineContextInInlinedLambda.kt
 coroutines/correctOrder1.kt
+coroutines/createCoroutineSafe.kt
 coroutines/defaultParameterLambdaInSuspend.kt
 coroutines/defaultParametersInSuspend.kt
 coroutines/degenerate1.kt
@@ -687,6 +690,7 @@ coroutines/returnsUnit1.kt
 coroutines/simple2.kt
 coroutines/simpleException.kt
 coroutines/simpleWithDefaultValue.kt
+coroutines/simpleWithHandleResult.kt
 coroutines/stackUnwinding/rethrowInFinallyWithSuspension.kt
 coroutines/stopAfter.kt
 coroutines/suspendConversion.kt
@@ -1164,6 +1168,7 @@ inlineClasses/anySuperCall.kt
 inlineClasses/anySuperCallGeneric.kt
 inlineClasses/boxImplDoesNotExecuteInSecondaryConstructorGeneric.kt
 inlineClasses/boxResultInlineClassOfConstructorCallGeneric.kt
+inlineClasses/boxReturnValueInLambda/kt27586_2.kt
 inlineClasses/boxReturnValueOnOverride/kt31585.kt
 inlineClasses/boxReturnValueOnOverride/kt31585Generic.kt
 inlineClasses/boxReturnValueOnOverride/kt35234.kt

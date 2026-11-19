@@ -1215,8 +1215,8 @@ impl<'a> Body<'a> {
                     // A block typed apart from its value (`fun f(): Any = g()` over a `Unit` call)
                     // leaves its value converted to the block's own type.
                     match self.completing_type(id)? {
-                        Some(ty) if carrier(ty)?.is_some() => self.value(value, ty)?,
-                        _ => self.expression(value)?,
+                        Some(ty) => self.value(value, ty)?,
+                        None => self.expression(value)?,
                     }
                 }
             }
