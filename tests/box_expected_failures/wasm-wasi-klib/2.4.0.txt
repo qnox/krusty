@@ -130,7 +130,6 @@ boxingOptimization/casts.kt
 boxingOptimization/checkcastAndInstanceOf2.kt
 boxingOptimization/fold.kt
 boxingOptimization/foldRange.kt
-boxingOptimization/kt19767_2.kt
 boxingOptimization/kt48394.kt
 boxingOptimization/kt49548.kt
 boxingOptimization/kt49548a.kt
@@ -143,7 +142,6 @@ boxingOptimization/safeCallWithElvis.kt
 boxingOptimization/safeCallWithElvisMultipleFiles.kt
 boxingOptimization/simple.kt
 boxingOptimization/simpleUninitializedMerge.kt
-boxingOptimization/taintedValues.kt
 boxingOptimization/taintedValuesBox.kt
 boxingOptimization/unsafeRemoving.kt
 boxingOptimization/unsignedArrayForEach.kt
@@ -1176,7 +1174,6 @@ inference/pcla/specialCallsWithLambdas.kt
 inference/pcla/substituteStubTypeIntoCR.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt
 inference/pcla/topDownCompletionBreakedByNonBuilderInferenceSession.kt
-inference/pcla/withoutAnnotation.kt
 inference/plusAssignInsideLambda.kt
 inference/referenceToCatchParameterFromLambdaExpression.kt
 inference/safeCastWithElvis.kt

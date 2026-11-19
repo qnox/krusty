@@ -314,6 +314,16 @@ pub(super) trait CallLinker {
         false
     }
 
+    /// The classifier of the object a non-public object read names, installed in the unit with
+    /// its one instance. Template linkers keep the refusal.
+    fn link_local_object(
+        &mut self,
+        _ir: &mut IrFile,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<crate::types::TypeName> {
+        unsupported("a file-private object value")
+    }
+
     /// The constructor a file-local construction invokes. Template linkers keep the refusal.
     fn link_local_constructor(
         &mut self,

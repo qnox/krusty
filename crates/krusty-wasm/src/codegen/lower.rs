@@ -1214,6 +1214,8 @@ impl<'a> Body<'a> {
                 // typed apart from its value (`fun f(): Any = g()` over a `Unit` call) leaves its
                 // value converted to the block's own type.
                 if let Some(value) = value {
+                    // A block typed apart from its value (`fun f(): Any = g()` over a `Unit` call)
+                    // leaves its value converted to the block's own type.
                     match self.completing_type(id)? {
                         Some(ty) => self.value(value, ty)?,
                         None => self.expression(value)?,
