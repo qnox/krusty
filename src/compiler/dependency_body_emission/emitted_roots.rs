@@ -382,7 +382,9 @@ pub(super) fn declarations(
                     | ExternalCallableKind::Member
             ) || !realization
                 .klib_body_declaration_modifiers
-                .is_some_and(|modifiers| modifiers.permits_ordinary_body()))
+                .is_some_and(|modifiers| {
+                    modifiers.permits_ordinary_body() || modifiers.permits_expanded_body()
+                }))
         {
             return Err(format!("a transitive KLIB body has no supported ordinary declaration contract: {identity:?}"));
         }
