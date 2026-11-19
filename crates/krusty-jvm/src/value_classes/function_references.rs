@@ -126,9 +126,18 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
             .iter()
             .take(fr.bound_contexts as usize)
             .map(|parameter| {
-                parameter
+                // The declared parameter's own physical form decides: a nullable value class over a
+                // scalar stays boxed, exactly as the mangled target's parameter does.
+                let value_class = parameter
+                    .non_null()
                     .obj_internal()
-                    .filter(|fq| callable_under.contains_key(fq))
+                    .filter(|fq| callable_under.contains_key(fq))?;
+                (erase(parameter, callable_under) != *parameter).then_some(
+                    krusty::ir::BoundContextUnbox {
+                        value_class,
+                        nullable: parameter.is_nullable(),
+                    },
+                )
             })
             .collect();
         if let Some((_, parameters, result)) = local_target {

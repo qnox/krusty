@@ -1114,7 +1114,7 @@ fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
             .bound_context_unbox
             .iter_mut()
             .flatten()
-            .for_each(|value| name(value, names));
+            .for_each(|value| name(&mut value.value_class, names));
     }
     for bridge in &mut class.bridges {
         bridge
