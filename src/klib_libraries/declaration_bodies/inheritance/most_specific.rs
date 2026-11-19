@@ -11,11 +11,13 @@
 //! `Cov<String>` is more specific than `Cov<CharSequence>` for `interface Cov<out T>`. A type
 //! parameter's declared bounds take part: `Cov<T>` for `T : Sub` is more specific than `Cov<Base>`.
 
-use super::super::super::semantic_types::{classifier_name, semantic_type, KlibTypeParameters};
 use crate::assignable::{TyCtx, TypeOracle};
 use crate::fx_hash::HashMap;
 use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::metadata::klib_ir::semantic_types::{
+    classifier_name, semantic_type, KlibTypeParameters,
+};
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrClass, KlibIrFunction, KlibIrType, KlibIrTypeArgument, KlibIrTypeId,
     KlibIrTypeParameter, KlibIrVariance,
@@ -272,7 +274,7 @@ impl SerializedHierarchy {
         let mut owners = self
             .classes
             .values()
-            .filter(|class| signature.is_member_of(&class.signature));
+            .filter(|class| signature.owner_path() == Some(class.signature.declaration_path()));
         let (Some(declaring), None) = (owners.next(), owners.next()) else {
             return None;
         };
