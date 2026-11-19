@@ -345,11 +345,9 @@ impl ProductionSignatureSemantics<'_> {
             source, scope.source,
             "a delegate convention site must belong to its retained signature scope",
         );
-        let convention_site = self.delegate_convention_site(&site, by_span, false);
-        // A candidate's own return may still be undetermined here — this phase is what determines
-        // it — and rendering the placeholder produces a second, differently worded message for the
-        // same mistake once the body check reports it. Ask the solver for the declaration instead,
-        // exactly as a SELECTED convention's result is asked for.
+        let convention_site = self.delegate_convention_site(&site, by_span);
+        // Ask the solver for an undetermined candidate return. A placeholder would disagree with
+        // the body check.
         let message = match self.with_resolver(scope, |resolver| {
             Some(
                 crate::resolve::delegated_properties::delegate_convention_message(
@@ -397,7 +395,7 @@ impl ProductionSignatureSemantics<'_> {
             source, scope.source,
             "a delegate convention site must belong to its retained signature scope",
         );
-        let convention_site = self.delegate_convention_site(&site, by_span, false);
+        let convention_site = self.delegate_convention_site(&site, by_span);
         let message = match crate::resolve::delegated_properties::delegate_convention_ambiguity_message_with_functions(
             &crate::resolve::delegated_properties::DelegateConventionQuery::for_delegate(
                 convention_site,
@@ -440,7 +438,7 @@ impl ProductionSignatureSemantics<'_> {
             source, scope.source,
             "a delegate convention site must belong to its retained signature scope",
         );
-        let convention_site = self.delegate_convention_site(&site, by_span, false);
+        let convention_site = self.delegate_convention_site(&site, by_span);
         let candidates = match candidates
             .iter()
             .map(|candidate| {
@@ -542,7 +540,11 @@ impl ProductionSignatureSemantics<'_> {
             source, scope.source,
             "a delegate convention site must belong to its retained signature scope",
         );
-        let convention_site = self.delegate_convention_site(&site, by_span, declared_type_failed);
+        let mut convention_site = self.delegate_convention_site(&site, by_span);
+        if declared_type_failed {
+            convention_site.failed_property_display =
+                self.failed_property_display(scope, site.diagnostic_owner);
+        }
         let message =
             crate::resolve::delegated_properties::delegate_convention_message_with_candidates(
                 convention_site,
@@ -557,11 +559,7 @@ impl ProductionSignatureSemantics<'_> {
         self.record_source_diagnostic_at(site.diagnostic_owner, source, by_span, message)
     }
 
-    /// One candidate's result type, resolved when this phase has not determined it yet.
-    ///
-    /// A declaration whose own return is inferred reads as undetermined in the symbol table until
-    /// its signature is solved. The solver answers for it on demand; a refusal carries that
-    /// declaration's diagnostic instead of rendering the placeholder or retrying another origin.
+    /// The solver's result for a candidate whose return is still inferred.
     fn determined_candidate_result(
         &self,
         candidate: &crate::libraries::FunctionInfo,
@@ -604,7 +602,6 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         site: &crate::fir::ResolvedSignatureDelegateSite,
         by_span: crate::diag::Span,
-        declared_type_failed: bool,
     ) -> crate::resolve::delegated_properties::DelegateConventionSite {
         let (dispatch_receiver, extension_receiver) = self.delegate_receivers(site);
         crate::resolve::delegated_properties::DelegateConventionSite {
@@ -618,15 +615,25 @@ impl ProductionSignatureSemantics<'_> {
                     crate::resolve::delegated_properties::DelegateDispatchDiagnosticName::Anonymous,
             }),
             is_var: site.mutable,
-            unresolved_property_name: declared_type_failed
-                .then(|| {
-                    super::super::delegated_properties::property_type_name(
-                        self.headers,
-                        site.diagnostic_owner,
-                    )
-                })
-                .flatten(),
+            written_property_type: None,
+            failed_property_display: None,
         }
+    }
+
+    fn failed_property_display(
+        &self,
+        scope: crate::fir::SignatureScope,
+        declaration: crate::fir::DeclarationId,
+    ) -> Option<String> {
+        let written =
+            super::super::delegated_properties::written_property_type(self.headers, declaration)?;
+        self.with_signature_type_scope(scope, |lexical| {
+            super::super::delegated_properties::diagnostic_type_syntax(&written, |leaf| {
+                self.signature_type_ref(scope, lexical, leaf)
+                    .is_none_or(|ty| ty.mentions_error())
+            })
+        })
+        .ok()
     }
 
     fn delegate_first_arguments(
@@ -705,11 +712,7 @@ impl ProductionSignatureSemantics<'_> {
 mod tests {
     use crate::symbol_source::{SymbolNamespace, SymbolSource};
 
-    /// The language builtins, minus the one declaration a delegate convention is selected against.
-    ///
-    /// `kotlin.reflect.KProperty` is what a delegated property's accessors pass as the second
-    /// convention argument, so a dependency set that declares none cannot supply the convention at
-    /// all. This source models exactly that set: everything else answers as usual.
+    /// Builtins except `kotlin.reflect.KProperty`, which a convention argument requires.
     struct WithoutPropertyReferences;
 
     impl SymbolSource for WithoutPropertyReferences {
