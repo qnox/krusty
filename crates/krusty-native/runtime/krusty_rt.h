@@ -401,6 +401,7 @@ extern const KType kt_type_kmutable_property2;
    `KType.interfaces` requires) and a class of the program that implements one names it too. None
    has instances of its own; each lists its own bases. */
 extern const KType kt_type_iterator_interface;
+extern const KType kt_type_list_iterator_interface;
 extern const KType kt_type_iterable_interface;
 extern const KType kt_type_mutable_iterable_interface;
 extern const KType kt_type_collection_interface;
@@ -472,6 +473,12 @@ kt_int kt_list_index_of(KRef list, KRef value);
 kt_int kt_list_last_index_of(KRef list, KRef value);
 kt_boolean kt_list_contains(KRef list, KRef value);
 KRef kt_list_iterator(KRef list);
+KRef kt_list_list_iterator(KRef list, kt_int index);
+KRef kt_list_list_iterator_from_start(KRef list);
+kt_boolean kt_list_iterator_has_previous(KRef iterator);
+kt_int kt_list_iterator_next_index(KRef iterator);
+kt_int kt_list_iterator_previous_index(KRef iterator);
+KRef kt_list_iterator_previous(KRef iterator);
 
 /* ---- a growable list -------------------------------------------------------------------------
 

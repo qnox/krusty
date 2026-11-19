@@ -1350,6 +1350,28 @@ pub(super) fn iteration_runtime_member(
     if declaration_shape != Some(CollectionShape::Iterator) {
         return None;
     }
+    // A `ListIterator`'s own members read the same runtime iterator from its cursor.
+    if signature
+        .owner
+        .classifier_matches("kotlin/collections/ListIterator")
+    {
+        let any = || vec![Ty::obj("kotlin/Any")];
+        match name {
+            "hasPrevious" if ret == Ty::Boolean => {
+                return Some(("kt_list_iterator_has_previous", any(), Ty::Boolean))
+            }
+            "nextIndex" if ret == Ty::Int => {
+                return Some(("kt_list_iterator_next_index", any(), Ty::Int))
+            }
+            "previousIndex" if ret == Ty::Int => {
+                return Some(("kt_list_iterator_previous_index", any(), Ty::Int))
+            }
+            "previous" if ret.is_ty_param() => {
+                return Some(("kt_list_iterator_previous", any(), Ty::obj("kotlin/Any")))
+            }
+            _ => {}
+        }
+    }
     if name == "hasNext" && ret == Ty::Boolean {
         return Some((
             "kt_iterator_has_next",
