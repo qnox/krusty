@@ -1394,7 +1394,6 @@ compiler/testData/diagnostics/tests/unqualifiedEnum/unqualifiedEnum.kt
 compiler/testData/diagnostics/tests/unsignedTypes/allowedVarargsOfUnsignedTypes.kt
 compiler/testData/diagnostics/tests/unsignedTypes/lateinitUnsignedType.kt
 compiler/testData/diagnostics/tests/unsignedTypes/overloadsWithUnsigned.kt
-compiler/testData/diagnostics/tests/unsignedTypes/unsignOverloadVsNonIntLike.kt
 compiler/testData/diagnostics/tests/unsignedTypes/wrongLongSuffixForULong.kt
 compiler/testData/diagnostics/tests/valueClasses/basicValueClassDeclaration.kt
 compiler/testData/diagnostics/tests/valueClasses/delegatedPropertyInValueClass.kt

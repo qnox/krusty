@@ -359,7 +359,6 @@ coroutines/coroutineContext1.kt
 coroutines/coroutineContext2.kt
 coroutines/coroutineContextInInlinedLambda.kt
 coroutines/correctOrder1.kt
-coroutines/createCoroutinesOnManualInstances.kt
 coroutines/defaultParameterLambdaInSuspend.kt
 coroutines/defaultParametersInSuspend.kt
 coroutines/degenerate1.kt
