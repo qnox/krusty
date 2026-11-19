@@ -117,7 +117,6 @@ callableReference/adaptedReferences/innerConstructorWithVararg.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithContextParameterAsAPropertyType.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithExtensionProperty.kt
 callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction.kt
-callableReference/adaptedReferences/unitCoercionOverloads.kt
 callableReference/arrayOfNulls.kt
 callableReference/bound/boundReferenceToOverloadedFunction.kt
 callableReference/bound/emptyLHS.kt
@@ -161,7 +160,6 @@ classes/nestedInitBlocksWithLambda.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
 closures/closuresAsSingleton.kt
 closures/kt11634_4.kt
-closures/localFunctionInInitBlock.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/addCollectionStubWithCovariantOverride.kt
@@ -594,7 +592,6 @@ innerClass/inheritanceMultipleModules1.kt
 innerClass/multipleModules.kt
 innerClass/noPrimaryConstructor.kt
 innerClass/secondaryConstructor.kt
-innerNested/kt63732.kt
 intrinsics/throwableParamOrder.kt
 intrinsics/tostring.kt
 intrinsics/trimMarginWithBlankString.kt
@@ -618,12 +615,7 @@ lambda/lambda5.kt
 lambda/lambda6.kt
 lambda/lambda_kt49360_withFlow.kt
 lateinit/globalIsInitialized.kt
-lateinit/innerIsInitialized.kt
 lateinit/isInitialized.kt
-lateinit/localCapturedInitialized.kt
-lateinit/localCapturedNotInitialized.kt
-lateinit/localInitialized.kt
-lateinit/localNotInitialized.kt
 lateinit/notInitialized.kt
 literals/strdedup1.kt
 localClasses/closureWithSelfInstantiation.kt
@@ -708,20 +700,9 @@ properties/lateinit/accessorExceptionPublic.kt
 properties/lateinit/exceptionField.kt
 properties/lateinit/exceptionGetter.kt
 properties/lateinit/kt30548.kt
-properties/lateinit/local/capturedLocalLateinit.kt
 properties/lateinit/local/kt23260.kt
-properties/lateinit/local/localLateinit.kt
-properties/lateinit/local/uninitializedCapturedMemberAccess.kt
-properties/lateinit/local/uninitializedCapturedRead.kt
-properties/lateinit/local/uninitializedMemberAccess.kt
-properties/lateinit/local/uninitializedRead.kt
 properties/lateinit/localClass.kt
 properties/lateinit/overrideException.kt
-properties/lateinit/topLevel/accessorException.kt
-properties/lateinit/topLevel/accessorForTopLevelLateinit.kt
-properties/lateinit/topLevel/topLevelLateinit.kt
-properties/lateinit/topLevel/uninitializedMemberAccess.kt
-properties/lateinit/topLevel/uninitializedRead.kt
 properties/lazyInitialization.kt
 properties/lazyInitializationCyclicImports.kt
 properties/lazyInitializationSplitPerModule.kt
@@ -1155,7 +1136,6 @@ sam/funInterfaceExtendsSuspendFunction2.kt
 sam/samWithAbstractToString.kt
 sam/samWithAbstractToString2.kt
 sam/samWithAbstractToString3.kt
-sam/topLevelConversions.kt
 secondaryConstructors/enums.kt
 secondaryConstructors/innerClasses.kt
 secondaryConstructors/innerClassesInheritance.kt
