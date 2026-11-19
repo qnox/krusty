@@ -685,3 +685,116 @@ fn a_common_call_of_an_inline_expect_function_inlines_its_actual_as_kotlinc_does
         (compiled.kotlinc.0, &compiled.kotlinc.2)
     );
 }
+
+/// A dependency, built by kotlinc, whose interface an actual class implements by delegation. Each
+/// member is one the `expect` side can state or one it must not accept.
+const SPEAKING: &str = "package lib\n\
+    interface Source {\n\
+    \x20   val label: String\n\
+    \x20   fun pick(from: String): String\n\
+    \x20   fun <T> answer(): String\n\
+    \x20   fun ping()\n\
+    }\n\
+    class Impl : Source {\n\
+    \x20   override val label: String get() = \"l\"\n\
+    \x20   override fun pick(from: String): String = from\n\
+    \x20   override fun <T> answer(): String = \"a\"\n\
+    \x20   override fun ping() {}\n\
+    }\n";
+
+const SPEAKER_ACTUAL: &str = "package p\nactual class Speaker : lib.Source by lib.Impl()\n";
+
+fn common_and_jvm_over(library: String) -> impl Fn(&str, &str) -> Vec<String> {
+    move |first, second| {
+        let mut arguments = common_and_jvm(first, second);
+        arguments.extend(["-classpath".to_string(), library.clone()]);
+        arguments
+    }
+}
+
+/// An `expect` member an actual class inherits from a dependency supertype is implemented by it
+/// only when kind, name, inputs, result and mutability all agree.
+#[test]
+fn an_expect_member_is_implemented_by_the_inherited_dependency_member_it_matches() {
+    let library = common::kotlinc_library(SPEAKING).expect("kotlinc builds the dependency");
+    let compiled = compile_sources(
+        "package p\nexpect class Speaker {\n    val label: String\n    fun pick(from: String): String\n    fun ping()\n}\n",
+        SPEAKER_ACTUAL,
+        common_and_jvm_over(library.to_string_lossy().into_owned()),
+    );
+    assert_eq!(compiled.kotlinc.0, 0, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(compiled.krusty.0, 0, "krusty: {}", compiled.krusty.1);
+    // Acceptance is what this pins: the delegating class's bytes are another comparison's concern.
+    let names = |files: &[(String, Vec<u8>)]| {
+        files
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&compiled.krusty.2), names(&compiled.kotlinc.2));
+}
+
+fn rejected_over_dependency(common_source: &str, reference_names_an_incompatible_pair: bool) {
+    let library = common::kotlinc_library(SPEAKING).expect("kotlinc builds the dependency");
+    let compiled = compile_sources(
+        common_source,
+        SPEAKER_ACTUAL,
+        common_and_jvm_over(library.to_string_lossy().into_owned()),
+    );
+    let (code, stderr, output) = &compiled.kotlinc;
+    assert_eq!((*code, output.len()), (1, 0), "kotlinc: {stderr}");
+    let (krusty_code, krusty_stderr, krusty_output) = &compiled.krusty;
+    assert_eq!(
+        (*krusty_code, krusty_output.len()),
+        (1, 0),
+        "krusty: {krusty_stderr}"
+    );
+    let reference = common::compiler_errors(stderr);
+    let krusty = common::compiler_errors(krusty_stderr);
+    if !reference_names_an_incompatible_pair {
+        assert_eq!(krusty, reference);
+        return;
+    }
+    // kotlinc words a member that exists but disagrees as an incompatible pair; krusty reports an
+    // unmatched `expect` member the one way it always has. Both reject the class at one position,
+    // and the two complete spellings are pinned side by side.
+    let positions = |errors: &[common::CompilerError]| {
+        errors
+            .iter()
+            .map(|error| (error.file.clone(), error.line, error.column))
+            .collect::<Vec<_>>()
+    };
+    let messages = |errors: &[common::CompilerError]| {
+        errors
+            .iter()
+            .map(|error| error.message.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(positions(&krusty), positions(&reference));
+    assert_eq!(
+        messages(&reference),
+        ["'actual class Speaker : Source' contains an incompatible pair of 'expect' and 'actual' member declarations."]
+    );
+    assert_eq!(
+        messages(&krusty),
+        ["'actual class Speaker : Source' has no corresponding members for 'expect' class members:"]
+    );
+}
+
+/// A generic dependency member is not the non-generic `expect` member of its name.
+#[test]
+fn a_generic_inherited_dependency_member_does_not_implement_a_non_generic_expect_member() {
+    rejected_over_dependency(
+        "package p\nexpect class Speaker {\n    fun answer(): String\n}\n",
+        false,
+    );
+}
+
+/// An ordinary dependency function is not the `suspend` `expect` function of its name.
+#[test]
+fn an_ordinary_inherited_dependency_function_does_not_implement_a_suspend_expect_function() {
+    rejected_over_dependency(
+        "package p\nexpect class Speaker {\n    suspend fun ping()\n}\n",
+        true,
+    );
+}

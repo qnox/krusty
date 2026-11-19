@@ -325,6 +325,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             declarations,
             authorized_member_edges,
             read_objects,
+            dispatched,
         } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
@@ -350,7 +351,12 @@ pub(super) fn emit_dependencies<B: Backend>(
             platform,
             bodies,
             intrinsics,
-            &roots,
+            // A member that dispatch reaches is emitted with its class although no walked body
+            // calls it, so its body's leaves are prepared as a root's are.
+            roots
+                .iter()
+                .map(|root| root.identity().clone())
+                .chain(dispatched),
             &capabilities,
             &mut externals,
             diags,
@@ -419,6 +425,15 @@ pub(super) fn emit_dependencies<B: Backend>(
             .materialized_classes()
             .map(|(classifier, identity)| (classifier, identity.clone()))
             .collect::<Vec<_>>();
+        let value_classes = materialized
+            .iter()
+            .filter(|(classifier, _)| {
+                unit.ir()
+                    .class_id_by_name(*classifier)
+                    .is_some_and(|class| unit.ir().classes[class as usize].is_value)
+            })
+            .map(|(classifier, _)| *classifier)
+            .collect::<crate::fx_hash::HashSet<_>>();
         for (classifier, identity) in &materialized {
             // Current-module representation facts take precedence in the checked backend view.
             // They cannot describe an unrelated imported class with the same unqualified key.
@@ -437,6 +452,11 @@ pub(super) fn emit_dependencies<B: Backend>(
                 .get(classifier)
                 .or_else(|| support_state.materializing_classes.get(classifier))
             {
+                if previous == identity && value_classes.contains(classifier) {
+                    // A value class's members spread over units; each one re-reads the class an
+                    // earlier unit published and emits only its own members.
+                    continue;
+                }
                 let message = if previous == identity {
                     "cannot materialize an imported class twice in separate dependency support units"
                 } else {
@@ -682,6 +702,17 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         }
+        if backend.reads_collections_through_interfaces() {
+            if let Err(error) =
+                super::backend_handoff::freeze_collection_protocol(&mut callables, platform)
+            {
+                diags.error(
+                    Span::new(0, 0),
+                    format!("internal error: cannot freeze the collection members: {error:?}"),
+                );
+                return Vec::new();
+            }
+        }
         if let Err(error) = super::backend_handoff::record_checked_klib_dependency_facts(
             &mut callables,
             platform,
@@ -742,6 +773,11 @@ pub(super) fn emit_dependencies<B: Backend>(
                 .get(classifier)
                 .or_else(|| support_state.materializing_classes.get(classifier))
             {
+                if previous == identity && value_classes.contains(classifier) {
+                    // A value class's members spread over units; each one re-reads the class an
+                    // earlier unit published and emits only its own members.
+                    continue;
+                }
                 let message = if previous == identity {
                     "cannot materialize an imported class twice in separate dependency support units"
                 } else {
@@ -942,15 +978,12 @@ fn prepare_bodyless_externals(
     platform: &dyn crate::libraries::SemanticPlatform,
     bodies: &crate::klib_libraries::KlibDeclarationBodies,
     intrinsics: &crate::klib_libraries::KlibIntrinsicFacts,
-    roots: &[crate::libraries::KlibBodyCallable<'_>],
+    walked_from: impl IntoIterator<Item = KlibDependencyCallable>,
     capabilities: &DependencyLeafCapabilities<'_>,
     externals: &mut HashMap<KlibDependencyCallable, EmittedDependencyCallable>,
     diags: &mut DiagSink,
 ) -> bool {
-    let mut pending = roots
-        .iter()
-        .map(|root| root.identity().clone())
-        .collect::<VecDeque<_>>();
+    let mut pending = walked_from.into_iter().collect::<VecDeque<_>>();
     let mut visited = HashSet::default();
     while let Some(identity) = pending.pop_front() {
         if !visited.insert(identity.clone()) {

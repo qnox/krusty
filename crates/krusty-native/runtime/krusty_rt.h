@@ -420,6 +420,11 @@ extern const KType kt_type_mutable_map_interface;
    `listOf(vararg)` answers an anonymous read-only `AbstractList`, which this class stands for. */
 extern const KType kt_type_list;
 extern const KType kt_type_list_iterator;
+/* The view `List.subList` answers: the range of a list, reading the list as it is. A `List`, not a
+   `MutableList`; its size is fixed, and a growable parent that changes shape after it was made
+   makes each read raise `ConcurrentModificationException`. */
+extern const KType kt_type_sub_list;
+extern const KType kt_type_mutable_sub_list;
 
 KRef kt_list_of(KRef elements);
 KRef kt_list_empty(void);
@@ -459,6 +464,7 @@ kt_boolean kt_mutable_collection_remove(KRef self, KRef value);
 void kt_mutable_collection_clear(KRef self);
 kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements);
 KRef kt_list_get(KRef list, kt_int index);
+KRef kt_list_sub_list(KRef list, kt_int from, kt_int to);
 /* `first()` / `last()`; both raise `NoSuchElementException` on an empty list, as Kotlin does. */
 KRef kt_list_first(KRef list);
 KRef kt_list_last(KRef list);
@@ -656,6 +662,15 @@ extern const KType kt_type_ulong_range;
 KRef kt_int_range(kt_int first, kt_int last);
 KRef kt_long_range(kt_long first, kt_long last);
 KRef kt_char_range(kt_char first, kt_char last);
+
+/* `IntProgression(first, last, step)` and its kin, with Kotlin's constructor checks: a zero step,
+   or the step type's minimum, is its `IllegalArgumentException`. `last` is normalized to the last
+   element on the step, as `IntProgression.last` is. */
+KRef kt_int_progression(kt_int first, kt_int last, kt_int step);
+KRef kt_long_progression(kt_long first, kt_long last, kt_long step);
+KRef kt_char_progression(kt_char first, kt_char last, kt_int step);
+KRef kt_uint_progression(kt_int first, kt_int last, kt_int step);
+KRef kt_ulong_progression(kt_long first, kt_long last, kt_long step);
 
 /* `first..<last` / `first until last`. Kotlin answers the EMPTY range rather than wrapping when
    `last` is the element type's minimum, so the half-open form is a function and not `last - 1`. */

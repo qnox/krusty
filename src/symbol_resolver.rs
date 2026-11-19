@@ -92,13 +92,10 @@ pub(crate) use generic_inference::*;
 pub(crate) use hierarchy_projection::{
     applied_hierarchy, apply_subtype_arguments_from_supertype, classifier_bindings,
     classifier_companion_instance, classifier_value_receiver, direct_supertypes,
-    inherited_classifier_shape, member_scope_receiver, supports_member_lookup, with_implicit_any,
+    inherited_classifier_shape, member_scope_receiver, supports_member_lookup,
     ClassifierCompanionInstance, SupertypeProjectionCache,
 };
-use hierarchy_projection::{
-    classifier_type_parameter_bounds, projected_supertypes, receiver_hierarchy,
-    supertype_with_classifier,
-};
+use hierarchy_projection::{projected_supertypes, receiver_hierarchy, supertype_with_classifier};
 pub use lambda_call_shape::LambdaCallShape;
 pub(crate) use member_hierarchy::{
     apply_inner_alias_outer_in_source, apply_inner_classifier_outer_in_source,
@@ -148,7 +145,7 @@ pub(crate) use resolved_symbol::ErrorReceiverSelection;
 pub use resolved_symbol::{
     AmbiguousExtensionProperty, MemberFacets, ResolvedPropertySetter, SymRecv, Symbol,
 };
-pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
+pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamMethodFrame, SamSignature};
 use scope_level_callables::{
     callables_from_symbols, fn_in_scope, level_functions, level_properties,
     symbol_levels_in_function_scope, symbols_in_function_scope,

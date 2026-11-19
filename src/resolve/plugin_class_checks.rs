@@ -101,7 +101,7 @@ impl Checker<'_> {
             .host("main")
             .check_frontend_class(&context)
         {
-            self.diags.error(diagnostic.span, diagnostic.message);
+            self.diags.frontend_plugin_diagnostic(diagnostic);
         }
     }
 

@@ -21,7 +21,9 @@ use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
 
 pub use crate::fir::BuiltinImplementation;
-use crate::fir::{CharSequenceProtocol, ExternalCallableId, ExternalPropertyId};
+use crate::fir::{
+    CharSequenceProtocol, CollectionProtocol, ExternalCallableId, ExternalPropertyId,
+};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
 /// A dependency classifier a target may represent itself
@@ -116,6 +118,8 @@ pub struct BackendCallableFact {
     pub klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
     /// Whether a source parameter declares a default value, as the provider's declaration says.
     pub declares_parameter_defaults: bool,
+    /// Per logical parameter, whether its declared type is a function type annotated `@Composable`.
+    pub composable_parameters: crate::libraries::ParamFlags,
     /// Qualified identities of the annotations the provider recorded on this declaration. A
     /// compiler plugin keys its own calling convention on them (Compose's `@Composable`).
     pub annotations: Box<[TypeName]>,
@@ -297,6 +301,7 @@ impl BackendCallableFact {
                 generic_signature: self.generic_sig.as_deref(),
                 type_parameters: &self.klib_body_type_parameters,
                 reified_type_parameter_ordinals: &self.reified_type_parameter_ordinals,
+                inline_modifiers: &self.inline_modifiers,
                 compiler_intrinsic: self.compiler_operation(),
                 range_construction: self.member_realization.range_construction(),
                 declaration_modifiers: self.klib_body_declaration_modifiers,
@@ -370,6 +375,7 @@ mod tests {
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
             declares_parameter_defaults: false,
+            composable_parameters: Default::default(),
             annotations: Box::new([]),
         }
     }
@@ -831,6 +837,7 @@ mod tests {
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
             declares_parameter_defaults: false,
+            composable_parameters: Default::default(),
             annotations: Box::new([]),
         };
         assert!(fact.matches_dependency_body_call(&[Ty::Int], None, true));
@@ -901,6 +908,8 @@ impl DependencyMemberHeader {
 #[derive(Debug, Default)]
 pub struct CheckedBackendCallables {
     callables: HashMap<ExternalCallableId, BackendCallableFact>,
+    /// SAM slot headers never grant executable dependency or export obligations.
+    sam_declarations: HashMap<ExternalCallableId, BackendCallableFact>,
     /// Header-only declaration identities never participate in executable dependency closure.
     member_declarations: HashMap<ExternalCallableId, KlibDependencyCallable>,
     /// The method headers of dependency members a target compares by signature only (a member
@@ -915,6 +924,7 @@ pub struct CheckedBackendCallables {
     /// with the parameters a plugin's transform appended to each.
     plugin_runtime: HashMap<ExternalCallableId, Box<[Ty]>>,
     char_sequence_protocol: Option<CharSequenceProtocol>,
+    collection_protocol: Option<CollectionProtocol>,
 }
 
 impl CheckedBackendCallables {
@@ -1156,7 +1166,11 @@ impl CheckedBackendCallables {
     ) -> Option<&KlibDependencyCallable> {
         match self.callables.get(&identity) {
             Some(callable) => callable.dependency_callable.as_ref(),
-            None => self.member_declarations.get(&identity),
+            None => self
+                .sam_declarations
+                .get(&identity)
+                .and_then(|fact| fact.dependency_callable.as_ref())
+                .or_else(|| self.member_declarations.get(&identity)),
         }
     }
 
@@ -1170,8 +1184,13 @@ impl CheckedBackendCallables {
         for property in referenced.properties {
             facts.freeze_property(property, provider)?;
         }
-        let callable = |identity| provider.external_callable(identity);
-        facts.freeze_callables(referenced.callables, callable)?;
+        let mut callable = |identity| provider.external_callable(identity);
+        facts.freeze_callables(referenced.callables, &mut callable)?;
+        for identity in referenced.sam_declarations {
+            if !facts.callables.contains_key(&identity) {
+                Self::freeze_callable_in(&mut facts.sam_declarations, identity, &mut callable)?;
+            }
+        }
         let mut singleton_dispatches = ir
             .external_singleton_dispatches
             .iter()
@@ -1277,6 +1296,33 @@ impl CheckedBackendCallables {
         self.char_sequence_protocol
     }
 
+    /// Freeze the collection members a target's own list reads another collection through
+    /// ([`crate::backend::Backend::reads_collections_through_interfaces`]); no source call need
+    /// name them.
+    pub(crate) fn freeze_collection_protocol(
+        &mut self,
+        protocol: CollectionProtocol,
+        provider: &dyn SymbolSource,
+    ) -> Result<(), DependencyFactError> {
+        let mut callable = |identity| provider.external_callable(identity);
+        for member in [
+            protocol.iterator,
+            protocol.has_next,
+            protocol.next,
+            protocol.contains,
+        ] {
+            self.freeze_callable(member, &mut callable)?;
+        }
+        self.collection_protocol = Some(protocol);
+        Ok(())
+    }
+
+    /// The collection members the handoff froze for a target whose list reads another collection
+    /// through them; `None` for every other target.
+    pub fn collection_protocol(&self) -> Option<CollectionProtocol> {
+        self.collection_protocol
+    }
+
     /// Copy checker-produced builtin implementation facts for every selected external member.
     /// A missing identity is an incomplete frontend handoff and must fail closed.
     pub fn record_checked_builtin_implementations(
@@ -1370,7 +1416,17 @@ impl CheckedBackendCallables {
             ExternalCallableId,
         ) -> Option<crate::libraries::ExternalCallableRealization>,
     ) -> Result<&BackendCallableFact, DependencyFactError> {
-        let fact = match self.callables.entry(identity) {
+        Self::freeze_callable_in(&mut self.callables, identity, provider)
+    }
+
+    fn freeze_callable_in<'a>(
+        declarations: &'a mut HashMap<ExternalCallableId, BackendCallableFact>,
+        identity: ExternalCallableId,
+        provider: &mut impl FnMut(
+            ExternalCallableId,
+        ) -> Option<crate::libraries::ExternalCallableRealization>,
+    ) -> Result<&'a BackendCallableFact, DependencyFactError> {
+        let fact = match declarations.entry(identity) {
             Entry::Occupied(fact) => fact.into_mut(),
             Entry::Vacant(slot) => {
                 let realization =
@@ -1387,6 +1443,7 @@ impl CheckedBackendCallables {
                 let klib_body_vararg_index = realization.klib_body_vararg_index;
                 let klib_body_parameter_defaults = realization.klib_body_parameter_defaults;
                 let declares_parameter_defaults = realization.declares_parameter_defaults;
+                let composable_parameters = realization.composable_parameters;
                 let callable = realization.callable;
                 let annotations = callable.annotations.into_boxed_slice();
                 slot.insert(BackendCallableFact {
@@ -1433,6 +1490,7 @@ impl CheckedBackendCallables {
                     klib_body_vararg_index,
                     klib_body_parameter_defaults,
                     declares_parameter_defaults,
+                    composable_parameters,
                     annotations,
                 })
             }
@@ -1444,6 +1502,13 @@ impl CheckedBackendCallables {
     /// is not one of this file's.
     pub fn callable(&self, identity: ExternalCallableId) -> Option<&BackendCallableFact> {
         self.callables.get(&identity)
+    }
+
+    /// A SAM declaration's frozen header, without selecting an executable dependency body.
+    pub fn sam_declaration(&self, identity: ExternalCallableId) -> Option<&BackendCallableFact> {
+        self.callables
+            .get(&identity)
+            .or_else(|| self.sam_declarations.get(&identity))
     }
 
     /// The fact for a dependency property identity this file's IR holds. `None` means the identity
