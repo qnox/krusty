@@ -22,6 +22,7 @@ mod object_equality;
 mod object_strings;
 mod root_any;
 mod string_order;
+mod string_slice;
 
 pub(super) use object_strings::ObjectStrings;
 
@@ -65,6 +66,8 @@ pub(super) struct Runtime {
     pub(super) string_equals: u32,
     /// `String.compareTo(String)`, once a call needs it.
     string_compare: Option<u32>,
+    /// `String.subSequence(Int, Int)`, once a call needs it.
+    string_sub_sequence: Option<u32>,
     /// `Double.toString()` and `Float.toString()`, once a conversion needs them.
     floating_strings: floating_strings::FloatingStrings,
     pub(super) object_equals: u32,
@@ -189,6 +192,7 @@ impl Runtime {
             arrays,
             string_equals: module.declare(),
             string_compare: None,
+            string_sub_sequence: None,
             floating_strings: Default::default(),
             object_equals,
             string_concat,

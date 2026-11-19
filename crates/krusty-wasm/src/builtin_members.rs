@@ -116,6 +116,8 @@ enum Operation {
     StringGet,
     /// The order of a string and another (`String.compareTo`).
     StringCompare,
+    /// The characters of a string between two indices (`String.subSequence`).
+    StringSubSequence,
     /// The order of the value a box holds and the value another box of its class holds
     /// (`Int.compareTo(Int)`).
     Compare,
@@ -399,6 +401,13 @@ impl Runtime {
                     .ref_cast(false, HeapType::Concrete(self.string))
                     .call(compare);
             }
+            (Receiver::String, Operation::StringSubSequence) => {
+                let slice = self.string_sub_sequence(module);
+                code.ref_cast(false, HeapType::Concrete(self.string))
+                    .local_get(1)
+                    .local_get(2)
+                    .call(slice);
+            }
             (Receiver::Box(form), Operation::Convert(to)) => {
                 form.emit_unbox(&mut code);
                 numeric_conversions::convert(&mut code, form.boxed, to)?;
@@ -596,6 +605,13 @@ fn operation(
                 && *results == [ValType::I32] =>
         {
             Ok(Operation::StringCompare)
+        }
+        (Representation::String, Some(BackendCompilerIntrinsic::StringSubSequence))
+            if *declaration.params == [Ty::Int, Ty::Int]
+                && params[1..] == [ValType::I32, ValType::I32]
+                && *results == [crate::objects::REFERENCE] =>
+        {
+            Ok(Operation::StringSubSequence)
         }
         (_, Some(operation)) => Err(format!(
             "a library member {} overrides as {operation:?}",
