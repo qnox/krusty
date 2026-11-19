@@ -197,6 +197,11 @@ fn list_symbol(
         ("get", [Ty::Int], ret) if reads && ret.is_reference() => {
             ("kt_list_get", vec![any(), Ty::Int], any())
         }
+        // The range of a list as a view. Either face selects it: whether the view may write is the
+        // parent's to say at run time, as it is for the JVM's, not the static type's.
+        ("subList", [Ty::Int, Ty::Int], ret) if (reads || mutates) && ret.is_reference() => {
+            ("kt_list_sub_list", vec![any(), Ty::Int, Ty::Int], any())
+        }
         ("indexOf", [element], Ty::Int) if reads && element.is_reference() => {
             ("kt_list_index_of", vec![any(), any()], Ty::Int)
         }

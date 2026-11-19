@@ -54,6 +54,29 @@ pub(super) fn emitted_dependency_targets(
     Ok(targets)
 }
 
+/// The dependency interface members the classes of `ir` inherit with a body and do not override.
+/// A target that dispatches through interface records calls each of them from its class's record,
+/// so they are emitted uses even though no expression of the file calls them.
+pub(super) fn emitted_inherited_default_targets(
+    ir: &IrFile,
+) -> impl Iterator<Item = crate::fir::ExternalCallableId> + '_ {
+    ir.classes
+        .iter()
+        .filter(|class| !class.is_interface)
+        .flat_map(|class| {
+            ir.inherited_defaults
+                .get(&class.fq_name_id())
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|default| match default.body {
+            crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration)
+            | crate::fir::InheritedDefaultBody::DependencyHolder(declaration) => Some(declaration),
+            crate::fir::InheritedDefaultBody::Module
+            | crate::fir::InheritedDefaultBody::JavaDefaultMethod => None,
+        })
+}
+
 /// The declarations a unit's closure freezes.
 pub(super) struct FrozenClosure {
     pub(super) declarations: Vec<(crate::fir::ExternalCallableId, ExternalCallableRealization)>,
@@ -103,6 +126,17 @@ pub(super) fn declarations(
         objects: HashSet::default(),
         read_objects: root_objects.to_vec(),
         dispatched: HashSet::default(),
+        emitted_defaults: roots
+            .callables
+            .iter()
+            .filter(|root| {
+                root.kind() == ExternalCallableKind::Member
+                    && root
+                        .class_contract()
+                        .is_some_and(crate::libraries::KlibBodyClassContract::emits_default_members)
+            })
+            .map(|root| root.identity().clone())
+            .collect(),
         capabilities,
     };
     // An object the emitted source reads as a value is materialized as one a body reads.
@@ -304,7 +338,10 @@ pub(super) fn declarations(
         // source call. A target which realizes no other declaration outside its emitted bodies
         // has no other such leaf: body lowering declines a call of one, as it declines any
         // unmodelled form.
-        let outside_edge = if member || is_outside_units(platform, bodies, &facts, selected)? {
+        let emitted_default = state.emitted_defaults.contains(&identity);
+        let outside_edge = if member
+            || (!emitted_default && is_outside_units(platform, bodies, &facts, selected)?)
+        {
             Some(member_edge(&facts, selected)?)
         } else {
             None
@@ -416,6 +453,9 @@ struct ClosureState<'c, 'u> {
     /// Members of a materialized class that dispatch reaches: their bodies are emitted even where
     /// a call of one folds to a common operation, as a virtual call runs the body.
     dispatched: HashSet<KlibDependencyCallable>,
+    /// Interface default bodies a class of the file inherits, emitted for its dispatch record
+    /// though no support unit materializes the interface.
+    emitted_defaults: HashSet<KlibDependencyCallable>,
     capabilities: &'c super::DependencyLeafCapabilities<'u>,
 }
 
@@ -713,6 +753,28 @@ pub(super) fn ordinary_roots<'a>(
             .constructor_initialization_callees(selected.identity(), bodies)
             .map_err(|reason| format!("an invalid superclass constructor root: {reason:?}"))?
             .is_some()
+            && seen.insert(selected.identity())
+        {
+            roots.push(selected);
+        }
+    }
+    // A class of this file inherits a dependency interface's default and does not override it, so
+    // its dispatch record calls that default's body. The body is an emitted use of the class, not
+    // of an expression, and dispatches statically from the record.
+    let mut defaults = emitted_inherited_default_targets(&source.ir).collect::<Vec<_>>();
+    defaults.sort_unstable_by_key(|target| target.raw());
+    defaults.dedup();
+    for target in defaults {
+        let Some(selected) = source
+            .callables
+            .callable(target)
+            .ok_or("an inherited dependency default has no frozen fact")?
+            .klib_body_callable()
+        else {
+            continue;
+        };
+        if intrinsics.get(selected.identity()).is_none()
+            && bodies.function_has_body(selected.identity()) == Some(true)
             && seen.insert(selected.identity())
         {
             roots.push(selected);
