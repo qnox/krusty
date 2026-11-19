@@ -769,9 +769,19 @@ fn prepare_interface<'a>(
         formals,
         variances: _,
         bounds,
-    } = class_formals(arena, class, &resolve)?;
-    let (supertypes, interfaces) =
-        authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
+        // An interface is never inner, so no outer instance's type parameters are its own.
+    } = class_formals(arena, class, None, &resolve)?;
+    let AuthenticatedSupertypes {
+        supertypes,
+        interfaces,
+        superclass,
+        library_superclass,
+    } = authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
+    // Only an interface can be a supertype of an interface: a superclass of either kind is a
+    // declaration this installation did not authenticate.
+    if superclass.is_some() || library_superclass.is_some() {
+        return Err(mismatch("an interface lists a superclass"));
+    }
     let self_type = Ty::obj_args_name(classifier_name, &formals);
     let Some(receiver) = &class.this_receiver else {
         return Err(mismatch("an interface has no instance receiver"));
@@ -790,6 +800,7 @@ fn prepare_interface<'a>(
         classes: source.classes,
         module: source.module,
         interfaces: &interfaces,
+        library_superclass: None,
     };
     let members = abstract_members(arena, class, &scope)?;
     let class_type_parameters = formals
