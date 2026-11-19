@@ -416,6 +416,9 @@ pub(super) struct PreparedLocalClass<'a> {
     /// The same-library superclass the constructor delegates to; `Any` otherwise.
     pub(super) superclass: Option<LocalSuperclass<'a>>,
     pub(super) open: bool,
+    /// How Kotlin names a top-level class private to its file: in its file's package, by its
+    /// declared name. Any other file-local class has no name of its own here.
+    pub(super) naming: Option<crate::ir::IrLocalClassNameProvenance>,
     /// Whether the class is an object, whose one instance its singleton value reads.
     pub(super) object: bool,
 }
@@ -799,6 +802,7 @@ fn prepare_class<'a>(
         class_name,
         outer,
     } = declaration;
+    let naming = file_private_naming(source.bodies, &key);
     if declaration_modality(class.base.flags).is_abstract() {
         return Err(unsupported("a non-public abstract class"));
     }
@@ -1000,7 +1004,27 @@ fn prepare_class<'a>(
         outer: outer_instance,
         superclass,
         open: declaration_modality(class.base.flags) != KotlinModality::Final,
+        naming,
         object,
+    })
+}
+
+/// The naming provenance of the class `key` names when it is a top-level class private to its
+/// file: rooted in that file's package, with no lexical owner and no ordinal.
+fn file_private_naming(
+    bodies: &KlibDeclarationBodies,
+    key: &LocalIdentity,
+) -> Option<crate::ir::IrLocalClassNameProvenance> {
+    let (package, class) = bodies.module_file_private_class(&key.module, &key.signature)?;
+    let package = package.iter().fold(TypeName::ROOT, |parent, segment| {
+        crate::types::type_name_child(parent, segment)
+    });
+    Some(crate::ir::IrLocalClassNameProvenance {
+        source: crate::ir::IrLocalClassNameRoot::Dependency { package },
+        lexical_owner: None,
+        segments: Box::new([class.name.clone()]),
+        ordinal: None,
+        parents: Box::new([]),
     })
 }
 
@@ -1730,8 +1754,10 @@ pub(super) fn construction_target(access: IrConstructorAccess) -> IrConstructorT
 pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
     let mut class = IrClass::synthetic(prepared.classifier);
     // A class private to its enclosing class is a member classifier its public signature names,
-    // as its source declares it; a file-local one has no name of its own here.
-    class.is_source_declared = matches!(prepared.key.signature, KlibIrSignature::Public(_));
+    // as its source declares it, and a top-level class private to its file is named by its
+    // provenance; any other file-local one has no name of its own here.
+    class.is_source_declared =
+        matches!(prepared.key.signature, KlibIrSignature::Public(_)) || prepared.naming.is_some();
     class.supertypes = prepared.supertypes.clone();
     for interface in &prepared.interfaces {
         class.interfaces.push_name(*interface);

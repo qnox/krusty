@@ -86,6 +86,9 @@ impl<'s> Linker<'_, 's> {
             class.super_args = args;
         }
         let class_id = ir.add_class(class);
+        if let Some(naming) = prepared.naming.clone() {
+            ir.local_class_name_provenance.insert(class_id, naming);
+        }
         ir.record_declared_class_self_type(prepared.classifier, prepared.self_type);
         let init = declare_function(ir, &prepared.init_header);
         ir.set_method_visibility(init, crate::types::Visibility::Private);
