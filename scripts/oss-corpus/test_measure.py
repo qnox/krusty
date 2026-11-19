@@ -30,6 +30,21 @@ class Measure(unittest.TestCase):
         time.sleep(0.2)
         self.assertFalse(os.path.exists(f'/proc/{daemon}'), 'the daemon outlived the measurement')
 
+    def test_the_bazel_builders_compile_worker_counts_as_kotlinc(self):
+        sys.path.insert(0, HERE)
+        import measure
+        # intellij-community's JvmCompile worker: the JDK running the launcher with the builder's jar.
+        worker = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', '--',
+                                   'external/rules_jvm+/rules/impl/MemoryLauncher.java',
+                                   'bazel-out/k8-opt-exec/bin/external/rules_jvm+/jvm-inc-builder/'
+                                   'jvm-inc-builder_deploy.jar'])
+        try:
+            time.sleep(0.2)
+            self.assertEqual(measure.kind(worker.pid), 'kotlin_daemon')
+        finally:
+            worker.kill()
+            worker.wait()
+
 
 if __name__ == '__main__':
     unittest.main()
