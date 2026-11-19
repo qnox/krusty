@@ -91,7 +91,6 @@ boxing/kt53100_casts.kt
 boxingOptimization/checkcastAndInstanceOf2.kt
 boxingOptimization/kt48394.kt
 boxingOptimization/kt5844.kt
-boxingOptimization/maxMinByOrNull.kt
 boxingOptimization/unsignedArrayForEach.kt
 bridges/delegationComplexWithList.kt
 bridges/genericProperty.kt
