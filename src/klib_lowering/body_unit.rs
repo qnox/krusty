@@ -1023,10 +1023,9 @@ impl DependencyBodyUnit {
             })?;
             self.ir.functions[body.function as usize].body = Some(lowered);
         }
-        super::class_hierarchies::publish(&mut self.ir, first_class, classes)
-            .map_err(|reason| KlibBodyDecline::new(identity.declaration.clone(), reason))?;
-        inline_functions::expand_calls(&mut self.ir)
-            .map_err(|reason| KlibBodyDecline::new(identity.declaration.clone(), reason))?;
+        let decline = |reason| KlibBodyDecline::new(identity.declaration.clone(), reason);
+        super::class_hierarchies::publish(&mut self.ir, first_class, classes).map_err(decline)?;
+        inline_functions::expand_calls(&mut self.ir).map_err(decline)?;
         Ok(root)
     }
 }
@@ -1639,12 +1638,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
-        match self.sources.declarations.classifier(name) {
-            Some(record) => Ok(record.is_interface()),
-            None => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+        let record = self.sources.declarations.classifier(name);
+        record.map(|record| record.is_interface()).ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(format!(
                 "an object literal's supertype {name:?} is not a selected classifier"
-            ))),
-        }
+            ))
+        })
     }
 
     fn link_accessor(
@@ -2615,20 +2614,8 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
-        // The selected root is lowered as the declaration it is; a call of an inline callee is
-        // expanded.
-        let root = self.root.is_some_and(|root| root.identity() == identity);
-        if !root && inline_functions::declares_inline(function) {
-            let mut is_interface = |name| self.is_interface(name);
-            inline_functions::declare(
-                ir,
-                declared,
-                function,
-                &header,
-                selected,
-                &mut is_interface,
-            )?;
-        }
+        let callee = inline_functions::Candidate::new(declared, function, &header, selected);
+        callee.declare(ir, self.root, identity, &mut |name| self.is_interface(name))?;
         self.functions.insert(identity.clone(), declared);
         if let Some(receiver) = header.value_receiver() {
             self.member_receivers.insert(identity.clone(), receiver);

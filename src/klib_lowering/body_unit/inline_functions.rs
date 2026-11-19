@@ -11,17 +11,67 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::inline_expansion::{InlineBodySplice, InlineOperand, SplicedResult};
 use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
-use crate::libraries::KlibBodyCallable;
+use crate::libraries::{KlibBodyCallable, KlibDependencyCallable};
 use crate::metadata::klib_ir::tree::KlibIrFunction;
-use crate::types::{stored_value_ty, InlineExpansionMode, InlineParameterModifier, Ty, TyKind};
+use crate::types::{
+    stored_value_ty, InlineExpansionMode, InlineParameterModifier, Ty, TyKind, TypeName,
+};
 
 use super::super::decline::KlibBodyDeclineReason;
 use super::super::function_lowering::FunctionHeader;
 use super::super::inline_templates::{expansion_modes, modifiers_with_receiver};
 
 /// Whether the serialized `function` is inline: every call of it is expanded, never made.
-pub(super) fn declares_inline(function: &KlibIrFunction) -> bool {
+fn declares_inline(function: &KlibIrFunction) -> bool {
     function.base.flags & crate::metadata::function_flags::IS_INLINE != 0
+}
+
+/// A function the unit lowered from its serialized body, with the selected declaration it was
+/// lowered for, that is declared as an inline callee when it is inline.
+pub(super) struct Candidate<'a, 's> {
+    declared: FunId,
+    function: &'a KlibIrFunction,
+    header: &'a FunctionHeader,
+    selected: Option<KlibBodyCallable<'s>>,
+}
+
+impl<'a, 's> Candidate<'a, 's> {
+    pub(super) fn new(
+        declared: FunId,
+        function: &'a KlibIrFunction,
+        header: &'a FunctionHeader,
+        selected: Option<KlibBodyCallable<'s>>,
+    ) -> Self {
+        Self {
+            declared,
+            function,
+            header,
+            selected,
+        }
+    }
+
+    /// Declare it, which is `identity`, as one the unit expands at each call, unless it is the
+    /// selected `root`: the root is lowered as the declaration it is, and a call of an inline
+    /// callee is expanded.
+    pub(super) fn declare(
+        &self,
+        ir: &mut IrFile,
+        root: Option<KlibBodyCallable<'_>>,
+        identity: &KlibDependencyCallable,
+        is_interface: &mut dyn FnMut(TypeName) -> Result<bool, KlibBodyDeclineReason>,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        let root = root.is_some_and(|root| root.identity() == identity);
+        if root || !declares_inline(self.function) {
+            return Ok(());
+        }
+        let Self {
+            declared,
+            function,
+            header,
+            selected,
+        } = *self;
+        declare(ir, declared, function, header, selected, is_interface)
+    }
 }
 
 /// Declare `function`, lowered from the serialized inline `declaration` with `header`, as one the
@@ -34,7 +84,7 @@ pub(super) fn declare(
     declaration: &KlibIrFunction,
     header: &FunctionHeader,
     selected: Option<KlibBodyCallable<'_>>,
-    is_interface: &mut dyn FnMut(crate::types::TypeName) -> Result<bool, KlibBodyDeclineReason>,
+    is_interface: &mut dyn FnMut(TypeName) -> Result<bool, KlibBodyDeclineReason>,
 ) -> Result<(), KlibBodyDeclineReason> {
     if declaration.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0 {
         return Err(KlibBodyDeclineReason::UnsupportedOperation(
@@ -84,7 +134,7 @@ fn sign_type_parameters(
     declaration: &KlibIrFunction,
     header: &FunctionHeader,
     selected: Option<KlibBodyCallable<'_>>,
-    is_interface: &mut dyn FnMut(crate::types::TypeName) -> Result<bool, KlibBodyDeclineReason>,
+    is_interface: &mut dyn FnMut(TypeName) -> Result<bool, KlibBodyDeclineReason>,
 ) -> Result<(), KlibBodyDeclineReason> {
     let Some(selected) = selected else {
         return Err(KlibBodyDeclineReason::UnsupportedOperation(
@@ -156,22 +206,12 @@ fn sign_type_parameters(
 /// Expand every call of an inline function of the unit in `ir`, including the calls a copied body
 /// itself makes.
 pub(super) fn expand_calls(ir: &mut IrFile) -> Result<(), KlibBodyDeclineReason> {
-    for expression in &ir.exprs {
-        if let IrExpr::Call { callee, .. } = expression {
-            if let Callee::LocalWithDefaults { function, .. } = **callee {
-                if ir.inline_only_fns.contains(&function) {
-                    return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                        "a call that leaves arguments of an inline function to their defaults",
-                    ));
-                }
-            }
+    let mut sites = Vec::new();
+    for site in 0..ir.exprs.len() as ExprId {
+        if inline_callee(ir, site)?.is_some() {
+            sites.push(site);
         }
     }
-    let mut sites = (0..ir.exprs.len())
-        .map(|site| site as ExprId)
-        .filter(|&site| inline_callee(ir, site).is_some())
-        .collect::<Vec<_>>();
-    sites.sort_unstable();
     if sites.is_empty() {
         return Ok(());
     }
@@ -186,14 +226,20 @@ pub(super) fn expand_calls(ir: &mut IrFile) -> Result<(), KlibBodyDeclineReason>
     Ok(())
 }
 
-/// The inline function of the unit `site` calls directly, when it is such a call.
-fn inline_callee(ir: &IrFile, site: ExprId) -> Option<FunId> {
+/// The inline function of the unit `site` calls, when it is such a call. A call that leaves
+/// arguments to an inline function's defaults is not expanded, so it declines.
+fn inline_callee(ir: &IrFile, site: ExprId) -> Result<Option<FunId>, KlibBodyDeclineReason> {
     let IrExpr::Call { callee, .. } = ir.expr(site) else {
-        return None;
+        return Ok(None);
     };
     match **callee {
-        Callee::Local(function) if ir.inline_only_fns.contains(&function) => Some(function),
-        _ => None,
+        Callee::Local(function) => Ok(ir.inline_only_fns.contains(&function).then_some(function)),
+        Callee::LocalWithDefaults { function, .. } if ir.inline_only_fns.contains(&function) => {
+            Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call of an inline function that leaves arguments to its defaults",
+            ))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -218,7 +264,7 @@ impl Expansion {
     /// Expand the call `site` of an inline function, and then the calls and lambda invocations its
     /// copied body makes.
     fn call(&mut self, ir: &mut IrFile, site: ExprId) -> Result<(), KlibBodyDeclineReason> {
-        let Some(function) = inline_callee(ir, site) else {
+        let Some(function) = inline_callee(ir, site)? else {
             return Ok(());
         };
         let IrExpr::Call {
@@ -395,7 +441,7 @@ impl Expansion {
         let mut copies = spliced.copies.into_values().collect::<Vec<_>>();
         copies.sort_unstable();
         for copy in copies {
-            if inline_callee(ir, copy).is_some() {
+            if inline_callee(ir, copy)?.is_some() {
                 self.call(ir, copy)?;
             } else if let Some((lambda, args)) = self.invoked(ir, copy) {
                 self.invocation(ir, copy, lambda, args)?;
