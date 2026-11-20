@@ -42,9 +42,13 @@ mod constructor_linking;
 mod enum_materialization;
 #[cfg(test)]
 mod initializer_capability_tests;
+mod inline_functions;
 mod local_class;
+mod private_members;
 mod sam_placement;
 mod static_properties;
+
+pub(crate) use private_members::is_private_class_member;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
 /// leaves and constructor calls have distinct realization contracts.
@@ -208,8 +212,9 @@ pub struct DependencyBodyUnit {
     realized_classes: HashSet<TypeName>,
     authenticated_singleton_dispatches: HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: HashMap<KlibDependencyCallable, TypeName>,
-    /// Private members of value classes, which only this unit's members of their class call.
-    private_members: HashSet<KlibDependencyCallable>,
+    /// Private members of value classes and file-private functions, which only this unit's bodies
+    /// call, each with its own formals and their bounds: no provider records them.
+    private_members: HashMap<KlibDependencyCallable, OwnFormals>,
     /// The dispatch receiver type of each class member this unit emits, its `this`.
     member_receivers: HashMap<KlibDependencyCallable, Ty>,
     /// File-local classes materialized for bodies of their own library, keyed by that library.
@@ -254,6 +259,8 @@ struct LocalFunction {
     class: super::same_library_class::LocalIdentity,
     /// Whether the function is its property's setter.
     setter: bool,
+    /// The function's own type parameters and their declared bounds.
+    formals: Vec<(crate::types::TyParamName, Vec<Ty>)>,
 }
 
 impl Default for DependencyBodyUnit {
@@ -267,7 +274,7 @@ impl Default for DependencyBodyUnit {
             realized_classes: HashSet::default(),
             authenticated_singleton_dispatches: HashMap::default(),
             authenticated_singleton_classifiers: HashMap::default(),
-            private_members: HashSet::default(),
+            private_members: HashMap::default(),
             member_receivers: HashMap::default(),
             local_classes: HashMap::default(),
             local_functions: HashMap::default(),
@@ -321,9 +328,9 @@ struct PendingBody<'a> {
 enum PendingInitialization<'a> {
     /// The admitted initialization of the class's own fields and initializers.
     Class(Box<super::class_initialization::ClassInitialization<'a, 'a>>),
-    /// A secondary constructor's statements after its delegation to the primary constructor,
-    /// whose arguments the class's secondary constructor `secondary` passes.
-    PrimaryDelegation {
+    /// A secondary constructor's statements after its delegation to another constructor of the
+    /// class, whose arguments the class's secondary constructor `secondary` passes.
+    OwnDelegation {
         secondary: usize,
         arguments: Vec<crate::metadata::klib_ir::tree::KlibIrExprId>,
     },
@@ -719,7 +726,10 @@ impl DependencyBodyUnit {
     ) -> impl Iterator<Item = (&KlibDependencyCallable, FunId)> + '_ {
         self.functions
             .iter()
-            .filter(|(identity, _)| !self.private_members.contains(*identity))
+            .filter(|(identity, function)| {
+                !self.private_members.contains_key(*identity)
+                    && !self.ir.inline_only_fns.contains(*function)
+            })
             .map(|(identity, &function)| (identity, function))
     }
 
@@ -909,6 +919,7 @@ impl DependencyBodyUnit {
             active_module: identity.module.clone(),
             active_identity: identity.clone(),
             active_value_class: None,
+            member_classes: Vec::new(),
             sources,
         };
         let root = seed(&mut linker, &mut self.ir)
@@ -928,6 +939,9 @@ impl DependencyBodyUnit {
             linker.active_module.clone_from(&body.identity.module);
             linker.active_identity.clone_from(&body.identity);
             linker.active_value_class.clone_from(&body.value_member);
+            if let Some(member) = &body.value_member {
+                linker.record_member_class(member);
+            }
             let function = LoweredFunction {
                 symbol: body.symbol,
                 function: body.function,
@@ -970,22 +984,22 @@ impl DependencyBodyUnit {
                     (
                         Some((
                             class,
-                            PendingInitialization::PrimaryDelegation {
+                            PendingInitialization::OwnDelegation {
                                 secondary,
                                 arguments,
                             },
                         )),
                         Some(member),
-                    ) => lowering.delegate_to_primary(
+                    ) => lowering.delegate_within_class(
                         *class,
                         *secondary,
                         member,
                         arguments,
                         body.statements,
                     ),
-                    (Some((_, PendingInitialization::PrimaryDelegation { .. })), None) => {
+                    (Some((_, PendingInitialization::OwnDelegation { .. })), None) => {
                         Err(KlibBodyDeclineReason::SignatureMismatch(
-                            "a primary constructor delegation has no materialized class".to_owned(),
+                            "a delegation within the class has no materialized class".to_owned(),
                         ))
                     }
                     (None, value_member) => match value_member {
@@ -1019,8 +1033,9 @@ impl DependencyBodyUnit {
             })?;
             self.ir.functions[body.function as usize].body = Some(lowered);
         }
-        super::class_hierarchies::publish(&mut self.ir, first_class, classes)
-            .map_err(|reason| KlibBodyDecline::new(identity.declaration.clone(), reason))?;
+        let decline = |reason| KlibBodyDecline::new(identity.declaration.clone(), reason);
+        super::class_hierarchies::publish(&mut self.ir, first_class, classes).map_err(decline)?;
+        inline_functions::expand_calls(&mut self.ir).map_err(decline)?;
         Ok(root)
     }
 }
@@ -1035,7 +1050,7 @@ struct Linker<'u, 's> {
     realized_classes: &'u HashSet<TypeName>,
     authenticated_singleton_dispatches: &'u mut HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
-    private_members: &'u mut HashSet<KlibDependencyCallable>,
+    private_members: &'u mut HashMap<KlibDependencyCallable, OwnFormals>,
     member_receivers: &'u mut HashMap<KlibDependencyCallable, Ty>,
     local_classes: &'u mut HashMap<
         super::same_library_class::LocalIdentity,
@@ -1059,6 +1074,9 @@ struct Linker<'u, 's> {
     /// The class and value field of the value class member being lowered, the class of every
     /// private member it calls.
     active_value_class: Option<MemberClass<'s>>,
+    /// Each class whose member body this lowering has made active. A nested class's body calls a
+    /// private member of its outer class through it.
+    member_classes: Vec<MemberClass<'s>>,
     sources: Sources<'s>,
 }
 
@@ -1735,7 +1753,8 @@ impl<'s> CallLinker for Linker<'_, 's> {
         let identity = self.callee_identity(callee)?;
         // The active selection decides every call, including one of a function an earlier
         // lowering already put in the unit.
-        let selected = if let Some(root) = self.root.filter(|root| &identity == root.identity()) {
+        let root = self.root.filter(|root| &identity == root.identity());
+        let selected = if let Some(root) = &root {
             Some(SelectedKlibCallables::One(root))
         } else {
             match self.sources.callees.get(&identity) {
@@ -1892,7 +1911,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             // member of that class. A member of a class realized outside the unit is called
             // through its frozen declaration, as a source call of it is.
             let candidates = match &selected {
-                Some(SelectedKlibCallables::One(candidate)) => std::slice::from_ref(candidate),
+                Some(SelectedKlibCallables::One(candidate)) => std::slice::from_ref(*candidate),
                 Some(SelectedKlibCallables::Variants(candidates)) => *candidates,
                 None => &[],
             };
@@ -2039,80 +2058,6 @@ impl<'s> Linker<'_, 's> {
             type_parameters: Vec::new(),
             type_parameter_bounds: Vec::new(),
             reified_type_parameters: Vec::new(),
-        }))
-    }
-
-    /// A call of a private member of the value class whose member is being lowered. No provider
-    /// records a private member, and only its class calls it, so it is emitted as the calling
-    /// member is, reading the value through the same field.
-    fn private_class_member(
-        &mut self,
-        ir: &mut IrFile,
-        identity: &KlibDependencyCallable,
-    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
-        // A private member is called only from its own class, whose member's body is active.
-        let Some(active) = self.active_value_class.clone() else {
-            return Ok(None);
-        };
-        if self.sources.callees.get(identity).is_some()
-            || self.sources.externals.contains_key(identity)
-        {
-            return Ok(None);
-        }
-        let Some((_, declaration)) = self.sources.bodies.function(identity) else {
-            return Ok(None);
-        };
-        if declaration.dispatch_receiver.is_none()
-            || crate::metadata::semantic::declaration_visibility(declaration.base.flags)
-                != crate::types::Visibility::Private
-        {
-            return Ok(None);
-        }
-        let (arena, declaration, header) =
-            private_class_member_header(active.contract, identity, self.sources.bodies)?;
-        self.private_members.insert(identity.clone());
-        let function = match self.functions.get(identity) {
-            Some(&function) => function,
-            None => {
-                let class = active.class;
-                let function = self.queue(
-                    ir,
-                    identity,
-                    None,
-                    arena,
-                    declaration,
-                    BodyHeader {
-                        header,
-                        value_member: Some(active),
-                    },
-                )?;
-                // It is a member of its class like any other, one no subclass overrides.
-                ir.set_method_visibility(function, crate::types::Visibility::Private);
-                register_class_method(ir, class, function);
-                function
-            }
-        };
-        let declared = &ir.functions[function as usize];
-        let (Some(receiver), params) = (
-            self.member_receivers.get(identity).copied(),
-            &declared.params,
-        ) else {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "a value class member is emitted without its receiver".to_owned(),
-            ));
-        };
-        Ok(Some(LinkedCallee {
-            callee: Callee::Local(function),
-            receiver: Some(receiver),
-            params: params.to_vec(),
-            ret: declared.ret,
-            context_count: 0,
-            singleton_dispatch: None,
-            type_parameters: Vec::new(),
-            type_parameter_bounds: Some(Vec::new()),
-            class_type_parameters: Vec::new(),
-            parameter_defaults: parameter_defaults(declaration),
-            edge: super::CallEdge::default(),
         }))
     }
 
@@ -2536,7 +2481,12 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
+        let root = self.root.is_some_and(|root| root.identity() == identity);
+        inline_functions::declare_callee(ir, declared, function, &header, selected, root)?;
         self.functions.insert(identity.clone(), declared);
+        if let Some(formals) = self.private_members.get_mut(identity) {
+            *formals = header.own_formals(function);
+        }
         if let Some(receiver) = header.value_receiver() {
             self.member_receivers.insert(identity.clone(), receiver);
         }
@@ -2585,35 +2535,6 @@ pub(crate) fn is_receiver_member(
             Some(crate::types::SemanticCallableOwner::Classifier(owner))
                 if callees.target_represents(owner)
         )
-}
-
-/// Whether `identity` is a private member of the materialized class `class` with a body, which no
-/// provider records and which a member of the class emitted from KLIB emits with it.
-pub(crate) fn is_private_class_member(
-    bodies: &KlibDeclarationBodies,
-    identity: &KlibDependencyCallable,
-    class: &crate::libraries::KlibBodyClassContract,
-) -> bool {
-    private_class_member_header(class, identity, bodies).is_ok()
-}
-
-/// The header of `identity`, a private member of the value class `class` with a body, proved
-/// against the class's raw header and read at the class's declared formals.
-fn private_class_member_header<'b>(
-    class: &crate::libraries::KlibBodyClassContract,
-    identity: &KlibDependencyCallable,
-    bodies: &'b KlibDeclarationBodies,
-) -> Result<(&'b KlibIrArena, &'b KlibIrFunction, FunctionHeader), KlibBodyDeclineReason> {
-    let member = super::class_headers::authenticate_private_member(class, identity, bodies)?;
-    block_statements(member.function)?;
-    let header = super::function_lowering::raw_function_header_with_class(
-        None,
-        HeaderPurpose::PrivateClassMember(class.classifier),
-        member.arena,
-        member.function,
-        member.types,
-    )?;
-    Ok((member.arena, member.function, header))
 }
 
 /// Record `function` as a method of the materialized `class`, once. A member no class table
@@ -2669,7 +2590,7 @@ fn body_header(
 /// authenticate the call. Declaration-shape conflicts remain ambiguous in `KlibCalleeFacts`.
 #[derive(Clone, Copy)]
 enum SelectedKlibCallables<'callable, 'facts> {
-    One(KlibBodyCallable<'callable>),
+    One(&'facts KlibBodyCallable<'callable>),
     Variants(&'facts [KlibBodyCallable<'callable>]),
 }
 
@@ -2722,7 +2643,7 @@ fn selected_callable_for_header_purpose<'callable>(
         None
     };
     match candidates {
-        SelectedKlibCallables::One(candidate) => {
+        SelectedKlibCallables::One(&candidate) => {
             if let Some(reason) = consider(candidate) {
                 return Err(reason);
             }
@@ -2777,7 +2698,7 @@ impl UnitCheckpoint {
         unit.authenticated_singleton_classifiers
             .retain(|identity, _| functions.contains_key(identity));
         unit.private_members
-            .retain(|identity| functions.contains_key(identity));
+            .retain(|identity, _| functions.contains_key(identity));
         unit.member_receivers
             .retain(|identity, _| functions.contains_key(identity));
         unit.local_classes
@@ -2908,7 +2829,7 @@ impl Linker<'_, '_> {
         let (types, type_parameters, type_parameter_bounds) =
             super::function_lowering::file_private_formals(&identity, arena, declaration)
                 .map_err(callee_declined)?;
-        self.private_members.insert(identity.clone());
+        self.private_members.entry(identity.clone()).or_default();
         let function = match self.functions.get(&identity) {
             Some(function) => *function,
             None => self
@@ -2932,6 +2853,10 @@ impl Linker<'_, '_> {
         })
     }
 }
+
+/// A declaration's own type parameters, each with its declared upper bounds (empty for the
+/// implicit `Any?`), in declaration order.
+type OwnFormals = Vec<(crate::types::TyParamName, Vec<Ty>)>;
 
 /// A primitive reading of a selected declaration's callee facts.
 type PrimitiveSelection = for<'f> fn(

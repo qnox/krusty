@@ -742,6 +742,15 @@ void kt_mutable_list_add_all(KRef self, KRef elements) {
     }
 }
 
+/* `ArrayList(elements)`: a new list holding the elements of any collection, in its iteration order,
+   read once now. The list owns its own storage, so a later write to either is not seen by the
+   other. */
+KRef kt_mutable_list_copy_of(KRef elements) {
+    KRef list = kt_mutable_list_new();
+    kt_mutable_list_add_all(list, elements);
+    return kt_raised() ? NULL : list;
+}
+
 KRef kt_mutable_list_set(KRef self, kt_int index, KRef value) {
     if (kt_is_sub_list(self)) {
         return kt_sub_list_set((KSubList *)self, index, value);
@@ -1037,6 +1046,54 @@ KRef kt_list_iterator_next(KRef iterator) {
         return NULL;
     }
     return kt_list_get(self->list, self->at++);
+}
+
+/* `listIterator(index)`: an iterator whose first `next()` answers the element at `index`, and
+   whose first `previous()` the one before it. `index` may be the size, where `next()` has nothing
+   left; past that, or below zero, it is an `IndexOutOfBoundsException`, as Kotlin's
+   `checkPositionIndex` raises. */
+KRef kt_list_iterator_at(KRef list, kt_int index) {
+    kt_int size = kt_list_size(list);
+    if (index < 0 || index > size) {
+        kt_index_out_of_bounds(index, size);
+        return NULL;
+    }
+    KRef iterator = kt_list_iterator(list);
+    ((KListIterator *)iterator)->at = index;
+    return iterator;
+}
+
+static KListIterator *kt_list_iterator_of(KRef iterator) {
+    if (!kt_is_list_iterator(iterator)) {
+        KT_FAIL("krusty: a list iterator was expected here\n");
+    }
+    return (KListIterator *)iterator;
+}
+
+kt_boolean kt_list_iterator_has_previous(KRef iterator) {
+    return kt_list_iterator_of(iterator)->at > 0;
+}
+
+/* The element before the cursor, which moves back over it. Checked against modification first,
+   as `next()` is, then against the start: there is no element before the first. */
+KRef kt_list_iterator_previous(KRef iterator) {
+    KListIterator *self = kt_list_iterator_of(iterator);
+    if (kt_is_mutable_list(self->list) &&
+        ((const KMutableList *)self->list)->modifications != self->modifications) {
+        kt_throw(kt_throwable_new(&kt_type_concurrent_modification_exception, NULL));
+        return NULL;
+    }
+    if (self->at <= 0) {
+        kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
+        return NULL;
+    }
+    return kt_list_get(self->list, --self->at);
+}
+
+kt_int kt_list_iterator_next_index(KRef iterator) { return kt_list_iterator_of(iterator)->at; }
+
+kt_int kt_list_iterator_previous_index(KRef iterator) {
+    return kt_list_iterator_of(iterator)->at - 1;
 }
 
 /* An `Iterable` or an `Iterator` that the generator could only type by the INTERFACE — a generic
