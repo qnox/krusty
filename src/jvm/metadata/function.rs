@@ -453,6 +453,10 @@ impl MetaFn {
             .iter()
             .map(|parameter| parameter.no_infer())
             .collect();
+        sig.composable_params = parameters
+            .iter()
+            .map(|parameter| parameter.composable_fun())
+            .collect();
         sig
     }
 

@@ -1133,12 +1133,16 @@ impl<'a> CommonIrBodySink<'a> {
                     .insert(
                         class,
                         crate::ir::IrLocalClassNameProvenance {
-                            source: crate::ir::IrModuleSource {
-                                source: provenance.source,
-                                package: index.source_package(provenance.source).ok_or(
-                                    FirFileLoweringFailure::MissingSourcePackage(provenance.source),
-                                )?,
-                            },
+                            source: crate::ir::IrLocalClassNameRoot::Source(
+                                crate::ir::IrModuleSource {
+                                    source: provenance.source,
+                                    package: index.source_package(provenance.source).ok_or(
+                                        FirFileLoweringFailure::MissingSourcePackage(
+                                            provenance.source,
+                                        ),
+                                    )?,
+                                },
+                            ),
                             lexical_owner,
                             segments: provenance.segments,
                             ordinal: provenance.ordinal,

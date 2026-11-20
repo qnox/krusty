@@ -57,7 +57,7 @@ pub(crate) fn publish_named_class_constructors(
             });
         diags.set_file(class.source_file);
         for diagnostic in diagnostics {
-            diags.error(diagnostic.span, diagnostic.message);
+            diags.frontend_plugin_diagnostic(diagnostic);
         }
         let Some(selection) = selection else {
             continue;
@@ -181,7 +181,7 @@ impl TypeUseConstructorPublisher<'_> {
                 });
         self.diags.set_file(self.source);
         for diagnostic in diagnostics {
-            self.diags.error(diagnostic.span, diagnostic.message);
+            self.diags.frontend_plugin_diagnostic(diagnostic);
         }
         let Some(selection) = selection else {
             return;

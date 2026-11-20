@@ -33,7 +33,9 @@ pub use source_facts::ComposeFileFacts;
 
 use crate::ir::IrFile;
 use crate::plugins::runtime_declarations::PluginRuntime;
-use crate::plugins::{IrPlugin, PluginContext, PluginRejection, PluginSourceView};
+use crate::plugins::{
+    IrPlugin, PluginContext, PluginRejection, PluginSourceView, TransformedEntry,
+};
 
 /// The runtime's `@Composable` annotation.
 const COMPOSABLE: &str = "androidx/compose/runtime/Composable";
@@ -66,5 +68,64 @@ impl IrPlugin for ComposePlugin {
 
     fn transform_bodies(&self, ir: &mut IrFile, _ctx: &PluginContext) {
         restart_groups::transform(ir);
+    }
+
+    fn passes_transformed_entry_defaults(&self, entry: &TransformedEntry<'_>) -> bool {
+        entry
+            .annotations
+            .contains(&crate::types::type_name(COMPOSABLE))
+            && source_facts::takes_composer_frame(entry.synthetic, entry.parameters, true)
+    }
+}
+
+#[cfg(test)]
+mod transformed_entry_tests {
+    use super::{ComposeOptions, ComposePlugin, COMPOSABLE};
+    use crate::plugins::{IrPlugin, TransformedEntry};
+    use crate::types::{type_name, Ty};
+
+    fn composer() -> Ty {
+        Ty::obj("androidx/compose/runtime/Composer")
+    }
+
+    fn passes(annotations: &[&str], synthetic: &[Ty]) -> bool {
+        let annotations = annotations
+            .iter()
+            .map(|annotation| type_name(annotation))
+            .collect::<Vec<_>>();
+        ComposePlugin::new(ComposeOptions::from_options(&[])).passes_transformed_entry_defaults(
+            &TransformedEntry {
+                annotations: &annotations,
+                synthetic,
+                parameters: 3,
+            },
+        )
+    }
+
+    #[test]
+    fn a_composable_with_the_composer_changed_and_mask_is_the_entry_this_plugin_passes() {
+        assert!(passes(&[COMPOSABLE], &[composer(), Ty::Int, Ty::Int]));
+    }
+
+    #[test]
+    fn a_tail_of_other_roles_ending_in_the_mask_words_is_not() {
+        assert!(!passes(&[COMPOSABLE], &[Ty::Long, Ty::Int, Ty::Int]));
+        assert!(!passes(&[COMPOSABLE], &[Ty::Int, Ty::Int, Ty::Int]));
+        assert!(!passes(
+            &[COMPOSABLE],
+            &[Ty::obj("lib/NotAComposer"), Ty::Int, Ty::Int]
+        ));
+        assert!(!passes(&[COMPOSABLE], &[composer(), Ty::Long, Ty::Int]));
+        assert!(!passes(
+            &[COMPOSABLE],
+            &[composer(), Ty::Int, Ty::Int, Ty::Int]
+        ));
+    }
+
+    #[test]
+    fn the_same_frame_on_a_declaration_that_is_not_composable_is_not() {
+        let frame = [composer(), Ty::Int, Ty::Int];
+        assert!(!passes(&[], &frame));
+        assert!(!passes(&["kotlin/Deprecated"], &frame));
     }
 }

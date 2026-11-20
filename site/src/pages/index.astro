@@ -122,7 +122,7 @@ const plugins: { name: string; level: Level; html: string }[] = [
   {
     name: "KSP (KSP2)",
     level: "partial",
-    html: "Through a build system. Under Gradle, KSP's own <code>kspKotlin</code> task runs the processors and krusty compiles what they generate (Gradle 8 or newer). Under the Kotlin Toolchain, only generated classes and resources are picked up. The plain command line rejects KSP.",
+    html: "Through a build system. Under Gradle, KSP's own <code>kspKotlin</code> task runs the processors and krusty compiles what they generate (Gradle 8 or newer). Under the Kotlin Toolchain, krusty compiles the generated Kotlin sources and picks up generated classes and resources; generated Java sources are not compiled yet. The plain command line rejects KSP.",
   },
   {
     name: "kapt",

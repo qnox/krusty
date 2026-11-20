@@ -35,6 +35,7 @@ use super::builtin_members::BuiltinMembers;
 use super::callable_references::CallableReferences;
 use super::char_sequence_appends::CharSequenceAppends;
 use super::class_tokens::{ClassTokens, TokenRuntime};
+use super::collection_arguments::CollectionArguments;
 use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
 };
@@ -87,6 +88,8 @@ pub(super) struct Runtime {
     pub(super) char_sequence_appends: CharSequenceAppends,
     /// `kotlin.collections.ArrayList`, which the runtime lays out.
     pub(super) array_lists: ArrayLists,
+    /// The members the list reads a collection argument through.
+    pub(super) collection_arguments: CollectionArguments,
     /// Kotlin's `hashCode()` rules.
     pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
@@ -206,6 +209,7 @@ impl Runtime {
                 host.target() == crate::target::WasmTarget::Wasi,
             ),
             array_lists,
+            collection_arguments: CollectionArguments::default(),
             hashing,
             class_tokens,
             exceptions,
