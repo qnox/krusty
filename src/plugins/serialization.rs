@@ -63,8 +63,8 @@ use deserialization_constructor::add_cached_descriptor;
 use deserialize_body::DeserializeBody;
 use element_serializer::element_serializer_expr;
 use generated_classifier::{
-    publish_generated_classifier_facts, publish_serializer_accessor_declaration, serializer_name,
-    SERIALIZER_OBJECT_NAME,
+    generated_classifier_names, publish_generated_classifier_facts,
+    publish_serializer_accessor_declaration, serializer_name, SERIALIZER_OBJECT_NAME,
 };
 use generated_members::{
     add_serializer_members, descriptor_property, install_inherited_type_parameter_serializers,
@@ -1155,6 +1155,14 @@ impl IrPlugin for SerializationPlugin {
         classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
     ) {
         publish_generated_classifier_facts(ctx, classifiers);
+    }
+
+    fn generated_classifier_names(
+        &self,
+        ctx: &crate::plugins::FrontendClassNameContext<'_>,
+        names: &mut Vec<crate::types::TypeName>,
+    ) {
+        generated_classifier_names(ctx, names);
     }
 
     fn check_frontend_class(

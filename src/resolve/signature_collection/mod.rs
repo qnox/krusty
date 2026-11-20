@@ -20,6 +20,7 @@ mod data_class_copy;
 mod declaration_facts;
 mod declaration_validation;
 mod declared_classifier_inventory;
+mod generated_classifier_names;
 mod member_signatures;
 mod plugin_member_signatures;
 mod referenced_type_names;
