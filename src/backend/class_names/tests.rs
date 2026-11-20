@@ -132,10 +132,10 @@ fn local(
     ir.local_class_name_provenance.insert(
         class,
         IrLocalClassNameProvenance {
-            source: crate::ir::IrModuleSource {
+            source: crate::ir::IrLocalClassNameRoot::Source(crate::ir::IrModuleSource {
                 source: crate::fir::SourceFileId::from_raw(0),
                 package: type_name("p/q"),
-            },
+            }),
             lexical_owner: owner,
             segments: segments.iter().map(|segment| segment.to_string()).collect(),
             ordinal,

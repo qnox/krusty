@@ -139,7 +139,7 @@ fn creator(ir: &mut IrFile, facts: &ParcelizeFileFacts, class: &ParcelizedClass)
     ir.local_class_name_provenance.insert(
         creator_id,
         crate::ir::IrLocalClassNameProvenance {
-            source: facts.source,
+            source: crate::ir::IrLocalClassNameRoot::Source(facts.source),
             lexical_owner: Some(crate::ir::IrLocalClassOwner::Class(class.class)),
             segments: vec!["Creator".to_string()].into_boxed_slice(),
             ordinal: None,
