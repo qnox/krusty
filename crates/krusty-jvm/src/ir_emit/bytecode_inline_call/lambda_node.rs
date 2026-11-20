@@ -832,7 +832,7 @@ impl Emitter<'_> {
                 value_class_return: self.invoke_coercion(result_semantic, result).value_class(),
                 captured: 0..0,
                 capture_names: {
-                    let mut names = self.capture_names(argument, impl_fn, own_captures);
+                    let mut names = self.capture_names(argument, impl_fn, own_captures, suspend);
                     if continuation_read.is_some() {
                         names.push(Some("$completion".to_string()));
                     }
@@ -863,10 +863,17 @@ impl Emitter<'_> {
     /// The names kotlinc's `capturedVars` give the lambda `impl_fn`'s first `count` parameters, its
     /// captured values: `$x` for a captured local `x`. A callable reference `argument`'s bound
     /// receiver, which its template places after the reference's captures, is `receiver`, the
-    /// value kotlinc's `InlineCallableReferenceToLambda` binds it to. A captured receiver of a
+    /// value kotlinc's `InlineCallableReferenceToLambda` binds it to; kotlinc's copy of a plain lambda
+    /// stores it as `$receiver`, and of a suspend lambda as `receiver`. A captured receiver of a
     /// literal is the parameter kotlinc lifts it to: `this$0` for the enclosing instance,
     /// `$this_f` for the receiver of `f`.
-    fn capture_names(&self, argument: u32, impl_fn: u32, count: usize) -> Vec<Option<String>> {
+    fn capture_names(
+        &self,
+        argument: u32,
+        impl_fn: u32,
+        count: usize,
+        suspend: bool,
+    ) -> Vec<Option<String>> {
         let identities = self.ir.fn_params.get(&impl_fn).map(|info| &info.identities);
         let bound_receiver = match self.ir.expr(argument) {
             IrExpr::CallableReference(reference) => {
@@ -877,7 +884,7 @@ impl Emitter<'_> {
         (0..count)
             .map(|index| {
                 if bound_receiver == Some(index) {
-                    return Some("receiver".to_string());
+                    return Some(if suspend { "receiver" } else { "$receiver" }.to_string());
                 }
                 let identity = identities?.get(index)?;
                 if let Some((owner, parameter)) = identity.constructor_receiver() {
