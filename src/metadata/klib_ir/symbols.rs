@@ -80,17 +80,6 @@ pub struct KlibIrSymbol {
     pub signature: KlibIrSignature,
 }
 
-/// What a serialized file-local signature (`FileLocalIdSignature`) records beside its table slot:
-/// the signature of its container and its id. kotlinc numbers an ordinary file-local declaration
-/// by a counter, but names a fake override of a local class by the hash of its own mangled
-/// signature (`FileLocalIdSignatureComputer.stableIndexForFakeOverride`), which is what links such a
-/// member from a call site that no declaration of the library defines.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct KlibFileLocalOrigin {
-    pub container: KlibIrSignature,
-    pub id: i64,
-}
-
 /// One file's signature table, decoded on demand and memoized by slot.
 pub(super) struct SignatureTable<'a> {
     file: u32,
@@ -98,7 +87,6 @@ pub(super) struct SignatureTable<'a> {
     strings: &'a [String],
     decoded: Vec<Option<KlibIrSignature>>,
     prepared_inline: bool,
-    origins: std::collections::HashMap<KlibIrSignature, KlibFileLocalOrigin>,
 }
 
 impl<'a> SignatureTable<'a> {
@@ -127,15 +115,7 @@ impl<'a> SignatureTable<'a> {
             strings,
             decoded: vec![None; entries.len()],
             prepared_inline,
-            origins: std::collections::HashMap::new(),
         }
-    }
-
-    /// The origins of the file-local signatures decoded so far.
-    pub(super) fn take_origins(
-        &mut self,
-    ) -> std::collections::HashMap<KlibIrSignature, KlibFileLocalOrigin> {
-        std::mem::take(&mut self.origins)
     }
 
     pub(super) fn symbol(&mut self, code: u64) -> Result<KlibIrSymbol, KlibIrDecodeError> {
@@ -245,30 +225,10 @@ impl<'a> SignatureTable<'a> {
                 }
             }
         }
-        let local = KlibIrSignature::FileLocal {
+        Ok(KlibIrSignature::FileLocal {
             file: self.file,
             slot: u32::try_from(slot).expect("a table slot fits u32"),
-        };
-        if let Some(private) = unique_bytes(&fields, 2, "file-local signature", ENTRY)? {
-            let private = message(private.value, ENTRY, private.value_offset)?;
-            let container = unique_varint(&private, 1, "file-local container", ENTRY)?;
-            let id = unique_varint(&private, 2, "file-local id", ENTRY)?;
-            if let (Some(container), Some(id)) = (container, id) {
-                let container = self.slot(container, "file-local container")?;
-                // A signature of a declaration the file serializes never contains itself.
-                if container != slot {
-                    let container = self.signature(container)?;
-                    self.origins.insert(
-                        local.clone(),
-                        KlibFileLocalOrigin {
-                            container,
-                            id: id as i64,
-                        },
-                    );
-                }
-            }
-        }
-        Ok(local)
+        })
     }
 
     fn direct_public_signature(
@@ -380,48 +340,6 @@ mod tests {
         assert_eq!(identity.package().segments(), ["fixture"]);
         assert_eq!(identity.declaration().segments(), ["probe"]);
         assert_eq!(identity.member_id(), Some(0x14ab_8f30_859f_59a9));
-    }
-
-    fn private_signature(container: u64, id: u64) -> Vec<u8> {
-        let mut body = Vec::new();
-        varint_field(&mut body, 1, container);
-        varint_field(&mut body, 2, id);
-        let mut signature = Vec::new();
-        bytes_field(&mut signature, 2, &body);
-        signature
-    }
-
-    #[test]
-    fn a_file_local_signature_records_its_container_and_id() {
-        // A fake override of a local class is file-local, named by its container and the hash of
-        // its mangle (`-5` here is a counter-sized stand-in for such an id as a signed value).
-        let public = public_signature();
-        let property = private_signature(0, 11);
-        let getter = private_signature(1, (-5_i64) as u64);
-        let entries = [public.as_slice(), property.as_slice(), getter.as_slice()];
-        let strings = ["fixture".to_owned(), "probe".to_owned()];
-
-        let mut table = SignatureTable::new(7, &entries, &strings);
-        let symbol = table.symbol(2 << 8).expect("the getter is a valid symbol");
-        assert_eq!(
-            symbol.signature,
-            KlibIrSignature::FileLocal { file: 7, slot: 2 }
-        );
-        let origins = table.take_origins();
-        let getter = origins
-            .get(&KlibIrSignature::FileLocal { file: 7, slot: 2 })
-            .expect("the getter records its origin");
-        assert_eq!(getter.id, -5);
-        assert_eq!(
-            getter.container,
-            KlibIrSignature::FileLocal { file: 7, slot: 1 }
-        );
-        let property = origins
-            .get(&KlibIrSignature::FileLocal { file: 7, slot: 1 })
-            .expect("the container's own origin is recorded when it is decoded");
-        assert_eq!(property.id, 11);
-        assert!(matches!(property.container, KlibIrSignature::Public(_)));
-        assert_eq!(origins.len(), 2);
     }
 
     #[test]

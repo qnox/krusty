@@ -126,14 +126,34 @@ typedef struct KType {
        implementing no interface of the program has none: nothing dispatches through it here.
        Appended, like the names above, so no existing initializer moves. */
     const kt_fn *itable;
+    /* On a class of the PROGRAM that implements `kotlin.collections.Map`: its members, through
+       typed virtual thunks, for the map entry points below to answer for an object they did not
+       make. NULL for every other type. */
+    const struct KMapMembers *map_members;
 } KType;
+
+/* The read-only members of `Map` a program class answers, each a thunk with the fixed signature
+   written here that dispatches to the class's override virtually, so a subclass overriding one is
+   reached through the same thunk. A key or value crosses as a reference, as `Map` declares it. */
+typedef struct KMapMembers {
+    kt_int (*size)(struct KObject *self);
+    kt_boolean (*is_empty)(struct KObject *self);
+    kt_boolean (*contains_key)(struct KObject *self, struct KObject *key);
+    kt_boolean (*contains_value)(struct KObject *self, struct KObject *value);
+    struct KObject *(*get)(struct KObject *self, struct KObject *key);
+    struct KObject *(*keys)(struct KObject *self);
+    struct KObject *(*values)(struct KObject *self);
+    struct KObject *(*entries)(struct KObject *self);
+} KMapMembers;
 
 /* The compiler writes each descriptor field at a fixed offset (`ktype` in
    `codegen/lower/objects.rs`); these pin the C layout to the same numbers. */
 _Static_assert(offsetof(KType, class_names) == 148, "KType.class_names moved");
 _Static_assert(offsetof(KType, collection_size) == 152, "KType.collection_size moved");
 _Static_assert(offsetof(KType, itable) == 160, "KType.itable moved");
-_Static_assert(sizeof(KType) == 168, "KType changed size");
+_Static_assert(offsetof(KType, map_members) == 168, "KType.map_members moved");
+_Static_assert(sizeof(KType) == 176, "KType changed size");
+_Static_assert(offsetof(KMapMembers, entries) == 56, "KMapMembers.entries moved");
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.
 
@@ -420,6 +440,11 @@ extern const KType kt_type_mutable_map_interface;
    `listOf(vararg)` answers an anonymous read-only `AbstractList`, which this class stands for. */
 extern const KType kt_type_list;
 extern const KType kt_type_list_iterator;
+/* The view `List.subList` answers: the range of a list, reading the list as it is. A `List`, not a
+   `MutableList`; its size is fixed, and a growable parent that changes shape after it was made
+   makes each read raise `ConcurrentModificationException`. */
+extern const KType kt_type_sub_list;
+extern const KType kt_type_mutable_sub_list;
 
 KRef kt_list_of(KRef elements);
 KRef kt_list_empty(void);
@@ -459,6 +484,7 @@ kt_boolean kt_mutable_collection_remove(KRef self, KRef value);
 void kt_mutable_collection_clear(KRef self);
 kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements);
 KRef kt_list_get(KRef list, kt_int index);
+KRef kt_list_sub_list(KRef list, kt_int from, kt_int to);
 /* `first()` / `last()`; both raise `NoSuchElementException` on an empty list, as Kotlin does. */
 KRef kt_list_first(KRef list);
 KRef kt_list_last(KRef list);
@@ -478,6 +504,8 @@ KRef kt_mutable_list_new(void);
 KRef kt_mutable_list_with_capacity(kt_int capacity);
 /* A growable list holding a COPY of an array's elements. */
 KRef kt_mutable_list_of(KRef elements);
+/* `ArrayList(elements)`: a growable list holding a copy of any collection's elements. */
+KRef kt_mutable_list_copy_of(KRef elements);
 kt_boolean kt_mutable_list_add(KRef self, KRef value);
 void kt_mutable_list_add_at(KRef self, kt_int index, KRef value);
 /* Answers the element that was there, as Kotlin's `set` does. */
@@ -494,6 +522,12 @@ void kt_mutable_list_plus_assign(KRef self, KRef value);
 void kt_mutable_list_add_all(KRef self, KRef elements);
 kt_boolean kt_list_iterator_has_next(KRef iterator);
 KRef kt_list_iterator_next(KRef iterator);
+/* `ListIterator`'s members over a list's iterator. `kt_list_iterator_at` is `listIterator(index)`. */
+KRef kt_list_iterator_at(KRef list, kt_int index);
+kt_boolean kt_list_iterator_has_previous(KRef iterator);
+KRef kt_list_iterator_previous(KRef iterator);
+kt_int kt_list_iterator_next_index(KRef iterator);
+kt_int kt_list_iterator_previous_index(KRef iterator);
 
 /* Iteration through a receiver the generator could only type by the INTERFACE, where either of the
    two iterable things this runtime has may turn up. The descriptor decides which, and `next`
@@ -865,6 +899,12 @@ kt_int kt_string_compare_to(KRef a, KRef b);
    both ranges are already within their strings (Kotlin/Native's `unsafeRangeEquals`). */
 kt_boolean kt_string_range_equals(KRef self, kt_int self_offset, KRef other, kt_int other_offset,
                                   kt_int length);
+
+/* Kotlin/Native's `indexOfString` and `indexOfChar`: the first UTF-16 unit offset at or after
+   `from` (a negative start counts from zero) where `other` or `ch` occurs, or -1. */
+kt_int kt_string_index_of_string(KRef self, KRef other, kt_int from);
+kt_int kt_string_index_of_char(KRef self, kt_char ch, kt_int from);
+kt_int kt_string_last_index_of_char(KRef self, kt_char ch, kt_int from);
 
 /* `s.removeSuffix(suffix)`: the receiver without it, cut by UTF-16 unit as `endsWith` and
    `substring` are; either may be a `StringBuilder`. A string that does not end there comes back

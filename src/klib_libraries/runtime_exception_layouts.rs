@@ -24,6 +24,8 @@ pub(super) fn normalize(
         RuntimeExceptionKind::Arithmetic,
         RuntimeExceptionKind::NumberFormat,
         RuntimeExceptionKind::ClassCast,
+        RuntimeExceptionKind::NoSuchElement,
+        RuntimeExceptionKind::ConcurrentModification,
     ]
     .into_iter()
     .find(|kind| kind.classifier() == identity)?;

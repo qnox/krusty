@@ -45,6 +45,9 @@ pub(super) struct SignatureAdapters {
     pub(super) result: Option<ResultAdapter>,
     /// What a collection special bridge answers when its argument is not the override's element.
     pub(super) rejection: Option<i32>,
+    /// The implementation returns `Nothing`: it never answers, so the bridge's reference result
+    /// follows a call that does not return.
+    pub(super) diverges: bool,
 }
 
 /// Result adaptation selected from the checked logical result while its type is live.
@@ -61,6 +64,7 @@ impl SignatureAdapters {
             parameters: vec![None; parameter_count],
             result: None,
             rejection: None,
+            diverges: false,
         }
     }
 }

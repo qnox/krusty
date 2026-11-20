@@ -51,10 +51,16 @@ impl LoweringCheckpoint {
             class.methods.truncate(methods);
             class.secondary_ctors.truncate(secondaries);
         }
+        // An object literal's naming provenance is keyed by its class id, which a later class may
+        // reuse; a stale entry would also count toward the next anonymous ordinal.
+        let first_class = crate::ir::ClassId::try_from(self.classes).expect("a class id fits u32");
+        ir.local_class_name_provenance
+            .retain(|class, _| *class < first_class);
         for class in removed {
             ir.classifier_hierarchies.remove(&class);
             ir.function_overrides.remove(&class);
             ir.property_overrides.remove(&class);
+            ir.classifier_hierarchies.remove(&class);
         }
         ir.restore_declared_class_self_type_owners(&self.class_self_types);
         ir.class_method_owners
@@ -67,7 +73,6 @@ impl LoweringCheckpoint {
             .retain(|function, _| *function < first);
         ir.extension_receiver_fns
             .retain(|function| *function < first);
-        ir.signatures.retain(|function, _| *function < first);
         ir.inline_fns.retain(|function| *function < first);
         ir.inline_only_fns.retain(|function| *function < first);
         ir.truncate_declared_parameters(first);
