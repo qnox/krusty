@@ -629,6 +629,11 @@ pub fn compose_runtime_jars() -> Option<Vec<PathBuf>> {
     crate::conformance::plugin_corpus::named("compose").runtime_jars()
 }
 
+/// The atomicfu runtime version, for callers that name it as a constant (the conformance-deps
+/// fetch script). The atomicfu corpus descriptor is the producer;
+/// `plugin_runtime_version_constants_match_descriptors` pins this to it.
+pub const ATOMICFU_RUNTIME_VERSION: &str = "0.32.1";
+
 /// `atomicfu-jvm`, the runtime the atomicfu compiler plugin lowers away.
 pub fn atomicfu_runtime_jar() -> Option<PathBuf> {
     crate::conformance::plugin_corpus::named("atomicfu").runtime[0].resolve()
@@ -781,6 +786,10 @@ mod tests {
         assert_eq!(
             named("compose").runtime_version("runtime-desktop"),
             Some(COMPOSE_RUNTIME_VERSION)
+        );
+        assert_eq!(
+            named("atomicfu").runtime_version("atomicfu-jvm"),
+            Some(ATOMICFU_RUNTIME_VERSION)
         );
         for artifact in [
             "kotlinx-serialization-core-jvm",
