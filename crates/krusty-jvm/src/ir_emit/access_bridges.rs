@@ -426,14 +426,16 @@ pub(super) fn cross_owner_member_calls(
     let mut protected = krusty::fx_hash::HashMap::default();
     let mut scan = |owner: &str,
                     caller: Option<krusty::ir::ClassId>,
-                    roots: Vec<krusty::ir::ExprId>,
+                    root: krusty::ir::ExprId,
                     export_private: bool| {
         let mut seen = krusty::fx_hash::HashSet::default();
-        let mut stack = roots;
-        while let Some(expression) = stack.pop() {
+        let mut crossinline = crate::inline_parameters::CrossinlineBodies::default();
+        let mut stack = vec![(root, export_private)];
+        while let Some((expression, export_private)) = stack.pop() {
             if !seen.insert(expression) {
                 continue;
             }
+            stack.extend(crossinline.children(ir, expression, export_private));
             // Local members carry a `FunId`; sibling-source members carry the exact stable module
             // declaration selected by FIR. Neither path reconstructs identity from owner/name. A
             // call inlined from its callee's compiled body never invokes that member, so it needs
@@ -587,15 +589,9 @@ pub(super) fn cross_owner_member_calls(
                 );
                 if local_target.is_none() {
                     let Some(callable) = ir.referenced_module_callables.get(target) else {
-                        krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                            stack.push(child)
-                        });
                         continue;
                     };
                     let Some(target_owner) = callable.owner else {
-                        krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                            stack.push(child)
-                        });
                         continue;
                     };
                     krusty::trace_compiler!(
@@ -623,9 +619,6 @@ pub(super) fn cross_owner_member_calls(
                             )
                         }
                         _ => {
-                            krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                                stack.push(child)
-                            });
                             continue;
                         }
                     };
@@ -669,15 +662,9 @@ pub(super) fn cross_owner_member_calls(
             }) = ir.module_member_accesses.get(&expression)
             {
                 let Some(property) = ir.referenced_module_properties.get(target) else {
-                    krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                        stack.push(child)
-                    });
                     continue;
                 };
                 let Some(target_owner) = property.owner else {
-                    krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                        stack.push(child)
-                    });
                     continue;
                 };
                 let visibility = if *write {
@@ -707,9 +694,6 @@ pub(super) fn cross_owner_member_calls(
                             *receiver,
                         ),
                         _ => {
-                            krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                                stack.push(child)
-                            });
                             continue;
                         }
                     };
@@ -798,7 +782,6 @@ pub(super) fn cross_owner_member_calls(
                     }
                 }
             }
-            krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
         }
     };
 
@@ -808,7 +791,7 @@ pub(super) fn cross_owner_member_calls(
             scan(
                 &owner,
                 context.class.map(|class| class as krusty::ir::ClassId),
-                vec![root],
+                root,
                 static_accessors::body_exports_private_access(ir, &exporting, root),
             );
         }
