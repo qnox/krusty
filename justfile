@@ -56,6 +56,7 @@ reference-cache-tests:
 versioning-tests:
     bash scripts/test-versioning.sh
     bash scripts/test-sort-kotlin-versions.sh
+    bash scripts/test-install-maven.sh
     bash scripts/test-fetch-conformance-deps.sh
 
 # The CI runner profile's machine and contention report, against stand-in /proc and /sys trees.

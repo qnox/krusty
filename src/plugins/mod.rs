@@ -23,6 +23,7 @@ pub mod compose;
 mod convention;
 pub mod deps;
 pub mod parcelize;
+pub mod plugin_order;
 mod plugin_release;
 pub use plugin_release::PluginRelease;
 pub mod registry;
