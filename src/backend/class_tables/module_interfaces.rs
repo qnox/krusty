@@ -48,7 +48,7 @@ pub struct NumberedInterface {
 }
 
 /// The module's interface member numbers.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ModuleInterfaces {
     numbers: HashMap<PlanKey, u32>,
     members: Vec<NumberedMember>,
@@ -142,6 +142,71 @@ impl ModuleInterfaces {
             }
         }
         result
+    }
+
+    /// This numbering extended with the interfaces `ir` holds that the module did not number:
+    /// the ones a KLIB lowering unit installed with the body that uses them. Each takes the next
+    /// numbers in the order the IR declares its classes and their methods, so one unit numbers
+    /// the same way every run, and they follow every module number, so a call through one never
+    /// reads a module member's. An installed interface that extends another numbered interface
+    /// is refused, whichever of the two the IR declares first: its members would have to share that
+    /// interface's numbers.
+    pub(crate) fn with_installed(&self, ir: &crate::ir::IrFile) -> Result<Self, Unsupported> {
+        let mut result = self.clone();
+        // The installed interfaces are all known before any inheritance is checked, so the refusal
+        // does not depend on whether a base is declared before or after the interface extending it.
+        let installed: std::collections::HashSet<_> = ir
+            .classes
+            .iter()
+            .filter(|class| class.is_interface && !self.interfaces.contains_key(&class.fq_name))
+            .map(|class| class.fq_name)
+            .collect();
+        for class in &ir.classes {
+            if !installed.contains(&class.fq_name) {
+                continue;
+            }
+            let name = class.fq_name;
+            let qualified = || name.render().replace('/', ".");
+            if class
+                .interfaces
+                .iter()
+                .any(|base| self.interfaces.contains_key(&base) || installed.contains(&base))
+            {
+                return Err(format!(
+                    "an installed interface extending one with module-wide numbers (`{}`)",
+                    qualified()
+                ));
+            }
+            for &function in &class.methods {
+                let declaration = &ir.functions[function as usize];
+                let key = PlanKey::Installed(function);
+                let number = result.members.len() as u32;
+                result.members.push(NumberedMember {
+                    key,
+                    aliases: Vec::new(),
+                    declarations: vec![MemberDeclaration {
+                        interface: name,
+                        member: key,
+                        bridged_from: None,
+                    }],
+                });
+                result.numbers.insert(key, number);
+                result.carriers.insert(
+                    key,
+                    Carriers::Function {
+                        parameters: declaration.params.clone().into_boxed_slice(),
+                        result: declaration.ret,
+                    },
+                );
+            }
+            result.interfaces.insert(
+                name,
+                Ok(NumberedInterface {
+                    closure: vec![name],
+                }),
+            );
+        }
+        Ok(result)
     }
 
     /// How many interface members this module numbered. A call through a dependency interface
