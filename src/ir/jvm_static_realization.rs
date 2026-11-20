@@ -211,7 +211,15 @@ impl IrFile {
                     Some(&class.properties.get(*property as usize)?.annotations[..])
                 })
         };
-        top_level.or_else(hoisted).unwrap_or_default()
+        let block = || {
+            self.companion_blocks
+                .property_for_storage(index)
+                .map(|property| &property.annotations[..])
+        };
+        top_level
+            .or_else(hoisted)
+            .or_else(block)
+            .unwrap_or_default()
     }
 
     /// Whether static `index` is published through a compiler-default `getX`. A `const val`

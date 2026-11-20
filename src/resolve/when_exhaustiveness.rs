@@ -1,12 +1,59 @@
 //! `when` exhaustiveness: the branches a `when` without an `else` still misses over a sealed,
 //! enum, or `Boolean` subject, and the diagnostic naming them.
 
+use super::runtime_functions::RuntimeFunction;
 use super::scope::FlowExclusion;
 use super::{Checker, CheckerScope, ExprLowering};
 use crate::ast::{Expr, ExprId, WhenArm};
-use crate::types::{Ty, TyKind, TypeName};
+use crate::fx_hash::HashSet;
+use crate::types::{wk, Ty, TyKind, TypeName};
+
+/// The `when`s the checker proved exhaustive, by an `else` or by covering their subject, and the
+/// failure kotlinc's fir2ir builds as the implicit `else` of a subject `when` without one.
+#[derive(Clone, Debug, Default)]
+pub(super) struct ExhaustiveWhens {
+    whens: HashSet<ExprId>,
+    /// Exhaustive subject `when`s without an `else` whose implicit `else` calls
+    /// `throwNoWhenBranchMatchedException(subject)` (`+NoWhenBranchMatchedExceptionWithMessage`).
+    failing_with_subject: HashSet<ExprId>,
+    /// That function as resolution selected it, once for the file. `None` when the provider
+    /// declares no applicable one.
+    subject_failure: Option<RuntimeFunction>,
+}
+
+impl ExhaustiveWhens {
+    pub(super) fn contains(&self, when: &ExprId) -> bool {
+        self.whens.contains(when)
+    }
+}
 
 impl Checker<'_> {
+    /// Record that the checker proved `when` exhaustive. Without an `else`, a subject `when` under
+    /// `+NoWhenBranchMatchedExceptionWithMessage` fails by passing its subject to
+    /// `kotlin.internal.throwNoWhenBranchMatchedException`, which this selects from the provider's
+    /// declarations the first time a `when` needs it.
+    pub(super) fn record_exhaustive_when(
+        &mut self,
+        when: ExprId,
+        has_else: bool,
+        has_subject: bool,
+    ) {
+        self.exhaustive_whens.whens.insert(when);
+        if has_else || !has_subject || !self.file.language.no_when_branch_matched_with_subject {
+            return;
+        }
+        if self.exhaustive_whens.failing_with_subject.is_empty() {
+            self.exhaustive_whens.subject_failure = self
+                .select_runtime_function(
+                    wk::kotlin_internal_package(),
+                    wk::THROW_NO_WHEN_BRANCH_MATCHED,
+                    &[Ty::obj_name(wk::any())],
+                )
+                .filter(|function| function.result == Ty::Nothing);
+        }
+        self.exhaustive_whens.failing_with_subject.insert(when);
+    }
+
     /// Every sealed descendant of `roots`, transitively (the roots themselves included). A sealed class
     /// may nest a further sealed class, so the hierarchy under a sealed subject is a tree, not a list.
     fn sealed_descendants(&self, roots: &[TypeName]) -> crate::fx_hash::HashSet<TypeName> {
@@ -288,5 +335,16 @@ impl super::TypeInfo {
     /// covering every value of its subject.
     pub fn when_is_exhaustive(&self, expression: ExprId) -> bool {
         self.exhaustive_whens.contains(&expression)
+    }
+
+    /// The failure the exhaustive subject `when` at `expression` reaches when no branch matches,
+    /// when kotlinc builds it as a call that takes the subject: `Some(None)` when the provider
+    /// declares no applicable `throwNoWhenBranchMatchedException`. `None` for every other `when`.
+    pub fn when_subject_failure(&self, expression: ExprId) -> Option<Option<&RuntimeFunction>> {
+        let whens = &self.exhaustive_whens;
+        whens
+            .failing_with_subject
+            .contains(&expression)
+            .then_some(whens.subject_failure.as_ref())
     }
 }

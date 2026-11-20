@@ -445,7 +445,10 @@ impl<'a> Checker<'a> {
             return true;
         }
         if visibility != Visibility::Protected
-            || !self.file.allow_protected_super_companion_property_access
+            || !self
+                .file
+                .language
+                .allow_protected_super_companion_property_access
             || receiver.non_null().obj_internal() != Some(owner)
         {
             return false;

@@ -1,3 +1,4 @@
+// KOTLINC_VERSION: [2.5.0,)
 // LANGUAGE: +ContextParameters +CallableReferencesToContextual
 
 class Cls(val x: String) {

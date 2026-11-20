@@ -186,6 +186,9 @@ fn validate_interface_block_members(
     class: &crate::ast::ClassDecl,
     diagnostics: &mut DiagSink,
 ) {
+    if file.language.interface_companion_block_members_are_static {
+        return;
+    }
     for member in &class.companion_block_members {
         let Decl::Property(property) = file.decl(member.declaration) else {
             continue;

@@ -578,7 +578,10 @@ impl BodyFirChecker<'_> {
         let origin = self.origins.synthetic(cause, kind);
         let value = match argument {
             ResolvedContextArgument::Binding { name, source, .. } => {
-                return self.materialize_context_binding(span, cause, origin, name, *source);
+                let receiver =
+                    self.materialize_context_binding(span, cause, origin, name, *source)?;
+                self.body.record_implicit_context_argument(receiver.value);
+                return Ok(receiver);
             }
             ResolvedContextArgument::ImplicitReceiver(selection) => {
                 self.materialize_implicit_receiver(origin, span, selection)?
@@ -586,6 +589,7 @@ impl BodyFirChecker<'_> {
                     .value
             }
         };
+        self.body.record_implicit_context_argument(value);
         Ok(FirReceiver {
             value,
             conversion: None,

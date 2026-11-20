@@ -99,7 +99,8 @@ pub(crate) fn function_requires_body(status: FunctionBodyStatus) -> bool {
         && !status.is_companion_block_member
 }
 
-/// A `companion { … }` block member of an interface is an interface member to kotlinc: a property
+/// Under a release with only the combined `CompanionBlocksAndExtensions` feature, a
+/// `companion { … }` block member of an interface is an interface member to kotlinc: a property
 /// without a getter body is abstract there, whatever its initializer, and an abstract interface
 /// property cannot be private. Reported at the member's own `private` modifier.
 pub(crate) fn interface_block_property_diagnostics(

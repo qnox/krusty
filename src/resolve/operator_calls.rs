@@ -1162,7 +1162,7 @@ pub(crate) struct ResolvedInRangeComparison {
     pub(crate) provenance: crate::fir::FirRangeComparisonProvenance,
     /// Exact provider-selected comparison for an unsigned counter. Common lowering consumes this
     /// identity before publishing the normalized unsigned-ordering operation to backends.
-    pub(crate) unsigned_compare: Option<super::for_loop_iteration::RuntimeFunction>,
+    pub(crate) unsigned_compare: Option<super::runtime_functions::RuntimeFunction>,
 }
 
 struct InRangeOperands {

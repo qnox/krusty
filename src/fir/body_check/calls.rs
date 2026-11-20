@@ -1649,7 +1649,7 @@ impl BodyFirChecker<'_> {
             return self.array_operation(expression, arguments, kind);
         }
         if selected.callable.compiler_intrinsic == Some(crate::libraries::CompilerIntrinsic::TypeOf)
-            && !self.file.recursive_type_of
+            && !self.file.language.recursive_type_of
         {
             let ty = self
                 .info
@@ -1692,9 +1692,9 @@ impl BodyFirChecker<'_> {
             selected.callable.compiler_intrinsic,
             selected.callable.ret,
         );
-        let assertion_mode = if self.file.assert_always_disabled {
+        let assertion_mode = if self.file.language.assert_always_disabled {
             crate::types::AssertionMode::AlwaysDisabled
-        } else if self.file.assert_always_enabled {
+        } else if self.file.language.assert_always_enabled {
             crate::types::AssertionMode::AlwaysEnabled
         } else {
             crate::types::AssertionMode::Runtime

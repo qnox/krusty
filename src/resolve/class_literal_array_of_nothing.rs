@@ -25,7 +25,11 @@ impl Checker<'_> {
                 continue;
             }
             let span = self.span(lhs);
-            if self.file.forbid_array_of_nothing_in_lhs_of_class_literal {
+            if self
+                .file
+                .language
+                .forbid_array_of_nothing_in_lhs_of_class_literal
+            {
                 self.diags
                     .error_named(span, crate::diag::names::UNSUPPORTED, message);
             } else if !self

@@ -177,6 +177,7 @@ impl Checker<'_> {
     ) -> R {
         if self
             .file
+            .language
             .forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds
         {
             return resolve(self);
