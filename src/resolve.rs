@@ -101,6 +101,7 @@ mod call_diagnostics;
 mod call_result_constraint;
 mod call_result_templates;
 mod callable_candidate_selection;
+mod callable_reference_constraints;
 mod callable_reference_lhs;
 mod callable_reference_outer_selection;
 mod callable_reference_prefilter;
@@ -308,6 +309,7 @@ pub(crate) mod receiver_capture_identity;
 use receiver_capture_identity::{LambdaReceiverSlot, ReceiverDeclarationRole, ReceiverLabel};
 mod receiver_flow;
 use receiver_flow::CompletedFlow;
+use receiver_flow::ReceiverNarrowing;
 mod receiver_function_values;
 use receiver_function_values::ImplicitReceiverFunctionInvoke;
 pub use receiver_function_values::ReceiverFunctionPropertyCallee;
@@ -13338,7 +13340,7 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    fn check_call(
+    pub(super) fn check_call_in_argument_scope(
         &mut self,
         scope: &CheckerScope<'_>,
         call: ExprId,
@@ -14605,9 +14607,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let receiver_diag_mark = self.diags.diags.len();
-                let (mut rt, argument_scope) =
-                    self.check_receiver_before_arguments(scope, receiver);
-                let scope = &argument_scope;
+                let mut rt = self.expr(scope, receiver);
                 let inferred_intersection = self.inferred_expression_intersection(receiver);
                 if inferred_intersection.len() > 1 {
                     // Keep the expression's denotable/physical type in its own slot. Candidate
@@ -30176,6 +30176,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         expected_declared: false,
         expectation_frames: Vec::new(),
         unreachable_statement_depth: 0,
+        annotation_argument_depth: 0,
         discover_anonymous_captures: false,
         selected_qualifier_accesses: HashMap::default(),
         selector_operands: None,
@@ -32470,8 +32471,9 @@ struct Checker<'a> {
     /// be `B` (a subtype of `this_ty`) inside the guarded branch, so a bare member of `B` resolves.
     /// Separate from `this_ty` (which stays the DECLARED receiver type so `this` still types as it,
     /// and the lowerer inserts a `checkcast` only where the narrowing was actually used). Cleared at
-    /// every scope boundary, like local flow-narrowings.
-    this_narrow: Option<Ty>,
+    /// every scope boundary, like local flow-narrowings. It names the receiver it narrows: a
+    /// receiver lambda inside the branch pushes a nearer receiver that the proof says nothing about.
+    this_narrow: Option<ReceiverNarrowing>,
     /// Stack of labeled receivers in scope, innermost LAST. Each entry is `(label, ty, is_class)`:
     /// a class body pushes `(ClassName, ty, true)`; a receiver lambda / scope function pushes
     /// `(fnName, receiverTy, false)`. Resolves `this@Label`. The innermost entry is the current `this`
@@ -32779,6 +32781,8 @@ struct Checker<'a> {
     /// semantic state, but a write there is not a reachable reassignment and therefore must never
     /// create a `VAL_REASSIGNMENT` diagnostic.
     unreachable_statement_depth: usize,
+    /// Nonzero while checking an annotation argument, whose array factory calls are array literals.
+    annotation_argument_depth: usize,
     /// This check exists only to discover anonymous-object captures: its diagnostics and results
     /// are discarded. It is also set while an object's body is checked for its captures.
     discover_anonymous_captures: bool,
@@ -33710,35 +33714,6 @@ impl<'a> Checker<'a> {
         r
     }
 
-    fn with_this_narrow<R>(&mut self, narrow: Option<Ty>, f: impl FnOnce(&mut Self) -> R) -> R {
-        let prev = self.this_narrow;
-        if let Some(n) = narrow {
-            self.this_narrow = Some(n);
-        }
-        let r = f(self);
-        self.this_narrow = prev;
-        r
-    }
-
-    /// Current smart-cast type of the implicit receiver.
-    fn effective_this_narrow(&self, scope: &CheckerScope<'_>) -> Option<Ty> {
-        self.this_narrow.or_else(|| {
-            self.lookup(scope, "this")
-                .map(|local| self.local_narrowing(scope, "this").unwrap_or(local.ty))
-        })
-    }
-
-    fn actual_this_narrow(&self, scope: &CheckerScope<'_>) -> Option<Ty> {
-        self.this_narrow
-            .or_else(|| self.local_narrowing(scope, "this"))
-            .or_else(|| self.lookup_path_narrowing(scope, &self.current_receiver_path(scope)?))
-            .or_else(|| {
-                let declared = scope.this_ty()?;
-                let shadow = self.lookup(scope, "this")?.ty;
-                (shadow != declared).then_some(shadow)
-            })
-    }
-
     /// The arg-binding call-resolution layer over this checker's [`SymbolSource`]. Cheap to construct.
     /// The checker's own least-upper-bound: same algebra, the checker's per-file module view and
     /// its own assignability oracle.
@@ -34513,30 +34488,7 @@ impl<'a> Checker<'a> {
             });
         }
 
-        self.resolver()
-            .top_level_candidates(name)
-            .into_iter()
-            .any(|mut function| {
-                function.kind == crate::libraries::FnKind::TopLevel
-                    && self
-                        .specialize_callable_ref_candidate(
-                            &mut function,
-                            None,
-                            Some(&expected.params),
-                            Some(expected.ret),
-                        )
-                        .is_ok()
-                    && self
-                        .callable_ref_argument_plan(&function, expected)
-                        .is_some()
-                    && self.callable_ref_is_compatible(
-                        &expected.params,
-                        function.callable.ret,
-                        function.callable.suspend,
-                        expected,
-                        true,
-                    )
-            })
+        self.scope_resolved_callable_reference_adapts_to(scope, name, expected)
     }
 
     /// Read-only applicability for a classifier-qualified callable reference while an enclosing
@@ -39557,63 +39509,6 @@ impl<'a> Checker<'a> {
         } else {
             base
         }
-    }
-
-    /// If `cond` is `x is T` (or `x !is T` when `for_else`) and `x` is a stable local/parameter and
-    /// `T` a non-nullable known reference type, return the smart-cast binding `(x, T)`.
-    /// The narrowed implicit-receiver type established by `if (this is B)` (`this !is B` in the
-    /// else-branch): `this` is a subtype `B` of the declared receiver. `this` is immutable, so the
-    /// narrowing is sound across nested scopes. Only a KNOWN reference subtype narrows (a primitive /
-    /// nullable / unresolved target is left un-narrowed, so the file skips rather than miscompiles).
-    fn this_is_narrowing(
-        &self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        for_else: bool,
-    ) -> Option<Ty> {
-        let Expr::Is {
-            operand,
-            ty,
-            negated,
-        } = self.file.expr(cond).clone()
-        else {
-            return None;
-        };
-        if negated != for_else {
-            return None;
-        }
-        if !matches!(self.file.expr(operand), Expr::Name(n) if n == "this") {
-            return None;
-        }
-        if ty.nullable() {
-            return None;
-        }
-        let tt = self
-            .resolved_type_tys
-            .get(&(ty.span.lo, ty.span.hi))
-            .copied()
-            .unwrap_or_else(|| self.type_ref_ty_silent(scope, &ty));
-        let runtime_tt =
-            crate::symbol_resolver::classifier_callable_signature(&self.fed_source(), tt)
-                .unwrap_or(tt);
-        // Context-sensitive nested type syntax may omit the subclass's type arguments (`is Right`)
-        // while the subject supplies them through its sealed/generic supertype (`Either<E, A>`).
-        // The general smart-cast path already reconstructs `Right<A>` from that relation; the
-        // implicit-`this` fast path must preserve the same applied target instead of replacing it
-        // with raw `Right`, whose `value` property subsequently erases to `Any?`.
-        let runtime_tt = self
-            .current_receiver_path(scope)
-            .and_then(|path| self.stable_path_ty(scope, &path, self.span(cond)))
-            .filter(|_| ty.targs.is_empty())
-            .map(|declared| {
-                crate::symbol_resolver::apply_subtype_arguments_from_supertype(
-                    &self.fed_source(),
-                    runtime_tt,
-                    declared,
-                )
-            })
-            .unwrap_or(runtime_tt);
-        runtime_tt.is_reference().then_some(runtime_tt)
     }
 
     /// The type a successful checked cast narrows a stable path to. A nullable target accepts null,
@@ -51598,7 +51493,7 @@ impl<'a> Checker<'a> {
                 fallthrough_declined: Vec<(String, Ty)>,
                 arm_casts: Vec<(NarrowPath, Ty)>,
                 arm_declined: Vec<(String, Ty)>,
-                this_narrow: Option<Ty>,
+                this_narrow: Option<ReceiverNarrowing>,
             }
             let mut arm_results = Vec::with_capacity(arms.len());
             let has_else = arms.iter().any(|arm| arm.conditions.is_empty());
@@ -52010,6 +51905,7 @@ impl<'a> Checker<'a> {
         let nominal = self.callable_ref_function_type(scope, e, selection_expected, receiver, name);
         self.active_callable_reference = previous_callable_reference;
         let misfit = self.misfit_callable_references.remove(&e);
+        self.publish_callable_reference_constraints(e);
         if nominal.mentions_error() || nominal.mentions_pending() {
             self.selected_callable_reference_diagnostics.remove(&e);
         }
@@ -54202,25 +54098,6 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    /// The array operation selected at `expression`: a compiler-built array literal or size
-    /// constructor, or a call whose selected declaration is one of the `kotlin` array factory
-    /// functions (`arrayOf`, `intArrayOf`, `emptyArray`, …).
-    pub(super) fn selected_array_operation(
-        &self,
-        expression: ExprId,
-    ) -> Option<crate::synthetics::SyntheticKind> {
-        if let Some(ExprLowering::CompilerSynthetic(kind)) = self.expr_lowers.get(&expression) {
-            return Some(*kind);
-        }
-        match self.resolved_calls.get(&expression) {
-            Some(ResolvedCall::TopLevel(call)) => match call.callable.compiler_intrinsic {
-                Some(crate::libraries::CompilerIntrinsic::ArrayFactory(kind)) => Some(kind),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
     /// Check a call whose every candidate is one `kotlin` vararg array factory (`arrayOf`,
     /// `intArrayOf`, …) once that declaration is known, before argument probes commit a type.
     ///
@@ -54274,9 +54151,9 @@ impl<'a> Checker<'a> {
                 Some(self.type_ref_ty(scope, argument))
             }
         });
-        let expected_element = expected
-            .and_then(Ty::array_elem)
-            .filter(|element| element.projection_inner().is_none());
+        // An expected `Array<out E>` (a vararg parameter's array) reaches the array builtin as the
+        // projection: it bounds a spread array without selecting the invariant element type.
+        let expected_element = expected.and_then(Ty::array_elem);
         let element_hint = explicit_element.or(expected_element);
         let candidate = candidates.into_iter().next()?;
         let result = self.check_array_builtin(

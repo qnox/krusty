@@ -63,6 +63,8 @@ mod default_arguments;
 mod enum_switch_whens;
 pub use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
+mod plugin_file_facts;
+pub use plugin_file_facts::PluginFileFacts;
 mod enums;
 mod expect_actualization;
 mod expression_copy;
@@ -1775,9 +1777,10 @@ pub struct IrFile {
     /// What the Compose plugin recorded from this file's source at the handoff, for its body
     /// transform. `None` unless the plugin is active and the file declares a composable function.
     pub compose: Option<Box<crate::plugins::compose::ComposeFileFacts>>,
-    /// What the atomicfu plugin recorded from this file's source at the handoff, for its body
-    /// transform. `None` unless the plugin is active and the file declares an atomic it lowers.
-    pub atomicfu: Option<Box<crate::plugins::atomicfu::AtomicfuFileFacts>>,
+    /// What compiler plugins recorded from this file's source at the handoff, for their own later
+    /// phases. The atomicfu plugin records its facts here when the file declares an atomic it
+    /// lowers.
+    pub plugin_facts: PluginFileFacts,
     /// The Parcelize plugin's handoff facts; `None` unless the file declares a parcelized class.
     pub parcelize: Option<Box<crate::plugins::parcelize::ParcelizeFileFacts>>,
     /// Package functions a compiler plugin gave physical parameters their declaration does not

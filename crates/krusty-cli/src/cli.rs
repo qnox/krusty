@@ -22,13 +22,15 @@ use crate::kotlinc_arguments::{self, Catalog, Disposition, Lifecycle, Origin, Va
 mod arguments;
 mod fragments;
 mod language_features;
+mod source_roots;
 mod warning_policy;
 
 pub use arguments::CLASSPATH_SEPARATOR;
 use arguments::{
-    apply, collect_sources, finish_jvm_target, finish_language_settings, finish_warning_policy,
+    apply, finish_jvm_target, finish_language_settings, finish_warning_policy,
     take_reference_version, unsupported, ParsedSettings,
 };
+use source_roots::{duplicate_source_root, SourceRoots};
 pub use warning_policy::{WarningDisposition, WarningLevel, WarningPolicy};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -193,6 +195,9 @@ pub struct Options {
     /// `-Xreport-all-warnings`: a failed compilation reports its warnings beside its errors. Without
     /// it, kotlinc reports only the errors of a compilation that fails.
     pub report_all_warnings: bool,
+    /// `-Xallow-no-source-files`: a command line with no sources compiles an empty module, writing
+    /// only its `.kotlin_module`, instead of failing.
+    pub allow_no_source_files: bool,
 }
 
 impl Default for Options {
@@ -249,6 +254,7 @@ impl Default for Options {
             opt_in: Vec::new(),
             suppress_version_warnings: false,
             report_all_warnings: false,
+            allow_no_source_files: false,
         }
     }
 }
@@ -388,15 +394,18 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
         return opts;
     }
     let fragments = fragments::check(&parsed.fragments, &tokenized.free);
+    let mut duplicate_roots = Vec::new();
+    let mut source_roots = SourceRoots::default();
     for source in &tokenized.free {
-        let first = opts.sources.len();
-        collect_sources(source, &mut opts.sources);
+        let Some(collected) = source_roots.collect(source, &mut opts.sources) else {
+            duplicate_roots.push(duplicate_source_root(source));
+            continue;
+        };
         if let Some(listed) = fragments
             .sources
             .iter()
             .find(|listed| listed.source == *source)
         {
-            let collected = opts.sources[first..].to_vec();
             for collected_source in &collected {
                 opts.source_fragments
                     .insert(collected_source.clone(), listed.fragment);
@@ -408,6 +417,11 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
     }
     if let Some(refusal) = fragments.unsupported {
         opts.refuse(refusal);
+    }
+    // kotlinc resolves source roots only once the module configuration is accepted, so a
+    // configuration error ends the run before a duplicate root is reported.
+    if !fragments.configuration_errors.is_empty() {
+        duplicate_roots.clear();
     }
     opts.configuration_errors
         .extend(fragments.configuration_errors);
@@ -427,6 +441,8 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
     finish_warning_policy(&mut opts, &parsed);
     finish_jvm_target(&mut opts, &parsed);
     finish_language_settings(&mut opts, parsed, catalog, &tokenized.explicit, lifecycle);
+    // kotlinc reports a repeated source root after the configuration warnings.
+    opts.warnings.append(&mut duplicate_roots);
     opts
 }
 

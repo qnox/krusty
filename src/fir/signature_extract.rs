@@ -245,7 +245,9 @@ impl SignatureConstraintExtractor {
             if self.graph.constraint(stub.id).is_some() {
                 continue;
             }
-            if stub.flags.has(super::DeclarationFlags::LOCAL_CLASS) {
+            if stub.flags.has(super::DeclarationFlags::LOCAL_CLASS)
+                && !super::signature_source::source_enum_entry_function(file, stub.range)
+            {
                 continue;
             }
             let Some(expression) = source_signature_expression(file, stub) else {

@@ -424,24 +424,58 @@ impl Body<'_> {
         if target.method_target == krusty::ir::IrSamMethod::FunctionTypeInvoke {
             return Err("a functional interface implementing a function type's `invoke`".into());
         }
-        if target.dispatch_methods.is_empty() {
-            return Err("a functional interface without its method family".into());
+        if !target
+            .dispatch_methods
+            .iter()
+            .any(|frame| frame.method == Some(target.method_target))
+        {
+            return Err(
+                "a functional interface without its checked selected dispatch frame".into(),
+            );
         }
+        let mut implemented = Vec::new();
         for frame in &target.dispatch_methods {
-            match frame.method {
-                Some(krusty::ir::IrSamMethod::Module(method)) => {
-                    let (member, params, result) = self.sam_member(method)?;
-                    if !self.runtime.objects.interfaces.implements(record, member) {
-                        self.implement_sam_member(record, invoke, member, (&params, result))?;
-                    }
-                }
-                Some(krusty::ir::IrSamMethod::External(method)) => {
-                    self.implement_sam_dependency_member(record, invoke, method, frame)?;
-                }
-                // The function value's own entry is the function type's `invoke`.
-                Some(krusty::ir::IrSamMethod::FunctionTypeInvoke) => {}
-                None => return Err("a functional interface method without its declaration".into()),
+            if frame.parameters.len() != target.parameters.len() {
+                return Err("a SAM alias with a different declared parameter count".into());
             }
+            if frame.method == Some(krusty::ir::IrSamMethod::FunctionTypeInvoke) {
+                // Function-value construction already installed this checked family's erased
+                // invocation protocol. It is not a nominal interface member needing a new thunk.
+                let protocol = self
+                    .runtime
+                    .objects
+                    .interfaces
+                    .function_invoke(self.module, frame.parameters.len());
+                if !self.runtime.objects.interfaces.implements(record, protocol) {
+                    return Err("a SAM function frame without its invocation protocol".into());
+                }
+                continue;
+            }
+            let (member, library) = self.sam_dispatch_member(frame)?;
+            if implemented.contains(&member)
+                || self.runtime.objects.interfaces.implements(record, member)
+            {
+                continue;
+            }
+            let thunk = self
+                .sam_dispatch_thunk(invoke, member, &frame.parameters, frame.result)
+                .and_then(|thunk| {
+                    self.runtime
+                        .objects
+                        .interfaces
+                        .implement(record, member, thunk)
+                });
+            match thunk {
+                // A library member's thunk this generator cannot write declines only a call
+                // through that member, so it is recorded on the member instead.
+                Err(reason) if library => self
+                    .runtime
+                    .objects
+                    .interfaces
+                    .unimplementable(member, reason),
+                thunk => thunk?,
+            }
+            implemented.push(member);
         }
         let interfaces = &mut self.runtime.objects.interfaces;
         let hierarchy = self
@@ -457,63 +491,53 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// Implement the dependency declaration `method` of the family, by its declared `frame`: a
-    /// call through it reaches the value by the member's identity, not by this module's number.
-    /// A library member's thunk this generator cannot write declines only a call through that
-    /// member, so it is recorded on the member instead.
-    fn implement_sam_dependency_member(
+    /// Bind each checked family declaration without reselecting a method or equating numbers,
+    /// and whether it is a library member this module does not publish.
+    fn sam_dispatch_member(
         &mut self,
-        record: crate::interface_dispatch::ClassRef,
-        invoke: u32,
-        method: krusty::fir::ExternalCallableId,
         frame: &krusty::ir::IrSamMethodFrame,
-    ) -> Result<(), Unsupported> {
-        let fact = self
-            .callables
-            .sam_declaration(method)
-            .ok_or("a functional interface method without its frozen declaration")?;
-        let member = crate::codegen::interface_members::dependency_member(
-            &mut self.runtime.objects.interfaces,
-            self.module,
-            fact,
-            library_members::MemberRole::Function,
-        )
-        .ok_or("a functional interface method a dependency declares without a member")?;
-        if self
-            .runtime
-            .objects
-            .interfaces
-            .implements(record, member.member)
-        {
-            return Ok(());
-        }
-        let implemented = self.implement_sam_member(
-            record,
-            invoke,
-            member.member,
-            (&frame.parameters, frame.result),
-        );
-        match implemented {
-            Err(reason) if member.library => {
-                self.runtime
-                    .objects
-                    .interfaces
-                    .unimplementable(member.member, reason);
-                Ok(())
+    ) -> Result<(crate::interface_dispatch::MemberRef, bool), Unsupported> {
+        use super::library_members::{library_member_signature, MemberRole};
+        let declared =
+            super::super::interface_members::member_signature(&frame.parameters, frame.result)?;
+        match frame.method {
+            Some(krusty::ir::IrSamMethod::Module(method)) => {
+                let (member, params, result) = self.sam_member(method)?;
+                if super::super::interface_members::member_signature(&params, result)? != declared {
+                    return Err("a module SAM alias changed its declared carriers".into());
+                }
+                Ok((member, false))
             }
-            implemented => implemented,
+            Some(krusty::ir::IrSamMethod::External(target)) => {
+                let fact = self
+                    .callables
+                    .sam_declaration(target)
+                    .ok_or("a SAM alias without its checked declaration")?;
+                if !fact.owner_is_interface
+                    || library_member_signature(fact, MemberRole::Function)? != declared
+                {
+                    return Err("a SAM alias changed its interface declaration frame".into());
+                }
+                let member = crate::codegen::interface_members::dependency_member(
+                    &mut self.runtime.objects.interfaces,
+                    self.module,
+                    fact,
+                    MemberRole::Function,
+                )?
+                .ok_or("a SAM alias without its declaration identity")?;
+                Ok((member.member, member.library))
+            }
+            _ => Err("a SAM alias without a supported checked method identity".into()),
         }
     }
 
-    /// A function of type `ty` implementing a member taking `params` and answering `result` by
-    /// forwarding to the boxed entry `invoke`: each argument is boxed, and the answer unboxed to
-    /// the member's own carrier.
-    fn sam_thunk(
+    /// The existing boxed lambda entry adapts each declared family frame independently.
+    fn sam_dispatch_thunk(
         &mut self,
         invoke: u32,
+        member: crate::interface_dispatch::MemberRef,
         params: &[Ty],
         result: Ty,
-        ty: u32,
     ) -> Result<u32, Unsupported> {
         let mut code = Code::default();
         let mut locals = Vec::new();
@@ -531,33 +555,10 @@ impl Body<'_> {
         } else {
             self.unpack_argument(&mut code, result)?;
         }
+        let ty = self.runtime.objects.interfaces.ty(member);
         let thunk = self.module.declare();
         self.module.define(thunk, Function { ty, locals, code });
         Ok(thunk)
-    }
-
-    /// Implement `member`, declared as taking `params` and answering `result`, for the function
-    /// value of `record` through a thunk to its boxed entry `invoke`.
-    fn implement_sam_member(
-        &mut self,
-        record: crate::interface_dispatch::ClassRef,
-        invoke: u32,
-        member: crate::interface_dispatch::MemberRef,
-        (params, result): (&[Ty], Ty),
-    ) -> Result<(), Unsupported> {
-        let (carried_params, carried_results) =
-            crate::codegen::interface_members::member_signature(params, result)?;
-        let ty = self.runtime.objects.interfaces.ty(member);
-        if self.module.func_type(carried_params, carried_results) != ty {
-            return Err(
-                "a functional interface member a dependency declares with other carriers".into(),
-            );
-        }
-        let thunk = self.sam_thunk(invoke, params, result, ty)?;
-        self.runtime
-            .objects
-            .interfaces
-            .implement(record, member, thunk)
     }
 
     /// `function(args)`, where `function` is a function value taking `params` and answering
