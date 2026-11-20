@@ -5507,6 +5507,13 @@ impl<'a> Checker<'a> {
                     return None;
                 };
                 let singleton = self.classifier_singleton_value(classifier)?;
+                // The import names a member only when the object declares one under that name; a
+                // nested classifier of the object is imported through the classifier namespace.
+                crate::symbol_resolver::imported_object_member_symbols(
+                    &self.fed_source(),
+                    classifier,
+                    &declared_name,
+                )?;
                 (singleton.classifier == classifier).then_some((
                     ImplicitReceiver {
                         receiver_role: None,
