@@ -1638,35 +1638,22 @@ jobs:
             ln -s "$(command -v bazelisk)" "$RUNNER_TEMP/bin/bazel"
             echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           fi
-      # The downloads the job makes itself live in one cache per Bazel release: the Bazel binary
-      # Bazelisk fetches and the repository cache that holds the BCR modules the consumer resolves.
-      # Saved only by a master run, like every cache here, and only once the build has filled it, so
-      # a miss downloads once and later runs use the entry.
-      - name: restore the Bazel downloads
-        id: bazel-downloads
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Bazelisk's downloads and the repository cache (the BCR modules the consumer resolves) are
+      # kept by setup-bazel, which saves them from a master run only. The repository cache is keyed
+      # on the smoke script because it writes the consumer's MODULE.bazel.
+      - uses: bazel-contrib/setup-bazel@f34d6a05eae3c24acab7fa54587492daeaeffdab # 0.19.2
         with:
-          path: |
-            ~/.cache/bazelisk
-            ~/.cache/krusty/bazel-repository
-          key: bazel-downloads-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.bazel }}-${{ hashFiles('scripts/bazel-smoke.sh', 'tools/krusty-bazel/**') }}
+          bazelisk-cache: true
+          repository-cache: scripts/bazel-smoke.sh
+          cache-save: ${{ github.ref == 'refs/heads/master' }}
       - name: build the packaged Bazel module with Bazel ${{ matrix.bazel }}
         env:
           USE_BAZEL_VERSION: ${{ matrix.bazel }}
         run: |
           set -euo pipefail
           chmod +x krusty
-          export BAZEL_REPOSITORY_CACHE="$HOME/.cache/krusty/bazel-repository"
           kotlinc=$(just kotlinc "${{ steps.max-version.outputs.version }}")
           scripts/bazel-smoke.sh "$PWD/krusty" "$(dirname "$kotlinc")/../lib/kotlin-stdlib.jar"
-      - name: save the Bazel downloads
-        if: github.ref == 'refs/heads/master' && steps.bazel-downloads.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cache/bazelisk
-            ~/.cache/krusty/bazel-repository
-          key: ${{ steps.bazel-downloads.outputs.cache-primary-key }}
 
   # A release is started by hand (`release` input) or by the daily schedule on a master commit and
   # builds its own immutable artifacts there, even after master advances. All six platforms build
