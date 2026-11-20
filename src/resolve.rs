@@ -101,6 +101,7 @@ mod call_diagnostics;
 mod call_result_constraint;
 mod call_result_templates;
 mod callable_candidate_selection;
+mod callable_reference_constraints;
 mod callable_reference_lhs;
 mod callable_reference_outer_selection;
 mod callable_reference_prefilter;
@@ -51891,6 +51892,7 @@ impl<'a> Checker<'a> {
         let nominal = self.callable_ref_function_type(scope, e, selection_expected, receiver, name);
         self.active_callable_reference = previous_callable_reference;
         let misfit = self.misfit_callable_references.remove(&e);
+        self.publish_callable_reference_constraints(e);
         if nominal.mentions_error() || nominal.mentions_pending() {
             self.selected_callable_reference_diagnostics.remove(&e);
         }
