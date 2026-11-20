@@ -328,9 +328,9 @@ struct PendingBody<'a> {
 enum PendingInitialization<'a> {
     /// The admitted initialization of the class's own fields and initializers.
     Class(Box<super::class_initialization::ClassInitialization<'a, 'a>>),
-    /// A secondary constructor's statements after its delegation to the primary constructor,
-    /// whose arguments the class's secondary constructor `secondary` passes.
-    PrimaryDelegation {
+    /// A secondary constructor's statements after its delegation to another constructor of the
+    /// class, whose arguments the class's secondary constructor `secondary` passes.
+    OwnDelegation {
         secondary: usize,
         arguments: Vec<crate::metadata::klib_ir::tree::KlibIrExprId>,
     },
@@ -984,22 +984,22 @@ impl DependencyBodyUnit {
                     (
                         Some((
                             class,
-                            PendingInitialization::PrimaryDelegation {
+                            PendingInitialization::OwnDelegation {
                                 secondary,
                                 arguments,
                             },
                         )),
                         Some(member),
-                    ) => lowering.delegate_to_primary(
+                    ) => lowering.delegate_within_class(
                         *class,
                         *secondary,
                         member,
                         arguments,
                         body.statements,
                     ),
-                    (Some((_, PendingInitialization::PrimaryDelegation { .. })), None) => {
+                    (Some((_, PendingInitialization::OwnDelegation { .. })), None) => {
                         Err(KlibBodyDeclineReason::SignatureMismatch(
-                            "a primary constructor delegation has no materialized class".to_owned(),
+                            "a delegation within the class has no materialized class".to_owned(),
                         ))
                     }
                     (None, value_member) => match value_member {
