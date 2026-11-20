@@ -8,8 +8,45 @@ use super::*;
 use crate::types::TyKind;
 
 impl Checker<'_> {
+    /// The array operation selected at `expression`: a compiler-built array literal or size
+    /// constructor, or a call whose selected declaration is one of the `kotlin` array factory
+    /// functions (`arrayOf`, `intArrayOf`, `emptyArray`, …).
+    pub(super) fn selected_array_operation(
+        &self,
+        expression: ExprId,
+    ) -> Option<crate::synthetics::SyntheticKind> {
+        if let Some(ExprLowering::CompilerSynthetic(kind)) = self.expr_lowers.get(&expression) {
+            return Some(*kind);
+        }
+        match self.resolved_calls.get(&expression) {
+            Some(ResolvedCall::TopLevel(call)) => match call.callable.compiler_intrinsic {
+                Some(crate::libraries::CompilerIntrinsic::ArrayFactory(kind)) => Some(kind),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Whether `expression` is an array factory call that kotlinc reads as an array literal: one
+    /// of `arrayOf`, `emptyArray` and the primitive `…ArrayOf` inside an annotation argument. A
+    /// literal is no call, so the checks of a call's reified type arguments and of its
+    /// `Array<Nothing>` result do not apply to it.
+    pub(super) fn is_annotation_array_literal_call(&self, expression: ExprId) -> bool {
+        use crate::types::ArrayFactoryKind;
+        self.annotation_argument_depth != 0
+            && matches!(
+                self.selected_array_operation(expression),
+                Some(
+                    ArrayFactoryKind::ReferenceVararg
+                        | ArrayFactoryKind::PrimitiveVararg(_)
+                        | ArrayFactoryKind::EmptyReference
+                )
+            )
+    }
+
     pub(super) fn check_array_of_nothing_expression(&mut self, expression: ExprId, ty: Ty) {
         if self.discover_anonymous_captures
+            || self.is_annotation_array_literal_call(expression)
             || self.suppresses_diagnostic("UNSUPPORTED")
             || matches!(
                 self.expr_lowers.get(&expression),

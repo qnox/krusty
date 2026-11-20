@@ -228,7 +228,7 @@ pub(crate) fn constructor_type_parameter(
     let source = intern(source);
     let semantic = intern(&format!(
         "\0ctor:{}:{declaration}:{ordinal}",
-        owner.name_id().0
+        owner.name_id().index()
     ));
     TYPE_PARAMETER_SOURCES
         .get_or_init(|| Mutex::new(HashMap::default()))
@@ -250,7 +250,7 @@ pub(crate) fn hidden_captured_type_parameter(
     let source = intern(source);
     let semantic = intern(&format!(
         "\0hidden-captured:{}:{ordinal}",
-        owner.name_id().0
+        owner.name_id().index()
     ));
     TYPE_PARAMETER_SOURCES
         .get_or_init(|| Mutex::new(HashMap::default()))
@@ -272,7 +272,7 @@ pub(crate) fn generated_function_type_parameter(
     let source = intern(source);
     let semantic = intern(&format!(
         "\0generated-fn:{}:{function}:{ordinal}",
-        owner.name_id().0
+        owner.name_id().index()
     ));
     TYPE_PARAMETER_SOURCES
         .get_or_init(|| Mutex::new(HashMap::default()))
