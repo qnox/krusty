@@ -106,7 +106,6 @@ boxingOptimization/casts.kt
 boxingOptimization/checkcastAndInstanceOf2.kt
 boxingOptimization/fold.kt
 boxingOptimization/foldRange.kt
-boxingOptimization/kt19767_2.kt
 boxingOptimization/kt5844.kt
 boxingOptimization/kt6842.kt
 boxingOptimization/maxMinByOrNull.kt
@@ -119,7 +118,6 @@ boxingOptimization/simpleUninitializedMerge.kt
 boxingOptimization/unsafeRemoving.kt
 boxingOptimization/unsignedArrayForEach.kt
 boxingOptimization/variables.kt
-bridges/complexTraitImpl.kt
 bridges/delegationComplexWithList.kt
 bridges/internalMethodFakeOverrideInFriendModule.kt
 bridges/internalMethodOverrideInFriendModule.kt
@@ -127,9 +125,7 @@ bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 bridges/internalMethodOverridePublishedApi.kt
 bridges/multipleModules1.kt
-bridges/noBridgeOnMutableCollectionInheritance.kt
 bridges/special.kt
-bridges/strListContains.kt
 bridges/test10.kt
 bridges/test11.kt
 bridges/test12.kt
@@ -305,8 +301,6 @@ coroutines/asyncIteratorNullMerge_1_3.kt
 coroutines/asyncIteratorToList_1_3.kt
 coroutines/asyncIterator_1_3.kt
 coroutines/await.kt
-coroutines/bridges/mapSuspendAbstractClear.kt
-coroutines/bridges/mapSuspendClear.kt
 coroutines/captureInfixFun.kt
 coroutines/captureMutableLocalVariableInsideCoroutineBlock.kt
 coroutines/captureUnaryOperator.kt
@@ -740,8 +734,6 @@ fp/powDouble.kt
 fp/powFloat.kt
 fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
-fullValueClasses/kt70461.kt
-fullValueClasses/lateinit.kt
 fullValueClasses/nonFinal.kt
 fullValueClasses/vararg.kt
 funInterface/basicFunInterfaceConversionClash.kt
@@ -992,7 +984,6 @@ inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClas
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypes.kt
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypesGeneric.kt
 inlineClasses/kt27113.kt
-inlineClasses/kt70461.kt
 inlineClasses/privateConstructorFunInterfaceMultiModule.kt
 inlineClasses/privateConstructorFunInterfaceMultiModuleGeneric.kt
 inlineClasses/removeInInlineCollectionOfInlineClassAsInt.kt
@@ -1940,7 +1931,6 @@ serialization/serializedCharConstant.kt
 serialization/serializedDefaultArgs.kt
 serialization/serializedEnumOrdinal.kt
 serialization/serializedVararg.kt
-smartCasts/negativesmartCastAugmentedAssignment.kt
 smartCasts/smartcastFromGenericToString.kt
 specialBuiltins/bridgeNotEmptyMap.kt
 specialBuiltins/bridges.kt
@@ -1948,7 +1938,6 @@ specialBuiltins/emptyList.kt
 specialBuiltins/emptyMap.kt
 specialBuiltins/emptyStringMap.kt
 specialBuiltins/enumAsOrdinaled.kt
-specialBuiltins/maps.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
 specialBuiltins/throwableComplex.kt
@@ -1969,7 +1958,6 @@ strings/constInStringTemplate.kt
 strings/kt2592.kt
 strings/kt3571.kt
 strings/nestedConcat.kt
-strings/stringPlusOnlyWorksOnString.kt
 strings/surrogatePair.kt
 strings/trimOptimization.kt
 super/innerClassLabeledSuperProperty2.kt
@@ -2027,7 +2015,6 @@ typeErasure/twoFunWithReifiedTypeParametersInlineFunWithTwoTypeParameters.kt
 typeErasure/twoFunWithTypeParametersInlineFunWithReifiedTypeParameters.kt
 typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParameters.kt
 typealias/abbreviationWithCapturedType.kt
-typealias/typeAliasAsBareType.kt
 unsignedTypes/forInUnsignedRangeWithCoercion.kt
 unsignedTypes/inUnsignedDownTo.kt
 unsignedTypes/kt47716.kt
