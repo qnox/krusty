@@ -115,6 +115,7 @@ fn complete_class_receivers(
                 class_receiver: true,
                 current: receiver_depth == 0,
                 receiver_depth,
+                dsl_shadowed: false,
             },
         );
     }
@@ -151,6 +152,7 @@ pub(super) fn declared_receivers(
                     } else {
                         coordinate
                     },
+                    dsl_shadowed: false,
                 }
             },
         )
@@ -199,6 +201,7 @@ pub(super) fn declared_receivers(
                         class_receiver: false,
                         current: depth == 0,
                         receiver_depth: depth,
+                        dsl_shadowed: false,
                     },
                 );
             }
@@ -254,6 +257,7 @@ pub(super) fn declared_receivers(
                 class_receiver: false,
                 current: false,
                 receiver_depth: usize::MAX,
+                dsl_shadowed: false,
             });
         }
     }
@@ -295,9 +299,11 @@ pub(super) fn declared_receivers(
                 class_receiver: false,
                 current: false,
                 receiver_depth: usize::MAX,
+                dsl_shadowed: false,
             });
         }
     }
+    checker.mark_dsl_shadowed_receivers(&mut receivers);
     receivers
 }
 
@@ -315,6 +321,7 @@ impl ImplicitReceiver {
             class_receiver: true,
             current: true,
             receiver_depth: 0,
+            dsl_shadowed: false,
         }
     }
 }
@@ -355,6 +362,7 @@ mod tests {
             class_receiver,
             current: receiver_depth == 0,
             receiver_depth,
+            dsl_shadowed: false,
         }
     }
 

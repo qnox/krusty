@@ -9,6 +9,7 @@ impl Checker<'_> {
     pub(super) fn check_expression_usage(&mut self, scope: &CheckerScope<'_>, expression: ExprId) {
         self.check_expression_opt_in(scope, expression);
         self.check_expression_deprecation(expression);
+        self.check_expression_dsl_scope(expression);
     }
 
     /// Check a type reference the body check resolved.
