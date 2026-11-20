@@ -97,7 +97,11 @@ pub(super) fn java_type_argument_nullability(ty: Ty) -> Ty {
         }
         TyKind::InProjection(inner) => Ty::in_projection(java_type_argument_nullability(inner)),
         TyKind::OutProjection(inner) => Ty::out_projection(java_type_argument_nullability(inner)),
-        TyKind::StarProjection(inner) => Ty::star_projection(java_type_argument_nullability(inner)),
+        // A star's bound is the signature parser's placeholder, not a Java type use. Declaration
+        // bounds replace the placeholder when the application meets its classifier; wrapping it in
+        // platform nullability first hides it from that step and a F-bounded `SELF` collapses to
+        // `Any!` (AssertJ's `AbstractThrowableAssert<?, ? extends Throwable>`).
+        TyKind::StarProjection(_) => ty,
         _ => java_type_nullability(ty, None),
     }
 }
