@@ -331,6 +331,7 @@ impl Filler<'_> {
             | PlanKey::DependencySetter(_) => {
                 Err("a dependency member numbered as a member of a module interface".to_owned())
             }
+            PlanKey::Installed(fid) => Ok(method(fid)),
             PlanKey::Getter(property) | PlanKey::Setter(property) => {
                 let setter = matches!(declaration.member, PlanKey::Setter(_));
                 let accessor = match ir.local_property_layouts.get(&property) {
