@@ -69,3 +69,12 @@ tasks.withType<AbstractArchiveTask>().configureEach {
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
 }
+
+// Resolves every dependency of every resolvable configuration, so CI can fill the Gradle cache for a
+// Kotlin release once, serially, before the matrix jobs read it (see the build-tools-deps job).
+tasks.register("resolveDependencies") {
+    notCompatibleWithConfigurationCache("resolves configurations at execution time")
+    doLast {
+        configurations.filter { it.isCanBeResolved }.forEach { it.resolve() }
+    }
+}

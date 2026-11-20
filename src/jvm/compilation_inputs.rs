@@ -69,9 +69,102 @@ pub struct JvmCompilationInputInventory {
     /// name keeps the historical "modules" spelling, but the value is deliberately widened at
     /// the SELECTION boundary rather than the reading boundary: a pre-jimage `rt.jar` is an
     /// ordinary archive classpath entry to the provider, so no jimage concept widens and the
-    /// resolver never learns a JDK layout.
+    /// resolver never learns a JDK layout. For an `-Xjdk-release` other than the JDK's own it
+    /// is the JDK's `lib/ct.sym`, read as the view of `ct_sym_release`.
     jdk_modules: Option<PathBuf>,
+    /// The release whose view of `jdk_modules` the compilation reads when that root is the JDK's
+    /// `lib/ct.sym` (see [`JdkApi::for_release`]); `None` for the JDK's own API.
+    ct_sym_release: Option<u8>,
     common_expectation_klib: Option<PathBuf>,
+}
+
+/// The JDK API a compilation compiles against: a bootclasspath root, and the release view to read
+/// when that root is the JDK's `lib/ct.sym`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JdkApi {
+    root: PathBuf,
+    ct_sym_release: Option<u8>,
+}
+
+impl JdkApi {
+    /// The selected JDK's own API: its module image, or `rt.jar` before JDK 9.
+    fn own(jdk_home: Option<&Path>) -> Option<Self> {
+        selected_jdk_modules(jdk_home).map(|root| JdkApi {
+            root,
+            ct_sym_release: None,
+        })
+    }
+
+    /// Select the JDK API for `-Xjdk-release=<release>` as kotlinc's `CliJavaModuleFinder` does.
+    /// The JDK's `lib/ct.sym` is required and names the releases it describes; the newest of them
+    /// is the JDK's own release, compiled against its own modules. Any other release it describes
+    /// is read from that release's signatures in `ct.sym`. A release it does not describe is an
+    /// error, as is a JDK without `ct.sym`. A release from 9 on is modular, so either error leaves
+    /// it without `java.base`, which kotlinc reports first. A release with no JDK to read, or the
+    /// JDK's own release in a home with no bootclasspath root, is a configuration error too (kotlinc
+    /// always runs on a JDK, and fails with an internal error on such a home). With no release,
+    /// the JDK's own API is selected, or nothing when there is none.
+    pub fn for_release(
+        jdk_home: Option<&Path>,
+        release: Option<u16>,
+    ) -> Result<Option<JdkApi>, Vec<String>> {
+        let Some(release) = release else {
+            return Ok(JdkApi::own(jdk_home));
+        };
+        let Some(home) = selected_jdk_home(jdk_home) else {
+            return Err(vec![format!(
+                "-Xjdk-release={release} needs a JDK: pass -jdk-home or set JAVA_HOME"
+            )]);
+        };
+        let unavailable = |reason: String| {
+            let mut errors = Vec::new();
+            if release >= 9 {
+                errors.push("module java.base cannot be found in the module graph".to_string());
+            }
+            errors.push(reason);
+            errors
+        };
+        let symbols = home.join("lib").join("ct.sym");
+        let releases = if symbols.is_file() {
+            crate::jvm::classpath::ct_sym_index::ct_sym_releases(&symbols)
+                .map_err(|error| vec![error])?
+        } else {
+            None
+        };
+        let Some(releases) = releases else {
+            return Err(unavailable(format!(
+                "this JDK does not have the 'ct.sym' file required for the '-Xjdk-release={release}' \
+                 option: {}",
+                home.display()
+            )));
+        };
+        if releases
+            .last()
+            .is_some_and(|&own| u16::from(own) == release)
+        {
+            return match JdkApi::own(Some(&home)) {
+                Some(own) => Ok(Some(own)),
+                None => Err(vec![format!(
+                    "-Xjdk-release={release} is the JDK's own release, but {} has neither \
+                     lib/modules nor jre/lib/rt.jar",
+                    home.display()
+                )]),
+            };
+        }
+        match u8::try_from(release)
+            .ok()
+            .filter(|release| releases.contains(release))
+        {
+            Some(release) => Ok(Some(JdkApi {
+                root: symbols,
+                ct_sym_release: Some(release),
+            })),
+            None => Err(unavailable(format!(
+                "'-Xjdk-release={release}' option is not supported by used JDK: {}",
+                home.display()
+            ))),
+        }
+    }
 }
 
 impl JvmCompilationInputInventory {
@@ -85,10 +178,19 @@ impl JvmCompilationInputInventory {
     /// This is the boundary used before `-no-jdk` turns ambient JDK discovery off and the selected
     /// JDK bootclasspath root is appended to the explicit compiler classpath instead.
     pub fn from_explicit_classpath_and_jdk(classpath: &[PathBuf], jdk_home: Option<&Path>) -> Self {
-        let jdk_modules = selected_jdk_modules(jdk_home);
+        Self::from_explicit_classpath_and_jdk_api(classpath, JdkApi::own(jdk_home))
+    }
+
+    /// Inventory inputs selected when an explicit classpath is combined with the JDK API that
+    /// [`JdkApi::for_release`] selected.
+    pub fn from_explicit_classpath_and_jdk_api(classpath: &[PathBuf], api: Option<JdkApi>) -> Self {
         let mut effective_classpath = classpath.to_vec();
-        effective_classpath.extend(jdk_modules.iter().cloned());
-        Self::from_classpath_and_jdk(effective_classpath, jdk_modules)
+        effective_classpath.extend(api.iter().map(|api| api.root.clone()));
+        let ct_sym_release = api.as_ref().and_then(|api| api.ct_sym_release);
+        let mut inventory =
+            Self::from_classpath_and_jdk(effective_classpath, api.map(|api| api.root));
+        inventory.ct_sym_release = ct_sym_release;
+        inventory
     }
 
     fn from_classpath_and_jdk(
@@ -111,8 +213,15 @@ impl JvmCompilationInputInventory {
         Self {
             effective_classpath,
             jdk_modules,
+            ct_sym_release: None,
             common_expectation_klib,
         }
+    }
+
+    /// The release whose view of the JDK's `lib/ct.sym` the classpath reads, when the selected JDK
+    /// root is that archive rather than the JDK's own API. The provider is built with it.
+    pub fn ct_sym_release(&self) -> Option<u8> {
+        self.ct_sym_release
     }
 
     /// Classpath roots the CLI hands to the JVM provider, in exact lookup order.
@@ -374,6 +483,117 @@ mod tests {
             explicit,
             "an unrecognized JDK home must not invent classpath entries"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `-Xjdk-release` selects from the releases `ct.sym` names: its newest is the JDK's own and
+    /// reads the module image, an older one reads that release's signatures, and one it does not
+    /// name, or a JDK without `ct.sym`, is reported in kotlinc's words.
+    #[test]
+    fn a_jdk_release_selects_the_matching_ct_sym_view() {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-jvm-jdk-release-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("lib")).expect("mkdir");
+        let modules = root.join("lib/modules");
+        std::fs::write(&modules, b"jimage").expect("modules");
+        let home = root.display().to_string();
+        let missing = |release: u16| {
+            format!(
+                "this JDK does not have the 'ct.sym' file required for the \
+                 '-Xjdk-release={release}' option: {home}"
+            )
+        };
+        assert_eq!(
+            JdkApi::for_release(Some(&root), Some(8)),
+            Err(vec![missing(8)])
+        );
+        assert_eq!(
+            JdkApi::for_release(Some(&root), Some(11)),
+            Err(vec![
+                "module java.base cannot be found in the module graph".to_string(),
+                missing(11)
+            ])
+        );
+
+        let symbols = root.join("lib/ct.sym");
+        let mut writer = crate::jvm::classfile::ClassWriter::new("demo/Legacy", "java/lang/Object");
+        writer.add_abstract_method(crate::jvm::classreader::ACC_PUBLIC, "legacy", "()V");
+        let file = std::fs::File::create(&symbols).expect("create ct.sym");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        let class = writer.finish();
+        for (name, bytes) in [
+            ("8/java.base/demo/Legacy.sig", class.as_slice()),
+            ("9A/java.base/demo/Modular.sig", b"unread".as_slice()),
+            ("C/system-modules", b"java.base".as_slice()),
+            ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0".as_slice()),
+        ] {
+            archive.start_file(name, options).expect("start entry");
+            std::io::Write::write_all(&mut archive, bytes).expect("write entry");
+        }
+        archive.finish().expect("finish ct.sym");
+
+        let own = JdkApi {
+            root: modules.clone(),
+            ct_sym_release: None,
+        };
+        assert_eq!(
+            JdkApi::for_release(Some(&root), None),
+            Ok(Some(own.clone()))
+        );
+        assert_eq!(JdkApi::for_release(Some(&root), Some(12)), Ok(Some(own)));
+        for release in [8, 9, 10] {
+            assert_eq!(
+                JdkApi::for_release(Some(&root), Some(release)),
+                Ok(Some(JdkApi {
+                    root: symbols.clone(),
+                    ct_sym_release: Some(release as u8),
+                })),
+                "release {release}"
+            );
+        }
+        let not_supported = |release: u16| {
+            format!("'-Xjdk-release={release}' option is not supported by used JDK: {home}")
+        };
+        assert_eq!(
+            JdkApi::for_release(Some(&root), Some(7)),
+            Err(vec![not_supported(7)])
+        );
+        assert_eq!(
+            JdkApi::for_release(Some(&root), Some(11)),
+            Err(vec![
+                "module java.base cannot be found in the module graph".to_string(),
+                not_supported(11)
+            ])
+        );
+
+        let api = JdkApi::for_release(Some(&root), Some(8)).expect("release 8");
+        let inventory = JvmCompilationInputInventory::from_explicit_classpath_and_jdk_api(&[], api);
+        assert_eq!(
+            inventory.effective_classpath(),
+            std::slice::from_ref(&symbols)
+        );
+        assert_eq!(
+            inventory.implicit_files().collect::<Vec<_>>(),
+            [symbols.as_path()]
+        );
+        assert_eq!(inventory.ct_sym_release(), Some(8));
+        let classpath = Classpath::new_with_friend_paths_and_jdk_release(
+            inventory.effective_classpath().to_vec(),
+            Vec::new(),
+            inventory.ct_sym_release(),
+        );
+        let class = classpath
+            .find("demo/Legacy")
+            .expect("the release 8 signature resolves");
+        assert!(class.method("legacy", "()V").is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 }

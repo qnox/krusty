@@ -248,10 +248,10 @@ pub(super) fn record(
     if updaters.is_empty() {
         return;
     }
-    ir.atomicfu = Some(Box::new(AtomicfuFileFacts {
+    ir.plugin_facts.record(AtomicfuFileFacts {
         updaters,
         operations,
-    }));
+    });
 }
 
 struct Recorder<'a, 'b> {
