@@ -15,8 +15,13 @@ use crate::objects::immutable;
 pub(super) enum FunctionEquality {
     /// A lambda is equal only to itself.
     Identity,
-    /// The checked declaration/adaptation kind and the semantic receiver's capture slot.
-    Declaration { kind: i32, receiver: Option<usize> },
+    /// The checked declaration/adaptation kind, the semantic receiver's capture slot, and how many
+    /// leading captures are values bound for the declaration's context parameters.
+    Declaration {
+        kind: i32,
+        receiver: Option<usize>,
+        contexts: usize,
+    },
 }
 
 impl Body<'_> {
@@ -65,12 +70,18 @@ impl Body<'_> {
             FunctionEquality::Identity => {
                 (self.runtime.identity.object, crate::identity::PREFIX_FIELDS)
             }
-            FunctionEquality::Declaration { receiver, .. } => {
-                if receiver.is_some_and(|slot| slot >= captures.len()) {
+            FunctionEquality::Declaration {
+                receiver, contexts, ..
+            } => {
+                if receiver.is_some_and(|slot| slot >= captures.len()) || contexts > captures.len()
+                {
                     return Err("a callable reference with an invalid bound receiver slot".into());
                 }
                 fields.push(immutable(ValType::I32));
                 fields.push(immutable(REFERENCE));
+                fields.push(immutable(ValType::nullable(
+                    self.runtime.callable_references.contexts,
+                )));
                 (
                     self.runtime.callable_references.object,
                     crate::callable_references::PREFIX_FIELDS,
@@ -214,7 +225,11 @@ impl Body<'_> {
             FunctionEquality::Identity => {
                 self.code.call(self.runtime.identity.allocate);
             }
-            FunctionEquality::Declaration { kind, receiver } => {
+            FunctionEquality::Declaration {
+                kind,
+                receiver,
+                contexts,
+            } => {
                 self.code
                     .call(self.runtime.identity.allocate)
                     .i32_const(kind);
@@ -226,6 +241,23 @@ impl Body<'_> {
                     )?;
                 } else {
                     self.code.ref_null(HeapType::None);
+                }
+                if contexts == 0 {
+                    self.code.ref_null(HeapType::Concrete(
+                        self.runtime.callable_references.contexts,
+                    ));
+                } else {
+                    for slot in 0..contexts {
+                        self.code.local_get(saved[slot]);
+                        self.coerce_emitted_value(
+                            params[slot],
+                            Ty::obj_name(krusty::types::wk::any()),
+                        )?;
+                    }
+                    self.code.array_new_fixed(
+                        self.runtime.callable_references.contexts,
+                        contexts as u32,
+                    );
                 }
             }
         }
@@ -257,6 +289,7 @@ impl Body<'_> {
             FunctionEquality::Declaration {
                 kind,
                 receiver: reference.bound_receiver.map(|_| reference.captures.len()),
+                contexts: reference.bound_context_slots().len(),
             },
             None,
         )?;

@@ -170,7 +170,8 @@ impl Runtime {
             string,
             object_equals,
         );
-        let callable_references = CallableReferences::declare(module, &objects, object_equals);
+        let callable_references =
+            CallableReferences::declare(module, &objects, object_equals, references);
         let string_concat = module.declare();
         let hashing = Hashing::declare(module);
         let class_tokens = ClassTokens::declare(

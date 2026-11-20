@@ -126,6 +126,13 @@ typedef struct KType {
        implementing no interface of the program has none: nothing dispatches through it here.
        Appended, like the names above, so no existing initializer moves. */
     const kt_fn *itable;
+    /* On a CALLABLE REFERENCE's descriptor: the byte offsets of the fields holding the values it
+       bound for the declaration's context parameters, `reference_context_count` of them, in
+       parameter order. Equality and `hashCode` read them as they read the bound receiver, so two
+       references to one declaration with different contexts are different. NULL, and a count of
+       0, for a reference binding none. */
+    const uint32_t *reference_context_offsets;
+    uint32_t reference_context_count;
 } KType;
 
 /* The compiler writes each descriptor field at a fixed offset (`ktype` in
@@ -133,7 +140,9 @@ typedef struct KType {
 _Static_assert(offsetof(KType, class_names) == 148, "KType.class_names moved");
 _Static_assert(offsetof(KType, collection_size) == 152, "KType.collection_size moved");
 _Static_assert(offsetof(KType, itable) == 160, "KType.itable moved");
-_Static_assert(sizeof(KType) == 168, "KType changed size");
+_Static_assert(offsetof(KType, reference_context_offsets) == 168, "KType.reference_context_offsets moved");
+_Static_assert(offsetof(KType, reference_context_count) == 176, "KType.reference_context_count moved");
+_Static_assert(sizeof(KType) == 184, "KType changed size");
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.
 
