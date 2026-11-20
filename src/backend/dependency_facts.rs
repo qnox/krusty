@@ -139,6 +139,15 @@ impl BackendCallableFact {
         }
     }
 
+    /// The name of the property whose getter this serialized accessor is, as its provider
+    /// decoded it.
+    pub fn getter_of(&self) -> Option<&str> {
+        self.klib_body_accessor
+            .as_ref()
+            .filter(|accessor| accessor.role == crate::libraries::KlibAccessorRole::Getter)
+            .map(|accessor| &*accessor.name)
+    }
+
     /// The selected operation shared by declaration and member realization views.
     pub fn compiler_operation(&self) -> Option<crate::libraries::CompilerIntrinsic> {
         self.compiler_intrinsic
@@ -301,6 +310,7 @@ impl BackendCallableFact {
                 generic_signature: self.generic_sig.as_deref(),
                 type_parameters: &self.klib_body_type_parameters,
                 reified_type_parameter_ordinals: &self.reified_type_parameter_ordinals,
+                inline_modifiers: &self.inline_modifiers,
                 compiler_intrinsic: self.compiler_operation(),
                 range_construction: self.member_realization.range_construction(),
                 declaration_modifiers: self.klib_body_declaration_modifiers,
