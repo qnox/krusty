@@ -1336,11 +1336,60 @@ jobs:
             dist-gradle/*-SHA256SUMS
           if-no-files-found: error
 
+  # Fills the Gradle cache the build-tools matrix reads. Every matrix job resolves the Build Tools
+  # API of its own Kotlin release from Maven Central, and a release no master run has resolved yet
+  # (a new one under test) is in no restored cache, so all rows fetched at once and Central answered
+  # 429. This job resolves every release's dependencies serially, retrying a refusal after a wait, and
+  # saves the cache for the rows that follow. Unlike the other Gradle caches it saves on a queue
+  # branch too: the rows are in the same run, so they see an entry their own branch saved.
+  build-tools-deps:
+    needs: [build-tool-bins]
+    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['build-tools-deps'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - *just-on-path
+      - *install-just
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: zulu
+          java-version: '17.0.21+0.3.1'
+      - name: select the Gradle user home
+        id: gradle-home
+        run: |
+          echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
+          echo "version=$(sed -n 's/^distributionUrl=.*gradle-\(.*\)-bin\.zip$/\1/p' tools/krusty-build-tools/gradle/wrapper/gradle-wrapper.properties)" >> "$GITHUB_OUTPUT"
+      - *restore-gradle-home
+      - *count-gradle-home
+      - *setup-gradle
+      - name: resolve the dependencies of every Kotlin release
+        run: |
+          set -euo pipefail
+          while read -r kotlin; do
+            for attempt in 1 2 3 4 5; do
+              if tools/krusty-build-tools/gradlew --no-daemon -p tools/krusty-build-tools -PkotlinVersion="$kotlin" resolveDependencies; then
+                continue 2
+              fi
+              echo "::warning::resolving Kotlin $kotlin failed (attempt $attempt); waiting before the next"
+              sleep $((attempt * 60))
+            done
+            echo "resolving Kotlin $kotlin failed after 5 attempts" >&2
+            exit 1
+          done < <(just kotlin-versions)
+      - name: check for new Gradle files
+        id: gradle-grown
+        env:
+          RESTORED: ${{ steps.gradle-restored.outputs.files }}
+        run: |
+          now=$(find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" "$GRADLE_USER_HOME/wrapper/dists" -type f 2> /dev/null | wc -l)
+          echo "Gradle ${{ steps.gradle-home.outputs.version }}: $RESTORED restored files, $now now"
+          if [ "$now" -gt "$RESTORED" ]; then echo "save=true" >> "$GITHUB_OUTPUT"; fi
+      - *save-gradle-home
+
   # Build, test and package the Kotlin Build Tools API implementation once per exact supported
   # Kotlin version, driving the shared krusty binary. Release publishes these bytes unchanged.
   build-tools:
     name: build-tools (${{ matrix.kotlin }})
-    needs: [build-tool-bins]
+    needs: [build-tool-bins, build-tools-deps]
     strategy:
       fail-fast: false
       matrix:
@@ -1371,6 +1420,9 @@ jobs:
         with:
           name: tool-bins
       - name: build, test and package for Kotlin ${{ matrix.kotlin }}
+        env:
+          # The dependencies came from the build-tools-deps job's cache; never fetch from Central here.
+          KRUSTY_GRADLE_OFFLINE: "1"
         run: |
           set -euo pipefail
           chmod +x krusty
