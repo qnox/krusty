@@ -480,7 +480,6 @@ coroutines/inlineClasses/direct/overrideSuspendFun_Any.kt
 coroutines/inlineClasses/direct/overrideSuspendFun_Any_itf.kt
 coroutines/inlineClasses/direct/overrideSuspendFun_Int.kt
 coroutines/inlineClasses/direct/syntheticAccessor.kt
-coroutines/inlineClasses/genericParameterResult.kt
 coroutines/inlineClasses/kt84305.kt
 coroutines/inlineClasses/resume/boxTypeParameterOfSuperType.kt
 coroutines/inlineClasses/resume/boxTypeParameterOfSuperTypeResult.kt
@@ -582,7 +581,6 @@ coroutines/kt15016.kt
 coroutines/kt21080.kt
 coroutines/kt21605.kt
 coroutines/kt24135.kt
-coroutines/kt25912.kt
 coroutines/kt28844.kt
 coroutines/kt31784.kt
 coroutines/kt41394.kt
@@ -662,7 +660,6 @@ coroutines/varSpilling/kt75926.kt
 coroutines/varSpilling/kt79276.kt
 coroutines/varValueConflictsWithTable.kt
 coroutines/varValueConflictsWithTableSameSort.kt
-coroutines/varargCallFromSuspend.kt
 coroutines/withReceiver.kt
 cycles/cycle.kt
 cycles/cycle_do.kt
@@ -1053,7 +1050,6 @@ inline/typeParameterSymbolIsUnbound.kt
 inline/vararg.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
 inlineArgsInPlace/kt49370.kt
-inlineArgsInPlace/suspensionPointInsideArgument.kt
 inlineClass/customEquals.kt
 inlineClass/defaultEquals.kt
 inlineClass/nestedInlineClasses.kt
