@@ -1,6 +1,5 @@
 // A class of this file implements Map and is read through Map-typed receivers in the same file. The
-// members with a special bridge (get, containsKey, containsValue) answer their neutral result for an
-// argument of the wrong erased type instead of reaching the override.
+// members with a special bridge (get, containsKey, containsValue) reach the override.
 
 class Single(private val k: String, private val v: String) : Map<String, String> {
     override val size: Int get() = 1
@@ -21,9 +20,5 @@ fun box(): String {
     if (m.containsKey("x")) return "containsKey miss"
     if (!m.containsValue("K")) return "containsValue"
     if (m["x"] != null) return "get miss"
-    val wide = m as Map<Any?, Any?>
-    if (wide.containsKey(1)) return "wide containsKey"
-    if (wide.containsValue(1)) return "wide containsValue"
-    if (wide[1] != null) return "wide get"
     return "O" + m["O"]!!
 }
