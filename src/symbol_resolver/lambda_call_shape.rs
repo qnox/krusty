@@ -9,6 +9,11 @@ pub struct LambdaCallShape {
     /// collect and suppress constraints only for these variables; symbolic types owned by an
     /// enclosing declaration remain fixed expectations.
     pub generic_formals: Vec<crate::types::TyParamName>,
+    /// The solutions of [`Self::generic_formals`] fixed before any value argument is analyzed:
+    /// explicit type arguments, and the receiver's evidence for a formal that is invariant in the
+    /// receiver or is a lambda input. A postponed lambda's inputs consume them on every recheck, as
+    /// they consume the solutions its own constraints produce.
+    pub fixed_input_bindings: crate::symbol_resolver::GSigBinds,
     /// Selected declaration parameters in source-argument order. This preserves the ordinary
     /// argument constraints that must be published before a later lambda is contextually checked,
     /// even when the selected callable comes from a provider rather than the source module.

@@ -3,7 +3,7 @@
 //! Code that takes a type apart matches on [`Ty::kind`] instead of on `Ty` itself. A `TyKind`
 //! carries its component types by value; `Ty` itself is only an id into the type table.
 
-use super::{FnSig, Ty, TyList, TyParamName, TypeName};
+use super::{FnSig, IntersectionParts, Ty, TyList, TyParamName, TypeName};
 
 /// One layer of a [`Ty`], with its component types by value.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -82,7 +82,13 @@ pub enum TyKind {
     /// A denotable intersection `A & B & …` produced when a type variable's only constraints are
     /// incompatible upper bounds (`Int & String`). It is a subtype of each component and is not
     /// [`TyKind::Nothing`]: the value still exists at run time.
-    Intersection(TyList),
+    ///
+    /// It also carries the type the intersection approximates to where a supertype is wanted,
+    /// when inference fixed a type variable to it below an upper type its public approximation
+    /// does not reach: `pick(StringBuilder(), "a")` for `fun <T : CharSequence> pick(vararg
+    /// values: T): T` is `Serializable & Comparable<…> & CharSequence` that publishes
+    /// `CharSequence`. Checking reads the components only.
+    Intersection(IntersectionParts),
 }
 
 /// The built-in classifier types, as kinds: `TyKind::INT` is the kind of [`Ty::Int`], so a match on
