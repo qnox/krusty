@@ -496,26 +496,34 @@ box-corpus VERSION=`just max-version`:
     done
     echo "$box"
 
-# Provision the kotlinx.serialization compiler-plugin box corpus (plugins/kotlinx-serialization/
-# testData/boxIr) from JetBrains/kotlin at the matching tag — blobless+sparse, idempotent. The
-# reference suite our own serialization conformance tests mirror (and must meet-or-exceed). Point
-# KRUSTY_SER_BOXIR_DIR at the printed path.
-ser-corpus VERSION=`just max-version`:
+# Provision a compiler plugin's upstream box corpus: the `upstream` directories its descriptor
+# (src/plugins/<name>/boxes/corpus.txt) names, from JetBrains/kotlin at the matching tag —
+# blobless+sparse, idempotent. These are the reference suites our own plugin conformance tests mirror
+# (and must meet-or-exceed). Prints the checkout root; each `upstream` path is below it.
+plugin-corpus PLUGIN VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
+    plugin="{{PLUGIN}}"
     ver="{{VERSION}}"
-    root="$PWD/target/cache/ser-corpus/$ver"
-    box="$root/plugins/kotlinx-serialization/testData/boxIr"
-    if [ -d "$box" ]; then echo "$box"; exit 0; fi
-    echo "cloning kotlinx.serialization boxIr corpus (v${ver})…" >&2
+    descriptor="$(ls src/plugins/"$plugin"/boxes/corpus.txt 2>/dev/null || true)"
+    [ -n "$descriptor" ] || { echo "no plugin corpus descriptor for $plugin" >&2; exit 1; }
+    mapfile -t upstream < <(sed -n 's/^upstream[[:space:]]*=[[:space:]]*//p' "$descriptor")
+    [ "${#upstream[@]}" -gt 0 ] || { echo "plugin $plugin names no upstream corpus" >&2; exit 1; }
+    root="$PWD/target/cache/plugin-corpus/$plugin/$ver"
+    complete=1
+    for dir in "${upstream[@]}"; do [ -d "$root/$dir" ] || complete=0; done
+    if [ "$complete" = 1 ]; then echo "$root"; exit 0; fi
+    echo "cloning the $plugin box corpus (v${ver})…" >&2
     rm -rf "$root"
     while read -r name; do unset "$name"; done < <(git rev-parse --local-env-vars)
     git clone --depth 1 --filter=blob:none --sparse --branch "v${ver}" \
         https://github.com/JetBrains/kotlin.git "$root" >&2 \
         || { echo "failed to clone JetBrains/kotlin v${ver}" >&2; rm -rf "$root"; exit 1; }
-    git -C "$root" sparse-checkout set plugins/kotlinx-serialization/testData >&2
-    [ -d "$box" ] || { echo "serialization boxIr dir missing after sparse checkout: $box" >&2; exit 1; }
-    echo "$box"
+    git -C "$root" sparse-checkout set "${upstream[@]}" >&2
+    for dir in "${upstream[@]}"; do
+        [ -d "$root/$dir" ] || { echo "$plugin corpus directory missing after sparse checkout: $dir" >&2; exit 1; }
+    done
+    echo "$root"
 
 # Provision the KSP reference test corpus (google/ksp kotlin-analysis-api/testData + its test-utils
 # processors) — shallow+sparse, idempotent. The authoritative KSP capability suite our own KSP

@@ -440,6 +440,20 @@ class-dump: live kotlinc summary invocations=<n> tests=<n>
 class-dump: live kotlinc summary cache-miss test=<module>::<case> invocations=<n>
 ```
 
+## Plugin box corpora
+
+A compiler plugin keeps its own box corpus beside its code: `src/plugins/<name>/boxes/corpus.txt`
+describes what the plugin's cases need, and the shared harness (`krusty::conformance::plugin_corpus`)
+discovers it with no per-plugin branch. The descriptor names the case directive that enables the
+plugin (`// WITH_COMPOSE`), the reference compiler plugin jar and `-P` options, the runtime jars, the
+upstream `JetBrains/kotlin` `testData` directories, and the inclusive Kotlin release bracket the
+corpus covers; the module documentation lists the format. A case whose compiler is outside the
+bracket fails closed instead of compiling without the plugin.
+
+`just plugin-corpus <plugin> [version]` provisions the descriptor's `upstream` directories under
+`target/cache/plugin-corpus/<plugin>/<version>/` and prints that root. A new plugin registers by
+adding its descriptor to `DESCRIPTORS` in `src/conformance/plugin_corpus.rs`.
+
 ## CLI Corpus Ratchet
 
 `kotlin_cli_jvm_conformance` (in the `conformance` binary) runs Kotlin's own command-line test
