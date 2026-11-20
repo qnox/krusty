@@ -1480,6 +1480,16 @@ jobs:
           if printf '9.6.0\n%s\n' "${{ matrix.gradle }}" | sort -V -C; then
             echo 'enabled=true' >> "$GITHUB_OUTPUT"
           fi
+      # The SDK is installed into a directory of this job alone, but its contents depend only on the
+      # packages below, so a restored copy seeds that directory and setup-android downloads nothing.
+      # Saved by a master run once the install has filled it, like every cache here.
+      - name: restore the Android integration SDK
+        id: android-sdk
+        if: steps.android.outputs.enabled == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/krusty-android/${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/sdk
+          key: android-sdk-v1-${{ runner.os }}-${{ runner.arch }}-platforms-android-36
       - name: provision the Android integration SDK
         if: steps.android.outputs.enabled == 'true'
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
@@ -1490,6 +1500,12 @@ jobs:
           ANDROID_USER_HOME: ${{ runner.temp }}/krusty-android/${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/user
         with:
           packages: 'platforms;android-36'
+      - name: save the Android integration SDK
+        if: steps.android.outputs.enabled == 'true' && github.ref == 'refs/heads/master' && steps.android-sdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/krusty-android/${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}/sdk
+          key: ${{ steps.android-sdk.outputs.cache-primary-key }}
       # Our runners' image holds each Gradle the matrix runs in the tool cache. setup-gradle installs a
       # gradle-version itself (and asks services.gradle.org first) unless it is the gradle on PATH, and
       # those downloads failed lanes with 504s and timeouts.
