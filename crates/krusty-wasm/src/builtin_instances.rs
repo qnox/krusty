@@ -23,16 +23,22 @@ pub(super) struct BuiltinInstances {
     interfaces: Vec<(TypeName, Vec<Ty>)>,
 }
 
+/// Which of the runtime's own classes are below a tested interface.
+#[derive(Clone, Copy)]
+pub(super) struct RuntimeLayouts {
+    pub(super) string_builder: bool,
+    pub(super) array_list: bool,
+}
+
 impl Runtime {
     /// Record that the builtin values of `subtypes` are instances of `interface`, which something
-    /// tests for: a string's now, and each box's now or when the box is declared. With
-    /// `string_builder`, the runtime's `StringBuilder`, whose class is below `interface`, is one
-    /// too.
+    /// tests for: a string's now, and each box's now or when the box is declared. Each of
+    /// `laid_out`, the runtime's own classes below `interface`, is one too.
     pub(super) fn builtin_instances(
         &mut self,
         interface: TypeName,
         subtypes: Vec<Ty>,
-        string_builder: bool,
+        laid_out: RuntimeLayouts,
     ) {
         if self
             .builtin_instance_tests
@@ -47,10 +53,17 @@ impl Runtime {
                 .interfaces
                 .representation_instance_of(self.string, interface);
         }
-        if string_builder {
+        if laid_out.string_builder {
             self.objects
                 .interfaces
                 .instance_of(self.string_builders.class, interface);
+        }
+        // The list is an instance by its struct, as a string is, so the interface's members are
+        // not obligations of the list: its class implements only the members the runtime realizes.
+        if laid_out.array_list {
+            self.objects
+                .interfaces
+                .representation_instance_of(self.array_lists.list, interface);
         }
         for form in self.box_forms() {
             if subtypes.contains(&form.boxed) {
