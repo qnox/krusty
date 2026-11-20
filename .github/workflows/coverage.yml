@@ -71,8 +71,8 @@ jobs:
         with:
           distribution: zulu
           java-version: |
-            21
-            25
+            21.0.13+0.3.1
+            25.0.5+0.3.1
       # Toolchain entries are named by the exact toolchain they hold, never by a hash of the
       # checkout, and every job that needs one restores the same entry.
       - name: select the maximum Kotlin version
@@ -203,9 +203,12 @@ jobs:
         run: |
           root=$(just kotlin-native "$(just max-version)")
           echo "KRUSTY_KOTLIN_NATIVE=$root" >> "$GITHUB_ENV"
-      - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          maven-version: '3.9.11'
+          path: ~/.cache/krusty-tools/maven
+          key: maven-distribution-3.9.11-v1
+      - name: install Maven
+        run: scripts/install-maven.sh 3.9.11
       - name: coverage gate
         id: coverage
         env:

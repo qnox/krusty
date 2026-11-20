@@ -826,3 +826,49 @@ fn warning_policy_precedence_matches_kotlinc() {
     }
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// `-Xallow-no-source-files` compiles a command line with no sources as an empty module: kotlinc
+/// exits successfully and writes only the module's `.kotlin_module`. Build tools pass it for a
+/// source set that has no Kotlin sources.
+#[test]
+fn allow_no_source_files_writes_the_empty_module_like_kotlinc() {
+    let dir = common::scratch_dir().expect("allocate a scratch directory");
+    let arguments = |output: &str| {
+        vec![
+            "-Xallow-no-source-files".to_string(),
+            "-module-name".to_string(),
+            "empty".to_string(),
+            "-d".to_string(),
+            dir.join(output).to_string_lossy().into_owned(),
+        ]
+    };
+    let (code, stderr) = common::kotlinc_server::kotlinc_compile_unrecorded(&arguments("kotlinc"))
+        .expect("the reference kotlinc is available");
+    assert_eq!((code, stderr.as_str()), (0, ""));
+
+    let krusty = Command::new(common::krusty_binary())
+        .args(arguments("krusty"))
+        .output()
+        .expect("run krusty");
+    assert_eq!(
+        (
+            krusty.status.code(),
+            String::from_utf8_lossy(&krusty.stderr).into_owned()
+        ),
+        (Some(0), String::new())
+    );
+
+    let files = output_file_ledger(&dir.join("kotlinc"));
+    assert_eq!(
+        files,
+        std::collections::BTreeSet::from(["META-INF/empty.kotlin_module".to_string()])
+    );
+    assert_eq!(output_file_ledger(&dir.join("krusty")), files);
+    for file in &files {
+        assert_eq!(
+            fs::read(dir.join("krusty").join(file)).unwrap(),
+            fs::read(dir.join("kotlinc").join(file)).unwrap(),
+            "{file}"
+        );
+    }
+}
