@@ -1542,7 +1542,9 @@ impl BodyFirChecker<'_> {
                 )
             })?;
             let value = self.expression(*argument)?;
-            if crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_5_0_RC) {
+            if !crate::kotlin_version::Quirks::target()
+                .has(crate::kotlin_version::Quirk::ContextArgumentEvaluatedBeforeExtensionReceiver)
+            {
                 self.body.record_receiver_ordered_context_argument(value);
             }
             let target = self.resolved_type(
