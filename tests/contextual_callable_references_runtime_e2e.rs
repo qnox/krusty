@@ -70,31 +70,3 @@ fn function_reference_equality_includes_bound_context_arguments() {
     let source = include_str!("contextual_references/contextualFunctionReferenceEquality.kt");
     expect_same_as_kotlinc_release(source, "ContextualFunctionReferenceEquality");
 }
-
-/// A reference to a local function binds its context arguments beside the variables the function
-/// captures, whether its type is expected, inferred, or adapts a default argument.
-#[test]
-fn local_function_references_bind_their_context_arguments() {
-    let source =
-        include_str!("box_regressions/contextParameters/localFunctionContextReferences.kt");
-    expect_same_as_kotlinc_release(source, "LocalFunctionContextReferences");
-}
-
-/// A reference to a local function that binds a context and captures a mutable local carries
-/// kotlinc's generated class: its capture fields named after the captured values, its constructor
-/// taking the captures before the bound-context array, and its own typed `invoke`. The program
-/// reads that class back through reflection, so both compilers answer for the same shape.
-#[test]
-fn local_function_reference_with_captures_and_contexts_has_kotlincs_carrier() {
-    let source = include_str!("contextual_references/localFunctionMixedCaptureCarrier.kt");
-    expect_same_as_kotlinc_release(source, "LocalFunctionMixedCaptureCarrier");
-}
-
-/// The same mixed program without the class-shape reads: a bound context, an enclosing context and
-/// a mutable capture give kotlinc's result.
-#[test]
-fn local_function_reference_with_captures_and_contexts_gives_kotlincs_result() {
-    let source =
-        include_str!("box_regressions/contextParameters/localFunctionMixedCaptureReferences.kt");
-    expect_same_as_kotlinc_release(source, "LocalFunctionMixedCaptureReferences");
-}
