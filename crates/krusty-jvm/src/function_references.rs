@@ -501,6 +501,7 @@ fn realize_adapter_reference(
         unbox_param_nullable: vec![false; function_type.params.len()],
         box_ret: None,
         staticbound_recv_unbox: None,
+        bound_context_unbox: Vec::new(),
         invoke: None,
         function_type: reference.function_type.non_null(),
         reflection_signature,

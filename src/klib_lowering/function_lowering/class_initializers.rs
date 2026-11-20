@@ -112,11 +112,8 @@ pub(in super::super) fn local_member_header(
             "a constructor is not a member function of its class".to_owned(),
         ));
     }
-    if !function.type_parameters.is_empty() {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "a generic member of a non-public class",
-        ));
-    }
+    // A member's own type parameters are formals of its frame beside its class's.
+    let types = &declared_type_parameters::own(function, arena, types.clone(), resolve)?;
     if !function.context_parameters.is_empty()
         || function.extension_receiver.is_some()
         || function.companion_extension_class.is_some()
