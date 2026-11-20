@@ -239,7 +239,13 @@ impl PropertyRegistry {
                 continue;
             };
             let mutable = declaration.flags.has(DeclarationFlags::MUTABLE);
-            if declaration.visibility == krusty::types::Visibility::Private
+            // A block property's private storage is still read by an inline function another file
+            // splices; it keeps a storage entry, since it has no accessor to call.
+            if is_private_block_storage(ir, property, declaration.visibility) {
+                if declaration.flags.has(DeclarationFlags::CONST) {
+                    continue;
+                }
+            } else if declaration.visibility == krusty::types::Visibility::Private
                 || !accessor_realized(declaration.flags, mutable)
             {
                 continue;
@@ -262,10 +268,17 @@ impl PropertyRegistry {
                     declaration.owner.is_none() && declaration.extension_receiver.is_none()
                 }
             };
+            let private_block = declaration.visibility == krusty::types::Visibility::Private
+                && matches!(
+                    declaration.placement,
+                    krusty::ir::IrStaticPlacement::CompanionBlock { .. }
+                );
             if !receiverless
                 || !declaration.context_parameters.is_empty()
-                || declaration.visibility == krusty::types::Visibility::Private
-                || !accessor_realized(declaration.flags, declaration.mutable)
+                || (private_block && declaration.flags.has(DeclarationFlags::CONST))
+                || (!private_block
+                    && (declaration.visibility == krusty::types::Visibility::Private
+                        || !accessor_realized(declaration.flags, declaration.mutable)))
             {
                 continue;
             }
@@ -456,6 +469,24 @@ impl PropertyRegistry {
             _ => Ok(()),
         }
     }
+}
+
+/// Whether `property` is a `companion { }` block property whose private storage has no accessor of
+/// its own: the only way another file's spliced inline body reaches it.
+fn is_private_block_storage(
+    ir: &IrFile,
+    property: PropertyId,
+    visibility: krusty::types::Visibility,
+) -> bool {
+    visibility == krusty::types::Visibility::Private
+        && matches!(
+            ir.local_property_layouts.get(&property),
+            Some(IrLocalPropertyLayout::TopLevelStorage {
+                storage,
+                getter: None,
+                ..
+            }) if ir.companion_blocks.is_storage(*storage)
+        )
 }
 
 /// Direct storage is valid only for the accessor directions whose source declaration left the
