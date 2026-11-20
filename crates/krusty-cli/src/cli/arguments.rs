@@ -376,7 +376,7 @@ pub(super) fn apply(
         // Compiler plugins, in kotlinc's syntax. They are resolved against the extension registry
         // before compiling, never dropped: a plugin that changes the output must either run
         // natively or fail the compile.
-        "-Xplugin" | "-Xcompiler-plugin" => {
+        "-Xplugin" | "-Xcompiler-plugin" | "-Xcompiler-plugin-order" => {
             for value in list {
                 opts.plugins.accept(&format!("{name}={value}"), || None);
             }

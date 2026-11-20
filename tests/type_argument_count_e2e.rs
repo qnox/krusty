@@ -130,3 +130,22 @@ fun narrowed(x: Box<String>) = x is Box
         ],
     );
 }
+
+/// A declaration whose signature cannot finalize sends the module to diagnostic recovery, which
+/// checks every finalized declaration again. Their typealias applications are still applications
+/// of the alias, not bare applications of the generic classifier it expands to.
+#[test]
+fn an_alias_application_keeps_its_alias_when_another_signature_fails() {
+    assert_errors_match_kotlinc(
+        "\
+open class Holder<T>(val t: T)
+typealias Names = List<String>
+typealias StringHolder = Holder<String>
+class Named : StringHolder(\"x\")
+fun first(names: Names): String = names[0]
+fun Names.second(other: Names) = this + other
+fun broken() = undefined
+",
+        &["7:16: unresolved reference 'undefined'."],
+    );
+}
