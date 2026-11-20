@@ -54,7 +54,7 @@ jobs:
   route:
     # Every run waits on this job, so it runs on our own small runner: on GitHub's runners it queued
     # behind the jobs it had placed there and held whole runs back.
-    runs-on: [self-hosted, helper-1c-1gb]
+    runs-on: [self-hosted, utility]
     timeout-minutes: 5
     continue-on-error: true
     outputs:
@@ -210,8 +210,14 @@ jobs:
         with:
           path: ~/.cache/krusty/plugin-host
           key: plugin-host-${{ github.job }}-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
+          # A changed adapter or pin must not start from nothing: the newest entry of this job holds
+          # the pinned jars, each verified by its checksum before it is reused, so only what the
+          # change added is downloaded (Central answered 429 to a full download of ~190 MB).
+          restore-keys: |
+            plugin-host-${{ github.job }}-
       - name: plugin host tests
-        run: cargo test --profile gate -p krusty-plugin-host -- --include-ignored
+        # The real-download test provisions into the cache restored above, not a directory of its own.
+        run: KRUSTY_CACHE_DIR="$HOME/.cache/krusty" cargo test --profile gate -p krusty-plugin-host -- --include-ignored
       - &save-plugin-host-runtime
         name: save plugin host runtime
         if: github.ref == 'refs/heads/master' && steps.plugin-host-runtime.outputs.cache-hit != 'true'
@@ -388,9 +394,16 @@ jobs:
           key: ${{ steps.kotlin-native.outputs.cache-primary-key }}
       # The session test compiles against the embedder. This is the Maven the plugin jobs
       # install; a missing install fails that test.
-      - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
+      # The Maven distribution is cached and checksum-pinned (scripts/install-maven.sh), so a
+      # mirror outage cannot fail a job that already holds it.
+      - &restore-maven
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          maven-version: '3.9.11'
+          path: ~/.cache/krusty-tools/maven
+          key: maven-distribution-3.9.11-v1
+      - &install-maven
+        name: install Maven
+        run: scripts/install-maven.sh 3.9.11
       # Coverage measures these same suites, instrumented, every night (.github/workflows/coverage.yml).
       - name: own test suites
         id: own-tests
@@ -552,7 +565,7 @@ jobs:
   # through the checkout path it was built in, which every runner of this pool shares, so it runs on
   # the pool that built it. Coverage runs it instrumented every night (.github/workflows/coverage.yml).
   e2e:
-    needs: [build-tool-bins]
+    needs: [build-tool-bins, conformance-deps]
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['e2e'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -637,6 +650,14 @@ jobs:
       - *restore-cross-packages
       - *install-cross-runners
       - *save-cross-packages
+      # The suite provisions the pinned serialization, Compose runtime and coroutines jars; the
+      # conformance-deps job downloaded them in this run, so a runner never asks Central for them.
+      - name: restore the pinned dependency jars
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: conformance-deps-v1-${{ hashFiles('scripts/fetch-conformance-deps.sh', 'kotlin-versions', 'src/toolchain.rs') }}
+          fail-on-cache-miss: true
       - name: download e2e binary
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -653,6 +674,7 @@ jobs:
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
           KRUSTY_REQUIRE_KLIB: "1"
           KRUSTY_REQUIRE_KOTLIN_NATIVE: "1"
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: |
           set -euo pipefail
           source scripts/test-gate-defaults.sh
@@ -693,9 +715,43 @@ jobs:
           path: test-failures/
           if-no-files-found: ignore
 
+  # Downloads the extra libraries the conformance rows read (the atomicfu compiler plugin of each
+  # Kotlin release and the pinned atomicfu runtimes) once, serially and with retries, and saves them
+  # for the rows that follow. A row whose own cache entry was missing used to download them itself,
+  # and a refused or missing answer from Central failed that row (Native 2.4.20 on master). It saves
+  # on a queue branch too: the rows are in the same run, so they see an entry their own branch saved.
+  conformance-deps:
+    needs: [build-tool-bins]
+    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['conformance-deps'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - *just-on-path
+      - *install-just
+      - name: restore the extra conformance libraries
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: conformance-deps-v1-${{ hashFiles('scripts/fetch-conformance-deps.sh', 'kotlin-versions', 'src/toolchain.rs') }}
+      - name: download the libraries of every Kotlin release
+        if: steps.deps.outputs.cache-hit != 'true'
+        env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+        run: |
+          set -euo pipefail
+          while read -r kotlin; do
+            scripts/fetch-conformance-deps.sh "$kotlin"
+          done < <(just kotlin-versions)
+      - name: save the extra conformance libraries
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    needs: [build-tool-bins]
+    needs: [build-tool-bins, conformance-deps]
     strategy:
       fail-fast: false
       matrix:
@@ -740,8 +796,18 @@ jobs:
         with:
           path: target/cache/kotlinc/${{ matrix.version }}
           key: kotlinc-${{ matrix.version }}
+      # The conformance-deps job downloaded the atomicfu plugin and runtimes of every release and
+      # saved them under this key in this run; a row never fetches them from Central itself.
+      - name: restore the extra conformance libraries
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: conformance-deps-v1-${{ hashFiles('scripts/fetch-conformance-deps.sh', 'kotlin-versions', 'src/toolchain.rs') }}
+          fail-on-cache-miss: true
+      # The Native lane's JVM oracle needs the same extra libraries (the atomicfu plugin), so it
+      # restores the entry the JVM lane saves; only the JVM lane saves it.
       - name: restore serialization and KSP conformance inputs (${{ matrix.version }})
-        if: matrix.target == 'jvm'
+        if: matrix.target == 'jvm' || matrix.target == 'native'
         id: conformance-inputs
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -749,7 +815,7 @@ jobs:
             target/cache/ser-corpus/${{ matrix.version }}
             target/cache/ksp-toolchain
             target/cache/krusty-deps
-          key: kotlin-conformance-inputs-${{ matrix.version }}
+          key: kotlin-conformance-inputs-v2-${{ matrix.version }}
       - name: restore Wasm target KLIB dependencies (${{ matrix.version }})
         if: startsWith(matrix.target, 'wasm-')
         id: wasm-klibs
@@ -900,6 +966,10 @@ jobs:
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
+          # The box cases' extra libraries (the atomicfu plugin and runtime, Compose, serialization)
+          # resolve from the restored `krusty-deps` entry; without this they went to
+          # `~/.cache/krusty-deps` and were downloaded from Maven Central on every run.
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: |
           set -euo pipefail
           chmod +x conformance-bin krusty
@@ -913,6 +983,7 @@ jobs:
         # Complete migration runs exceeded the former 600-second corpus budget. Keep ordinary
         # and focused deadlines unchanged; a corpus timeout still fails this row.
         env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
           KRUSTY_NATIVE_BYTE_REPORT: ${{ github.workspace }}/native-byte-equality.txt
           KRUSTY_KLIB_REFERENCE_CACHE: ${{ github.workspace }}/target/cache/klib-references
@@ -930,6 +1001,7 @@ jobs:
         id: native_focused
         continue-on-error: true
         env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.native-recording-mode.outputs.write }}
@@ -1135,7 +1207,7 @@ jobs:
     name: ci-and-conformance
     needs: [ci, lint, plugin-host, e2e, conformance, build-gradle-plugin, gradle, maven, build-tools, bazel]
     if: always()
-    runs-on: [self-hosted, helper-1c-1gb]
+    runs-on: [self-hosted, utility]
     steps:
       - name: require every merge gate to succeed
         env:
@@ -1264,11 +1336,60 @@ jobs:
             dist-gradle/*-SHA256SUMS
           if-no-files-found: error
 
+  # Fills the Gradle cache the build-tools matrix reads. Every matrix job resolves the Build Tools
+  # API of its own Kotlin release from Maven Central, and a release no master run has resolved yet
+  # (a new one under test) is in no restored cache, so all rows fetched at once and Central answered
+  # 429. This job resolves every release's dependencies serially, retrying a refusal after a wait, and
+  # saves the cache for the rows that follow. Unlike the other Gradle caches it saves on a queue
+  # branch too: the rows are in the same run, so they see an entry their own branch saved.
+  build-tools-deps:
+    needs: [build-tool-bins]
+    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['build-tools-deps'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - *just-on-path
+      - *install-just
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: zulu
+          java-version: '17.0.21+0.3.1'
+      - name: select the Gradle user home
+        id: gradle-home
+        run: |
+          echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
+          echo "version=$(sed -n 's/^distributionUrl=.*gradle-\(.*\)-bin\.zip$/\1/p' tools/krusty-build-tools/gradle/wrapper/gradle-wrapper.properties)" >> "$GITHUB_OUTPUT"
+      - *restore-gradle-home
+      - *count-gradle-home
+      - *setup-gradle
+      - name: resolve the dependencies of every Kotlin release
+        run: |
+          set -euo pipefail
+          while read -r kotlin; do
+            for attempt in 1 2 3 4 5; do
+              if tools/krusty-build-tools/gradlew --no-daemon -p tools/krusty-build-tools -PkotlinVersion="$kotlin" resolveDependencies; then
+                continue 2
+              fi
+              echo "::warning::resolving Kotlin $kotlin failed (attempt $attempt); waiting before the next"
+              sleep $((attempt * 60))
+            done
+            echo "resolving Kotlin $kotlin failed after 5 attempts" >&2
+            exit 1
+          done < <(just kotlin-versions)
+      - name: check for new Gradle files
+        id: gradle-grown
+        env:
+          RESTORED: ${{ steps.gradle-restored.outputs.files }}
+        run: |
+          now=$(find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" "$GRADLE_USER_HOME/wrapper/dists" -type f 2> /dev/null | wc -l)
+          echo "Gradle ${{ steps.gradle-home.outputs.version }}: $RESTORED restored files, $now now"
+          if [ "$now" -gt "$RESTORED" ]; then echo "save=true" >> "$GITHUB_OUTPUT"; fi
+      - *save-gradle-home
+
   # Build, test and package the Kotlin Build Tools API implementation once per exact supported
   # Kotlin version, driving the shared krusty binary. Release publishes these bytes unchanged.
   build-tools:
     name: build-tools (${{ matrix.kotlin }})
-    needs: [build-tool-bins]
+    needs: [build-tool-bins, build-tools-deps]
     strategy:
       fail-fast: false
       matrix:
@@ -1299,6 +1420,9 @@ jobs:
         with:
           name: tool-bins
       - name: build, test and package for Kotlin ${{ matrix.kotlin }}
+        env:
+          # The dependencies came from the build-tools-deps job's cache; never fetch from Central here.
+          KRUSTY_GRADLE_OFFLINE: "1"
         run: |
           set -euo pipefail
           chmod +x krusty
@@ -1464,9 +1588,8 @@ jobs:
           java-version: '17'
           cache: maven
           cache-dependency-path: tools/krusty-maven/pom.xml
-      - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
-        with:
-          maven-version: '3.9.11'
+      - *restore-maven
+      - *install-maven
       - name: build portable local-Maven distribution
         run: |
           set -euo pipefail
@@ -1501,9 +1624,8 @@ jobs:
           java-version: '17'
           cache: maven
           cache-dependency-path: tools/krusty-maven/pom.xml
-      - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
-        with:
-          maven-version: '3.9.11'
+      - *restore-maven
+      - *install-maven
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins

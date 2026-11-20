@@ -664,12 +664,21 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             krusty::ir::IrSuperCallKind::Function => {}
         }
         let ir = self.file.ir;
-        let Some(krusty::fir::ResolvedFunctionOverrideTarget::Module(source)) = declaration else {
-            return Err(declined!(
-                "a `super` call without a source declaration (`{name}`)"
-            ));
+        // A dependency member is a method of a class this file materializes.
+        let method = match declaration {
+            Some(krusty::fir::ResolvedFunctionOverrideTarget::Module(source)) => {
+                ir.checked_callable_functions.get(&source)
+            }
+            Some(krusty::fir::ResolvedFunctionOverrideTarget::External(member)) => {
+                ir.dependency_methods.get(&member)
+            }
+            None => {
+                return Err(declined!(
+                    "a `super` call without a source declaration (`{name}`)"
+                ))
+            }
         };
-        let Some(&fid) = ir.checked_callable_functions.get(&source) else {
+        let Some(&fid) = method else {
             return Err(declined!("a `super` call to an unknown method (`{name}`)"));
         };
         let Some(id) = self.file.functions[fid as usize] else {

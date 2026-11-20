@@ -214,8 +214,12 @@ KSP does not run again while its inputs and its output are as its last successfu
 (`src/compile/avoidance.rs`): its arguments, the paths and contents of KSP's class path, the
 processors, the module's classpath and sources and the JDK's `release` file, and the files below
 `build/generated/<module>/main`, recorded in `build/krusty-toolchain/<module>jvm/ksp.state`. This is
-decided before the module's own check, whose fingerprint reads the classes KSP generated. A run that generates Kotlin or Java sources fails the module, since
-krusty-toolchain does not compile generated sources yet.
+decided before the module's own check, whose fingerprint reads the classes and sources KSP
+generated. The directory of the Kotlin sources KSP generates is the fragment's last source
+directory, so they compile with the module's own, the fragment then described to the compiler as
+one of several source directories, as the toolchain does. A run that generates Java sources fails
+the module, since krusty-toolchain compiles Kotlin sources only, and so does a run that generates
+the only Kotlin sources of a module that has none of its own.
 
 ### Toolchain plugins
 

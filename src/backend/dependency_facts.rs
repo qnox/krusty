@@ -139,6 +139,15 @@ impl BackendCallableFact {
         }
     }
 
+    /// The name of the property whose getter this serialized accessor is, as its provider
+    /// decoded it.
+    pub fn getter_of(&self) -> Option<&str> {
+        self.klib_body_accessor
+            .as_ref()
+            .filter(|accessor| accessor.role == crate::libraries::KlibAccessorRole::Getter)
+            .map(|accessor| &*accessor.name)
+    }
+
     /// The selected operation shared by declaration and member realization views.
     pub fn compiler_operation(&self) -> Option<crate::libraries::CompilerIntrinsic> {
         self.compiler_intrinsic
@@ -1275,7 +1284,7 @@ impl CheckedBackendCallables {
 
     /// Freeze the `CharSequence` members resolution selected for a target whose `StringBuilder`
     /// reads an appended sequence through them
-    /// ([`crate::backend::Backend::appends_char_sequences_by_index`]); no source call need name
+    /// ([`crate::backend::Backend::reads_appended_char_sequences`]); no source call need name
     /// them.
     pub(crate) fn freeze_char_sequence_protocol(
         &mut self,

@@ -607,6 +607,9 @@ impl FileLowering<'_> {
                     .and_then(|(_, itable)| itable.get(*number as usize))
                     .map(|function| self.object_function(*function)),
                 DependencyImplementation::Function(function) => Some(function.clone()),
+                DependencyImplementation::Declared(function) => {
+                    Some(self.object_function(*function))
+                }
                 DependencyImplementation::Bridge { .. } => self
                     .published_dependency_bridges
                     .get(&(class, identity.clone()))
