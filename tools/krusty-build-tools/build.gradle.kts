@@ -44,6 +44,7 @@ val versionResource = tasks.register("versionResource") {
 
 tasks.test {
     useJUnitPlatform()
+    testLogging { exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL }
     // The tests drive a real krusty binary: -Pkrusty.binary=<path> or KRUSTY_BIN.
     val binary = providers.gradleProperty("krusty.binary").orElse(providers.environmentVariable("KRUSTY_BIN"))
     inputs.property("krustyBinary", binary.orElse(""))
@@ -65,6 +66,9 @@ testing {
             }
             targets.all {
                 testTask.configure {
+                    // A failed build under test carries the nested Gradle build's output in its
+                    // message; the log shows it whole, where the default shows only its first line.
+                    testLogging { exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL }
                     val binary = providers.gradleProperty("krusty.binary").orElse(providers.environmentVariable("KRUSTY_BIN"))
                     inputs.property("krustyBinary", binary.orElse(""))
                     systemProperty("krusty.kotlinVersion", kotlinVersion.get())
