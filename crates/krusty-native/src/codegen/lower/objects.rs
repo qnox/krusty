@@ -17,6 +17,7 @@ use krusty::types::TypeName;
 
 #[cfg(test)]
 mod layout_tests;
+mod map_members;
 mod walking;
 pub(super) use walking::WalkMembers;
 
@@ -55,7 +56,9 @@ pub(super) mod ktype {
     /// The interface table; see the note on `KType`. Absent for a type implementing no interface
     /// of the program.
     pub const ITABLE: u32 = 160;
-    pub const SIZE: usize = 168;
+    /// The `Map` members of a class of the program implementing it; see the note on `KType`.
+    pub const MAP_MEMBERS: u32 = 168;
+    pub const SIZE: usize = 176;
 }
 
 const CLASS_NAMES_MEMBER: u32 = 1;
@@ -680,6 +683,7 @@ impl<'a> FileLowering<'a> {
             ),
             (ktype::QUALIFIED_NAME, qualified_name_data),
             (ktype::SIMPLE_NAME, simple_name_data),
+            (ktype::MAP_MEMBERS, walk.map_members),
         ] {
             let Some(data) = data else {
                 continue;
