@@ -985,13 +985,16 @@ impl BodyLowering<'_, '_, '_> {
             .property(target)
             .ok_or("a range member without its property")?
             .getter;
-        let implementors: Vec<_> = self
-            .file
-            .implementors_of(internal)
-            .into_iter()
-            .filter_map(|class| self.external_property_getter_slot(class, getter))
+        let arms = self.file.implementors_of(internal);
+        let implementors: Vec<_> = arms
+            .iter()
+            .filter_map(|&class| self.external_property_getter_slot(class, getter))
             .collect();
-        if implementors.len() != module_implementors.len() {
+        // Every class of the module that can be an instance must be answered by an arm that has
+        // a getter to enter: an arm also answers the classes below it.
+        if implementors.len() != arms.len()
+            || self.file.classes_answered_by(&arms) != module_implementors.len()
+        {
             return Err(declined!(
                 "the member `{name}` of a range type this file implements with a class whose \
                  override cannot be dispatched to"
