@@ -24,7 +24,7 @@ mod class_entry_bytes;
 mod class_locations;
 mod class_members;
 pub mod content_snapshot;
-mod ct_sym_index;
+pub(crate) mod ct_sym_index;
 mod declaration_annotations;
 mod entry_class_reads;
 mod external_identities;

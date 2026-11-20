@@ -11,7 +11,8 @@ mod specialization;
 mod value_numbering;
 
 pub(crate) use body_splice::{
-    fresh_value_base, splice_inline_body, InlineBodySplice, InlineBodySpliceFailure, SplicedResult,
+    fresh_value_base, splice_inline_body, InlineBodySplice, InlineBodySpliceFailure, InlineOperand,
+    SplicedResult,
 };
 pub(crate) use result_frame::{frame_exit, produce_sole_tail_return, InlineReturn};
 pub(crate) use specialization::specialize_inline_copy;

@@ -57,7 +57,16 @@ done
 
 fetch org.jetbrains.kotlinx kotlinx-serialization-core-jvm "$serialization" jar
 fetch org.jetbrains.kotlinx kotlinx-serialization-json-jvm "$serialization" jar
+# tests/serializer_return_value_status_e2e.rs compares against a must-use runtime, 1.11.0.
+fetch org.jetbrains.kotlinx kotlinx-serialization-core-jvm 1.11.0 jar
+# tests/klib_class_surface_e2e.rs reads the pinned runtime of the host's Native target; CI hosts
+# are linux-x86_64.
+fetch org.jetbrains.kotlinx kotlinx-serialization-core-linuxx64 "$serialization" klib
 fetch org.jetbrains.kotlinx kotlinx-coroutines-core-jvm 1.9.0 jar
 fetch androidx.compose.runtime runtime-desktop "$compose" jar "$google"
 fetch androidx.compose.runtime runtime-annotation-jvm "$compose" jar "$google"
 fetch androidx.collection collection-jvm 1.5.0 jar "$google"
+# The exact-version wasm-wasi stdlib and the wasm kotlin-test KLIBs the KLIB e2e and box lanes read.
+fetch org.jetbrains.kotlin kotlin-stdlib-wasm-wasi "$version" klib
+fetch org.jetbrains.kotlin kotlin-test-wasm-js "$version" klib
+fetch org.jetbrains.kotlin kotlin-test-wasm-wasi "$version" klib

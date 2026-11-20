@@ -415,6 +415,14 @@ file and position, and a dependency's function by its `CallableIdentity`. IR the
 yet, such as a type annotation or a module function's type parameters, refuses the request by what
 it is, before anything is added; a session builds one module.
 
+`Host::generate` returns the module the plugins left, as a `ModuleIr` again (`adapter/ModuleOutput.kt`
+frames it): the files krusty sent, each with every declaration it holds now. An element a plugin made
+without a source position keeps kotlinc's `UNDEFINED_OFFSET` or `SYNTHETIC_OFFSET`, which `Span`
+spells as `Span::UNDEFINED` and `Span::SYNTHETIC`. The whole module is written before it is sent, so
+IR the plugin IR does not cover, such as a `when` a plugin made, refuses the module by what it is,
+naming the element, instead of returning the module without it. A test runs a plugin that changes
+constants and adds calls, and requires the exact module it leaves.
+
 The IR covers top-level functions with regular parameters and a block body (an expression body as
 the block kotlinc makes of it), local `val` and `var`, constants, reads and plain assignments of
 parameters and locals, `return`, and calls to module and dependency functions with their type and
