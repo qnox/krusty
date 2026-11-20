@@ -1096,7 +1096,6 @@ inline/propertyAccessorInline.kt
 inline/redundantCoercionsCleaner.kt
 inline/redundantCoercionsCleanerKT48876.kt
 inline/redundantCoercionsCleanerKT49356.kt
-inline/requireNotNull.kt
 inline/rootConstructor.kt
 inline/safeCall.kt
 inline/sharedVar.kt
