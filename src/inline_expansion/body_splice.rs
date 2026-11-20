@@ -21,7 +21,7 @@ pub(crate) struct InlineBodySplice<'a> {
     /// The part of the function's body the use runs.
     pub(crate) body: ExprId,
     /// The use's operand for each of the function's parameters, its dispatch receiver first.
-    pub(crate) operands: Vec<ExprId>,
+    pub(crate) operands: Vec<InlineOperand>,
     /// The use's type arguments, by the function's type parameter identities.
     pub(crate) bindings: &'a HashMap<String, Ty>,
     /// The reified ones among [`Self::bindings`], at their run-time types.
@@ -30,6 +30,16 @@ pub(crate) struct InlineBodySplice<'a> {
     pub(crate) statement: bool,
     /// The prefix of the label of the loop a return leaves the copied body by.
     pub(crate) label_prefix: &'a str,
+}
+
+/// What a parameter of the copied body reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InlineOperand {
+    /// A value the use computes, bound to a fresh local before the copied body runs.
+    Value(ExprId),
+    /// A local of the caller the parameter reads in place: a value already bound to it, or a
+    /// lambda whose invocations the caller expands itself.
+    Slot(u32),
 }
 
 /// A use expanded: the operand declarations, then the copied body's effect or value.
@@ -98,7 +108,8 @@ pub(crate) fn splice_inline_body(
         .collect::<Vec<_>>();
     let read = crate::ir::read_values(ir, body);
     for (ordinal, operand) in operands.iter().enumerate() {
-        if !read.contains(&(ordinal as u32)) {
+        if let (InlineOperand::Value(operand), false) = (operand, read.contains(&(ordinal as u32)))
+        {
             ir.mark_unread_inline_operand(*operand);
         }
     }
@@ -108,6 +119,13 @@ pub(crate) fn splice_inline_body(
     let mut operand_slots = Vec::with_capacity(operands.len());
     let mut statements = Vec::with_capacity(operands.len());
     for (ordinal, (operand, ty)) in operands.into_iter().zip(operand_types).enumerate() {
+        let operand = match operand {
+            InlineOperand::Value(operand) => operand,
+            InlineOperand::Slot(slot) => {
+                operand_slots.push(Some(slot));
+                continue;
+            }
+        };
         let slot = allocate_temporary(next_temporary)?;
         let declaration = ir.add_expr(IrExpr::Variable {
             index: slot,

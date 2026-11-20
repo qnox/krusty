@@ -1,0 +1,379 @@
+//! Inline functions the unit's bodies call.
+//!
+//! kotlinc expands each call of an inline function of a library it links, which a library compiled
+//! before Kotlin 2.4.20 still serializes as a call. The unit lowers such a function from its
+//! serialized body like any other, keeps it out of the emitted program, and expands every call of
+//! it from that lowered body, as common lowering expands a call of an inline function it compiles.
+//! A lambda the call passes for a parameter the function inlines is not created: each invocation
+//! of the parameter in the copied body is expanded from the lambda's own body instead.
+
+use crate::fx_hash::{HashMap, HashSet};
+
+use crate::inline_expansion::{InlineBodySplice, InlineOperand, SplicedResult};
+use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
+use crate::libraries::KlibBodyCallable;
+use crate::metadata::klib_ir::tree::KlibIrFunction;
+use crate::types::{stored_value_ty, InlineExpansionMode, InlineParameterModifier};
+
+use super::super::decline::KlibBodyDeclineReason;
+use super::super::function_lowering::FunctionHeader;
+use super::super::inline_templates::{expansion_modes, modifiers_with_receiver};
+
+/// Whether the serialized `function` is inline: every call of it is expanded, never made.
+fn declares_inline(function: &KlibIrFunction) -> bool {
+    function.base.flags & crate::metadata::function_flags::IS_INLINE != 0
+}
+
+/// Declare `function` as an inline callee when it is inline, unless it is the selected `root`:
+/// the root is lowered as the declaration it is, and a call of an inline callee is expanded.
+pub(super) fn declare_callee(
+    ir: &mut IrFile,
+    function: FunId,
+    declaration: &KlibIrFunction,
+    header: &FunctionHeader,
+    selected: Option<KlibBodyCallable<'_>>,
+    root: bool,
+) -> Result<(), KlibBodyDeclineReason> {
+    if root || !declares_inline(declaration) {
+        return Ok(());
+    }
+    let modifiers = selected.map(KlibBodyCallable::inline_modifiers);
+    declare(ir, function, declaration, header, modifiers)
+}
+
+/// Declare `function`, lowered from the serialized inline `declaration` with `header`, as one the
+/// unit expands at each call. `modifiers` are the `crossinline`/`noinline` modifiers of its value
+/// parameters the selected declaration records, which decide the parameters whose lambdas are
+/// expanded. A form whose expansion is not modelled declines the call.
+pub(super) fn declare(
+    ir: &mut IrFile,
+    function: FunId,
+    declaration: &KlibIrFunction,
+    header: &FunctionHeader,
+    modifiers: Option<&[InlineParameterModifier]>,
+) -> Result<(), KlibBodyDeclineReason> {
+    if !declaration.type_parameters.is_empty() {
+        return Err(KlibBodyDeclineReason::UnsupportedOperation(
+            "a call of a generic inline function",
+        ));
+    }
+    if declaration.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0 {
+        return Err(KlibBodyDeclineReason::UnsupportedOperation(
+            "a call of a suspend inline function",
+        ));
+    }
+    let receiver = header.extension_receiver_index();
+    let modifiers = match modifiers {
+        Some(modifiers) => modifiers.to_vec(),
+        // Only a function-typed parameter's modifier decides its expansion.
+        None if header
+            .params()
+            .iter()
+            .all(|parameter| !parameter.non_null().is_fun()) =>
+        {
+            vec![
+                InlineParameterModifier::None;
+                header.params().len() - usize::from(receiver.is_some())
+            ]
+        }
+        None => {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call of an inline function whose parameter modifiers are not selected",
+            ))
+        }
+    };
+    let modes = expansion_modes(header.params(), receiver, &modifiers)?;
+    let info = ir
+        .fn_params
+        .get_mut(&function)
+        .expect("a declared function publishes its parameters");
+    info.inline_modifiers = modifiers_with_receiver(&modifiers, receiver);
+    info.expansion_modes = modes;
+    ir.inline_fns.insert(function);
+    ir.inline_only_fns.insert(function);
+    Ok(())
+}
+
+/// Expand every call of an inline function of the unit in `ir`, including the calls a copied body
+/// itself makes.
+pub(super) fn expand_calls(ir: &mut IrFile) -> Result<(), KlibBodyDeclineReason> {
+    let mut sites = Vec::new();
+    for site in 0..ir.exprs.len() as ExprId {
+        if inline_callee(ir, site)?.is_some() {
+            sites.push(site);
+        }
+    }
+    if sites.is_empty() {
+        return Ok(());
+    }
+    let mut expansion = Expansion {
+        next_temporary: crate::inline_expansion::fresh_value_base(ir),
+        stack: HashSet::default(),
+        lambdas: HashMap::default(),
+    };
+    for site in sites {
+        expansion.call(ir, site)?;
+    }
+    Ok(())
+}
+
+/// The inline function of the unit `site` calls, when it is such a call. A call that leaves
+/// arguments to an inline function's defaults is not expanded, so it declines.
+fn inline_callee(ir: &IrFile, site: ExprId) -> Result<Option<FunId>, KlibBodyDeclineReason> {
+    let IrExpr::Call { callee, .. } = ir.expr(site) else {
+        return Ok(None);
+    };
+    match **callee {
+        Callee::Local(function) => Ok(ir.inline_only_fns.contains(&function).then_some(function)),
+        Callee::LocalWithDefaults { function, .. } if ir.inline_only_fns.contains(&function) => {
+            Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call of an inline function that leaves arguments to its defaults",
+            ))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// A lambda passed for an inlined parameter: its implementation and the caller's locals holding
+/// the values it captured.
+#[derive(Clone)]
+struct InlinedLambda {
+    function: FunId,
+    captures: Vec<u32>,
+}
+
+/// The state of the expansions of one unit.
+struct Expansion {
+    next_temporary: u32,
+    /// The inline functions and lambdas whose expansion is in progress.
+    stack: HashSet<FunId>,
+    /// The local each inlined parameter's lambda stands in, by the slot the copied bodies read.
+    lambdas: HashMap<u32, InlinedLambda>,
+}
+
+impl Expansion {
+    /// Expand the call `site` of an inline function, and then the calls and lambda invocations its
+    /// copied body makes.
+    fn call(&mut self, ir: &mut IrFile, site: ExprId) -> Result<(), KlibBodyDeclineReason> {
+        let Some(function) = inline_callee(ir, site)? else {
+            return Ok(());
+        };
+        let IrExpr::Call {
+            dispatch_receiver,
+            args,
+            ..
+        } = ir.expr(site).clone()
+        else {
+            unreachable!("the site was proved to be a call")
+        };
+        let modes = ir
+            .inline_expansion_modes(function)
+            .map(<[_]>::to_vec)
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "an inline function publishes no expansion mode for each parameter".to_owned(),
+                )
+            })?;
+        if modes.len() != args.len() {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an inline call's arguments disagree with its function's parameters".to_owned(),
+            ));
+        }
+        let mut statements = Vec::new();
+        let mut lambdas = Vec::new();
+        let mut operands = dispatch_receiver
+            .into_iter()
+            .map(InlineOperand::Value)
+            .collect::<Vec<_>>();
+        for (argument, mode) in args.into_iter().zip(modes) {
+            let lambda = match mode {
+                InlineExpansionMode::Splice => self.lambda(ir, argument, &mut statements)?,
+                InlineExpansionMode::Receiver | InlineExpansionMode::Materialize => None,
+            };
+            operands.push(match lambda {
+                Some(slot) => {
+                    lambdas.push(slot);
+                    InlineOperand::Slot(slot)
+                }
+                None => InlineOperand::Value(argument),
+            });
+        }
+        let body = Self::body(ir, function)?;
+        let expanded = self.splice(ir, site, function, body, operands, statements)?;
+        // Only an invocation of an inlined parameter is expanded; any other use would need the
+        // lambda as an object, which the call never creates.
+        if lambdas.iter().any(|slot| reads(ir, expanded, *slot)) {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "an inline function's lambda parameter used other than by invoking it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The local an inlined parameter's `argument` stands in, with the declarations of the values
+    /// it captures appended to `statements`, when the argument is a lambda.
+    fn lambda(
+        &mut self,
+        ir: &mut IrFile,
+        argument: ExprId,
+        statements: &mut Vec<ExprId>,
+    ) -> Result<Option<u32>, KlibBodyDeclineReason> {
+        let lambda = match ir.expr(argument).clone() {
+            // A parameter of an enclosing expansion passed on keeps standing in its lambda.
+            IrExpr::GetValue(slot) if self.lambdas.contains_key(&slot) => return Ok(Some(slot)),
+            IrExpr::Lambda {
+                impl_fn,
+                captures,
+                sam: None,
+                ..
+            } => {
+                let types = ir.functions[impl_fn as usize].params.clone();
+                let mut slots = Vec::with_capacity(captures.len());
+                for (capture, ty) in captures.into_iter().zip(types) {
+                    let slot = self.temporary()?;
+                    statements.push(ir.add_expr(IrExpr::Variable {
+                        index: slot,
+                        ty: stored_value_ty(ty),
+                        init: Some(capture),
+                        named: false,
+                    }));
+                    slots.push(slot);
+                }
+                // The lambda is expanded at each invocation, never created.
+                ir.inline_only_fns.insert(impl_fn);
+                InlinedLambda {
+                    function: impl_fn,
+                    captures: slots,
+                }
+            }
+            _ => return Ok(None),
+        };
+        let slot = self.temporary()?;
+        self.lambdas.insert(slot, lambda);
+        Ok(Some(slot))
+    }
+
+    /// Expand the invocation `site` of the lambda `lambda` from the lambda's body.
+    fn invocation(
+        &mut self,
+        ir: &mut IrFile,
+        site: ExprId,
+        lambda: InlinedLambda,
+        args: Vec<ExprId>,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        let operands = lambda
+            .captures
+            .iter()
+            .map(|slot| InlineOperand::Slot(*slot))
+            .chain(args.into_iter().map(InlineOperand::Value))
+            .collect();
+        let body = Self::body(ir, lambda.function)?;
+        self.splice(ir, site, lambda.function, body, operands, Vec::new())?;
+        Ok(())
+    }
+
+    /// Replace `site` with the expansion of `function`'s `body` for `operands` after `statements`,
+    /// then expand the calls and invocations the copy makes. Returns the expansion.
+    fn splice(
+        &mut self,
+        ir: &mut IrFile,
+        site: ExprId,
+        function: FunId,
+        body: ExprId,
+        operands: Vec<InlineOperand>,
+        mut statements: Vec<ExprId>,
+    ) -> Result<ExprId, KlibBodyDeclineReason> {
+        if !self.stack.insert(function) {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a recursive inline function",
+            ));
+        }
+        let none = HashMap::default();
+        let spliced = crate::inline_expansion::splice_inline_body(
+            ir,
+            InlineBodySplice {
+                function,
+                body,
+                operands,
+                bindings: &none,
+                reified_bindings: &none,
+                statement: false,
+                label_prefix: "$klib_inline$",
+            },
+            &mut self.next_temporary,
+        )
+        .map_err(|failure| {
+            KlibBodyDeclineReason::SignatureMismatch(format!(
+                "an inline function body cannot be expanded at its call: {failure:?}"
+            ))
+        })?;
+        statements.extend(spliced.statements);
+        let value = match spliced.produced {
+            SplicedResult::Value(value) => value,
+            SplicedResult::Statement(statement) => {
+                statements.push(statement);
+                ir.add_expr(IrExpr::UnitInstance)
+            }
+        };
+        ir.exprs[site as usize] = IrExpr::Block {
+            stmts: statements,
+            value: Some(value),
+        };
+        ir.inline_regions.insert(site);
+        let mut copies = spliced.copies.into_values().collect::<Vec<_>>();
+        copies.sort_unstable();
+        for copy in copies {
+            if inline_callee(ir, copy)?.is_some() {
+                self.call(ir, copy)?;
+            } else if let Some((lambda, args)) = self.invoked(ir, copy) {
+                self.invocation(ir, copy, lambda, args)?;
+            }
+        }
+        self.stack.remove(&function);
+        Ok(site)
+    }
+
+    /// The inlined lambda `site` invokes, with the invocation's arguments.
+    fn invoked(&self, ir: &IrFile, site: ExprId) -> Option<(InlinedLambda, Vec<ExprId>)> {
+        let IrExpr::InvokeFunction { func, args, .. } = ir.expr(site) else {
+            return None;
+        };
+        let IrExpr::GetValue(slot) = ir.expr(*func) else {
+            return None;
+        };
+        Some((self.lambdas.get(slot)?.clone(), args.clone()))
+    }
+
+    fn body(ir: &IrFile, function: FunId) -> Result<ExprId, KlibBodyDeclineReason> {
+        ir.functions
+            .get(function as usize)
+            .and_then(|function| function.body)
+            .ok_or(KlibBodyDeclineReason::NoBody)
+    }
+
+    fn temporary(&mut self) -> Result<u32, KlibBodyDeclineReason> {
+        let slot = self.next_temporary;
+        self.next_temporary = slot.checked_add(1).ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "an inline expansion overflows the caller's locals".to_owned(),
+            )
+        })?;
+        Ok(slot)
+    }
+}
+
+/// Whether the tree under `root` reads the local `slot`.
+fn reads(ir: &IrFile, root: ExprId, slot: u32) -> bool {
+    let mut pending = vec![root];
+    let mut seen = HashSet::default();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if matches!(ir.expr(expression), IrExpr::GetValue(read) if *read == slot) {
+            return true;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
+}

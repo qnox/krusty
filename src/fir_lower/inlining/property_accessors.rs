@@ -13,7 +13,8 @@ use crate::types::{ty_subst_keep_unbound, Ty};
 
 use super::super::{FirFileLoweringFailure, InlineAccessorFailure as InlineFail};
 use crate::inline_expansion::{
-    fresh_value_base, splice_inline_body, InlineBodySplice, InlineBodySpliceFailure, SplicedResult,
+    fresh_value_base, splice_inline_body, InlineBodySplice, InlineBodySpliceFailure, InlineOperand,
+    SplicedResult,
 };
 
 /// Splice `inline` property accessors at the uses the checker recorded.
@@ -153,7 +154,7 @@ fn expand_inline_accessor(
         InlineBodySplice {
             function,
             body: inner,
-            operands,
+            operands: operands.into_iter().map(InlineOperand::Value).collect(),
             bindings: &bindings,
             reified_bindings: &reified_bindings,
             statement: access.value.is_some(),

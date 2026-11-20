@@ -51,9 +51,9 @@ pub(super) struct InterfaceDispatch {
     /// Each member by the module that numbered it and its number there.
     numbered: HashMap<(String, u32), MemberRef>,
     /// Each member a source module published an identity for, by that identity.
-    identities: HashMap<Vec<u8>, MemberRef>,
+    identities: HashMap<Vec<u8>, (MemberRef, TypeName)>,
     /// Each member of a library classifier something names, by its KLIB identity.
-    library: HashMap<Vec<u8>, MemberRef>,
+    library: HashMap<Vec<u8>, (MemberRef, TypeName)>,
     /// Runtime callable protocols, interned by their checked physical arity.
     function_invokes: HashMap<usize, MemberRef>,
     classes: Vec<ClassRecord>,
@@ -80,8 +80,9 @@ struct Member {
     /// Why a class implementing this library member has no implementation this generator can
     /// write: a call through the member declines with it.
     unimplementable: Option<String>,
-    /// The library classifier declaring this member, whose every instance must implement it.
-    library_owner: Option<TypeName>,
+    /// Declaring nominal classifiers of its exact identities, including published aliases.
+    /// Every instance of each classifier must implement this member.
+    declaring_owners: Vec<TypeName>,
     protocol_arity: Option<usize>,
 }
 
@@ -149,7 +150,7 @@ impl InterfaceDispatch {
             implementations: Vec::new(),
             representations: Vec::new(),
             unimplementable: None,
-            library_owner: None,
+            declaring_owners: Vec::new(),
             protocol_arity: None,
         });
         member
@@ -200,38 +201,62 @@ impl InterfaceDispatch {
         identity: &[u8],
         (params, results): (Vec<ValType>, Vec<ValType>),
     ) -> Result<MemberRef, String> {
-        // A member a source module published is that module's: its classes implement it by
-        // number, so a call through it must not name a second member for the same identity.
-        if let Some(&member) = self.identities.get(identity) {
-            return Ok(member);
-        }
-        if let Some(&member) = self.library.get(identity) {
+        // The same exact declaration must retain its owner and prototype when its numbered
+        // source publication and a dependency view meet. Aliased declarations may share a member,
+        // but every declaring interface contributes its instance-completeness obligation.
+        let known = self
+            .identities
+            .get(identity)
+            .or_else(|| self.library.get(identity))
+            .copied();
+        let member = if let Some((member, declared_owner)) = known {
+            if declared_owner != owner {
+                return Err("one interface identity has two declaring owners".into());
+            }
             let known = &self.members[member.0 as usize];
             if known.params != params || known.results != results {
-                return Err("a library member carried two ways".to_string());
+                return Err("a library member carried two ways".into());
             }
-            return Ok(member);
+            member
+        } else {
+            self.unnumbered(module, (params, results))
+        };
+        let owners = &mut self.members[member.0 as usize].declaring_owners;
+        if !owners.contains(&owner) {
+            owners.push(owner);
         }
-        let member = self.unnumbered(module, (params, results));
-        self.members[member.0 as usize].library_owner = Some(owner);
-        self.library.insert(identity.to_vec(), member);
+        self.library.insert(identity.to_vec(), (member, owner));
         Ok(member)
     }
 
-    /// Publish `identity` as `member`'s, for a dependent module to name it by.
-    pub(super) fn publish(&mut self, identity: Vec<u8>, member: MemberRef) -> Result<(), String> {
-        match self.identities.insert(identity, member) {
-            Some(previous) if previous != member => {
-                Err("two interface members published one identity".to_string())
-            }
-            _ => Ok(()),
+    /// Publish the checked declaring owner beside the exact exported identity. This does not
+    /// mark a call or manufacture an implementation; it authenticates a later dependency join.
+    pub(super) fn publish(
+        &mut self,
+        identity: Vec<u8>,
+        owner: TypeName,
+        member: MemberRef,
+    ) -> Result<(), String> {
+        if self
+            .identities
+            .get(&identity)
+            .or_else(|| self.library.get(&identity))
+            .is_some_and(|known| *known != (member, owner))
+        {
+            return Err("two interface declarations published one identity".into());
         }
+        let owners = &mut self.members[member.0 as usize].declaring_owners;
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+        self.identities.insert(identity, (member, owner));
+        Ok(())
     }
 
     /// The member a source module published `identity` for; `None` for a member of a library
     /// interface, which no stub calls.
     pub(super) fn identified(&self, identity: &[u8]) -> Option<MemberRef> {
-        self.identities.get(identity).copied()
+        self.identities.get(identity).map(|(member, _)| *member)
     }
 
     /// The function type `member` is carried as.
@@ -347,34 +372,34 @@ impl InterfaceDispatch {
             if let Some(reason) = &member.unimplementable {
                 return Some(reason.clone());
             }
-            let unimplemented = self.classes.iter().enumerate().any(|(class, record)| {
-                let advertised = member.protocol_arity.map_or_else(
-                    || {
-                        member
-                            .library_owner
-                            .is_some_and(|owner| record.interfaces.contains(&owner))
-                    },
-                    |arity| record.function_arities.contains(&arity),
-                );
-                advertised
-                    && !member
-                        .implementations
-                        .iter()
-                        .any(|(known, _)| known.0 as usize == class)
-            });
-            if unimplemented {
-                return Some(match member.protocol_arity {
-                    Some(arity) => {
-                        format!("a callable of arity {arity} with no emitted invocation")
-                    }
-                    None => format!(
-                        "a call of a `{}` member on an instance that does not implement it",
-                        member
-                            .library_owner
-                            .expect("an advertised library member has an owner")
-                            .render()
-                    ),
+            if let Some(arity) = member.protocol_arity {
+                let unimplemented = self.classes.iter().enumerate().any(|(class, record)| {
+                    record.function_arities.contains(&arity)
+                        && !member
+                            .implementations
+                            .iter()
+                            .any(|(known, _)| known.0 as usize == class)
                 });
+                if unimplemented {
+                    return Some(format!(
+                        "a callable of arity {arity} with no emitted invocation"
+                    ));
+                }
+            }
+            for owner in &member.declaring_owners {
+                let unimplemented = self.classes.iter().enumerate().any(|(class, record)| {
+                    record.interfaces.contains(owner)
+                        && !member
+                            .implementations
+                            .iter()
+                            .any(|(known, _)| known.0 as usize == class)
+                });
+                if unimplemented {
+                    return Some(format!(
+                        "a call of a `{}` member on an instance that does not implement it",
+                        owner.render()
+                    ));
+                }
             }
         }
         None
@@ -650,40 +675,4 @@ fn stub_body(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn callable_protocols_intern_exact_erased_signatures_by_arity() {
-        let mut module = Module::default();
-        let mut dispatch = InterfaceDispatch::default();
-        let one = dispatch.function_invoke(&mut module, 1);
-        assert_eq!(one, dispatch.function_invoke(&mut module, 1));
-        assert_ne!(one, dispatch.function_invoke(&mut module, 0));
-        assert_eq!(
-            module.func_signature(dispatch.ty(one)),
-            Some((vec![REFERENCE; 2], vec![REFERENCE]))
-        );
-    }
-
-    #[test]
-    fn advertised_callable_membership_does_not_depend_on_emitting_its_body() {
-        let mut module = Module::default();
-        let mut dispatch = InterfaceDispatch::default();
-        let (class, _) = dispatch.class(&mut module, 0, vec![1]);
-        dispatch.function_instance_of(class, 1, false);
-        let member = dispatch.function_invoke(&mut module, 1);
-        let test = dispatch.function_test(&mut module, 1);
-        assert_eq!(test, dispatch.function_test(&mut module, 1));
-        assert_eq!(dispatch.classes[class.0 as usize].function_arities, vec![1]);
-        assert_eq!(dispatch.declined(), None);
-        dispatch.stub(&mut module, member);
-        assert_eq!(
-            dispatch.declined(),
-            Some("a callable of arity 1 with no emitted invocation".into())
-        );
-        let function = module.declare();
-        dispatch.implement(class, member, function).unwrap();
-        assert_eq!(dispatch.declined(), None);
-    }
-}
+mod tests;

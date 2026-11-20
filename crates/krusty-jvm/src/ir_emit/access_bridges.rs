@@ -94,31 +94,8 @@ fn set_bridge_locals(
     descriptor: &str,
     cw: &mut ClassWriter,
 ) {
-    let extension_receivers = ir
-        .function_parameter_identities(fid)
-        .expect("an access bridge target carries exact parameter identities")
-        .iter()
-        .map(|identity| {
-            matches!(
-                identity.role,
-                krusty::ir::IrParameterRole::ExtensionReceiver
-            )
-        })
-        .collect::<Vec<_>>();
-    let names = crate::parameter_names::function_locals(ir, fid, parameters)
+    let names = crate::parameter_names::access_bridge_locals(ir, fid, parameters)
         .expect("an access bridge target carries exact parameter identities");
-    // The accessor's own table spells an extension receiver `$this$<name>`. The bridge that
-    // forwards to it spells that same slot `$receiver`, as kotlinc's `access$` local table does.
-    let names = names
-        .into_iter()
-        .zip(extension_receivers)
-        .map(|(name, extension)| {
-            if extension {
-                Some("$receiver".to_string())
-            } else {
-                name
-            }
-        });
     let mut locals = Vec::with_capacity(parameters.len() + 1);
     let mut slot = 0u16;
     if let Some(owner) = receiver {
