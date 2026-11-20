@@ -54,7 +54,7 @@ jobs:
   route:
     # Every run waits on this job, so it runs on our own small runner: on GitHub's runners it queued
     # behind the jobs it had placed there and held whole runs back.
-    runs-on: [self-hosted, helper-1c-1gb]
+    runs-on: [self-hosted, utility]
     timeout-minutes: 5
     continue-on-error: true
     outputs:
@@ -1202,7 +1202,7 @@ jobs:
     name: ci-and-conformance
     needs: [ci, lint, plugin-host, e2e, conformance, build-gradle-plugin, gradle, maven, build-tools, bazel]
     if: always()
-    runs-on: [self-hosted, helper-1c-1gb]
+    runs-on: [self-hosted, utility]
     steps:
       - name: require every merge gate to succeed
         env:

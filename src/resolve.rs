@@ -440,7 +440,7 @@ pub(crate) use dependency_platform::DependencyPlatform;
 pub(crate) use diagnostic_selection::unresolved_member_message;
 use extension_reference_selection::ExtensionReferenceChoice;
 pub(crate) use finalized_projection::{
-    project_finalized_signatures, publish_stable_declaration_metadata,
+    project_finalized_signatures, publish_declared_spellings, publish_stable_declaration_metadata,
 };
 pub use for_loop_iteration::{IterationPlans, LoopMemberProperty};
 pub(crate) use inspection_analysis::{
@@ -16878,31 +16878,20 @@ impl<'a> Checker<'a> {
                     Some(shape) => (Some(shape), shape.inline),
                     None => (toplevel_lambda_shape.as_ref(), toplevel_inline),
                 };
-                let selected_lambda_pts: Option<Vec<Vec<Ty>>> =
-                    selected_lambda_shape.and_then(|shape| shape.param_types.clone());
-                let selected_lambda_expected: Option<Vec<Option<Ty>>> =
-                    selected_lambda_shape.and_then(|shape| shape.expected_types.clone());
-                let selected_lambda_fixed_expected: Option<Vec<Option<Ty>>> =
-                    selected_lambda_shape.and_then(|shape| shape.fixed_expected_types.clone());
-                let selected_lambda_formals = selected_lambda_shape
-                    .map(|shape| shape.generic_formals.clone())
-                    .unwrap_or_default();
-                // Per-param RECEIVER function type for a classpath top-level HOF (`NavHost(builder:
-                // NGB.()->Unit){…}`) — a lambda to such a param binds its implicit `this` to the receiver.
-                // From `@Metadata`'s `@ExtensionFunctionType` (no JVM `Signature` needed, so this also
-                // drives a krusty-emitted module's HOF whose `Signature` attribute is absent). `None` for a
-                // user fn.
-                let selected_lambda_recvs: Option<Vec<Option<Ty>>> =
-                    selected_lambda_shape.and_then(|shape| shape.receivers.clone());
-                let selected_lambda_context_counts: Option<Vec<usize>> =
-                    selected_lambda_shape.and_then(|shape| shape.context_counts.clone());
-                // Per-param `crossinline`/`noinline`: a mutable local such a lambda captures is
-                // `Ref`-boxed (see `InlineParameterModifier::boxes_captures`), not an inline splice's.
-                let selected_lambda_boxes_captures: Option<Vec<Option<bool>>> =
-                    selected_lambda_shape.and_then(|shape| shape.boxes_captures.clone());
-                // The shape's own callable may be a companion's `operator fun invoke` rather than
-                // a top-level function; its inline flag decides where a lambda's `return` may go.
-                let selected_shape_inline = selected_lambda_shape.is_some_and(|shape| shape.inline);
+                lambda_call_shapes::seed_fixed_input_bindings(
+                    selected_lambda_shape,
+                    &mut known_generic_bindings,
+                );
+                let lambda_call_shapes::SelectedLambdaInputs {
+                    param_types: selected_lambda_pts,
+                    expected_types: selected_lambda_expected,
+                    fixed_expected_types: selected_lambda_fixed_expected,
+                    generic_formals: selected_lambda_formals,
+                    receivers: selected_lambda_recvs,
+                    context_counts: selected_lambda_context_counts,
+                    boxes_captures: selected_lambda_boxes_captures,
+                    inline: selected_shape_inline,
+                } = lambda_call_shapes::SelectedLambdaInputs::of(selected_lambda_shape);
                 let constructor_expectations: Option<ConstructionExpectations> = if !self
                     .lexical_value_declares(scope, &fname)
                     && self.resolver().top_level_candidates(&fname).is_empty()

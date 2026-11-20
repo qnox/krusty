@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::compilation_inputs::{selected_jdk_feature_release, JvmCompilationInputInventory};
+use krusty::jvm::compilation_inputs::{JdkApi, JvmCompilationInputInventory};
 use krusty::kotlin_version::KotlinVersion;
 use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
@@ -158,8 +158,8 @@ pub struct Options {
     /// `25`→69). `None` keeps krusty's default (Java 8 / major 52), which runs on the test JDK.
     pub jvm_target_major: Option<u16>,
     /// `-Xjdk-release=<v>`: the JDK release whose API the sources compile against. kotlinc also
-    /// derives the JVM target from it. krusty compiles against the selected JDK's own API only, so
-    /// [`Options::check_jdk_release`] refuses a release other than that JDK's.
+    /// derives the JVM target from it. A release other than the selected JDK's own is read from
+    /// that release's signatures in the JDK's `lib/ct.sym` (see [`Options::compilation_inputs`]).
     pub jdk_release: Option<u16>,
     /// The compiler-plugin switches (`-Xplugin`, `-P`, `-Xcompiler-plugin`), resolved against krusty's
     /// extension registry by [`Options::resolve_plugins`].
@@ -505,28 +505,13 @@ fn plugin_jar_problems(plugins: &PluginConfig) -> Vec<String> {
 }
 
 impl Options {
-    /// Refuse an `-Xjdk-release` whose API krusty would not compile against. kotlinc compiles
-    /// against the JDK's own modules when the release is the JDK's own, and against that release's
-    /// signatures in the JDK's `lib/ct.sym` otherwise; krusty implements only the first. Kept out
-    /// of `parse` so parsing stays env-independent.
-    pub fn check_jdk_release(&self) -> Result<(), String> {
-        let Some(release) = self.jdk_release else {
-            return Ok(());
-        };
+    /// The errors kotlinc reports for an `-Xjdk-release` whose API the selected JDK cannot provide
+    /// (see [`JdkApi::for_release`]). Kept out of `parse` so parsing stays env-independent.
+    pub fn check_jdk_release(&self) -> Result<(), Vec<String>> {
         if self.no_jdk {
             return Ok(());
         }
-        match selected_jdk_feature_release(self.jdk_home.as_deref()) {
-            Some(jdk) if jdk == release => Ok(()),
-            Some(jdk) => Err(format!(
-                "-Xjdk-release={release} compiles against the JDK {release} API from ct.sym, \
-                 which krusty does not implement; the selected JDK is {jdk}"
-            )),
-            None => Err(format!(
-                "-Xjdk-release={release} needs the selected JDK's release, and its `release` file \
-                 does not name one"
-            )),
-        }
+        JdkApi::for_release(self.jdk_home.as_deref(), self.jdk_release).map(|_| ())
     }
 
     /// The classpath to drive resolution with: the user's `-cp` entries plus kotlinc's implicit
@@ -534,6 +519,12 @@ impl Options {
     /// corresponding `-no-*` option disables them.
     /// Kept out of `parse` so parsing stays env-independent.
     pub fn effective_classpath(&self) -> Result<Vec<PathBuf>, String> {
+        Ok(self.compilation_inputs()?.effective_classpath().to_vec())
+    }
+
+    /// [`Options::effective_classpath`] with the JDK API selection it made, which the classpath
+    /// provider is built with.
+    pub fn compilation_inputs(&self) -> Result<JvmCompilationInputInventory, String> {
         let mut cp = self.classpath.clone();
         if !self.no_stdlib {
             let stdlib = krusty::jvm::kotlin_stdlib_jar().ok_or_else(|| {
@@ -561,15 +552,12 @@ impl Options {
                 }
             }
         }
-        if !self.no_jdk {
-            cp = JvmCompilationInputInventory::from_explicit_classpath_and_jdk(
-                &cp,
-                self.jdk_home.as_deref(),
-            )
-            .effective_classpath()
-            .to_vec();
+        if self.no_jdk {
+            return Ok(JvmCompilationInputInventory::from_effective_classpath(&cp));
         }
-        Ok(cp)
+        let api = JdkApi::for_release(self.jdk_home.as_deref(), self.jdk_release)
+            .map_err(|errors| errors.join("\n"))?;
+        Ok(JvmCompilationInputInventory::from_explicit_classpath_and_jdk_api(&cp, api))
     }
 
     /// The JVM backend this command line selects, emitting against `classpath`. The `krusty`
