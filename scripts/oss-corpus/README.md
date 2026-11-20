@@ -69,6 +69,10 @@ with `--offline` from the same caches. A warm-up that fails to download somethin
 after a pause (`$CORPUS_RETRY_PAUSE` seconds, then twice that); one that still cannot download stops
 the run with a pointer to its log.
 
+A project's job fails when the reference kotlinc build or the krusty build fails, after the
+comparison has recorded how far each got, so the project still appears in the report; the `summary`
+job runs either way.
+
 The krusty build is also sampled: `perf` records every process at 99 Hz while it runs (the corpus
 binary keeps frame pointers), `hotspots.py` folds the krusty processes' call stacks, and
 `inferno-flamegraph` draws them. `compare.py` ranks the functions krusty spends the most time in,

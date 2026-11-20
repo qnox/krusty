@@ -174,6 +174,16 @@ class RunScript(unittest.TestCase):
         self.assertEqual(project['reference_exit'], 3)
         self.assertIn("p: the reference kotlinc build failed (exit 3); see p.kotlinc.log", self.stderr)
 
+    def test_a_failed_krusty_build_is_compared_and_then_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as work:
+            # Every build records its one compilation; only the krusty builds fail.
+            project = self.run_corpus(work, '#!/bin/sh\n'
+                                            'if [ -n "$CORPUS_COMPILATIONS" ]; then : > "$CORPUS_COMPILATIONS"; fi\n'
+                                            'case "$*" in *krusty.binary*) exit 4;; *) exit 0;; esac\n',
+                                      expected_exit=1)
+        self.assertEqual(project['reference_exit'], 0)
+        self.assertEqual(self.stderr.splitlines()[-1], 'p: the krusty build failed (exit 4); see p.krusty.log')
+
     # The warm-up is the only build that is not offline. This one fails to download on its first
     # `failures` attempts, then succeeds; every other build records its one compilation.
     FLAKY_WARMUP = ('#!/bin/sh\n'
