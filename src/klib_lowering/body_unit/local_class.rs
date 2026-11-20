@@ -355,6 +355,7 @@ impl<'s> Linker<'_, 's> {
                     function,
                     class: prepared.key.clone(),
                     setter: member.setter,
+                    formals: member.formals.clone(),
                 },
             );
             publish_overrides(
