@@ -147,6 +147,16 @@ fn wasm_official_dependency_inherited_members_implement_indirect_interfaces() {
     );
 }
 
+/// A subclass implements a library interface member with the body it inherits from its
+/// superclass, which does not declare the interface and which no body calls.
+#[test]
+fn wasm_official_dependency_subclasses_implement_interfaces_with_inherited_bodies() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyInheritedSuperclassImplementation.kt"),
+        "DependencyInheritedSuperclassImplementation",
+    );
+}
+
 /// Run the shared two-module program through the product producer, then compile its consumer
 /// against the library the exact official Wasm compiler produces and run it, on every target.
 fn run_against_official_producer(source: &str, name: &str) {
