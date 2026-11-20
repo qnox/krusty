@@ -102,8 +102,10 @@ pub(in crate::codegen) fn library_member_signature(
     match role {
         MemberRole::Function | MemberRole::Getter => member_signature(params, result),
         MemberRole::Setter => {
-            let (params, result) = accessor_types(result, true);
-            member_signature(&params, result)
+            // The getter's declared parameters are its extension receiver, if it has one, which
+            // the setter takes before the value.
+            let (value, result) = accessor_types(result, true);
+            member_signature(&[params, value.as_slice()].concat(), result)
         }
     }
 }

@@ -73,7 +73,6 @@ impl LoweringCheckpoint {
             .retain(|function, _| *function < first);
         ir.extension_receiver_fns
             .retain(|function| *function < first);
-        ir.signatures.retain(|function, _| *function < first);
         ir.inline_fns.retain(|function| *function < first);
         ir.inline_only_fns.retain(|function| *function < first);
         ir.truncate_declared_parameters(first);

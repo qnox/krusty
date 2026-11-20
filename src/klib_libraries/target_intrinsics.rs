@@ -999,6 +999,36 @@ fn string_range_equals(
     })
 }
 
+/// `String.nativeIndexOf(sought, fromIndex: Int): Int` and `String.nativeLastIndexOf(sought,
+/// fromIndex: Int): Int` in `kotlin.text`, where `sought` is a `String` or a `Char`.
+fn string_index_of(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    sought: Ty,
+    sought_name: &str,
+    last: bool,
+) -> Option<KlibIntrinsicShape> {
+    let string = Ty::obj("kotlin/String");
+    let [value, from] = declaration.params.as_slice() else {
+        return None;
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/text"))
+        && declaration
+            .receiver
+            .as_ref()
+            .is_some_and(|receiver| exact_type(receiver, "kotlin/String"))
+        && exact_type(value, sought_name)
+        && semantic_type(from) == Some(Ty::Int)
+        && exact_type(&declaration.ret, "kotlin/Int"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::StringIndexOf { sought, last },
+        kind: ExternalCallableKind::Extension,
+        receiver: Some(string),
+        params: vec![string, sought, Ty::Int],
+        ret: Ty::Int,
+    })
+}
+
 /// `arrayCopy(array, fromIndex: Int, destination, toIndex: Int, count: Int)` in
 /// `kotlin.collections`, where both arrays are `declared`, the array of `element`: a specialized
 /// primitive array, or `Array<Any?>`.
@@ -1158,6 +1188,21 @@ fn native(
             }
             "Kotlin_String_unsafeRangeEquals" => {
                 return string_range_equals(placement, declaration)
+            }
+            "Kotlin_String_indexOfString" => {
+                return string_index_of(
+                    placement,
+                    declaration,
+                    Ty::obj("kotlin/String"),
+                    "kotlin/String",
+                    false,
+                )
+            }
+            "Kotlin_String_indexOfChar" => {
+                return string_index_of(placement, declaration, Ty::Char, "kotlin/Char", false)
+            }
+            "Kotlin_String_lastIndexOfChar" => {
+                return string_index_of(placement, declaration, Ty::Char, "kotlin/Char", true)
             }
             _ => return None,
         };

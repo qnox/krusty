@@ -411,6 +411,34 @@ impl<'a> BodyLowering<'a, '_, '_> {
                     self.runtime_call("kt_string_range_equals", &params, ret, &arguments)
                 })());
             }
+            Some(krusty::backend::BackendCompilerIntrinsic::StringIndexOf { sought, last }) => {
+                let operands = match (receiver, args, extension_receiver_parameter) {
+                    (Some(this), [value, from], None) => [this, *value, *from],
+                    (None, &[this, value, from], Some(0)) => [this, value, from],
+                    _ => {
+                        return Some(Err("a String search with malformed operands".into()));
+                    }
+                };
+                if ret != Ty::Int {
+                    return Some(Err("a String search with a non-Int result".into()));
+                }
+                let symbol = match (sought == Ty::Char, last) {
+                    (true, false) => "kt_string_index_of_char",
+                    (true, true) => "kt_string_last_index_of_char",
+                    (false, false) => "kt_string_index_of_string",
+                    (false, true) => {
+                        return Some(Err("a backward String search for a String".into()));
+                    }
+                };
+                let params = [Ty::obj("kotlin/String"), sought, Ty::Int];
+                return Some((|| {
+                    let arguments = self.arguments(&operands, &params)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call(symbol, &params, ret, &arguments)
+                })());
+            }
             Some(krusty::backend::BackendCompilerIntrinsic::ArrayCopy { array }) => {
                 let (None, [source, from, destination, to, count]) = (receiver, args) else {
                     return Some(Err("an array copy with malformed operands".into()));

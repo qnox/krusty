@@ -1763,9 +1763,13 @@ impl ResolvedModuleIndex {
         declaration: DeclarationId,
         contract: crate::contracts::ResolvedContract,
     ) {
+        // A failed explicit result publishes no semantic signature. Its diagnostic callable is
+        // still the contract's owner, so the contract is not dropped and the result is not
+        // replaced with a type the source never declared.
         assert!(
-            self.signatures.contains_key(&declaration),
-            "a contract requires a published callable signature"
+            self.signatures.contains_key(&declaration)
+                || self.callable_by_declaration.contains_key(&declaration),
+            "a contract requires a published callable"
         );
         assert!(
             self.contracts.insert(declaration, contract).is_none(),
