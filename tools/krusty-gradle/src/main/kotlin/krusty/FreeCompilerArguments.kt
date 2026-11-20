@@ -11,7 +11,8 @@ import org.gradle.api.GradleException
 // under any spelling (a short or deprecated alias), hide them in an argument file, or turn them into
 // sources after `--`. A free plugin option (`-P plugin:<id>:<key>=<value>`) is not one of them: it
 // configures a plugin the task already loads, and krusty decides whether it implements that setting
-// exactly as it does for a structured option.
+// exactly as it does for a structured option. Nor is a plugin order constraint
+// (`-Xcompiler-plugin-order`): it orders the plugins the task loads and loads none.
 
 /** A kotlinc argument's canonical name, and whether a bare occurrence consumes the next token. */
 private class KotlincArgument(val name: String, val takesValue: Boolean)
@@ -67,7 +68,6 @@ private val reservedArguments: Map<String, String> = mapOf(
     "-Xkotlin-reference-version" to "the Kotlin Gradle plugin version",
     "-Xplugin" to "compiler plugin configuration",
     "-Xcompiler-plugin" to "compiler plugin configuration",
-    "-Xcompiler-plugin-order" to "compiler plugin configuration",
 )
 
 /**
