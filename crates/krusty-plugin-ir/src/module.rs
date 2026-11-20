@@ -1,5 +1,5 @@
 //! A module's own declarations as kotlinc's IR spells them, which the host builds in the session for
-//! IR plugins to run over. Offsets are UTF-16 code-unit offsets into the file's text, as kotlinc's
+//! IR plugins to run over, and reads back from the module they leave. Offsets are UTF-16 code-unit offsets into the file's text, as kotlinc's
 //! are; every element carries the offsets kotlinc gives the same source.
 
 use crate::identity::{CallableIdentity, TypeIdentity};
@@ -22,11 +22,28 @@ pub struct FileIr {
     pub functions: Vec<FunctionIr>,
 }
 
-/// UTF-16 offsets into the file's text, start inclusive and end exclusive.
+/// UTF-16 offsets into the file's text, start inclusive and end exclusive, as kotlinc's IR keeps
+/// them: an element a plugin made without a source position has [`Span::UNDEFINED`] or
+/// [`Span::SYNTHETIC`] offsets instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
-    pub start: u32,
-    pub end: u32,
+    pub start: i32,
+    pub end: i32,
+}
+
+impl Span {
+    /// kotlinc's `UNDEFINED_OFFSET`, which an element without a source position has.
+    pub const UNDEFINED_OFFSET: i32 = -1;
+    /// kotlinc's `SYNTHETIC_OFFSET`, which an element the compiler synthesized for its file has.
+    pub const SYNTHETIC_OFFSET: i32 = -2;
+    pub const UNDEFINED: Span = Span {
+        start: Self::UNDEFINED_OFFSET,
+        end: Self::UNDEFINED_OFFSET,
+    };
+    pub const SYNTHETIC: Span = Span {
+        start: Self::SYNTHETIC_OFFSET,
+        end: Self::SYNTHETIC_OFFSET,
+    };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
