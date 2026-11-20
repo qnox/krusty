@@ -124,6 +124,46 @@ pub struct StreamingSourceSetAnalysis {
     pub(crate) streamed: Option<StreamedPassState>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl StreamingSourceSetAnalysis {
+    /// Select one written file-level function for an owned backend fixture. Selection happens
+    /// here, while finalized declaration headers are available; emission receives only its id.
+    pub fn fixture_function(
+        &self,
+        source: u32,
+        name: &str,
+    ) -> Result<crate::fir::CallableId, &'static str> {
+        let index = self
+            .streamed
+            .as_ref()
+            .ok_or("missing checked fixture module")?
+            .module
+            .index();
+        let mut selected = None;
+        for raw in 0..index.declaration_count() {
+            let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
+            let Some(anchor) = index.declaration_anchor(declaration) else {
+                continue;
+            };
+            if anchor.source.raw() != source
+                || anchor.owner.is_some()
+                || anchor.kind != crate::fir::DeclarationKind::Function
+                || index.declaration_name(declaration) != Some(name)
+            {
+                continue;
+            }
+            let callable = index
+                .callable_for_declaration(declaration)
+                .ok_or("fixture function has no finalized callable")?
+                .id;
+            if selected.replace(callable).is_some() {
+                return Err("ambiguous fixture function");
+            }
+        }
+        selected.ok_or("missing fixture function")
+    }
+}
+
 impl From<SourceSetAnalysis> for StreamingSourceSetAnalysis {
     fn from(analysis: SourceSetAnalysis) -> Self {
         let SourceSetAnalysis {
@@ -1340,29 +1380,7 @@ where
                 .iter()
                 .any(|diagnostic| diagnostic.severity == Severity::Error);
         parse_errors.push(parse_error);
-        // The brackets were parsed. Report the language gate only after `parse_error` is captured,
-        // so the file's declarations still join the module for every other file.
-        for span in file
-            .destructuring
-            .ungated_bracket_spans
-            .iter()
-            .copied()
-            .chain(file.destructuring.ungated_full_form_spans.iter().copied())
-        {
-            diags.error(
-                span,
-                "the feature \"name based destructuring\" is only available since language version 2.5",
-            );
-        }
-        for span in file.destructuring.ungated_short_form_spans.iter().copied() {
-            diags.error(
-                span,
-                "the feature \"enable name based destructuring short form\" is experimental and \
-                 should be enabled explicitly. This can be done by supplying the compiler \
-                 argument '-Xname-based-destructuring=complete', but note that no stability \
-                 guarantees are provided.",
-            );
-        }
+        header_validation::validate_after_parsing(&file, parser_error, diags);
         let extracted = pass1_builder.add_source(
             index,
             source,

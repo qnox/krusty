@@ -69,6 +69,18 @@ pub struct IrModuleCallable {
     pub overridden_declarations: Box<[IrOverriddenFunction]>,
 }
 
+impl IrModuleCallable {
+    /// Whether the declaration is `inline`.
+    pub fn is_inline(&self) -> bool {
+        self.flags.has(crate::fir::DeclarationFlags::INLINE)
+    }
+
+    /// Whether the declaration is `suspend`.
+    pub fn is_suspend(&self) -> bool {
+        self.flags.has(crate::fir::DeclarationFlags::SUSPEND)
+    }
+}
+
 /// One declaration a module callable overrides, as its override edge records it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrOverriddenFunction {
@@ -188,5 +200,17 @@ impl InheritedFacts for IrModuleConstructions {
             records: _,
         } = self;
         selected.inherit(source, target);
+    }
+
+    fn relocate(&mut self, source: super::ExprId, target: super::ExprId) {
+        let Self {
+            selected,
+            records: _,
+        } = self;
+        selected.relocate(source, target);
+    }
+
+    fn truncate_from(&mut self, first: super::ExprId) {
+        self.selected.truncate_from(first);
     }
 }

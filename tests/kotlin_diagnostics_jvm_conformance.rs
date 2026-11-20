@@ -100,7 +100,7 @@ enum Outcome {
 
 /// The case's source as both compilers receive it: markers stripped, the directive-selected helper
 /// sources added to each module, and the JVM corpus placeholders applied.
-fn prepare(root: &Path, source: &str, stem: &str) -> Result<String, String> {
+fn prepare(root: &Path, file: &Path, source: &str, stem: &str) -> Result<String, String> {
     let mut helpers = Vec::new();
     for (directive, path) in HELPERS {
         if krusty::conformance::directive(source, directive) {
@@ -113,7 +113,10 @@ fn prepare(root: &Path, source: &str, stem: &str) -> Result<String, String> {
             helpers.push(format!("// FILE: {name}\n{text}"));
         }
     }
-    let source = strip_diagnostic_markers(source);
+    let source = with_directory_defaults(
+        &box_inventory::key(root, file),
+        &strip_diagnostic_markers(source),
+    );
     let source = if helpers.is_empty() {
         source
     } else {
@@ -123,6 +126,37 @@ fn prepare(root: &Path, source: &str, stem: &str) -> Result<String, String> {
         &source,
         TestTarget::Jvm,
     ))
+}
+
+/// The return-value checker mode JetBrains' runner configures for a whole directory of cases
+/// (`BaseDiagnosticConfiguration`: `crv/*`, `crvFull/*` and `crvDisabled/*` under
+/// `compiler/testData/diagnostics/tests`). A case's own `// RETURN_VALUE_CHECKER_MODE:` wins.
+const DIRECTORY_CHECKER_MODES: [(&str, &str); 3] = [
+    ("compiler/testData/diagnostics/tests/crv/", "CHECKER"),
+    ("compiler/testData/diagnostics/tests/crvFull/", "FULL"),
+    (
+        "compiler/testData/diagnostics/tests/crvDisabled/",
+        "DISABLED",
+    ),
+];
+
+/// `source` with the directory-wide defaults of the case at `key` spelled as the directives the
+/// box lane's argument selection already reads, so the reference compile, its cache identity and
+/// krusty's compile all see the one effective configuration.
+fn with_directory_defaults(key: &str, source: &str) -> String {
+    let Some((_, mode)) = DIRECTORY_CHECKER_MODES
+        .iter()
+        .find(|(directory, _)| key.starts_with(directory))
+    else {
+        return source.to_string();
+    };
+    if source.lines().any(|line| {
+        line.trim_start()
+            .starts_with("// RETURN_VALUE_CHECKER_MODE:")
+    }) {
+        return source.to_string();
+    }
+    format!("// RETURN_VALUE_CHECKER_MODE: {mode}\n{source}")
 }
 
 /// `source` with `helpers` (`// FILE:` blocks) closing each of its modules. A case without
@@ -220,7 +254,7 @@ fn worker_verdict(root: &Path, jdks: &BoxJdkRoots, file: &Path) -> String {
         Err(error) => return format!("F\tread {}: {error}", file.display()),
     };
     let stem = case_stem(file);
-    let prepared = match prepare(root, &source, stem) {
+    let prepared = match prepare(root, file, &source, stem) {
         Ok(prepared) => prepared,
         Err(reason) => return format!("F\t{reason}"),
     };
@@ -321,7 +355,7 @@ fn run_case(
         .map_err(|error| fatal(format!("read {}: {error}", file.display())))?;
     let stem = case_stem(file);
     let prepared =
-        prepare(root, &source, stem).map_err(|reason| fatal(format!("prepare: {reason}")))?;
+        prepare(root, file, &source, stem).map_err(|reason| fatal(format!("prepare: {reason}")))?;
     let classpath = common::classpath_jars_for(&prepared);
     let jdk = jdks.select(&prepared);
     let reference = reference(&prepared, stem, &classpath, jdk).map_err(fatal)?;
@@ -671,6 +705,40 @@ mod tests {
             false_accepts: BTreeSet::from([LISTED.to_string()]),
             not_scored: BTreeSet::from([LISTED.to_string()]),
         }
+    }
+
+    #[test]
+    fn a_directory_selects_the_return_value_checker_mode_its_cases_run_under() {
+        let case = "fun f() {}\n";
+        for (key, mode) in [
+            ("compiler/testData/diagnostics/tests/crv/a.kt", "CHECKER"),
+            (
+                "compiler/testData/diagnostics/tests/crv/expectActual/a.kt",
+                "CHECKER",
+            ),
+            ("compiler/testData/diagnostics/tests/crvFull/a.kt", "FULL"),
+            (
+                "compiler/testData/diagnostics/tests/crvDisabled/a.kt",
+                "DISABLED",
+            ),
+        ] {
+            assert_eq!(
+                with_directory_defaults(key, case),
+                format!("// RETURN_VALUE_CHECKER_MODE: {mode}\n{case}"),
+                "{key}"
+            );
+        }
+        for key in [
+            "compiler/testData/diagnostics/tests/crvDifferent/a.kt",
+            "compiler/testData/diagnostics/tests/other/a.kt",
+        ] {
+            assert_eq!(with_directory_defaults(key, case), case, "{key}");
+        }
+        let explicit = "// RETURN_VALUE_CHECKER_MODE: FULL\nfun f() {}\n";
+        assert_eq!(
+            with_directory_defaults("compiler/testData/diagnostics/tests/crv/a.kt", explicit),
+            explicit
+        );
     }
 
     #[test]
