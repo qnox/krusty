@@ -2335,8 +2335,6 @@ reflection/typeOf/nonReifiedTypeParameters/upperBounds.kt
 reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeAliasedType.kt
 reflection/typeOf/typeOfCapturedStar.kt
-regressions/collectionSizeOrDefault.kt
-regressions/inlineCallsInInitializerLambda.kt
 regressions/kt15196.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
