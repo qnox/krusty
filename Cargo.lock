@@ -837,6 +837,7 @@ dependencies = [
  "krusty-native",
  "krusty-plugin-allopen",
  "krusty-plugin-api",
+ "krusty-plugin-assignment",
  "krusty-plugin-host",
  "krusty-plugin-ir",
  "krusty-plugin-noarg",
@@ -938,6 +939,13 @@ name = "krusty-plugin-api"
 version = "0.0.1"
 dependencies = [
  "krusty-names",
+]
+
+[[package]]
+name = "krusty-plugin-assignment"
+version = "0.0.1"
+dependencies = [
+ "krusty-plugin-api",
 ]
 
 [[package]]

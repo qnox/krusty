@@ -1567,13 +1567,40 @@ fn generic_call_solves_mixed_lower_constraints_with_its_declared_bound() {
         "choose",
         jvm_semantics(),
     );
+    // `Int` and `Double` meet at `Number & Comparable<*>`: the type argument, and the call's
+    // result, which approximates to the declared bound `Number`. The declared result reads its
+    // `Number` constituent through a smart cast.
     let root = body.expr(root_expression(&body)).expect("generic call");
-    let FirExprKind::Call(call) = &root.kind else {
-        panic!("mixed numeric lower constraints must retain the selected generic call")
+    let FirExprKind::ImplicitConversion {
+        value,
+        conversion:
+            FirConversion {
+                kind: FirConversionKind::SmartCast { to },
+                ..
+            },
+    } = &root.kind
+    else {
+        panic!("the declared result must read the Number constituent of the call's result")
     };
     assert_eq!(root.ty.get(), Ty::obj("kotlin/Number"));
+    assert_eq!(to.get(), Ty::obj("kotlin/Number"));
+    let call_expression = body.expr(*value).expect("generic call");
+    let FirExprKind::Call(call) = &call_expression.kind else {
+        panic!("mixed numeric lower constraints must retain the selected generic call")
+    };
+    let joined = Ty::intersection(&[
+        Ty::obj("kotlin/Number"),
+        Ty::obj_args(
+            "kotlin/Comparable",
+            &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
+        ),
+    ]);
+    assert_eq!(
+        call_expression.ty.get(),
+        joined.with_intersection_approximation(Ty::obj("kotlin/Number"))
+    );
     assert_eq!(call.substitutions.len(), 1);
-    assert_eq!(call.substitutions[0].value.get(), Ty::obj("kotlin/Number"));
+    assert_eq!(call.substitutions[0].value.get(), joined);
 }
 
 #[test]
