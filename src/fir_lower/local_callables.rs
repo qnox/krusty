@@ -252,7 +252,9 @@ impl BodyLowering<'_> {
                     conversion,
                     ..
                 },
-                crate::ir::IrCheckedArgument::Expression { parameter, value },
+                crate::ir::IrCheckedArgument::Expression {
+                    parameter, value, ..
+                },
             ) = (argument, lowered)
             else {
                 continue;
@@ -703,6 +705,7 @@ impl BodyLowering<'_> {
                     crate::ir::IrCheckedArgument::Expression {
                         parameter,
                         value: self.coerce_to_declared(value, actual, declared),
+                        context: Default::default(),
                     }
                 }
                 crate::fir::FirAdaptedReferenceArgument::Context => {
