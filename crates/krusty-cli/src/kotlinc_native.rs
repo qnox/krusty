@@ -7,10 +7,27 @@
 //! option's value follows it (`-o app`) or is joined to it by `=` (`-produce=library`). An option
 //! krusty cannot honor is refused by name rather than ignored, since the result would silently
 //! differ.
+//!
+//! The compiler arguments every Kotlin compiler shares (the language settings, opt-ins and a
+//! multiplatform fragment structure) are read with the sources by the same reader `krusty` uses
+//! for kotlinc's, so a source set means one thing whichever target compiles it.
 
 use std::path::PathBuf;
 
-use krusty_native::{NativeCompileOptions, NativeTarget};
+use krusty_native::{NativeCompileOptions, NativeSource, NativeTarget};
+
+use crate::cli::LanguageArgument;
+
+/// The shared compiler arguments other than the language settings that a native compilation
+/// honors: the multiplatform fragment structure and the opt-ins.
+const SHARED_ARGUMENTS: &[&str] = &[
+    "-Xfragments",
+    "-Xfragment-sources",
+    "-Xfragment-refines",
+    "-Xexpect-actual-classes",
+    "-opt-in",
+    "-Xopt-in",
+];
 
 pub const HELP: &str = "\
 Usage: krusty kotlinc-native <options> <source files>
@@ -22,18 +39,22 @@ Options:
     -module-name <name> -> the program's module name [the output's file name]
     -no-default-libs -> don't link the libraries from dist/klib automatically
     -help, -h -> usage info
+The language settings, -opt-in, -Xmulti-platform and the -Xfragments structure are read as
+kotlinc reads them.
 ";
 
 /// What a `kotlinc-native` command line asks for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Invocation {
     Help,
-    Compile(NativeCompileOptions),
+    Compile(Box<NativeCompileOptions>),
 }
 
 /// Read the arguments that follow `krusty kotlinc-native`.
 pub fn parse(arguments: &[String]) -> Result<Invocation, String> {
-    let mut sources = Vec::new();
+    // The shared compiler arguments and the sources, in command-line order, for kotlinc's reader.
+    let mut shared = Vec::new();
+    let mut has_sources = false;
     let mut libraries = Vec::new();
     let mut output = None;
     let mut target = None;
@@ -79,12 +100,28 @@ pub fn parse(arguments: &[String]) -> Result<Invocation, String> {
             // krusty never links the platform libraries implicitly: a compilation is always what
             // `-no-default-libs` makes.
             "-no-default-libs" | "-nodefaultlibs" => {}
-            other if other.starts_with('-') => {
-                return Err(format!(
-                    "option {other} is not supported by krusty kotlinc-native"
-                ))
+            shared_name if SHARED_ARGUMENTS.contains(&shared_name) => {
+                shared.push(argument.clone());
+                if joined.is_none() {
+                    shared.push(value()?);
+                }
             }
-            source => sources.push(PathBuf::from(source)),
+            other if other.starts_with('-') => match crate::cli::language_argument(argument) {
+                Some(LanguageArgument::Alone) => shared.push(argument.clone()),
+                Some(LanguageArgument::WithValue) => {
+                    shared.push(argument.clone());
+                    shared.push(value()?);
+                }
+                None => {
+                    return Err(format!(
+                        "option {other} is not supported by krusty kotlinc-native"
+                    ))
+                }
+            },
+            source => {
+                has_sources = true;
+                shared.push(source.to_string());
+            }
         }
     }
     let target = match target.as_deref() {
@@ -97,14 +134,41 @@ pub fn parse(arguments: &[String]) -> Result<Invocation, String> {
             )
         })?,
     };
-    if sources.is_empty() {
+    if !has_sources {
         return Err("no source files".to_string());
     }
+    let read = crate::cli::parse(shared);
+    let problems = read
+        .argument_errors
+        .iter()
+        .map(|error| crate::kotlinc_arguments::render(error))
+        .chain(read.errors.iter().cloned())
+        .chain(
+            read.language_feature_problems
+                .iter()
+                .filter(|problem| problem.is_error)
+                .map(|problem| crate::kotlinc_arguments::render(&problem.message)),
+        )
+        .chain(read.configuration_errors.iter().cloned())
+        .collect::<Vec<_>>();
+    if !problems.is_empty() {
+        return Err(problems.join("\n"));
+    }
+    let sources = read
+        .sources
+        .iter()
+        .map(|path| NativeSource {
+            path: PathBuf::from(path),
+            fragment: read.source_fragments.get(path).copied(),
+            common: read.common_sources.contains(path),
+        })
+        .collect();
     let mut options = NativeCompileOptions::new(sources, target);
+    options.features = read.language_settings.features;
     options.libraries = libraries;
     options.output = output;
     options.module_name = module_name;
-    Ok(Invocation::Compile(options))
+    Ok(Invocation::Compile(Box::new(options)))
 }
 
 #[cfg(test)]
@@ -125,13 +189,19 @@ mod tests {
             panic!("not a compilation");
         };
         let mut expected = NativeCompileOptions::new(
-            vec![PathBuf::from("a.kt"), PathBuf::from("b.kt")],
+            vec![
+                NativeSource::plain(PathBuf::from("a.kt")),
+                NativeSource::plain(PathBuf::from("b.kt")),
+            ],
             NativeTarget::from_konan_name("linux_arm64").expect("a target"),
         );
+        expected.features = crate::cli::language_settings(Vec::<String>::new())
+            .settings
+            .features;
         expected.libraries = vec![PathBuf::from("a.klib"), PathBuf::from("b")];
         expected.output = Some(PathBuf::from("out/app"));
         expected.module_name = Some("app".to_string());
-        assert_eq!(options, expected);
+        assert_eq!(*options, expected);
     }
 
     #[test]
