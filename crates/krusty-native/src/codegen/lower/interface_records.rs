@@ -74,7 +74,7 @@ impl FileLowering<'_> {
     /// interface identity (`krusty::backend::interface_identity`). The same member keeps one
     /// number, after the numbers of this module's own interfaces.
     pub(super) fn dependency_interface_number(&mut self, bytes: Vec<u8>) -> u32 {
-        let base = self.slot_plan.interfaces().count();
+        let base = self.model.numbers().count();
         let number = match self.dependency_interface_numbers.get(&bytes).copied() {
             Some(number) => number,
             None => {
