@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -62,12 +63,23 @@ class KotlinGradlePluginTest {
             ""));
         assertTrue(recording.toFile().setExecutable(true));
 
+        // CI fills one Gradle user home beforehand and sets KRUSTY_GRADLE_OFFLINE: the inner build
+        // reads that home and never fetches from Maven Central. Otherwise it keeps one home of its
+        // own across runs, so the Kotlin Gradle plugin is downloaded once.
+        boolean offline = !System.getenv().getOrDefault("KRUSTY_GRADLE_OFFLINE", "").isEmpty();
+        String warmedHome = System.getenv("GRADLE_USER_HOME");
+        assertTrue(!offline || warmedHome != null, "KRUSTY_GRADLE_OFFLINE needs the warmed GRADLE_USER_HOME");
+        Path testKit = Path.of(offline ? warmedHome : System.getProperty("krusty.testKitDir"));
+        List<String> arguments = new ArrayList<>(List.of(
+            "compileKotlin", "--stacktrace", "-Dkrusty.binary=" + recording));
+        if (offline) {
+            arguments.add("--offline");
+        }
         BuildResult result = GradleRunner.create()
-            // One Gradle user home across runs, so the Kotlin Gradle plugin is downloaded once.
-            .withTestKitDir(Path.of(System.getProperty("krusty.testKitDir")).toFile())
+            .withTestKitDir(testKit.toFile())
             .withProjectDir(project.toFile())
             // The Gradle daemon reads the binary from this system property before KRUSTY_BIN.
-            .withArguments("compileKotlin", "--stacktrace", "-Dkrusty.binary=" + recording)
+            .withArguments(arguments)
             .withEnvironment(Map.of(
                 "PATH", System.getenv("PATH"),
                 "HOME", System.getProperty("user.home")))
