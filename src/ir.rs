@@ -205,9 +205,9 @@ pub use properties::{
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
-    FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable,
-    IrConstructorReferenceDeclaration, IrPropertyFunctionReference, IrReferencedProperty, PropRef,
-    ReflectedCallable,
+    BoundContextUnbox, FuncRef, IrCallableReference, IrCallableReferenceTarget,
+    IrClassifierCallable, IrConstructorReferenceDeclaration, IrPropertyFunctionReference,
+    IrReferencedProperty, PropRef, ReflectedCallable,
 };
 pub use sam_target::{
     IrSamMethod, IrSamMethodFrame, IrSamPlacement, IrSamTarget, IrSamTypeParameter,

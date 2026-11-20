@@ -1006,7 +1006,7 @@ fun make(value: String): View<CharSequence> = Hidden(value)
 ";
 
 #[test]
-fn a_file_private_class_overrides_the_interfaces_above_its_written_ones() {
+fn a_file_private_class_is_named_and_overrides_the_interfaces_above_its_written_ones() {
     let Some((directory, libraries)) = produce_library("inherited-interface", INHERITED_INTERFACE)
     else {
         return;
@@ -1038,6 +1038,45 @@ fn a_file_private_class_overrides_the_interfaces_above_its_written_ones() {
             "{owner}"
         );
     }
+    let [class] = ir
+        .classes
+        .iter()
+        .enumerate()
+        .filter(|(_, class)| class.fq_name.render().contains("klib-local"))
+        .map(|(id, _)| u32::try_from(id).unwrap())
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one materialized private class")
+    };
+    assert!(ir.classes[class as usize].is_source_declared);
+    assert_eq!(
+        ir.local_class_name_provenance.get(&class),
+        Some(&crate::ir::IrLocalClassNameProvenance {
+            source: crate::ir::IrLocalClassNameRoot::Dependency {
+                package: crate::types::type_name("fixture"),
+            },
+            lexical_owner: None,
+            segments: Box::new(["Hidden".to_owned()]),
+            ordinal: None,
+            parents: Box::new([]),
+        })
+    );
+    let names = crate::backend::class_names::source_class_names(ir, class)
+        .expect("the private class is named");
+    assert_eq!(
+        (names.qualified.as_str(), names.simple.as_str()),
+        ("fixture.Hidden", "Hidden")
+    );
+    // Native's and Wasm's runtime reflection read the same declared name.
+    let reflection = crate::backend::class_names::declared_class(ir, class);
+    assert_eq!(
+        (
+            reflection.package.as_str(),
+            reflection.simple.as_deref(),
+            reflection.qualified.as_deref()
+        ),
+        ("fixture", Some("Hidden"), Some("fixture.Hidden"))
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }
 
@@ -1074,10 +1113,13 @@ fn an_erased_factory_freezes_only_the_private_classes_its_body_constructs() {
         .unwrap();
     let callable = selected.klib_body_callable().unwrap();
     assert_eq!(callable.ret(), Ty::obj("kotlin/Any"));
-    let roots = libraries.declaration_bodies().emitted_body_classifiers(
-        callable.identity(),
-        crate::klib_lowering::EMITTED_CALL_FORMS,
-    );
+    let roots = libraries
+        .declaration_bodies()
+        .emitted_body(
+            callable.identity(),
+            crate::klib_lowering::EMITTED_CALL_FORMS,
+        )
+        .hierarchy_roots;
     assert!(roots.contains(&crate::types::type_name("fixture/Leaf")));
     assert!(!roots.contains(&crate::types::type_name("fixture/Unused")));
     // The declaring header is a hierarchy root, not a new public callable or source candidate.
