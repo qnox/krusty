@@ -33,6 +33,7 @@ pub mod fir_lower;
 pub mod frontend;
 pub use krusty_names::fx_hash;
 pub mod hosted_plugin_ir;
+mod inline_expansion;
 mod inline_parameter_modifier;
 pub mod integer_constant;
 pub mod ir;
