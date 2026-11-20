@@ -1617,6 +1617,17 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
+      # The smoke test consumes the reference release's own kotlin-stdlib.jar from the kotlinc
+      # distribution the other jobs cache; Maven Central refused the jar to GitHub-hosted runners
+      # (HTTP 404 on every retry for minutes) while it stayed published.
+      - name: select the maximum Kotlin version
+        id: max-version
+        run: echo "version=$(just max-version)" >> "$GITHUB_OUTPUT"
+      - name: restore kotlinc ${{ steps.max-version.outputs.version }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/kotlinc/${{ steps.max-version.outputs.version }}
+          key: kotlinc-${{ steps.max-version.outputs.version }}
       # ubuntu-latest has Bazelisk installed as `bazel`; the self-hosted image installs it as
       # `bazelisk`.
       - name: put bazelisk on PATH as bazel
@@ -1627,13 +1638,10 @@ jobs:
             ln -s "$(command -v bazelisk)" "$RUNNER_TEMP/bin/bazel"
             echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           fi
-      # Everything the job downloads lives in one cache per Bazel release: the Bazel binary Bazelisk
-      # fetches, the repository cache that holds the BCR modules the consumer resolves, and the
-      # Kotlin standard library. Saved only by a master run, like every cache here, and only once
-      # the build has filled it, so a miss downloads once and later runs use the entry.
-      - name: select the maximum Kotlin version
-        id: max-version
-        run: echo "version=$(just max-version)" >> "$GITHUB_OUTPUT"
+      # The downloads the job makes itself live in one cache per Bazel release: the Bazel binary
+      # Bazelisk fetches and the repository cache that holds the BCR modules the consumer resolves.
+      # Saved only by a master run, like every cache here, and only once the build has filled it, so
+      # a miss downloads once and later runs use the entry.
       - name: restore the Bazel downloads
         id: bazel-downloads
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1641,27 +1649,16 @@ jobs:
           path: |
             ~/.cache/bazelisk
             ~/.cache/krusty/bazel-repository
-            ~/.cache/krusty/kotlin-stdlib
-          key: bazel-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.bazel }}-${{ steps.max-version.outputs.version }}-${{ hashFiles('scripts/bazel-smoke.sh', 'tools/krusty-bazel/**') }}
+          key: bazel-downloads-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.bazel }}-${{ hashFiles('scripts/bazel-smoke.sh', 'tools/krusty-bazel/**') }}
       - name: build the packaged Bazel module with Bazel ${{ matrix.bazel }}
         env:
           USE_BAZEL_VERSION: ${{ matrix.bazel }}
-          KOTLIN_VERSION: ${{ steps.max-version.outputs.version }}
         run: |
           set -euo pipefail
           chmod +x krusty
-          stdlib="$HOME/.cache/krusty/kotlin-stdlib/kotlin-stdlib-$KOTLIN_VERSION.jar"
-          if [[ ! -s $stdlib ]]; then
-            mkdir -p "$(dirname "$stdlib")"
-            # Maven Central's CDN sometimes answers a published artifact with a 404 or 429 for a
-            # few seconds, so every error is retried.
-            curl -fsSL --connect-timeout 30 --retry 8 --retry-max-time 300 --retry-all-errors \
-              -o "$stdlib.part" \
-              "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$KOTLIN_VERSION/kotlin-stdlib-$KOTLIN_VERSION.jar"
-            mv "$stdlib.part" "$stdlib"
-          fi
           export BAZEL_REPOSITORY_CACHE="$HOME/.cache/krusty/bazel-repository"
-          scripts/bazel-smoke.sh "$PWD/krusty" "$stdlib"
+          kotlinc=$(just kotlinc "${{ steps.max-version.outputs.version }}")
+          scripts/bazel-smoke.sh "$PWD/krusty" "$(dirname "$kotlinc")/../lib/kotlin-stdlib.jar"
       - name: save the Bazel downloads
         if: github.ref == 'refs/heads/master' && steps.bazel-downloads.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1669,7 +1666,6 @@ jobs:
           path: |
             ~/.cache/bazelisk
             ~/.cache/krusty/bazel-repository
-            ~/.cache/krusty/kotlin-stdlib
           key: ${{ steps.bazel-downloads.outputs.cache-primary-key }}
 
   # A release is started by hand (`release` input) or by the daily schedule on a master commit and
