@@ -204,8 +204,6 @@ callableReference/kt52270.kt
 callableReference/property/accessorForPropertyWithPrivateSetter.kt
 callableReference/property/delegated.kt
 callableReference/property/extensionPropertyWithExtensionReceiver.kt
-callableReference/property/kt14330_2.kt
-callableReference/property/kt15447.kt
 callableReference/property/listOfStringsMapLength.kt
 callableReference/property/nullableExtensionProperty.kt
 casts/asForConstants.kt
@@ -912,7 +910,6 @@ inference/pcla/builderCallAsReturnTypeInLocalClass.kt
 inference/pcla/callableReferenceAndCoercionToUnit.kt
 inference/pcla/callableReferencesProperCompletion.kt
 inference/pcla/issues/kt42139.kt
-inference/pcla/issues/kt45083.kt
 inference/pcla/issues/kt47052.kt
 inference/pcla/issues/kt49887.kt
 inference/pcla/issues/kt54400b.kt
