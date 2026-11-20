@@ -34519,7 +34519,7 @@ impl<'a> Checker<'a> {
             if callable_reference_selection::select_adapted_instance_candidate(
                 &source,
                 &candidates,
-                self.file.callable_references_to_contextual,
+                self.file.language.callable_references_to_contextual,
                 None,
                 self.instance_reference_expectation(expected),
                 |actual, target| self.receiver_is_assignable(actual, target),
@@ -34701,7 +34701,7 @@ impl<'a> Checker<'a> {
                 }
                 // Without `CallableReferencesToContextual` a declaration with context parameters
                 // cannot be referenced at all.
-                if function.context_count > 0 && !self.file.callable_references_to_contextual {
+                if function.context_count > 0 && !self.file.language.callable_references_to_contextual {
                     context_parameter_candidate.get_or_insert_with(|| function.clone());
                     return None;
                 }
@@ -35241,7 +35241,7 @@ impl<'a> Checker<'a> {
             callable_reference_selection::select_adapted_instance_candidate(
                 &source,
                 overloads,
-                self.file.callable_references_to_contextual,
+                self.file.language.callable_references_to_contextual,
                 None,
                 self.instance_reference_expectation(expected),
                 |actual, target| self.receiver_is_assignable(actual, target),
@@ -52102,7 +52102,7 @@ impl<'a> Checker<'a> {
                         callable_reference_selection::select_adapted_instance_candidate(
                             &source,
                             &candidates,
-                            self.file.callable_references_to_contextual,
+                            self.file.language.callable_references_to_contextual,
                             None,
                             self.instance_reference_expectation(expected),
                             |actual, target| self.receiver_is_assignable(actual, target),
@@ -52401,7 +52401,7 @@ impl<'a> Checker<'a> {
                     callable_reference_selection::select_adapted_instance_candidate(
                         &source,
                         &receiver_candidates.overloads,
-                        self.file.callable_references_to_contextual,
+                        self.file.language.callable_references_to_contextual,
                         Some(receiver_ty),
                         self.instance_reference_expectation(expected),
                         |actual, target| self.receiver_is_assignable(actual, target),
@@ -52829,7 +52829,8 @@ impl<'a> Checker<'a> {
                         .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
                         .collect::<Vec<_>>();
                     if let [selected] = candidates.as_slice() {
-                        if selected.context_count > 0 && self.file.callable_references_to_contextual
+                        if selected.context_count > 0
+                            && self.file.language.callable_references_to_contextual
                         {
                             if let Some(ty) =
                                 self.contextual_top_level_reference(e, &name, selected)
