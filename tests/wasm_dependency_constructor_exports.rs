@@ -48,6 +48,26 @@ fn wasm_official_dependency_secondary_constructors_delegate_to_the_primary() {
     );
 }
 
+/// Secondary constructors that reach the primary one through another secondary constructor lower
+/// from the official producer's bodies, each running its own body after the one it delegates to.
+#[test]
+fn wasm_official_dependency_secondary_constructors_delegate_through_each_other() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyChainedSecondaryConstructors.kt"),
+        "DependencyChainedSecondaryConstructors",
+    );
+}
+
+/// A public constructor that delegates to a library-private primary constructor lowers from the
+/// official producer's bodies, though no provider publishes the private constructor to source.
+#[test]
+fn wasm_official_dependency_public_constructors_delegate_to_a_private_primary() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyPrivatePrimaryConstructor.kt"),
+        "DependencyPrivatePrimaryConstructor",
+    );
+}
+
 /// Generic classes, a generic superclass and a secondary constructor of a generic class lower
 /// from the official producer's bodies.
 #[test]
