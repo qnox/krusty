@@ -187,6 +187,32 @@ pub(super) fn function_locals(
     )
 }
 
+/// Local-variable spellings for the parameters of a synthetic `access$<name>` bridge forwarding to
+/// `function`. The target's own table spells an extension receiver `$this$<name>`; the bridge
+/// takes that receiver as an ordinary parameter and spells it `$receiver`, as kotlinc's `access$`
+/// local table does, whether the bridge forwards to a member or to a static declaration.
+pub(super) fn access_bridge_locals(
+    ir: &IrFile,
+    function: u32,
+    types: &[krusty::types::Ty],
+) -> Option<Vec<Option<String>>> {
+    let identities = ir.function_parameter_identities(function)?;
+    let names = function_locals(ir, function, types)?;
+    Some(
+        names
+            .into_iter()
+            .zip(identities)
+            .map(|(name, identity)| {
+                if identity.role == IrParameterRole::ExtensionReceiver {
+                    Some(HOLDER_EXTENSION_RECEIVER.to_string())
+                } else {
+                    name
+                }
+            })
+            .collect(),
+    )
+}
+
 /// Local-variable spellings for a static property-annotation marker. Its extension receiver is the
 /// property's receiver rather than a callable receiver, and kotlinc publishes that slot as
 /// `<this>`; context parameters keep their ordinary declaration spellings.
@@ -684,8 +710,9 @@ fn is_lambda_class_invoke(ir: &IrFile, function: u32) -> bool {
     })
 }
 
-/// kotlinc's name for an extension receiver that a static taking the interface instance first
-/// (`DefaultImpls`, `access$<name>$jd`) receives as an ordinary parameter.
+/// kotlinc's name for an extension receiver that a static receives as an ordinary parameter: one
+/// taking the interface instance first (`DefaultImpls`, `access$<name>$jd`), or a synthetic
+/// `access$<name>` bridge.
 const HOLDER_EXTENSION_RECEIVER: &str = "$receiver";
 
 /// One surface's spellings of `function`'s parameters where its body is emitted. kotlinc writes a
