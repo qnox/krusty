@@ -32,7 +32,7 @@ import kotlin.system.exitProcess
  * the real stdout for frames. The protocol is `crates/krusty-plugin-host/src/protocol.rs`; keep the
  * two in step and bump [PROTOCOL] on any change.
  */
-const val PROTOCOL = 5
+const val PROTOCOL = 6
 
 private const val HELLO = 0
 private const val LOAD = 1
@@ -125,10 +125,7 @@ private fun serve() {
                 send(frames) { reply.write(this) }
             }
             GENERATE -> {
-                val reply = answer {
-                    generate(request, current?.irGenerationExtensions ?: emptyList())
-                    Generated
-                }
+                val reply = answer { Generated(generate(request, current?.irGenerationExtensions ?: emptyList())) }
                 send(frames) { reply.write(this) }
             }
             SCRIPT_DEFINITION -> {
@@ -182,9 +179,11 @@ private object SessionClosed : Reply {
     }
 }
 
-private object Generated : Reply {
+/** The module the plugins left, framed by [ModuleWriter]. */
+private class Generated(val module: ByteArray) : Reply {
     override fun write(out: DataOutputStream) {
         out.writeByte(GENERATED)
+        out.write(module)
     }
 }
 

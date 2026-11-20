@@ -1535,7 +1535,6 @@ propertyCallableReference/varClass.kt
 propertyCallableReference/varExtension.kt
 propertyCallableReference/varModule.kt
 ranges/capturedLoopVar.kt
-ranges/contains/evaluationOrderForCollection.kt
 ranges/contains/evaluationOrderForComparableRange.kt
 ranges/contains/evaluationOrderForDownTo.kt
 ranges/contains/evaluationOrderForDownToReversed.kt
