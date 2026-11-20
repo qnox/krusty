@@ -5,18 +5,21 @@
 //! plugin's cases need: the case directive that enables it, the reference compiler plugin jar and
 //! options, the runtime jars, the upstream `testData` directory, and the Kotlin releases it covers.
 //! The harness reads descriptors through [`all`] and has no per-plugin branches, so a plugin's
-//! corpus moves with its code.
+//! corpus moves with its code. A plugin's expected-failure and not-applicable inventories live in
+//! `expected_failures/` and `expected_not_applicable/` beside its descriptor.
 //!
 //! A descriptor is `key = value` lines; `#` starts a comment line. Keys:
 //!
 //! | key | meaning |
 //! |---|---|
 //! | `plugin` | the plugin's name (required, unique) |
-//! | `directive` | the `// <DIRECTIVE>` that makes a case compile with the plugin |
+//! | `directive` | the `// <DIRECTIVE>` that makes a case compile with the plugin; the corpus runner puts it on every upstream case, which carries none of its own |
 //! | `plugin-jar` | the reference compiler's plugin jar, an [artifact](Artifact) |
 //! | `plugin-option` | `<plugin id>:<option>=<value>`, passed as `-P plugin:<id>:<option>`; repeatable |
 //! | `runtime` | a jar the case compiles and runs against, an [artifact](Artifact); repeatable |
 //! | `upstream` | a `JetBrains/kotlin` directory holding the plugin's cases, read at the tag `v<Kotlin version>`; repeatable |
+//! | `support` | a `JetBrains/kotlin` source file every case compiles with, as another file of its module; repeatable |
+//! | `stubs` | a directory of Java sources, relative to the descriptor, compiled into a runtime the cases link against |
 //! | `kotlin` | the inclusive Kotlin release bracket `<min>..<max>`, either end optional |
 //!
 //! An artifact is one source or several joined by `|` (the first that provisions wins):
@@ -29,11 +32,24 @@ use std::sync::OnceLock;
 
 use crate::kotlin_version::KotlinVersion;
 
-/// Every plugin's descriptor text, each from its own `boxes` directory.
-const DESCRIPTORS: &[&str] = &[
-    include_str!("../plugins/atomicfu/boxes/corpus.txt"),
-    include_str!("../plugins/compose/boxes/corpus.txt"),
-    include_str!("../plugins/serialization/boxes/corpus.txt"),
+/// Every plugin's `boxes` directory, relative to the crate root, with its descriptor text.
+const DESCRIPTORS: &[(&str, &str)] = &[
+    (
+        "src/plugins/atomicfu/boxes",
+        include_str!("../plugins/atomicfu/boxes/corpus.txt"),
+    ),
+    (
+        "src/plugins/compose/boxes",
+        include_str!("../plugins/compose/boxes/corpus.txt"),
+    ),
+    (
+        "src/plugins/parcelize/boxes",
+        include_str!("../plugins/parcelize/boxes/corpus.txt"),
+    ),
+    (
+        "src/plugins/serialization/boxes",
+        include_str!("../plugins/serialization/boxes/corpus.txt"),
+    ),
 ];
 
 /// One way of providing a jar. See the module documentation for the spelling.
@@ -228,11 +244,16 @@ impl std::fmt::Display for KotlinBracket {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginCorpus {
     pub plugin: String,
+    /// The plugin's `boxes` directory, relative to the crate root; empty for a parsed descriptor
+    /// that no registry entry placed.
+    pub dir: String,
     pub directive: Option<String>,
     pub plugin_jar: Option<Artifact>,
     pub options: Vec<PluginOption>,
     pub runtime: Vec<Artifact>,
     pub upstream: Vec<String>,
+    pub support: Vec<String>,
+    pub stubs: Option<String>,
     pub kotlin: KotlinBracket,
 }
 
@@ -245,6 +266,8 @@ impl PluginCorpus {
         let mut options = Vec::new();
         let mut runtime = Vec::new();
         let mut upstream = Vec::new();
+        let mut support = Vec::new();
+        let mut stubs = None;
         let mut kotlin = None;
         let once = |slot: &mut Option<String>, key: &str, value: &str| match slot {
             Some(_) => Err(format!("`{key}` is given twice")),
@@ -271,6 +294,8 @@ impl PluginCorpus {
                 "directive" => once(&mut directive, key, value)?,
                 "plugin-jar" => once(&mut jar_text, key, value)?,
                 "kotlin" => once(&mut bracket_text, key, value)?,
+                "stubs" => once(&mut stubs, key, value)?,
+                "support" => support.push(value.to_string()),
                 "plugin-option" => {
                     let (plugin_id, option) = value
                         .split_once(':')
@@ -297,11 +322,14 @@ impl PluginCorpus {
         }
         Ok(Self {
             plugin,
+            dir: String::new(),
             directive,
             plugin_jar,
             options,
             runtime,
             upstream,
+            support,
+            stubs,
             kotlin: kotlin.unwrap_or_default(),
         })
     }
@@ -368,9 +396,12 @@ pub fn all() -> &'static [PluginCorpus] {
     CORPORA.get_or_init(|| {
         let corpora: Vec<PluginCorpus> = DESCRIPTORS
             .iter()
-            .map(|text| {
-                PluginCorpus::parse(text)
-                    .unwrap_or_else(|error| panic!("invalid plugin corpus descriptor: {error}"))
+            .map(|(dir, text)| {
+                let mut corpus = PluginCorpus::parse(text).unwrap_or_else(|error| {
+                    panic!("invalid plugin corpus descriptor {dir}/corpus.txt: {error}")
+                });
+                corpus.dir = (*dir).to_string();
+                corpus
             })
             .collect();
         for (index, corpus) in corpora.iter().enumerate() {
@@ -415,7 +446,7 @@ mod tests {
         assert_eq!(sorted.len(), directives.len());
         assert_eq!(
             all().iter().map(|c| c.plugin.as_str()).collect::<Vec<_>>(),
-            ["atomicfu", "compose", "serialization"]
+            ["atomicfu", "compose", "parcelize", "serialization"]
         );
     }
 
@@ -424,13 +455,15 @@ mod tests {
         let corpus = PluginCorpus::parse(
             "# comment\nplugin = demo\ndirective = WITH_DEMO\nplugin-jar = dist:demo.jar\n\
              plugin-option = demo.id:flag=true\nruntime = maven:g:a:1.0 | dist:a.jar\n\
-             upstream = plugins/demo/testData/box\nkotlin = 2.4.0..2.4.20\n",
+             upstream = plugins/demo/testData/box\nsupport = plugins/demo/testData/lib.kt\n\
+             stubs = stubs\nkotlin = 2.4.0..2.4.20\n",
         )
         .unwrap();
         assert_eq!(
             corpus,
             PluginCorpus {
                 plugin: "demo".into(),
+                dir: String::new(),
                 directive: Some("WITH_DEMO".into()),
                 plugin_jar: Some(Artifact {
                     sources: vec![ArtifactSource::Dist("demo.jar".into())]
@@ -450,6 +483,8 @@ mod tests {
                     ]
                 }],
                 upstream: vec!["plugins/demo/testData/box".into()],
+                support: vec!["plugins/demo/testData/lib.kt".into()],
+                stubs: Some("stubs".into()),
                 kotlin: KotlinBracket {
                     min: Some(KotlinVersion::V2_4_0),
                     max: Some(KotlinVersion::V2_4_20)
@@ -465,6 +500,10 @@ mod tests {
     fn malformed_descriptors_are_refused_with_the_offending_text() {
         let refused = |text: &str| PluginCorpus::parse(text).unwrap_err();
         assert_eq!(refused("directive = X\n"), "a descriptor names no `plugin`");
+        assert_eq!(
+            refused("plugin = a\nstubs = x\nstubs = y\n"),
+            "`stubs` is given twice"
+        );
         assert_eq!(
             refused("plugin = a\nplugin = b\n"),
             "`plugin` is given twice"
