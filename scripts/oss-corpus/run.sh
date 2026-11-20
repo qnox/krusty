@@ -168,22 +168,16 @@ release() {
 # The warm-up build downloads everything the build needs (dependencies, Gradle and compiler plugins,
 # toolchains) and is not compared; its cost goes unrecorded and its outputs are dropped. The two
 # measured builds then run offline, so neither pays for the network and both start from the same
-# caches. A warm-up that could not download something (a repository or the plugin portal out for a
-# moment) is retried twice, after a pause: the offline builds cannot fetch it later. Any other
-# warm-up failure is the build's own, which the reference build then reports. A download that still
-# fails stops the run, which would otherwise measure a build that cannot start.
+# caches. A warm-up that could not download something (a repository or the plugin portal refused
+# it) stops the run: the offline builds cannot fetch it later, and a retry would only extend a block
+# the repository placed on this host. Any other warm-up failure is the build's own, which the
+# reference build then reports.
 unreachable='Could not (resolve|GET|HEAD)|could not resolve plugin artifact|Connection reset|timed out|Name or service not known|No such host'
-for attempt in 1 2 3; do
-  build warmup
-  if [ "$status" -eq 0 ] || ! grep -qE "$unreachable" "$logs/$name.warmup.log"; then
-    break
-  fi
-  if [ "$attempt" -eq 3 ]; then
-    echo "$name: the warm-up could not download what the build needs; see $name.warmup.log" >&2
-    exit 1
-  fi
-  sleep $((attempt * ${CORPUS_RETRY_PAUSE:-60}))
-done
+build warmup
+if [ "$status" -ne 0 ] && grep -qE "$unreachable" "$logs/$name.warmup.log"; then
+  echo "$name: the warm-up could not download what the build needs; see $name.warmup.log" >&2
+  exit 1
+fi
 snapshot warmup
 rm -rf "$work/out/$name/warmup" "$logs/$name.warmup.metrics.json" "$logs/$name.warmup.tasks.tsv"
 CORPUS_PLUGIN_SURVEY=$logs/$name.plugins.tsv build kotlinc

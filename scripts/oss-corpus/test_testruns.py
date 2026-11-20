@@ -150,7 +150,7 @@ class RunScript(unittest.TestCase):
         commit = subprocess.run(git + ['rev-parse', 'HEAD'], check=True, capture_output=True,
                                 text=True).stdout.strip()
         write(f'{work}/projects.tsv', f'p\tfile://{repo}\t{commit}\t.\t21\t-\n')
-        env = dict(os.environ, CORPUS_PROJECTS=f'{work}/projects.tsv', CORPUS_RETRY_PAUSE='0')
+        env = dict(os.environ, CORPUS_PROJECTS=f'{work}/projects.tsv')
         env.pop('CORPUS_PERF', None)
         result = subprocess.run(['bash', os.path.join(HERE, 'run.sh'), 'p', f'{work}/corpus',
                                  '/nonexistent/krusty', '/nonexistent/repository', '0'],
@@ -175,7 +175,7 @@ class RunScript(unittest.TestCase):
         self.assertIn("p: the reference kotlinc build failed (exit 3); see p.kotlinc.log", self.stderr)
 
     # The warm-up is the only build that is not offline. This one fails to download on its first
-    # `failures` attempts, then succeeds; every other build records its one compilation.
+    # `failures` attempts; every other build records its one compilation.
     FLAKY_WARMUP = ('#!/bin/sh\n'
                     'case "$*" in *--offline*) ;; *)\n'
                     '  n=$(cat "$HOME/attempts" 2>/dev/null || echo 0); echo $((n + 1)) > "$HOME/attempts"\n'
@@ -185,26 +185,14 @@ class RunScript(unittest.TestCase):
                     'esac\n'
                     'if [ -n "$CORPUS_COMPILATIONS" ]; then : > "$CORPUS_COMPILATIONS"; fi\n')
 
-    def test_a_warm_up_that_could_not_download_is_retried(self):
+    def test_a_warm_up_that_could_not_download_stops_the_run_after_one_attempt(self):
         with tempfile.TemporaryDirectory() as work:
             os.environ['HOME'], home = work, os.environ.get('HOME')
             try:
-                project = self.run_corpus(work, self.FLAKY_WARMUP.replace('{failures}', '2'))
+                self.run_corpus(work, self.FLAKY_WARMUP.replace('{failures}', '1'), expected_exit=1, compared=False)
             finally:
                 os.environ['HOME'] = home
-        self.assertEqual(project['reference_exit'], 0)
-        self.assertEqual([line.split(' seconds')[0] for line in self.status if ' warmup ' in line],
-                         ['p warmup exit 1', 'p warmup exit 1', 'p warmup exit 0'])
-
-    def test_a_warm_up_that_never_downloads_stops_the_run(self):
-        with tempfile.TemporaryDirectory() as work:
-            os.environ['HOME'], home = work, os.environ.get('HOME')
-            try:
-                self.run_corpus(work, self.FLAKY_WARMUP.replace('{failures}', '3'), expected_exit=1, compared=False)
-            finally:
-                os.environ['HOME'] = home
-        self.assertEqual([line.split(' seconds')[0] for line in self.status],
-                         ['p warmup exit 1', 'p warmup exit 1', 'p warmup exit 1'])
+        self.assertEqual([line.split(' seconds')[0] for line in self.status], ['p warmup exit 1'])
         self.assertIn('p: the warm-up could not download what the build needs; see p.warmup.log', self.stderr)
 
     def test_each_test_build_reports_on_its_own_classes(self):
