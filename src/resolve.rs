@@ -65,13 +65,14 @@ mod backing_field_binding;
 mod boolean_implications;
 mod dependency_annotation_defaults;
 mod dependency_body_call_edges;
+pub(crate) use anonymous_object_capture::discover_inline_anonymous_object_captures;
+pub use anonymous_object_capture::{
+    discover_anonymous_object_captures, AnonymousObjectCapture, AnonymousObjectCaptureSource,
+    AnonymousObjectReceiverSource, ClassStorageSource,
+};
 use anonymous_object_capture::{
     record_anonymous_construction_captures, AnonymousCaptureCandidate,
     SelectedLocalCallableCaptures,
-};
-pub use anonymous_object_capture::{
-    AnonymousObjectCapture, AnonymousObjectCaptureSource, AnonymousObjectReceiverSource,
-    ClassStorageSource,
 };
 mod anonymous_receiver_labels;
 mod applied_hierarchy;
@@ -438,7 +439,7 @@ pub(crate) use dependency_platform::DependencyPlatform;
 pub(crate) use diagnostic_selection::unresolved_member_message;
 use extension_reference_selection::ExtensionReferenceChoice;
 pub(crate) use finalized_projection::{
-    project_finalized_signatures, publish_stable_declaration_metadata,
+    project_finalized_signatures, publish_declared_spellings, publish_stable_declaration_metadata,
 };
 pub use for_loop_iteration::{IterationPlans, LoopMemberProperty};
 pub(crate) use inspection_analysis::{
@@ -16876,31 +16877,20 @@ impl<'a> Checker<'a> {
                     Some(shape) => (Some(shape), shape.inline),
                     None => (toplevel_lambda_shape.as_ref(), toplevel_inline),
                 };
-                let selected_lambda_pts: Option<Vec<Vec<Ty>>> =
-                    selected_lambda_shape.and_then(|shape| shape.param_types.clone());
-                let selected_lambda_expected: Option<Vec<Option<Ty>>> =
-                    selected_lambda_shape.and_then(|shape| shape.expected_types.clone());
-                let selected_lambda_fixed_expected: Option<Vec<Option<Ty>>> =
-                    selected_lambda_shape.and_then(|shape| shape.fixed_expected_types.clone());
-                let selected_lambda_formals = selected_lambda_shape
-                    .map(|shape| shape.generic_formals.clone())
-                    .unwrap_or_default();
-                // Per-param RECEIVER function type for a classpath top-level HOF (`NavHost(builder:
-                // NGB.()->Unit){…}`) — a lambda to such a param binds its implicit `this` to the receiver.
-                // From `@Metadata`'s `@ExtensionFunctionType` (no JVM `Signature` needed, so this also
-                // drives a krusty-emitted module's HOF whose `Signature` attribute is absent). `None` for a
-                // user fn.
-                let selected_lambda_recvs: Option<Vec<Option<Ty>>> =
-                    selected_lambda_shape.and_then(|shape| shape.receivers.clone());
-                let selected_lambda_context_counts: Option<Vec<usize>> =
-                    selected_lambda_shape.and_then(|shape| shape.context_counts.clone());
-                // Per-param `crossinline`/`noinline`: a mutable local such a lambda captures is
-                // `Ref`-boxed (see `InlineParameterModifier::boxes_captures`), not an inline splice's.
-                let selected_lambda_boxes_captures: Option<Vec<Option<bool>>> =
-                    selected_lambda_shape.and_then(|shape| shape.boxes_captures.clone());
-                // The shape's own callable may be a companion's `operator fun invoke` rather than
-                // a top-level function; its inline flag decides where a lambda's `return` may go.
-                let selected_shape_inline = selected_lambda_shape.is_some_and(|shape| shape.inline);
+                lambda_call_shapes::seed_fixed_input_bindings(
+                    selected_lambda_shape,
+                    &mut known_generic_bindings,
+                );
+                let lambda_call_shapes::SelectedLambdaInputs {
+                    param_types: selected_lambda_pts,
+                    expected_types: selected_lambda_expected,
+                    fixed_expected_types: selected_lambda_fixed_expected,
+                    generic_formals: selected_lambda_formals,
+                    receivers: selected_lambda_recvs,
+                    context_counts: selected_lambda_context_counts,
+                    boxes_captures: selected_lambda_boxes_captures,
+                    inline: selected_shape_inline,
+                } = lambda_call_shapes::SelectedLambdaInputs::of(selected_lambda_shape);
                 let constructor_expectations: Option<ConstructionExpectations> = if !self
                     .lexical_value_declares(scope, &fname)
                     && self.resolver().top_level_candidates(&fname).is_empty()
@@ -30961,67 +30951,6 @@ fn discover_anonymous_object_captures_at(
         install_anonymous_object_captures(symbols, file_index, discovered.clone());
     }
     discovered
-}
-
-pub fn discover_anonymous_object_captures(
-    files: &[File],
-    syms: &mut SymbolTable,
-) -> Vec<HashMap<DeclId, Vec<AnonymousObjectCapture>>> {
-    // Bracketed as a module mutation: installing capture fields and constructor parameters changes
-    // the synthesized classes, and the table's derived indexes are rebuilt on `finish`. Without the
-    // bracket the members are written but nothing rebuilds, so an anonymous object that captures a
-    // local loses its methods entirely — `resumeWith` is absent from the emitted class and the JVM
-    // raises `AbstractMethodError` at the first call.
-    syms.begin_module_mutation();
-    // On the CHECKER's own stack: this walks whole files through the checker, and the depth guard
-    // that stops a deeply nested expression fires far later than a small caller stack runs out.
-    // Every other entry into a file-wide check is reserved the same way.
-    let discovered = crate::wide_stack::on_wide_stack(|| {
-        let mut discovered = Vec::with_capacity(files.len());
-        for (file_index, file) in files.iter().enumerate() {
-            discovered.push(discover_anonymous_object_captures_at(
-                file,
-                file_index as u32,
-                syms,
-                None,
-                None,
-            ));
-        }
-        discovered
-    });
-    syms.finish_module_mutation();
-    discovered
-}
-
-/// Prepare only anonymous objects owned by retained inline body units. The root/body selections
-/// come from compact stable headers, so an inline declaration does not pull neighboring ordinary
-/// bodies into Pass 1.
-pub(crate) fn discover_inline_anonymous_object_captures(
-    files: &[File],
-    selected_declarations: &[crate::fx_hash::HashSet<Span>],
-    selected_body_declarations: &[crate::fx_hash::HashSet<Span>],
-    syms: &mut SymbolTable,
-) {
-    assert_eq!(files.len(), selected_declarations.len());
-    assert_eq!(files.len(), selected_body_declarations.len());
-    syms.begin_module_mutation();
-    crate::wide_stack::on_wide_stack(|| {
-        for (file_index, file) in files.iter().enumerate() {
-            let declarations = &selected_declarations[file_index];
-            let bodies = &selected_body_declarations[file_index];
-            if declarations.is_empty() {
-                continue;
-            }
-            discover_anonymous_object_captures_at(
-                file,
-                file_index as u32,
-                syms,
-                Some(declarations),
-                Some(bodies),
-            );
-        }
-    });
-    syms.finish_module_mutation();
 }
 
 /// The exact function shape whose return the WALK cannot determine: no declared return type and an
