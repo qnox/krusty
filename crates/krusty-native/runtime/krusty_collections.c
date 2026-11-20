@@ -991,31 +991,6 @@ KRef kt_list_list_iterator_from_start(KRef list) {
     return kt_list_list_iterator(list, 0);
 }
 
-kt_boolean kt_list_iterator_has_previous(KRef iterator) {
-    return ((const KListIterator *)iterator)->at > 0;
-}
-
-kt_int kt_list_iterator_next_index(KRef iterator) {
-    return ((const KListIterator *)iterator)->at;
-}
-
-kt_int kt_list_iterator_previous_index(KRef iterator) {
-    return ((const KListIterator *)iterator)->at - 1;
-}
-
-KRef kt_list_iterator_previous(KRef iterator) {
-    KListIterator *self = (KListIterator *)iterator;
-    if (kt_list_version(self->list) != self->modifications) {
-        kt_throw(kt_throwable_new(&kt_type_concurrent_modification_exception, NULL));
-        return NULL;
-    }
-    if (self->at <= 0) {
-        kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
-        return NULL;
-    }
-    return kt_list_get(self->list, --self->at);
-}
-
 /* `cursor < size`, as Kotlin/Native's `ArrayList` iterator answers it (`Itr.hasNext` in the
    stdlib's `ArrayList.kt`): a walk whose last element removes an element leaves the cursor past the
    end, and the walk ends there without a `ConcurrentModificationException`. The JVM's `ArrayList`

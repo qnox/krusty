@@ -495,10 +495,6 @@ kt_boolean kt_list_contains(KRef list, KRef value);
 KRef kt_list_iterator(KRef list);
 KRef kt_list_list_iterator(KRef list, kt_int index);
 KRef kt_list_list_iterator_from_start(KRef list);
-kt_boolean kt_list_iterator_has_previous(KRef iterator);
-kt_int kt_list_iterator_next_index(KRef iterator);
-kt_int kt_list_iterator_previous_index(KRef iterator);
-KRef kt_list_iterator_previous(KRef iterator);
 
 /* ---- a growable list -------------------------------------------------------------------------
 
