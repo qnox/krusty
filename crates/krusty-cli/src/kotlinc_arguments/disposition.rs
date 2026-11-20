@@ -106,7 +106,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-Xallow-condition-implies-returns-contracts",
     "-Xallow-contracts-on-more-functions",
     "-Xallow-holdsin-contract",
-    "-Xallow-no-source-files",
     // This flag only lifts kotlinc's check that its own JVM is at least 17. krusty does not
     // run that check, so the flag is inert. It stays refused: the inert-argument harness needs
     // kotlinc to reject a compilation that omits the flag, and a JDK that is already 17 or newer
