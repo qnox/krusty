@@ -109,6 +109,11 @@ pub(super) struct ArrayLists {
     pub(super) class: ClassRef,
     /// The list's struct type.
     pub(super) list: u32,
+    /// The `equals`, `hashCode` and `toString` slot bodies of the list's table, which compare, hash
+    /// and print its elements as `java.util.AbstractList` does. They read an argument and print
+    /// elements through the collection members recorded with the list's operations
+    /// (`crate::collection_arguments`), which a program records before it can hold a list.
+    pub(super) value_slots: [u32; 3],
     pub(super) iterator: u32,
     pub(super) new: u32,
     pub(super) add: u32,
@@ -187,10 +192,15 @@ impl ArrayLists {
             supertype: Some(identity.object),
             open: false,
         });
-        let list_text = empty_string_function(module, objects, chars, string);
+        let value_slots = [module.declare(), module.declare(), module.declare()];
+        let (class, list_table) = dispatch_table(module, objects, list, value_slots);
         let iter_text = empty_string_function(module, objects, chars, string);
-        let (class, list_table) = dispatch_table(module, objects, identity, list, list_text);
-        let (_, iter_table) = dispatch_table(module, objects, identity, iterator, iter_text);
+        let (_, iter_table) = dispatch_table(
+            module,
+            objects,
+            iterator,
+            [objects.identity_equals, identity.hash_code, iter_text],
+        );
         let layout = Layout {
             list,
             iterator,
@@ -199,6 +209,7 @@ impl ArrayLists {
         let lists = Self {
             class,
             list,
+            value_slots,
             iterator,
             new: module.declare(),
             add: module.declare(),
@@ -836,15 +847,14 @@ impl Layout {
 fn dispatch_table(
     module: &mut Module,
     objects: &mut ObjectRoot,
-    identity: &IdentityObjects,
     structure: u32,
-    to_string: u32,
+    slots: [u32; 3],
 ) -> (ClassRef, u32) {
     let (class, itable) = objects
         .interfaces
         .class(module, objects.itable, vec![structure]);
     let mut init = Code::default();
-    for function in [objects.identity_equals, identity.hash_code, to_string] {
+    for function in slots {
         module.reference_function(function);
         init.ref_func(function);
     }
