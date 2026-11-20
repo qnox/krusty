@@ -45,13 +45,18 @@ expected=$(printf '%s\n' \
   "atomicfu-wasm-wasi-$runtime.klib" \
   "collection-jvm-1.5.0.jar" \
   "kotlin-atomicfu-compiler-plugin-embeddable-2.4.20.jar" \
+  "kotlin-stdlib-wasm-wasi-2.4.20.klib" \
+  "kotlin-test-wasm-js-2.4.20.klib" \
+  "kotlin-test-wasm-wasi-2.4.20.klib" \
   "kotlinx-coroutines-core-jvm-1.9.0.jar" \
+  "kotlinx-serialization-core-jvm-1.11.0.jar" \
   "kotlinx-serialization-core-jvm-$serialization.jar" \
+  "kotlinx-serialization-core-linuxx64-$serialization.klib" \
   "kotlinx-serialization-json-jvm-$serialization.jar" \
   "runtime-annotation-jvm-$compose.jar" \
   "runtime-desktop-$compose.jar")
 [ "$(ls "$deps")" = "$expected" ] || { echo "unexpected files:"; ls "$deps"; exit 1; }
-[ "$(wc -l < "$STUB_LOG")" -eq 11 ] || { echo "expected 11 downloads"; cat "$STUB_LOG"; exit 1; }
+[ "$(wc -l < "$STUB_LOG")" -eq 16 ] || { echo "expected 16 downloads"; cat "$STUB_LOG"; exit 1; }
 grep -qx "https://dl.google.com/android/maven2/androidx/compose/runtime/runtime-desktop/$compose/runtime-desktop-$compose.jar" "$STUB_LOG"
 grep -qx "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.20/kotlin-atomicfu-compiler-plugin-embeddable-2.4.20.jar" "$STUB_LOG"
 
@@ -62,7 +67,7 @@ SCRIPT_ROOT="$work" KRUSTY_DEPS_CACHE="$deps" bash "$root/scripts/fetch-conforma
 
 # Another Kotlin version adds only its own plugin.
 SCRIPT_ROOT="$work" KRUSTY_DEPS_CACHE="$deps" bash "$root/scripts/fetch-conformance-deps.sh" 2.5.0-RC
-[ "$(wc -l < "$STUB_LOG")" -eq 1 ] && grep -q 'embeddable/2.5.0-RC/' "$STUB_LOG"
+[ "$(wc -l < "$STUB_LOG")" -eq 4 ] && grep -q 'embeddable/2.5.0-RC/' "$STUB_LOG"
 
 # A refused download fails naming the URL and leaves no partial file.
 rm -rf "$deps"
