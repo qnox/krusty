@@ -234,9 +234,15 @@ impl KlibDeclarationBodies {
                     .into_iter()
                     .filter(|identity| *identity != body)
                     .collect::<Vec<_>>();
-                // A default no other declaration overrides implements itself for the class: the
-                // class's instances reach it through the interface it declares.
+                // An interface default no other declaration overrides implements itself for the
+                // class: the class's instances reach it through the interface it declares. A
+                // body a superclass declares is inherited only for the declarations it implements.
                 if implemented.is_empty() {
+                    if crate::metadata::semantic::class_kind(interface.base.flags)
+                        != crate::libraries::TypeKind::Interface
+                    {
+                        continue;
+                    }
                     implemented.push(body.clone());
                 }
                 if !found.iter().any(|(known, _)| *known == body) {
