@@ -7,6 +7,10 @@
 
 use super::*;
 
+mod dependency_members;
+
+pub use dependency_members::InheritedDependencyMember;
+
 /// Match top-level multiplatform headers using compact Pass-1 facts and resolver-published
 /// classifier identities. The returned stable ids identify expect declarations shadowed by a
 /// same-package, same-shape non-expect declaration or type alias. No parser declaration id
@@ -90,6 +94,9 @@ pub struct UnactualizedMembers {
 pub struct ActualizationTypeBindings {
     by_type: crate::fx_hash::HashMap<(SourceFileId, HeaderTypeId), crate::types::TypeName>,
     by_declaration: crate::fx_hash::HashMap<DeclarationId, crate::types::TypeName>,
+    /// Per source classifier, the members its dependency supertypes declare.
+    inherited_dependency_members:
+        crate::fx_hash::HashMap<DeclarationId, Vec<InheritedDependencyMember>>,
 }
 
 impl ActualizationTypeBindings {
@@ -108,6 +115,28 @@ impl ActualizationTypeBindings {
         classifier: crate::types::TypeName,
     ) {
         self.by_declaration.insert(declaration, classifier);
+    }
+
+    pub(crate) fn bind_inherited_dependency_members(
+        &mut self,
+        classifier: DeclarationId,
+        members: Vec<InheritedDependencyMember>,
+    ) {
+        if !members.is_empty() {
+            self.inherited_dependency_members
+                .entry(classifier)
+                .or_default()
+                .extend(members);
+        }
+    }
+
+    /// The classifier a header type of `source` was bound to.
+    pub(crate) fn bound_type(
+        &self,
+        source: SourceFileId,
+        syntax: HeaderTypeId,
+    ) -> Option<crate::types::TypeName> {
+        self.type_classifier(source, syntax)
     }
 
     fn type_classifier(
@@ -1248,8 +1277,25 @@ pub fn actualization(
             let Some(key) = child_key(headers, child, bindings, &actualized_aliases) else {
                 continue;
             };
+            // A source member nearer than a dependency supertype hides an inherited one only when
+            // it implements the `expect` member itself, so the dependency candidates are
+            // consulted whenever no source member does, not only when no source bucket exists.
+            let discharged_by_dependency = || {
+                dependency_members::implementations(
+                    headers,
+                    bindings,
+                    child,
+                    &key.1,
+                    actual_member_owners(headers, bindings, pair.actual)
+                        .into_iter()
+                        .filter_map(|owner| bindings.inherited_dependency_members.get(&owner))
+                        .flatten(),
+                ) == 1
+            };
             let Some(candidates) = actual_children.get(&key) else {
-                owed.push(child.id);
+                if !discharged_by_dependency() {
+                    owed.push(child.id);
+                }
                 continue;
             };
             // The child key is deliberately coarse — kind, name, receiver and arity — so members
@@ -1281,7 +1327,7 @@ pub fn actualization(
                     TypeParameterScope::Positional,
                 ) {
                     incompatible_members.insert(renamed);
-                } else {
+                } else if !discharged_by_dependency() {
                     owed.push(child.id);
                 }
                 continue;
@@ -1659,5 +1705,186 @@ mod tests {
         assert!(matched.pairs.iter().any(|pair| {
             pair.expect == expect_to_string.id && pair.actual == actual_to_string.id
         }));
+    }
+    /// What an `expect` class owes when its actual class inherits `inherited` from a dependency
+    /// supertype: the names of the members left unactualized.
+    fn owed_with_inherited(
+        expect_members: &str,
+        inherited: impl Fn(crate::types::Ty, crate::types::Ty) -> Vec<InheritedDependencyMember>,
+    ) -> usize {
+        owed_with_actual_members(expect_members, "", inherited)
+    }
+
+    /// As [`owed_with_inherited`], for an actual class that also declares `actual_members`.
+    fn owed_with_actual_members(
+        expect_members: &str,
+        actual_members: &str,
+        inherited: impl Fn(crate::types::Ty, crate::types::Ty) -> Vec<InheritedDependencyMember>,
+    ) -> usize {
+        let headers = headers(&[
+            (
+                "Common",
+                &format!(
+                    "// LANGUAGE: +MultiPlatformProjects\n\
+                     package fixture\n\
+                     \n\
+                     class Token\n\
+                     class Other\n\
+                     expect class Speaker {{ {expect_members} }}\n"
+                ),
+            ),
+            (
+                "Platform",
+                &format!(
+                    "// LANGUAGE: +MultiPlatformProjects\n\
+                     package fixture\n\
+                     \n\
+                     actual class Speaker {{ {actual_members} }}\n"
+                ),
+            ),
+        ]);
+        let bindings = crate::resolve::actualization_type_bindings(
+            &headers,
+            &crate::libraries::EmptySymbolSource,
+        );
+        let token = resolve(&headers, SourceFileId::from_raw(0), &["fixture", "Token"])
+            .expect("source classifier");
+        let other = resolve(&headers, SourceFileId::from_raw(0), &["fixture", "Other"])
+            .expect("source classifier");
+        let speaker = headers
+            .stubs
+            .iter()
+            .find(|stub| {
+                stub.source == SourceFileId::from_raw(1) && stub.kind == DeclarationKind::Classifier
+            })
+            .expect("actual classifier")
+            .id;
+        let mut bindings = bindings;
+        bindings.bind_inherited_dependency_members(
+            speaker,
+            inherited(
+                crate::types::Ty::obj_name(token),
+                crate::types::Ty::obj_name(other),
+            ),
+        );
+        actualization(&headers, &bindings)
+            .unactualized_members
+            .iter()
+            .map(|owed| owed.expected.len())
+            .sum()
+    }
+
+    fn inherited_function(
+        name: &str,
+        parameters: &[crate::types::Ty],
+        result: crate::types::Ty,
+    ) -> InheritedDependencyMember {
+        InheritedDependencyMember {
+            kind: DeclarationKind::Function,
+            name: name.to_owned(),
+            parameters: parameters.into(),
+            result,
+            mutable: false,
+        }
+    }
+
+    fn inherited_property(
+        name: &str,
+        result: crate::types::Ty,
+        mutable: bool,
+    ) -> InheritedDependencyMember {
+        InheritedDependencyMember {
+            kind: DeclarationKind::Property,
+            name: name.to_owned(),
+            parameters: Box::default(),
+            result,
+            mutable,
+        }
+    }
+
+    /// An inherited dependency member implements an `expect` member only when its kind, name,
+    /// inputs, result and mutability all agree.
+    #[test]
+    fn an_inherited_dependency_member_with_the_same_signature_implements_the_expect_member() {
+        let owed = owed_with_inherited(
+            "fun pick(from: Token?): Token\n val label: Token\n var current: Token?",
+            |token, _| {
+                vec![
+                    inherited_function("pick", &[crate::types::Ty::nullable(token)], token),
+                    inherited_property("label", token, false),
+                    inherited_property("current", crate::types::Ty::nullable(token), true),
+                ]
+            },
+        );
+        assert_eq!(owed, 0);
+    }
+
+    #[test]
+    fn an_inherited_function_with_another_result_implements_nothing() {
+        let owed = owed_with_inherited("fun pick(from: Token): Token", |token, other| {
+            vec![inherited_function("pick", &[token], other)]
+        });
+        assert_eq!(owed, 1);
+    }
+
+    #[test]
+    fn an_inherited_property_with_another_type_implements_nothing() {
+        let owed = owed_with_inherited("val label: Token", |_, other| {
+            vec![inherited_property("label", other, false)]
+        });
+        assert_eq!(owed, 1);
+    }
+
+    #[test]
+    fn an_inherited_val_does_not_implement_an_expect_var_nor_the_reverse() {
+        let var_owed = owed_with_inherited("var label: Token", |token, _| {
+            vec![inherited_property("label", token, false)]
+        });
+        let val_owed = owed_with_inherited("val label: Token", |token, _| {
+            vec![inherited_property("label", token, true)]
+        });
+        assert_eq!((var_owed, val_owed), (1, 1));
+    }
+
+    #[test]
+    fn an_inherited_property_does_not_implement_an_expect_function_of_its_name() {
+        let owed = owed_with_inherited("fun label(): Token", |token, _| {
+            vec![inherited_property("label", token, false)]
+        });
+        assert_eq!(owed, 1);
+    }
+
+    /// Two inherited members the hierarchy kept apart are a conflict, not a choice.
+    #[test]
+    fn two_inherited_members_that_both_qualify_implement_nothing() {
+        let owed = owed_with_inherited("fun pick(from: Token): Token", |token, _| {
+            vec![
+                inherited_function("pick", &[token], token),
+                inherited_function("pick", &[token], token),
+            ]
+        });
+        assert_eq!(owed, 1);
+    }
+
+    /// A source overload of the same name and arity that does not implement the `expect` member
+    /// neither hides nor replaces the inherited one that does.
+    #[test]
+    fn a_source_overload_does_not_hide_the_inherited_member_that_implements() {
+        let owed = owed_with_actual_members(
+            "fun pick(from: Token): Token",
+            "fun pick(from: Other): Other = from",
+            |token, _| vec![inherited_function("pick", &[token], token)],
+        );
+        assert_eq!(owed, 0);
+    }
+
+    /// The `expect` member's modifiers are part of its contract; the inherited record carries none,
+    /// so an inherited member never discharges an `expect` member that states one.
+    #[test]
+    fn an_expect_member_stating_a_modifier_is_not_discharged_by_an_inherited_member() {
+        let owed = owed_with_inherited("suspend fun ping()", |_, _| {
+            vec![inherited_function("ping", &[], crate::types::Ty::Unit)]
+        });
+        assert_eq!(owed, 1);
     }
 }

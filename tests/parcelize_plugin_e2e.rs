@@ -162,7 +162,7 @@ fn unsupported_parcelized_classes_are_refused() {
     let fixture = PluginFixture::new("parcelize-unsupported");
     let sources = [("Tags.kt", UNSUPPORTED)];
     assert_eq!(
-        fixture.krusty_rejects(
+        fixture.krusty_refuses(
             "main",
             &sources,
             &android_classpath(),
@@ -197,7 +197,7 @@ fn a_runtime_type_annotation_is_refused_at_its_property() {
     let fixture = PluginFixture::new("parcelize-raw-value");
     let sources = [("Raw.kt", RAW_VALUE)];
     assert_eq!(
-        fixture.krusty_rejects(
+        fixture.krusty_refuses(
             "main",
             &sources,
             &android_classpath(),

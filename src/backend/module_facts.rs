@@ -52,6 +52,34 @@ pub trait BackendClassifierSource {
         }
     }
 
+    /// Whether `ancestor` is `classifier` or one of the supertypes its facts publish, transitively.
+    fn is_subclassifier(&self, classifier: TypeName, ancestor: TypeName) -> bool {
+        is_subclassifier(self, classifier, ancestor)
+    }
+
+    /// Every interface `classifier` is a proper subclassifier of, through the supertypes its facts
+    /// publish, transitively: the interfaces an instance of `classifier` is an instance of.
+    fn inherited_interfaces(&self, classifier: TypeName) -> Vec<TypeName> {
+        let mut interfaces = Vec::new();
+        let mut pending = self
+            .classifier(classifier)
+            .map(|fact| fact.supertypes.to_vec())
+            .unwrap_or_default();
+        let mut seen = crate::fx_hash::HashSet::default();
+        while let Some(next) = pending.pop() {
+            if !seen.insert(next) {
+                continue;
+            }
+            if let Some(fact) = self.classifier(next) {
+                if fact.is_interface() {
+                    interfaces.push(next);
+                }
+                pending.extend(fact.supertypes.iter().copied());
+            }
+        }
+        interfaces
+    }
+
     /// Every builtin class (`String`, a primitive, an unsigned integer) whose classifier is a
     /// proper subtype of `classifier`, through the supertypes the classifier facts publish: the
     /// builtin values a target carrying them in representations of its own must count as
@@ -1355,6 +1383,36 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn inherited_interfaces_follow_published_supertypes_through_superclasses() {
+        let facts = classifier_name_snapshot(
+            "package ownership.inherited\n\
+             interface Root\n\
+             interface Middle : Root\n\
+             interface Side\n\
+             abstract class Base : Middle\n\
+             open class Leaf : Base(), Side\n\
+             class Plain\n",
+        );
+        let name = |name| {
+            crate::types::type_name_child(crate::types::type_name("ownership/inherited"), name)
+        };
+        let classifiers =
+            CheckedBackendClassifiers::new(&facts, &crate::libraries::EmptySymbolSource);
+        let interfaces = |classifier| {
+            let mut found = classifiers.inherited_interfaces(name(classifier));
+            found.sort_by_key(|interface| interface.render());
+            found
+        };
+        assert_eq!(
+            interfaces("Leaf"),
+            [name("Middle"), name("Root"), name("Side")]
+        );
+        assert_eq!(interfaces("Base"), [name("Middle"), name("Root")]);
+        assert_eq!(interfaces("Middle"), [name("Root")]);
+        assert_eq!(interfaces("Plain"), Vec::<crate::types::TypeName>::new());
     }
 
     #[test]

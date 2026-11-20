@@ -22,6 +22,7 @@ mod absent_arguments;
 mod accessor_property_entries;
 pub(super) mod any_members;
 mod array_lists;
+mod array_storage;
 mod arrays;
 mod boxing;
 mod callable_reference_identity;
@@ -50,6 +51,7 @@ mod type_of;
 #[cfg(test)]
 use tests::lower_alone;
 
+pub(super) use array_storage::realizes_storage_getter;
 pub(super) use exceptions::runtime_lays_out;
 pub(super) use scalar_instructions::is_scalar_operation;
 pub(super) use scalar_value_classes::runtime_value_declaration;
@@ -64,8 +66,12 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayGet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArraySize
+        || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageCopy
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
+        || operation == krusty::backend::BackendCompilerIntrinsic::StringPlus
+        || operation
+            == krusty::backend::BackendCompilerIntrinsic::StartCoroutineUninterceptedOrReturn
         || matches!(
             operation,
             krusty::backend::BackendCompilerIntrinsic::ClassName(_)
@@ -249,6 +255,7 @@ pub(super) fn lower_file(
                 classifiers,
                 plan,
                 laid_out: laid_out_classes,
+                callables,
             },
         )?;
         super::interface_members::record(
@@ -259,6 +266,7 @@ pub(super) fn lower_file(
                 functions: &indices,
                 callables,
                 exports: dependency_exports,
+                classifiers,
             },
             &mut classes,
             &mut super::interface_members::Destination {
@@ -994,7 +1002,7 @@ impl<'a> Body<'a> {
 
     /// Evaluate `id` and convert its value to the carrier of `target`.
     fn value(&mut self, id: u32, target: Ty) -> Result<(), Unsupported> {
-        let source_ty = self.type_of(id)?;
+        let source_ty = self.completing_type(id)?;
         self.expression(id)?;
         // An operand may return, throw or enter a loop it never leaves before its enclosing value
         // use resumes, whatever type it is annotated with: an inlined `Nothing` body keeps its
@@ -1017,6 +1025,21 @@ impl<'a> Body<'a> {
             );
         }
         self.coerce_emitted_value(source, target)
+    }
+
+    /// The type `id` completes with. An inline body spliced at its call keeps the `Nothing` (or no
+    /// type) its blocks had around the callee's `return`, though they complete with the body's
+    /// result; such a block completes with its value's type.
+    fn completing_type(&self, id: u32) -> Result<Option<Ty>, Unsupported> {
+        let ty = self.type_of(id)?;
+        match self.ir.expr(id) {
+            IrExpr::Block {
+                value: Some(value), ..
+            } if ty.is_none_or(|ty| ty == Ty::Nothing) && !self.diverges(id) => {
+                self.completing_type(*value)
+            }
+            _ => Ok(ty),
+        }
     }
 
     /// Whether evaluating `id` as a value never completes: it ends in a jump or a `throw`, or in an
@@ -1162,8 +1185,13 @@ impl<'a> Body<'a> {
                 for statement in stmts {
                     self.statement(statement)?;
                 }
+                // The block's value is delivered at the type the block completes with, which an
+                // inline body's erased generic result is narrower than at its call.
                 if let Some(value) = value {
-                    self.expression(value)?;
+                    match self.completing_type(id)? {
+                        Some(ty) => self.value(value, ty)?,
+                        None => self.expression(value)?,
+                    }
                 }
             }
             IrExpr::Return(value) => {
@@ -1351,6 +1379,22 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::External {
+                target,
+                substitutions,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.is_array_storage_copy(*target) =>
+            {
+                self.array_storage_copy(*target, substitutions, &args)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
                 dispatch_receiver,
                 args,
             } if let Callee::External {
@@ -1416,6 +1460,51 @@ impl<'a> Body<'a> {
                 self.value(*other, Ty::String)?;
                 let function = self.runtime.string_compare(self.module);
                 self.code.call(function);
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::StringPlus)
+                }) =>
+            {
+                // The member `String.plus(Any?)` and the extension `String?.plus(Any?)` are the
+                // concatenation a template makes of its two operands.
+                let (receiver, other) =
+                    match (dispatch_receiver, args.as_slice(), *extension_receiver_parameter) {
+                        (Some(receiver), [other], None) => (receiver, *other),
+                        (None, [receiver, other], Some(0)) => (*receiver, *other),
+                        _ => {
+                            return Err("an authenticated `String.plus` with malformed operands"
+                                .into())
+                        }
+                    };
+                self.string_of(receiver)?;
+                self.string_of(other)?;
+                self.code.call(self.runtime.string_concat);
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: None,
+                args,
+            } if let Callee::External { target, params, .. } = &**call_callee
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(
+                            krusty::backend::BackendCompilerIntrinsic::StartCoroutineUninterceptedOrReturn,
+                        )
+                }) =>
+            {
+                self.start_coroutine_unintercepted_or_return(&args, params)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1494,7 +1583,7 @@ impl<'a> Body<'a> {
                             && array_lists::realized_array_list_member(fact))
                 }) =>
             {
-                self.array_list_call(*target, receiver, &args)?;
+                self.array_list_call(id, *target, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1524,8 +1613,10 @@ impl<'a> Body<'a> {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
                 type_operand,
-            } if self.class_structure(type_operand)?.is_some()
-                || self.interface_of_type(type_operand).is_some() =>
+            } if type_operand.non_null().is_array()
+                || self.class_structure(type_operand)?.is_some()
+                || self.interface_of_type(type_operand).is_some()
+                || self.library_interface_of_type(type_operand).is_some() =>
             {
                 self.cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
@@ -1550,8 +1641,8 @@ impl<'a> Body<'a> {
                 type_operand,
             } => self.type_test(id, op, arg, type_operand)?,
             // A cast to a non-null type is the cast to its nullable form, then a null check: `as
-            // String` on an `Any` reads the reference as the runtime's string and traps on `null`,
-            // as a cast to a class of the file does.
+            // String` on an `Any` reads the reference as the runtime's string and throws the
+            // Kotlin NPE on `null`, as a cast to a class or an interface does.
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::ImplicitCoercion | IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
@@ -1591,7 +1682,7 @@ impl<'a> Body<'a> {
                     Some(target) => {
                         self.value(arg, type_operand)?;
                         if op == IrTypeOp::CastNonNull && matches!(target, ValType::Ref { .. }) {
-                            self.code.ref_as_non_null();
+                            self.require_nonnull_reference(target)?;
                         }
                     }
                 }
@@ -1674,7 +1765,16 @@ impl<'a> Body<'a> {
                 receiver,
                 class,
                 index,
-            } => self.field_read(receiver, class, index)?,
+            } => {
+                self.field_read(receiver, class, index)?;
+                // A field that stores `kotlin.Unit`'s instance and is read where the checked use
+                // is `Unit` has no carrier there: the stored reference is discarded, as any value
+                // converted to a type without a carrier is.
+                let stored = self.ir.classes[class as usize].fields[index as usize].ty;
+                if carrier(stored)?.is_some() && self.carrier_of(id)?.is_none() {
+                    self.code.drop_();
+                }
+            }
             IrExpr::SetField {
                 receiver,
                 class,
@@ -1750,7 +1850,22 @@ impl<'a> Body<'a> {
                 } = &**checked_op
                     && context_arguments.is_empty() =>
             {
-                self.property_read(*target, *dispatch_receiver)?
+                self.property_read(Some(id), *target, *dispatch_receiver)?
+            }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
+                    receiver: Some(receiver),
+                    arguments,
+                    parameters,
+                    ..
+                } = &**checked_op
+                    && parameters.is_empty()
+                    && arguments.is_empty()
+                    && let Some(element) = self.array_storage_property(*target) =>
+            {
+                self.array_storage_read(element, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } =
@@ -1796,6 +1911,7 @@ impl<'a> Body<'a> {
                     parameters,
                     result,
                     source_receiver: Some(_),
+                    ..
                 } = &**checked_op
                     && parameters.is_empty()
                     && let Some(field) = self.throwable_field_property(*target) =>
@@ -1866,7 +1982,7 @@ impl<'a> Body<'a> {
                                 .and_then(|property| self.callables.callable(property.getter))
                                 .is_some_and(array_lists::realized_array_list_member))) =>
             {
-                self.array_list_property(*target, *receiver)?;
+                self.array_list_property(id, *target, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::PropertyWrite {
@@ -1879,14 +1995,14 @@ impl<'a> Body<'a> {
                 } = &**checked_op
                     && context_arguments.is_empty() =>
             {
-                self.property_write(*target, *dispatch_receiver, *value)?
+                self.property_write(Some(id), *target, *dispatch_receiver, *value)?
             }
             IrExpr::Call {
                 callee: ref call_callee,
                 dispatch_receiver: Some(receiver),
                 args,
             } if let Callee::Local(function) = &**call_callee => {
-                self.direct_member_call(*function, receiver, &args)?
+                self.local_member_call(*function, receiver, &args)?
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1922,9 +2038,7 @@ impl<'a> Body<'a> {
                     sam.as_deref(),
                 )?;
             }
-            IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
-                self.callable_reference(id, &reference)?
-            }
+            IrExpr::CallableReference(reference) => self.callable_reference(id, &reference)?,
             IrExpr::InvokeFunction {
                 func,
                 args,

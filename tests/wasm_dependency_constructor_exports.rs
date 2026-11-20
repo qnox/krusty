@@ -30,6 +30,14 @@ fn wasm_official_dependency_class_members_lower_from_their_bodies() {
     );
 }
 
+#[test]
+fn wasm_official_dependency_nested_classes_lower_from_their_bodies() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyNestedClasses.kt"),
+        "DependencyNestedClasses",
+    );
+}
+
 /// A final class's secondary constructors delegate to its primary one: each construction lowers
 /// from the official producer's bodies, the delegated initialization first.
 #[test]
@@ -40,11 +48,44 @@ fn wasm_official_dependency_secondary_constructors_delegate_to_the_primary() {
     );
 }
 
+/// Secondary constructors that reach the primary one through another secondary constructor lower
+/// from the official producer's bodies, each running its own body after the one it delegates to.
 #[test]
-fn wasm_official_dependency_nested_classes_lower_from_their_bodies() {
+fn wasm_official_dependency_secondary_constructors_delegate_through_each_other() {
     run_against_official_producer(
-        include_str!("box_regressions/multimodule/dependencyNestedClasses.kt"),
-        "DependencyNestedClasses",
+        include_str!("box_regressions/multimodule/dependencyChainedSecondaryConstructors.kt"),
+        "DependencyChainedSecondaryConstructors",
+    );
+}
+
+/// Generic classes, a generic superclass and a secondary constructor of a generic class lower
+/// from the official producer's bodies.
+#[test]
+fn wasm_official_dependency_generic_classes_lower_from_their_bodies() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyGenericClasses.kt"),
+        "DependencyGenericClasses",
+    );
+}
+
+/// Library bodies with a generic private function call, a `super` call, a nested class reading
+/// its outer class's private property, a generic private member and reordered named arguments
+/// lower from the official producer's bodies.
+#[test]
+fn wasm_official_dependency_body_member_forms_lower_from_their_bodies() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyBodyMemberForms.kt"),
+        "DependencyBodyMemberForms",
+    );
+}
+
+/// A library body calls generic members of a generic class and of a class private to its
+/// library, binding the member's own type parameters and its class's.
+#[test]
+fn wasm_official_dependency_generic_members_of_library_classes_bind_every_type_parameter() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyGenericMembersOfLibraryClasses.kt"),
+        "DependencyGenericMembersOfLibraryClasses",
     );
 }
 

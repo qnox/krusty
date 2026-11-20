@@ -71,6 +71,12 @@ git commit -q -m "rename into a JVM-owned path"
 expect "a rename into a JVM-owned path selects JVM" "jvm"
 
 reset_branch
+echo conformance >scripts/conformance-regressions.sh
+git add scripts/conformance-regressions.sh
+git commit -q -m "add a conformance script"
+expect "a conformance script selects every lane" "jvm native wasm-js wasm-wasi"
+
+reset_branch
 git rm -q crates/krusty-wasm/src/lib.rs
 git commit -q -m "delete a Wasm source"
 expect "a deleted Wasm crate source selects both Wasm lanes" "wasm-js wasm-wasi"

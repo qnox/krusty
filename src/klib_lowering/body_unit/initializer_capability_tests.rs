@@ -6,7 +6,7 @@ fn emitted_initializer_is_not_an_allocation_or_function_capability() {
     let initializer = EmittedDependencyCallable::constructor_initializer(target);
     assert_eq!(initializer.constructor_initializer_target(), Some(target));
     assert!(!initializer.is_constructor());
-    assert!(!initializer.realizes_getter());
+    assert!(!initializer.realizes_accessor());
     assert_eq!(initializer.target(), target);
     assert_eq!(
         EmittedDependencyCallable::allocating_constructor(target).constructor_initializer_target(),

@@ -28,8 +28,67 @@ impl<'s> Linker<'_, 's> {
                 "different dependency identities claim the same materialized classifier".to_owned(),
             ));
         }
-        let class = super::super::same_library_class::installed_class(&prepared);
+        // A same-library superclass is installed first, and the class's constructor passes it the
+        // constructor parameters its delegation names.
+        let superclass = match &prepared.superclass {
+            Some(superclass) => {
+                let declaration = match superclass.constructor {
+                    super::super::same_library_class::SuperclassConstructor::Local(signature) => {
+                        self.link_local_constructor(ir, signature)?.declaration
+                    }
+                    super::super::same_library_class::SuperclassConstructor::Library {
+                        signature,
+                        classifier,
+                    } => {
+                        // The library superclass is extended only where this unit materializes it.
+                        let linked = self.link_constructor(
+                            ir,
+                            signature,
+                            super::ConstructorRole::Delegation,
+                        )?;
+                        if linked.declaration.classifier != classifier
+                            || !self
+                                .classes
+                                .values()
+                                .any(|class| ir.classes[*class as usize].fq_name_id() == classifier)
+                        {
+                            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                                "a superclass this unit does not materialize",
+                            ));
+                        }
+                        linked.declaration
+                    }
+                };
+                let params = declaration.declared_parameters().to_vec();
+                if params.len() != superclass.operands.len() {
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "a superclass delegation passes another number of arguments".to_owned(),
+                    ));
+                }
+                let args = superclass
+                    .operands
+                    .iter()
+                    .zip(&params)
+                    .map(|(&slot, &ty)| {
+                        let value = ir.add_expr(IrExpr::GetValue(slot));
+                        ir.set_logical_type(value, ty);
+                        value
+                    })
+                    .collect::<Vec<_>>();
+                Some((declaration.classifier, params, args))
+            }
+            None => None,
+        };
+        let mut class = super::super::same_library_class::installed_class(&prepared);
+        if let Some((name, params, args)) = superclass {
+            class.superclass = name;
+            class.super_ctor_params = params;
+            class.super_args = args;
+        }
         let class_id = ir.add_class(class);
+        if let Some(naming) = prepared.naming.clone() {
+            ir.local_class_name_provenance.insert(class_id, naming);
+        }
         ir.record_declared_class_self_type(prepared.classifier, prepared.self_type);
         let init = declare_function(ir, &prepared.init_header);
         ir.set_method_visibility(init, crate::types::Visibility::Private);
@@ -37,6 +96,8 @@ impl<'s> Linker<'_, 's> {
         ir.note_class_method(class_id, init);
         let receiver = ir.add_expr(IrExpr::GetValue(0));
         ir.set_logical_type(receiver, prepared.self_type);
+        // The initialization takes the constructor's value parameters, after an outer instance.
+        let prefix = usize::from(prepared.outer.is_some());
         let args = prepared
             .init_header
             .params()
@@ -44,7 +105,7 @@ impl<'s> Linker<'_, 's> {
             .enumerate()
             .map(|(index, ty)| {
                 let value = ir.add_expr(IrExpr::GetValue(
-                    u32::try_from(index + 1).expect("a value index fits u32"),
+                    u32::try_from(index + 1 + prefix).expect("a value index fits u32"),
                 ));
                 ir.set_logical_type(value, *ty);
                 Some(value)
@@ -77,6 +138,7 @@ impl<'s> Linker<'_, 's> {
                     receiver_ty: prepared.receiver_ty,
                     fields: prepared.stored.clone(),
                     steps: prepared.steps,
+                    outer: prepared.outer,
                 },
             )),
             static_initialization: None,
@@ -143,6 +205,7 @@ impl<'s> Linker<'_, 's> {
                     function,
                     class: prepared.key.clone(),
                     setter: member.setter,
+                    formals: member.formals.clone(),
                 },
             );
             self.pending.push_back(PendingBody {
@@ -160,6 +223,7 @@ impl<'s> Linker<'_, 's> {
                         declaring: prepared.declaring,
                         receiver: prepared.self_type,
                         fields: prepared.stored.clone(),
+                        outer: prepared.outer,
                     },
                 )),
                 static_initialization: None,
@@ -176,6 +240,7 @@ impl<'s> Linker<'_, 's> {
         let constructor = super::super::same_library_class::LocalConstructor {
             declaration: prepared.declaration.clone(),
             access: prepared.access,
+            object: prepared.object,
         };
         self.local_classes.insert(
             prepared.key,
@@ -189,6 +254,7 @@ impl<'s> Linker<'_, 's> {
                 supertypes: prepared.supertypes,
                 self_type: prepared.self_type,
                 class_type_parameters: prepared.class_type_parameters,
+                object: prepared.object,
             },
         );
         Ok(constructor)
@@ -238,6 +304,36 @@ impl<'s> Linker<'_, 's> {
         let constructor = class_constructor(class_arena, class)?;
         self.link_local_constructor(ir, &constructor)?;
         self.linked_local_member(ir, &key)
+    }
+
+    /// The object a body of this library reads under the non-public `signature`, installed in
+    /// this unit by its private constructor, which creates its one instance.
+    pub(super) fn install_local_object(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<crate::types::TypeName, KlibBodyDeclineReason> {
+        let module = self.active_module.clone();
+        let Some(classifier) =
+            super::super::same_library_class::classifier(self.sources.bodies, &module, signature)?
+        else {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a file-private object value",
+            ));
+        };
+        let Some((arena, class)) = self.sources.bodies.module_local_class(&module, signature)
+        else {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a file-private object value",
+            ));
+        };
+        let constructor = class_constructor(arena, class)?;
+        if !self.link_local_constructor(ir, &constructor)?.object {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an object value names a class other than an object".to_owned(),
+            ));
+        }
+        Ok(classifier)
     }
 
     pub(super) fn linked_installed_member(
@@ -293,7 +389,7 @@ impl<'s> Linker<'_, 's> {
             .collect();
         Ok(super::super::same_library_class::linked_member(
             class,
-            registered.function,
+            (registered.function, &registered.formals),
             ir,
             defaults,
         ))
@@ -335,9 +431,9 @@ fn publish_overrides(
                 implementation_owner: owner,
                 overridden: crate::fir::ResolvedFunctionOverrideTarget::External(external.target()),
                 overridden_owner: edge.owner,
-                overridden_semantic_role: None,
+                overridden_semantic_role: edge.semantic_role,
                 collection_barrier: None,
-                overridden_is_interface: true,
+                overridden_is_interface: edge.is_interface,
                 name: name.clone(),
                 declared_parameters: edge.declared_parameters.clone(),
                 declared_result: edge.declared_result,

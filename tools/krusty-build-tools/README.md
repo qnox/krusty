@@ -9,8 +9,10 @@ with krusty when this jar takes the place of `org.jetbrains.kotlin:kotlin-build-
   picks the implementation by its configured Kotlin version, and krusty compiles as that release
   (`-Xkotlin-reference-version`).
 - Compiler arguments are forwarded as kotlinc command-line strings, which krusty parses itself.
-- Only the JVM toolchain and in-process execution exist. Each compilation is one krusty process
-  over the whole source set; the destination is cleared first. With an incremental-compilation
+- Only the JVM toolchain exists. The in-process and daemon execution policies compile alike: the
+  daemon policy asks for a compile outside the build tool's process, which is where krusty always
+  compiles, and its options configure a Kotlin daemon JVM krusty never starts. Each compilation is
+  one krusty process over the whole source set; the destination is cleared first. With an incremental-compilation
   configuration the compilation is skipped instead when its inputs match the last successful run
   in that configuration's working directory and the output is untouched. `krusty
   compilation-fingerprint` digests those inputs by contents: everything the compilation reads,

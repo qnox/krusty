@@ -124,6 +124,46 @@ pub struct StreamingSourceSetAnalysis {
     pub(crate) streamed: Option<StreamedPassState>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl StreamingSourceSetAnalysis {
+    /// Select one written file-level function for an owned backend fixture. Selection happens
+    /// here, while finalized declaration headers are available; emission receives only its id.
+    pub fn fixture_function(
+        &self,
+        source: u32,
+        name: &str,
+    ) -> Result<crate::fir::CallableId, &'static str> {
+        let index = self
+            .streamed
+            .as_ref()
+            .ok_or("missing checked fixture module")?
+            .module
+            .index();
+        let mut selected = None;
+        for raw in 0..index.declaration_count() {
+            let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
+            let Some(anchor) = index.declaration_anchor(declaration) else {
+                continue;
+            };
+            if anchor.source.raw() != source
+                || anchor.owner.is_some()
+                || anchor.kind != crate::fir::DeclarationKind::Function
+                || index.declaration_name(declaration) != Some(name)
+            {
+                continue;
+            }
+            let callable = index
+                .callable_for_declaration(declaration)
+                .ok_or("fixture function has no finalized callable")?
+                .id;
+            if selected.replace(callable).is_some() {
+                return Err("ambiguous fixture function");
+            }
+        }
+        selected.ok_or("missing fixture function")
+    }
+}
+
 impl From<SourceSetAnalysis> for StreamingSourceSetAnalysis {
     fn from(analysis: SourceSetAnalysis) -> Self {
         let SourceSetAnalysis {
@@ -1246,6 +1286,9 @@ where
     let diagnostics_start = diags.diags.len();
     let mut files = Vec::with_capacity(sources.len());
     let mut parse_errors = Vec::with_capacity(sources.len());
+    // Syntax errors are the files header inventory refuses. Later checks already skip them;
+    // capture discovery must see the same set, or it checks a class with no collected signature.
+    let mut syntax_errors = Vec::with_capacity(sources.len());
     // Set when any file writes an `expect` declaration with an implementation. The reference
     // compiler stops before actualization once one exists, so the unmatched-expect report below is
     // skipped for the WHOLE compilation rather than per file.
@@ -1340,29 +1383,9 @@ where
                 .iter()
                 .any(|diagnostic| diagnostic.severity == Severity::Error);
         parse_errors.push(parse_error);
-        // The brackets were parsed. Report the language gate only after `parse_error` is captured,
-        // so the file's declarations still join the module for every other file.
-        for span in file
-            .destructuring
-            .ungated_bracket_spans
-            .iter()
-            .copied()
-            .chain(file.destructuring.ungated_full_form_spans.iter().copied())
-        {
-            diags.error(
-                span,
-                "the feature \"name based destructuring\" is only available since language version 2.5",
-            );
-        }
-        for span in file.destructuring.ungated_short_form_spans.iter().copied() {
-            diags.error(
-                span,
-                "the feature \"enable name based destructuring short form\" is experimental and \
-                 should be enabled explicitly. This can be done by supplying the compiler \
-                 argument '-Xname-based-destructuring=complete', but note that no stability \
-                 guarantees are provided.",
-            );
-        }
+        syntax_errors.push(parser_error);
+        header_validation::validate_after_parsing(&file, parser_error, diags);
+        diags.sort_source_order_from(diagnostics_before);
         let extracted = pass1_builder.add_source(
             index,
             source,
@@ -1669,11 +1692,13 @@ where
     let retained_anonymous_captures = if retain_inspection_analysis {
         Some(crate::resolve::discover_anonymous_object_captures(
             &files[..inferred_end],
+            &syntax_errors[..inferred_end],
             &mut symbols,
         ))
     } else if has_inline_capture_roots {
         crate::resolve::discover_inline_anonymous_object_captures(
             &files[..inferred_end],
+            &syntax_errors[..inferred_end],
             &inline_capture_selection.roots[..inferred_end],
             &inline_capture_selection.bodies[..inferred_end],
             &mut symbols,
@@ -1866,6 +1891,8 @@ where
         // genuine signature error would make every use of an unrelated inferred declaration look
         // unresolved in an editor's steady state. Failed declarations remain absent.
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
+        // Pass 2 checks each finalized declaration type against the spelling it was written with.
+        crate::resolve::publish_declared_spellings(&mut index, &symbols);
         // File-level policies (`@file:Suppress`, opt-ins) govern the recovery diagnostics too.
         crate::resolve::publish_file_annotations(
             &files[..inferred_end],

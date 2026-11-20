@@ -10,7 +10,13 @@ use crate::ir::{ExprId, IrExpr};
 #[derive(Clone, Copy)]
 pub(in super::super) enum LambdaParameterBinding<'callee> {
     /// Named parameters become locals holding their arguments; `callee` opens the inline frame.
-    Declared { callee: Option<&'callee str> },
+    /// `specialization` binds the formals of the inline callee whose body declares the lambda:
+    /// a lambda that callee's own body passes, as `suspendCoroutine` captures its `block`, types
+    /// its parameters with them, and its locals take them at this expansion's type arguments.
+    Declared {
+        callee: Option<&'callee str>,
+        specialization: Option<&'callee crate::fx_hash::HashMap<String, crate::types::Ty>>,
+    },
     /// Parameters directly reuse value slots supplied by their arguments.
     Remapped,
 }
@@ -143,7 +149,7 @@ fn local_count(
         if !seen.insert(expression) {
             continue;
         }
-        for index in value_indices(ir.expr(expression)) {
+        for index in crate::inline_expansion::value_indices(ir.expr(expression)) {
             if index < formal_count {
                 continue;
             }
@@ -158,19 +164,4 @@ fn local_count(
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
     Some(local_count)
-}
-
-pub(super) fn value_indices(expression: &IrExpr) -> Vec<u32> {
-    match expression {
-        IrExpr::GetValue(index)
-        | IrExpr::SetValue { var: index, .. }
-        | IrExpr::Variable { index, .. } => vec![*index],
-        IrExpr::Try { catches, .. } => catches.iter().map(|catch| catch.var).collect(),
-        IrExpr::Checked(checked_op)
-            if let crate::ir::IrCheckedOperation::RangeLoop { variable, .. } = &**checked_op =>
-        {
-            vec![*variable]
-        }
-        _ => Vec::new(),
-    }
 }

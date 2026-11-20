@@ -4,14 +4,13 @@
 //! inheritance walk, specialization, and single-abstract-method selection for every declaration
 //! origin.
 
-use crate::libraries::LibraryMember;
+use crate::libraries::{
+    classifier_type_parameter_bounds, sam_application_bindings, sam_substitute, LibraryMember,
+};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind, TypeName, Visibility};
 
-use super::{
-    classifier_bindings, classifier_type_parameter_bounds, receiver_hierarchy,
-    ty_subst_keep_unbound, GSigBinds,
-};
+use super::{receiver_hierarchy, GSigBinds};
 
 /// The abstract method a functional-interface conversion implements, as the declaration identity
 /// its provider published: a current-module declaration or a dependency callable, or the `invoke`
@@ -44,10 +43,13 @@ pub struct SamSignature {
     pub(crate) context_count: usize,
     pub(crate) has_receiver: bool,
     pub(crate) suspend: bool,
+    pub(crate) requires_object_dispatch: bool,
     /// The distinct own results of the declarations the method overrides, at any depth, before the
     /// call specializes them: a type parameter the call binds to `Int` stays that type parameter.
     /// A target realizes its result and bridge descriptors from these.
     pub(crate) overridden_results: Vec<Ty>,
+    pub(crate) dispatch_methods: Vec<SamMethodFrame>,
+    pub(crate) default_methods: Vec<SamMethodFrame>,
     /// The interface is a Kotlin declaration, not a Java one.
     pub(crate) kotlin_interface: bool,
     /// Provider-normalized semantic identities parallel to `declared_params`.
@@ -55,6 +57,24 @@ pub struct SamSignature {
     /// The interface's own type parameters, in declaration order, with every declared upper bound
     /// and whether that bound is an interface type. `declared_params` and `declared_ret` name them.
     pub(crate) type_parameters: Vec<SamTypeParameter>,
+}
+
+/// One checked declaration in a SAM dispatch family or an effective default slot.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SamMethodFrame {
+    pub(crate) declaration: Option<SamMethodDeclaration>,
+    pub(crate) parameters: Vec<Ty>,
+    pub(crate) result: Ty,
+}
+
+impl SamMethodFrame {
+    fn of(declaration: &CollectedDeclaration) -> Self {
+        Self {
+            declaration: declaration.declaration,
+            parameters: declaration.member.params.clone(),
+            result: declaration.member.ret,
+        }
+    }
 }
 
 /// One type parameter the functional interface declares.
@@ -70,6 +90,7 @@ struct CollectedDeclaration {
     depth: u32,
     /// The declaring interface carries a sam-with-receiver annotation.
     receiver_convention: bool,
+    requires_object_dispatch: bool,
     member: LibraryMember,
     params: Vec<Ty>,
     contravariant_params: Vec<bool>,
@@ -109,28 +130,8 @@ pub(crate) fn semantic_sam_signature(
         let Some(classifier) = source.classifier(owner) else {
             continue;
         };
-        let mut logical_bindings = classifier_bindings(&classifier, applied);
-        // `in String` checks the converted function at `String`, while its capture-read view is
-        // `Any?`. Keep that distinction only as provenance; `out` and `*` have no such divergence.
-        let capture_read_bindings = logical_bindings
-            .iter()
-            .map(|(name, argument)| {
-                (
-                    crate::types::TyParamName::from(name),
-                    contravariant_capture_read(*argument),
-                )
-            })
-            .collect::<GSigBinds>();
-        for argument in logical_bindings.values_mut() {
-            // A SAM method receives/returns values, never use-site projection syntax. Composed
-            // variance can legitimately leave more than one capture shell here: selecting
-            // `Consumer<in T>` through `Holder<out X>` produces `in (out X)`. Consume the complete
-            // shell so the abstract method is specialized to the value type `X`, rather than
-            // publishing a top-level `out X` parameter into checked FIR.
-            while let Some(projected) = argument.projection_inner() {
-                *argument = projected;
-            }
-        }
+        let (logical_bindings, capture_read_bindings) =
+            sam_application_bindings(&classifier, applied);
         let occurrence_bounds = classifier_type_parameter_bounds(&classifier);
         let specialization = SamCaptureSpecialization {
             logical: &logical_bindings,
@@ -201,6 +202,7 @@ pub(crate) fn semantic_sam_signature(
     }
 
     let mut abstract_method = None;
+    let mut default_methods = Vec::new();
     for (_, declarations) in declarations {
         let nearest = declarations
             .iter()
@@ -216,6 +218,10 @@ pub(crate) fn semantic_sam_signature(
                 overridden_results.push(result);
             }
         }
+        let dispatch_methods = declarations
+            .iter()
+            .map(SamMethodFrame::of)
+            .collect::<Vec<_>>();
         let nearest = declarations
             .into_iter()
             .filter(|declaration| declaration.depth == nearest)
@@ -224,6 +230,12 @@ pub(crate) fn semantic_sam_signature(
             .iter()
             .any(|declaration| !declaration.member.is_abstract())
         {
+            default_methods.extend(
+                nearest
+                    .iter()
+                    .filter(|declaration| !declaration.member.is_abstract())
+                    .map(SamMethodFrame::of),
+            );
             continue;
         }
         let CollectedDeclaration {
@@ -233,6 +245,7 @@ pub(crate) fn semantic_sam_signature(
             ret,
             declaration,
             receiver_convention,
+            requires_object_dispatch,
             ..
         } = nearest.into_iter().next()?;
         if abstract_method
@@ -244,14 +257,25 @@ pub(crate) fn semantic_sam_signature(
                 declaration,
                 overridden_results,
                 receiver_convention,
+                requires_object_dispatch,
+                dispatch_methods,
             ))
             .is_some()
         {
             return None;
         }
     }
-    let (sam, params, contravariant_params, ret, declaration, overridden_results, convention) =
-        abstract_method?;
+    let (
+        sam,
+        params,
+        contravariant_params,
+        ret,
+        declaration,
+        overridden_results,
+        convention,
+        requires_object_dispatch,
+        dispatch_methods,
+    ) = abstract_method?;
     let parameter_identities = sam_parameter_identities(&sam)?;
     let type_parameters = target_classifier
         .type_params()
@@ -293,7 +317,10 @@ pub(crate) fn semantic_sam_signature(
         context_count: sam.context_count,
         has_receiver,
         suspend: sam.suspend(),
+        requires_object_dispatch,
         overridden_results,
+        dispatch_methods,
+        default_methods,
         kotlin_interface,
         parameter_identities,
         type_parameters,
@@ -361,8 +388,10 @@ fn collect_member(
     // (`fun interface F { override fun toString(): String }`).  The declaration at depth zero is
     // then the interface's functional method and must not be erased merely because its signature
     // resembles `Any`.
+    let object_method = is_public_object_method(member);
     if member.visibility != Visibility::Public
-        || (!retain_direct_kotlin_object_method && is_public_object_method(member))
+        || member.is_classifier_static()
+        || (!retain_direct_kotlin_object_method && object_method)
     {
         return;
     }
@@ -408,6 +437,7 @@ fn collect_member(
     let collected = CollectedDeclaration {
         depth,
         receiver_convention,
+        requires_object_dispatch: retain_direct_kotlin_object_method && object_method,
         member: member.clone(),
         params: params.clone(),
         contravariant_params,
@@ -419,44 +449,6 @@ fn collect_member(
     } else {
         declarations.push(((member.name.clone(), params), vec![collected]));
     }
-}
-
-/// The read view of a use-site capture, used only to identify an `in`-origin parameter. It is not
-/// the interface method's callable input: `Sink<in String>` still accepts `String`.
-fn contravariant_capture_read(mut argument: Ty) -> Ty {
-    while argument.projection_inner().is_some() {
-        let read = argument.projection_read_ty();
-        if read == argument {
-            break;
-        }
-        argument = read;
-    }
-    argument
-}
-
-fn sam_substitute(
-    declared: Ty,
-    occurrence_bounds: &crate::types::TyParamBindings,
-    bindings: &GSigBinds,
-) -> Ty {
-    let platform_inner = match declared.kind() {
-        TyKind::PlatformNullable(inner) => Some(inner),
-        _ => None,
-    };
-    let explicit_nullable = platform_inner.and_then(|inner| match inner.kind() {
-        TyKind::TyParam(name, _) | TyKind::Var(name, _) => bindings
-            .get(name.as_str())
-            .copied()
-            .filter(|binding| matches!(binding.kind(), TyKind::Nullable(_))),
-        _ => None,
-    });
-    if let Some(binding) = explicit_nullable {
-        return binding;
-    }
-    ty_subst_keep_unbound(
-        crate::types::ty_with_param_bounds(declared, occurrence_bounds),
-        bindings,
-    )
 }
 
 fn is_public_object_method(member: &LibraryMember) -> bool {

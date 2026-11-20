@@ -11,6 +11,7 @@ mod dependency_inline_templates;
 mod diagnostic_recovery;
 mod emission_session;
 mod local_visibility;
+mod lowering_failure;
 mod metadata_handoff;
 #[cfg(test)]
 mod streaming_tests;
@@ -300,7 +301,10 @@ fn emit_analyzed_into<B: Backend>(
         if let Err(error) = sink.accept_inline_bodies(&index, &inline_bodies) {
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: cannot consume inline FIR: {error:?}"),
+                format!(
+                    "internal error: cannot consume inline FIR: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             default_arguments.take_for_source(&index, source_id);
             continue;
@@ -314,7 +318,10 @@ fn emit_analyzed_into<B: Backend>(
             crate::trace_compiler!("fir", "default FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: default FIR lowering failed: {error:?}"),
+                format!(
+                    "internal error: default FIR lowering failed: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             continue;
         }
@@ -415,7 +422,8 @@ fn emit_analyzed_into<B: Backend>(
             diags.error(
                 Span::new(0, 0),
                 format!(
-                    "internal error: cannot consume completed body-local inline FIR: {error:?}"
+                    "internal error: cannot consume completed body-local inline FIR: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
                 ),
             );
             source_failed = true;
@@ -430,7 +438,10 @@ fn emit_analyzed_into<B: Backend>(
             crate::trace_compiler!("fir", "default FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: default FIR lowering failed: {error:?}"),
+                format!(
+                    "internal error: default FIR lowering failed: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             source_failed = true;
         }
@@ -450,7 +461,10 @@ fn emit_analyzed_into<B: Backend>(
             crate::trace_compiler!("fir", "FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: FIR lowering failed: {error:?}"),
+                format!(
+                    "internal error: FIR lowering failed: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             continue;
         }
@@ -473,7 +487,8 @@ fn emit_analyzed_into<B: Backend>(
                 origins: source_map.origins(),
                 common_ir_coroutines: common_ir_preparation.is_some(),
                 dispatched_classes: &dispatched_classes,
-                char_sequences_by_index: backend.appends_char_sequences_by_index(),
+                reads_appended_char_sequences: backend.reads_appended_char_sequences(),
+                collections_through_interfaces: backend.reads_collections_through_interfaces(),
             },
             diags,
         ) else {
@@ -1121,7 +1136,10 @@ fn consume_body_group(
                 if let Err(error) = sink.accept_streamed_body(index, inline_bodies, owner, body) {
                     diags.error(
                         Span::new(0, 0),
-                        format!("internal error: checked FIR lowering failed: {error:?}"),
+                        format!(
+                            "internal error: checked FIR lowering failed: {}",
+                            lowering_failure::describe(&error, symbols.semantic_platform())
+                        ),
                     );
                     return false;
                 }

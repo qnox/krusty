@@ -56,6 +56,8 @@ pub struct KlibIrModuleTrees {
     /// The serialized file each tree of [`Self::trees`] is a top-level declaration of, by tree
     /// index: the file a file-local signature of that file names.
     files: Vec<u32>,
+    /// The package each serialized file declares, by file index.
+    packages: Vec<Vec<String>>,
     functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
     /// File-local functions, meaningful only inside this library.
     local_functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
@@ -123,6 +125,11 @@ impl KlibIrModuleTrees {
             .then(|| self.files[tree])
     }
 
+    /// The package segments of the serialized file `file` (`IrFile.fq_name`).
+    pub(crate) fn file_package(&self, file: u32) -> Option<&[String]> {
+        self.packages.get(file as usize).map(Vec::as_slice)
+    }
+
     /// Every tree with the serialized file it is a top-level declaration of, in serialized order.
     pub(crate) fn trees_with_files(
         &self,
@@ -138,6 +145,25 @@ impl KlibIrModuleTrees {
         let (tree, class) = *self.local_classes.get(signature)?;
         let arena = &self.trees[tree].arena;
         Some((arena, arena.class(class)))
+    }
+
+    /// The package of the top-level class private to its file that this library serializes
+    /// under the file-local `signature`, together with that class. A class local to a body or
+    /// nested in another class is not one.
+    pub(crate) fn file_private_class(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> Option<(&[String], &super::tree::KlibIrClass)> {
+        let KlibIrSignature::FileLocal { file, .. } = signature else {
+            return None;
+        };
+        let (tree, class) = *self.local_classes.get(signature)?;
+        let tree = &self.trees[tree];
+        if tree.declaration != KlibIrMember::Class(class) {
+            return None;
+        }
+        let package = self.file_package(*file)?;
+        Some((package, tree.arena.class(class)))
     }
 
     /// Every file-local class this library serializes, with the arena that owns it.
@@ -461,7 +487,8 @@ fn read_declaration_trees_from(
                 .map(|tables| entries(&tables[index], FILE_ENTRIES).map(|entries| entries.len()))
                 .transpose()?,
         };
-        let declaration_ids = ir_file_declaration_ids(&mut file, &files[index])?;
+        let (declaration_ids, package) = ir_file_declaration_ids(&mut file, &files[index])?;
+        module.packages.push(package);
         let declarations = declaration_index(&declarations[index])?;
         for id in declaration_ids {
             let bytes = declarations.get(&id).ok_or_else(|| {
@@ -510,16 +537,23 @@ fn read_declaration_trees_from(
     Ok(module)
 }
 
-/// Validate an `IrFile`'s own provenance before decoding declarations from it. Kotlin 2.4.21
-/// requires one of fields 2 and 7 when consuming a produced KLIB; older inputs may omit both, but
-/// an id that is present must resolve in this file's `fileEntries.knf` table.
+/// Validate an `IrFile`'s own provenance before decoding declarations from it, and read its
+/// declaration ids and package. Kotlin 2.4.21 requires one of fields 2 and 7 when consuming a
+/// produced KLIB; older inputs may omit both, but an id that is present must resolve in this
+/// file's `fileEntries.knf` table.
 fn ir_file_declaration_ids(
     file: &mut FileTables<'_>,
     bytes: &[u8],
-) -> Result<Vec<u64>, KlibIrDecodeError> {
+) -> Result<(Vec<u64>, Vec<String>), KlibIrDecodeError> {
     let ir_file = Msg::parse(bytes, 0, FILES)?;
-    TreeDecoder::new(file).file_reference(&ir_file, 2, 7)?;
-    ir_file.packed(1, "declaration ids")
+    let decoder = TreeDecoder::new(file);
+    decoder.file_reference(&ir_file, 2, 7)?;
+    let package = ir_file
+        .packed(3, "file package")?
+        .into_iter()
+        .map(|segment| decoder.string(segment, "file package"))
+        .collect::<Result<_, _>>()?;
+    Ok((ir_file.packed(1, "declaration ids")?, package))
 }
 
 /// The identity of the declaration `msg` serializes, read from its base without decoding the rest.
@@ -2130,7 +2164,20 @@ mod tests {
         push_varint(9, &mut declaration_ids);
         let mut valid = bytes_field(1, &declaration_ids);
         valid.extend(varint_field(7, 0));
-        assert_eq!(ir_file_declaration_ids(&mut file, &valid).unwrap(), [9]);
+        assert_eq!(
+            ir_file_declaration_ids(&mut file, &valid).unwrap(),
+            (vec![9], Vec::new())
+        );
+        // `IrFile.fq_name` names the file's package by string-table indices.
+        let mut package = Vec::new();
+        push_varint(0, &mut package);
+        push_varint(3, &mut package);
+        let mut packaged = valid.clone();
+        packaged.extend(bytes_field(3, &package));
+        assert_eq!(
+            ir_file_declaration_ids(&mut file, &packaged).unwrap(),
+            (vec![9], vec!["kotlin".to_string(), "value".to_string()])
+        );
 
         let mut absent = bytes_field(1, &declaration_ids);
         absent.extend(varint_field(7, 1));
@@ -2140,6 +2187,36 @@ mod tests {
                 .to_string(),
             "invalid KLIB IR files.knf at byte 0: file entry 1 is absent from fileEntries.knf"
         );
+    }
+
+    #[test]
+    fn ir_file_field_3_spells_the_package_of_its_declarations() {
+        let strings = declaration_strings();
+        let signatures: Vec<&[u8]> = Vec::new();
+        let mut file = FileTables {
+            strings: &strings,
+            signatures: SignatureTable::new(0, &signatures, &strings),
+            types: Vec::new(),
+            bodies: Vec::new(),
+            file_entries: Some(1),
+        };
+        let mut declaration_ids = Vec::new();
+        push_varint(9, &mut declaration_ids);
+        let mut package = Vec::new();
+        push_varint(0, &mut package);
+        push_varint(6, &mut package);
+        let mut bytes = bytes_field(1, &declaration_ids);
+        bytes.extend(bytes_field(3, &package));
+        bytes.extend(varint_field(7, 0));
+        let (ids, package) = ir_file_declaration_ids(&mut file, &bytes).unwrap();
+        assert_eq!(package, ["kotlin".to_owned(), "Marker".to_owned()]);
+        assert_eq!(ids, [9]);
+
+        let mut absent = Vec::new();
+        push_varint(7, &mut absent);
+        let mut bytes = bytes_field(3, &absent);
+        bytes.extend(varint_field(7, 0));
+        assert!(ir_file_declaration_ids(&mut file, &bytes).is_err());
     }
 
     #[test]

@@ -29,7 +29,7 @@ pub(super) struct CaptureField {
 }
 
 /// An object literal's delegation to a superclass constructor: the operands evaluated where the
-/// object is constructed, the constructor's parameters and the constructor itself.
+/// object is constructed, the constructor's declared parameters and the constructor itself.
 struct SuperclassForwards {
     operands: Vec<(ExprId, Ty)>,
     params: Vec<Ty>,
@@ -141,6 +141,13 @@ impl<'a> BodyLowering<'a> {
         declared.enclosure = Some(crate::ir::IrEnclosure::Function(self.function.function));
         declared.is_source_declared = true;
         declared.is_anonymous_object = true;
+        declared.site_name =
+            self.linker
+                .site_container()
+                .map(|container| crate::ir::IrSiteClassName {
+                    container,
+                    name: class.name.as_str().into(),
+                });
         declared.is_local_class = true;
         declared.superclass = superclass;
         declared.interfaces = interfaces.into();
@@ -224,6 +231,11 @@ impl<'a> BodyLowering<'a> {
             });
         }
         let class_id = self.ir.add_class(declared);
+        if let Some(provenance) = self.anonymous_object_provenance() {
+            self.ir
+                .local_class_name_provenance
+                .insert(class_id, provenance);
+        }
         let owner = self.ir.classes[class_id as usize].fq_name_id();
         let mut capture_fields = HashMap::default();
         for (index, capture) in captures.iter().enumerate() {
@@ -292,6 +304,59 @@ impl<'a> BodyLowering<'a> {
             default_prefix_count: prefix_count,
         });
         Ok(self.typed(constructed, Ty::obj_name(owner)))
+    }
+
+    /// How Kotlin names an object literal the body of a published function declares: in the
+    /// function's class, or its package for a top-level one, below the function, numbered after
+    /// the ones it already declared. A body of any other declaration names none here.
+    fn anonymous_object_provenance(&self) -> Option<crate::ir::IrLocalClassNameProvenance> {
+        let crate::metadata::klib_ir::KlibIrSignature::Public(signature) =
+            &self.function.symbol.signature
+        else {
+            return None;
+        };
+        let (function, owner) = signature.declaration().segments().split_last()?;
+        let package = signature
+            .package()
+            .segments()
+            .iter()
+            .fold(TypeName::ROOT, |parent, segment| {
+                crate::types::type_name_child(parent, segment)
+            });
+        let lexical_owner = match owner.split_first() {
+            None => None,
+            Some((first, nested)) => {
+                let owner = nested.iter().fold(
+                    crate::types::type_name_child(package, first),
+                    |parent, segment| crate::types::type_name_nested_child(parent, segment),
+                );
+                Some(match self.ir.class_id_by_name(owner) {
+                    Some(class) => crate::ir::IrLocalClassOwner::Class(class),
+                    None => crate::ir::IrLocalClassOwner::External(owner),
+                })
+            }
+        };
+        let source = crate::ir::IrLocalClassNameRoot::Dependency { package };
+        let segments: Box<[String]> = Box::new([function.clone()]);
+        let ordinal = self
+            .ir
+            .local_class_name_provenance
+            .values()
+            .filter(|known| {
+                known.source == source
+                    && known.lexical_owner == lexical_owner
+                    && known.segments == segments
+            })
+            .filter_map(|known| known.ordinal)
+            .max()
+            .map_or(1, |ordinal| ordinal.saturating_add(1));
+        Some(crate::ir::IrLocalClassNameProvenance {
+            source,
+            lexical_owner,
+            segments,
+            ordinal: Some(ordinal),
+            parents: Box::new([]),
+        })
     }
 
     /// Checks the members an object literal may declare, and returns the constructor's delegation
@@ -367,7 +432,8 @@ impl<'a> BodyLowering<'a> {
             .copied()
             .find(|ty| ty.non_null().kotlin_class_internal() == Some(superclass))
             .ok_or_else(|| mismatch("an object literal delegates to a class it does not extend"))?;
-        let operands = self.constructor_operands(access, 0, ty)?;
+        let operands =
+            self.constructor_operands(access, 0, ty, super::ConstructorRole::Delegation)?;
         if operands.declaration.classifier != superclass || operands.local_access.is_some() {
             return Err(mismatch(
                 "an object literal delegates to another class than its superclass",
@@ -410,7 +476,10 @@ impl<'a> BodyLowering<'a> {
             .zip(operands.params.iter().copied());
         Ok(SuperclassForwards {
             operands: pairs.collect(),
-            params: operands.params,
+            // The superclass constructor's own declared frame, as a source class records it: a
+            // backend couples it to the constructor's physical frame, while each operand above is
+            // carried at its type in this object's instantiation.
+            params: operands.declaration.declared_parameters().to_vec(),
             target: IrConstructorTarget {
                 ordinal,
                 access: crate::ir::IrConstructorAccess::Unrestricted,
@@ -631,10 +700,18 @@ impl<'a> BodyLowering<'a> {
                         }
                         None => None,
                     };
+                    let dispatched =
+                        self.record_property_override(&name, &getter, fun, owner, supertypes, ret)?;
                     self.ir.classes[class_id as usize]
                         .properties
-                        .push(property_declaration(&name, ret, fun, setter));
-                    self.record_property_override(&name, &getter, fun, owner, supertypes, ret)?;
+                        .push(property_declaration(
+                            &name,
+                            property.base.flags,
+                            ret,
+                            fun,
+                            setter,
+                            dispatched,
+                        )?);
                 }
                 _ => {}
             }
@@ -882,6 +959,49 @@ impl<'a> BodyLowering<'a> {
         Ok(())
     }
 
+    /// An override of the accessor `record` names, which this unit emits as a method of the
+    /// class it materializes: the override edge of a function without parameters.
+    fn record_accessor_method_override(
+        &mut self,
+        getter: &KlibIrFunction,
+        fun: FunId,
+        owner: TypeName,
+        record: super::super::same_library_class::MemberOverride,
+        interface: bool,
+        ty: Ty,
+    ) -> Lowered<()> {
+        let target = crate::fir::ResolvedFunctionOverrideTarget::External(
+            self.linker.external_override(&record.identity)?,
+        );
+        self.ir
+            .function_overrides
+            .entry(owner)
+            .or_default()
+            .push(IrFunctionOverride {
+                implementation: target,
+                implementation_function: Some(fun),
+                implementation_owner: owner,
+                overridden: target,
+                overridden_owner: record.owner,
+                overridden_semantic_role: record.semantic_role,
+                collection_barrier: None,
+                overridden_is_interface: interface,
+                name: getter.name.clone(),
+                declared_parameters: record.declared_parameters,
+                declared_result: record.declared_result,
+                applied_parameters: record.applied_parameters,
+                applied_result: record.applied_result,
+                implementation_parameters: Vec::new(),
+                implementation_parameter_identities: Vec::new(),
+                overridden_parameter_identities: Vec::new(),
+                implementation_result: ty,
+                suspend: false,
+                has_kotlin_superclass_override: false,
+                depth: 1,
+            });
+        Ok(())
+    }
+
     fn record_property_override(
         &mut self,
         name: &str,
@@ -890,16 +1010,22 @@ impl<'a> BodyLowering<'a> {
         owner: TypeName,
         supertypes: &[Ty],
         ty: Ty,
-    ) -> Lowered<()> {
+    ) -> Lowered<bool> {
         use crate::fir::ResolvedPropertyOverrideTarget;
+        let mut dispatched = false;
         for symbol in &getter.overridden {
             let Some(record) = self.linker.dependency_override(symbol, supertypes, true)? else {
                 continue;
             };
-            let target = ResolvedPropertyOverrideTarget::External(
-                self.linker.external_override(&record.identity)?,
-            );
+            let external = self.linker.external_override(&record.identity)?;
             let interface = self.linker.is_interface(record.owner)?;
+            // An accessor a class this unit materializes declares is a method of that class,
+            // whose slot a function override edge reaches.
+            if self.ir.dependency_methods.contains_key(&external) {
+                self.record_accessor_method_override(getter, fun, owner, record, interface, ty)?;
+                continue;
+            }
+            let target = ResolvedPropertyOverrideTarget::External(external);
             self.ir
                 .property_overrides
                 .entry(owner)
@@ -923,8 +1049,9 @@ impl<'a> BodyLowering<'a> {
                     has_kotlin_superclass_override: false,
                     depth: 1,
                 });
+            dispatched = true;
         }
-        Ok(())
+        Ok(dispatched)
     }
 }
 
@@ -937,11 +1064,30 @@ struct MemberFrame<'a> {
     compiler_aliases: HashMap<KlibIrSymbol, crate::metadata::klib_ir::tree::KlibIrExprId>,
     returnable_targets: Vec<KlibIrSymbol>,
     returnable_frames: Vec<super::compiler_blocks::ReturnableFrame>,
-    null_proven: HashSet<KlibIrSymbol>,
+    null_proven: HashSet<super::safe_calls::NullProvenRead>,
 }
 
-fn property_declaration(name: &str, ty: Ty, getter: FunId, setter: Option<FunId>) -> IrProperty {
-    IrProperty {
+/// An object literal property, with the modality its serialized declaration flags state: only an
+/// `open` or `abstract` one (an `override` not marked `final` included) dispatches, and only when it
+/// overrides a property of a supertype the unit does not materialize; an accessor of a class the
+/// unit materializes is overridden as that class's method, so the property itself stays final.
+fn property_declaration(
+    name: &str,
+    flags: u64,
+    ty: Ty,
+    getter: FunId,
+    setter: Option<FunId>,
+    dispatched: bool,
+) -> Lowered<IrProperty> {
+    use crate::metadata::semantic::KotlinModality;
+    let modality = match crate::metadata::semantic::declaration_modality(flags) {
+        KotlinModality::Sealed => return Err(mismatch("an object literal property is sealed")),
+        _ if !dispatched => crate::ir::IrPropertyModality::Final,
+        KotlinModality::Final => crate::ir::IrPropertyModality::Final,
+        KotlinModality::Open => crate::ir::IrPropertyModality::Open,
+        KotlinModality::Abstract => crate::ir::IrPropertyModality::Abstract,
+    };
+    Ok(IrProperty {
         name: name.to_owned(),
         origin: crate::ir::IrPropertyOrigin::Declaration,
         diagnostic_span: None,
@@ -960,9 +1106,9 @@ fn property_declaration(name: &str, ty: Ty, getter: FunId, setter: Option<FunId>
         storage_ty: None,
         backing_field: None,
         is_var: setter.is_some(),
-        is_open: true,
+        is_open: modality != crate::ir::IrPropertyModality::Final,
         modifiers: crate::ir::IrPropertyModifiers {
-            modality: crate::ir::IrPropertyModality::Open,
+            modality,
             declared_getter: true,
             ..crate::ir::IrPropertyModifiers::default()
         },
@@ -974,5 +1120,5 @@ fn property_declaration(name: &str, ty: Ty, getter: FunId, setter: Option<FunId>
         setter,
         needs_access_bridge: false,
         accessor_annotations: Default::default(),
-    }
+    })
 }

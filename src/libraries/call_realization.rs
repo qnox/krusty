@@ -304,13 +304,27 @@ impl<'a> KlibBodyCallable<'a> {
         self.singleton_classifier
     }
 
-    /// The class contract that belongs to the declaration, with a singleton edge's own class
-    /// removed. That class is the singleton the edge dispatches to, so two edges of one
-    /// declaration may name different singleton classes and still be the same declaration.
-    fn declaration_class_contract(self) -> Option<&'a super::KlibBodyClassContract> {
-        match (self.singleton_classifier, self.class_contract) {
-            (Some(singleton), Some(class)) if class.classifier == singleton => None,
-            _ => self.class_contract,
+    /// The contract of the class that declares the member, when this edge carries it. An edge
+    /// may instead carry the contract of the singleton it dispatches to, which is not the
+    /// declaration's own and says nothing about it.
+    fn declaring_class_contract(self) -> Option<&'a super::KlibBodyClassContract> {
+        let class = self.class_contract?;
+        (self.declaration_owner
+            == Some(crate::types::SemanticCallableOwner::Classifier(
+                class.classifier,
+            )))
+        .then_some(class)
+    }
+
+    /// Two edges of one declaration agree on its declaring class where both carry it; an edge
+    /// that names only its singleton's class is no evidence against the other's.
+    fn declaring_class_contracts_agree(self, other: Self) -> bool {
+        match (
+            self.declaring_class_contract(),
+            other.declaring_class_contract(),
+        ) {
+            (Some(left), Some(right)) => left == right,
+            _ => true,
         }
     }
 
@@ -335,7 +349,7 @@ impl<'a> KlibBodyCallable<'a> {
             && self.compiler_intrinsic == other.compiler_intrinsic
             && self.range_construction == other.range_construction
             && self.declaration_modifiers == other.declaration_modifiers
-            && self.declaration_class_contract() == other.declaration_class_contract()
+            && self.declaring_class_contracts_agree(other)
             && self.companion_receiver == other.companion_receiver
             && self.declaration_owner == other.declaration_owner
             && self.identity == other.identity
@@ -395,6 +409,8 @@ pub struct ExternalCallableRealization {
     pub klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
     /// Whether a source parameter declares a default value, as the provider's declaration says.
     pub declares_parameter_defaults: bool,
+    /// Per logical parameter, whether its declared type is a function type annotated `@Composable`.
+    pub composable_parameters: crate::libraries::ParamFlags,
 }
 
 impl ExternalCallableRealization {
@@ -541,6 +557,7 @@ impl LibraryCallable {
             inline: InlineKind::None,
             default_call: false,
             defaults_from_declaration: false,
+            transformed_entry_tail: None,
             vararg_elem: None,
             vararg_index: None,
             signature: None,

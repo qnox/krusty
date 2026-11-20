@@ -339,6 +339,7 @@ fn realize_expressions(
                     arguments,
                     parameters,
                     result,
+                    substitutions,
                     source_receiver,
                 } = &**checked_op =>
             {
@@ -350,6 +351,7 @@ fn realize_expressions(
                     arguments,
                     parameters,
                     result,
+                    substitutions,
                     source_receiver,
                 ))
             }
@@ -361,6 +363,7 @@ fn realize_expressions(
                     arguments,
                     parameters,
                     result,
+                    substitutions,
                     source_receiver,
                 } = &**checked_op =>
             {
@@ -372,6 +375,7 @@ fn realize_expressions(
                     arguments,
                     parameters,
                     result,
+                    substitutions,
                     source_receiver,
                 ))
             }
@@ -387,6 +391,7 @@ fn realize_expressions(
             arguments,
             parameters,
             result,
+            substitutions,
             source_receiver,
         )) = property
         {
@@ -401,6 +406,19 @@ fn realize_expressions(
             } else {
                 realization.getter
             };
+            let accessor = callables
+                .callable(target)
+                .ok_or(ExternalDependencyTarget::Callable(target))?;
+            let extension_receiver_parameter = if accessor.is_member_extension()
+                || (accessor.is_extension() && receiver.is_none())
+            {
+                Some(
+                    u32::try_from(accessor.context_count)
+                        .map_err(|_| ExternalDependencyTarget::Callable(target))?,
+                )
+            } else {
+                None
+            };
             let property_target = krusty::fir::ResolvedPropertyOverrideTarget::External(target);
             property_virtual_target = Some(if write {
                 krusty::ir::IrVirtualTarget::PropertySetter(property_target)
@@ -413,9 +431,9 @@ fn realize_expressions(
                     default_provider: None,
                     params: parameters.to_vec(),
                     ret: *result,
-                    substitutions: Vec::new(),
+                    substitutions: substitutions.to_vec(),
                     defaults: Vec::new(),
-                    extension_receiver_parameter: None,
+                    extension_receiver_parameter,
                 }),
                 dispatch_receiver: *receiver,
                 args: arguments.to_vec(),
@@ -901,6 +919,21 @@ fn realize_expressions(
         // `$composer` and `$changed`); its generated calls pass them after the declared ones, and
         // the compiled method takes them last.
         let appended = callables.plugin_runtime_appended(target);
+        // An extension's receiver is a call operand of its own, not one of `args`: it takes the
+        // parameter ordinal after the context parameters, which the arguments leave out.
+        let physical_arity = source_arity + appended.len();
+        let receiver_ordinal = (kind == ExternalCallableKind::Extension
+            && supplied + 1 == physical_arity)
+            .then(|| u32::try_from(callable.context_count))
+            .transpose()
+            .map_err(|_| ExternalRealizationError::Arguments {
+                target: target.into(),
+                detail: format!(
+                    "call {expression} ({kind:?} {}.{}) extension receiver does not fit a parameter ordinal",
+                    callable.physical_owner.render(),
+                    physical_name
+                ),
+            })?;
         if !appended.is_empty() {
             let physical = appended_physical_parameters(&source_parameters, appended, &descriptor)
                 .map_err(|detail| ExternalRealizationError::Arguments {
@@ -927,7 +960,7 @@ fn realize_expressions(
                 physical,
                 Some(&plan),
                 supplied,
-                &[],
+                receiver_ordinal.as_slice(),
             )
             .map_err(|detail| ExternalRealizationError::Arguments {
                 target: target.into(),
@@ -1040,12 +1073,19 @@ fn realize_expressions(
                 unreachable!("a target KLIB scalar instruction cannot reach JVM call realization")
             }
             Some(
+                krusty::libraries::CompilerIntrinsic::CurrentContinuation
+                | krusty::libraries::CompilerIntrinsic::ReturnIfSuspended,
+            ) => {
+                unreachable!("a Native continuation intrinsic cannot reach JVM call realization")
+            }
+            Some(
                 krusty::libraries::CompilerIntrinsic::UnsignedDivide { .. }
                 | krusty::libraries::CompilerIntrinsic::UnsignedRemainder { .. }
                 | krusty::libraries::CompilerIntrinsic::ResultFailure(_)
                 | krusty::libraries::CompilerIntrinsic::TextTrim
                 | krusty::libraries::CompilerIntrinsic::StringCompare
-                | krusty::libraries::CompilerIntrinsic::CollectionSizeOrDefault,
+                | krusty::libraries::CompilerIntrinsic::CollectionSizeOrDefault
+                | krusty::libraries::CompilerIntrinsic::StartCoroutineUninterceptedOrReturn,
             ) => {
                 unreachable!("a target KLIB library helper cannot reach JVM call realization")
             }
@@ -1063,6 +1103,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::FloatingIsNaN { .. }
                 | krusty::libraries::CompilerIntrinsic::FloatingIsInfinite { .. }
                 | krusty::libraries::CompilerIntrinsic::RadixToString { .. }
+                | krusty::libraries::CompilerIntrinsic::ArrayStorageCopy
                 | krusty::libraries::CompilerIntrinsic::StringRangeEquals
                 | krusty::libraries::CompilerIntrinsic::ArrayCopy { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayGet
@@ -1097,6 +1138,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::Indices(_)
                 | krusty::libraries::CompilerIntrinsic::UnsignedCompare { .. }
                 | krusty::libraries::CompilerIntrinsic::PrimitiveIteratorNext
+                | krusty::libraries::CompilerIntrinsic::ResultFailureException
                 | krusty::libraries::CompilerIntrinsic::NumericConversion
                 | krusty::libraries::CompilerIntrinsic::PrimitiveUnary(_)
                 | krusty::libraries::CompilerIntrinsic::PrimitiveCompare

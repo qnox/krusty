@@ -23,7 +23,7 @@ use krusty::types::{Ty, TyKind};
 
 use super::super::super::super::boxes::is_boxed_scalar;
 use super::super::super::super::encode::ValType;
-use super::super::super::super::function_value_names::named_shape;
+use super::super::super::super::function_value_names::{named_shape, sam_class_name};
 use super::super::super::any_member_reach::Receiver;
 use super::{carrier, Body, Unsupported};
 
@@ -197,7 +197,8 @@ impl Body<'_> {
                 .map(UnrealizedMember::Class));
         }
         self.record_call(member, ty, Receiver::Erased);
-        let unprinted = (member == AnyMember::ToString)
+        let class_elsewhere = self.classifier_declared_elsewhere(value);
+        let unprinted = (member == AnyMember::ToString && class_elsewhere.is_none())
             .then(|| first_unprinted_value(self.ir))
             .flatten();
         if let Some(expression) = unprinted {
@@ -212,7 +213,13 @@ impl Body<'_> {
             return Ok(None);
         };
         Ok((0..self.ir.classes.len() as ClassId)
-            .find(|&class| classes.has_bodiless_instances(class, member))
+            .find(|&class| {
+                classes.has_bodiless_instances(class, member)
+                    && class_elsewhere.is_none_or(|ancestor| {
+                        self.classifiers
+                            .is_subclassifier(self.ir.classes[class as usize].fq_name, ancestor)
+                    })
+            })
             .map(UnrealizedMember::Class))
     }
 
@@ -242,6 +249,26 @@ impl Body<'_> {
                 }
                 (related && classes.has_bodiless_instances(id, member)).then_some(id)
             }))
+    }
+
+    /// The classifier of `value` when it is declared elsewhere and no value whose `toString` has
+    /// no body can be an instance of it, other than a class of this file implementing it. A
+    /// function value is an instance of `Any`, of `kotlin.Function`'s hierarchy and of the
+    /// `fun interface` it is converted to, so an interface counts only in a file converting none.
+    fn classifier_declared_elsewhere(&self, value: Ty) -> Option<krusty::types::TypeName> {
+        let internal = value.obj_internal()?;
+        if internal == krusty::types::wk::any() {
+            return None;
+        }
+        let fact = self.classifiers.classifier(internal)?;
+        let holds_function_values = matches!(
+            fact.kind,
+            krusty::libraries::TypeKind::Interface | krusty::libraries::TypeKind::Annotation
+        ) && (self
+            .classifiers
+            .is_subclassifier(krusty::types::wk::function_root(), internal)
+            || converts_function_values(self.ir));
+        (!holds_function_values).then_some(internal)
     }
 
     /// Whether this file constructs a runtime exception or binds one in a catch. Those objects
@@ -279,8 +306,17 @@ fn runtime_exception_lacks_body(member: AnyMember) -> bool {
     }
 }
 
+/// Whether `ir` converts a function value to a `fun interface`.
+fn converts_function_values(ir: &IrFile) -> bool {
+    ir.classes.iter().any(|class| class.sam_wrapper.is_some())
+        || ir
+            .exprs
+            .iter()
+            .any(|node| matches!(node, IrExpr::Lambda { sam: Some(_), .. }))
+}
+
 /// Whether a reference of `ir` can hold a runtime object whose `toString` has no body: a function
-/// value kotlinc-wasm does not name for its shape, which only a lambda or a callable reference the
+/// value kotlinc-wasm does not name for its shape or its `fun interface`, which only a lambda or a callable reference the
 /// file emits creates.
 pub(in super::super) fn holds_unprinted_values(ir: &IrFile) -> bool {
     first_unprinted_value(ir).is_some()
@@ -294,5 +330,6 @@ fn first_unprinted_value(ir: &IrFile) -> Option<u32> {
             let node = ir.expr(expression);
             matches!(node, IrExpr::Lambda { .. } | IrExpr::CallableReference(_))
                 && named_shape(node, ir.checked_type(expression)).is_none()
+                && sam_class_name(ir, expression).is_none()
         })
 }

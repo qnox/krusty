@@ -294,6 +294,7 @@ impl JvmLibraries {
                                 signature.parameters_with_receiver(m.context_count)
                             }),
                             equality_bound: m.equality_bound,
+                            contract: m.contract.clone(),
                             // Whether the dispatch owner is an interface is the MEMBER's fact here.
                             // For a mapped builtin resolved with no JDK on the classpath the JVM
                             // owner (`java/util/List`) has no class file, so the call site cannot
@@ -390,6 +391,11 @@ impl JvmLibraries {
                             // Keep the selected member record and callable handle structurally
                             // identical; either lowering seam may consume the declaration.
                             function.callable.inline_body_plan = inline_body_plan;
+                            if !t.is_kotlin {
+                                function.override_inputs = override_slots::java_override_inputs(
+                                    &function.semantic_params(),
+                                );
+                            }
                         }
                     }
                 }

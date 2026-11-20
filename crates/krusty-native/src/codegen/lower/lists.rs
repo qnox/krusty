@@ -197,6 +197,11 @@ fn list_symbol(
         ("get", [Ty::Int], ret) if reads && ret.is_reference() => {
             ("kt_list_get", vec![any(), Ty::Int], any())
         }
+        // The range of a list as a view. Either face selects it: whether the view may write is the
+        // parent's to say at run time, as it is for the JVM's, not the static type's.
+        ("subList", [Ty::Int, Ty::Int], ret) if (reads || mutates) && ret.is_reference() => {
+            ("kt_list_sub_list", vec![any(), Ty::Int, Ty::Int], any())
+        }
         ("indexOf", [element], Ty::Int) if reads && element.is_reference() => {
             ("kt_list_index_of", vec![any(), any()], Ty::Int)
         }
@@ -211,6 +216,12 @@ fn list_symbol(
             vec![any(), any()],
             Ty::Boolean,
         ),
+        ("listIterator", [], ret) if reads && ret.is_reference() => {
+            ("kt_list_iterator", vec![any()], any())
+        }
+        ("listIterator", [Ty::Int], ret) if reads && ret.is_reference() => {
+            ("kt_list_iterator_at", vec![any(), Ty::Int], any())
+        }
         // The mutating half, declared on the MUTABLE face (or by `ArrayList` itself). A read-only
         // face never declares one, so a same-shaped member of anything else stays its own.
         ("add", [element], Ty::Boolean) if mutates && element.is_reference() => {
@@ -256,8 +267,31 @@ fn list_symbol(
     })
 }
 
-/// The runtime function for one list or collection member, selected by the receiver's collection
-/// kind and the declaration's physical parameters.
+/// The runtime function for one member `ListIterator` declares over a list's iterator: the steps
+/// back and the positions on either side of the cursor. `hasNext` and `next` are every iterator's
+/// and the walk answers them.
+fn list_iterator_symbol(
+    declaration: classifier_shapes::CollectionDeclaration,
+    signature: super::super::super::intrinsics::FunctionSignature<'_>,
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    if !declaration.reads(&[CollectionKind::ListIterator]) {
+        return None;
+    }
+    Some(match (signature.name, signature.params, signature.ret) {
+        ("hasPrevious", [], Ty::Boolean) => {
+            ("kt_list_iterator_has_previous", vec![any()], Ty::Boolean)
+        }
+        ("previous", [], ret) if ret.is_reference() => {
+            ("kt_list_iterator_previous", vec![any()], any())
+        }
+        ("nextIndex", [], Ty::Int) => ("kt_list_iterator_next_index", vec![any()], Ty::Int),
+        ("previousIndex", [], Ty::Int) => ("kt_list_iterator_previous_index", vec![any()], Ty::Int),
+        _ => return None,
+    })
+}
+
+/// The runtime function for one list, collection or list-iterator member, selected by the
+/// receiver's collection kind and the declaration's physical parameters.
 ///
 /// `ArrayList.contains` is declared on `AbstractMutableList`. The receiver is still the runtime's
 /// list, so the operation is that list's, not a member the owner alone names.
@@ -267,6 +301,14 @@ pub(super) fn collection_runtime_member(
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
     physical: &[Ty],
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    // A list's iterator, held as a `ListIterator`: its steps back are the runtime's too.
+    if file.iteration_shape_of(ty)
+        == Some(super::super::super::intrinsics::CollectionShape::Iterator)
+    {
+        let owner = signature.owner.semantic_classifier()?;
+        let declaration = classifier_shapes::collection_declaration(file.classifiers, owner)?;
+        return list_iterator_symbol(declaration, signature);
+    }
     let list = is_list(file, ty);
     if !(list || is_collection(file, ty)) {
         return None;
@@ -403,47 +445,6 @@ impl BodyLowering<'_, '_, '_> {
         self.runtime_call("kt_lazy_of", &[any()], any(), &[function])
     }
 
-    /// `getValue(thisRef, property)` / `setValue(thisRef, property, value)` on one of those delegates.
-    ///
-    /// `thisRef` is nothing either delegate reads, but an explicit operator call may supply an
-    /// arbitrary expression, so it is still evaluated in source order. The PROPERTY is carried
-    /// differently by each half. On
-    /// a WRITE it travels through as the object it is, because an observable hands it to its
-    /// callback and nothing reads it on the way. On a READ only its NAME can matter — it is the
-    /// text of the error a `notNull` read-before-write raises — and the runtime cannot ask the
-    /// object for that, so the name is a literal here, taken from the reference operand's own
-    /// declaration. A `KProperty` this file did not build has no name to take, and the read
-    /// declines rather than reporting a wrong one.
-    fn read_write_property_member(
-        &mut self,
-        signature: super::super::super::intrinsics::FunctionSignature<'_>,
-        receiver: u32,
-        args: &[u32],
-        ret: Ty,
-    ) -> Option<Result<Option<Value>, Unsupported>> {
-        if !super::super::super::intrinsics::classifier_matches(
-            signature.owner.physical(),
-            "kotlin/properties/ReadWriteProperty",
-        ) {
-            return None;
-        }
-        match (signature.name, signature.params, signature.ret, args) {
-            ("getValue", [_, _], declared, [this_ref, property]) if declared.is_reference() => {
-                let Some(text) = self.property_reference_name(*property) else {
-                    return Some(Err(
-                        "a delegated property read through a `KProperty` this file did not build"
-                            .into(),
-                    ));
-                };
-                Some(self.delegate_read(receiver, *this_ref, *property, &text, ret))
-            }
-            ("setValue", [_, _, _], Ty::Unit, [this_ref, property, value]) => {
-                Some(self.delegate_write(receiver, *this_ref, *property, *value))
-            }
-            _ => None,
-        }
-    }
-
     /// `ReadOnlyProperty.getValue` on a delegate this FILE declares.
     ///
     /// Unlike `ReadWriteProperty`, whose `notNull()` and `observable(…)` the runtime builds itself,
@@ -523,127 +524,6 @@ impl BodyLowering<'_, '_, '_> {
             },
         )?;
         Ok(produced)
-    }
-
-    /// The name a `KProperty` operand of the delegate convention carries, or `None` when the
-    /// operand is not a property reference this file built.
-    ///
-    /// An IMPLICIT COERCION is looked through: the convention's parameter is `KProperty<*>` and the
-    /// reference is narrower, so common lowering wraps it — and the wrapper changes nothing about
-    /// which declaration the reference names. So is a read of a STATIC: a top-level delegated
-    /// property's `KProperty` is built once in the file's initializer and the call site reads it
-    /// from there, so the reference is the static's INITIALIZER rather than the operand itself.
-    fn property_reference_name(&self, property: u32) -> Option<String> {
-        let property = self.through_coercions(property);
-        if let IrExpr::GetStatic(index) = self.file.ir.expr(property) {
-            let init = self.file.ir.statics.get(*index as usize)?.init?;
-            // One level only. A static's initializer is the reference itself where this applies,
-            // and following a chain of statics would be following assignments rather than reading
-            // a declaration.
-            return self.named_property_reference(self.through_coercions(init));
-        }
-        self.named_property_reference(property)
-    }
-
-    /// The name of a property-reference node, or `None` for anything else.
-    fn named_property_reference(&self, property: u32) -> Option<String> {
-        match self.file.ir.expr(property) {
-            IrExpr::LocalPropertyReference(reference) => Some(reference.name.to_string()),
-            IrExpr::Checked(checked_op)
-                if let krusty::ir::IrCheckedOperation::PropertyReference { target, .. } =
-                    &**checked_op =>
-            {
-                let target = match target {
-                    krusty::fir::FirPropertyReferenceTarget::Module(property)
-                    | krusty::fir::FirPropertyReferenceTarget::SpecializedModule {
-                        property, ..
-                    } => property,
-                    _ => return None,
-                };
-                Some(self.file.ir.checked_properties.get(target)?.name.clone())
-            }
-            _ => None,
-        }
-    }
-
-    /// An expression with every implicit coercion around it stripped.
-    fn through_coercions(&self, mut id: u32) -> u32 {
-        while let IrExpr::TypeOp {
-            op: krusty::ir::IrTypeOp::ImplicitCoercion,
-            arg,
-            ..
-        } = self.file.ir.expr(id)
-        {
-            id = *arg;
-        }
-        id
-    }
-
-    fn delegate_read(
-        &mut self,
-        receiver: u32,
-        this_ref: u32,
-        property_object: u32,
-        property: &str,
-        ret: Ty,
-    ) -> Result<Option<Value>, Unsupported> {
-        let object = self.reference(receiver)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        self.reference(this_ref)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        self.reference(property_object)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        let name = self.string_literal(property.as_bytes())?;
-        let Some(produced) = self.runtime_call(
-            "kt_rw_property_get",
-            &[any(), any()],
-            any(),
-            &[object, name],
-        )?
-        else {
-            return Ok(None);
-        };
-        self.convert(produced, Some(any()), ret)
-    }
-
-    /// The write, which carries the PROPERTY itself: an observable hands it to its callback, and
-    /// nothing in the runtime reads it, so whatever object the delegation built travels straight
-    /// through.
-    fn delegate_write(
-        &mut self,
-        receiver: u32,
-        this_ref: u32,
-        property: u32,
-        value: u32,
-    ) -> Result<Option<Value>, Unsupported> {
-        let object = self.reference(receiver)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        self.reference(this_ref)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        let named = self.reference(property)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        let written = self.reference(value)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        self.runtime_call(
-            "kt_rw_property_set",
-            &[any(), any(), any()],
-            Ty::Unit,
-            &[object, named, written],
-        )
     }
 
     /// `l.value` — a checked read of a dependency property the runtime answers.
@@ -902,9 +782,6 @@ impl BodyLowering<'_, '_, '_> {
                 args,
                 ret,
             ));
-        }
-        if has_standard_identity(ty, super::classifier_shapes::is_read_write_property) {
-            return self.read_write_property_member(signature, receiver, args, ret);
         }
         if has_standard_identity(ty, super::classifier_shapes::is_pair) {
             let (symbol, carried, answer) = pair_symbol(signature)?;
@@ -1472,6 +1349,48 @@ mod tests {
         // `Collection` is the only declaration a `Collection`-typed receiver can select.
         assert!(collection_symbol(face(CollectionKind::List, false), size).is_none());
         assert!(collection_symbol(array_list, size).is_none());
+    }
+
+    /// `listIterator` is a query of a list, and the steps back are `ListIterator`'s own: an
+    /// `Iterator` declares no `previous`, and a step with another shape is not this table's.
+    #[test]
+    fn list_iterator_members_match_their_declaration() {
+        let element = Ty::ty_param("E", any());
+        let iterator = Ty::obj_args("kotlin/collections/ListIterator", &[element]);
+        let list = face(CollectionKind::List, false);
+        let at_params = [Ty::Int];
+        let at = signature(
+            "kotlin/collections/List",
+            "listIterator",
+            &at_params,
+            iterator,
+        );
+        let first = signature("kotlin/collections/List", "listIterator", &[], iterator);
+        let by_text_params = [Ty::String];
+        let by_text = signature(
+            "kotlin/collections/List",
+            "listIterator",
+            &by_text_params,
+            iterator,
+        );
+        assert!(list_symbol(list, first, &[]).is_some());
+        assert!(list_symbol(list, at, &[Ty::Int]).is_some());
+        assert!(list_symbol(list, by_text, &[Ty::String]).is_none());
+        assert!(list_symbol(face(CollectionKind::Set, false), at, &[Ty::Int]).is_none());
+
+        let steps = face(CollectionKind::ListIterator, false);
+        let previous = signature("kotlin/collections/ListIterator", "previous", &[], element);
+        let next_index = signature("kotlin/collections/ListIterator", "nextIndex", &[], Ty::Int);
+        let long_index = signature(
+            "kotlin/collections/ListIterator",
+            "nextIndex",
+            &[],
+            Ty::Long,
+        );
+        assert!(list_iterator_symbol(steps, previous).is_some());
+        assert!(list_iterator_symbol(steps, next_index).is_some());
+        assert!(list_iterator_symbol(steps, long_index).is_none());
+        assert!(list_iterator_symbol(face(CollectionKind::Iterator, false), previous).is_none());
     }
 
     #[test]

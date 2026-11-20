@@ -420,6 +420,11 @@ extern const KType kt_type_mutable_map_interface;
    `listOf(vararg)` answers an anonymous read-only `AbstractList`, which this class stands for. */
 extern const KType kt_type_list;
 extern const KType kt_type_list_iterator;
+/* The view `List.subList` answers: the range of a list, reading the list as it is. A `List`, not a
+   `MutableList`; its size is fixed, and a growable parent that changes shape after it was made
+   makes each read raise `ConcurrentModificationException`. */
+extern const KType kt_type_sub_list;
+extern const KType kt_type_mutable_sub_list;
 
 KRef kt_list_of(KRef elements);
 KRef kt_list_empty(void);
@@ -459,6 +464,7 @@ kt_boolean kt_mutable_collection_remove(KRef self, KRef value);
 void kt_mutable_collection_clear(KRef self);
 kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements);
 KRef kt_list_get(KRef list, kt_int index);
+KRef kt_list_sub_list(KRef list, kt_int from, kt_int to);
 /* `first()` / `last()`; both raise `NoSuchElementException` on an empty list, as Kotlin does. */
 KRef kt_list_first(KRef list);
 KRef kt_list_last(KRef list);
@@ -478,6 +484,8 @@ KRef kt_mutable_list_new(void);
 KRef kt_mutable_list_with_capacity(kt_int capacity);
 /* A growable list holding a COPY of an array's elements. */
 KRef kt_mutable_list_of(KRef elements);
+/* `ArrayList(elements)`: a growable list holding a copy of any collection's elements. */
+KRef kt_mutable_list_copy_of(KRef elements);
 kt_boolean kt_mutable_list_add(KRef self, KRef value);
 void kt_mutable_list_add_at(KRef self, kt_int index, KRef value);
 /* Answers the element that was there, as Kotlin's `set` does. */
@@ -494,6 +502,12 @@ void kt_mutable_list_plus_assign(KRef self, KRef value);
 void kt_mutable_list_add_all(KRef self, KRef elements);
 kt_boolean kt_list_iterator_has_next(KRef iterator);
 KRef kt_list_iterator_next(KRef iterator);
+/* `ListIterator`'s members over a list's iterator. `kt_list_iterator_at` is `listIterator(index)`. */
+KRef kt_list_iterator_at(KRef list, kt_int index);
+kt_boolean kt_list_iterator_has_previous(KRef iterator);
+KRef kt_list_iterator_previous(KRef iterator);
+kt_int kt_list_iterator_next_index(KRef iterator);
+kt_int kt_list_iterator_previous_index(KRef iterator);
 
 /* Iteration through a receiver the generator could only type by the INTERFACE, where either of the
    two iterable things this runtime has may turn up. The descriptor decides which, and `next`
@@ -657,6 +671,15 @@ KRef kt_int_range(kt_int first, kt_int last);
 KRef kt_long_range(kt_long first, kt_long last);
 KRef kt_char_range(kt_char first, kt_char last);
 
+/* `IntProgression(first, last, step)` and its kin, with Kotlin's constructor checks: a zero step,
+   or the step type's minimum, is its `IllegalArgumentException`. `last` is normalized to the last
+   element on the step, as `IntProgression.last` is. */
+KRef kt_int_progression(kt_int first, kt_int last, kt_int step);
+KRef kt_long_progression(kt_long first, kt_long last, kt_long step);
+KRef kt_char_progression(kt_char first, kt_char last, kt_int step);
+KRef kt_uint_progression(kt_int first, kt_int last, kt_int step);
+KRef kt_ulong_progression(kt_long first, kt_long last, kt_long step);
+
 /* `first..<last` / `first until last`. Kotlin answers the EMPTY range rather than wrapping when
    `last` is the element type's minimum, so the half-open form is a function and not `last - 1`. */
 KRef kt_int_range_until(kt_int first, kt_int last);
@@ -699,27 +722,6 @@ kt_boolean kt_floating_range_contains(KRef range, kt_double value);
 kt_boolean kt_floating_range_is_empty(KRef range);
 kt_double kt_floating_range_start(KRef range);
 kt_double kt_floating_range_end(KRef range);
-
-/* ---- Delegates.notNull -------------------------------------------------------------------------
-
-   `var x: T by Delegates.notNull()`: one reference, and reading it before it is written is an
-   error. The NAME the error reports is handed over by the caller, read from the `KProperty`
-   operand the delegate convention passes. */
-extern const KType kt_type_not_null_var;
-
-KRef kt_not_null_var(void);
-/* `Delegates.observable(initial) { property, old, new -> … }`: the value and a callback run after
-   each write. The `KProperty` is passed along, never read, which is what lets this carry it without
-   any reflection. */
-extern const KType kt_type_observable;
-KRef kt_observable(KRef initial, KRef on_change);
-/* The two entry points a `ReadWriteProperty` receiver reaches; the DESCRIPTOR says which delegate
-   it is, no static type separating them. `get` takes the property's NAME, the only thing it can
-   need (the text of a `notNull` read-before-write error); `set` takes the PROPERTY, which an
-   observable passes to its callback. Any object other than those two delegates ends the program
-   with a message naming its descriptor. */
-KRef kt_rw_property_get(KRef self, KRef name);
-void kt_rw_property_set(KRef self, KRef property, KRef value);
 
 /* ---- comparable ranges ------------------------------------------------------------------------
 
@@ -1088,6 +1090,7 @@ KRef kt_throwable_new_defaulted(const KType *type);
 /* `kotlin.Result`'s failed state, and kotlin-test's `checkResultIsFailure` over one. */
 extern const KType kt_type_result_failure;
 KRef kt_result_failure_new(KRef exception);
+KRef kt_result_failure_exception(KRef failure);
 KRef kt_check_result_is_failure(KRef expected, KRef message, KRef result);
 /* A `Result` held where its class is not known statically, and the value back out of one. */
 extern const KType kt_type_result;
