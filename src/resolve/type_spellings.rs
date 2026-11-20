@@ -244,12 +244,15 @@ pub(in crate::resolve) fn spelling_of_ref_with(
     let unsafe_variance =
         occurrence_unsafe_variance || template.is_some_and(|(rhs, _, _)| rhs.unsafe_variance);
     let expansion_args = expansion_arg_spellings(template, &alias_args);
+    let alias_absorbs_nullability =
+        !spelled.nullable() && template.is_some_and(|(_, _, expansion)| expansion.is_nullable());
     Spelled {
         classifier_segment,
         definitely_non_null: spelled.definitely_non_null(),
         use_site_definitely_non_null: spelled.definitely_non_null(),
         alias: Some(alias),
         alias_args,
+        alias_absorbs_nullability,
         // The expansion's argument spellings come from TWO places. A right-hand side that spells an
         // alias in a fixed position supplies it directly (`typealias CargoBox = PBox<Cargo, Cargo>`
         // abbreviates both expanded arguments as `Cargo`). A position holding one of the alias's
@@ -466,6 +469,7 @@ fn substitute_expansion_spelling(
         // above and retain the actual argument's use-site provenance instead.
         use_site_definitely_non_null: false,
         alias: spelling.alias,
+        alias_absorbs_nullability: spelling.alias_absorbs_nullability,
         alias_args,
         args,
         annotations: spelling.annotations.clone(),
@@ -477,6 +481,45 @@ fn substitute_expansion_spelling(
         enhanced_nullability: spelling.enhanced_nullability,
         actualized_expect: spelling.actualized_expect,
     }
+}
+
+/// The typealias application the written type `syntax` selected: its alias applied to the resolved
+/// types of its written arguments, marked nullable as written. `spelling` answers the resolved
+/// spelling of each written node.
+pub(in crate::resolve) fn written_alias_application(
+    arena: &crate::fir::HeaderSyntaxArena,
+    syntax: crate::fir::HeaderTypeId,
+    spelling: impl Fn(crate::fir::HeaderTypeId) -> Option<ResolvedTypeSpelling>,
+) -> Option<crate::libraries::DeclaredResultAlias> {
+    let alias = spelling(syntax)?.alias?;
+    let node = arena.ty(syntax)?;
+    let crate::fir::HeaderTypeKind::Classifier { detail, .. } = node.kind else {
+        return None;
+    };
+    let arguments = arena
+        .type_operands(arena.classifier_type(detail)?.arguments)
+        .iter()
+        .map(|&argument| {
+            let flags = arena.ty(argument)?.flags;
+            if flags.star_projection() {
+                let bound = Ty::nullable(Ty::obj("kotlin/Any"));
+                return Some(Ty::star_projection(bound));
+            }
+            let resolved = spelling(argument)?.resolved?;
+            Some(if flags.in_projection() {
+                Ty::in_projection(resolved)
+            } else if flags.out_projection() {
+                Ty::out_projection(resolved)
+            } else {
+                resolved
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(crate::libraries::DeclaredResultAlias::new(
+        alias,
+        &arguments,
+        node.flags.nullable(),
+    ))
 }
 
 #[cfg(test)]
