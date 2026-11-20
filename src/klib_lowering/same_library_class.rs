@@ -893,11 +893,13 @@ fn prepare_abstract_member<'a>(
             "a member of a non-public interface with a body",
         ));
     }
+    let header = local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?;
     Ok(PreparedMember {
         signature: function.base.symbol.signature.clone(),
         symbol: &function.base.symbol,
         statements: &[],
-        header: local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?,
+        formals: header.own_formals(function),
+        header,
         overrides: member_overrides(function, scope)?,
         visibility: declaration_visibility(function.base.flags),
         setter,
