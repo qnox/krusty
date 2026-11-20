@@ -10,12 +10,14 @@
 //! list is read directly. The operations reading an argument exist once those members are
 //! recorded, which the code generator does before anything reaches a runtime list's member.
 
-use super::array_lists::BulkOperations;
+use super::array_lists::{BulkOperations, RangeExceptions};
 use super::encode::ValType;
 use super::encode::{BlockType, Code, Function, HeapType, Module};
 use super::interface_dispatch::MemberRef;
 use super::objects::REFERENCE;
-use super::runtime::{Runtime, ADD32, EQZ32, GE_S32};
+use super::runtime::{Runtime, ADD32, AND32, EQZ32, GE_S32, MUL32, NE32};
+use krusty::backend::BackendClassifierSource;
+use krusty::libraries::RuntimeExceptionKind;
 
 /// The checked members a collection argument is read through.
 #[derive(Clone, Copy)]
@@ -45,11 +47,13 @@ impl Runtime {
     pub(super) fn record_collection_members(
         &mut self,
         module: &mut Module,
+        classifiers: &dyn BackendClassifierSource,
         members: CollectionMembers,
-    ) {
+    ) -> Result<(), String> {
         if self.collection_arguments.members.is_some() {
-            return;
+            return Ok(());
         }
+        self.define_list_ranges(module, classifiers)?;
         self.collection_arguments.members = Some(members);
         let bulk = BulkOperations {
             add_all: module.declare(),
@@ -59,6 +63,7 @@ impl Runtime {
             elements_of: module.declare(),
             argument_contains: module.declare(),
         };
+        self.define_list_value_members(module, members);
         self.define_elements_of(module, members, bulk.elements_of);
         self.define_argument_contains(module, members, bulk.argument_contains);
         self.define_contains_all(module, members, bulk.contains_all);
@@ -67,6 +72,32 @@ impl Runtime {
         lists.define_remove_where(module, &bulk, true);
         lists.define_remove_where(module, &bulk, false);
         self.array_lists.bulk = Some(bulk);
+        Ok(())
+    }
+
+    /// The operations answering a range of a list, which throw the runtime exceptions the checked
+    /// classes give.
+    fn define_list_ranges(
+        &mut self,
+        module: &mut Module,
+        classifiers: &dyn BackendClassifierSource,
+    ) -> Result<(), String> {
+        let mut class = |kind: RuntimeExceptionKind| {
+            self.exception_class(module, classifiers, kind.classifier())
+        };
+        let exceptions = RangeExceptions {
+            concurrent_modification: class(RuntimeExceptionKind::ConcurrentModification)?,
+            unsupported_operation: class(RuntimeExceptionKind::UnsupportedOperation)?,
+            index_out_of_bounds: class(RuntimeExceptionKind::IndexOutOfBounds)?,
+            illegal_argument: class(RuntimeExceptionKind::IllegalArgument)?,
+        };
+        let (runtime_exceptions, string) = (&self.exceptions, self.string);
+        let throw = |code: &mut Code, class: u32| -> Result<(), String> {
+            runtime_exceptions.construct_class(code, class, None, string)?;
+            code.throw(runtime_exceptions.tag);
+            Ok(())
+        };
+        self.array_lists.define_ranges(module, &throw, exceptions)
     }
 
     /// `elements_of(collection)`: a runtime list as it is, any other collection copied into a new
@@ -87,6 +118,8 @@ impl Runtime {
         code.local_get(collection)
             .ref_test(false, HeapType::Concrete(lists.list))
             .if_(BlockType::Empty)
+            .local_get(collection)
+            .call(lists.ranges.validate)
             .local_get(collection)
             .return_()
             .end()
@@ -235,5 +268,202 @@ impl Runtime {
                 code,
             },
         );
+    }
+}
+
+impl Runtime {
+    /// The `equals`, `hashCode` and `toString` of a runtime list: `java.util.AbstractList`'s
+    /// contract, over the elements the collection's own iterator answers. A list equals another
+    /// `List` with equal elements in the same order, hashes as `31 * hash + element hash` from
+    /// `1`, and prints its elements between brackets, a list holding itself as `(this Collection)`.
+    fn define_list_value_members(&mut self, module: &mut Module, members: CollectionMembers) {
+        let interfaces = &mut self.objects.interfaces;
+        let iterate = interfaces.stub(module, members.iterator);
+        let has_next = interfaces.stub(module, members.has_next);
+        let next = interfaces.stub(module, members.next);
+        let list_class = krusty::types::type_name("kotlin/collections/List");
+        let is_list = interfaces.test(module, list_class);
+        let [equals_slot, hash_slot, string_slot] = self.array_lists.value_slots;
+        let slot_types = self.objects.any_slot_types;
+
+        // equals(this, other)
+        let (this, other, walk, against) = (0, 1, 2, 3);
+        let mut code = Code::default();
+        code.local_get(this)
+            .local_get(other)
+            .ref_eq()
+            .if_(BlockType::Empty)
+            .i32_const(1)
+            .return_()
+            .end()
+            .local_get(other)
+            .ref_test(false, HeapType::Concrete(self.array_lists.list))
+            .op(EQZ32)
+            .local_get(other)
+            .call(is_list)
+            .op(EQZ32)
+            .op(AND32)
+            .if_(BlockType::Empty)
+            .i32_const(0)
+            .return_()
+            .end()
+            .local_get(this)
+            .call(iterate)
+            .local_set(walk)
+            .local_get(other)
+            .call(iterate)
+            .local_set(against)
+            .block(BlockType::Empty)
+            .loop_(BlockType::Empty)
+            .local_get(walk)
+            .call(has_next)
+            .local_get(against)
+            .call(has_next)
+            .op(NE32)
+            .if_(BlockType::Empty)
+            .i32_const(0)
+            .return_()
+            .end()
+            .local_get(walk)
+            .call(has_next)
+            .op(EQZ32)
+            .br_if(1)
+            .local_get(walk)
+            .call(next)
+            .local_get(against)
+            .call(next)
+            .call(self.object_equals)
+            .op(EQZ32)
+            .if_(BlockType::Empty)
+            .i32_const(0)
+            .return_()
+            .end()
+            .br(0)
+            .end()
+            .end()
+            .i32_const(1);
+        module.define(
+            equals_slot,
+            Function {
+                ty: slot_types[0],
+                locals: vec![REFERENCE, REFERENCE],
+                code,
+            },
+        );
+
+        // hashCode(this)
+        let (this, walk, hash) = (0, 1, 2);
+        let mut code = Code::default();
+        code.i32_const(1).local_set(hash);
+        code.local_get(this)
+            .call(iterate)
+            .local_set(walk)
+            .block(BlockType::Empty)
+            .loop_(BlockType::Empty)
+            .local_get(walk)
+            .call(has_next)
+            .op(EQZ32)
+            .br_if(1)
+            .local_get(hash)
+            .i32_const(31)
+            .op(MUL32)
+            .local_get(walk)
+            .call(next)
+            .call(self.hashing.hash_code)
+            .op(ADD32)
+            .local_set(hash)
+            .br(0)
+            .end()
+            .end()
+            .local_get(hash);
+        module.define(
+            hash_slot,
+            Function {
+                ty: slot_types[1],
+                locals: vec![REFERENCE, ValType::I32],
+                code,
+            },
+        );
+
+        // toString(this)
+        let string = self.string_type();
+        let (this, walk, text, first, element) = (0, 1, 2, 3, 4);
+        let mut code = Code::default();
+        self.ascii_constant(module, &mut code, "[");
+        code.local_set(text).i32_const(1).local_set(first);
+        code.local_get(this)
+            .call(iterate)
+            .local_set(walk)
+            .block(BlockType::Empty)
+            .loop_(BlockType::Empty)
+            .local_get(walk)
+            .call(has_next)
+            .op(EQZ32)
+            .br_if(1)
+            .local_get(first)
+            .op(EQZ32)
+            .if_(BlockType::Empty)
+            .local_get(text);
+        self.ascii_constant(module, &mut code, ", ");
+        code.call(self.string_concat)
+            .local_set(text)
+            .end()
+            .i32_const(0)
+            .local_set(first)
+            .local_get(walk)
+            .call(next)
+            .local_set(element)
+            .local_get(text)
+            .local_get(element)
+            .local_get(this)
+            .ref_eq()
+            .if_(BlockType::Value(string));
+        self.ascii_constant(module, &mut code, "(this Collection)");
+        code.else_()
+            .local_get(element)
+            .call(self.object_strings.any_to_string)
+            .end()
+            .call(self.string_concat)
+            .local_set(text)
+            .br(0)
+            .end()
+            .end()
+            .local_get(text);
+        self.ascii_constant(module, &mut code, "]");
+        code.call(self.string_concat);
+        module.define(
+            string_slot,
+            Function {
+                ty: slot_types[2],
+                locals: vec![REFERENCE, string, ValType::I32, REFERENCE],
+                code,
+            },
+        );
+    }
+
+    /// Give the list's table slots bodies when the program never records the collection members:
+    /// no runtime list exists then, so no call reaches them.
+    pub(super) fn define_unreachable_list_value_members(&self, module: &mut Module) {
+        if self.collection_arguments.has_members() {
+            return;
+        }
+        self.array_lists.define_unreachable_ranges(module);
+        for (slot, ty) in self
+            .array_lists
+            .value_slots
+            .into_iter()
+            .zip(self.objects.any_slot_types)
+        {
+            let mut code = Code::default();
+            code.unreachable();
+            module.define(
+                slot,
+                Function {
+                    ty,
+                    locals: Vec::new(),
+                    code,
+                },
+            );
+        }
     }
 }
