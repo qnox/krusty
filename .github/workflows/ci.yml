@@ -1315,7 +1315,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - name: select the Gradle user home
         id: gradle-home
         run: |
