@@ -891,6 +891,8 @@ mod tests {
         let allowed = [
             "assignable",
             "fir",
+            // A call of an inline function is expanded by the IR splice checked lowering shares.
+            "inline_expansion",
             "ir",
             "klib_libraries",
             "libraries",

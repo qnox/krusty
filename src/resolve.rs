@@ -13339,7 +13339,7 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    fn check_call(
+    pub(super) fn check_call_in_argument_scope(
         &mut self,
         scope: &CheckerScope<'_>,
         call: ExprId,
@@ -14606,9 +14606,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let receiver_diag_mark = self.diags.diags.len();
-                let (mut rt, argument_scope) =
-                    self.check_receiver_before_arguments(scope, receiver);
-                let scope = &argument_scope;
+                let mut rt = self.expr(scope, receiver);
                 let inferred_intersection = self.inferred_expression_intersection(receiver);
                 if inferred_intersection.len() > 1 {
                     // Keep the expression's denotable/physical type in its own slot. Candidate

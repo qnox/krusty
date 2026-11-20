@@ -43,16 +43,21 @@ internal class ModuleBuilder(private val ir: Fir2IrActualizedResult) {
     /** The module's functions, by file and then by position in it, as krusty numbers them. */
     private val functions = mutableListOf<List<IrSimpleFunction>>()
 
-    /** Reads the module's files and builds them, unattached to the session's module. */
-    fun read(input: DataInputStream): List<IrFile> {
+    /**
+     * Reads the module's files and builds them, unattached to the session's module: each file, in
+     * krusty's order, with the text krusty sent for it.
+     */
+    fun read(input: DataInputStream): Map<IrFile, String> {
         val files = input.readList { readFile() }
         for ((file, bodies) in files) {
             for ((function, body) in file.declarations.filterIsInstance<IrSimpleFunction>().zip(bodies)) {
                 function.body = body.build(function)
             }
         }
-        return files.map { it.first }
+        return files.associate { (file, _) -> file to texts.getValue(file) }
     }
+
+    private val texts = HashMap<IrFile, String>()
 
     /** A file with its functions declared, and each function's body still to build. */
     private fun DataInputStream.readFile(): Pair<IrFile, List<BodyReader>> {
@@ -62,6 +67,7 @@ internal class ModuleBuilder(private val ir: Fir2IrActualizedResult) {
         val lineStarts = listOf(0) + text.indices.filter { text[it] == '\n' }.map { it + 1 }
         val entry = NaiveSourceBasedFileEntryImpl(path, lineStarts.toIntArray(), text.length)
         val file = newIrFile(entry, FqName(packageName), ir.irModuleFragment)
+        texts[file] = text
         val bodies = mutableListOf<BodyReader>()
         val declared = readList {
             val (function, body) = readFunction(file)
