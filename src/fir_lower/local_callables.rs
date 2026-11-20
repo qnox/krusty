@@ -715,6 +715,7 @@ impl BodyLowering<'_> {
                     crate::ir::IrCheckedArgument::Expression {
                         parameter,
                         value: self.ir.add_expr(IrExpr::GetValue(parameter)),
+                        context: Default::default(),
                     }
                 }
                 crate::fir::FirAdaptedReferenceArgument::Default => {
