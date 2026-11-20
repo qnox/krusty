@@ -595,7 +595,7 @@ impl FileRecorder<'_, '_, '_> {
             .flatten();
         if adapters.rejection.is_some() {
             for (local, ty) in implemented.0.iter().enumerate() {
-                adapters.rejects_null[local + 1] = !ty.admits_null();
+                adapters.rejects_null[local + 1] = !ty.upper_bound_admits_null();
             }
         }
         let class = self.recording.ir.classes[self.id as usize].fq_name();
@@ -650,7 +650,7 @@ impl FileRecorder<'_, '_, '_> {
         // same references: the thunk is what rejects the `null`.
         let guards_null = special_bridge
             && collection_bridge_rejection(declared, signature).is_some()
-            && implemented.0.iter().any(|ty| !ty.admits_null());
+            && implemented.0.iter().any(|ty| !ty.upper_bound_admits_null());
         if signature == &placed.1 && !guards_null {
             return Ok(SignatureAdapters::none(signature.0.len()));
         }

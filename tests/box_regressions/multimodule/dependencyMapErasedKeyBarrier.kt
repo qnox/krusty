@@ -33,11 +33,27 @@ class Optional : Map<String?, String?> {
         get() = throw UnsupportedOperationException("entries")
 }
 
+// A key type that is a type parameter admits null whatever it is later instantiated with.
+class Generic<K> : Map<K, String> {
+    override val size: Int get() = 1
+    override fun isEmpty(): Boolean = false
+    override fun containsKey(key: K): Boolean = true
+    override fun containsValue(value: String): Boolean = true
+    override fun get(key: K): String? = "found"
+    override val keys: Set<K> get() = throw UnsupportedOperationException("keys")
+    override val values: Collection<String>
+        get() = throw UnsupportedOperationException("values")
+    override val entries: Set<Map.Entry<K, String>>
+        get() = throw UnsupportedOperationException("entries")
+}
+
+fun generic(): Map<String?, String> = Generic<String?>()
 fun words(): Map<String, String> = Words()
 fun optional(): Map<String?, String?> = Optional()
 
 // MODULE: main(library)
 // FILE: main.kt
+import maps.generic
 import maps.optional
 import maps.words
 
@@ -58,5 +74,8 @@ fun box(): String {
     if (maybe[null] != "found") return "optional get"
     if (!maybe.containsKey("x") || maybe["x"] != "found") return "optional present"
     if (maybe.containsKey(1) || maybe.containsValue(1) || maybe[1] != null) return "optional wrong-type"
+    val open = generic() as Map<Any?, Any?>
+    if (!open.containsKey(null)) return "generic null containsKey"
+    if (open[null] != "found") return "generic null get"
     return "OK"
 }
