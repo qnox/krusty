@@ -1073,14 +1073,18 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let name = signature.name;
         let params = signature.params;
-        // A member Kotlin gives a SPECIAL BRIDGE is not this dispatch's to make: a call through the
+        // A member Kotlin gives a SPECIAL BRIDGE is not this dispatch's to make, except the `Map` reads
+        // the runtime's own thunks guard (`KType.map_members`): a call through the
         // wide type answers the member's default rather than reaching the override when the
         // argument cannot be what the declaration accepts, and there is no bridge here to put in
         // front of an implementor's arm. Every one of them takes an argument, so the nullary
         // members are untouched.
-        if classifier_shapes::mapped_collection(self.file.classifiers, internal)
-            .is_some_and(|collection| collection.has_special_bridge(name))
-        {
+        if classifier_shapes::mapped_collection(self.file.classifiers, internal).is_some_and(
+            |collection| {
+                collection.has_special_bridge(name)
+                    && !super::super::super::intrinsics::map_thunk_guards_bridge(collection, name)
+            },
+        ) {
             return None;
         }
         let ty = self.checked_type(receiver)?;
