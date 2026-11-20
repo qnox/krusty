@@ -220,6 +220,17 @@ mod tests {
                 NativeSource::plain(PathBuf::from("b.kt")),
             ]
         );
+        let Invocation::Compile(options) = parse(&arguments(
+            "a.kt -Xexpect-actual-classes -o app -Xexpect-actual-classes",
+        ))
+        .expect("parses") else {
+            panic!("not a compilation");
+        };
+        assert_eq!(
+            options.sources,
+            vec![NativeSource::plain(PathBuf::from("a.kt"))]
+        );
+        assert_eq!(options.output, Some(PathBuf::from("app")));
     }
 
     #[test]
