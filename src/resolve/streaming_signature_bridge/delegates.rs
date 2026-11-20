@@ -15,8 +15,7 @@ impl ProductionSignatureSemantics<'_> {
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let (provide_ref, this_ref) = self.delegate_first_arguments(&site);
-        // Resolve `KProperty` through the same source as applicability. No declaration is the
-        // same refusal as a missing convention.
+        // A missing `KProperty` is the same refusal as a missing convention.
         let property_reference = match self.with_resolver(scope, |resolver| {
             Some(crate::resolve::delegated_properties::delegate_property_reference_type(resolver))
         }) {
@@ -628,9 +627,13 @@ impl ProductionSignatureSemantics<'_> {
         let written =
             super::super::delegated_properties::written_property_type(self.headers, declaration)?;
         self.with_signature_type_scope(scope, |lexical| {
-            super::super::delegated_properties::diagnostic_type_syntax(&written, |leaf| {
-                self.signature_type_ref(scope, lexical, leaf)
-                    .is_none_or(|ty| ty.mentions_error())
+            super::super::delegated_properties::diagnostic_type_syntax(&written, |name| {
+                super::super::delegated_properties::delegate_classifier_display(
+                    name,
+                    lexical.tparam_contains(name),
+                    self.qualified_type_classifier(scope, name),
+                    lexical.type_alias(name).is_some(),
+                )
             })
         })
         .ok()
@@ -757,9 +760,7 @@ mod tests {
             .collect()
     }
 
-    /// The delegate convention is selected against a RESOLVED `KProperty`, never a spelling the
-    /// compiler manufactures. A dependency set that declares none therefore refuses the property —
-    /// with the ordinary convention diagnostic, not an internal failure and not a silent accept.
+    /// A missing `KProperty` refuses the convention instead of inventing one.
     #[test]
     fn a_dependency_set_without_kproperty_refuses_the_convention_instead_of_assuming_it() {
         const SOURCE: &str =

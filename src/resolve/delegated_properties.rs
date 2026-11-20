@@ -107,11 +107,36 @@ pub(crate) fn written_property_type(
         .transient_written_type_ref(declared_type?, &headers.lookup_names)
 }
 
+/// Diagnostic spelling of one written type leaf.
+///
+/// `resolved` is the classifier identity the name bound to, before type arguments are considered.
+/// A type parameter or typealias is already a resolved name and keeps its source spelling. Anything
+/// else that does not name a classifier is unresolved.
+pub(crate) fn delegate_classifier_display(
+    name: &str,
+    type_parameter: bool,
+    resolved: Option<crate::types::TypeName>,
+    alias: bool,
+) -> Option<String> {
+    if type_parameter {
+        return Some(crate::types::type_parameter_source_name(name).to_string());
+    }
+    if let Some(identity) =
+        super::source_type_resolution::parameterized_classifier_identity(name, resolved)
+    {
+        return Some(identity.segment_ref().replace('$', "."));
+    }
+    alias.then(|| name.rsplit(['.', '/']).next().unwrap_or(name).to_string())
+}
+
 /// Kotlinc's spelling of a written type whose resolution failed. Unresolved leaves are named in
 /// place; arguments, nullability, and function shape stay outside that marker.
+///
+/// `classifier` reports the diagnostic spelling of a leaf whose name resolves to a classifier
+/// identity, a type parameter, or a typealias. `None` is an unresolved leaf.
 pub(crate) fn diagnostic_type_syntax(
     ty: &crate::ast::TypeRef,
-    mut unresolved: impl FnMut(&crate::ast::TypeRef) -> bool,
+    mut classifier: impl FnMut(&str) -> Option<String>,
 ) -> String {
     use std::fmt::Write;
     let mut out = super::source_signature_display::BoundedSourceDisplay::new(usize::MAX);
@@ -120,17 +145,13 @@ pub(crate) fn diagnostic_type_syntax(
         if leaf.is_star_projection() {
             return out.write_str("*");
         }
-        let mut probe = leaf.clone();
-        probe.arg = None;
-        probe.targs.clear();
-        probe.fun_params = Box::new([]);
-        probe.fun_context_count = 0;
-        if leaf.name != "Array" && unresolved(&probe) {
-            out.write_str("??? (Unresolved qualified name: ")?;
-            out.write_str(&leaf.name.replace('/', "."))?;
-            out.write_str(")")?;
-        } else {
-            super::source_signature_display::write_source_type_leaf(out, leaf)?;
+        match classifier(&leaf.name) {
+            Some(name) => out.write_str(&name)?,
+            None => {
+                out.write_str("??? (Unresolved qualified name: ")?;
+                out.write_str(&leaf.name.replace('/', "."))?;
+                out.write_str(")")?;
+            }
         }
         Ok(())
     };
@@ -1067,8 +1088,14 @@ impl Checker<'_> {
         let Some(written) = site.written_property_type.as_ref() else {
             return;
         };
-        site.failed_property_display = Some(diagnostic_type_syntax(written, |leaf| {
-            self.type_ref_ty_silent(scope, leaf).mentions_error()
+        site.failed_property_display = Some(diagnostic_type_syntax(written, |name| {
+            let (selection, _, alias, _) = self.select_classifier_binding(scope, name);
+            delegate_classifier_display(
+                name,
+                scope.tparam_contains(name),
+                selection.found(),
+                alias.is_some() || scope.type_alias(name).is_some(),
+            )
         }));
     }
 
