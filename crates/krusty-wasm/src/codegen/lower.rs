@@ -70,6 +70,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageCopy
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
+        || operation == krusty::backend::BackendCompilerIntrinsic::StringPlus
         || operation
             == krusty::backend::BackendCompilerIntrinsic::StartCoroutineUninterceptedOrReturn
         || matches!(
@@ -161,11 +162,6 @@ pub(super) fn lower_file(
         classes: laid_out_classes,
         tables: module_tables,
     } = state;
-    for property in &ir.statics {
-        if property.is_lateinit {
-            return Err("a `lateinit` top-level property".to_string());
-        }
-    }
     let globals = property_registry.prepare_file(ir, module, carrier)?;
     let class_initializers =
         class_statics::ClassInitializers::declare(ir, module, property_registry)?;
@@ -681,7 +677,10 @@ fn expression_type(
                 .ok_or_else(|| "an enclosing instance without authenticated storage".to_string())?;
             ir.classes[class as usize].fields[field as usize].ty
         }
-        IrExpr::GetField { class, index, .. } if ir.checked_type(id).is_none() => {
+        IrExpr::GetField { class, index, .. }
+        | IrExpr::LateinitInitialized { class, index, .. }
+            if ir.checked_type(id).is_none() =>
+        {
             ir.classes[*class as usize].fields[*index as usize].ty
         }
         IrExpr::MethodCall { class, index, .. } if ir.checked_type(id).is_none() => {
@@ -1189,6 +1188,17 @@ impl<'a> Body<'a> {
             IrExpr::GetStatic(index) => {
                 self.initialize_static_owner(index)?;
                 self.code.global_get(self.globals[index as usize]);
+                // A read of a `lateinit` top-level property is guarded unless it is the raw
+                // storage read `::p.isInitialized` compares with null.
+                let declaration = &self.ir.statics[index as usize];
+                if declaration.is_lateinit && !self.ir.lateinit_initialization_probes.contains(&id)
+                {
+                    let name = declaration.name.clone();
+                    let Some(reference @ ValType::Ref { .. }) = carrier(declaration.ty)? else {
+                        return Err("a `lateinit` read without a reference carrier".to_string());
+                    };
+                    self.guard_lateinit(reference, &name)?;
+                }
             }
             IrExpr::SetStatic { index, value } => {
                 let ty = self.ir.statics[index as usize].ty;
@@ -1478,6 +1488,37 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::StringPlus)
+                }) =>
+            {
+                // The member `String.plus(Any?)` and the extension `String?.plus(Any?)` are the
+                // concatenation a template makes of its two operands.
+                let (receiver, other) =
+                    match (dispatch_receiver, args.as_slice(), *extension_receiver_parameter) {
+                        (Some(receiver), [other], None) => (receiver, *other),
+                        (None, [receiver, other], Some(0)) => (*receiver, *other),
+                        _ => {
+                            return Err("an authenticated `String.plus` with malformed operands"
+                                .into())
+                        }
+                    };
+                self.string_of(receiver)?;
+                self.string_of(other)?;
+                self.code.call(self.runtime.string_concat);
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
             } if let Callee::External { target, params, .. } = &**call_callee
@@ -1749,7 +1790,24 @@ impl<'a> Body<'a> {
                 receiver,
                 class,
                 index,
+            } => {
+                self.field_read(receiver, class, index)?;
+                // A field that stores `kotlin.Unit`'s instance and is read where the checked use
+                // is `Unit` has no carrier there: the stored reference is discarded, as any value
+                // converted to a type without a carrier is.
+                let stored = self.ir.classes[class as usize].fields[index as usize].ty;
+                if carrier(stored)?.is_some() && self.carrier_of(id)?.is_none() {
+                    self.code.drop_();
+                }
+            }
+            // The raw field a `lateinit` read would guard, for `::p.isInitialized` to compare with
+            // null: the same read as an ordinary field's, without the guard.
+            IrExpr::LateinitInitialized {
+                receiver,
+                class,
+                index,
             } => self.field_read(receiver, class, index)?,
+            IrExpr::LateinitCheck { operand, name } => self.lateinit_check(operand, &name)?,
             IrExpr::SetField {
                 receiver,
                 class,

@@ -172,10 +172,11 @@ impl Backend for WasmBackend {
         ]
     }
 
-    /// The WASI stdlib's `StringBuilder.append(CharSequence?)` copies the sequence's `length`
-    /// indexed `Char`s; the JS one appends its `toString` (`crate::string_builders`).
-    fn appends_char_sequences_by_index(&self) -> bool {
-        self.target == WasmTarget::Wasi
+    /// Both stdlibs read an appended sequence's `length`: the WASI one copies that many indexed
+    /// `Char`s, and the JS one checks `appendRange`'s bounds against it before it appends the
+    /// sequence's `toString` (`crate::char_sequence_appends`).
+    fn reads_appended_char_sequences(&self) -> bool {
+        true
     }
 
     /// The runtime's `ArrayList` walks a collection argument with its `iterator()` and asks it
@@ -981,12 +982,12 @@ mod tests {
     fn an_unsupported_construct_declines_the_whole_compilation_by_name() {
         let (outputs, diagnostics) = compile(
             WasmTarget::Js,
-            "lateinit var pending: String\nfun box(): String = \"OK\"",
+            "fun box(): String { var s = 0.0f; s %= 2f; return \"OK\" }",
         );
         assert_eq!(outputs, Vec::<Artifact>::new());
         assert_eq!(
             diagnostics,
-            ["krusty: the wasm backend does not support a `lateinit` top-level property yet"]
+            ["krusty: the wasm backend does not support the operator Rem on `kotlin.Float` yet"]
         );
     }
 
