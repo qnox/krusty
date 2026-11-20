@@ -17,7 +17,7 @@ use crate::metadata::klib_ir::tree::{
     KlibIrMember, KlibIrStatement,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
-use crate::metadata::semantic::KotlinModality;
+use crate::metadata::semantic::{class_kind, KotlinModality};
 use crate::types::Ty;
 
 pub(super) enum InitializationStep<'a> {
@@ -821,7 +821,8 @@ fn dispatched_members(
     plan: &ClassInitialization<'_, '_>,
     bodies: &KlibDeclarationBodies,
 ) -> Result<Vec<KlibDependencyCallable>, KlibBodyDeclineReason> {
-    plan.dispatched
+    let mut members = plan
+        .dispatched
         .iter()
         .filter(|function| function.body.is_some())
         .map(|function| {
@@ -835,7 +836,30 @@ fn dispatched_members(
                 }
             }
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    // A member the class inherits implements the interface declarations it reaches only through
+    // its supertypes (`Itr.remove` for `MutableIterator.remove` under a subclass), so dispatch
+    // through the interface runs the inherited body, which is emitted with the class.
+    let inherited = bodies
+        .inherited_implementations(
+            &plan.header.contract.module,
+            plan.header.arena,
+            plan.header.class,
+        )
+        .map_err(mismatch)?;
+    for (body, _) in inherited {
+        // Only a body a superclass declares: an interface's default is inherited by its own
+        // mechanism.
+        let from_class = matches!(
+            bodies.member_owner(&body),
+            crate::klib_libraries::LocatedMember::One { class, .. }
+                if class_kind(class.base.flags) == TypeKind::Class
+        );
+        if from_class && !members.contains(&body) {
+            members.push(body);
+        }
+    }
+    Ok(members)
 }
 
 /// The declarations an admitted class initialization names without emitting their bodies: the

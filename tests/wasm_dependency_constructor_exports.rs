@@ -48,6 +48,16 @@ fn wasm_official_dependency_secondary_constructors_delegate_to_the_primary() {
     );
 }
 
+/// A subclass implements a library interface member with the body it inherits from its
+/// superclass, which does not declare the interface and which no body calls.
+#[test]
+fn wasm_official_dependency_subclasses_implement_interfaces_with_inherited_bodies() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyInheritedSuperclassImplementation.kt"),
+        "DependencyInheritedSuperclassImplementation",
+    );
+}
+
 /// Generic classes, a generic superclass and a secondary constructor of a generic class lower
 /// from the official producer's bodies.
 #[test]
