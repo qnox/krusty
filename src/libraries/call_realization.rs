@@ -409,6 +409,8 @@ pub struct ExternalCallableRealization {
     pub klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
     /// Whether a source parameter declares a default value, as the provider's declaration says.
     pub declares_parameter_defaults: bool,
+    /// Per logical parameter, whether its declared type is a function type annotated `@Composable`.
+    pub composable_parameters: crate::libraries::ParamFlags,
 }
 
 impl ExternalCallableRealization {
@@ -555,6 +557,7 @@ impl LibraryCallable {
             inline: InlineKind::None,
             default_call: false,
             defaults_from_declaration: false,
+            transformed_entry_tail: None,
             vararg_elem: None,
             vararg_index: None,
             signature: None,

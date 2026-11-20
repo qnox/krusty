@@ -148,11 +148,24 @@ impl JvmLibraries {
             } else {
                 descriptor
             };
-            let Some((physical_params, pret)) = parse_method_desc(&descriptor) else {
+            let Some((mut physical_params, pret)) = parse_method_desc(&descriptor) else {
                 continue;
             };
             if physical_params.is_empty() {
                 continue;
+            }
+            // A compiled entry that takes more than the declaration declares, such as a composable
+            // with its composer and `$changed`, has those extras as a synthetic tail: the
+            // declaration's own parameters are the callable's physical ones, as for a top-level
+            // function, and the descriptor still spells the whole entry.
+            let source_len = mf
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.parameters_with_receiver(mf.context_count()).len());
+            let synthetic_tail =
+                !mf.is_suspend() && source_len.is_some_and(|source| source < physical_params.len());
+            if let (true, Some(source)) = (synthetic_tail, source_len) {
+                physical_params.truncate(source);
             }
             let call_sig = mf.extension_call_sig();
             let ret_class = mf.ret_class.map(kotlin_type_name_to_ty);
@@ -236,9 +249,11 @@ impl JvmLibraries {
                 )
             };
             callable.physical_params = physical_params;
+            if synthetic_tail {
+                parameter_plans::source_only(&mut callable);
+            }
             if call_sig.param_defaults.iter().any(|default| *default) {
-                callable.default_realization =
-                    self.top_level_default_realization(&callable).map(Box::new);
+                self.realize_top_level_defaults(&mut callable);
             }
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
             let paired = cand.paired_common;

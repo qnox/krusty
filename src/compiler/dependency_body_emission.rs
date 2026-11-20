@@ -678,12 +678,23 @@ pub(super) fn emit_dependencies<B: Backend>(
         };
         if let Some(protocol) = symbols
             .char_sequence_protocol()
-            .filter(|_| backend.appends_char_sequences_by_index())
+            .filter(|_| backend.reads_appended_char_sequences())
         {
             if let Err(error) = callables.freeze_char_sequence_protocol(protocol, platform) {
                 diags.error(
                     Span::new(0, 0),
                     format!("internal error: cannot freeze the CharSequence members: {error:?}"),
+                );
+                return Vec::new();
+            }
+        }
+        if backend.reads_collections_through_interfaces() {
+            if let Err(error) =
+                super::backend_handoff::freeze_collection_protocol(&mut callables, platform)
+            {
+                diags.error(
+                    Span::new(0, 0),
+                    format!("internal error: cannot freeze the collection members: {error:?}"),
                 );
                 return Vec::new();
             }
