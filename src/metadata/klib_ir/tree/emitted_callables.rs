@@ -17,6 +17,10 @@ pub(crate) struct EmittedCallForms {
     /// The declaration a call is realized as a call of in place of the one it names, such as the
     /// array content extension a data class array member operator lowers to.
     pub(crate) implied_callee: fn(&KlibIrArena, &KlibIrExpr) -> Option<&'static KlibIrSymbol>,
+    /// The functional interface a closure is converted to, when its serialized form is a closure
+    /// of the interface's type rather than a `SAM_CONVERSION` of a function value.
+    pub(crate) converted_closure:
+        for<'a> fn(&'a KlibIrArena, &KlibIrExpr) -> Option<&'a KlibIrSymbol>,
 }
 
 impl KlibIrArena {
@@ -154,6 +158,7 @@ impl KlibIrArena {
                     sams.push(classifier);
                 }
             }
+            sams.extend((forms.converted_closure)(self, expression));
             push_child_expressions(self, &expression.kind, &mut pending);
             if let Some(nested) = (forms.closure)(self, expression) {
                 let nested = self.function(nested);

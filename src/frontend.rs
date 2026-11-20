@@ -1286,6 +1286,9 @@ where
     let diagnostics_start = diags.diags.len();
     let mut files = Vec::with_capacity(sources.len());
     let mut parse_errors = Vec::with_capacity(sources.len());
+    // Syntax errors are the files header inventory refuses. Later checks already skip them;
+    // capture discovery must see the same set, or it checks a class with no collected signature.
+    let mut syntax_errors = Vec::with_capacity(sources.len());
     // Set when any file writes an `expect` declaration with an implementation. The reference
     // compiler stops before actualization once one exists, so the unmatched-expect report below is
     // skipped for the WHOLE compilation rather than per file.
@@ -1380,7 +1383,9 @@ where
                 .iter()
                 .any(|diagnostic| diagnostic.severity == Severity::Error);
         parse_errors.push(parse_error);
+        syntax_errors.push(parser_error);
         header_validation::validate_after_parsing(&file, parser_error, diags);
+        diags.sort_source_order_from(diagnostics_before);
         let extracted = pass1_builder.add_source(
             index,
             source,
@@ -1687,11 +1692,13 @@ where
     let retained_anonymous_captures = if retain_inspection_analysis {
         Some(crate::resolve::discover_anonymous_object_captures(
             &files[..inferred_end],
+            &syntax_errors[..inferred_end],
             &mut symbols,
         ))
     } else if has_inline_capture_roots {
         crate::resolve::discover_inline_anonymous_object_captures(
             &files[..inferred_end],
+            &syntax_errors[..inferred_end],
             &inline_capture_selection.roots[..inferred_end],
             &inline_capture_selection.bodies[..inferred_end],
             &mut symbols,
@@ -1884,6 +1891,8 @@ where
         // genuine signature error would make every use of an unrelated inferred declaration look
         // unresolved in an editor's steady state. Failed declarations remain absent.
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
+        // Pass 2 checks each finalized declaration type against the spelling it was written with.
+        crate::resolve::publish_declared_spellings(&mut index, &symbols);
         // File-level policies (`@file:Suppress`, opt-ins) govern the recovery diagnostics too.
         crate::resolve::publish_file_annotations(
             &files[..inferred_end],

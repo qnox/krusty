@@ -95,6 +95,7 @@ mod tests {
                 has_receiver: false,
                 suspend: false,
                 source_suspend: false,
+                requires_object_dispatch: false,
                 overridden_results: Vec::new(),
                 dispatch_methods: Vec::new(),
                 default_methods: Vec::new(),
@@ -104,6 +105,7 @@ mod tests {
                 kotlin_interface: false,
                 parameter_identities: Vec::new(),
                 type_parameters: Vec::new(),
+                placement: krusty::ir::IrSamPlacement::ThisFile,
             })),
             inline_body: None,
         });

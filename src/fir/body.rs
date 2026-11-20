@@ -97,6 +97,8 @@ pub struct FirSamConversion {
     /// is the selected interface method: a non-suspend value adapted to a suspend method keeps its
     /// own `FunctionN`.
     pub source_suspend: bool,
+    /// The selected declaration requires the object-method dispatch path, not an ordinary slot.
+    pub requires_object_dispatch: bool,
     /// The distinct own results of the declarations the selected method overrides, unspecialized.
     pub overridden_results: Box<[ResolvedTy]>,
     pub dispatch_methods: Box<[FirSamMethodFrame]>,

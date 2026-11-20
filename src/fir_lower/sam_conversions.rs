@@ -126,6 +126,7 @@ impl BodyLowering<'_> {
             has_receiver: conversion.has_receiver,
             suspend: conversion.suspend,
             source_suspend: conversion.source_suspend,
+            requires_object_dispatch: conversion.requires_object_dispatch,
             overridden_results: conversion
                 .overridden_results
                 .iter()
@@ -143,6 +144,7 @@ impl BodyLowering<'_> {
                 .iter()
                 .map(crate::ir::IrSamTypeParameter::lowered)
                 .collect(),
+            placement: crate::ir::IrSamPlacement::ThisFile,
         };
         let name = format!(
             "$fir_sam_delegate_{}_{}",

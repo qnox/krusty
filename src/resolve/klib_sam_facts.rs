@@ -94,6 +94,7 @@ pub(super) fn freeze(
         has_receiver: selected.has_receiver,
         suspend: selected.suspend,
         source_suspend: false,
+        requires_object_dispatch: selected.requires_object_dispatch,
         overridden_results: selected.overridden_results,
         dispatch_methods,
         default_methods,
@@ -110,6 +111,25 @@ pub(super) fn freeze(
                 bounds: p.bounds,
             })
             .collect(),
+        placement: crate::ir::IrSamPlacement::ThisFile,
     };
-    Some(CheckedKlibSamDeclaration { classifier, target })
+    // A lambda the producer serialized with the interface's type names the method it overrides.
+    // That is the selected method or one of the dispatch frames it implements, by exact identity.
+    let mut overridable = Vec::new();
+    for method in std::iter::once(Some(target.method_target))
+        .chain(target.dispatch_methods.iter().map(|frame| frame.method))
+        .flatten()
+    {
+        if let IrSamMethod::External(external) = method {
+            let callable = source.external_callable(external)?.dependency_callable?;
+            if !overridable.contains(&callable) {
+                overridable.push(callable);
+            }
+        }
+    }
+    Some(CheckedKlibSamDeclaration {
+        classifier,
+        target,
+        overridable: overridable.into_boxed_slice(),
+    })
 }

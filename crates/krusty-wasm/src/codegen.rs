@@ -162,15 +162,27 @@ impl Backend for WasmBackend {
     }
 
     /// The runtime's `StringBuilder` answers the `Appendable` and `CharSequence` members it
-    /// overrides (`crate::builtin_members`).
+    /// overrides, and its `ArrayList` the collection members (`crate::builtin_members`).
     fn dispatched_dependency_classes(&self) -> Vec<krusty::backend::DependencyClassifier> {
-        vec![crate::string_builders::class()]
+        vec![
+            crate::string_builders::class(),
+            krusty::types::Ty::obj("kotlin/collections/ArrayList")
+                .obj_internal()
+                .expect("a classifier type"),
+        ]
     }
 
-    /// The WASI stdlib's `StringBuilder.append(CharSequence?)` copies the sequence's `length`
-    /// indexed `Char`s; the JS one appends its `toString` (`crate::string_builders`).
-    fn appends_char_sequences_by_index(&self) -> bool {
-        self.target == WasmTarget::Wasi
+    /// Both stdlibs read an appended sequence's `length`: the WASI one copies that many indexed
+    /// `Char`s, and the JS one checks `appendRange`'s bounds against it before it appends the
+    /// sequence's `toString` (`crate::char_sequence_appends`).
+    fn reads_appended_char_sequences(&self) -> bool {
+        true
+    }
+
+    /// The runtime's `ArrayList` walks a collection argument with its `iterator()` and asks it
+    /// `contains`, whatever class it is (`crate::array_lists`).
+    fn reads_collections_through_interfaces(&self) -> bool {
+        true
     }
 
     fn realizes_dependency_intrinsic(
@@ -616,6 +628,8 @@ mod tests {
 
     /// A file dispatching `toString` on an erased receiver, and another file creating a value
     /// whose `toString` this target has no body for, decline together, whichever file comes first.
+    /// A lambda converted to a `fun interface` inside a local class is such a value: kotlinc-wasm
+    /// names its class after the local class, a name this target does not spell yet.
     #[test]
     fn an_erased_to_string_declines_on_another_files_unprinted_value() {
         let show = "fun show(value: Any?): String = value.toString()\n\
@@ -625,12 +639,33 @@ mod tests {
             super::DECLINE_PREFIX
         )];
         let other = "fun interface Supplier { fun get(): Int }\n\
-                     fun converted(): String = show(Supplier { 1 })";
+                     fun converted(): String {\n\
+                     class Local { fun make(): Any = Supplier { 1 } }\n\
+                     return show(Local().make()) }";
         for target in WasmTarget::ALL {
             for sources in [[show, other], [other, show]] {
                 let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
                 assert_eq!(diagnostics, expected, "{sources:?}");
                 assert!(outputs.is_empty());
+            }
+        }
+    }
+
+    /// A lambda another file converts to a `fun interface` at its top level prints the class name
+    /// kotlinc-wasm gives it, so an erased `toString` reaching it is lowered, whichever file comes
+    /// first. `wasm_sam_conversions_reached_from_another_file_print_their_class_names` in
+    /// `tests/kotlin_box_wasm_conformance.rs` runs the printed names against kotlinc-wasm's.
+    #[test]
+    fn an_erased_to_string_reaches_another_files_sam_value() {
+        let show = "fun show(value: Any?): String = value.toString()\n\
+                    fun box(): String = \"OK\"";
+        let other = "fun interface Supplier { fun get(): Int }\n\
+                     fun converted(): String = show(Supplier { 1 })";
+        for target in WasmTarget::ALL {
+            for sources in [[show, other], [other, show]] {
+                let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
+                assert_eq!(diagnostics, Vec::<String>::new(), "{sources:?}");
+                assert!(!outputs.is_empty(), "{sources:?}");
             }
         }
     }
@@ -671,12 +706,28 @@ mod tests {
         }
     }
 
-    /// A function value converted to a `fun interface` is an instance of it with no `toString`
-    /// body, so rendering a value of that interface declines.
+    /// A function value converted to a `fun interface` prints the class name kotlinc-wasm gives
+    /// it, so rendering a value of that interface is lowered.
+    #[test]
+    fn a_fun_interface_to_string_prints_a_converted_function_value() {
+        let source = "fun interface Supplier { fun get(): Int }\n\
+                      fun box(): String { val supplier = Supplier { 1 }\n\
+                      return if (\"$supplier\" == \"\") \"empty\" else \"OK\" }";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            assert!(!outputs.is_empty(), "{target:?}");
+        }
+    }
+
+    /// A function value converted to a `fun interface` in a local class is an instance of it with
+    /// no `toString` body, so rendering a value of that interface declines.
     #[test]
     fn a_fun_interface_to_string_declines_on_a_converted_function_value() {
         let source = "fun interface Supplier { fun get(): Int }\n\
-                      fun box(): String { val supplier = Supplier { 1 }\n\
+                      fun box(): String {\n\
+                      class Local { fun make(): Supplier = Supplier { 1 } }\n\
+                      val supplier = Local().make()\n\
                       return if (\"$supplier\" == \"\") \"empty\" else \"OK\" }";
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile(target, source);
@@ -708,11 +759,13 @@ mod tests {
 
     /// A `var` can be assigned anything after its initializer, so rendering it still declines
     /// while the file creates a function value with no `toString` body, one converted to a
-    /// `fun interface`.
+    /// `fun interface` in a local class.
     #[test]
     fn an_erased_to_string_of_a_reassigned_var_declines() {
         let source = "fun interface Supplier { fun get(): Int }\n\
-                      fun box(): String { val supplier = Supplier { 1 }\n\
+                      fun box(): String {\n\
+                      class Local { fun make(): Supplier = Supplier { 1 } }\n\
+                      val supplier = Local().make()\n\
                       var message: Any = \"O\"\n\
                       if (supplier.get() == 2) message = supplier\n\
                       return \"$message\" + \"K\" }";
@@ -727,6 +780,22 @@ mod tests {
                 )]
             );
             assert!(outputs.is_empty());
+        }
+    }
+
+    /// A `var` that may hold a function value converted to a `fun interface` at the file's level
+    /// renders it by the class name kotlinc-wasm gives it, so the erased `toString` is lowered.
+    #[test]
+    fn an_erased_to_string_of_a_reassigned_var_prints_a_sam_value() {
+        let source = "fun interface Supplier { fun get(): Int }\n\
+                      fun box(): String { val supplier = Supplier { 1 }\n\
+                      var message: Any = \"O\"\n\
+                      if (supplier.get() == 2) message = supplier\n\
+                      return \"$message\" + \"K\" }";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            assert!(!outputs.is_empty(), "{target:?}");
         }
     }
 
