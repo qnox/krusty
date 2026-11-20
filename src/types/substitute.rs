@@ -144,11 +144,14 @@ where
                 })
                 .collect::<Vec<_>>(),
         ),
-        TyKind::Intersection(parts) => Ty::intersection(
+        TyKind::Intersection(parts) => Ty::intersection_approximated_to(
             &parts
                 .iter()
                 .map(|part| substitute_type_parameters(*part, lookup, preserve_unbound, narrowing))
                 .collect::<Vec<_>>(),
+            parts.approximation().map(|approximation| {
+                substitute_type_parameters(approximation, lookup, preserve_unbound, narrowing)
+            }),
         ),
         _ => ty,
     }
@@ -216,11 +219,12 @@ pub(crate) fn ty_subst_alias_expansion<K: TyParamKey>(ty: Ty, bindings: &HashMap
                     .map(|argument| normalize(*argument))
                     .collect::<Vec<_>>(),
             ),
-            TyKind::Intersection(parts) => Ty::intersection(
+            TyKind::Intersection(parts) => Ty::intersection_approximated_to(
                 &parts
                     .iter()
                     .map(|part| normalize(*part))
                     .collect::<Vec<_>>(),
+                parts.approximation().map(normalize),
             ),
             _ => ty,
         }
@@ -306,11 +310,14 @@ pub(crate) fn ty_with_param_bounds<K: TyParamKey>(ty: Ty, bounds: &HashMap<K, Ty
                 .map(|argument| ty_with_param_bounds(*argument, bounds))
                 .collect::<Vec<_>>(),
         ),
-        TyKind::Intersection(parts) => Ty::intersection(
+        TyKind::Intersection(parts) => Ty::intersection_approximated_to(
             &parts
                 .iter()
                 .map(|part| ty_with_param_bounds(*part, bounds))
                 .collect::<Vec<_>>(),
+            parts
+                .approximation()
+                .map(|approximation| ty_with_param_bounds(approximation, bounds)),
         ),
         _ => ty,
     }
@@ -372,11 +379,14 @@ pub(crate) fn ty_with_transitive_param_bounds<K: TyParamKey>(
                     .map(|argument| hydrate(*argument, bounds, visiting))
                     .collect::<Vec<_>>(),
             ),
-            TyKind::Intersection(parts) => Ty::intersection(
+            TyKind::Intersection(parts) => Ty::intersection_approximated_to(
                 &parts
                     .iter()
                     .map(|part| hydrate(*part, bounds, visiting))
                     .collect::<Vec<_>>(),
+                parts
+                    .approximation()
+                    .map(|approximation| hydrate(approximation, bounds, visiting)),
             ),
             _ => ty,
         }
@@ -436,9 +446,10 @@ pub(crate) fn ty_map_symbols(ty: Ty, rebuild: &dyn Fn(Ty, Ty) -> Ty) -> Ty {
                 .map(|argument| map(*argument))
                 .collect::<Vec<_>>(),
         ),
-        TyKind::Intersection(parts) => {
-            Ty::intersection(&parts.iter().map(|part| map(*part)).collect::<Vec<_>>())
-        }
+        TyKind::Intersection(parts) => Ty::intersection_approximated_to(
+            &parts.iter().map(|part| map(*part)).collect::<Vec<_>>(),
+            parts.approximation().map(map),
+        ),
         _ => ty,
     }
 }

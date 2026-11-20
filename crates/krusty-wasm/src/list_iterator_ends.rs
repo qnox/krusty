@@ -40,6 +40,9 @@ impl Runtime {
             RuntimeExceptionKind::NoSuchElement.classifier(),
         )?;
         let mut code = Code::default();
+        // The walk's shape comes first, as the JVM's iterator checks it before its ends: a walk
+        // of a list that changed raises `ConcurrentModificationException` even when it is at an end.
+        code.local_get(0).call(self.array_lists.ranges.check_walk);
         code.local_get(0).call(has).op(EQZ32).if_(BlockType::Empty);
         self.exceptions
             .construct_class(&mut code, exception, None, self.string)?;
