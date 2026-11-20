@@ -183,7 +183,7 @@ pub use lambda_classes::{IrInvokeBridge, IrLambdaCapture, IrLambdaClass, IrSamWr
 pub(crate) use lifting_sequences::IrLiftingEntry;
 pub use lifting_sequences::{IrLiftingRoot, IrLiftingSequence};
 pub use local_class_names::{
-    IrClassDeclarationContext, IrLocalClassNameProvenance, IrLocalClassOwner,
+    IrClassDeclarationContext, IrLocalClassNameProvenance, IrLocalClassNameRoot, IrLocalClassOwner,
 };
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
@@ -205,9 +205,9 @@ pub use properties::{
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
-    FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable,
-    IrConstructorReferenceDeclaration, IrPropertyFunctionReference, IrReferencedProperty, PropRef,
-    ReflectedCallable,
+    BoundContextUnbox, FuncRef, IrCallableReference, IrCallableReferenceTarget,
+    IrClassifierCallable, IrConstructorReferenceDeclaration, IrPropertyFunctionReference,
+    IrReferencedProperty, PropRef, ReflectedCallable,
 };
 pub use sam_target::{
     IrSamMethod, IrSamMethodFrame, IrSamPlacement, IrSamTarget, IrSamTypeParameter,

@@ -419,7 +419,19 @@ impl BodyLowering<'_, '_, '_> {
                         .as_ref()
                         .and_then(|identity| symbols.get(identity))
                 };
-                let export = export_of(realization);
+                // A call through a dependency interface's member is virtual: the receiver's class
+                // may override it. The exported default body is what a class that inherits the
+                // default reaches from its dispatch record, so a call never enters it directly.
+                let virtual_interface_member = dispatch_receiver.is_some()
+                    && realization.owner_is_interface
+                    && realization.is_member_function()
+                    && realization.member_realization
+                        == krusty::libraries::MemberRealization::Dispatch;
+                let export = if virtual_interface_member {
+                    None
+                } else {
+                    export_of(realization)
+                };
                 let provider = match default_provider {
                     Some(provider) if !defaults.is_empty() => self
                         .file
