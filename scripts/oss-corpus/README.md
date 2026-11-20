@@ -67,7 +67,9 @@ measured builds are comparable: an unmeasured warm-up build first downloads ever
 needs (dependencies, plugins, toolchains) and its outputs are dropped, then both measured builds run
 with `--offline` from the same caches. A warm-up that fails to download something is retried twice,
 after a pause (`$CORPUS_RETRY_PAUSE` seconds, then twice that); one that still cannot download stops
-the run with a pointer to its log.
+the run with a pointer to its log. After each failed attempt the repositories the log names, and the
+default ones, are probed: `<name>.warmup.http.tsv` and stderr list their HTTP status (`000` for a host
+that does not answer), because Gradle reports any refused download as "not found".
 
 The krusty build is also sampled: `perf` records every process at 99 Hz while it runs (the corpus
 binary keeps frame pointers), `hotspots.py` folds the krusty processes' call stacks, and
