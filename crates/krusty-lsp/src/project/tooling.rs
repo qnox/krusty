@@ -34,6 +34,9 @@ pub struct GradleBuildAction {
     pub tasks: Vec<String>,
     pub arguments: Vec<String>,
     pub timeout: Duration,
+    /// JVM the project daemon uses to compile the injected init script.
+    /// `None` keeps the client's JVM.
+    pub java_home: Option<PathBuf>,
 }
 
 /// One coordinate for `RepositorySystem`.
@@ -76,6 +79,8 @@ struct GradleWire<'a> {
     project_dir: &'a Path,
     tasks: &'a [String],
     arguments: &'a [String],
+    #[serde(rename = "javaHome", skip_serializing_if = "Option::is_none")]
+    java_home: Option<&'a Path>,
 }
 
 #[derive(Serialize)]
@@ -92,18 +97,23 @@ struct ToolResponse {
     stderr: String,
 }
 
+pub(super) fn gradle_request(action: &GradleBuildAction) -> io::Result<String> {
+    serde_json::to_string(&GradleWire {
+        kind: "gradle",
+        project_dir: &action.project_dir,
+        tasks: &action.tasks,
+        arguments: &action.arguments,
+        java_home: action.java_home.as_deref(),
+    })
+    .map_err(io::Error::other)
+}
+
 pub fn run_gradle(action: &GradleBuildAction) -> io::Result<CommandOutput> {
     debug_assert_eq!(action.distribution, Distribution::BuildDistribution);
     if let Some(response) = test_gradle(action) {
         return response;
     }
-    let line = serde_json::to_string(&GradleWire {
-        kind: "gradle",
-        project_dir: &action.project_dir,
-        tasks: &action.tasks,
-        arguments: &action.arguments,
-    })
-    .map_err(io::Error::other)?;
+    let line = gradle_request(action)?;
     let response = transact(ClientKind::Gradle, &line, action.timeout)?;
     Ok(CommandOutput {
         status: response.status,
@@ -587,7 +597,7 @@ fn is_resolver_api_name(name: &std::ffi::OsStr) -> bool {
         || (name.starts_with("maven-resolver-api-") && name.ends_with(".jar"))
 }
 
-fn gradle_user_home() -> PathBuf {
+pub(super) fn gradle_user_home() -> PathBuf {
     if let Ok(home) = std::env::var("GRADLE_USER_HOME") {
         return PathBuf::from(home);
     }
