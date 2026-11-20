@@ -100,7 +100,7 @@ const buildSystems: { name: string; level: Level; html: string }[] = [
   {
     name: "Kotlin Build Tools API",
     level: "partial",
-    html: `<code>krusty-build-tools-&lt;version&gt;-kotlin-&lt;kotlin&gt;.jar</code> in each release stands in for <code>kotlin-build-tools-impl</code> in a build tool that loads the API from a classpath. JVM toolchain and in-process execution only. See <a href="${blob("tools/krusty-build-tools/README.md")}">tools/krusty-build-tools</a>.`,
+    html: `<code>krusty-build-tools-&lt;version&gt;-kotlin-&lt;kotlin&gt;.jar</code> in each release stands in for <code>kotlin-build-tools-impl</code> in a build tool that loads the API from a classpath. JVM toolchain only, under the in-process or daemon execution policy. See <a href="${blob("tools/krusty-build-tools/README.md")}">tools/krusty-build-tools</a>.`,
   },
   {
     name: "Bazel",
