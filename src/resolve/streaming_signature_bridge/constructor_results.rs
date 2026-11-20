@@ -12,12 +12,7 @@ pub(super) fn selected_sam_constructor_result(
     actual: Ty,
     type_arguments: &[Ty],
 ) -> Option<Ty> {
-    let module =
-        crate::module_symbols::ModuleSymbols::for_file(semantics.table, scope.source.raw());
-    let source = crate::symbol_source::CompositeSource::new(vec![
-        &module as &dyn crate::symbol_source::SymbolSource,
-        &*semantics.table.libraries as &dyn crate::symbol_source::SymbolSource,
-    ]);
+    file_library_source!(semantics.table, scope.source.raw(), module, source);
     let classifier = crate::symbol_source::SymbolSource::classifier(&source, internal)?;
     if !type_arguments.is_empty() && type_arguments.len() != classifier.type_params.len() {
         return None;

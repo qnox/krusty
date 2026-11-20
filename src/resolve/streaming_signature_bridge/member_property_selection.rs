@@ -15,11 +15,7 @@ impl ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        file_library_source!(self.table, scope.source.raw(), module, source);
         let implicit_receivers = self.implicit_receivers(scope);
         let selected = self.with_resolver(scope, |resolver| {
             resolver.select_member_property_applicable_where(receiver, spelling, |property| {

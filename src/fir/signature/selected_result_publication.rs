@@ -21,6 +21,18 @@ pub trait SelectedResultPublicationSemantics {
         self.call_result_abbreviation(origin)
     }
 
+    /// The expectation under which the call selected at `origin` is checked again as a conditional
+    /// branch beside `sibling`, when the call left a result-only formal open (`emptyMap()` beside
+    /// `mapOf("O" to "K")`). `None` when the call fixed its result or no face of `sibling` binds it.
+    fn open_result_expectation(
+        &self,
+        _scope: SignatureScope,
+        _origin: OriginId,
+        _sibling: ResolvedTy,
+    ) -> Option<ResolvedTy> {
+        None
+    }
+
     fn call_result_publication(
         &self,
         _scope: SignatureScope,

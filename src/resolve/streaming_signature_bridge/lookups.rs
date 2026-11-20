@@ -92,11 +92,7 @@ impl ProductionSignatureSemantics<'_> {
             .anchor(declaration)
             .map(|anchor| anchor.source.raw())
             .unwrap_or(0);
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, source_file);
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        file_library_source!(self.table, source_file, module, source);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let context = crate::assignable::TyCtx::new();
         crate::assignable::is_subtype(&context, &oracle, actual.get(), expected.get())

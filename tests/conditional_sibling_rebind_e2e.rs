@@ -116,3 +116,12 @@ fun clash(flag: Boolean): Bag<String> =\n\
     assert_eq!(common::compiler_errors(&result.reference_stderr), reference);
     assert_eq!(common::compiler_errors(&result.krusty_stderr), krusty);
 }
+
+#[test]
+fn an_inferred_declaration_result_rebinds_an_open_dependency_branch() {
+    // Declaration results are typed by the signature graph, which shares the body checker's
+    // open-branch rule: a library call that leaves a result-only formal open (`emptyMap()`) takes
+    // it from its sibling, including inside a lambda result.
+    const SOURCE: &str = include_str!("box_regressions/inferredDeclarationOpenDependencyBranch.kt");
+    common::expect_box_same_as_kotlinc(SOURCE, "conditional-open-dependency-branch");
+}
