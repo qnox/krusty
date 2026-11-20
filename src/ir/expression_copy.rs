@@ -518,12 +518,13 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, action: Exp
         (generated_secondary_constructor_calls, true),
         (annotation_constructions, true),
         (construction_targets, true),
+        // A copied call still calls the declaration whose role the provider selected.
+        (semantic_call_roles, true),
         (value_class_type_operations, false),
         (value_class_unbox_type_operation_edges, false),
         (value_class_null_safe_unbox_type_operation_edges, false),
         (jvm_member_targets, false),
         (jvm_overridden_call_realizations, false),
-        (semantic_call_roles, false),
     ];
     for (facts, copy_on_clone) in operation_facts {
         match action {
