@@ -1307,8 +1307,13 @@ impl Body<'_> {
             .referenced_module_properties
             .get(&target)
             .ok_or_else(|| "a cross-file property with no module record".to_string())?;
-        if reference.owner.is_some()
-            || reference.extension_receiver.is_some()
+        // A `companion { }` block property is a static of its owner: its recorded owner and
+        // receiver coordinate name that class, which its storage takes no receiver for.
+        let block = matches!(
+            reference.placement,
+            krusty::ir::IrStaticPlacement::CompanionBlock { .. }
+        );
+        if (!block && (reference.owner.is_some() || reference.extension_receiver.is_some()))
             || !reference.context_parameters.is_empty()
         {
             return Err("a cross-file property storage with a receiver".to_string());

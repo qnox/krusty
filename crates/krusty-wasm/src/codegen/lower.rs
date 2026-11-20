@@ -167,13 +167,9 @@ pub(super) fn lower_file(
             return Err("a `lateinit` top-level property".to_string());
         }
     }
-    let globals = property_registry.prepare_file(ir, |ty| {
-        let Some(value) = carrier(ty)? else {
-            return Err("a `Unit` top-level property".to_string());
-        };
-        Ok(module.global(value))
-    })?;
-    let class_initializers = class_statics::ClassInitializers::declare(ir, module)?;
+    let globals = property_registry.prepare_file(ir, module, carrier)?;
+    let class_initializers =
+        class_statics::ClassInitializers::declare(ir, module, property_registry)?;
     let member_property_definitions = property_registry.prepare_member_properties(ir, module)?;
     let accessor_property_definitions =
         property_registry.prepare_accessor_properties(ir, module)?;
@@ -403,7 +399,7 @@ pub(super) fn lower_file(
     } else if !member_property_definitions.is_empty() {
         return Err("a member property definition without its class layout".to_string());
     }
-    accessor_property_entries::define(&context, &accessor_property_definitions, module)?;
+    accessor_property_entries::define(&context, &accessor_property_definitions, module, runtime)?;
     class_initializers.define(&context, module, runtime)?;
     let file_statics = || {
         ir.statics
