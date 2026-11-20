@@ -95,6 +95,13 @@ struct Started {
 }
 
 impl Started {
+    /// The module's bytes, once every slot the runtime declared has a body.
+    fn encode(&mut self) -> Vec<u8> {
+        self.runtime
+            .define_unreachable_list_value_members(&mut self.module);
+        self.module.encode()
+    }
+
     fn new(target: WasmTarget) -> Self {
         let mut module = Module::default();
         // The object model's types come first, so their indices are the ones `lower` names.
@@ -443,7 +450,7 @@ impl Backend for WasmBackend {
         );
         started.module.export_function("_start", start);
         vec![
-            (format!("{module_name}.wasm"), started.module.encode()),
+            (format!("{module_name}.wasm"), started.encode()),
             (
                 format!("{module_name}.mjs"),
                 started.host.loader(module_name).into_bytes(),

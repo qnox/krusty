@@ -30,6 +30,19 @@ fn wasm_official_dependency_class_members_lower_from_their_bodies() {
     );
 }
 
+/// A library function that tests a value against a file-private interface of its library and calls
+/// that interface's member lowers from the official producer's body through the interface's
+/// installed class.
+#[test]
+fn wasm_official_dependency_file_private_interface_dispatches_through_its_installed_class() {
+    run_against_official_producer(
+        include_str!(
+            "box_regressions/multimodule/dependencyInstalledInterfaceTypeTestAndMemberCall.kt"
+        ),
+        "DependencyInstalledInterfaceTypeTestAndMemberCall",
+    );
+}
+
 #[test]
 fn wasm_official_dependency_nested_classes_lower_from_their_bodies() {
     run_against_official_producer(

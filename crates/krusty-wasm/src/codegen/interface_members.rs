@@ -129,23 +129,19 @@ pub(super) fn dependency_member(
     module: &mut Module,
     fact: &BackendCallableFact,
     role: MemberRole,
-) -> Option<DependencyMember> {
-    let identity = library_member_identity(fact, role)?;
-    if let Some(member) = interfaces.identified(&identity) {
-        return Some(DependencyMember {
-            member,
-            library: false,
-        });
-    }
-    let signature = library_member_signature(fact, role).ok()?;
-    let owner = library_member_owner(fact)?;
-    let member = interfaces
-        .library(module, owner, &identity, signature)
-        .ok()?;
-    Some(DependencyMember {
+) -> Result<Option<DependencyMember>, Unsupported> {
+    let Some(identity) = library_member_identity(fact, role) else {
+        return Ok(None);
+    };
+    let published = interfaces.identified(&identity).is_some();
+    let signature = library_member_signature(fact, role)?;
+    let owner = library_member_owner(fact)
+        .ok_or("an interface member without its checked declaring classifier")?;
+    let member = interfaces.library(module, owner, &identity, signature)?;
+    Ok(Some(DependencyMember {
         member,
-        library: true,
-    })
+        library: !published,
+    }))
 }
 
 /// Publish the identities of the file's interface members and record what its classes implement.
@@ -261,11 +257,13 @@ fn publish_identities(
         let declaration = &ir.functions[*function as usize];
         let signature = member_signature(&declaration.params, declaration.ret)?;
         let member = numbered(recording, program, number, signature)?;
-        program
-            .runtime
-            .objects
-            .interfaces
-            .publish(member_identity(identity), member)?;
+        program.runtime.objects.interfaces.publish(
+            member_identity(identity),
+            declaration
+                .dispatch_receiver
+                .ok_or("an interface publication without its checked declaring owner")?,
+            member,
+        )?;
     }
     let mut properties = ir.local_property_layouts.iter().collect::<Vec<_>>();
     properties.sort_unstable_by_key(|(property, _)| **property);
@@ -310,11 +308,19 @@ fn publish_identities(
                 _ => continue,
             };
             let member = numbered(recording, program, number, signature)?;
-            program
-                .runtime
-                .objects
-                .interfaces
-                .publish(identity, member)?;
+            program.runtime.objects.interfaces.publish(
+                identity,
+                match layout {
+                    IrLocalPropertyLayout::Member { owner, .. }
+                    | IrLocalPropertyLayout::MemberExtension { owner, .. } => *owner,
+                    _ => {
+                        return Err(
+                            "an interface property publication without its declaring owner".into(),
+                        )
+                    }
+                },
+                member,
+            )?;
         }
     }
     Ok(())
@@ -842,7 +848,7 @@ impl FileRecorder<'_, '_, '_> {
                         }
                     }
                 }
-                let Some(member) = self.dependency_member(target, MemberRole::Function) else {
+                let Some(member) = self.dependency_member(target, MemberRole::Function)? else {
                     continue;
                 };
                 if self.implements(member.member) {
@@ -887,7 +893,7 @@ impl FileRecorder<'_, '_, '_> {
                     InheritedMemberName::PropertyGetter(_) => MemberRole::Getter,
                     InheritedMemberName::PropertySetter(_) => MemberRole::Setter,
                 };
-                let Some(member) = self.dependency_member(declaration, role) else {
+                let Some(member) = self.dependency_member(declaration, role)? else {
                     continue;
                 };
                 if self.implements(member.member) {
@@ -1068,7 +1074,7 @@ impl FileRecorder<'_, '_, '_> {
                 } else {
                     MemberRole::Getter
                 };
-                let Some(member) = self.dependency_member(target, role) else {
+                let Some(member) = self.dependency_member(target, role)? else {
                     continue;
                 };
                 if self.implements(member.member) {
@@ -1151,8 +1157,10 @@ impl FileRecorder<'_, '_, '_> {
         &mut self,
         target: krusty::fir::ExternalCallableId,
         role: MemberRole,
-    ) -> Option<DependencyMember> {
-        let fact = self.recording.callables.callable(target)?;
+    ) -> Result<Option<DependencyMember>, Unsupported> {
+        let Some(fact) = self.recording.callables.callable(target) else {
+            return Ok(None);
+        };
         dependency_member(
             &mut self.program.runtime.objects.interfaces,
             self.program.module,
