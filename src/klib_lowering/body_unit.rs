@@ -42,6 +42,7 @@ mod constructor_linking;
 mod enum_materialization;
 #[cfg(test)]
 mod initializer_capability_tests;
+mod inline_functions;
 mod local_class;
 mod private_members;
 mod sam_placement;
@@ -725,7 +726,10 @@ impl DependencyBodyUnit {
     ) -> impl Iterator<Item = (&KlibDependencyCallable, FunId)> + '_ {
         self.functions
             .iter()
-            .filter(|(identity, _)| !self.private_members.contains_key(*identity))
+            .filter(|(identity, function)| {
+                !self.private_members.contains_key(*identity)
+                    && !self.ir.inline_only_fns.contains(*function)
+            })
             .map(|(identity, &function)| (identity, function))
     }
 
@@ -1029,8 +1033,9 @@ impl DependencyBodyUnit {
             })?;
             self.ir.functions[body.function as usize].body = Some(lowered);
         }
-        super::class_hierarchies::publish(&mut self.ir, first_class, classes)
-            .map_err(|reason| KlibBodyDecline::new(identity.declaration.clone(), reason))?;
+        let decline = |reason| KlibBodyDecline::new(identity.declaration.clone(), reason);
+        super::class_hierarchies::publish(&mut self.ir, first_class, classes).map_err(decline)?;
+        inline_functions::expand_calls(&mut self.ir).map_err(decline)?;
         Ok(root)
     }
 }
@@ -2475,6 +2480,8 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
+        let root = self.root.is_some_and(|root| root.identity() == identity);
+        inline_functions::declare_callee(ir, declared, function, &header, root)?;
         self.functions.insert(identity.clone(), declared);
         if let Some(formals) = self.private_members.get_mut(identity) {
             *formals = header.own_formals(function);
