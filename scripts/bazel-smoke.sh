@@ -9,7 +9,8 @@
 # does: a `bazel_dep` resolved through that registry. Each target is compiled once as plain
 # actions and once through the persistent worker, with automatic execution groups on and off, both with the
 # toolchain's compiler and with a `--@krusty//:krusty_binary` override. `bazel` and `node` must be
-# on PATH.
+# on PATH. BAZEL_REPOSITORY_CACHE, when set, names the repository cache Bazel downloads into, so a
+# caller can keep the modules it resolves between runs.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -122,6 +123,7 @@ for exec_groups in --incompatible_auto_exec_groups --noincompatible_auto_exec_gr
   for compiler in toolchain --@krusty//:krusty_binary=//tools:krusty; do
     flags=("$exec_groups" "--distdir=$dist" "--registry=file://$registry" --registry=https://bcr.bazel.build)
     [[ $compiler == toolchain ]] || flags+=("$compiler")
+    [[ -z ${BAZEL_REPOSITORY_CACHE:-} ]] || flags+=("--repository_cache=$BAZEL_REPOSITORY_CACHE")
     echo "bazel build ${flags[*]}" >&2
     bazel build "${flags[@]}" //:actions //:worker
     for jar in actions worker; do
