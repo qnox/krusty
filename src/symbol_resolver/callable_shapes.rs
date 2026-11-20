@@ -281,4 +281,65 @@ mod tests {
         assert!(signatures.contains(&Ty::fun(Vec::new(), Ty::String)));
         assert!(signatures.contains(&Ty::fun(vec![Ty::Int], Ty::String)));
     }
+
+    /// A class implementing `(Int) -> String` and `(String, String) -> String` reaches a
+    /// `(T, T) -> String` formal through the two-parameter view whichever supertype is listed
+    /// first; the other view contributes nothing to `T`.
+    #[test]
+    fn a_function_formal_reads_the_nominal_view_of_its_own_arity() {
+        let one = type_name("fixture/Function1");
+        let two = type_name("fixture/Function2");
+        let mut one_declaration = (*callable_classifier([])).clone();
+        one_declaration.callable_signature = Some(Ty::fun(vec![Ty::Int], Ty::String));
+        one_declaration.callable_signatures = vec![one_declaration.callable_signature.unwrap()];
+        let mut two_declaration = (*callable_classifier([])).clone();
+        two_declaration.callable_signature =
+            Some(Ty::fun(vec![Ty::String, Ty::String], Ty::String));
+        two_declaration.callable_signatures = vec![two_declaration.callable_signature.unwrap()];
+        let one_first = type_name("fixture/BothOneFirst");
+        let two_first = type_name("fixture/BothTwoFirst");
+        let mut one_first_declaration = (*callable_classifier([one, two])).clone();
+        one_first_declaration.callable_signature = None;
+        one_first_declaration.callable_signatures.clear();
+        let mut two_first_declaration = (*callable_classifier([two, one])).clone();
+        two_first_declaration.callable_signature = None;
+        two_first_declaration.callable_signatures.clear();
+        let source = Shapes {
+            declarations: vec![
+                (one, std::sync::Arc::new(one_declaration)),
+                (two, std::sync::Arc::new(two_declaration)),
+                (one_first, std::sync::Arc::new(one_first_declaration)),
+                (two_first, std::sync::Arc::new(two_first_declaration)),
+            ],
+        };
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let formal = Ty::ty_param("T", any);
+        let signature = crate::symbol_resolver::GenericSig {
+            formals: vec![crate::types::TyParamName::new("T")],
+            formal_bounds: vec![vec![any]],
+            receiver: None,
+            params: vec![Ty::fun(vec![formal, formal], Ty::String), formal, formal],
+            ret: Ty::String,
+            return_policy: crate::libraries::GenericReturnPolicy::Exact,
+        };
+        for both in [one_first, two_first] {
+            let inferred =
+                crate::symbol_resolver::generic_inference::infer_generic_call_constraints_from_symbols(
+                    &source,
+                    &signature,
+                    [
+                        (0, Ty::obj_name(both), false),
+                        (1, Ty::String, false),
+                        (2, Ty::String, false),
+                    ],
+                    None,
+                );
+            assert_eq!(inferred.bindings.get("T"), Some(&Ty::String), "{both:?}");
+            assert_eq!(
+                inferred.upper_bounds.get("T"),
+                Some(&vec![Ty::String]),
+                "only the two-parameter view bounds T for {both:?}"
+            );
+        }
+    }
 }

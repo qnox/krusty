@@ -73,6 +73,15 @@ impl KlibBodyClassContract {
             && self.modality == KotlinModality::Final
     }
 
+    /// Whether a support unit emits this interface's default bodies as functions of the instance
+    /// a class's dispatch record calls them on, materializing nothing: the interface lays out
+    /// no storage, and its receiver is the implementing instance as the interface type. A call
+    /// through the interface stays a virtual one; only a class that inherits the default
+    /// reaches the body.
+    pub(crate) fn emits_default_members(&self) -> bool {
+        self.kind == super::TypeKind::Interface && !self.is_expect && !self.is_builtin_type()
+    }
+
     /// Whether a support unit materializes this class and emits its members as functions of the
     /// class it materializes: a value class, or a class or object that is not sealed, inner or
     /// expected; a generic one carries its formals, which its members' bodies read. A builtin type

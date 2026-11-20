@@ -1394,7 +1394,6 @@ compiler/testData/diagnostics/tests/unqualifiedEnum/unqualifiedEnum.kt
 compiler/testData/diagnostics/tests/unsignedTypes/allowedVarargsOfUnsignedTypes.kt
 compiler/testData/diagnostics/tests/unsignedTypes/lateinitUnsignedType.kt
 compiler/testData/diagnostics/tests/unsignedTypes/overloadsWithUnsigned.kt
-compiler/testData/diagnostics/tests/unsignedTypes/unsignOverloadVsNonIntLike.kt
 compiler/testData/diagnostics/tests/unsignedTypes/wrongLongSuffixForULong.kt
 compiler/testData/diagnostics/tests/valueClasses/basicValueClassDeclaration.kt
 compiler/testData/diagnostics/tests/valueClasses/delegatedPropertyInValueClass.kt
@@ -1442,8 +1441,6 @@ compiler/testData/diagnostics/testsWithStdLib/annotations/annotationAllRepeatabl
 compiler/testData/diagnostics/testsWithStdLib/annotations/annotationApplicability/jvmName.kt
 compiler/testData/diagnostics/testsWithStdLib/annotations/annotationApplicability/jvmNameOnFile.kt
 compiler/testData/diagnostics/testsWithStdLib/annotations/annotationApplicability/jvmNameOnMangledNames.kt
-compiler/testData/diagnostics/testsWithStdLib/annotations/annotationWithVarargParameter/javaAnnotationWithVarargArgument.kt
-compiler/testData/diagnostics/testsWithStdLib/annotations/annotationWithVarargParameter/kotlinAnnotationWithVarargArgument.kt
 compiler/testData/diagnostics/testsWithStdLib/annotations/explicitMetadata.kt
 compiler/testData/diagnostics/testsWithStdLib/annotations/jvmDefault/jvmDefaultWithCompatibility/disable.kt
 compiler/testData/diagnostics/testsWithStdLib/annotations/jvmDefault/jvmDefaultWithCompatibility/enable.kt
