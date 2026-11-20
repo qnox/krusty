@@ -1634,7 +1634,10 @@ jobs:
           set -euo pipefail
           chmod +x krusty
           kotlin=$(just max-version)
-          curl -fsSLo "$RUNNER_TEMP/kotlin-stdlib.jar" \
+          # Maven Central's CDN sometimes answers a published artifact with a 404 or 429 for a
+          # few seconds, so every error is retried.
+          curl -fsSL --connect-timeout 30 --retry 8 --retry-max-time 300 --retry-all-errors \
+            -o "$RUNNER_TEMP/kotlin-stdlib.jar" \
             "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$kotlin/kotlin-stdlib-$kotlin.jar"
           scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
 
