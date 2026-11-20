@@ -135,6 +135,33 @@ jobs:
             echo "pin each action above to a full commit SHA, with its version as a comment" >&2
             exit 1
           fi
+      # A bare major resolves differently by pool: a runner keeps the build already in its tool
+      # cache, while a GitHub-hosted runner downloads Azul's newest. The kotlinc reference caches are
+      # keyed by the producing JDK, so a cache saved on one pool then misses on the other.
+      - name: JDKs are pinned to an exact build
+        id: jdk_pins
+        run: |
+          python3 - .github/workflows/*.yml <<'PY'
+          import re, sys
+          bad = []
+          for path in sys.argv[1:]:
+              block = False
+              for n, line in enumerate(open(path), 1):
+                  single = re.match(r"\s*java-version:\s*(?!\|)(\S+)", line)
+                  if re.match(r"\s*java-version:\s*\|\s*$", line):
+                      block = True
+                      continue
+                  item = re.match(r"\s+([^\s:#]+)\s*$", line) if block else None
+                  if not item:
+                      block = False
+                  value = (single or item)
+                  if value and not re.fullmatch(r"['\"]?\d+\.\d+\.\d+\+[\d.]+['\"]?", value.group(1)):
+                      bad.append(f"{path}:{n}: {line.strip()}")
+          if bad:
+              print("\n".join(bad), file=sys.stderr)
+              print("name each JDK by its exact build, as setup-java resolves it (major.minor.patch+build)", file=sys.stderr)
+              sys.exit(1)
+          PY
       - name: outcome manifests only shrink
         id: outcome_lists
         env:
@@ -155,7 +182,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - *just-on-path
       - *install-just
       - name: lint
@@ -197,7 +224,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       # The host tests start real compiler-plugin hosts from their pinned toolchains on the
       # runner's JDK. The toolchains and compiled adapters stay in krusty's cache. Each job keeps
       # its own entry: this job and ci provision different Kotlin versions, and an entry is never
@@ -259,8 +286,8 @@ jobs:
         with:
           distribution: zulu
           java-version: |
-            21
-            25
+            21.0.13+0.3.1
+            25.0.5+0.3.1
       # Toolchain entries are named by the exact toolchain they hold, never by a hash of the
       # checkout, and every job that needs one restores the same entry.
       - name: select the maximum Kotlin version
@@ -504,7 +531,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - *just-on-path
       - *install-just
       - name: select supported Kotlin versions
@@ -581,8 +608,8 @@ jobs:
         with:
           distribution: zulu
           java-version: |
-            21
-            25
+            21.0.13+0.3.1
+            25.0.5+0.3.1
       # The Wasm e2e programs run under Node.js, which runs WasmGC without flags from version 22.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -693,7 +720,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - name: compiler plugin integration tests
         env:
           RUST_MIN_STACK: "134217728"
@@ -784,11 +811,11 @@ jobs:
         with:
           distribution: zulu
           java-version: |
-            8
-            11
-            17
-            21
-            25
+            8.0.512+9
+            11.0.33+10
+            17.0.21+0.3.1
+            21.0.13+0.3.1
+            25.0.5+0.3.1
       # Every row and the ci job restore one kotlinc entry per version, named by that version.
       - name: restore kotlinc ${{ matrix.version }}
         id: kotlinc
@@ -1265,7 +1292,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - name: select the Gradle user home
         id: gradle-home
         run: |
@@ -1407,7 +1434,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - name: select the Gradle user home
         id: gradle-home
         run: |
@@ -1473,7 +1500,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - name: select Android integration requirements
         id: android
         run: |
@@ -1585,7 +1612,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
           cache: maven
           cache-dependency-path: tools/krusty-maven/pom.xml
       - *restore-maven
@@ -1621,7 +1648,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
           cache: maven
           cache-dependency-path: tools/krusty-maven/pom.xml
       - *restore-maven
@@ -1969,7 +1996,7 @@ jobs:
         if: steps.tip.outputs.publish == 'true'
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       # No setup-gradle here: it injects an init script into every Gradle build, and these builds
       # hold the signing key and publishing credentials. The lint job validates the wrapper jar,
       # whose properties pin the distribution's checksum.
