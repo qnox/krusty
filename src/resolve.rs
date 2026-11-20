@@ -308,6 +308,7 @@ pub(crate) mod receiver_capture_identity;
 use receiver_capture_identity::{LambdaReceiverSlot, ReceiverDeclarationRole, ReceiverLabel};
 mod receiver_flow;
 use receiver_flow::CompletedFlow;
+use receiver_flow::ReceiverNarrowing;
 mod receiver_function_values;
 use receiver_function_values::ImplicitReceiverFunctionInvoke;
 pub use receiver_function_values::ReceiverFunctionPropertyCallee;
@@ -32469,8 +32470,9 @@ struct Checker<'a> {
     /// be `B` (a subtype of `this_ty`) inside the guarded branch, so a bare member of `B` resolves.
     /// Separate from `this_ty` (which stays the DECLARED receiver type so `this` still types as it,
     /// and the lowerer inserts a `checkcast` only where the narrowing was actually used). Cleared at
-    /// every scope boundary, like local flow-narrowings.
-    this_narrow: Option<Ty>,
+    /// every scope boundary, like local flow-narrowings. It names the receiver it narrows: a
+    /// receiver lambda inside the branch pushes a nearer receiver that the proof says nothing about.
+    this_narrow: Option<ReceiverNarrowing>,
     /// Stack of labeled receivers in scope, innermost LAST. Each entry is `(label, ty, is_class)`:
     /// a class body pushes `(ClassName, ty, true)`; a receiver lambda / scope function pushes
     /// `(fnName, receiverTy, false)`. Resolves `this@Label`. The innermost entry is the current `this`
@@ -33704,35 +33706,6 @@ impl<'a> Checker<'a> {
         let r = f(self);
         self.allow_lambda_mutation = prev;
         r
-    }
-
-    fn with_this_narrow<R>(&mut self, narrow: Option<Ty>, f: impl FnOnce(&mut Self) -> R) -> R {
-        let prev = self.this_narrow;
-        if let Some(n) = narrow {
-            self.this_narrow = Some(n);
-        }
-        let r = f(self);
-        self.this_narrow = prev;
-        r
-    }
-
-    /// Current smart-cast type of the implicit receiver.
-    fn effective_this_narrow(&self, scope: &CheckerScope<'_>) -> Option<Ty> {
-        self.this_narrow.or_else(|| {
-            self.lookup(scope, "this")
-                .map(|local| self.local_narrowing(scope, "this").unwrap_or(local.ty))
-        })
-    }
-
-    fn actual_this_narrow(&self, scope: &CheckerScope<'_>) -> Option<Ty> {
-        self.this_narrow
-            .or_else(|| self.local_narrowing(scope, "this"))
-            .or_else(|| self.lookup_path_narrowing(scope, &self.current_receiver_path(scope)?))
-            .or_else(|| {
-                let declared = scope.this_ty()?;
-                let shadow = self.lookup(scope, "this")?.ty;
-                (shadow != declared).then_some(shadow)
-            })
     }
 
     /// The arg-binding call-resolution layer over this checker's [`SymbolSource`]. Cheap to construct.
@@ -39535,63 +39508,6 @@ impl<'a> Checker<'a> {
         } else {
             base
         }
-    }
-
-    /// If `cond` is `x is T` (or `x !is T` when `for_else`) and `x` is a stable local/parameter and
-    /// `T` a non-nullable known reference type, return the smart-cast binding `(x, T)`.
-    /// The narrowed implicit-receiver type established by `if (this is B)` (`this !is B` in the
-    /// else-branch): `this` is a subtype `B` of the declared receiver. `this` is immutable, so the
-    /// narrowing is sound across nested scopes. Only a KNOWN reference subtype narrows (a primitive /
-    /// nullable / unresolved target is left un-narrowed, so the file skips rather than miscompiles).
-    fn this_is_narrowing(
-        &self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        for_else: bool,
-    ) -> Option<Ty> {
-        let Expr::Is {
-            operand,
-            ty,
-            negated,
-        } = self.file.expr(cond).clone()
-        else {
-            return None;
-        };
-        if negated != for_else {
-            return None;
-        }
-        if !matches!(self.file.expr(operand), Expr::Name(n) if n == "this") {
-            return None;
-        }
-        if ty.nullable() {
-            return None;
-        }
-        let tt = self
-            .resolved_type_tys
-            .get(&(ty.span.lo, ty.span.hi))
-            .copied()
-            .unwrap_or_else(|| self.type_ref_ty_silent(scope, &ty));
-        let runtime_tt =
-            crate::symbol_resolver::classifier_callable_signature(&self.fed_source(), tt)
-                .unwrap_or(tt);
-        // Context-sensitive nested type syntax may omit the subclass's type arguments (`is Right`)
-        // while the subject supplies them through its sealed/generic supertype (`Either<E, A>`).
-        // The general smart-cast path already reconstructs `Right<A>` from that relation; the
-        // implicit-`this` fast path must preserve the same applied target instead of replacing it
-        // with raw `Right`, whose `value` property subsequently erases to `Any?`.
-        let runtime_tt = self
-            .current_receiver_path(scope)
-            .and_then(|path| self.stable_path_ty(scope, &path, self.span(cond)))
-            .filter(|_| ty.targs.is_empty())
-            .map(|declared| {
-                crate::symbol_resolver::apply_subtype_arguments_from_supertype(
-                    &self.fed_source(),
-                    runtime_tt,
-                    declared,
-                )
-            })
-            .unwrap_or(runtime_tt);
-        runtime_tt.is_reference().then_some(runtime_tt)
     }
 
     /// The type a successful checked cast narrows a stable path to. A nullable target accepts null,
@@ -51563,7 +51479,7 @@ impl<'a> Checker<'a> {
                 fallthrough_declined: Vec<(String, Ty)>,
                 arm_casts: Vec<(NarrowPath, Ty)>,
                 arm_declined: Vec<(String, Ty)>,
-                this_narrow: Option<Ty>,
+                this_narrow: Option<ReceiverNarrowing>,
             }
             let mut arm_results = Vec::with_capacity(arms.len());
             let has_else = arms.iter().any(|arm| arm.conditions.is_empty());
