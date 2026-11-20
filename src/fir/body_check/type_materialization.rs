@@ -50,39 +50,6 @@ impl BodyFirChecker<'_> {
         Ok(self.origins.source(self.source, span))
     }
 
-    /// Record where the callee of the call `call` is written: its name, or the member name that
-    /// follows a receiver. A callee of another shape has no selector to record.
-    pub(super) fn record_call_selector(
-        &mut self,
-        call: ExprId,
-        callee: ExprId,
-    ) -> Result<(), BodyCheckFailure> {
-        let selector = match self.file.expr(callee) {
-            Expr::Name(_) => self.file.expr_span(callee),
-            Expr::Member { name, .. } => Some(self.file.member_name_span(callee, name)),
-            _ => None,
-        };
-        match selector {
-            Some(selector) => self.record_invoke_selector(call, selector),
-            None => Ok(()),
-        }
-    }
-
-    /// Record the selector a function value's invoke call was written with, for the checked facts
-    /// a plugin reads the call's source position from.
-    pub(super) fn record_invoke_selector(
-        &mut self,
-        call: ExprId,
-        selector: Span,
-    ) -> Result<(), BodyCheckFailure> {
-        let span = self
-            .file
-            .expr_span(call)
-            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
-        self.origins.record_selector(self.source, span, selector);
-        Ok(())
-    }
-
     pub(super) fn statement_origin(
         &mut self,
         statement: StmtId,

@@ -1828,19 +1828,17 @@ impl BodyFirChecker<'_> {
                             ));
                         }
                     };
-                    self.record_call_selector(expression, *callee)?;
                     let kind =
                         self.receiver_function_invoke(expression, explicit_receiver, args)?;
                     let ty = self.invoke_result_type(expression, &kind)?;
                     return self.add_expression_with_type(expression, ty, kind);
                 }
-                Expr::Call { callee, args }
+                Expr::Call { args, .. }
                     if matches!(
                         self.info.expr_lowers.get(&expression),
                         Some(ExprLowering::Invoke { .. })
                     ) =>
                 {
-                    self.record_call_selector(expression, *callee)?;
                     let ExprLowering::Invoke {
                         receiver,
                         params,
@@ -1977,11 +1975,7 @@ impl BodyFirChecker<'_> {
                         }
                     }
                 }
-                Expr::SafeCall {
-                    receiver,
-                    args,
-                    name,
-                } => {
+                Expr::SafeCall { receiver, args, .. } => {
                     crate::trace_compiler!(
                     "fir",
                     "safe call expression={expression:?} receiver={receiver:?} args={} lowering={:?}",
@@ -2047,8 +2041,6 @@ impl BodyFirChecker<'_> {
                             )?
                         }
                         Some(arguments) if receiver_function => {
-                            let selector = self.file.member_name_span(expression, name);
-                            self.record_invoke_selector(expression, selector)?;
                             self.receiver_function_invoke(expression, Some(*receiver), arguments)?
                         }
                         Some(arguments) if invoke => {

@@ -44,9 +44,6 @@ pub enum Origin {
 #[derive(Debug, Default)]
 pub struct OriginStore {
     origins: Vec<Origin>,
-    /// Where the selector of each source call that has one starts, keyed by the call's own span:
-    /// the `content` of `receiver.content()`, which the span of the whole call does not locate.
-    selectors: std::collections::HashMap<(SourceFileId, Span), Span>,
 }
 
 impl OriginStore {
@@ -66,16 +63,6 @@ impl OriginStore {
         let id = OriginId::from_raw(next_id(self.origins.len(), "origins"));
         self.origins.push(origin);
         id
-    }
-
-    /// Record that the call written at `call` selects through the name written at `selector`.
-    pub fn record_selector(&mut self, file: SourceFileId, call: Span, selector: Span) {
-        self.selectors.insert((file, call), selector);
-    }
-
-    /// The selector the call written at `call` names, as the parser located it.
-    pub fn selector_span(&self, file: SourceFileId, call: Span) -> Option<Span> {
-        self.selectors.get(&(file, call)).copied()
     }
 
     pub fn get(&self, id: OriginId) -> Option<Origin> {

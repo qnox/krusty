@@ -1492,7 +1492,19 @@ impl BodyLowering<'_> {
         if !matches!(expression.kind, FirExprKind::Lambda { .. }) {
             self.record_callable_reference_provenance(expression_id, first_generated);
         }
+        let call_line = self.body.expression_debug_lines(expression_id).source;
         let debug = self.expression_position(expression_id, &expression.kind);
+        // The array instructions take the first element's line. The factory call's own line stays
+        // on the vararg: the JVM lambda-offset pass still moves a lambda argument onto that call,
+        // which ran while the factory was a call. An empty factory keeps its own position.
+        let factory_line = match &expression.kind {
+            FirExprKind::ArrayLiteral { elements, .. }
+                if !elements.is_empty() && call_line != 0 =>
+            {
+                Some(call_line)
+            }
+            _ => None,
+        };
         // The builtin call this node realizes, when lowering made a node of its own for it.
         if debug.source != 0 {
             if let Some(call) = builtin_call.filter(|_| lowered as usize >= first_generated) {
@@ -1500,6 +1512,9 @@ impl BodyLowering<'_> {
             }
         }
         self.stamp_expression(debug, lowered, first_generated);
+        if let Some(line) = factory_line {
+            self.ir.set_factory_line(lowered, line);
+        }
         self.record_expression_origins(first_generated, lowered, origin);
         if ends_inlined_call {
             self.ir.fir_origins.insert(
@@ -1589,7 +1604,10 @@ impl BodyLowering<'_> {
             .source;
         let package = self.index.source_package(source)?;
         Some(crate::ir::IrLocalClassNameProvenance {
-            source: crate::ir::IrModuleSource { source, package },
+            source: crate::ir::IrLocalClassNameRoot::Source(crate::ir::IrModuleSource {
+                source,
+                package,
+            }),
             lexical_owner,
             segments: provenance.segments.clone(),
             ordinal: provenance.ordinal,
@@ -1825,11 +1843,18 @@ impl BodyLowering<'_> {
                         has_receiver: conversion.has_receiver,
                         suspend: conversion.suspend,
                         source_suspend: conversion.source_suspend,
+                        requires_object_dispatch: conversion.requires_object_dispatch,
                         overridden_results: conversion
                             .overridden_results
                             .iter()
                             .map(|ty| ty.get())
                             .collect(),
+                        dispatch_methods: super::sam_conversions::ir_sam_frames(
+                            &conversion.dispatch_methods,
+                        ),
+                        default_methods: super::sam_conversions::ir_sam_frames(
+                            &conversion.default_methods,
+                        ),
                         function_adapter: false,
                         wraps_function_value: false,
                         // The lambda object is created here. A null check applies to a captured
@@ -1842,6 +1867,7 @@ impl BodyLowering<'_> {
                             .iter()
                             .map(crate::ir::IrSamTypeParameter::lowered)
                             .collect(),
+                        placement: crate::ir::IrSamPlacement::ThisFile,
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,

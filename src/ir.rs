@@ -18,7 +18,9 @@ use crate::kt_string::KtString;
 use crate::types::{Ty, TypeName, TypeNameList};
 
 mod checked_klib_facts;
+mod checked_klib_sam;
 pub(crate) use checked_klib_facts::{CheckedKlibDependencyFacts, CheckedKlibTypeFacts};
+pub(crate) use checked_klib_sam::{CheckedKlibSamDeclaration, KlibSamKey};
 mod checked_member_call_edge;
 pub(crate) use checked_member_call_edge::CheckedMemberCallEdge;
 
@@ -181,7 +183,7 @@ pub use lambda_classes::{IrInvokeBridge, IrLambdaCapture, IrLambdaClass, IrSamWr
 pub(crate) use lifting_sequences::IrLiftingEntry;
 pub use lifting_sequences::{IrLiftingRoot, IrLiftingSequence};
 pub use local_class_names::{
-    IrClassDeclarationContext, IrLocalClassNameProvenance, IrLocalClassOwner,
+    IrClassDeclarationContext, IrLocalClassNameProvenance, IrLocalClassNameRoot, IrLocalClassOwner,
 };
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
@@ -203,11 +205,13 @@ pub use properties::{
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
-    FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable,
-    IrConstructorReferenceDeclaration, IrPropertyFunctionReference, IrReferencedProperty, PropRef,
-    ReflectedCallable,
+    BoundContextUnbox, FuncRef, IrCallableReference, IrCallableReferenceTarget,
+    IrClassifierCallable, IrConstructorReferenceDeclaration, IrPropertyFunctionReference,
+    IrReferencedProperty, PropRef, ReflectedCallable,
 };
-pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
+pub use sam_target::{
+    IrSamMethod, IrSamMethodFrame, IrSamPlacement, IrSamTarget, IrSamTypeParameter,
+};
 pub use site_class_names::{IrSiteClassContainer, IrSiteClassName};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;

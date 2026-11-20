@@ -15,20 +15,19 @@
 //! AST vs IR (see the doc): declaration/supertype generation belongs before type checking so
 //! generated symbols resolve. Body and expression rewriting belongs at the IR level.
 
-pub mod allopen;
 pub mod assignment;
 pub mod atomicfu;
 pub mod class_metadata;
 pub mod cli;
 pub mod compose;
+mod convention;
 pub mod deps;
-pub mod noarg;
 pub mod parcelize;
+pub mod plugin_order;
 mod plugin_release;
 pub use plugin_release::PluginRelease;
 pub mod registry;
 pub mod runtime_declarations;
-pub mod sam_with_receiver;
 pub mod serialization;
 
 use crate::fx_hash::HashMap;
@@ -308,6 +307,28 @@ pub struct FrontendDeclaredProperty {
 pub struct FrontendPluginDiagnostic {
     pub span: crate::diag::Span,
     pub message: String,
+    /// The plugin does not implement the construct yet, as opposed to the source being invalid.
+    pub refusal: bool,
+}
+
+impl FrontendPluginDiagnostic {
+    /// The source is invalid under the plugin's rules, as kotlinc's plugin reports it.
+    pub fn error(span: crate::diag::Span, message: String) -> Self {
+        Self {
+            span,
+            message,
+            refusal: false,
+        }
+    }
+
+    /// The source is valid, but the plugin's native pass does not implement it yet.
+    pub fn refusal(span: crate::diag::Span, message: String) -> Self {
+        Self {
+            span,
+            message,
+            refusal: true,
+        }
+    }
 }
 
 /// A source classifier as a plugin sees it when one of its annotations names a CLASS the plugin
@@ -813,6 +834,14 @@ pub trait IrPlugin {
         &[]
     }
 
+    /// Whether this plugin's transformation owns `entry`, so its calls pass the mask of omitted
+    /// default arguments the entry ends with (Compose's `@Composable` declarations, whose entry
+    /// takes the composer, `$changed` and `$default`). A declaration of another role or shape has
+    /// nothing to realize an omitted default, whatever plugins are enabled.
+    fn passes_transformed_entry_defaults(&self, _entry: &TransformedEntry<'_>) -> bool {
+        false
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
@@ -870,6 +899,15 @@ pub struct PluginSourceView<'a> {
 }
 
 impl PluginSourceView<'_> {
+    /// The span of the call `expression`'s own syntax, which kotlinc's call offsets begin at.
+    pub fn call_span(
+        &self,
+        ir: &IrFile,
+        expression: crate::ir::ExprId,
+    ) -> Option<crate::diag::Span> {
+        self.checked.call_span(ir, expression)
+    }
+
     /// The span in this file that `expression` was lowered from, when it has one.
     pub fn expression_span(
         &self,
@@ -877,15 +915,6 @@ impl PluginSourceView<'_> {
         expression: crate::ir::ExprId,
     ) -> Option<crate::diag::Span> {
         self.checked.expression_span(ir, expression)
-    }
-
-    /// The span of the selector `expression`, a call of a function value, was written with.
-    pub fn selector_span(
-        &self,
-        ir: &IrFile,
-        expression: crate::ir::ExprId,
-    ) -> Option<crate::diag::Span> {
-        self.checked.selector_span(ir, expression)
     }
 }
 
@@ -897,13 +926,15 @@ pub trait CheckedSourceFacts {
         ir: &IrFile,
         expression: crate::ir::ExprId,
     ) -> Option<crate::diag::Span>;
-    /// The span of the selector a call of a function value was written with (`content` in
-    /// `receiver.content()`), when the call has one.
-    fn selector_span(
-        &self,
-        ir: &IrFile,
-        expression: crate::ir::ExprId,
-    ) -> Option<crate::diag::Span>;
+    /// The span of the call `expression`'s own syntax: the whole expression, or for a qualified
+    /// call (`lib.f(x)`) its selector (`f(x)`), where kotlinc's call offsets begin.
+    fn call_span(&self, ir: &IrFile, expression: crate::ir::ExprId) -> Option<crate::diag::Span> {
+        let span = self.expression_span(ir, expression)?;
+        Some(match ir.selector_offset(expression) {
+            Some(offset) => crate::diag::Span::new(offset, span.hi),
+            None => span,
+        })
+    }
     /// The checked annotations of the dependency function a call selected by `callable`.
     fn dependency_annotations(&self, callable: crate::ir::ExternalCallableId) -> &[TypeName];
     /// The declaring owner and Kotlin name of the dependency function a call selected by
@@ -933,15 +964,32 @@ pub struct DependencyDeclaration<'a> {
     pub name: &'a str,
 }
 
+/// A selected library declaration whose compiled entry ends with the mask of omitted default
+/// arguments after parameters a compiler plugin's transformation appended.
+pub struct TransformedEntry<'a> {
+    /// The annotations the declaration carries, which say what role it has.
+    pub annotations: &'a [TypeName],
+    /// The parameters its compiled entry takes after its source parameters.
+    pub synthetic: &'a [Ty],
+    /// How many source parameters the declaration has, which the appended words follow.
+    pub parameters: usize,
+}
+
 /// What a plugin reads of a dependency function's declaration besides its parameter types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DependencyCallableShape {
     /// An `inline` function, whose body a call splices.
     pub inline: bool,
-    /// An extension or a function with context parameters, which takes a receiver value.
-    pub receiver: bool,
+    /// An extension function, whose receiver is its first source parameter.
+    pub extension: bool,
+    /// A function with context parameters, which take values ahead of its source parameters.
+    pub context_parameters: bool,
     /// A source parameter declares a default value.
     pub defaults: bool,
+    /// The parameters the declaration's compiled entry takes after its source parameters, which
+    /// a plugin's transformation appended (Compose's composer, `$changed` and `$default`). Empty
+    /// when it takes none, or when its entry does not begin with the source parameters.
+    pub synthetic_parameters: Box<[Ty]>,
     /// Per logical parameter, whether its declared type is a `@Composable` function type.
     pub composable_parameters: crate::libraries::ParamFlags,
 }
@@ -951,6 +999,9 @@ pub struct DependencyCallableShape {
 pub struct PluginRejection {
     pub span: crate::diag::Span,
     pub message: String,
+    /// The plugin does not implement the construct yet, so kotlinc compiles source it rejects. False
+    /// when the source is invalid under the plugin's own rules, which kotlinc's plugin reports too.
+    pub refusal: bool,
 }
 
 /// Run each native plugin's [`IrPlugin::record_source_facts`] over a file at the handoff.
@@ -1416,6 +1467,14 @@ impl PluginHost {
     /// Names of the registered plugins, in run order (introspection / tests).
     pub fn plugin_names(&self) -> Vec<&str> {
         self.plugins.iter().map(|p| p.name()).collect()
+    }
+
+    /// Whether a registered plugin [passes the default mask of a transformed library
+    /// entry](IrPlugin::passes_transformed_entry_defaults).
+    pub fn passes_transformed_entry_defaults(&self, entry: &TransformedEntry<'_>) -> bool {
+        self.plugins
+            .iter()
+            .any(|plugin| plugin.passes_transformed_entry_defaults(entry))
     }
 
     /// Every registered plugin's [`IrPlugin::sam_with_receiver_annotations`].
