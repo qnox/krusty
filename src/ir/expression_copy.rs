@@ -289,7 +289,7 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, action: Exp
         function_annotations: _,
         function_source_annotations: _,
         compose: _,
-        atomicfu: _,
+        plugin_facts: _,
         parcelize: _,
         plugin_extended_signatures: _,
         property_annotation_markers: _,

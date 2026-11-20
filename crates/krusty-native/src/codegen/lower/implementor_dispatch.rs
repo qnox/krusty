@@ -29,9 +29,9 @@ pub(super) struct ImplementorArm {
 /// `Comparable<II>.compareTo` takes a `T`, carried as a reference, where `II.compareTo` takes the
 /// `II` value. The operand crosses that declared boundary first and becomes the implementation's
 /// type from there, as it would through the bridge a virtual call reaches.
-struct ParameterBoundary {
-    declared: Ty,
-    implementation: Ty,
+pub(super) struct ParameterBoundary {
+    pub(super) declared: Ty,
+    pub(super) implementation: Ty,
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
@@ -729,23 +729,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             self.jump_to_merge(merge, carried, rejected);
             return Ok(true);
         }
-        let Some(descriptor) = self.file.type_descriptor(boundary.implementation)? else {
+        let Some((accepted, rejected)) = self.bridge_argument_guard(*value, boundary)? else {
             return Ok(false);
         };
-        let type_address = self.data_address(descriptor);
-        let matches = self
-            .runtime_call(
-                "kt_is_instance",
-                &[any(), any()],
-                Ty::Boolean,
-                &[*value, type_address],
-            )?
-            .expect("`kt_is_instance` returns a Boolean");
-        let accepted = self.builder.create_block();
-        let rejected = self.builder.create_block();
-        self.builder
-            .ins()
-            .brif(matches, accepted, &[], rejected, &[]);
         self.continue_in(rejected);
         self.builder.seal_block(rejected);
         let rejected_value = self.bridge_rejection(answer);
@@ -755,8 +741,46 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(false)
     }
 
+    /// The branch of a collection special bridge on one erased reference argument: it goes to the
+    /// first block when the argument is an instance of the override's parameter type (a `null` the
+    /// type admits too), and to the second, which the caller fills with the bridge's rejection,
+    /// when it is not. A primitive parameter is asked through its box, so a `null` and a value of
+    /// another type are rejected rather than unboxed. `None` where the override's parameter is the
+    /// declared one, or has no type descriptor to test, so there is nothing to bridge.
+    pub(super) fn bridge_argument_guard(
+        &mut self,
+        value: Value,
+        boundary: &ParameterBoundary,
+    ) -> Result<Option<(Block, Block)>, Unsupported> {
+        if boundary.implementation.non_null() == boundary.declared.non_null() {
+            return Ok(None);
+        }
+        let Some(descriptor) = self.file.type_descriptor(boundary.implementation)? else {
+            return Ok(None);
+        };
+        let type_address = self.data_address(descriptor);
+        let mut matches = self
+            .runtime_call(
+                "kt_is_instance",
+                &[any(), any()],
+                Ty::Boolean,
+                &[value, type_address],
+            )?
+            .expect("`kt_is_instance` returns a Boolean");
+        if boundary.implementation.admits_null() {
+            let absent = self.builder.ins().icmp_imm_u(IntCC::Equal, value, 0);
+            matches = self.builder.ins().bor(matches, absent);
+        }
+        let accepted = self.builder.create_block();
+        let rejected = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(matches, accepted, &[], rejected, &[]);
+        Ok(Some((accepted, rejected)))
+    }
+
     /// `contains`/`remove` answer `false` for a foreign argument; an index answers `-1`.
-    fn bridge_rejection(&mut self, answer: Ty) -> Option<Value> {
+    pub(super) fn bridge_rejection(&mut self, answer: Ty) -> Option<Value> {
         let clif = self.carrier(answer).clif()?;
         let bits = if answer == Ty::Int { -1 } else { 0 };
         Some(self.builder.ins().iconst(clif, bits))

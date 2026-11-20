@@ -126,14 +126,34 @@ typedef struct KType {
        implementing no interface of the program has none: nothing dispatches through it here.
        Appended, like the names above, so no existing initializer moves. */
     const kt_fn *itable;
+    /* On a class of the PROGRAM that implements `kotlin.collections.Map`: its members, through
+       typed virtual thunks, for the map entry points below to answer for an object they did not
+       make. NULL for every other type. */
+    const struct KMapMembers *map_members;
 } KType;
+
+/* The read-only members of `Map` a program class answers, each a thunk with the fixed signature
+   written here that dispatches to the class's override virtually, so a subclass overriding one is
+   reached through the same thunk. A key or value crosses as a reference, as `Map` declares it. */
+typedef struct KMapMembers {
+    kt_int (*size)(struct KObject *self);
+    kt_boolean (*is_empty)(struct KObject *self);
+    kt_boolean (*contains_key)(struct KObject *self, struct KObject *key);
+    kt_boolean (*contains_value)(struct KObject *self, struct KObject *value);
+    struct KObject *(*get)(struct KObject *self, struct KObject *key);
+    struct KObject *(*keys)(struct KObject *self);
+    struct KObject *(*values)(struct KObject *self);
+    struct KObject *(*entries)(struct KObject *self);
+} KMapMembers;
 
 /* The compiler writes each descriptor field at a fixed offset (`ktype` in
    `codegen/lower/objects.rs`); these pin the C layout to the same numbers. */
 _Static_assert(offsetof(KType, class_names) == 148, "KType.class_names moved");
 _Static_assert(offsetof(KType, collection_size) == 152, "KType.collection_size moved");
 _Static_assert(offsetof(KType, itable) == 160, "KType.itable moved");
-_Static_assert(sizeof(KType) == 168, "KType changed size");
+_Static_assert(offsetof(KType, map_members) == 168, "KType.map_members moved");
+_Static_assert(sizeof(KType) == 176, "KType changed size");
+_Static_assert(offsetof(KMapMembers, entries) == 56, "KMapMembers.entries moved");
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.
 
@@ -879,6 +899,12 @@ kt_int kt_string_compare_to(KRef a, KRef b);
    both ranges are already within their strings (Kotlin/Native's `unsafeRangeEquals`). */
 kt_boolean kt_string_range_equals(KRef self, kt_int self_offset, KRef other, kt_int other_offset,
                                   kt_int length);
+
+/* Kotlin/Native's `indexOfString` and `indexOfChar`: the first UTF-16 unit offset at or after
+   `from` (a negative start counts from zero) where `other` or `ch` occurs, or -1. */
+kt_int kt_string_index_of_string(KRef self, KRef other, kt_int from);
+kt_int kt_string_index_of_char(KRef self, kt_char ch, kt_int from);
+kt_int kt_string_last_index_of_char(KRef self, kt_char ch, kt_int from);
 
 /* `s.removeSuffix(suffix)`: the receiver without it, cut by UTF-16 unit as `endsWith` and
    `substring` are; either may be a `StringBuilder`. A string that does not end there comes back

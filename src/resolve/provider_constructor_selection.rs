@@ -879,6 +879,13 @@ impl Checker<'_> {
             }
         } else if selected.argument_slots == (0..args.len()).collect::<Vec<_>>()
             && selected.omitted.is_empty()
+            // The positional form reads every argument from a vararg's slot on as one of its
+            // elements, so a parameter after the vararg (`C("t", *keys, exclude = x)`) needs its
+            // selected slot.
+            && member
+                .call_sig
+                .vararg_index
+                .is_none_or(|vararg| vararg + 1 == member.params.len())
         {
             ResolvedConstructor::Plain {
                 owner: internal,
