@@ -541,6 +541,8 @@ impl Body<'_> {
         }
         let any = Ty::obj_name(krusty::types::wk::any());
         let shape = self.runtime.function_shape(self.module, args.len());
+        self.runtime
+            .null_receiver_throws(self.module, self.classifiers)?;
         self.expression(function)?;
         for (&arg, &param) in args.iter().zip(params) {
             self.value(arg, param)?;

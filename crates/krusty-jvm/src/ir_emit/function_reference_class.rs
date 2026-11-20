@@ -441,7 +441,22 @@ pub(super) fn emit_func_ref_class(
             inv.push_int(index as i32, &mut cw);
             inv.array_load(0x32, 1);
             let declared = jvm_declared_ty(&ty);
-            if declared.is_jvm_scalar() {
+            if let Some(unbox) = fr.bound_context_unbox.get(index).copied().flatten() {
+                let value_class = unbox.value_class.render();
+                let descriptor = format!("(){}", type_descriptor(declared));
+                let words = slot_words(declared) as i32;
+                property_reference_values::value_class_boundary_conversion(
+                    &mut cw,
+                    &mut inv,
+                    unbox.nullable,
+                    |cw, code| {
+                        let class = cw.class_ref(&value_class);
+                        code.checkcast(class);
+                        let method = cw.methodref(&value_class, "unbox-impl", &descriptor);
+                        code.invokevirtual(method, 0, words);
+                    },
+                );
+            } else if declared.is_jvm_scalar() {
                 unbox_prim_from(&mut cw, &mut inv, Ty::obj("java/lang/Object"), declared);
             } else if let Some(internal) = checkcast_internal(declared) {
                 let class = cw.class_ref(&internal);

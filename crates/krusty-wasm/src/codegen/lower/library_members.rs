@@ -384,7 +384,7 @@ impl Body<'_> {
         if fact.builtin_implementations.iter().any(|implementation| {
             super::string_builders::is_string_builder_type(implementation.receiver)
         }) {
-            self.record_char_sequence_reads()?;
+            self.record_char_sequence_reads(false)?;
         }
         let member = self.library_member_of(&fact, identity, role, &name)?;
         if reference_name {
@@ -413,6 +413,8 @@ impl Body<'_> {
                 },
             )?;
         }
+        self.runtime
+            .null_receiver_throws(self.module, self.classifiers)?;
         self.value(receiver, objects::any())?;
         for (&arg, &param) in args.iter().zip(params) {
             self.value(arg, param)?;

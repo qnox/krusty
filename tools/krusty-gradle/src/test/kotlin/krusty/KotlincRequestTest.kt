@@ -109,6 +109,9 @@ class KotlincRequestTest {
             "-jvm-default=disable",
             "-opt-in=krusty.fixture.ExperimentalFirstApi",
             "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
+            // Metro's Gradle plugin orders its compiler plugin before Compose's this way. It orders
+            // the plugins the task loads and reaches none of them, so krusty applies it as kotlinc does.
+            "-Xcompiler-plugin-order=dev.zacsweers.metro.compiler>androidx.compose.compiler.plugins.kotlin",
         )) {
             assertArguments(withFree(free), structured + slice.freeCompilerArgs + free)
         }
