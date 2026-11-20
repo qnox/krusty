@@ -3864,11 +3864,11 @@ pub(crate) fn finalized_streamed_signature_index(
             deferred_local_headers.insert(stub.id);
             continue;
         }
-        // An ordinary local inferred result is not a module signature root. It is published in
-        // Pass 2 while its real lexical context is active; semantic override plans for its local
-        // classifier are completed immediately after that publication.
+        // An ordinary local inferred result is published in Pass 2. An enum-entry method is not:
+        // the checker reads its finalized header while walking the entry.
         let deferred_local_signature = stub.signature_inference.is_some()
-            && stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS);
+            && stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+            && !super::enum_entry_method_owner::is_entry_method(headers, stub.id);
         if !deferred_local_signature {
             required.push(stub.id);
         }
