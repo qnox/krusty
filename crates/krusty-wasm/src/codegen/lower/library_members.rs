@@ -109,8 +109,8 @@ pub(in crate::codegen) fn library_member_signature(
 
 /// Whether a call of `fact` with a dispatch receiver at `expression` goes through its library
 /// member: a member of a library classifier that dispatches on its receiver, with no `published`
-/// body to call and no compiler operation realizing it (`KClass.simpleName`), which an
-/// interface's classes or the builtin classes below it implement.
+/// body to call (an interface's member dispatches whatever its default publishes) and no compiler
+/// operation realizing it (`KClass.simpleName`), which an interface's classes or the builtin classes below it implement.
 pub(in crate::codegen) fn dispatches_through_library_member(
     ir: &IrFile,
     callables: &CheckedBackendCallables,
@@ -118,7 +118,10 @@ pub(in crate::codegen) fn dispatches_through_library_member(
     fact: &BackendCallableFact,
     published: bool,
 ) -> bool {
-    !published
+    // A published body is the one a call reaches directly, except an interface's default: the
+    // receiver's class may override it, and a class that inherits it reaches the body from its
+    // own record.
+    (!published || fact.owner_is_interface)
         && fact.kind == ExternalCallableKind::Member
         && fact.member_realization == MemberRealization::Dispatch
         && fact.compiler_operation().is_none()
@@ -166,54 +169,85 @@ impl Body<'_> {
         node: &IrExpr,
     ) -> Option<Result<(), Unsupported>> {
         // A function's overrides are named by the function, an accessor's by its property.
-        let (target, receiver, args, (property, role)) = match node {
-            IrExpr::Call {
-                callee,
-                dispatch_receiver: Some(receiver),
-                args,
-            } => {
-                let Callee::External {
-                    target,
-                    defaults,
-                    extension_receiver_parameter: None,
-                    ..
-                } = &**callee
-                else {
-                    return None;
-                };
-                if !defaults.is_empty() {
-                    return None;
-                }
-                (
-                    *target,
-                    *receiver,
-                    args.as_slice(),
-                    (None, MemberRole::Function),
-                )
-            }
-            IrExpr::Checked(operation) => {
-                let access = self.callables.dependency_accessor(operation)?;
-                let receiver = access.receiver?;
-                if !access.dispatches() || access.callable.is_member_extension() {
-                    return None;
-                }
-                (
-                    access.target,
-                    receiver,
-                    access.arguments,
+        let (target, receiver, args, (property, role), generic_accessor, member_extension) =
+            match node {
+                IrExpr::Call {
+                    callee,
+                    dispatch_receiver: Some(receiver),
+                    args,
+                } => {
+                    let Callee::External {
+                        target,
+                        defaults,
+                        extension_receiver_parameter: None,
+                        ..
+                    } = &**callee
+                    else {
+                        return None;
+                    };
+                    if !defaults.is_empty() {
+                        return None;
+                    }
                     (
-                        Some(access.property),
-                        if access.writes() {
-                            MemberRole::Setter
-                        } else {
-                            MemberRole::Getter
-                        },
-                    ),
-                )
-            }
-            _ => return None,
-        };
+                        *target,
+                        *receiver,
+                        args.as_slice(),
+                        (None, MemberRole::Function),
+                        false,
+                        false,
+                    )
+                }
+                IrExpr::Checked(operation) => {
+                    let access = self.callables.dependency_accessor(operation)?;
+                    let receiver = access.receiver?;
+                    // A generic getter's instantiated virtual frame is checked below; a setter goes
+                    // through the published-class path.
+                    let generic_accessor = !access.writes()
+                        && (!access.substitutions().is_empty()
+                            || access
+                                .callable
+                                .generic_sig
+                                .as_ref()
+                                .is_some_and(|signature| !signature.formals.is_empty()));
+                    if !access.dispatches() {
+                        return None;
+                    }
+                    (
+                        access.target,
+                        receiver,
+                        access.arguments,
+                        (
+                            Some(access.property),
+                            if access.writes() {
+                                MemberRole::Setter
+                            } else {
+                                MemberRole::Getter
+                            },
+                        ),
+                        generic_accessor,
+                        access.callable.is_member_extension(),
+                    )
+                }
+                _ => return None,
+            };
         let fact = self.callables.callable(target)?;
+        if generic_accessor
+            && (member_extension
+                || (matches!(fact.kind, ExternalCallableKind::Member)
+                    && fact.member_realization == MemberRealization::Dispatch
+                    && fact.compiler_operation().is_none()))
+        {
+            // Whether an export exists must not decide virtual semantics. The direct dependency
+            // body path below cannot instantiate this generic accessor's virtual frame, so do not
+            // let it bypass a possible override.
+            return Some(Err(
+                "a generic dependency member getter whose instantiated virtual interface call is unsupported"
+                    .into(),
+            ));
+        }
+        if member_extension {
+            return None;
+        }
         if target_owns_call(self.ir, self.callables, id, fact) {
             return None;
         }
@@ -258,7 +292,9 @@ impl Body<'_> {
             return None;
         }
         let published = self.calls.external(target).is_some();
-        if !dispatches_through_library_member(self.ir, self.callables, id, fact, published) {
+        let dispatches =
+            dispatches_through_library_member(self.ir, self.callables, id, fact, published);
+        if !dispatches {
             return None;
         }
         // A function's identity names a function, and an accessor's a property.
@@ -342,42 +378,19 @@ impl Body<'_> {
         if params.len() != args.len() {
             return Err("a call whose arguments do not match its parameters".into());
         }
-        let signature = library_member_signature(&fact, role)?;
-        let owner = library_member_owner(&fact).ok_or("a library member without its classifier")?;
-        let member = self.runtime.objects.interfaces.library(
-            self.module,
-            owner,
-            &identity,
-            signature.clone(),
-        )?;
         // The builder's `append(CharSequence?)` reads the appended sequence through the checked
         // `CharSequence` members on a target that copies its units.
         if fact.builtin_implementations.iter().any(|implementation| {
             super::string_builders::is_string_builder_type(implementation.receiver)
         }) {
-            self.record_char_sequence_reads()?;
+            self.record_char_sequence_reads(false)?;
         }
-        self.runtime.builtin_member(
-            self.module,
-            member,
-            &name,
-            &signature,
-            &fact.builtin_implementations,
-        )?;
+        let member = self.library_member_of(&fact, identity, role, &name)?;
         if reference_name {
             self.runtime.reference_name_member(self.module, member)?;
         }
-        if let Some(step) = super::array_lists::iterator_step(&fact) {
-            let function = match step {
-                super::array_lists::IteratorStep::HasNext => self.runtime.array_lists.has_next,
-                super::array_lists::IteratorStep::Next => self.runtime.array_lists.next,
-            };
-            self.runtime.objects.interfaces.implement_representation(
-                member,
-                self.runtime.array_lists.iterator,
-                function,
-            )?;
-        }
+        self.runtime
+            .null_receiver_throws(self.module, self.classifiers)?;
         self.value(receiver, objects::any())?;
         for (&arg, &param) in args.iter().zip(params) {
             self.value(arg, param)?;
@@ -391,5 +404,71 @@ impl Body<'_> {
                 Ok(())
             }
         }
+    }
+}
+
+impl Body<'_> {
+    /// The library member `fact` declares in `role`, named by its KLIB `identity`, with what the
+    /// builtin classes and the runtime list's iterator run for it recorded: the member a call
+    /// through it, or the runtime reading a collection or a sequence through it, goes to.
+    pub(super) fn library_member_of(
+        &mut self,
+        fact: &BackendCallableFact,
+        identity: Vec<u8>,
+        role: MemberRole,
+        name: &str,
+    ) -> Result<crate::interface_dispatch::MemberRef, Unsupported> {
+        // The runtime list's operations reading a collection argument exist once the members they
+        // read it through are recorded.
+        if fact.builtin_implementations.iter().any(|implementation| {
+            implementation
+                .receiver
+                .obj_internal()
+                .is_some_and(crate::array_lists::lays_out)
+        }) {
+            self.record_collection_arguments()?;
+        }
+        let signature = library_member_signature(fact, role)?;
+        let owner = library_member_owner(fact).ok_or("a library member without its classifier")?;
+        let member = self.runtime.objects.interfaces.library(
+            self.module,
+            owner,
+            &identity,
+            signature.clone(),
+        )?;
+        self.runtime.builtin_member(
+            self.module,
+            self.classifiers,
+            member,
+            name,
+            &signature,
+            &fact.builtin_implementations,
+        )?;
+        if let Some(step) = super::array_lists::iterator_step(fact) {
+            use super::array_lists::IteratorStep;
+            use crate::list_iterator_ends::EndedStep;
+            let lists = &self.runtime.array_lists;
+            let function = match step {
+                IteratorStep::HasNext => lists.has_next,
+                IteratorStep::HasPrevious => lists.has_previous,
+                IteratorStep::NextIndex => lists.next_index,
+                IteratorStep::PreviousIndex => lists.previous_index,
+                IteratorStep::Next | IteratorStep::Previous => {
+                    let ended = if matches!(step, IteratorStep::Next) {
+                        EndedStep::Next
+                    } else {
+                        EndedStep::Previous
+                    };
+                    self.runtime
+                        .checked_list_iterator_step(self.module, self.classifiers, ended)?
+                }
+            };
+            self.runtime.objects.interfaces.implement_representation(
+                member,
+                self.runtime.array_lists.iterator,
+                function,
+            )?;
+        }
+        Ok(member)
     }
 }

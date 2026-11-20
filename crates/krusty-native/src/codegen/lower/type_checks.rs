@@ -79,12 +79,15 @@ impl<'a> FileLowering<'a> {
         base: &str,
     ) -> Result<(DataId, Option<String>), Unsupported> {
         // A support unit names the descriptors of the dependency classes a source file extends,
-        // which that file's descriptors point at as their superclass's.
+        // which that file's descriptors point at as their superclass's, and of the objects whose
+        // single instance it hands to other files, which may ask that instance its class.
         let named = match self.unit_kind {
             krusty::backend::CheckedIrUnitKind::Source => {
                 !self.ir.local_class_name_provenance.contains_key(&class)
             }
-            krusty::backend::CheckedIrUnitKind::DependencySupport => self.exported.contains(&class),
+            krusty::backend::CheckedIrUnitKind::DependencySupport => {
+                self.exported.contains(&class) || self.exports_singleton(class)
+            }
         };
         if !named {
             let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
@@ -99,6 +102,17 @@ impl<'a> FileLowering<'a> {
             .declare_data(&symbol, Linkage::Hidden, false, false)
             .map_err(|error| declined!("declaring `{symbol}` ({error})"))?;
         Ok((descriptor, Some(symbol)))
+    }
+
+    /// Whether this unit exports the entry answering `class`'s single instance.
+    fn exports_singleton(&self, class: ClassId) -> bool {
+        let object = krusty::backend::instance_links::InstanceEntry::Object(
+            self.ir.classes[class as usize].fq_name_id(),
+        );
+        self.dependency_signatures
+            .instance_entries()
+            .iter()
+            .any(|(instance, _)| *instance == object)
     }
 
     /// The runtime descriptor for a represented type: a class of this file or of another file of
@@ -133,6 +147,13 @@ impl<'a> FileLowering<'a> {
                 let symbol = symbol.to_owned();
                 return self.import_data(&symbol).map(Some);
             }
+        }
+        // The companion object of a built-in type is the runtime's, with a descriptor of its own.
+        if let Some(symbol) = target
+            .obj_internal()
+            .and_then(super::super::super::intrinsics::builtin_companion_descriptor)
+        {
+            return self.import_data(symbol).map(Some);
         }
         let symbol = match target {
             Ty::String => "kt_type_string",
@@ -842,9 +863,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         // `ArrayList()`, the runtime's growable list. Declared in no file either, like `Any` and
         // the throwables above, so the runtime allocates it rather than the generator laying one
-        // out. The capacity overload is a HINT with nothing observable depending on it; a copy
-        // constructor takes a collection and declines, because sharing that collection's storage
-        // would let a write through the new list reach it.
+        // out. The capacity overload is a HINT with nothing observable depending on it. The copy
+        // constructor takes any collection and walks it into storage of the new list's own, so a
+        // later write to either list is not seen by the other.
         if self.file.standard_collection_implementation(internal)
             == Some(super::classifier_shapes::StandardCollectionImplementation::List)
         {
@@ -863,6 +884,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         any(),
                         &[capacity],
                     )
+                }
+                ([argument], Some([only])) if only.is_reference() => {
+                    let elements = self.reference(*argument)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call("kt_mutable_list_copy_of", &[any()], any(), &[elements])
                 }
                 _ => Err(declined!("this constructor of `{name}`")),
             };

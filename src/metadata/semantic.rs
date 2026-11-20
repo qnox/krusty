@@ -421,6 +421,11 @@ pub(crate) fn class_kind(flags: u64) -> TypeKind {
     }
 }
 
+/// Class flag `IS_INNER` (bit 9): an `inner class`, whose instance holds its outer one.
+pub(crate) fn class_is_inner(flags: u64) -> bool {
+    flags & (1 << 9) != 0
+}
+
 /// Class flag `IS_DATA` (bit 10): a `data class` or `data object`.
 pub(crate) fn class_is_data(flags: u64) -> bool {
     flags & (1 << 10) != 0
@@ -679,7 +684,7 @@ fn semantic_ty_with_identity_map(
         KotlinType::OutProjection(inner) => {
             Ty::out_projection(semantic_ty_with_identity_map(inner, bounds, identities))
         }
-        KotlinType::Star => Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
+        KotlinType::Star => Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
     };
     if ty.nullable() {
         Ty::nullable(semantic)
@@ -744,6 +749,40 @@ mod tests {
             short,
             kind,
         }
+    }
+
+    #[test]
+    fn a_metadata_star_keeps_its_identity_apart_from_an_explicit_out_projection() {
+        let bound = Ty::nullable(Ty::obj("kotlin/Any"));
+        let star = semantic_ty(
+            &class("sample/Box", vec![KotlinType::Star]),
+            &HashMap::default(),
+        );
+        // The declaration's parameter must agree with the same source-written Box<*>. Override
+        // status (including inherited operator) compares these normalized parameter identities.
+        assert_eq!(
+            star,
+            Ty::obj_args("sample/Box", &[Ty::star_projection(bound)])
+        );
+        let explicit_out = semantic_ty(
+            &class(
+                "sample/Box",
+                vec![KotlinType::OutProjection(Box::new(KotlinType::Class {
+                    internal: "kotlin/Any".to_owned(),
+                    args: Vec::new(),
+                    nullable: true,
+                    shape: KotlinFunctionTypeShape::default(),
+                }))],
+            ),
+            &HashMap::default(),
+        );
+        assert_eq!(
+            explicit_out,
+            Ty::obj_args("sample/Box", &[Ty::out_projection(bound)])
+        );
+        assert_ne!(star, explicit_out);
+        assert_eq!(star.type_args()[0].projection_read_ty(), bound);
+        assert_eq!(explicit_out.type_args()[0].projection_read_ty(), bound);
     }
 
     #[test]

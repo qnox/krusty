@@ -30,7 +30,10 @@ pub(in super::super) fn splice_immediate_lambda(
     lowering
         .splice_inline_lambda(
             invocation,
-            LambdaParameterBinding::Declared { callee: None },
+            LambdaParameterBinding::Declared {
+                callee: None,
+                specialization: None,
+            },
         )
         .ok_or(FirLoweringFailure::ImmediateLambdaExpansionDeclined { origin })?;
     Ok(())

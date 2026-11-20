@@ -13,7 +13,7 @@ use super::super::super::encode::{
     BlockType, CompositeType, FieldType, Function, Module, StorageType, SubType, ValType,
 };
 use super::super::super::runtime::Runtime;
-use super::{carrier, Body, FileContext, Unsupported};
+use super::{carrier, parameter_carrier_of, Body, FileContext, Unsupported};
 
 /// Accessors reserved for one file, and the object each local delegated property is.
 pub(super) struct Prepared {
@@ -65,7 +65,6 @@ pub(super) fn prepare(ir: &IrFile, module: &mut Module, runtime: &Runtime) -> Pr
             .entry(reference.property)
             .or_insert_with(|| module.global(ValType::nullable(struct_type)));
     }
-    drop(property_struct);
     let mut helpers = HashMap::default();
     for (plan, declaration) in ir.local_delegate_plans.iter().enumerate() {
         let plan = plan as u32;
@@ -100,8 +99,7 @@ pub(super) fn define(
                 .parameters
                 .iter()
                 .map(|ty| {
-                    super::parameter_carrier_of(*ty)?
-                        .ok_or_else(|| "a `Unit` parameter".to_string())
+                    parameter_carrier_of(*ty)?.ok_or_else(|| "a `Unit` parameter".to_string())
                 })
                 .collect::<Result<Vec<_>, Unsupported>>()?;
             let results = carrier(accessor.result)?.into_iter().collect::<Vec<_>>();
