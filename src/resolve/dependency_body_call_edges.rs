@@ -62,9 +62,9 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         }
         pending.extend(bodies.direct_callees(&identity));
         pending.extend(bodies.overridden_callables(&identity));
-        pending.extend(
-            bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
-        );
+        pending.extend(crate::klib_lowering::emitted_body_callables(
+            bodies, &identity,
+        ));
 
         // An object the body reads as a value is materialized with its initialization and the
         // members dispatch reaches, as the emission closure walks it.

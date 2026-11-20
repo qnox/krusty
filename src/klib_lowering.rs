@@ -44,7 +44,7 @@ mod type_evidence;
 pub use crate::libraries::KlibBodyCallable as KlibCallable;
 pub use body_unit::DependencyBodyUnit;
 pub(crate) use body_unit::{
-    is_private_class_member, is_receiver_member, EmittedDependencyCallable,
+    emitted_body_callables, is_private_class_member, is_receiver_member, EmittedDependencyCallable,
 };
 pub(crate) use callee_facts::CallEdge;
 pub use callee_facts::KlibCalleeFacts;

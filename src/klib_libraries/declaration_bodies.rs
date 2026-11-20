@@ -1059,15 +1059,21 @@ impl KlibDeclarationBodies {
     /// Exact module-qualified edges of the bodies common lowering structurally emits, including
     /// reached closure implementations. The supplied operation policy does not grant intrinsic
     /// authority; original direct inventories remain the authority for that separate decision.
+    /// `inherited` names the declaration a call of a fake override of a local class stands for,
+    /// which lowering links in place of the signature the body serializes.
     pub(crate) fn emitted_body_callables(
         &self,
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+        inherited: &dyn Fn(&KlibIrSignature) -> Option<KlibIrSignature>,
     ) -> Vec<KlibDependencyCallable> {
         let symbols = self.emitted_body_symbols(identity, forms).callables;
         symbols
             .into_iter()
-            .filter_map(|symbol| declaration_signature(&symbol.signature))
+            .filter_map(|symbol| {
+                let resolved = inherited(&symbol.signature);
+                declaration_signature(resolved.as_ref().unwrap_or(&symbol.signature))
+            })
             .filter_map(
                 |declaration| match self.linked_origin(&identity.module, &declaration) {
                     KlibCalleeOrigin::Exact(callee) => Some(callee),
