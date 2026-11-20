@@ -1722,6 +1722,17 @@ jobs:
             ln -s "$(command -v bazelisk)" "$RUNNER_TEMP/bin/bazel"
             echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           fi
+      # Bazelisk's downloads and the repository cache (the BCR modules the consumer resolves) are
+      # kept by setup-bazel, which saves them from a master run only. It keys the Bazelisk cache on
+      # .bazelversion, so the matrix's Bazel is written there, and the repository cache on the smoke
+      # script because it writes the consumer's MODULE.bazel.
+      - name: record the Bazel version for the Bazelisk cache key
+        run: echo '${{ matrix.bazel }}' > .bazelversion
+      - uses: bazel-contrib/setup-bazel@f34d6a05eae3c24acab7fa54587492daeaeffdab # 0.19.2
+        with:
+          bazelisk-cache: true
+          repository-cache: scripts/bazel-smoke.sh
+          cache-save: ${{ github.ref == 'refs/heads/master' }}
       - name: build the packaged Bazel module with Bazel ${{ matrix.bazel }}
         env:
           USE_BAZEL_VERSION: ${{ matrix.bazel }}
