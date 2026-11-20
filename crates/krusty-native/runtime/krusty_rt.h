@@ -900,6 +900,12 @@ kt_int kt_string_compare_to(KRef a, KRef b);
 kt_boolean kt_string_range_equals(KRef self, kt_int self_offset, KRef other, kt_int other_offset,
                                   kt_int length);
 
+/* Kotlin/Native's `indexOfString` and `indexOfChar`: the first UTF-16 unit offset at or after
+   `from` (a negative start counts from zero) where `other` or `ch` occurs, or -1. */
+kt_int kt_string_index_of_string(KRef self, KRef other, kt_int from);
+kt_int kt_string_index_of_char(KRef self, kt_char ch, kt_int from);
+kt_int kt_string_last_index_of_char(KRef self, kt_char ch, kt_int from);
+
 /* `s.removeSuffix(suffix)`: the receiver without it, cut by UTF-16 unit as `endsWith` and
    `substring` are; either may be a `StringBuilder`. A string that does not end there comes back
    as itself, and a builder as a copy of its text. */
