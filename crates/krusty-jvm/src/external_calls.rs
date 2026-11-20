@@ -1199,8 +1199,10 @@ fn realize_expressions(
                     // dispatch receiver, but route the selected physical handle through the JVM
                     // bytecode splicer. `Callee::Static` is the common IR's existing opaque inline
                     // handle; with a dispatch receiver the emitter prepends `this` to the splice-local
-                    // descriptor and emits no static invocation on success. Public inline members keep
-                    // ordinary virtual dispatch as their legal fallback.
+                    // descriptor and emits no static invocation on success. A public inline member is
+                    // inlined as well, as kotlinc does: a lambda that returns non-locally has no
+                    // function-object realization, and the real call stays only as the fallback of a
+                    // body the splicer declines.
                     if let krusty::ir::IrPropertyDispatch::Super { owner, interface } =
                         property_dispatch
                     {
@@ -1222,7 +1224,7 @@ fn realize_expressions(
                                 source: None,
                             }),
                         };
-                    } else if callable.inline.must_inline() {
+                    } else if callable.inline.can_inline() {
                         **callee = Callee::Static {
                             owner: callable.physical_owner,
                             name: physical_name.clone(),
