@@ -100,24 +100,25 @@ pub fn parse(arguments: &[String]) -> Result<Invocation, String> {
             // krusty never links the platform libraries implicitly: a compilation is always what
             // `-no-default-libs` makes.
             "-no-default-libs" | "-nodefaultlibs" => {}
-            shared_name if SHARED_ARGUMENTS.contains(&shared_name) => {
-                shared.push(argument.clone());
-                if joined.is_none() {
-                    shared.push(value()?);
+            other if other.starts_with('-') => {
+                let occupancy = if SHARED_ARGUMENTS.contains(&other) {
+                    crate::cli::argument_occupancy(argument)
+                } else {
+                    crate::cli::language_argument(argument)
+                };
+                match occupancy {
+                    Some(LanguageArgument::Alone) => shared.push(argument.clone()),
+                    Some(LanguageArgument::WithValue) => {
+                        shared.push(argument.clone());
+                        shared.push(value()?);
+                    }
+                    None => {
+                        return Err(format!(
+                            "option {other} is not supported by krusty kotlinc-native"
+                        ))
+                    }
                 }
             }
-            other if other.starts_with('-') => match crate::cli::language_argument(argument) {
-                Some(LanguageArgument::Alone) => shared.push(argument.clone()),
-                Some(LanguageArgument::WithValue) => {
-                    shared.push(argument.clone());
-                    shared.push(value()?);
-                }
-                None => {
-                    return Err(format!(
-                        "option {other} is not supported by krusty kotlinc-native"
-                    ))
-                }
-            },
             source => {
                 has_sources = true;
                 shared.push(source.to_string());
@@ -202,6 +203,23 @@ mod tests {
         expected.output = Some(PathBuf::from("out/app"));
         expected.module_name = Some("app".to_string());
         assert_eq!(*options, expected);
+    }
+
+    #[test]
+    fn a_shared_flag_stands_alone_and_a_shared_value_follows_its_option() {
+        let Invocation::Compile(options) = parse(&arguments(
+            "-Xexpect-actual-classes a.kt -opt-in kotlin.ExperimentalStdlibApi b.kt",
+        ))
+        .expect("parses") else {
+            panic!("not a compilation");
+        };
+        assert_eq!(
+            options.sources,
+            vec![
+                NativeSource::plain(PathBuf::from("a.kt")),
+                NativeSource::plain(PathBuf::from("b.kt")),
+            ]
+        );
     }
 
     #[test]
