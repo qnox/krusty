@@ -43,6 +43,7 @@ import org.jetbrains.kotlin.gradle.tasks.KaptGenerateStubs
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.OutputStream
 import javax.inject.Inject
 
 /**
@@ -292,6 +293,7 @@ private fun replaceKotlinJvmCompiles(
             description = "${kotlinTask.description ?: kotlinTask.name}, using krusty"
             configureCompilation()
             destinationDirectory.set(kotlinTask.destinationDirectory)
+            handoff.set(project.layout.buildDirectory.file("krusty/${kotlinTask.name}/handoff.txt"))
             dependsOn(compilePrerequisites)
             dependsOn(supportCheck)
             onlyIf("krusty implements everything the compile requests") { !compilerChoice.refuses() }
@@ -377,10 +379,11 @@ private fun replaceKotlinJvmCompiles(
         // Preserve the public task graph: callers and downstream tasks can still depend on
         // compileKotlin/compileTestKotlin. A skipped task runs its dependencies but none of its own
         // compiler actions, so no private action list is mutated. kotlinc runs only for a compile
-        // whose request krusty refused.
+        // whose request krusty refused, or whose module a native compiler plugin pass handed back.
         kotlinTask.dependsOn(replacement)
-        kotlinTask.onlyIf("krusty refused part of the compile's request, or the build verifies krusty") {
-            verifying || compilerChoice.refuses()
+        val handedBack = replacement.flatMap { it.handoff }
+        kotlinTask.onlyIf("krusty refused part of the compile's request, handed the module back, or the build verifies krusty") {
+            verifying || compilerChoice.refuses() || handedBack.get().asFile.refuses()
         }
     }
 }
@@ -533,6 +536,15 @@ abstract class KrustyCompileTask @Inject constructor(
     @get:OutputDirectory
     abstract val destinationDirectory: DirectoryProperty
 
+    /**
+     * Empty when krusty compiled the module. Otherwise the errors of a native compiler plugin pass
+     * that does not implement a construct of the module yet, which krusty reports with its own exit
+     * status, [PLUGIN_REFUSAL_EXIT_STATUS]: the Kotlin task then compiles the module with kotlinc.
+     * Any other failure of krusty fails the build.
+     */
+    @get:OutputFile
+    abstract val handoff: RegularFileProperty
+
     @TaskAction
     fun compile() {
         val sources = sources()
@@ -543,17 +555,52 @@ abstract class KrustyCompileTask @Inject constructor(
         // product of the previous full invocation behind. Validate every option before mutating it.
         fileSystemOperations.delete { delete(destination) }
         destination.mkdirs()
+        handoff.get().asFile.writeText("")
         if (sources.isEmpty()) return
 
         val executable = binary.get().asFile.absolutePath
+        val errors = ByteArrayOutputStream()
         val result = execOperations.exec {
             this.executable = executable
             args(arguments)
+            errorOutput = TeeOutputStream(System.err, errors)
             isIgnoreExitValue = true
         }
-        if (result.exitValue != 0) {
-            throw GradleException("$executable exited with ${result.exitValue} for $path")
+        when (result.exitValue) {
+            0 -> return
+            PLUGIN_REFUSAL_EXIT_STATUS -> {
+                val refused = errors.toString(Charsets.UTF_8).lines().filter { ": error: " in it }
+                logger.warn(
+                    "krusty: task '{}' is handed to kotlinc: a krusty compiler plugin does not implement " +
+                        "everything the module uses\n{}",
+                    path,
+                    refused.joinToString("\n") { "  $it" },
+                )
+                handoff.get().asFile.writeText(refused.joinToString("\n", postfix = "\n"))
+            }
+            else -> throw GradleException("$executable exited with ${result.exitValue} for $path")
         }
+    }
+}
+
+/** krusty's exit status for a compile that failed only on a native plugin pass's refusals. */
+private const val PLUGIN_REFUSAL_EXIT_STATUS = 3
+
+/** Writes to both streams, so krusty's report reaches the build output and the task keeps it. */
+private class TeeOutputStream(private val first: OutputStream, private val second: OutputStream) : OutputStream() {
+    override fun write(byte: Int) {
+        first.write(byte)
+        second.write(byte)
+    }
+
+    override fun write(bytes: ByteArray, offset: Int, length: Int) {
+        first.write(bytes, offset, length)
+        second.write(bytes, offset, length)
+    }
+
+    override fun flush() {
+        first.flush()
+        second.flush()
     }
 }
 

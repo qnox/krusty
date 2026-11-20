@@ -28,7 +28,6 @@
 //!     → ERROR. Silently ignoring it would emit wrong bytecode, so a drop-in must fail loudly.
 
 use crate::compilation_target::CompilationTarget;
-use crate::plugins::allopen::AllOpenPlugin;
 use crate::plugins::assignment::AssignmentPlugin;
 use crate::plugins::atomicfu::AtomicfuPlugin;
 use crate::plugins::cli::{
@@ -37,9 +36,8 @@ use crate::plugins::cli::{
     SAM_WITH_RECEIVER_PLUGIN_ID, SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
 };
 use crate::plugins::compose::{ComposeOptions, ComposePlugin};
-use crate::plugins::noarg::NoArgPlugin;
+use crate::plugins::convention::ConventionInstance;
 use crate::plugins::parcelize::ParcelizePlugin;
-use crate::plugins::sam_with_receiver::SamWithReceiverPlugin;
 use crate::plugins::serialization::{SerializationAbi, SerializationPlugin};
 use crate::plugins::{IrPlugin, PluginHost, PluginRelease};
 
@@ -203,8 +201,8 @@ pub enum PluginDiagnostic {
     /// A declared option setting krusty's native implementation does not honour yet — hard error.
     UnimplementedOption { option: PluginOption },
     /// krusty substitutes a native pass that covers only part of what the plugin generates. Not an
-    /// error for a compilation, which rejects an uncovered construct itself, but a refusal for a
-    /// build that must choose a compiler before it knows the sources.
+    /// error for a compilation, which rejects an uncovered construct itself as a plugin refusal
+    /// (`DiagnosticKind::PluginRefusal`) that a build can hand to kotlinc.
     PartialSubstitution { plugin_id: String },
 }
 
@@ -217,11 +215,6 @@ impl PluginDiagnostic {
                 | PluginDiagnostic::UnsupportedOption { .. }
                 | PluginDiagnostic::UnimplementedOption { .. }
         )
-    }
-
-    /// Whether a build asking which compilations krusty takes must give this one to kotlinc.
-    pub fn is_refusal(&self) -> bool {
-        self.is_error() || matches!(self, PluginDiagnostic::PartialSubstitution { .. })
     }
 
     pub fn message(&self) -> String {
@@ -332,6 +325,12 @@ impl NativePlugins {
         self.enabled.iter().map(|native| native.plugin_id).collect()
     }
 
+    /// Whether an enabled plugin [passes the default mask of a transformed library
+    /// entry](IrPlugin::passes_transformed_entry_defaults).
+    pub fn passes_transformed_entry_defaults(&self, entry: &super::TransformedEntry<'_>) -> bool {
+        !self.enabled.is_empty() && self.host("").passes_transformed_entry_defaults(entry)
+    }
+
     /// Build this compilation's plugin host. `module_name` reaches plugins whose output is
     /// module-mangled (serialization's `write$Self$<module>`).
     pub fn host(&self, module_name: &str) -> PluginHost {
@@ -401,7 +400,10 @@ fn build_allopen(
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(AllOpenPlugin::from_options(options))
+    Box::new(ConventionInstance::new(
+        &krusty_plugin_allopen::PLUGIN,
+        options,
+    ))
 }
 
 /// Build the native no-arg plugin from the compilation's options for it.
@@ -411,7 +413,10 @@ fn build_noarg(
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(NoArgPlugin::from_options(options))
+    Box::new(ConventionInstance::new(
+        &krusty_plugin_noarg::PLUGIN,
+        options,
+    ))
 }
 
 /// Build the native sam-with-receiver plugin from the compilation's options for it.
@@ -421,7 +426,10 @@ fn build_sam_with_receiver(
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(SamWithReceiverPlugin::from_options(options))
+    Box::new(ConventionInstance::new(
+        &krusty_plugin_sam_with_receiver::PLUGIN,
+        options,
+    ))
 }
 
 /// Build the native atomicfu plugin. Its registrar declares no command-line processor, so it has
@@ -831,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn atomicfu_runs_natively_but_a_build_is_refused_it_until_coverage_is_complete() {
+    fn atomicfu_runs_natively_and_notes_that_its_coverage_is_partial() {
         let jar = plugin_jar(
             "kotlin-atomicfu-compiler-plugin-embeddable.jar",
             &[registrar_of(ATOMICFU_PLUGIN_ID)],
@@ -845,11 +853,10 @@ mod tests {
             &resolved.diagnostics[0],
             PluginDiagnostic::PartialSubstitution { plugin_id } if plugin_id == ATOMICFU_PLUGIN_ID
         ));
-        assert!(resolved.diagnostics[0].is_refusal());
     }
 
     #[test]
-    fn compose_runs_natively_but_a_build_is_refused_it_until_coverage_is_complete() {
+    fn compose_runs_natively_and_notes_that_its_coverage_is_partial() {
         let jar = plugin_jar(
             "compose-compiler-plugin.jar",
             &["androidx.compose.compiler.plugins.kotlin.ComposePluginRegistrar"],
@@ -867,7 +874,6 @@ mod tests {
             &resolved.diagnostics[0],
             PluginDiagnostic::PartialSubstitution { plugin_id } if plugin_id == COMPOSE_PLUGIN_ID
         ));
-        assert!(resolved.diagnostics[0].is_refusal());
     }
 
     #[test]

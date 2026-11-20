@@ -425,10 +425,12 @@ pub(super) enum ConstructorRole {
 }
 
 /// The dependency constructor a constructor call invokes: the provider's identity, the class it
-/// constructs and its declared value parameters.
+/// constructs and its declared value parameters, and, when the linking unit materializes that
+/// class, the constructor of the materialized class the call selects.
 pub(super) struct LinkedConstructor {
     pub(super) target: crate::fir::ExternalCallableId,
     pub(super) declaration: super::constructor_calls::ConstructorDeclaration,
+    pub(super) materialized: Option<crate::ir::IrConstructorTarget>,
 }
 
 /// The dependency property a call of one of its accessors reads or writes, as a source access of
@@ -784,6 +786,7 @@ impl<'a> BodyLowering<'a> {
             } if matches!(
                 origin.as_str(),
                 "INLINE_ARGS_CONTAINER"
+                    | "ARGUMENTS_REORDERING_FOR_CALL"
                     | "WHEN"
                     | "PLUSEQ"
                     | "MINUSEQ"
@@ -818,7 +821,7 @@ impl<'a> BodyLowering<'a> {
                 origin: Some(origin),
             } if origin == "OBJECT_LITERAL" => return self.object_literal(statements),
             KlibIrExprKind::Block { .. } => {
-                return unsupported("a block of a compiler-introduced form")
+                return unsupported("a block of a compiler-introduced form");
             }
             KlibIrExprKind::Composite { .. } => return unsupported("a composite block"),
             KlibIrExprKind::ReturnableBlock {
@@ -1036,6 +1039,18 @@ impl<'a> BodyLowering<'a> {
     /// of every nullable type. Any other use, such as an erased body's value where its declared
     /// type is expected, is a conversion the body must state.
     fn operand(&mut self, id: KlibIrExprId, expected: Ty) -> Lowered<ExprId> {
+        self.operand_capturing(id, expected, None)
+    }
+
+    /// [`Self::operand`] for an argument of a call, whose callee declaration `site` names: a
+    /// star-projected argument is also a value of the parameter when the call binds the type
+    /// parameter the parameter applies there to the capture of that star.
+    fn operand_capturing(
+        &mut self,
+        id: KlibIrExprId,
+        expected: Ty,
+        site: Option<CaptureSite<'_>>,
+    ) -> Lowered<ExprId> {
         let lowered = self.expression(id)?;
         let actual = self.lowered_type(lowered);
         if is_value_of(actual, expected) {
@@ -1046,6 +1061,9 @@ impl<'a> BodyLowering<'a> {
         }
         if let Some(narrowed) = self.null_proven_field(id, lowered, actual, expected) {
             return Ok(narrowed);
+        }
+        if site.is_some_and(|site| captures_star_projection(actual, expected, site)) {
+            return Ok(lowered);
         }
         self.upcast(lowered, actual, expected)
             .ok_or(KlibBodyDeclineReason::ImplicitConversion)
@@ -1349,6 +1367,78 @@ fn is_value_of(actual: Ty, expected: Ty) -> bool {
     actual == expected || (actual == Ty::Null && expected.is_nullable())
 }
 
+/// The callee declaration a call argument is passed to, as the callee declares it before the
+/// call binds its type parameters.
+#[derive(Clone, Copy)]
+struct CaptureSite<'a> {
+    /// The declared type of the parameter the argument is passed to.
+    declared: Ty,
+    /// Every declared parameter of the callee.
+    parameters: &'a [Ty],
+    /// The type parameters of the callee itself.
+    formals: &'a [crate::types::TyParamName],
+}
+
+/// A value typed `actual` is one of `expected` through the capture of a star projection: the
+/// call binds a type parameter of its callee to the star, which the serialized call states as
+/// the type parameter's bound (`Key<*>` passed to `get<E : Element>(key: Key<E>)` is read at
+/// `Key<Element>`).
+///
+/// Every slot where the types differ must be a star projection of `actual` against a type
+/// parameter of the callee that the declaration applies in that slot alone, and `expected` must
+/// state that parameter's bound there. A parameter the declaration fixes (`Key<Element>`) or a
+/// type parameter the call does not bind is no capture and is read as written.
+fn captures_star_projection(actual: Ty, expected: Ty, site: CaptureSite<'_>) -> bool {
+    let (
+        Some((class, actual_args)),
+        Some((expected_class, expected_args)),
+        Some((owner, declared_args)),
+    ) = (
+        actual.obj_parts(),
+        expected.obj_parts(),
+        site.declared.obj_parts(),
+    )
+    else {
+        return false;
+    };
+    if class != expected_class
+        || class != owner
+        || actual_args.len() != expected_args.len()
+        || actual_args.len() != declared_args.len()
+    {
+        return false;
+    }
+    let mut captured = false;
+    for (slot, ((have, want), declared)) in actual_args
+        .iter()
+        .zip(expected_args)
+        .zip(declared_args)
+        .enumerate()
+    {
+        if have == want {
+            continue;
+        }
+        let crate::types::TyKind::TyParam(name, bound) = declared.kind() else {
+            return false;
+        };
+        let sole = !declared_args
+            .iter()
+            .enumerate()
+            .any(|(other, argument)| other != slot && calls::names(*argument, name))
+            && site
+                .parameters
+                .iter()
+                .filter(|parameter| calls::names(**parameter, name))
+                .count()
+                == 1;
+        if !have.is_star_projection() || !site.formals.contains(&name) || !sole || *want != bound {
+            return false;
+        }
+        captured = true;
+    }
+    captured
+}
+
 /// The target-neutral zero a deferred local of type `ty` holds before its first assignment, as the
 /// source parser supplies it: the primitive's zero, and `null` for every other type (a backend
 /// reads the deferred type to choose the physical zero it stores).
@@ -1363,5 +1453,114 @@ fn deferred_zero(ty: Ty) -> IrConst {
         Ty::Double => IrConst::Double(0.0),
         Ty::Char => IrConst::Char(0),
         _ => IrConst::Null,
+    }
+}
+
+#[cfg(test)]
+mod capture_conversion_tests {
+    use super::{captures_star_projection, CaptureSite};
+    use crate::types::{Ty, TyParamName};
+
+    fn key(argument: Ty) -> Ty {
+        Ty::obj_args("demo/Key", &[argument])
+    }
+
+    fn star() -> Ty {
+        Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))
+    }
+
+    fn formal() -> (TyParamName, Ty) {
+        let name = TyParamName::from("E");
+        (name, Ty::ty_param("E", Ty::obj("demo/Element")))
+    }
+
+    #[test]
+    fn a_star_is_captured_by_a_type_parameter_of_the_callee_at_its_bound() {
+        let (name, e) = formal();
+        let declared = key(e);
+        let site = CaptureSite {
+            declared,
+            parameters: &[declared],
+            formals: &[name],
+        };
+        assert!(captures_star_projection(
+            key(star()),
+            key(Ty::obj("demo/Element")),
+            site
+        ));
+    }
+
+    #[test]
+    fn a_star_is_not_captured_where_the_declaration_fixes_or_does_not_bind_the_slot() {
+        let (name, e) = formal();
+        let element = Ty::obj("demo/Element");
+        // The declared parameter is fixed to `Key<Element>`.
+        let fixed = key(element);
+        assert!(!captures_star_projection(
+            key(star()),
+            key(element),
+            CaptureSite {
+                declared: fixed,
+                parameters: &[fixed],
+                formals: &[name]
+            }
+        ));
+        // The parameter applies a type parameter the callee does not declare.
+        let rigid = key(e);
+        assert!(!captures_star_projection(
+            key(star()),
+            key(element),
+            CaptureSite {
+                declared: rigid,
+                parameters: &[rigid],
+                formals: &[]
+            }
+        ));
+        // Another parameter constrains the same type parameter too.
+        let declared = key(e);
+        assert!(!captures_star_projection(
+            key(star()),
+            key(element),
+            CaptureSite {
+                declared,
+                parameters: &[declared, e],
+                formals: &[name]
+            }
+        ));
+    }
+
+    #[test]
+    fn a_capture_states_the_bound_and_only_a_star_is_captured() {
+        let (name, e) = formal();
+        let declared = key(e);
+        let site = CaptureSite {
+            declared,
+            parameters: &[declared],
+            formals: &[name],
+        };
+        let element = Ty::obj("demo/Element");
+        // Another type argument than the bound.
+        assert!(!captures_star_projection(
+            key(star()),
+            key(Ty::obj("demo/Other")),
+            site
+        ));
+        // A concrete argument is not a capture.
+        assert!(!captures_star_projection(
+            key(Ty::obj("demo/Other")),
+            key(element),
+            site
+        ));
+        // Another class or another nullability.
+        assert!(!captures_star_projection(
+            Ty::obj_args("demo/Lock", &[star()]),
+            key(element),
+            site
+        ));
+        assert!(!captures_star_projection(
+            key(star()),
+            Ty::nullable(key(element)),
+            site
+        ));
     }
 }
