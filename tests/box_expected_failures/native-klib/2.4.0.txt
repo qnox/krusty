@@ -207,7 +207,6 @@ classLiteral/bound/primitives.kt
 classes/kt1538.kt
 classes/kt2566_2.kt
 classes/kt3001.kt
-classes/overloadUnaryOperator.kt
 classes/typedDelegation.kt
 closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
@@ -1274,7 +1273,6 @@ multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
-multiplatform/k2/hmpp/genericTypealiasSameNameTwoLibs.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
 multiplatform/k2/hmpp/inheritanceFromExpected3-3.kt
@@ -1326,7 +1324,6 @@ properties/accessorForProtectedPropertyWithPrivateSetter.kt
 properties/accessorForProtectedPropertyWithPrivateSetterInObjectLiteral.kt
 properties/accessorForProtectedPropertyWithPrivateSetterViaSuper.kt
 properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
-properties/backingField/backingFieldWithSmartTypeParameters.kt
 properties/complexPropertyInitializer.kt
 properties/eagerInitializationGlobal1.kt
 properties/eagerInitializationGlobal2.kt
@@ -2165,7 +2162,6 @@ when/stringOptimization/expression.kt
 when/stringOptimization/nullability.kt
 when/stringOptimization/sameHashCode.kt
 when/stringOptimization/statement.kt
-when/stringOptimization/temporaryVarInWhenByStringIsDisposedProperly.kt
 when/whenSubjectVariable/whenByEnum.kt
 when/whenSubjectVariable/whenByNullableEnum.kt
 when/whenSubjectVariable/whenByString.kt
