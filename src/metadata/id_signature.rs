@@ -134,6 +134,15 @@ impl KlibPublicIdSignature {
         })
     }
 
+    /// Whether `class` names the class that declares this member.
+    pub(crate) fn is_member_of(&self, class: &Self) -> bool {
+        let segments = self.declaration.segments();
+        self.package == class.package
+            && segments
+                .split_last()
+                .is_some_and(|(_, owner)| owner == class.declaration.segments())
+    }
+
     /// Public class identity for an already-resolved classifier.
     ///
     /// KLIB serialized IR names classifier types by the same structural package/declaration paths

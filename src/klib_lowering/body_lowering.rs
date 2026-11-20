@@ -430,6 +430,9 @@ pub(super) enum ConstructorRole {
 pub(super) struct LinkedConstructor {
     pub(super) target: crate::fir::ExternalCallableId,
     pub(super) declaration: super::constructor_calls::ConstructorDeclaration,
+    /// The constructor's place in the class this unit materialized for it, which a
+    /// construction runs by identity: a parameter list instantiated at the call's type
+    /// arguments is not one. `None` when the class is realized elsewhere.
     pub(super) materialized: Option<crate::ir::IrConstructorTarget>,
 }
 

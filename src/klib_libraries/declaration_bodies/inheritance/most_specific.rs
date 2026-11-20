@@ -271,7 +271,7 @@ impl SerializedHierarchy {
         let mut owners = self
             .classes
             .values()
-            .filter(|class| signature.owner_path() == Some(class.signature.declaration_path()));
+            .filter(|class| signature.is_member_of(&class.signature));
         let (Some(declaring), None) = (owners.next(), owners.next()) else {
             return None;
         };

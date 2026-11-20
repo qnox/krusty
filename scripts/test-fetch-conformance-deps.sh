@@ -9,6 +9,8 @@ mkdir -p "$work/bin" "$work/src"
 cp "$root/src/toolchain.rs" "$work/src/toolchain.rs"
 runtime="$(sed -n 's/^pub const ATOMICFU_RUNTIME_VERSION: &str = "\(.*\)";$/\1/p' "$root/src/toolchain.rs")"
 [ -n "$runtime" ] || { echo "no ATOMICFU_RUNTIME_VERSION in src/toolchain.rs" >&2; exit 1; }
+serialization="$(sed -n 's/^pub const SERIALIZATION_VERSION: &str = "\(.*\)";$/\1/p' "$root/src/toolchain.rs")"
+compose="$(sed -n 's/^pub const COMPOSE_RUNTIME_VERSION: &str = "\(.*\)";$/\1/p' "$root/src/toolchain.rs")"
 
 # The stub records each URL and writes the file named by `-o`; `FAIL_URL_PART` makes a URL answer 404.
 cat > "$work/bin/curl" <<'STUB'
@@ -41,9 +43,16 @@ expected=$(printf '%s\n' \
   "atomicfu-linuxx64-$runtime.klib" \
   "atomicfu-wasm-js-$runtime.klib" \
   "atomicfu-wasm-wasi-$runtime.klib" \
-  "kotlin-atomicfu-compiler-plugin-embeddable-2.4.20.jar")
+  "collection-jvm-1.5.0.jar" \
+  "kotlin-atomicfu-compiler-plugin-embeddable-2.4.20.jar" \
+  "kotlinx-coroutines-core-jvm-1.9.0.jar" \
+  "kotlinx-serialization-core-jvm-$serialization.jar" \
+  "kotlinx-serialization-json-jvm-$serialization.jar" \
+  "runtime-annotation-jvm-$compose.jar" \
+  "runtime-desktop-$compose.jar")
 [ "$(ls "$deps")" = "$expected" ] || { echo "unexpected files:"; ls "$deps"; exit 1; }
-[ "$(wc -l < "$STUB_LOG")" -eq 5 ] || { echo "expected 5 downloads"; cat "$STUB_LOG"; exit 1; }
+[ "$(wc -l < "$STUB_LOG")" -eq 11 ] || { echo "expected 11 downloads"; cat "$STUB_LOG"; exit 1; }
+grep -qx "https://dl.google.com/android/maven2/androidx/compose/runtime/runtime-desktop/$compose/runtime-desktop-$compose.jar" "$STUB_LOG"
 grep -qx "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-atomicfu-compiler-plugin-embeddable/2.4.20/kotlin-atomicfu-compiler-plugin-embeddable-2.4.20.jar" "$STUB_LOG"
 
 # A second run finds everything in place and downloads nothing.

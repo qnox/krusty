@@ -48,6 +48,16 @@ fn wasm_official_dependency_secondary_constructors_delegate_to_the_primary() {
     );
 }
 
+/// Secondary constructors that reach the primary one through another secondary constructor lower
+/// from the official producer's bodies, each running its own body after the one it delegates to.
+#[test]
+fn wasm_official_dependency_secondary_constructors_delegate_through_each_other() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyChainedSecondaryConstructors.kt"),
+        "DependencyChainedSecondaryConstructors",
+    );
+}
+
 /// A subclass implements a library interface member with the body it inherits from its
 /// superclass, which does not declare the interface and which no body calls.
 #[test]
@@ -55,6 +65,26 @@ fn wasm_official_dependency_subclasses_implement_interfaces_with_inherited_bodie
     run_against_official_producer(
         include_str!("box_regressions/multimodule/dependencyInheritedSuperclassImplementation.kt"),
         "DependencyInheritedSuperclassImplementation",
+    );
+}
+
+/// A public constructor that delegates to a library-private primary constructor lowers from the
+/// official producer's bodies, though no provider publishes the private constructor to source.
+#[test]
+fn wasm_official_dependency_public_constructors_delegate_to_a_private_primary() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyPrivatePrimaryConstructor.kt"),
+        "DependencyPrivatePrimaryConstructor",
+    );
+}
+
+/// A library body that asserts a value of a nullable-bounded type parameter non-null (`item!!`)
+/// types the assertion `T & Any`, and lowers from the official producer's bodies.
+#[test]
+fn wasm_official_dependency_definitely_non_null_assertions_lower_from_their_bodies() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyDefinitelyNonNullAssertion.kt"),
+        "DependencyDefinitelyNonNullAssertion",
     );
 }
 
@@ -76,16 +106,6 @@ fn wasm_official_dependency_body_member_forms_lower_from_their_bodies() {
     run_against_official_producer(
         include_str!("box_regressions/multimodule/dependencyBodyMemberForms.kt"),
         "DependencyBodyMemberForms",
-    );
-}
-
-/// A library body calls generic members of a generic class and of a class private to its
-/// library, binding the member's own type parameters and its class's.
-#[test]
-fn wasm_official_dependency_generic_members_of_library_classes_bind_every_type_parameter() {
-    run_against_official_producer(
-        include_str!("box_regressions/multimodule/dependencyGenericMembersOfLibraryClasses.kt"),
-        "DependencyGenericMembersOfLibraryClasses",
     );
 }
 
@@ -157,6 +177,21 @@ fn wasm_official_dependency_inherited_members_implement_indirect_interfaces() {
     );
 }
 
+/// A library body calls generic members of a generic class and of a class private to its
+/// library, binding the member's own type parameters and its class's.
+#[test]
+fn wasm_official_dependency_generic_members_of_library_classes_bind_every_type_parameter() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyGenericMembersOfLibraryClasses.kt"),
+        "DependencyGenericMembersOfLibraryClasses",
+    );
+}
+
+/// A library body calls a member an abstract class inherits from several interfaces without a
+/// The most specific inherited declaration is selected by subtyping its result: a covariant type
+/// A library body reads a property of a generic class of its library at a concrete type argument,
+/// A library body constructs a generic class through the secondary constructor it selected,
+/// An interface member a class reaches only through a supertype is implemented by the member
 /// Run the shared two-module program through the product producer, then compile its consumer
 /// against the library the exact official Wasm compiler produces and run it, on every target.
 fn run_against_official_producer(source: &str, name: &str) {

@@ -1632,7 +1632,8 @@ fn stdlib_calls_reach_header_declared_callees() {
     // reaches past it and declines at a member call. A generic property's access links through
     // its exact accessor, so `toKString` reaches `toKStringFromUtf16` and declines at its type
     // parameters. A generic file-private function now links with the formals its identity
-    // mints, so three more bodies reach past one and decline at a member call.
+    // mints, so three more bodies reach past one and decline at a member call. An access of a
+    // generic extension property the unit declares lowers that property and declines inside it.
     let expected = if crate::kotlin_version::target()
         >= crate::kotlin_version::KotlinVersion::V2_4_20
     {

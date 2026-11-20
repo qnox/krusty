@@ -302,7 +302,13 @@ impl BodyLowering<'_> {
             ));
         };
         let operand = self.expression(operand)?;
-        if self.lowered_type(operand).non_null() != ty || ty.is_nullable() {
+        // A type parameter whose bound admits null asserts to the intersection `T & Any`, which
+        // keeps the parameter's identity; any other operand to its non-null type.
+        let asserted = self
+            .lowered_type(operand)
+            .non_null()
+            .marked_definitely_not_null();
+        if asserted != ty || ty.is_nullable() {
             return Err(mismatch(
                 "`CHECK_NOT_NULL` is typed apart from its operand's non-null type",
             ));
@@ -999,25 +1005,7 @@ impl BodyLowering<'_> {
             }
         }
         let mut linked = self.linker.link_accessor(self.ir, accessor)?;
-        if matches!(linked.target, LinkedAccessorTarget::Local(_))
-            && !access.type_arguments.is_empty()
-        {
-            // A generic extension property this unit declares binds its own type parameters as a
-            // call of a generic function of this unit does.
-            if linked.type_parameters.len() != access.type_arguments.len() {
-                return Err(mismatch(
-                    "a property access has another number of type arguments than its selected accessor",
-                ));
-            }
-            self.bind_local_formals(
-                &linked.type_parameters,
-                access,
-                |_, value| value,
-                (&mut linked.receiver, &mut linked.params, &mut linked.ret),
-            )?;
-            // The access reads the declaration at its type arguments: no formal is left to bind.
-            linked.type_parameters.clear();
-        } else if linked.type_parameters.len() != access.type_arguments.len() {
+        if linked.type_parameters.len() != access.type_arguments.len() {
             return Err(mismatch(
                 "a property access has another number of type arguments than its selected accessor",
             ));
@@ -1025,49 +1013,45 @@ impl BodyLowering<'_> {
         if !linked.reified_type_parameters.is_empty() {
             return unsupported("a reified generic property accessor");
         }
-        let mut bindings = crate::fx_hash::HashMap::default();
-        for (formal, argument) in linked.type_parameters.iter().zip(&access.type_arguments) {
-            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
-                "a property access that leaves a type argument unset",
-            ))?;
-            bindings.insert(*formal, self.semantic(argument)?);
-        }
         if linked.type_parameter_bounds.len() != linked.type_parameters.len() {
             return Err(mismatch(
                 "the selected accessor's bounds do not match its formal identities",
             ));
         }
+        let bindings =
+            self.local_type_bindings(&linked.type_parameters, access, |_, value| value)?;
         let mut substitutions = Vec::with_capacity(linked.type_parameters.len());
         if !linked.type_parameters.is_empty() {
-            let target = linked.callable.ok_or_else(|| {
-                KlibBodyDeclineReason::SignatureMismatch(
-                    "a generic accessor has no exact external callable identity".to_owned(),
-                )
-            })?;
-            for (ordinal, formal) in linked.type_parameters.iter().enumerate() {
-                let value = bindings[formal];
-                substitutions.push(IrCheckedSubstitution {
-                    parameter: FirTypeParameterRef::External {
-                        callable: target,
-                        ordinal: u32::try_from(ordinal).map_err(|_| {
-                            mismatch("a property accessor has too many type parameters")
-                        })?,
-                    },
-                    reified: false,
-                    value,
-                    reified_runtime: value,
-                    additional_bounds: Vec::new(),
-                });
+            // A dependency accessor records each binding against its exact external identity; one
+            // the unit declares is a function of this unit, bound where it is called.
+            if !matches!(linked.target, LinkedAccessorTarget::Local(_)) {
+                let target = linked.callable.ok_or_else(|| {
+                    KlibBodyDeclineReason::SignatureMismatch(
+                        "a generic accessor has no exact external callable identity".to_owned(),
+                    )
+                })?;
+                for (ordinal, formal) in linked.type_parameters.iter().enumerate() {
+                    let value = bindings[formal];
+                    substitutions.push(IrCheckedSubstitution {
+                        parameter: FirTypeParameterRef::External {
+                            callable: target,
+                            ordinal: u32::try_from(ordinal).map_err(|_| {
+                                mismatch("a property accessor has too many type parameters")
+                            })?,
+                        },
+                        reified: false,
+                        value,
+                        reified_runtime: value,
+                        additional_bounds: Vec::new(),
+                    });
+                }
             }
             // The accessor's own formals are bound here; a declaring-class formal stays as written
             // until the dispatch receiver applies it.
-            let formals = &linked.type_parameters;
-            let own = |ty| crate::types::ty_subst_formals(ty, formals, &bindings);
-            for parameter in &mut linked.params {
-                *parameter = own(*parameter);
-            }
-            linked.ret = own(linked.ret);
-            linked.receiver = linked.receiver.map(own);
+            substitute_local_signature(
+                (&mut linked.receiver, &mut linked.params, &mut linked.ret),
+                &bindings,
+            );
         }
         let CallOperands {
             receiver,
@@ -1170,33 +1154,23 @@ impl BodyLowering<'_> {
         }))))
     }
 
-    /// Read a declaration of this unit at the type arguments of the call or access `access`, as
-    /// checked FIR lowering reads a source call of a module generic function: its receiver,
-    /// parameters and result are substituted through `bound` (the captured projection a formal
-    /// binds, if any), and the call records no substitutions of its own. A member of a generic
-    /// class keeps naming its class's type parameters.
-    fn bind_local_formals(
+    /// The type each of `parameters`, a callee's own formals, is bound to by the call or
+    /// access `access`, through `bound` (the captured projection a parameter binds, if any).
+    fn local_type_bindings(
         &self,
-        formals: &[crate::types::TyParamName],
+        parameters: &[crate::types::TyParamName],
         access: &KlibIrMemberAccess,
         bound: impl Fn(&crate::types::TyParamName, Ty) -> Ty,
-        (receiver, params, ret): (&mut Option<Ty>, &mut [Ty], &mut Ty),
-    ) -> Lowered<()> {
+    ) -> Lowered<crate::fx_hash::HashMap<crate::types::TyParamName, Ty>> {
         let mut bindings = crate::fx_hash::HashMap::default();
-        for (parameter, argument) in formals.iter().zip(&access.type_arguments) {
+        for (parameter, argument) in parameters.iter().zip(&access.type_arguments) {
             let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
                 "a call that leaves a type argument unset",
             ))?;
             let value = self.semantic(argument)?;
             bindings.insert(*parameter, bound(parameter, value));
         }
-        let substitute = |ty: Ty| crate::types::ty_subst_formals(ty, formals, &bindings);
-        for param in params.iter_mut() {
-            *param = substitute(*param);
-        }
-        *ret = substitute(*ret);
-        *receiver = receiver.map(substitute);
-        Ok(())
+        Ok(bindings)
     }
 
     /// A call's dispatch receiver and arguments, each read at the callee's declared type, after
@@ -1366,12 +1340,11 @@ impl BodyLowering<'_> {
             // lowers a source call of a module generic function: the arguments are read at the
             // substituted parameters and the declared result is coerced to the substituted one,
             // with no substitutions recorded on the call.
-            self.bind_local_formals(
-                &linked.type_parameters,
-                access,
-                bound,
+            let bindings = self.local_type_bindings(&linked.type_parameters, access, bound)?;
+            substitute_local_signature(
                 (&mut linked.receiver, &mut linked.params, &mut linked.ret),
-            )?;
+                &bindings,
+            );
             return Ok(linked);
         }
         let Callee::External {
@@ -1658,4 +1631,23 @@ fn argument_expectation(
     let mut approximated = bindings.clone();
     approximated.extend(approximations);
     declared.substitute_erased(&approximated)
+}
+
+/// Read a declaration of this unit at `bindings`, as checked FIR lowering reads a source call of
+/// a module generic function: its receiver, parameters and result are substituted, and the call
+/// records no substitutions of its own.
+fn substitute_local_signature(
+    (receiver, params, ret): (&mut Option<Ty>, &mut [Ty], &mut Ty),
+    bindings: &crate::fx_hash::HashMap<crate::types::TyParamName, Ty>,
+) {
+    // Every one of the callee's own type parameters is bound. A member of a generic class keeps
+    // naming its class's type parameters, which [`BodyLowering::call_operands`] binds from the
+    // dispatch receiver's type.
+    let formals = bindings.keys().copied().collect::<Vec<_>>();
+    let substitute = |ty: Ty| crate::types::ty_subst_formals(ty, &formals, bindings);
+    for param in params.iter_mut() {
+        *param = substitute(*param);
+    }
+    *ret = substitute(*ret);
+    *receiver = receiver.map(substitute);
 }

@@ -86,13 +86,15 @@ impl Linker<'_, '_> {
             context_count: ir.declared_parameters(function).context_count,
             class_type_parameters: Vec::new(),
             callable: None,
-            // A generic extension property declares its own type parameters, which each access
-            // binds.
             type_parameters: selected
                 .and_then(|selected| selected.generic_signature())
                 .map_or_else(Vec::new, |signature| signature.formals.clone()),
-            type_parameter_bounds: Vec::new(),
-            reified_type_parameters: Vec::new(),
+            type_parameter_bounds: selected
+                .and_then(|selected| selected.generic_signature())
+                .map_or_else(Vec::new, |signature| signature.formal_bounds.clone()),
+            reified_type_parameters: selected.map_or_else(Vec::new, |selected| {
+                selected.reified_type_parameter_ordinals().to_vec()
+            }),
         }))
     }
 

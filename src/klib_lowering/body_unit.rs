@@ -38,7 +38,6 @@ use crate::types::{Ty, TypeName};
 
 mod class_construction;
 pub(crate) use class_construction::superclass_constructor_ordinal;
-mod constructor_linking;
 mod enum_materialization;
 #[cfg(test)]
 mod initializer_capability_tests;
@@ -327,9 +326,9 @@ struct PendingBody<'a> {
 enum PendingInitialization<'a> {
     /// The admitted initialization of the class's own fields and initializers.
     Class(Box<super::class_initialization::ClassInitialization<'a, 'a>>),
-    /// A secondary constructor's statements after its delegation to the primary constructor,
-    /// whose arguments the class's secondary constructor `secondary` passes.
-    PrimaryDelegation {
+    /// A secondary constructor's statements after its delegation to another constructor of the
+    /// class, whose arguments the class's secondary constructor `secondary` passes.
+    OwnDelegation {
         secondary: usize,
         arguments: Vec<crate::metadata::klib_ir::tree::KlibIrExprId>,
     },
@@ -980,22 +979,22 @@ impl DependencyBodyUnit {
                     (
                         Some((
                             class,
-                            PendingInitialization::PrimaryDelegation {
+                            PendingInitialization::OwnDelegation {
                                 secondary,
                                 arguments,
                             },
                         )),
                         Some(member),
-                    ) => lowering.delegate_to_primary(
+                    ) => lowering.delegate_within_class(
                         *class,
                         *secondary,
                         member,
                         arguments,
                         body.statements,
                     ),
-                    (Some((_, PendingInitialization::PrimaryDelegation { .. })), None) => {
+                    (Some((_, PendingInitialization::OwnDelegation { .. })), None) => {
                         Err(KlibBodyDeclineReason::SignatureMismatch(
-                            "a primary constructor delegation has no materialized class".to_owned(),
+                            "a delegation within the class has no materialized class".to_owned(),
                         ))
                     }
                     (None, value_member) => match value_member {
@@ -1425,7 +1424,70 @@ impl<'s> CallLinker for Linker<'_, 's> {
         callee: &KlibPublicIdSignature,
         role: ConstructorRole,
     ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
-        self.link_selected_constructor(ir, callee, role)
+        let identity = self.callee_identity(callee)?;
+        let (_, function) = self.sources.bodies.function(&identity).ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "a constructor call has no serialized function header".to_owned(),
+            )
+        })?;
+        super::constructor_calls::require_constructor_kind(function)?;
+        if matches!(self.sources.callees.get(&identity), Some(KlibCalleeFact::Selected(callables))
+            if callables[0].kind() != crate::libraries::ExternalCallableKind::Constructor)
+        {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a constructor call selected a non-constructor provider declaration".to_owned(),
+            ));
+        }
+        // An earlier unit's retained initializer runs on an instance a subclass allocated; it
+        // never allocates its own class.
+        let retained_initializer = self.sources.externals.get(&identity).filter(|external| {
+            matches!(
+                external.realization,
+                DependencyExternalRealization::ConstructorInitializer
+            )
+        });
+        if retained_initializer.is_some() && role == ConstructorRole::Allocation {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an initializer-only dependency does not permit class allocation".to_owned(),
+            ));
+        }
+        let declaration = self
+            .sources
+            .callees
+            .constructor(&identity, self.sources.bodies)?
+            // Producer lookup above already proved the serialized declaration exists. Without
+            // exact provider evidence this unit cannot realize construction; that is not a
+            // missing declaration and must not invent a constructor handle.
+            .ok_or_else(|| KlibBodyDeclineReason::UnsupportedCallee(Box::new(callee.clone())))?;
+        if let Some(initializer) = retained_initializer {
+            return Ok(LinkedConstructor {
+                target: initializer.target(),
+                declaration,
+                materialized: None,
+            });
+        }
+        let external = self
+            .sources
+            .externals
+            .get(&identity)
+            .filter(|external| external.is_constructor())
+            .ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "an authenticated constructor has no exact constructor external handle"
+                        .to_owned(),
+                )
+            })?;
+        let target = external.target();
+        let allocating = matches!(
+            external.realization,
+            DependencyExternalRealization::AllocatingConstructor
+        );
+        let materialized = self.materialize_constructed_class(ir, &identity, allocating)?;
+        Ok(LinkedConstructor {
+            target,
+            declaration,
+            materialized,
+        })
     }
 
     fn constructor_bound(
