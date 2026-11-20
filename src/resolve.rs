@@ -34483,30 +34483,7 @@ impl<'a> Checker<'a> {
             });
         }
 
-        self.resolver()
-            .top_level_candidates(name)
-            .into_iter()
-            .any(|mut function| {
-                function.kind == crate::libraries::FnKind::TopLevel
-                    && self
-                        .specialize_callable_ref_candidate(
-                            &mut function,
-                            None,
-                            Some(&expected.params),
-                            Some(expected.ret),
-                        )
-                        .is_ok()
-                    && self
-                        .callable_ref_argument_plan(&function, expected)
-                        .is_some()
-                    && self.callable_ref_is_compatible(
-                        &expected.params,
-                        function.callable.ret,
-                        function.callable.suspend,
-                        expected,
-                        true,
-                    )
-            })
+        self.scope_resolved_callable_reference_adapts_to(scope, name, expected)
     }
 
     /// Read-only applicability for a classifier-qualified callable reference while an enclosing
