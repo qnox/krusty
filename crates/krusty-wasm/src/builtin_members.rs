@@ -118,6 +118,9 @@ enum Operation {
     StringCompare,
     /// The characters of a string between two indices (`String.subSequence`).
     StringSubSequence,
+    /// The builder's entry for a member it does not realize while no builder exists: nothing can
+    /// call it, and a program constructing a builder declines a call through the member.
+    Unreachable,
     /// The order of the value a box holds and the value another box of its class holds
     /// (`Int.compareTo(Int)`).
     Compare,
@@ -266,7 +269,20 @@ impl Runtime {
                     self.objects.interfaces.implement(class, member, function)?;
                 }
                 Some(Err(reason)) => match class {
-                    RuntimeClass::StringBuilder => self.unanswered_builder_member(member, reason),
+                    RuntimeClass::StringBuilder => {
+                        let function = self.define_implementation(
+                            module,
+                            member,
+                            Receiver::Runtime,
+                            Operation::Unreachable,
+                        )?;
+                        self.objects.interfaces.implement(
+                            self.string_builders.class,
+                            member,
+                            function,
+                        )?;
+                        self.unanswered_builder_member(member, reason);
+                    }
                     // A list member the runtime does not realize keeps the empty slot it had
                     // before the list answered any interface member. Declining it would decline
                     // every program constructing a list and reaching, say, `MutableList.set`
@@ -455,6 +471,9 @@ impl Runtime {
                     code.local_get(parameter);
                 }
                 code.call(function);
+            }
+            (Receiver::Runtime, Operation::Unreachable) => {
+                code.unreachable();
             }
             (Receiver::Runtime, Operation::Builder(builder)) => {
                 let builders = &self.string_builders;
