@@ -1024,7 +1024,6 @@ fakeOverride/intersectionInLocal.kt
 fakeOverride/privateFakeOverrides0.kt
 fakeOverride/privateFakeOverrides1.kt
 fir/kt68806.kt
-fir/listAssignmentInWhen.kt
 fir/multipleDefaultsFalsePositiveDelegation.kt
 fp/atan2ZeroGuadrantsDouble.kt
 fp/powDouble.kt
@@ -1100,7 +1099,6 @@ ieee754/nullableFloatNotEquals.kt
 ieee754/whenNullableSmartCast.kt
 ieee754/when_properIeeeComparisons.kt
 increment/augmentedAssignmentWithComplexRhs.kt
-increment/mutableListElement.kt
 increment/nullable.kt
 inference/builderInferenceLeakingVariable.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
@@ -1370,9 +1368,6 @@ inlineClasses/unboxGenericParameter/funInterface/primitive.kt
 inlineClasses/unboxGenericParameter/lambda/primitive.kt
 inlineClasses/unboxGenericParameter/objectLiteral/primitive.kt
 inlineClasses/unboxResultParameterWhenCapturingToCrossinlineLambda.kt
-inlineClasses/unboxValueOfAnyBeforeMethodInvocation.kt
-inlineClasses/unboxValueOfAnyBeforeMethodInvocationGeneric.kt
-inlineClasses/unboxValueOfAnyBeforeMethodInvocationGeneric2.kt
 inlineClasses/valueClassInstanceOfNumberAndComparable.kt
 inlineEvaluationOrder/argumentOfCall.kt
 inlineEvaluationOrder/argumentOfCallMultipleInlineCalls.kt
