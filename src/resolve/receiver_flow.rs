@@ -345,6 +345,19 @@ impl Checker<'_> {
             .find(|types| !types.is_empty())
             .unwrap_or_default()
     }
+
+    /// The intersection a stable-path argument is proved to have, when it has several
+    /// constituents. Overload comparison treats the argument as that type, so a parameter of any
+    /// one constituent admits it.
+    pub(super) fn flow_intersection_argument(
+        &self,
+        scope: &CheckerScope<'_>,
+        argument: ExprId,
+    ) -> Option<Ty> {
+        let path = self.expr_access_path(argument)?;
+        let constituents = self.lookup_intersection_narrowing(scope, &path);
+        (constituents.len() > 1).then(|| Ty::intersection(&constituents))
+    }
 }
 
 /// Flow a completing expression proved in one scope frame: narrowing shadows, property paths, and

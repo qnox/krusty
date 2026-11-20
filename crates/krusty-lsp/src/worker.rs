@@ -380,6 +380,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
                         DiagnosticKind::Inspection => 2,
                         DiagnosticKind::ValReassignment => 3,
                         DiagnosticKind::Actualization => 4,
+                        DiagnosticKind::PluginRefusal => 5,
                     },
                     message: diagnostic.msg,
                 })
@@ -425,6 +426,7 @@ impl AnalysisResponse {
                         2 => DiagnosticKind::Inspection,
                         3 => DiagnosticKind::ValReassignment,
                         4 => DiagnosticKind::Actualization,
+                        5 => DiagnosticKind::PluginRefusal,
                         _ => DiagnosticKind::Compiler,
                     },
                     msg: diagnostic.message,
