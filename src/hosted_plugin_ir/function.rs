@@ -672,7 +672,12 @@ fn expression_kind(kind: &FirExprKind) -> String {
 /// `span` of the file as kotlinc's offsets into the text it reads.
 fn plugin_span(offsets: &Utf16Offsets, span: Span) -> krusty_plugin_ir::Span {
     krusty_plugin_ir::Span {
-        start: offsets.unit(span.lo),
-        end: offsets.unit(span.hi),
+        start: kotlinc_offset(offsets.unit(span.lo)),
+        end: kotlinc_offset(offsets.unit(span.hi)),
     }
+}
+
+/// A UTF-16 offset as kotlinc's IR keeps one, an `Int`.
+fn kotlinc_offset(unit: u32) -> i32 {
+    i32::try_from(unit).expect("kotlinc reads no file past an Int offset")
 }
