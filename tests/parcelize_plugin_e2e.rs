@@ -54,6 +54,20 @@ public final class Parcel {
     public float readFloat() { return (Float) next(); }
     public void writeDouble(double value) { values.add(value); }
     public double readDouble() { return (Double) next(); }
+    public void writeIntArray(int[] value) { values.add(value == null ? null : value.clone()); }
+    public int[] createIntArray() { return (int[]) next(); }
+    public void writeByteArray(byte[] value) { values.add(value == null ? null : value.clone()); }
+    public byte[] createByteArray() { return (byte[]) next(); }
+    public void writeLongArray(long[] value) { values.add(value == null ? null : value.clone()); }
+    public long[] createLongArray() { return (long[]) next(); }
+    public void writeFloatArray(float[] value) { values.add(value == null ? null : value.clone()); }
+    public float[] createFloatArray() { return (float[]) next(); }
+    public void writeDoubleArray(double[] value) { values.add(value == null ? null : value.clone()); }
+    public double[] createDoubleArray() { return (double[]) next(); }
+    public void writeBooleanArray(boolean[] value) { values.add(value == null ? null : value.clone()); }
+    public boolean[] createBooleanArray() { return (boolean[]) next(); }
+    public void writeCharArray(char[] value) { values.add(value == null ? null : value.clone()); }
+    public char[] createCharArray() { return (char[]) next(); }
 }
 "#;
 
@@ -115,6 +129,17 @@ class Unsigned(
     val maybeShort: UShort?,
 ) : Parcelable
 
+@Parcelize
+class Arrays(
+    val ints: IntArray,
+    val bytes: ByteArray,
+    val longs: LongArray?,
+    val floats: FloatArray,
+    val doubles: DoubleArray,
+    val flags: BooleanArray?,
+    val chars: CharArray,
+) : Parcelable
+
 class Outer {
     @Parcelize
     class Point(val x: Int, val y: Long?) : Parcelable
@@ -162,13 +187,32 @@ fun box(): String {
     if (unsigned.int != 4000000000u || unsigned.long != 18000000000000000000uL) return "unsigned"
     if (unsigned.maybeInt != null || unsigned.maybeLong != 5uL) return "nullable unsigned"
     if (unsigned.maybeByte != 7.toUByte() || unsigned.maybeShort != null) return "nullable small"
+    val arrays = roundTrip(
+        Arrays(
+            intArrayOf(1, -2),
+            byteArrayOf(3),
+            null,
+            floatArrayOf(1.5f),
+            doubleArrayOf(2.5, 3.5),
+            booleanArrayOf(true, false),
+            charArrayOf('a', 'b'),
+        ),
+        Arrays::class.java,
+    )
+    if (!arrays.ints.contentEquals(intArrayOf(1, -2)) || !arrays.bytes.contentEquals(byteArrayOf(3))) {
+        return "int and byte arrays"
+    }
+    if (arrays.longs != null || !arrays.floats.contentEquals(floatArrayOf(1.5f))) return "arrays"
+    if (!arrays.doubles.contentEquals(doubleArrayOf(2.5, 3.5))) return "double array"
+    if (!arrays.flags!!.contentEquals(booleanArrayOf(true, false))) return "boolean array"
+    if (!arrays.chars.contentEquals(charArrayOf('a', 'b'))) return "char array"
     val users = creator(User::class.java).newArray(2)
     if (users.size != 2 || users[0] != null) return "newArray"
     return "OK"
 }
 "#;
 
-/// Strings, primitives (booleans, shorts, chars and unsigned integers included) and their nullable forms, top-level and nested classes: `describeContents`,
+/// Strings, primitives (booleans, shorts, chars and unsigned integers and primitive arrays included) and their nullable forms, top-level and nested classes: `describeContents`,
 /// `writeToParcel`, `CREATOR` and its local `Creator` class with their bridges, generic signature
 /// and debug tables match kotlinc's, and each class reads back what it wrote.
 #[test]
