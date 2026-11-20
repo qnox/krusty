@@ -838,7 +838,9 @@ impl Walk<'_> {
     /// class's private static declaration. A use without a source line takes its parent's; the
     /// construction of a carrier in `carriers` stands for that carrier's own uses. `export_private`
     /// is set when `root` is a non-private `inline` function: that body is copied into other
-    /// classes, so its private calls need accessors even when `context` is their owner.
+    /// classes, so its private calls need accessors even when `context` is their owner. The body
+    /// of a literal passed to a `crossinline` parameter exports its private access the same way,
+    /// wherever it stands.
     fn collect(
         &self,
         context: StaticOwner,
@@ -850,8 +852,9 @@ impl Walk<'_> {
     ) {
         let ir = self.ir;
         // Post-order: an operand's use precedes the use of the call or store consuming it.
-        let mut stack = vec![(root, line, false)];
-        while let Some((expression, inherited, expanded)) = stack.pop() {
+        let mut crossinline = crate::inline_parameters::CrossinlineBodies::default();
+        let mut stack = vec![(root, line, false, export_private)];
+        while let Some((expression, inherited, expanded, export_private)) = stack.pop() {
             let line = ir.source_line(expression).unwrap_or(inherited);
             if !expanded {
                 // Kotlin discovers a store's target after its receiver but before its assigned
@@ -861,30 +864,32 @@ impl Walk<'_> {
                     IrExpr::PropertyWrite {
                         receiver, value, ..
                     } => {
-                        stack.push((*value, line, false));
-                        stack.push((expression, inherited, true));
+                        stack.push((*value, line, false, export_private));
+                        stack.push((expression, inherited, true, export_private));
                         if let Some(receiver) = receiver {
-                            stack.push((*receiver, line, false));
+                            stack.push((*receiver, line, false, export_private));
                         }
                     }
                     IrExpr::SetField {
                         receiver, value, ..
                     } => {
-                        stack.push((*value, line, false));
-                        stack.push((expression, inherited, true));
-                        stack.push((*receiver, line, false));
+                        stack.push((*value, line, false, export_private));
+                        stack.push((expression, inherited, true, export_private));
+                        stack.push((*receiver, line, false, export_private));
                     }
                     IrExpr::SetStatic { value, .. } => {
-                        stack.push((*value, line, false));
-                        stack.push((expression, inherited, true));
+                        stack.push((*value, line, false, export_private));
+                        stack.push((expression, inherited, true, export_private));
                     }
                     _ => {
-                        stack.push((expression, inherited, true));
-                        let mut children = Vec::new();
-                        krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                            children.push(child)
-                        });
-                        stack.extend(children.into_iter().rev().map(|child| (child, line, false)));
+                        stack.push((expression, inherited, true, export_private));
+                        stack.extend(
+                            crossinline
+                                .children(ir, expression, export_private)
+                                .into_iter()
+                                .rev()
+                                .map(|(child, exports)| (child, line, false, exports)),
+                        );
                     }
                 }
                 continue;
@@ -1907,7 +1912,7 @@ impl Accessor<'_> {
         }
         let mut slot = 0u16;
         let mut locals = Vec::new();
-        let names = crate::parameter_names::function_locals(ir, function, &parameters);
+        let names = crate::parameter_names::access_bridge_locals(ir, function, &parameters);
         for (ordinal, &ty) in parameters.iter().enumerate() {
             load(ty, slot, &mut code);
             if let Some(local) = names

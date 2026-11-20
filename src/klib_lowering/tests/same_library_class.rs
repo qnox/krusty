@@ -1113,10 +1113,13 @@ fn an_erased_factory_freezes_only_the_private_classes_its_body_constructs() {
         .unwrap();
     let callable = selected.klib_body_callable().unwrap();
     assert_eq!(callable.ret(), Ty::obj("kotlin/Any"));
-    let roots = libraries.declaration_bodies().emitted_body_classifiers(
-        callable.identity(),
-        crate::klib_lowering::EMITTED_CALL_FORMS,
-    );
+    let roots = libraries
+        .declaration_bodies()
+        .emitted_body(
+            callable.identity(),
+            crate::klib_lowering::EMITTED_CALL_FORMS,
+        )
+        .hierarchy_roots;
     assert!(roots.contains(&crate::types::type_name("fixture/Leaf")));
     assert!(!roots.contains(&crate::types::type_name("fixture/Unused")));
     // The declaring header is a hierarchy root, not a new public callable or source candidate.
