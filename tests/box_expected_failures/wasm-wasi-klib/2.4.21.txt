@@ -680,7 +680,6 @@ coroutines/suspendFunctionAsSupertype.kt
 coroutines/suspendFunctionAsSupertypeCall.kt
 coroutines/suspendFunctionAsSupertypeWithInlinedFunInKlib.kt
 coroutines/suspendFunctionTypeCall/manyParametersNoCapture.kt
-coroutines/suspendInlineReference.kt
 coroutines/suspensionInsideSafeCallWithElvis.kt
 coroutines/tailCallOptimizations/crossinline.kt
 coroutines/tailCallOptimizations/innerObjectRetransformation.kt
