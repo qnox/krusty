@@ -267,7 +267,6 @@ casts/wasmCastMessages.kt
 classDelegation/multipleModules.kt
 classLiteral/bound/primitives.kt
 classLiteral/classEquality.kt
-classes/comanionObjectFieldVsClassField.kt
 classes/kt1538.kt
 classes/kt2417.kt
 classes/kt2566_2.kt
@@ -1137,8 +1136,6 @@ inlineClasses/castInsideWhenExpression.kt
 inlineClasses/castInsideWhenExpressionGeneric.kt
 inlineClasses/constructorCallableReference.kt
 inlineClasses/constructorCallableReferenceGeneric.kt
-inlineClasses/contextsAndAccessors/accessPrivateInlineClassConstructorFromLambda.kt
-inlineClasses/contextsAndAccessors/accessPrivateInlineClassConstructorFromLambdaGeneric.kt
 inlineClasses/contextsAndAccessors/kt27513.kt
 inlineClasses/contextsAndAccessors/kt27513Generic.kt
 inlineClasses/contextsAndAccessors/kt30780.kt
@@ -2227,7 +2224,6 @@ regressions/kt15196.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
 regressions/kt32949.kt
-regressions/kt344.kt
 regressions/kt3442.kt
 regressions/kt5056.kt
 regressions/kt6434.kt
@@ -2328,8 +2324,6 @@ strings/concatNullableGenericWithPrimitiveUpperBound.kt
 strings/constInStringTemplate.kt
 strings/kt13213.kt
 strings/kt13213a.kt
-strings/kt3571.kt
-strings/kt5956.kt
 strings/kt86478_stringBuilderSetLength.kt
 strings/nestedConcat.kt
 strings/trimOptimization.kt
