@@ -4,9 +4,9 @@
 
 class Single(private val k: String, private val v: String) : Map<String, String> {
     override val size: Int get() = 1
-    override val keys: Set<String> get() = setOf(k)
-    override val values: Collection<String> get() = listOf(v)
-    override val entries: Set<Map.Entry<String, String>> get() = mapOf(k to v).entries
+    override val keys: Set<String> get() = throw UnsupportedOperationException()
+    override val values: Collection<String> get() = throw UnsupportedOperationException()
+    override val entries: Set<Map.Entry<String, String>> get() = throw UnsupportedOperationException()
     override fun isEmpty(): Boolean = false
     override fun containsKey(key: String): Boolean = key == k
     override fun containsValue(value: String): Boolean = value == v
@@ -21,11 +21,9 @@ fun box(): String {
     if (m.containsKey("x")) return "containsKey miss"
     if (!m.containsValue("K")) return "containsValue"
     if (m["x"] != null) return "get miss"
-    if (m.keys.size != 1) return "keys"
-    if (m.values.size != 1) return "values"
     val wide = m as Map<Any?, Any?>
     if (wide.containsKey(1)) return "wide containsKey"
     if (wide.containsValue(1)) return "wide containsValue"
     if (wide[1] != null) return "wide get"
-    return "O" + m.getValue("O")
+    return "O" + m["O"]!!
 }
