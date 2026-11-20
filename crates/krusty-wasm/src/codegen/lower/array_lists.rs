@@ -148,9 +148,13 @@ impl Body<'_> {
             // The index the member takes, its only argument, must stay within `bound`.
             let size = self.runtime.array_lists.size;
             let (list, index) = (self.local(REFERENCE), self.local(ValType::I32));
-            // `set` takes the element after the index: set it aside while the index is checked.
-            let element = (operation == crate::array_lists::ListOperation::Set)
-                .then(|| self.local(REFERENCE));
+            // `set` and an insertion take the element after the index: set it aside while the
+            // index is checked.
+            let element = matches!(
+                operation,
+                crate::array_lists::ListOperation::Set | crate::array_lists::ListOperation::AddAt
+            )
+            .then(|| self.local(REFERENCE));
             if let Some(element) = element {
                 self.code.local_set(element);
             }
