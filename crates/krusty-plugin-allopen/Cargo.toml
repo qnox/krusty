@@ -1,0 +1,10 @@
+[package]
+name = "krusty-plugin-allopen"
+version = "0.0.1"
+edition = "2021"
+description = "krusty's native reimplementation of kotlinc's all-open compiler plugin"
+license = "Apache-2.0"
+repository = "https://github.com/qnox/krusty"
+
+[dependencies]
+krusty-plugin-api = { path = "../krusty-plugin-api" }
