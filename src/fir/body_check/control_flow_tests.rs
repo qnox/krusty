@@ -6,6 +6,17 @@ use super::*;
 use crate::types::EqualityMode;
 use crate::types::TyKind;
 
+/// kotlinc's join of `Int` and `Double`: `Number` and `Comparable<*>`, not their arithmetic promotion.
+fn number_and_comparable() -> Ty {
+    Ty::intersection(&[
+        Ty::obj("kotlin/Number"),
+        Ty::obj_args(
+            "kotlin/Comparable",
+            &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
+        ),
+    ])
+}
+
 #[test]
 fn elvis_mixed_numeric_branches_retain_their_number_supertype() {
     let platform = jvm_stdlib_semantics();
@@ -36,7 +47,7 @@ fn elvis_mixed_numeric_branches_retain_their_number_supertype() {
         .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
         .find(|expression| matches!(expression.kind, FirExprKind::Elvis { .. }))
         .expect("checked Elvis expression");
-    assert_eq!(elvis.ty.get(), Ty::obj("kotlin/Number"));
+    assert_eq!(elvis.ty.get(), number_and_comparable());
 }
 
 #[test]
@@ -849,4 +860,34 @@ fn return_in_for_range_header_terminates_the_enclosing_function() {
             })
         )
     }));
+}
+
+#[test]
+fn conditional_numeric_lub_is_not_arithmetic_promotion() {
+    let (body, _) = checked_function_body_with_platform(
+        "import kotlin.test.assertEquals\n\
+         fun use() {\n\
+             val value = when (true) {\n\
+                 true -> 42\n\
+                 else -> 1.0\n\
+             }\n\
+             assertEquals(42, value)\n\
+         }\n",
+        "use",
+        jvm_stdlib_semantics(),
+    );
+
+    let call = (0..body.expression_count())
+        .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
+        .find_map(|expression| match &expression.kind {
+            FirExprKind::Call(call)
+                if matches!(call.target, FirCallTarget::External { .. })
+                    && call.substitutions.len() == 1 =>
+            {
+                Some(call)
+            }
+            _ => None,
+        })
+        .expect("assertEquals must remain an applicable checked call");
+    assert_eq!(call.substitutions[0].value.get(), number_and_comparable());
 }

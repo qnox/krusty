@@ -943,9 +943,15 @@ impl Checker<'_> {
                 // A flexible producer is committed to a non-null generic parameter through its
                 // lower bound. That is the same selected value, not a widening: retain the
                 // boundary provenance while normalizing the call's denotable type argument.
+                // A value whose own type is already the intersection is committed to the formal's
+                // denotable approximation of it, which is the same selected value.
                 let selected_same_value = fact.selected_result == selected_argument
                     || (fact.through_flexible
-                        && fact.selected_result.non_null() == selected_argument);
+                        && fact.selected_result.non_null() == selected_argument)
+                    || (matches!(
+                        fact.selected_result.non_null().kind(),
+                        crate::types::TyKind::Intersection(_)
+                    ) && self.receiver_is_assignable(fact.selected_result, selected_argument));
                 if fact.parts.len() < 2 || !selected_same_value {
                     continue;
                 }

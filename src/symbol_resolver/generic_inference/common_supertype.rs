@@ -409,6 +409,14 @@ fn reified_approximation(ty: Ty, to_super: bool, approximation: &Approximation<'
                 Ty::nullable(approximated)
             }
         }
+        TyKind::PlatformNullable(inner) => {
+            let approximated = reified_approximation(inner, to_super, approximation);
+            if approximated == inner {
+                ty
+            } else {
+                Ty::platform_nullable(approximated)
+            }
+        }
         TyKind::Intersection(parts) if to_super => {
             approximate_reified_intersection(parts.as_slice(), approximation).unwrap_or(ty)
         }
