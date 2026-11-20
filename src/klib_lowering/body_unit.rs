@@ -1753,7 +1753,8 @@ impl<'s> CallLinker for Linker<'_, 's> {
         let identity = self.callee_identity(callee)?;
         // The active selection decides every call, including one of a function an earlier
         // lowering already put in the unit.
-        let selected = if let Some(root) = self.root.filter(|root| &identity == root.identity()) {
+        let root = self.root.filter(|root| &identity == root.identity());
+        let selected = if let Some(root) = &root {
             Some(SelectedKlibCallables::One(root))
         } else {
             match self.sources.callees.get(&identity) {
@@ -1910,7 +1911,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             // member of that class. A member of a class realized outside the unit is called
             // through its frozen declaration, as a source call of it is.
             let candidates = match &selected {
-                Some(SelectedKlibCallables::One(candidate)) => std::slice::from_ref(candidate),
+                Some(SelectedKlibCallables::One(candidate)) => std::slice::from_ref(*candidate),
                 Some(SelectedKlibCallables::Variants(candidates)) => *candidates,
                 None => &[],
             };
@@ -2481,7 +2482,7 @@ impl<'s> Linker<'_, 's> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
         let root = self.root.is_some_and(|root| root.identity() == identity);
-        inline_functions::declare_callee(ir, declared, function, &header, root)?;
+        inline_functions::declare_callee(ir, declared, function, &header, selected, root)?;
         self.functions.insert(identity.clone(), declared);
         if let Some(formals) = self.private_members.get_mut(identity) {
             *formals = header.own_formals(function);
@@ -2589,7 +2590,7 @@ fn body_header(
 /// authenticate the call. Declaration-shape conflicts remain ambiguous in `KlibCalleeFacts`.
 #[derive(Clone, Copy)]
 enum SelectedKlibCallables<'callable, 'facts> {
-    One(KlibBodyCallable<'callable>),
+    One(&'facts KlibBodyCallable<'callable>),
     Variants(&'facts [KlibBodyCallable<'callable>]),
 }
 
@@ -2642,7 +2643,7 @@ fn selected_callable_for_header_purpose<'callable>(
         None
     };
     match candidates {
-        SelectedKlibCallables::One(candidate) => {
+        SelectedKlibCallables::One(&candidate) => {
             if let Some(reason) = consider(candidate) {
                 return Err(reason);
             }
