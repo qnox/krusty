@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::compilation_inputs::{selected_jdk_feature_release, JvmCompilationInputInventory};
+use krusty::jvm::compilation_inputs::{JdkApi, JvmCompilationInputInventory};
 use krusty::kotlin_version::KotlinVersion;
 use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
@@ -22,13 +22,15 @@ use crate::kotlinc_arguments::{self, Catalog, Disposition, Lifecycle, Origin, Va
 mod arguments;
 mod fragments;
 mod language_features;
+mod source_roots;
 mod warning_policy;
 
 pub use arguments::CLASSPATH_SEPARATOR;
 use arguments::{
-    apply, collect_sources, finish_jvm_target, finish_language_settings, finish_warning_policy,
+    apply, finish_jvm_target, finish_language_settings, finish_warning_policy,
     take_reference_version, unsupported, ParsedSettings,
 };
+use source_roots::{duplicate_source_root, SourceRoots};
 pub use warning_policy::{WarningDisposition, WarningLevel, WarningPolicy};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -158,8 +160,8 @@ pub struct Options {
     /// `25`→69). `None` keeps krusty's default (Java 8 / major 52), which runs on the test JDK.
     pub jvm_target_major: Option<u16>,
     /// `-Xjdk-release=<v>`: the JDK release whose API the sources compile against. kotlinc also
-    /// derives the JVM target from it. krusty compiles against the selected JDK's own API only, so
-    /// [`Options::check_jdk_release`] refuses a release other than that JDK's.
+    /// derives the JVM target from it. A release other than the selected JDK's own is read from
+    /// that release's signatures in the JDK's `lib/ct.sym` (see [`Options::compilation_inputs`]).
     pub jdk_release: Option<u16>,
     /// The compiler-plugin switches (`-Xplugin`, `-P`, `-Xcompiler-plugin`), resolved against krusty's
     /// extension registry by [`Options::resolve_plugins`].
@@ -193,6 +195,9 @@ pub struct Options {
     /// `-Xreport-all-warnings`: a failed compilation reports its warnings beside its errors. Without
     /// it, kotlinc reports only the errors of a compilation that fails.
     pub report_all_warnings: bool,
+    /// `-Xallow-no-source-files`: a command line with no sources compiles an empty module, writing
+    /// only its `.kotlin_module`, instead of failing.
+    pub allow_no_source_files: bool,
 }
 
 impl Default for Options {
@@ -249,6 +254,7 @@ impl Default for Options {
             opt_in: Vec::new(),
             suppress_version_warnings: false,
             report_all_warnings: false,
+            allow_no_source_files: false,
         }
     }
 }
@@ -388,15 +394,18 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
         return opts;
     }
     let fragments = fragments::check(&parsed.fragments, &tokenized.free);
+    let mut duplicate_roots = Vec::new();
+    let mut source_roots = SourceRoots::default();
     for source in &tokenized.free {
-        let first = opts.sources.len();
-        collect_sources(source, &mut opts.sources);
+        let Some(collected) = source_roots.collect(source, &mut opts.sources) else {
+            duplicate_roots.push(duplicate_source_root(source));
+            continue;
+        };
         if let Some(listed) = fragments
             .sources
             .iter()
             .find(|listed| listed.source == *source)
         {
-            let collected = opts.sources[first..].to_vec();
             for collected_source in &collected {
                 opts.source_fragments
                     .insert(collected_source.clone(), listed.fragment);
@@ -408,6 +417,11 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
     }
     if let Some(refusal) = fragments.unsupported {
         opts.refuse(refusal);
+    }
+    // kotlinc resolves source roots only once the module configuration is accepted, so a
+    // configuration error ends the run before a duplicate root is reported.
+    if !fragments.configuration_errors.is_empty() {
+        duplicate_roots.clear();
     }
     opts.configuration_errors
         .extend(fragments.configuration_errors);
@@ -427,6 +441,8 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
     finish_warning_policy(&mut opts, &parsed);
     finish_jvm_target(&mut opts, &parsed);
     finish_language_settings(&mut opts, parsed, catalog, &tokenized.explicit, lifecycle);
+    // kotlinc reports a repeated source root after the configuration warnings.
+    opts.warnings.append(&mut duplicate_roots);
     opts
 }
 
@@ -505,28 +521,13 @@ fn plugin_jar_problems(plugins: &PluginConfig) -> Vec<String> {
 }
 
 impl Options {
-    /// Refuse an `-Xjdk-release` whose API krusty would not compile against. kotlinc compiles
-    /// against the JDK's own modules when the release is the JDK's own, and against that release's
-    /// signatures in the JDK's `lib/ct.sym` otherwise; krusty implements only the first. Kept out
-    /// of `parse` so parsing stays env-independent.
-    pub fn check_jdk_release(&self) -> Result<(), String> {
-        let Some(release) = self.jdk_release else {
-            return Ok(());
-        };
+    /// The errors kotlinc reports for an `-Xjdk-release` whose API the selected JDK cannot provide
+    /// (see [`JdkApi::for_release`]). Kept out of `parse` so parsing stays env-independent.
+    pub fn check_jdk_release(&self) -> Result<(), Vec<String>> {
         if self.no_jdk {
             return Ok(());
         }
-        match selected_jdk_feature_release(self.jdk_home.as_deref()) {
-            Some(jdk) if jdk == release => Ok(()),
-            Some(jdk) => Err(format!(
-                "-Xjdk-release={release} compiles against the JDK {release} API from ct.sym, \
-                 which krusty does not implement; the selected JDK is {jdk}"
-            )),
-            None => Err(format!(
-                "-Xjdk-release={release} needs the selected JDK's release, and its `release` file \
-                 does not name one"
-            )),
-        }
+        JdkApi::for_release(self.jdk_home.as_deref(), self.jdk_release).map(|_| ())
     }
 
     /// The classpath to drive resolution with: the user's `-cp` entries plus kotlinc's implicit
@@ -534,6 +535,12 @@ impl Options {
     /// corresponding `-no-*` option disables them.
     /// Kept out of `parse` so parsing stays env-independent.
     pub fn effective_classpath(&self) -> Result<Vec<PathBuf>, String> {
+        Ok(self.compilation_inputs()?.effective_classpath().to_vec())
+    }
+
+    /// [`Options::effective_classpath`] with the JDK API selection it made, which the classpath
+    /// provider is built with.
+    pub fn compilation_inputs(&self) -> Result<JvmCompilationInputInventory, String> {
         let mut cp = self.classpath.clone();
         if !self.no_stdlib {
             let stdlib = krusty::jvm::kotlin_stdlib_jar().ok_or_else(|| {
@@ -561,15 +568,12 @@ impl Options {
                 }
             }
         }
-        if !self.no_jdk {
-            cp = JvmCompilationInputInventory::from_explicit_classpath_and_jdk(
-                &cp,
-                self.jdk_home.as_deref(),
-            )
-            .effective_classpath()
-            .to_vec();
+        if self.no_jdk {
+            return Ok(JvmCompilationInputInventory::from_effective_classpath(&cp));
         }
-        Ok(cp)
+        let api = JdkApi::for_release(self.jdk_home.as_deref(), self.jdk_release)
+            .map_err(|errors| errors.join("\n"))?;
+        Ok(JvmCompilationInputInventory::from_explicit_classpath_and_jdk_api(&cp, api))
     }
 
     /// The JVM backend this command line selects, emitting against `classpath`. The `krusty`

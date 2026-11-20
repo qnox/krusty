@@ -23,6 +23,7 @@ pub const APPLIED: &[&str] = &[
     "-Werror",
     "-X",
     "-XXLanguage",
+    "-Xallow-no-source-files",
     "-Xcompiler-plugin",
     "-Xcompiler-plugin-order",
     "-Xconsistent-data-class-copy-visibility",

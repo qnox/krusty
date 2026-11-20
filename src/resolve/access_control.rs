@@ -160,9 +160,58 @@ impl SourceMemberSite for Checker<'_> {
 
 /// The checker's member visibility, read by the resolver's overload selection so a member this
 /// site cannot see ranks below every accessible applicable candidate.
+///
+/// A `@Suppress` of the visibility errors silences the diagnostic of a call that resolved to an
+/// invisible member; it does not make that member visible, so the ranking reads the real
+/// visibility. Without it a protected `Object.clone` would outrank a visible `T.clone()` extension.
 impl crate::symbol_resolver::MemberAccessSite for Checker<'_> {
     fn member_accessible(&self, member: &crate::libraries::FunctionInfo, receiver: Ty) -> bool {
         self.member_candidate_accessible(member, Some(receiver))
+    }
+}
+
+/// The checker's access site with its visibility suppression ignored.
+struct UnsuppressedVisibility<'c, 'a>(&'c Checker<'a>);
+
+impl SourceMemberSite for UnsuppressedVisibility<'_, '_> {
+    fn visibility_suppressed(&self) -> bool {
+        false
+    }
+
+    fn source_package(&self) -> Option<TypeName> {
+        self.0.source_package()
+    }
+
+    fn module_owns(&self, owner: TypeName) -> bool {
+        self.0.module_owns(owner)
+    }
+
+    fn internal_friend(
+        &self,
+        owner: TypeName,
+        callable: Option<crate::fir::ExternalCallableId>,
+    ) -> bool {
+        self.0.internal_friend(owner, callable)
+    }
+
+    fn access_classes(&self) -> Vec<TypeName> {
+        self.0.access_classes()
+    }
+
+    fn protected_classes(&self) -> Vec<TypeName> {
+        self.0.protected_classes()
+    }
+
+    fn companion_of(&self, enclosing: TypeName) -> Option<TypeName> {
+        self.0.companion_of(enclosing)
+    }
+
+    fn is_subtype(&self, subclass: TypeName, superclass: TypeName) -> bool {
+        self.0.is_subtype(subclass, superclass)
+    }
+
+    fn receiver_assignable(&self, receiver: Ty, access_classifier: TypeName) -> bool {
+        self.0.receiver_assignable(receiver, access_classifier)
     }
 }
 
@@ -310,21 +359,39 @@ impl<'a> Checker<'a> {
         candidate: &crate::libraries::FunctionInfo,
         receiver: Option<Ty>,
     ) -> bool {
-        if candidate.kind != crate::libraries::FnKind::Member || self.visibility_access_suppressed()
-        {
+        if candidate.kind != crate::libraries::FnKind::Member {
             return true;
         }
+        let site = UnsuppressedVisibility(self);
         let owner = candidate.callable.owner_type();
         let identity = candidate.callable.external_identity;
         match receiver {
-            Some(receiver) => self.receiver_callable_accessible(
+            Some(receiver) => site_receiver_callable_accessible(
+                &site,
                 candidate.visibility,
                 owner,
                 crate::symbol_resolver::member_scope_receiver(receiver),
                 identity,
             ),
-            None => self.callable_accessible(candidate.visibility, owner, identity),
+            None => site_callable_accessible(&site, candidate.visibility, owner, identity),
         }
+    }
+
+    /// [`Self::selected_member_accessible`] with a `@Suppress` of the visibility errors ignored.
+    /// The suppression silences the diagnostic of a call that resolved to an invisible member; it
+    /// does not make that member rank with the visible candidates of a nearer tower rung.
+    pub(super) fn selected_member_visible(
+        &self,
+        selected: &crate::symbol_resolver::ResolvedMember,
+        owner: TypeName,
+    ) -> bool {
+        site_receiver_callable_accessible(
+            &UnsuppressedVisibility(self),
+            selected.member.visibility,
+            owner,
+            selected.receiver,
+            selected.member.external_identity,
+        )
     }
 
     pub(super) fn selected_member_accessible(

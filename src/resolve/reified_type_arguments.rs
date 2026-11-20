@@ -71,7 +71,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         expression: ExprId,
     ) {
-        if self.discover_anonymous_captures {
+        if self.discover_anonymous_captures || self.is_annotation_array_literal_call(expression) {
             return;
         }
         let arguments = self.reified_type_arguments(expression);

@@ -1918,7 +1918,7 @@ impl Accessor<'_> {
         }
         let mut slot = 0u16;
         let mut locals = Vec::new();
-        let names = crate::parameter_names::function_locals(ir, function, &parameters);
+        let names = crate::parameter_names::access_bridge_locals(ir, function, &parameters);
         for (ordinal, &ty) in parameters.iter().enumerate() {
             load(ty, slot, &mut code);
             if let Some(local) = names
