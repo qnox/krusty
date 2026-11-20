@@ -44,7 +44,7 @@ mod type_evidence;
 pub use crate::libraries::KlibBodyCallable as KlibCallable;
 pub use body_unit::DependencyBodyUnit;
 pub(crate) use body_unit::{
-    is_private_class_member, is_receiver_member, EmittedDependencyCallable,
+    emitted_body, is_private_class_member, is_receiver_member, EmittedDependencyCallable,
 };
 pub(crate) use callee_facts::CallEdge;
 pub use callee_facts::KlibCalleeFacts;
@@ -58,22 +58,6 @@ pub(crate) fn object_classifier(
     signature: &crate::metadata::id_signature::KlibPublicIdSignature,
 ) -> Option<crate::types::TypeName> {
     klib_types::classifier_name(signature).ok()
-}
-
-/// Every declaration the emitted body of `identity` calls: the callees its serialized calls name,
-/// and the getters its file-local fake overrides inherit. The dependency walks and the checker's
-/// call edges select their edges from this one answer.
-pub(crate) fn emitted_callees(
-    bodies: &crate::klib_libraries::KlibDeclarationBodies,
-    identity: &crate::libraries::KlibDependencyCallable,
-) -> Vec<crate::libraries::KlibDependencyCallable> {
-    let mut callees = bodies.emitted_body_callables(identity, EMITTED_CALL_FORMS);
-    callees.extend(body_unit::inherited_getter_callees(
-        bodies,
-        identity,
-        EMITTED_CALL_FORMS,
-    ));
-    callees
 }
 
 /// The serialized forms common body lowering realizes without the declaration edges they name.

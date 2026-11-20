@@ -11,6 +11,7 @@
 mod enclosing_function;
 
 use super::*;
+use crate::klib_libraries::KlibDeclarationBodies;
 use crate::metadata::id_signature::{
     accessor_mangled, mangled_id, property_mangled, Accessor, ClassScope, DeclarationContainer,
     Placement, PropertyShape,
@@ -27,45 +28,39 @@ pub(super) type Inherited = Result<Option<KlibIrSignature>, KlibBodyDeclineReaso
 /// The getter of the inherited property that the file-local `callee` of the active module is a
 /// fake override of, or `None` when `callee` is no fake override of a local class.
 pub(super) fn inherited_getter(linker: &Linker<'_, '_>, callee: &KlibIrSignature) -> Inherited {
-    InheritedGetters {
-        bodies: linker.sources.bodies,
-        module: &linker.active_module,
-    }
-    .resolve_inherited_getter(callee)
+    resolve_inherited_getter(linker.sources.bodies, &linker.active_module, callee)
 }
 
-/// The module whose file-local fake overrides are resolved, with the bodies that serialize it.
-struct InheritedGetters<'a> {
-    bodies: &'a KlibDeclarationBodies,
-    module: &'a str,
-}
-
-/// The exact declarations the inherited getters named by file-local fake overrides in the emitted
-/// body of `identity` resolve to. The dependency walks follow them as they follow every other
-/// callee of a body, so the accessor a call links to is an edge the walk selected.
-pub(crate) fn inherited_getter_callees(
+/// What the emitted body of `identity` reaches: its serialized edges, with a call of a fake
+/// override of a local class resolved to the inherited getter lowering links. A fake override no
+/// unit can resolve keeps its serialized edge, and lowering reports it.
+pub(crate) fn emitted_body(
     bodies: &KlibDeclarationBodies,
     identity: &KlibDependencyCallable,
-    forms: crate::metadata::klib_ir::tree::EmittedCallForms,
-) -> Vec<KlibDependencyCallable> {
-    let resolver = InheritedGetters {
-        bodies,
-        module: &identity.module,
-    };
-    bodies
-        .emitted_file_local_callees(identity, forms)
-        .iter()
-        .filter_map(|callee| resolver.resolve_inherited_getter(callee).ok().flatten())
-        .filter_map(
-            |getter| match bodies.linked_ir_origin(&identity.module, &getter) {
-                KlibCalleeOrigin::Exact(callee) => Some(callee),
-                KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
-            },
-        )
-        .collect()
+) -> crate::klib_libraries::EmittedBody {
+    bodies.emitted_body(identity, super::super::EMITTED_CALL_FORMS, &|callee| {
+        resolve_inherited_getter(bodies, &identity.module, callee)
+            .ok()
+            .flatten()
+    })
 }
 
-impl InheritedGetters<'_> {
+/// [`inherited_getter`] for a body of `module`, over the libraries alone. The dependency closure
+/// walks the calls a body lowers, so it resolves a fake override as lowering does.
+pub(crate) fn resolve_inherited_getter(
+    bodies: &KlibDeclarationBodies,
+    module: &str,
+    callee: &KlibIrSignature,
+) -> Inherited {
+    LocalHierarchy { bodies, module }.resolve_inherited_getter(callee)
+}
+
+struct LocalHierarchy<'b> {
+    bodies: &'b KlibDeclarationBodies,
+    module: &'b str,
+}
+
+impl LocalHierarchy<'_> {
     /// Resolve the file-local `callee` of the active module as a getter of a property its class
     /// inherits.
     fn resolve_inherited_getter(
