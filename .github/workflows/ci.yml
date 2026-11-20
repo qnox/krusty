@@ -394,9 +394,16 @@ jobs:
           key: ${{ steps.kotlin-native.outputs.cache-primary-key }}
       # The session test compiles against the embedder. This is the Maven the plugin jobs
       # install; a missing install fails that test.
-      - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
+      # The Maven distribution is cached and checksum-pinned (scripts/install-maven.sh), so a
+      # mirror outage cannot fail a job that already holds it.
+      - &restore-maven
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          maven-version: '3.9.11'
+          path: ~/.cache/krusty-tools/maven
+          key: maven-distribution-3.9.11-v1
+      - &install-maven
+        name: install Maven
+        run: scripts/install-maven.sh 3.9.11
       # Coverage measures these same suites, instrumented, every night (.github/workflows/coverage.yml).
       - name: own test suites
         id: own-tests
@@ -1529,9 +1536,8 @@ jobs:
           java-version: '17'
           cache: maven
           cache-dependency-path: tools/krusty-maven/pom.xml
-      - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
-        with:
-          maven-version: '3.9.11'
+      - *restore-maven
+      - *install-maven
       - name: build portable local-Maven distribution
         run: |
           set -euo pipefail
@@ -1566,9 +1572,8 @@ jobs:
           java-version: '17'
           cache: maven
           cache-dependency-path: tools/krusty-maven/pom.xml
-      - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
-        with:
-          maven-version: '3.9.11'
+      - *restore-maven
+      - *install-maven
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
