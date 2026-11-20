@@ -1150,7 +1150,15 @@ impl BodyLowering<'_, '_, '_> {
             carried: &carried,
             answer,
         };
-        Some(self.member_by_implementor(&implementors, runtime, receiver, args, ret))
+        // A `Map` read the runtime's thunks guard goes to the runtime entry point alone: an arm of
+        // this dispatch would hand the override an argument its bridge has not checked, and the
+        // thunk of `KType.map_members` is where the guard lives for a program class.
+        let guarded = classifier_shapes::mapped_collection(self.file.classifiers, internal)
+            .is_some_and(|collection| {
+                super::super::super::intrinsics::map_thunk_guards_bridge(collection, name)
+            });
+        let arms: &[ImplementorArm] = if guarded { &[] } else { &implementors };
+        Some(self.member_by_implementor(arms, runtime, receiver, args, ret))
     }
 
     /// One of those, with the runtime entry point as the last arm.
