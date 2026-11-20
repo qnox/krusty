@@ -109,7 +109,11 @@ impl IrFile {
         else {
             return None;
         };
-        if !matches!(self.expr(*when), IrExpr::When { .. }) {
+        // Only a `when` the source wrote has a subject: a block that declares a variable and then
+        // compares it with entries (`val m = mode; m == A || m == B`) is ordinary code.
+        if !matches!(self.expr(*when), IrExpr::When { .. })
+            || !self.whens.source_lines.contains_key(when)
+        {
             return None;
         }
         let (classifier, nullable) = match ty.kind() {

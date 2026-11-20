@@ -109,8 +109,8 @@ pub(in crate::codegen) fn library_member_signature(
 
 /// Whether a call of `fact` with a dispatch receiver at `expression` goes through its library
 /// member: a member of a library classifier that dispatches on its receiver, with no `published`
-/// body to call and no compiler operation realizing it (`KClass.simpleName`), which an
-/// interface's classes or the builtin classes below it implement.
+/// body to call (an interface's member dispatches whatever its default publishes) and no compiler
+/// operation realizing it (`KClass.simpleName`), which an interface's classes or the builtin classes below it implement.
 pub(in crate::codegen) fn dispatches_through_library_member(
     ir: &IrFile,
     callables: &CheckedBackendCallables,
@@ -118,7 +118,10 @@ pub(in crate::codegen) fn dispatches_through_library_member(
     fact: &BackendCallableFact,
     published: bool,
 ) -> bool {
-    !published
+    // A published body is the one a call reaches directly, except an interface's default: the
+    // receiver's class may override it, and a class that inherits it reaches the body from its
+    // own record.
+    (!published || fact.owner_is_interface)
         && fact.kind == ExternalCallableKind::Member
         && fact.member_realization == MemberRealization::Dispatch
         && fact.compiler_operation().is_none()
@@ -380,12 +383,14 @@ impl Body<'_> {
         if fact.builtin_implementations.iter().any(|implementation| {
             super::string_builders::is_string_builder_type(implementation.receiver)
         }) {
-            self.record_char_sequence_reads()?;
+            self.record_char_sequence_reads(false)?;
         }
         let member = self.library_member_of(&fact, identity, role, &name)?;
         if reference_name {
             self.runtime.reference_name_member(self.module, member)?;
         }
+        self.runtime
+            .null_receiver_throws(self.module, self.classifiers)?;
         self.value(receiver, objects::any())?;
         for (&arg, &param) in args.iter().zip(params) {
             self.value(arg, param)?;
