@@ -28,8 +28,6 @@
 //!     → ERROR. Silently ignoring it would emit wrong bytecode, so a drop-in must fail loudly.
 
 use crate::compilation_target::CompilationTarget;
-use crate::plugins::allopen::AllOpenPlugin;
-use crate::plugins::assignment::AssignmentPlugin;
 use crate::plugins::atomicfu::AtomicfuPlugin;
 use crate::plugins::cli::{
     PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, ASSIGNMENT_PLUGIN_ID, ATOMICFU_PLUGIN_ID,
@@ -37,9 +35,9 @@ use crate::plugins::cli::{
     SAM_WITH_RECEIVER_PLUGIN_ID, SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
 };
 use crate::plugins::compose::{ComposeOptions, ComposePlugin};
-use crate::plugins::noarg::NoArgPlugin;
+use crate::plugins::convention::ConventionInstance;
 use crate::plugins::parcelize::ParcelizePlugin;
-use crate::plugins::sam_with_receiver::SamWithReceiverPlugin;
+use crate::plugins::plugin_order::{self, PluginOrderConstraint, PluginOrderCycle};
 use crate::plugins::serialization::{SerializationAbi, SerializationPlugin};
 use crate::plugins::{IrPlugin, PluginHost, PluginRelease};
 
@@ -202,6 +200,12 @@ pub enum PluginDiagnostic {
     UnsupportedOption { option: PluginOption },
     /// A declared option setting krusty's native implementation does not honour yet — hard error.
     UnimplementedOption { option: PluginOption },
+    /// `-Xcompiler-plugin-order` constraints that order a plugin set's plugins in a cycle —
+    /// kotlinc's own error.
+    OrderCycle(PluginOrderCycle),
+    /// An `-Xcompiler-plugin-order` value kotlinc cannot parse — its own error, reported before any
+    /// plugin is loaded.
+    UnparsedOrderConstraint { message: String },
     /// krusty substitutes a native pass that covers only part of what the plugin generates. Not an
     /// error for a compilation, which rejects an uncovered construct itself as a plugin refusal
     /// (`DiagnosticKind::PluginRefusal`) that a build can hand to kotlinc.
@@ -216,6 +220,8 @@ impl PluginDiagnostic {
                 | PluginDiagnostic::HostUnavailable { .. }
                 | PluginDiagnostic::UnsupportedOption { .. }
                 | PluginDiagnostic::UnimplementedOption { .. }
+                | PluginDiagnostic::OrderCycle(_)
+                | PluginDiagnostic::UnparsedOrderConstraint { .. }
         )
     }
 
@@ -246,6 +252,8 @@ impl PluginDiagnostic {
                 "unsupported plugin option: {}:{}={}",
                 option.id, option.key, option.value
             ),
+            PluginDiagnostic::OrderCycle(cycle) => cycle.message(),
+            PluginDiagnostic::UnparsedOrderConstraint { message } => message.clone(),
             PluginDiagnostic::PartialSubstitution { plugin_id } => format!(
                 "krusty: '{plugin_id}' is only partly implemented by krusty's built-in \
                  implementation; a module that uses what it does not cover yet fails to compile."
@@ -402,7 +410,10 @@ fn build_allopen(
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(AllOpenPlugin::from_options(options))
+    Box::new(ConventionInstance::new(
+        &krusty_plugin_allopen::PLUGIN,
+        options,
+    ))
 }
 
 /// Build the native no-arg plugin from the compilation's options for it.
@@ -412,7 +423,10 @@ fn build_noarg(
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(NoArgPlugin::from_options(options))
+    Box::new(ConventionInstance::new(
+        &krusty_plugin_noarg::PLUGIN,
+        options,
+    ))
 }
 
 /// Build the native sam-with-receiver plugin from the compilation's options for it.
@@ -422,7 +436,10 @@ fn build_sam_with_receiver(
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(SamWithReceiverPlugin::from_options(options))
+    Box::new(ConventionInstance::new(
+        &krusty_plugin_sam_with_receiver::PLUGIN,
+        options,
+    ))
 }
 
 /// Build the native atomicfu plugin. Its registrar declares no command-line processor, so it has
@@ -456,7 +473,10 @@ fn build_assignment(
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(AssignmentPlugin::from_options(options))
+    Box::new(ConventionInstance::new(
+        &krusty_plugin_assignment::PLUGIN,
+        options,
+    ))
 }
 
 /// The set of extensions krusty knows about — independent of any compilation.
@@ -616,6 +636,17 @@ impl PluginRegistry {
             reference_release: None,
             compilation_target: None,
         };
+        let order_constraints = match plugin_order::parse_constraints(&act.config.order_constraints)
+        {
+            Ok(constraints) => constraints,
+            Err(message) => {
+                return Resolved {
+                    native,
+                    ksp_active: false,
+                    diagnostics: vec![PluginDiagnostic::UnparsedOrderConstraint { message }],
+                };
+            }
+        };
         let mut ksp_active = false;
         let mut diagnostics = Vec::new();
         let jars = act
@@ -623,6 +654,19 @@ impl PluginRegistry {
             .all_plugin_jars()
             .map(|jar| (jar, declared_registrars(jar)))
             .collect::<Vec<_>>();
+        // kotlinc orders the loaded plugins, and rejects a cycle among them, before it processes any
+        // plugin's options, so a cycle is the compilation's only error.
+        let registration_order =
+            match self.registration_order(act.config, &order_constraints, &jars) {
+                Ok(order) => order,
+                Err(cycle) => {
+                    return Resolved {
+                        native,
+                        ksp_active,
+                        diagnostics: vec![PluginDiagnostic::OrderCycle(cycle)],
+                    };
+                }
+            };
 
         for ext in &self.extensions {
             let jar = jars
@@ -732,11 +776,52 @@ impl PluginRegistry {
             }
         }
 
+        native.enabled.sort_by_key(|enabled| {
+            registration_order
+                .iter()
+                .position(|plugin_id| *plugin_id == enabled.plugin_id)
+                .unwrap_or(usize::MAX)
+        });
+
         Resolved {
             native,
             ksp_active,
             diagnostics,
         }
+    }
+
+    /// The ids of the registered extensions the requested jars load, in the order kotlinc registers
+    /// them: the `-Xplugin` classpath's registrars, then the `-Xcompiler-plugin` registrations', each
+    /// set in its load order rearranged by the `-Xcompiler-plugin-order` constraints
+    /// ([`plugin_order::registration_order`]). A registrar no extension answers to keeps its place
+    /// with no id; it is refused on its own. An extension activated only by `-P` options has no
+    /// registrar loaded, so it has no place here.
+    fn registration_order(
+        &self,
+        config: &PluginConfig,
+        constraints: &[PluginOrderConstraint],
+        jars: &[(&str, Option<Vec<String>>)],
+    ) -> Result<Vec<&'static str>, PluginOrderCycle> {
+        let (legacy, modern) = jars.split_at(config.plugin_jars.len().min(jars.len()));
+        let mut order = Vec::new();
+        for set in [legacy, modern] {
+            let plugins = set
+                .iter()
+                .flat_map(|(_, registrars)| registrars.iter().flatten())
+                .map(|registrar| {
+                    self.extensions
+                        .iter()
+                        .find(|extension| extension.registrar == registrar)
+                        .map(|extension| extension.plugin_id)
+                })
+                .collect::<Vec<_>>();
+            order.extend(
+                plugin_order::registration_order(&plugins, constraints)?
+                    .into_iter()
+                    .filter_map(|index| plugins[index]),
+            );
+        }
+        Ok(order)
     }
 }
 

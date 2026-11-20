@@ -17,8 +17,22 @@ use krusty::types::{Ty, TypeName};
 
 const ELEMENTS: u32 = PREFIX_FIELDS;
 const LENGTH: u32 = ELEMENTS + 1;
+/// How often the list's shape changed: every insertion and removal counts, an overwrite does not.
+const MODIFICATIONS: u32 = LENGTH + 1;
+/// Where a range's first element sits in the shared array. A list's own is zero.
+const OFFSET: u32 = MODIFICATIONS + 1;
+/// The list a range was taken from, directly or through other ranges: `null` for a list.
+const ROOT: u32 = OFFSET + 1;
+/// The root's `MODIFICATIONS` when the range was taken. The range answers while they still match.
+const EXPECTED: u32 = ROOT + 1;
+/// The list a range was taken from directly, which a write through the range resizes in turn:
+/// `null` for a list.
+const PARENT: u32 = EXPECTED + 1;
 const ITER_LIST: u32 = PREFIX_FIELDS;
 const ITER_INDEX: u32 = ITER_LIST + 1;
+/// The shape of the list when the iterator was taken (`Layout::shape`). A step of the iterator
+/// answers while the list still has it.
+const ITER_EXPECTED: u32 = ITER_INDEX + 1;
 
 /// Whether `classifier` is `kotlin.collections.ArrayList`, which the runtime lays out.
 pub(super) fn lays_out(classifier: TypeName) -> bool {
@@ -29,6 +43,7 @@ pub(super) fn lays_out(classifier: TypeName) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ListOperation {
     Add,
+    AddAt,
     AddAll,
     Size,
     IsEmpty,
@@ -36,12 +51,15 @@ pub(super) enum ListOperation {
     Contains,
     ContainsAll,
     Remove,
+    RemoveAt,
     RemoveAll,
     RetainAll,
     Clear,
     Iterator,
     ListIterator,
     ListIteratorAt,
+    Set,
+    SubList,
 }
 
 impl ListOperation {
@@ -49,8 +67,8 @@ impl ListOperation {
     /// `IndexOutOfBoundsException` past.
     pub(super) fn index_bound(self) -> Option<IndexBound> {
         match self {
-            Self::Get => Some(IndexBound::BelowSize),
-            Self::ListIteratorAt => Some(IndexBound::AtMostSize),
+            Self::Get | Self::Set | Self::RemoveAt => Some(IndexBound::BelowSize),
+            Self::AddAt | Self::ListIteratorAt => Some(IndexBound::AtMostSize),
             _ => None,
         }
     }
@@ -72,13 +90,16 @@ pub(super) fn list_operation(name: &str, params: &[Ty]) -> Result<ListOperation,
     use ListOperation::*;
     Ok(match (name, params) {
         ("add", [_]) => Add,
-        ("add", [Ty::Int, _]) => return Err("an ArrayList insertion at an index".into()),
+        ("add", [Ty::Int, _]) => AddAt,
         ("addAll", [_]) => AddAll,
         ("<get-size>" | "getSize" | "size", []) => Size,
         ("isEmpty", []) => IsEmpty,
         ("get", [Ty::Int]) => Get,
+        ("set", [Ty::Int, _]) => Set,
+        ("subList", [Ty::Int, Ty::Int]) => SubList,
         ("contains", [_]) => Contains,
         ("containsAll", [_]) => ContainsAll,
+        ("removeAt", [Ty::Int]) => RemoveAt,
         ("remove", [Ty::Int]) => return Err("an ArrayList removal at an index".into()),
         ("remove", [_]) => Remove,
         ("removeAll", [_]) => RemoveAll,
@@ -109,6 +130,28 @@ pub(super) struct ArrayLists {
     pub(super) class: ClassRef,
     /// The list's struct type.
     pub(super) list: u32,
+    /// The `equals`, `hashCode` and `toString` slot bodies of the list's table, which compare, hash
+    /// and print its elements as `java.util.AbstractList` does. They read an argument and print
+    /// elements through the collection members recorded with the list's operations
+    /// (`crate::collection_arguments`), which a program records before it can hold a list.
+    pub(super) value_slots: [u32; 3],
+    /// The operations that read or refuse a range, whose bodies throw runtime exceptions and so
+    /// are written once the checked classes are known (`crate::list_ranges`).
+    pub(super) ranges: RangeOperations,
+    /// The list's dispatch table, which a range of it shares.
+    pub(super) table: u32,
+    /// `identity.allocate`, which a range takes its identity hash from.
+    pub(super) allocate: u32,
+    pub(super) set: u32,
+    /// `(list, index, element) -> ()`: insert at an index, in a list or through a range.
+    pub(super) insert: u32,
+    /// `(list, index) -> element`: remove at an index, in a list or through a range.
+    pub(super) remove_at: u32,
+    /// `(list, from, to) -> ()`: remove a span of elements, in a list or through a range.
+    remove_range: u32,
+    /// `(list, delta) -> ()`: after a write through a range changed its root's length by `delta`,
+    /// the range and every range it was taken from adopt the root's elements and shape.
+    resync: u32,
     pub(super) iterator: u32,
     pub(super) new: u32,
     pub(super) add: u32,
@@ -137,6 +180,24 @@ pub(super) struct ArrayLists {
     /// recorded (`crate::collection_arguments`).
     pub(super) bulk: Option<BulkOperations>,
     layout: Layout,
+}
+
+/// The list operations that answer a range of a list.
+#[derive(Clone, Copy)]
+pub(super) struct RangeOperations {
+    /// `(list) -> ()`: throws `ConcurrentModificationException` for a range whose root list
+    /// changed shape since the range was taken.
+    pub(super) validate: u32,
+    /// `(list) -> ()`: throws `UnsupportedOperationException` for a range, for the operations that
+    /// cannot be written through a range yet (`removeAll` and `retainAll`).
+    pub(super) reject_write: u32,
+    /// `(iterator) -> ()`: throws `ConcurrentModificationException` when the iterator's range has
+    /// lost its root's shape, or the shape of the iterator's list is not the one the iterator was
+    /// taken with.
+    pub(super) check_walk: u32,
+    /// `(list, from, to) -> range`. Like the JVM's, it checks the bounds against the size the range
+    /// was taken with and does not look at the root: a range of a stale range is itself stale.
+    pub(super) sub_list: u32,
 }
 
 /// The list operations that read a collection argument, and the two reads they share.
@@ -173,6 +234,11 @@ impl ArrayLists {
                 immutable(ValType::I32),
                 mutable(ValType::reference(elements)),
                 mutable(ValType::I32),
+                mutable(ValType::I32),
+                immutable(ValType::I32),
+                immutable(REFERENCE),
+                mutable(ValType::I32),
+                immutable(REFERENCE),
             ]),
             supertype: Some(identity.object),
             open: false,
@@ -183,14 +249,20 @@ impl ArrayLists {
                 immutable(ValType::I32),
                 immutable(ValType::reference(list)),
                 mutable(ValType::I32),
+                immutable(ValType::I32),
             ]),
             supertype: Some(identity.object),
             open: false,
         });
-        let list_text = empty_string_function(module, objects, chars, string);
+        let value_slots = [module.declare(), module.declare(), module.declare()];
+        let (class, list_table) = dispatch_table(module, objects, list, value_slots);
         let iter_text = empty_string_function(module, objects, chars, string);
-        let (class, list_table) = dispatch_table(module, objects, identity, list, list_text);
-        let (_, iter_table) = dispatch_table(module, objects, identity, iterator, iter_text);
+        let (_, iter_table) = dispatch_table(
+            module,
+            objects,
+            iterator,
+            [objects.identity_equals, identity.hash_code, iter_text],
+        );
         let layout = Layout {
             list,
             iterator,
@@ -199,6 +271,20 @@ impl ArrayLists {
         let lists = Self {
             class,
             list,
+            value_slots,
+            ranges: RangeOperations {
+                validate: module.declare(),
+                reject_write: module.declare(),
+                check_walk: module.declare(),
+                sub_list: module.declare(),
+            },
+            table: list_table,
+            allocate: identity.allocate,
+            set: module.declare(),
+            insert: module.declare(),
+            remove_at: module.declare(),
+            remove_range: module.declare(),
+            resync: module.declare(),
             iterator,
             new: module.declare(),
             add: module.declare(),
@@ -225,10 +311,15 @@ impl ArrayLists {
         lists.define_size(module, layout);
         lists.define_is_empty(module);
         lists.define_get(module, layout);
-        lists.define_add(module, layout, reserve);
+        lists.define_set(module, layout);
+        lists.define_insert(module, layout, reserve);
+        lists.define_add(module);
+        lists.define_remove_range(module, layout);
+        lists.define_remove_at(module);
+        lists.define_resync(module, layout);
         lists.define_contains(module, layout, equals);
-        lists.define_clear(module, layout);
-        lists.define_remove(module, layout, equals);
+        lists.define_clear(module);
+        lists.define_remove(module, equals);
         lists.define_iterator(module, identity, layout, iter_table);
         lists.define_has_next(module, layout);
         lists.define_next(module, layout);
@@ -252,6 +343,16 @@ impl ArrayLists {
         };
         let (function, params, results) = match operation {
             Add => (self.add, vec![REFERENCE, REFERENCE], vec![ValType::I32]),
+            AddAt => (
+                self.insert,
+                vec![REFERENCE, ValType::I32, REFERENCE],
+                Vec::new(),
+            ),
+            RemoveAt => (
+                self.remove_at,
+                vec![REFERENCE, ValType::I32],
+                vec![REFERENCE],
+            ),
             AddAll => (
                 bulk(|bulk| bulk.add_all)?,
                 vec![REFERENCE, REFERENCE],
@@ -288,6 +389,16 @@ impl ArrayLists {
                 vec![REFERENCE, ValType::I32],
                 vec![REFERENCE],
             ),
+            Set => (
+                self.set,
+                vec![REFERENCE, ValType::I32, REFERENCE],
+                vec![REFERENCE],
+            ),
+            SubList => (
+                self.ranges.sub_list,
+                vec![REFERENCE, ValType::I32, ValType::I32],
+                vec![REFERENCE],
+            ),
         };
         Ok(ListMember {
             function,
@@ -317,6 +428,11 @@ impl ArrayLists {
             .local_get(0)
             .array_new_default(layout.elements)
             .i32_const(0)
+            .i32_const(0)
+            .i32_const(0)
+            .ref_null(HeapType::Eq)
+            .i32_const(0)
+            .ref_null(HeapType::Eq)
             .struct_new(layout.list);
         module.define(
             self.new,
@@ -373,6 +489,7 @@ impl ArrayLists {
     fn define_size(&self, module: &mut Module, layout: Layout) {
         let ty = module.func_type(vec![REFERENCE], vec![ValType::I32]);
         let mut code = Code::default();
+        code.local_get(0).call(self.ranges.validate);
         layout.length(&mut code, 0);
         module.define(
             self.size,
@@ -405,6 +522,7 @@ impl ArrayLists {
         let ty = module.func_type(vec![REFERENCE, ValType::I32], vec![REFERENCE]);
         let (list, index) = (0, 1);
         let mut code = Code::default();
+        code.local_get(list).call(self.ranges.validate);
         code.local_get(index)
             .i32_const(0)
             .op(LT_S32)
@@ -416,7 +534,9 @@ impl ArrayLists {
             .unreachable()
             .end();
         layout.elements(&mut code, list);
-        code.local_get(index).array_get(layout.elements);
+        code.local_get(index);
+        layout.offset(&mut code, list);
+        code.op(ADD32).array_get(layout.elements);
         module.define(
             self.get,
             Function {
@@ -427,29 +547,214 @@ impl ArrayLists {
         );
     }
 
-    fn define_add(&self, module: &mut Module, layout: Layout, reserve: u32) {
-        let ty = module.func_type(vec![REFERENCE, REFERENCE], vec![ValType::I32]);
-        let (list, element, at) = (0, 1, 2);
+    /// `set(index, element)`: the element it replaces. The caller has checked the index. An
+    /// overwrite resizes nothing, so a range takes it at its offset in the shared elements; `get`
+    /// first answers a range whose root changed shape with `ConcurrentModificationException`.
+    fn define_set(&self, module: &mut Module, layout: Layout) {
+        let ty = module.func_type(vec![REFERENCE, ValType::I32, REFERENCE], vec![REFERENCE]);
+        let (list, index, element, old) = (0, 1, 2, 3);
         let mut code = Code::default();
-        code.local_get(list).call(reserve);
-        layout.length(&mut code, list);
-        code.local_set(at);
-        layout.elements(&mut code, list);
-        code.local_get(at)
-            .local_get(element)
-            .array_set(layout.elements);
         code.local_get(list)
-            .ref_cast(false, HeapType::Concrete(layout.list))
-            .local_get(at)
-            .i32_const(1)
-            .op(ADD32)
-            .struct_set(layout.list, LENGTH)
+            .local_get(index)
+            .call(self.get)
+            .local_set(old);
+        layout.elements(&mut code, list);
+        code.local_get(index);
+        layout.offset(&mut code, list);
+        code.op(ADD32)
+            .local_get(element)
+            .array_set(layout.elements)
+            .local_get(old);
+        module.define(
+            self.set,
+            Function {
+                ty,
+                locals: vec![REFERENCE],
+                code,
+            },
+        );
+    }
+
+    /// `add(element)`: insert at the end of the list or range.
+    fn define_add(&self, module: &mut Module) {
+        let ty = module.func_type(vec![REFERENCE, REFERENCE], vec![ValType::I32]);
+        let (list, element) = (0, 1);
+        let mut code = Code::default();
+        code.local_get(list)
+            .local_get(list)
+            .call(self.size)
+            .local_get(element)
+            .call(self.insert)
             .i32_const(1);
         module.define(
             self.add,
             Function {
                 ty,
-                locals: vec![ValType::I32],
+                locals: Vec::new(),
+                code,
+            },
+        );
+    }
+
+    /// `insert(index, element)`: the element lands at `index` of the list or range, the elements
+    /// from there on move one place up, and the list's shape changes. A range inserts into its
+    /// root at the range's offset, then it and every range it was taken from take the new shape.
+    /// The caller has checked the index against the size.
+    fn define_insert(&self, module: &mut Module, layout: Layout, reserve: u32) {
+        let ty = module.func_type(vec![REFERENCE, ValType::I32, REFERENCE], Vec::new());
+        let (list, index, element, root, at) = (0, 1, 2, 3, 4);
+        let mut code = Code::default();
+        code.local_get(list).call(self.ranges.validate);
+        layout.root_of(&mut code, list);
+        code.local_set(root);
+        code.local_get(root).call(reserve);
+        layout.offset(&mut code, list);
+        code.local_get(index).op(ADD32).local_set(at);
+        layout.elements(&mut code, root);
+        code.local_get(at).i32_const(1).op(ADD32);
+        layout.elements(&mut code, root);
+        code.local_get(at);
+        layout.length(&mut code, root);
+        code.local_get(at)
+            .op(super::runtime::SUB32)
+            .array_copy(layout.elements, layout.elements);
+        layout.elements(&mut code, root);
+        code.local_get(at)
+            .local_get(element)
+            .array_set(layout.elements);
+        code.local_get(root)
+            .ref_cast(false, HeapType::Concrete(layout.list));
+        layout.length(&mut code, root);
+        code.i32_const(1).op(ADD32).struct_set(layout.list, LENGTH);
+        layout.bump(&mut code, root);
+        code.local_get(list).i32_const(1).call(self.resync);
+        module.define(
+            self.insert,
+            Function {
+                ty,
+                locals: vec![REFERENCE, ValType::I32],
+                code,
+            },
+        );
+    }
+
+    /// `removeRange(from, to)`: the elements of the list or range from `from` up to `to` leave,
+    /// the ones after them close the gap, and the list's shape changes, even for an empty span, as
+    /// the JVM's does.
+    fn define_remove_range(&self, module: &mut Module, layout: Layout) {
+        let ty = module.func_type(vec![REFERENCE, ValType::I32, ValType::I32], Vec::new());
+        let (list, from, to, root, first, last) = (0, 1, 2, 3, 4, 5);
+        let mut code = Code::default();
+        code.local_get(list).call(self.ranges.validate);
+        layout.root_of(&mut code, list);
+        code.local_set(root);
+        layout.offset(&mut code, list);
+        code.local_get(from).op(ADD32).local_set(first);
+        layout.offset(&mut code, list);
+        code.local_get(to).op(ADD32).local_set(last);
+        layout.elements(&mut code, root);
+        code.local_get(first);
+        layout.elements(&mut code, root);
+        code.local_get(last);
+        layout.length(&mut code, root);
+        code.local_get(last)
+            .op(super::runtime::SUB32)
+            .array_copy(layout.elements, layout.elements);
+        code.local_get(root)
+            .ref_cast(false, HeapType::Concrete(layout.list));
+        layout.length(&mut code, root);
+        code.local_get(last)
+            .local_get(first)
+            .op(super::runtime::SUB32)
+            .op(super::runtime::SUB32)
+            .struct_set(layout.list, LENGTH);
+        layout.bump(&mut code, root);
+        code.local_get(list)
+            .local_get(from)
+            .local_get(to)
+            .op(super::runtime::SUB32)
+            .call(self.resync);
+        module.define(
+            self.remove_range,
+            Function {
+                ty,
+                locals: vec![REFERENCE, ValType::I32, ValType::I32],
+                code,
+            },
+        );
+    }
+
+    /// `removeAt(index)`: the element it removes. The caller has checked the index.
+    fn define_remove_at(&self, module: &mut Module) {
+        let ty = module.func_type(vec![REFERENCE, ValType::I32], vec![REFERENCE]);
+        let (list, index, old) = (0, 1, 2);
+        let mut code = Code::default();
+        code.local_get(list)
+            .local_get(index)
+            .call(self.get)
+            .local_set(old);
+        code.local_get(list)
+            .local_get(index)
+            .local_get(index)
+            .i32_const(1)
+            .op(ADD32)
+            .call(self.remove_range)
+            .local_get(old);
+        module.define(
+            self.remove_at,
+            Function {
+                ty,
+                locals: vec![REFERENCE],
+                code,
+            },
+        );
+    }
+
+    /// After a write through the range in local 0 resized its root by local 1, the range and every
+    /// range it was taken from have the root's elements, the new length and the root's shape, so
+    /// they go on answering. Any other range of the root keeps its old shape and no longer does.
+    /// A list has nothing to take.
+    fn define_resync(&self, module: &mut Module, layout: Layout) {
+        let ty = module.func_type(vec![REFERENCE, ValType::I32], Vec::new());
+        let (list, delta, range, root) = (0, 1, 2, 3);
+        let mut code = Code::default();
+        layout.root_of(&mut code, list);
+        code.local_set(root);
+        code.local_get(list).local_set(range);
+        code.block(BlockType::Empty).loop_(BlockType::Empty);
+        code.local_get(range)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .struct_get(layout.list, ROOT)
+            .ref_is_null()
+            .br_if(1);
+        code.local_get(range)
+            .ref_cast(false, HeapType::Concrete(layout.list));
+        layout.length(&mut code, range);
+        code.local_get(delta)
+            .op(ADD32)
+            .struct_set(layout.list, LENGTH);
+        code.local_get(range)
+            .ref_cast(false, HeapType::Concrete(layout.list));
+        layout.elements(&mut code, root);
+        code.struct_set(layout.list, ELEMENTS);
+        code.local_get(range)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .local_get(root)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .struct_get(layout.list, MODIFICATIONS)
+            .struct_set(layout.list, EXPECTED);
+        code.local_get(range)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .struct_get(layout.list, PARENT)
+            .local_set(range)
+            .br(0)
+            .end()
+            .end();
+        module.define(
+            self.resync,
+            Function {
+                ty,
+                locals: vec![REFERENCE, REFERENCE],
                 code,
             },
         );
@@ -459,13 +764,16 @@ impl ArrayLists {
         let ty = module.func_type(vec![REFERENCE, REFERENCE], vec![ValType::I32]);
         let (list, element, index) = (0, 1, 2);
         let mut code = Code::default();
+        code.local_get(list).call(self.ranges.validate);
         code.block(BlockType::Empty).loop_(BlockType::Empty);
         code.local_get(index);
         layout.length(&mut code, list);
         code.op(GE_S32).br_if(1);
         code.local_get(element);
         layout.elements(&mut code, list);
-        code.local_get(index)
+        code.local_get(index);
+        layout.offset(&mut code, list);
+        code.op(ADD32)
             .array_get(layout.elements)
             .call(equals)
             .if_(BlockType::Empty)
@@ -490,13 +798,15 @@ impl ArrayLists {
         );
     }
 
-    fn define_clear(&self, module: &mut Module, layout: Layout) {
+    fn define_clear(&self, module: &mut Module) {
         let ty = module.func_type(vec![REFERENCE], Vec::new());
         let mut code = Code::default();
+        // `size` first: an empty range of a list that changed still answers to the list.
         code.local_get(0)
-            .ref_cast(false, HeapType::Concrete(layout.list))
             .i32_const(0)
-            .struct_set(layout.list, LENGTH);
+            .local_get(0)
+            .call(self.size)
+            .call(self.remove_range);
         module.define(
             self.clear,
             Function {
@@ -507,22 +817,31 @@ impl ArrayLists {
         );
     }
 
-    fn define_remove(&self, module: &mut Module, layout: Layout, equals: u32) {
+    fn define_remove(&self, module: &mut Module, equals: u32) {
         let ty = module.func_type(vec![REFERENCE, REFERENCE], vec![ValType::I32]);
         let (list, element, index) = (0, 1, 2);
         let mut code = Code::default();
         code.block(BlockType::Empty).loop_(BlockType::Empty);
-        code.local_get(index);
-        layout.length(&mut code, list);
-        code.op(GE_S32).br_if(1);
-        code.local_get(element);
-        layout.elements(&mut code, list);
         code.local_get(index)
-            .array_get(layout.elements)
+            .local_get(list)
+            .call(self.size)
+            .op(GE_S32)
+            .br_if(1);
+        code.local_get(element)
+            .local_get(list)
+            .local_get(index)
+            .call(self.get)
             .call(equals)
-            .if_(BlockType::Empty);
-        self.shift_down(&mut code, layout, list, index, 3);
-        code.i32_const(1).return_().end();
+            .if_(BlockType::Empty)
+            .local_get(list)
+            .local_get(index)
+            .local_get(index)
+            .i32_const(1)
+            .op(ADD32)
+            .call(self.remove_range)
+            .i32_const(1)
+            .return_()
+            .end();
         code.local_get(index)
             .i32_const(1)
             .op(ADD32)
@@ -535,7 +854,7 @@ impl ArrayLists {
             self.remove,
             Function {
                 ty,
-                locals: vec![ValType::I32, ValType::I32],
+                locals: vec![ValType::I32],
                 code,
             },
         );
@@ -564,24 +883,46 @@ impl ArrayLists {
         code.i32_const(1)
             .op(super::runtime::SUB32)
             .struct_set(layout.list, LENGTH);
+        layout.bump(code, list);
     }
 
+    /// `addAll(elements)`. The elements are taken out before the first is appended, as
+    /// `ArrayList.addAll` takes `c.toArray()`: appending changes the shape of a list the argument
+    /// may be a range of.
     pub(super) fn define_add_all(&self, module: &mut Module, bulk: &BulkOperations) {
         let layout = self.layout;
         let ty = module.func_type(vec![REFERENCE, REFERENCE], vec![ValType::I32]);
-        let (list, other, count, index) = (0, 1, 2, 3);
+        let (list, other, count, index, taken) = (0, 1, 2, 3, 4);
         let mut code = Code::default();
         code.local_get(other)
             .call(bulk.elements_of)
             .local_set(other);
         layout.length(&mut code, other);
-        code.local_set(count);
+        code.local_tee(count)
+            .array_new_default(layout.elements)
+            .local_set(taken);
         code.block(BlockType::Empty).loop_(BlockType::Empty);
         code.local_get(index).local_get(count).op(GE_S32).br_if(1);
-        code.local_get(list)
+        code.local_get(taken)
+            .local_get(index)
             .local_get(other)
             .local_get(index)
             .call(self.get)
+            .array_set(layout.elements);
+        code.local_get(index)
+            .i32_const(1)
+            .op(ADD32)
+            .local_set(index)
+            .br(0)
+            .end()
+            .end();
+        code.i32_const(0).local_set(index);
+        code.block(BlockType::Empty).loop_(BlockType::Empty);
+        code.local_get(index).local_get(count).op(GE_S32).br_if(1);
+        code.local_get(list)
+            .local_get(taken)
+            .local_get(index)
+            .array_get(layout.elements)
             .call(self.add)
             .drop_();
         code.local_get(index)
@@ -598,7 +939,11 @@ impl ArrayLists {
             bulk.add_all,
             Function {
                 ty,
-                locals: vec![ValType::I32, ValType::I32],
+                locals: vec![
+                    ValType::I32,
+                    ValType::I32,
+                    ValType::reference(layout.elements),
+                ],
                 code,
             },
         );
@@ -621,6 +966,7 @@ impl ArrayLists {
         let ty = module.func_type(vec![REFERENCE, REFERENCE], vec![ValType::I32]);
         let (list, other, index, changed) = (0, 1, 2, 3);
         let mut code = Code::default();
+        code.local_get(list).call(self.ranges.reject_write);
         code.block(BlockType::Empty).loop_(BlockType::Empty);
         code.local_get(index);
         layout.length(&mut code, list);
@@ -664,12 +1010,14 @@ impl ArrayLists {
     ) {
         let ty = module.func_type(vec![REFERENCE, ValType::I32], vec![REFERENCE]);
         let mut code = Code::default();
+        code.local_get(0).call(self.ranges.validate);
         code.global_get(table)
             .call(identity.allocate)
             .local_get(0)
             .ref_cast(false, HeapType::Concrete(layout.list))
-            .local_get(1)
-            .struct_new(layout.iterator);
+            .local_get(1);
+        layout.shape(&mut code, 0);
+        code.struct_new(layout.iterator);
         module.define(
             self.iterator_at,
             Function {
@@ -716,6 +1064,7 @@ impl ArrayLists {
         let ty = module.func_type(vec![REFERENCE], vec![REFERENCE]);
         let (iter, index, list) = (0, 1, 2);
         let mut code = Code::default();
+        code.local_get(iter).call(self.ranges.check_walk);
         code.local_get(iter)
             .ref_cast(false, HeapType::Concrete(layout.iterator))
             .struct_get(layout.iterator, ITER_INDEX)
@@ -742,7 +1091,192 @@ impl ArrayLists {
     }
 }
 
+/// The runtime exception classes a range throws, by the struct of each.
+#[derive(Clone, Copy)]
+pub(super) struct RangeExceptions {
+    pub(super) concurrent_modification: u32,
+    pub(super) unsupported_operation: u32,
+    pub(super) index_out_of_bounds: u32,
+    pub(super) illegal_argument: u32,
+}
+
+/// Construct the runtime exception whose struct is the argument and throw it.
+pub(super) type Throw<'a> = &'a dyn Fn(&mut Code, u32) -> Result<(), String>;
+
 impl ArrayLists {
+    /// The bodies of the operations that answer a range of a list: `validate`, `reject_write`,
+    /// `check_walk` and `sub_list`. A range shares the list's elements, starting at an offset, and
+    /// stays valid while its root list keeps the shape it had. A write that resizes it goes to the
+    /// root and takes the new shape in the range and the ranges it was taken from
+    /// (`ArrayLists::define_resync`); `removeAll` and `retainAll` through a range are not supported.
+    pub(super) fn define_ranges(
+        &self,
+        module: &mut Module,
+        throw: Throw<'_>,
+        exceptions: RangeExceptions,
+    ) -> Result<(), String> {
+        let layout = self.layout;
+        // validate(list)
+        let ty = module.func_type(vec![REFERENCE], Vec::new());
+        let mut code = Code::default();
+        code.local_get(0)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .struct_get(layout.list, ROOT)
+            .ref_is_null()
+            .op(EQZ32)
+            .if_(BlockType::Empty);
+        code.local_get(0)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .struct_get(layout.list, ROOT)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .struct_get(layout.list, MODIFICATIONS)
+            .local_get(0)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .struct_get(layout.list, EXPECTED)
+            .op(super::runtime::NE32)
+            .if_(BlockType::Empty);
+        throw(&mut code, exceptions.concurrent_modification)?;
+        code.end().end();
+        module.define(
+            self.ranges.validate,
+            Function {
+                ty,
+                locals: Vec::new(),
+                code,
+            },
+        );
+        // reject_write(list)
+        let mut code = Code::default();
+        code.local_get(0)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .struct_get(layout.list, ROOT)
+            .ref_is_null()
+            .op(EQZ32)
+            .if_(BlockType::Empty);
+        throw(&mut code, exceptions.unsupported_operation)?;
+        code.end();
+        module.define(
+            self.ranges.reject_write,
+            Function {
+                ty,
+                locals: Vec::new(),
+                code,
+            },
+        );
+        // check_walk(iterator)
+        let ty = module.func_type(vec![REFERENCE], Vec::new());
+        let mut code = Code::default();
+        code.local_get(0)
+            .ref_cast(false, HeapType::Concrete(layout.iterator))
+            .struct_get(layout.iterator, ITER_LIST)
+            .local_set(1);
+        // A range answers for its root's actual shape, not the one it cached when it was taken.
+        code.local_get(1).call(self.ranges.validate);
+        layout.shape(&mut code, 1);
+        code.local_get(0)
+            .ref_cast(false, HeapType::Concrete(layout.iterator))
+            .struct_get(layout.iterator, ITER_EXPECTED)
+            .op(super::runtime::NE32)
+            .if_(BlockType::Empty);
+        throw(&mut code, exceptions.concurrent_modification)?;
+        code.end();
+        module.define(
+            self.ranges.check_walk,
+            Function {
+                ty,
+                locals: vec![REFERENCE],
+                code,
+            },
+        );
+        // sub_list(list, from, to)
+        let ty = module.func_type(vec![REFERENCE, ValType::I32, ValType::I32], vec![REFERENCE]);
+        let (list, from, to, root) = (0, 1, 2, 3);
+        let mut code = Code::default();
+        code.local_get(from).i32_const(0).op(LT_S32).local_get(to);
+        layout.length(&mut code, list);
+        code.op(super::runtime::GT_S32)
+            .op(super::runtime::OR32)
+            .if_(BlockType::Empty);
+        throw(&mut code, exceptions.index_out_of_bounds)?;
+        code.end();
+        code.local_get(from)
+            .local_get(to)
+            .op(super::runtime::GT_S32)
+            .if_(BlockType::Empty);
+        throw(&mut code, exceptions.illegal_argument)?;
+        code.end();
+        // The root: the list itself, or what the range it is was taken from.
+        code.local_get(list)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .struct_get(layout.list, ROOT)
+            .ref_is_null()
+            .if_(BlockType::Value(REFERENCE))
+            .local_get(list)
+            .else_()
+            .local_get(list)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .struct_get(layout.list, ROOT)
+            .end()
+            .local_set(root);
+        code.global_get(self.table).call(self.allocate);
+        layout.elements(&mut code, list);
+        code.local_get(to).local_get(from).op(super::runtime::SUB32);
+        code.i32_const(0);
+        layout.offset(&mut code, list);
+        code.local_get(from).op(ADD32).local_get(root);
+        // A range of a list expects the shape the list has now; a range of a range expects the one
+        // that range expects, so one the root has left behind stays left behind.
+        code.local_get(list)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .struct_get(layout.list, ROOT)
+            .ref_is_null()
+            .if_(BlockType::Value(ValType::I32))
+            .local_get(root)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .struct_get(layout.list, MODIFICATIONS)
+            .else_()
+            .local_get(list)
+            .ref_cast(false, HeapType::Concrete(layout.list))
+            .struct_get(layout.list, EXPECTED)
+            .end()
+            .local_get(list)
+            .struct_new(layout.list);
+        module.define(
+            self.ranges.sub_list,
+            Function {
+                ty,
+                locals: vec![REFERENCE],
+                code,
+            },
+        );
+        Ok(())
+    }
+
+    /// Give the range operations bodies a module that never records the collection members gets:
+    /// it holds no list, so none is reached.
+    pub(super) fn define_unreachable_ranges(&self, module: &mut Module) {
+        let void = module.func_type(vec![REFERENCE], Vec::new());
+        let sub_list =
+            module.func_type(vec![REFERENCE, ValType::I32, ValType::I32], vec![REFERENCE]);
+        for (function, ty) in [
+            (self.ranges.validate, void),
+            (self.ranges.reject_write, void),
+            (self.ranges.check_walk, void),
+            (self.ranges.sub_list, sub_list),
+        ] {
+            let mut code = Code::default();
+            code.unreachable();
+            module.define(
+                function,
+                Function {
+                    ty,
+                    locals: Vec::new(),
+                    code,
+                },
+            );
+        }
+    }
+
     fn define_has_previous(&self, module: &mut Module, layout: Layout) {
         let ty = module.func_type(vec![REFERENCE], vec![ValType::I32]);
         let mut code = Code::default();
@@ -763,6 +1297,7 @@ impl ArrayLists {
         let ty = module.func_type(vec![REFERENCE], vec![REFERENCE]);
         let (iter, index) = (0, 1);
         let mut code = Code::default();
+        code.local_get(iter).call(self.ranges.check_walk);
         iterator_index(&mut code, layout, iter);
         code.i32_const(-1).op(ADD32).local_set(index);
         code.local_get(iter)
@@ -831,20 +1366,71 @@ impl Layout {
             .ref_cast(false, HeapType::Concrete(self.list))
             .struct_get(self.list, LENGTH);
     }
+
+    /// Where the range in local `list` starts in its elements.
+    fn offset(self, code: &mut Code, list: u32) {
+        code.local_get(list)
+            .ref_cast(false, HeapType::Concrete(self.list))
+            .struct_get(self.list, OFFSET);
+    }
+
+    /// Push the list in local `list`, or the list a range in it was taken from.
+    fn root_of(self, code: &mut Code, list: u32) {
+        code.local_get(list)
+            .ref_cast(false, HeapType::Concrete(self.list))
+            .struct_get(self.list, ROOT)
+            .ref_is_null()
+            .if_(BlockType::Value(REFERENCE))
+            .local_get(list)
+            .else_()
+            .local_get(list)
+            .ref_cast(false, HeapType::Concrete(self.list))
+            .struct_get(self.list, ROOT)
+            .end();
+    }
+
+    /// Push the shape of the list or range in local `list`: how many times a list's shape
+    /// changed, or the one of its root a range answers for.
+    fn shape(self, code: &mut Code, list: u32) {
+        code.local_get(list)
+            .ref_cast(false, HeapType::Concrete(self.list))
+            .struct_get(self.list, ROOT)
+            .ref_is_null()
+            .if_(BlockType::Value(ValType::I32))
+            .local_get(list)
+            .ref_cast(false, HeapType::Concrete(self.list))
+            .struct_get(self.list, MODIFICATIONS)
+            .else_()
+            .local_get(list)
+            .ref_cast(false, HeapType::Concrete(self.list))
+            .struct_get(self.list, EXPECTED)
+            .end();
+    }
+
+    /// Count a change of the shape of the list in local `list`.
+    fn bump(self, code: &mut Code, list: u32) {
+        code.local_get(list)
+            .ref_cast(false, HeapType::Concrete(self.list))
+            .local_get(list)
+            .ref_cast(false, HeapType::Concrete(self.list))
+            .struct_get(self.list, MODIFICATIONS)
+            .i32_const(1)
+            .op(ADD32)
+            .struct_set(self.list, MODIFICATIONS);
+    }
 }
 
 fn dispatch_table(
     module: &mut Module,
     objects: &mut ObjectRoot,
-    identity: &IdentityObjects,
     structure: u32,
-    to_string: u32,
+    slots: [u32; 3],
 ) -> (ClassRef, u32) {
     let (class, itable) = objects
         .interfaces
         .class(module, objects.itable, vec![structure]);
     let mut init = Code::default();
-    for function in [objects.identity_equals, identity.hash_code, to_string] {
+    for function in slots {
         module.reference_function(function);
         init.ref_func(function);
     }
