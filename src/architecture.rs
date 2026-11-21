@@ -901,6 +901,8 @@ mod tests {
         let allowed = [
             "assignable",
             "fir",
+            // A call of an inline function is expanded by the IR splice checked lowering shares.
+            "inline_expansion",
             "ir",
             "klib_libraries",
             "libraries",
@@ -1084,6 +1086,9 @@ mod tests {
                 &path,
                 &[
                     "fir",
+                    // The IR-only expansion of an inline body at a use, which dependency-body
+                    // lowering shares; it reads and writes common IR only.
+                    "inline_expansion",
                     "ir",
                     "kt_string",
                     // Which enclosing callable is a lambda, so a nested one takes that lambda's
@@ -1248,8 +1253,8 @@ mod tests {
     }
 
     #[test]
-    fn the_hosted_plugin_ir_reads_only_checked_fir_and_its_declarations() {
-        // It encodes Pass 2's checked bodies for kotlinc plugins in the plugin host: checked FIR,
+    fn the_plugin_ir_reads_only_checked_fir_and_its_declarations() {
+        // It encodes Pass 2's checked bodies for IR plugins through the plugin API: checked FIR,
         // the declarations' syntax and resolved index, and the platform's description of a
         // dependency. It never resolves, lowers or reaches a backend.
         let allowed = [
@@ -1261,8 +1266,8 @@ mod tests {
             "libraries",
             "types",
         ];
-        assert_allowed_crate_modules("src/hosted_plugin_ir.rs", &allowed);
-        assert_allowed_crate_modules_in_tree("src/hosted_plugin_ir", &allowed);
+        assert_allowed_crate_modules("src/plugin_ir.rs", &allowed);
+        assert_allowed_crate_modules_in_tree("src/plugin_ir", &allowed);
     }
 
     #[test]
@@ -1343,7 +1348,7 @@ mod tests {
                 "features",
                 "frontend",
                 // Compiler plugins consume this public projection of the module's checked FIR.
-                "hosted_plugin_ir",
+                "plugin_ir",
                 "ir",
                 "js",
                 "jvm",

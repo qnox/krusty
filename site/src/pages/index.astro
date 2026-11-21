@@ -100,7 +100,7 @@ const buildSystems: { name: string; level: Level; html: string }[] = [
   {
     name: "Kotlin Build Tools API",
     level: "partial",
-    html: `<code>krusty-build-tools-&lt;version&gt;-kotlin-&lt;kotlin&gt;.jar</code> in each release stands in for <code>kotlin-build-tools-impl</code> in a build tool that loads the API from a classpath. JVM toolchain and in-process execution only. See <a href="${blob("tools/krusty-build-tools/README.md")}">tools/krusty-build-tools</a>.`,
+    html: `<code>krusty-build-tools-&lt;version&gt;-kotlin-&lt;kotlin&gt;.jar</code> in each release stands in for <code>kotlin-build-tools-impl</code> in a build tool that loads the API from a classpath. JVM toolchain only, under the in-process or daemon execution policy. See <a href="${blob("tools/krusty-build-tools/README.md")}">tools/krusty-build-tools</a>.`,
   },
   {
     name: "Bazel",
@@ -122,7 +122,7 @@ const plugins: { name: string; level: Level; html: string }[] = [
   {
     name: "KSP (KSP2)",
     level: "partial",
-    html: "Through a build system. Under Gradle, KSP's own <code>kspKotlin</code> task runs the processors and krusty compiles what they generate (Gradle 8 or newer). Under the Kotlin Toolchain, only generated classes and resources are picked up. The plain command line rejects KSP.",
+    html: "Through a build system. Under Gradle, KSP's own <code>kspKotlin</code> task runs the processors and krusty compiles what they generate (Gradle 8 or newer). Under the Kotlin Toolchain, krusty compiles the generated Kotlin sources and picks up generated classes and resources; generated Java sources are not compiled yet. The plain command line rejects KSP.",
   },
   {
     name: "kapt",
