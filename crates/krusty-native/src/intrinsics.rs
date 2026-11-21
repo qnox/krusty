@@ -262,37 +262,18 @@ pub(super) fn throwable_descriptor(owner: krusty::types::TypeName) -> Option<&'s
     })
 }
 
-/// Whether Kotlin gives this member a SPECIAL BRIDGE, so that a call through the wide type does
-/// not always reach an override at all.
+/// Whether the runtime's entry point for this `Map` member applies the special bridge itself.
 ///
-/// `Map<Any, Any>.get(key: Any)` is declared with a NON-NULL parameter, and a caller holding the
-/// same object as a `Map<Any?, Any?>` may pass `null`. Kotlin does not call the override there: it
-/// answers the member's default — `null` for `get` and `remove`, `false` for a `contains`, `-1` for
-/// an `indexOf` — because the argument cannot be what the declaration accepts. The corpus asks
-/// exactly that (`specialBuiltins/notEmptyMap.kt`, `bridges/special.kt`).
-///
-/// The receiver dispatch has no bridge to put in front of an implementor's arm, so it declines
-/// these rather than calling an override Kotlin would have skipped. Every one of them takes an
-/// ARGUMENT, which is why the nullary members are unaffected.
-pub(super) fn has_special_bridge(collection: krusty::types::MappedCollection, name: &str) -> bool {
-    let over_a_map = matches!(
-        collection.kind,
-        krusty::types::CollectionKind::Map | krusty::types::CollectionKind::MapEntry
-    );
-    let over_a_collection = matches!(
-        collection.kind,
-        krusty::types::CollectionKind::Iterable
-            | krusty::types::CollectionKind::Collection
-            | krusty::types::CollectionKind::List
-            | krusty::types::CollectionKind::Set
-    );
-    match name {
-        "get" | "containsKey" | "containsValue" | "getOrDefault" => over_a_map,
-        // `MutableCollection.remove(element)` is as special as `Map.remove(key)`.
-        "remove" => over_a_map || over_a_collection,
-        "contains" | "indexOf" | "lastIndexOf" => over_a_collection,
-        _ => false,
-    }
+/// `kt_map_get`, `kt_map_contains_key` and `kt_map_contains_value` reach a program class through
+/// its `KType.map_members` thunks, which answer the bridge's neutral result for an argument that is
+/// not the override's type. A call through `Map` to such an object therefore needs no bridge of its
+/// own at the call site, unlike the other members `has_special_bridge` names.
+pub(super) fn map_thunk_guards_bridge(
+    collection: krusty::types::MappedCollection,
+    name: &str,
+) -> bool {
+    collection.kind == krusty::types::CollectionKind::Map
+        && matches!(name, "get" | "containsKey" | "containsValue")
 }
 
 /// The one member of a functional interface the RUNTIME knows, or `None` for any other.
@@ -2667,27 +2648,6 @@ mod tests {
             floor_mod(facade("kotlin/NumbersKt"), "mod", Ty::Int, &[Ty::Double]),
             None
         );
-    }
-
-    #[test]
-    fn collection_roles_keep_their_special_bridges() {
-        let collection = |kind, mutable| krusty::types::MappedCollection { kind, mutable };
-        assert!(has_special_bridge(
-            collection(krusty::types::CollectionKind::Collection, false),
-            "contains"
-        ));
-        assert!(has_special_bridge(
-            collection(krusty::types::CollectionKind::Collection, true),
-            "remove"
-        ));
-        assert!(has_special_bridge(
-            collection(krusty::types::CollectionKind::Map, false),
-            "remove"
-        ));
-        assert!(!has_special_bridge(
-            collection(krusty::types::CollectionKind::Collection, false),
-            "get"
-        ));
     }
 
     #[test]

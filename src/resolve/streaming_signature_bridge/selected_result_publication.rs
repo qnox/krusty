@@ -271,6 +271,18 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
         })
     }
 
+    fn open_result_expectation(
+        &self,
+        scope: crate::fir::SignatureScope,
+        origin: crate::fir::OriginId,
+        sibling: crate::fir::ResolvedTy,
+    ) -> Option<crate::fir::ResolvedTy> {
+        let publication = self.selected_calls.publication(origin)?;
+        let expectation =
+            publication.expectation_from_sibling(self.table, scope.source.raw(), sibling.get())?;
+        crate::fir::ResolvedTy::new(expectation).ok()
+    }
+
     fn call_result_publication(
         &self,
         _scope: crate::fir::SignatureScope,

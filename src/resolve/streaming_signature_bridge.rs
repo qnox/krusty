@@ -2164,11 +2164,7 @@ impl ProductionSignatureSemantics<'_> {
         // The operator's result type is algebra over the operands; only its value-class check needs a
         // lookup context, which signature evaluation supplies for the file being solved. Every
         // refusal is a decline here — the checker owns the wording, this path owns the decision.
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        file_library_source!(self.table, scope.source.raw(), module, source);
         let _ = origin;
         let outcome = super::binary_result(&source, operator, lhs, rhs);
         crate::trace_compiler!(

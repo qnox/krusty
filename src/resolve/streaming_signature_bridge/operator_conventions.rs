@@ -206,11 +206,7 @@ impl ProductionSignatureSemantics<'_> {
         if !signature.has_receiver || explicit.len() != arguments.len() + 1 {
             return None;
         }
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        file_library_source!(self.table, scope.source.raw(), module, source);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         super::super::context_argument_types(
             &self.implicit_receivers(scope),
