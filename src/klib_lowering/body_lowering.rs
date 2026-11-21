@@ -311,6 +311,21 @@ pub(super) trait CallLinker {
         unsupported("a file-private object value")
     }
 
+    /// Whether `signature` names a non-public interface of the library of the body being lowered.
+    fn is_local_interface(&self, _signature: &crate::metadata::klib_ir::KlibIrSignature) -> bool {
+        false
+    }
+
+    /// The non-public interface a type test or a cast of this library's body names, installed in
+    /// the unit with its abstract members. Template linkers keep the refusal.
+    fn link_local_interface(
+        &mut self,
+        _ir: &mut IrFile,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<()> {
+        unsupported("a type of a file-private interface")
+    }
+
     /// The constructor a file-local construction invokes. Template linkers keep the refusal.
     fn link_local_constructor(
         &mut self,
