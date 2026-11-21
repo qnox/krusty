@@ -945,12 +945,14 @@ fn local_extension_receiver_resolves_a_preceding_local_classifier_before_fir() {
         function_type,
         reflective,
         extension_receiver,
+        context_arguments,
         adaptation,
     } = &reference.kind
     else {
         unreachable!("the search selected a local callable reference")
     };
     let classifier_ty = Ty::obj_name(classifier);
+    assert!(context_arguments.is_empty());
     assert_eq!(target.body_depth, 0);
     assert_eq!(target.callable, *callable);
     assert_eq!(

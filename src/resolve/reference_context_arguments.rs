@@ -231,6 +231,12 @@ impl Checker<'_> {
                 resolved_argument_mapping,
                 ..
             } => (&target.params, resolved_argument_mapping),
+            ExprLowering::AdaptedLocalFunctionRef {
+                bound_context_types,
+                ..
+            } => {
+                return (!bound_context_types.is_empty()).then(|| bound_context_types.clone());
+            }
             ExprLowering::AdaptedCallableReference {
                 target,
                 argument_mapping,
