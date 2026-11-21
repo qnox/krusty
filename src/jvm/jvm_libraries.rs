@@ -4149,7 +4149,7 @@ impl JvmLibraries {
         };
         let until = match elem {
             Ty::Double | Ty::Float => None,
-            Ty::UInt => Some(LibraryCallable::library(
+            Ty::UInt => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/URangesKt"),
                 "until-J1ME1BU",
                 vec![elem, elem],
@@ -4157,7 +4157,7 @@ impl JvmLibraries {
                 Ty::obj(internal),
                 format!("({prim}{prim})L{internal};"),
             )),
-            Ty::ULong => Some(LibraryCallable::library(
+            Ty::ULong => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/URangesKt"),
                 "until-eb3DHEI",
                 vec![elem, elem],
@@ -4165,7 +4165,7 @@ impl JvmLibraries {
                 Ty::obj(internal),
                 format!("({prim}{prim})L{internal};"),
             )),
-            _ if trailing_nulls == 0 => Some(LibraryCallable::library(
+            _ if trailing_nulls == 0 => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/RangesKt"),
                 "until",
                 vec![elem, elem],
@@ -4180,7 +4180,7 @@ impl JvmLibraries {
                 let iface = "kotlin/ranges/ClosedFloatingPointRange";
                 (
                     Ty::obj(iface),
-                    Some(LibraryCallable::library(
+                    Some(LibraryCallable::declared(
                         type_name("kotlin/ranges/RangesKt"),
                         "rangeTo",
                         vec![elem, elem],
