@@ -1531,7 +1531,9 @@ impl<'s> CallLinker for Linker<'_, 's> {
             KlibIrSignature::Accessor(accessor) => {
                 KlibDeclarationSignature::Accessor(accessor.clone())
             }
-            KlibIrSignature::FileLocal { .. } => return Ok(None),
+            KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => {
+                return Ok(None)
+            }
         };
         // The overridden symbol is the declaration itself, which this body's producer graph
         // resolves exactly as it resolves a call of it.
