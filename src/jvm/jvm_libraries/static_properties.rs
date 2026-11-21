@@ -610,6 +610,7 @@ impl JvmLibraries {
         getter.physical_name =
             (getter_sig.name != getter_source_name).then(|| getter_sig.name.clone());
         getter.params = semantic_context.iter().copied().chain(receiver).collect();
+        getter.declared_params = Some(getter.params.clone().into_boxed_slice());
         getter.source_receiver = receiver;
         getter.context_count = context_count;
         getter.inline = getter_inline;
@@ -641,6 +642,7 @@ impl JvmLibraries {
                 .chain(receiver)
                 .chain(std::iter::once(property_ty))
                 .collect();
+            setter.declared_params = Some(setter.params.clone().into_boxed_slice());
             setter.source_receiver = receiver;
             setter.context_count = context_count;
             Some(setter)

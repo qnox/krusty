@@ -837,8 +837,8 @@ dependencies = [
  "krusty-native",
  "krusty-plugin-allopen",
  "krusty-plugin-api",
+ "krusty-plugin-assignment",
  "krusty-plugin-host",
- "krusty-plugin-ir",
  "krusty-plugin-noarg",
  "krusty-plugin-sam-with-receiver",
  "krusty-test-modules",
@@ -941,17 +941,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "krusty-plugin-host"
+name = "krusty-plugin-assignment"
 version = "0.0.1"
 dependencies = [
- "krusty-plugin-ir",
- "sha2",
- "zip",
+ "krusty-plugin-api",
 ]
 
 [[package]]
-name = "krusty-plugin-ir"
+name = "krusty-plugin-host"
 version = "0.0.1"
+dependencies = [
+ "krusty-plugin-api",
+ "sha2",
+ "zip",
+]
 
 [[package]]
 name = "krusty-plugin-noarg"
