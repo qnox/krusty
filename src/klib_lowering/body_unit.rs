@@ -1664,6 +1664,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .externals
             .get(&identity)
             .is_some_and(|external| external.realizes_accessor())
+            && !self.is_earlier_abstract_accessor(&identity)
         {
             return Err(unsupported());
         }
@@ -2034,6 +2035,14 @@ impl<'s> Linker<'_, 's> {
         if !abstract_ && !matches!(declaration.body, Some(KlibIrBody::Block(_))) {
             return Ok(None);
         }
+        // An abstract accessor of a class an earlier unit realized is that unit's dispatch slot,
+        // which no body here implements.
+        if abstract_
+            && !self.functions.contains_key(identity)
+            && self.class_realized_earlier(selected)
+        {
+            return Ok(None);
+        }
         let selected = selected_callable_for_header_purpose(
             Some(SelectedKlibCallables::Variants(callables)),
             HeaderPurpose::Body(None),
@@ -2261,6 +2270,23 @@ impl<'s> Linker<'_, 's> {
                     "a member realized outside the unit has no frozen call edge".to_owned(),
                 )
             })
+    }
+
+    /// Whether `identity` is an abstract accessor of a class an earlier unit realized and this
+    /// unit does not declare: a call of it dispatches through the member's frozen declaration.
+    fn is_earlier_abstract_accessor(&self, identity: &KlibDependencyCallable) -> bool {
+        let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(identity) else {
+            return false;
+        };
+        let Some((_, declaration)) = self.sources.bodies.function(identity) else {
+            return false;
+        };
+        declaration.body.is_none()
+            && crate::metadata::semantic::declaration_modality(declaration.base.flags)
+                == crate::metadata::semantic::KotlinModality::Abstract
+            && !self.functions.contains_key(identity)
+            && self.class_realized_earlier(callables[0])
+            && self.sources.callees.reference_target(identity).is_some()
     }
 
     /// A call of the value class member `selected`, which this unit emits as a member of its
