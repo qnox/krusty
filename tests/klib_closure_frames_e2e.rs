@@ -8,6 +8,9 @@ use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantic
 #[path = "klib_closure_frames_e2e/elvis_blocks.rs"]
 mod elvis_blocks;
 
+#[path = "klib_closure_frames_e2e/local_superclass_arguments.rs"]
+mod local_superclass_arguments;
+
 #[path = "klib_closure_frames_e2e/top_level_properties.rs"]
 mod top_level_properties;
 
