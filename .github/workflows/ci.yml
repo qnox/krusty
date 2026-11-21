@@ -1609,6 +1609,7 @@ jobs:
           # The SDK setup uses the same Gradle compatibility decision as the test inventory.
           if [ "${{ steps.android.outputs.enabled }}" = true ]; then
             tests="$tests android_variants_compile_through_krusty"
+            tests="$tests android_compose_app_is_compiled_by_krusty_with_a_handoff_for_what_it_refuses"
           fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
