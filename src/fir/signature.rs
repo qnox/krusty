@@ -17,6 +17,7 @@ use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
 mod arena_ranges;
 mod call_arguments;
 mod call_result_constraints;
+mod cycle_decision;
 mod declaration_type_sites;
 mod expressions;
 mod local_type_aliases;
@@ -1312,28 +1313,10 @@ fn resolve_signature(
     match states.get(&declaration) {
         Some(SignatureState::Resolved(signature)) => return Ok(signature.clone()),
         Some(SignatureState::Failed(diagnostic)) => return Err(*diagnostic),
-        Some(SignatureState::Computing) => {
-            crate::trace_compiler!(
-                "fir",
-                "signature cycle: re-entered {declaration:?} with stack {computing:?}",
-            );
-            let cycle_start = computing
-                .iter()
-                .position(|candidate| *candidate == declaration)
-                .unwrap_or(computing.len());
-            let cycle = computing[cycle_start..].to_vec();
-            let mut requested = None;
-            for member in cycle {
-                let diagnostic = evaluator.recursive_inference_diagnostic(member);
-                if member == declaration {
-                    requested = Some(diagnostic);
-                }
-                states.insert(member, SignatureState::Failed(diagnostic));
-            }
-            let diagnostic =
-                requested.unwrap_or_else(|| evaluator.recursive_inference_diagnostic(declaration));
-            return Err(diagnostic);
-        }
+        // Re-entry is not a decision: a declaration still being computed has no known type. A
+        // caller that merely probes it may move on; one that commits to it decides the cycle in
+        // `decide_cycle` below.
+        Some(SignatureState::Computing) => return Err(DiagnosticId::in_progress(declaration)),
         Some(SignatureState::Uncomputed) | None => {}
     }
 
@@ -1351,10 +1334,16 @@ fn resolve_signature(
     let evaluated = evaluator.evaluate(declaration, constraint.result, graph, &mut |dependency| {
         resolve_signature(graph, states, computing, dependency, evaluator)
     });
+    let evaluated = evaluated.map_err(|failure| match failure.in_progress_declaration() {
+        Some(target) => {
+            cycle_decision::decide_cycle(states, computing, declaration, target, evaluator)
+        }
+        None => failure,
+    });
     let popped = computing.pop();
     debug_assert_eq!(popped, Some(declaration));
 
-    // Re-entry may already have marked this declaration as a cycle member. Never overwrite that
+    // A committed re-entry already marked this declaration as a cycle member. Never overwrite that
     // diagnostic with a value computed on top of the recursive failure.
     if let Some(SignatureState::Failed(diagnostic)) = states.get(&declaration) {
         return Err(*diagnostic);

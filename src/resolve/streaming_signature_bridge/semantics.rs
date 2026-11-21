@@ -1506,7 +1506,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // functions at this same receiver rung. The property declaration and the `invoke`
             // convention are both selected by the shared resolver; SigExpr only composes them.
             if let Some(callee) =
-                self.selected_member_property_type(scope, receiver, spelling, None, demand)?
+                self.invoke_callee_property_type(scope, receiver, spelling, demand)?
             {
                 if let Ok(result) = self.invoke_result(scope, origin, callee, arguments, demand) {
                     return Ok(result);
@@ -3842,13 +3842,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 // A member PROPERTY whose value is callable participates in call syntax after
                 // ordinary member functions, exactly as at a top-level callee: `outer.Inner().fn()`
                 // reads the property `fn` and applies the `invoke` convention to its value.
-                if let Some(callee) = self.selected_member_property_type(
-                    scope,
-                    receiver.get(),
-                    spelling,
-                    None,
-                    demand,
-                )? {
+                if let Some(callee) =
+                    self.invoke_callee_property_type(scope, receiver.get(), spelling, demand)?
+                {
                     if let Ok(result) = self.invoke_result(scope, origin, callee, arguments, demand)
                     {
                         return Ok(crate::fir::ResolvedMemberCall {

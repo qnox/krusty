@@ -140,8 +140,6 @@ struct ExplicitContextCall {
     argument_types: Vec<Ty>,
 }
 
-const RECURSIVE_INFERENCE_MESSAGE: &str = "type checking has run into a recursive problem. Easiest workaround: specify the types of your declarations explicitly.";
-
 impl ProductionSignatureSemantics<'_> {
     fn failure() -> crate::fir::DiagnosticId {
         crate::fir::DiagnosticId::from_raw(0)
@@ -497,37 +495,16 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         declaration: crate::fir::DeclarationId,
     ) -> crate::fir::DiagnosticId {
-        let mut diagnostics = self.diagnostics.borrow_mut();
-        if let Some(index) = diagnostics
-            .iter()
-            .position(|diagnostic| diagnostic.declaration == declaration)
-        {
-            return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
+        let message = super::RECURSIVE_INFERENCE_MESSAGE.to_string();
+        match self.signature_origins.get(&declaration) {
+            Some(origin) => self.record_source_diagnostic(declaration, *origin, message),
+            None => self
+                .headers
+                .stub(declaration)
+                .map_or_else(Self::failure, |stub| {
+                    self.record_source_diagnostic_at(declaration, stub.source, stub.range, message)
+                }),
         }
-        let Some(stub) = self.headers.stub(declaration) else {
-            return Self::failure();
-        };
-        let span = self
-            .signature_origins
-            .get(&declaration)
-            .and_then(|origin| match self.headers.signature_origins.get(*origin) {
-                Some(crate::fir::Origin::Source { span, .. }) => Some(span),
-                Some(crate::fir::Origin::Synthetic { cause, .. }) => {
-                    match self.headers.signature_origins.get(cause) {
-                        Some(crate::fir::Origin::Source { span, .. }) => Some(span),
-                        Some(crate::fir::Origin::Synthetic { .. }) | None => None,
-                    }
-                }
-                None => None,
-            })
-            .unwrap_or(stub.range);
-        diagnostics.push(ProductionSignatureDiagnostic::conditional(
-            declaration,
-            stub.source.raw(),
-            span,
-            RECURSIVE_INFERENCE_MESSAGE.to_string(),
-        ));
-        crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
     fn record_missing_signature(

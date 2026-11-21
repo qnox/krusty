@@ -984,6 +984,9 @@ impl ProductionSignatureSemantics<'_> {
                         self, scope, segment, origin, receiver, None, demand,
                     ) {
                         Ok(next) => receiver = next,
+                        Err(failure) if failure.in_progress_declaration().is_some() => {
+                            return Err(failure)
+                        }
                         Err(_) => resolved = false,
                     }
                 }
@@ -994,6 +997,9 @@ impl ProductionSignatureSemantics<'_> {
                         self, scope, segment, origin, receiver, None, demand,
                     ) {
                         Ok(next) => receiver = next,
+                        Err(failure) if failure.in_progress_declaration().is_some() => {
+                            return Err(failure)
+                        }
                         Err(_) => {
                             resolved = false;
                             break;
@@ -1451,7 +1457,7 @@ impl ProductionSignatureSemantics<'_> {
             // operation used by final call selection so an explicit or lazily inferred member
             // function type can contextualize its arguments without duplicating member lookup.
             if let Some(callee) =
-                self.selected_member_property_type(scope, receiver, spelling, None, demand)?
+                self.invoke_callee_property_type(scope, receiver, spelling, demand)?
             {
                 if let Ok(expectations) = self.invoke_argument_expectations_for_refresh(
                     scope,
