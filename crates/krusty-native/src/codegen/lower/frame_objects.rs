@@ -141,12 +141,15 @@ impl BodyLowering<'_, '_, '_> {
             {
                 *receiver == read
                     && context_arguments.is_empty()
-                    && self.checked_property(target).is_ok_and(|property| {
-                        let super::objects::CheckedProperty::Member(owner, index) = property else {
-                            return false;
-                        };
-                        owner == class && self.property_field(owner, index).is_some()
-                    })
+                    && self
+                        .checked_property_at(reader, target)
+                        .is_ok_and(|property| {
+                            let super::objects::CheckedProperty::Member(owner, index) = property
+                            else {
+                                return false;
+                            };
+                            owner == class && self.property_field(owner, index).is_some()
+                        })
             }
             _ => false,
         }
