@@ -43,7 +43,7 @@ impl super::IrFile {
     /// last callable lifted out of that declaration's sequence, so a target names it as it names
     /// a source lambda written after the others there (kotlinc's IR plugins run before its
     /// lowering lifts lambdas). The caller makes sure every callable already in the sequence is
-    /// one of the declaration's own lambdas, numbered directly by the sequence.
+    /// one of the declaration's own lambdas, numbered directly by the sequence, or nested in one.
     pub(crate) fn place_generated_lambda(
         &mut self,
         sequence: IrLiftingSequence,
@@ -52,10 +52,6 @@ impl super::IrFile {
         implementation: super::FunId,
     ) {
         let entries = self.lifting_sequences.entry(sequence.clone()).or_default();
-        assert!(
-            entries.values().all(|entry| entry.scope.is_none()),
-            "a generated lambda is placed after the lambdas a sequence numbers itself"
-        );
         let position = entries.keys().max().map_or(0, |last| last + 1);
         let order = entries
             .values()
@@ -101,15 +97,24 @@ impl super::IrFile {
         sequence: &IrLiftingSequence,
         implementations: &[super::FunId],
     ) -> bool {
-        let excluded = implementations
+        let mut excluded = implementations
             .iter()
             .filter_map(|implementation| self.lifted_functions.get(implementation))
             .filter(|(lifted, _)| lifted == sequence)
             .filter_map(|(_, site)| Some(site.path.first()?.position))
             .collect::<Vec<_>>();
-        self.lifting_sequences
-            .get(sequence)
-            .is_some_and(|entries| entries.keys().any(|position| !excluded.contains(position)))
+        let Some(entries) = self.lifting_sequences.get(sequence) else {
+            return false;
+        };
+        // A callable written in one of those lambdas goes with it.
+        while let Some(nested) = entries.iter().find_map(|(position, entry)| {
+            (!excluded.contains(position)
+                && entry.scope.is_some_and(|scope| excluded.contains(&scope)))
+            .then_some(*position)
+        }) {
+            excluded.push(nested);
+        }
+        entries.keys().any(|position| !excluded.contains(position))
     }
 
     /// Move `implementation`, a source lambda a compiler plugin takes out of the body it is
@@ -128,10 +133,17 @@ impl super::IrFile {
             .lifted_functions
             .remove(&implementation)
             .expect("a relocated lambda was lifted from its source body");
-        let [step] = site.path.as_ref() else {
-            panic!("a relocated lambda is written directly in a declaration's body");
-        };
+        let step = site
+            .path
+            .last()
+            .expect("a relocated lambda was lifted along a path");
         if let Some(entries) = self.lifting_sequences.get_mut(&written) {
+            debug_assert!(
+                !entries
+                    .values()
+                    .any(|entry| entry.scope == Some(step.position)),
+                "a relocated lambda declares no callable of its own"
+            );
             entries.remove(&step.position);
         }
         self.place_generated_lambda(sequence, source_order, container, implementation);

@@ -733,6 +733,13 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          lambda yet",
     );
     assert_compose_rejects(
+        "compose-singleton-lambda-remembering-lambda",
+        "@Composable fun Show(n: Int) {}\n@Composable fun Each(content: @Composable (Int) -> Unit) {\ncontent(1)\n}\n@Composable fun F() {\nEach { n ->\nEach { _ -> Show(n) }\n}\n}\n",
+        &[],
+        "8:6: error: krusty's Compose compiler plugin does not support a composable lambda that \
+         captures nothing passing a capturing composable lambda yet",
+    );
+    assert_compose_rejects(
         "compose-empty-lambda",
         &format!("{frame}@Composable fun Greeting() {{\nFrame {{ }}\n}}\n"),
         &[],
