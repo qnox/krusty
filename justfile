@@ -234,7 +234,7 @@ conformance-one VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     v="{{VERSION}}"
-    kc_var="KRUSTY_KOTLINC_${v//./_}"
+    kc_var="KRUSTY_KOTLINC_${v//[.-]/_}"
     kc="${!kc_var:-}"
     vendored="$PWD/target/cache/kotlinc/$v/kotlinc/bin/kotlinc"
     [ -z "$kc" ] && [ -x "$vendored" ] && kc="$vendored"
@@ -585,7 +585,7 @@ test-all *ARGS:
     declare -a pids=() tags=()
     while read -r v; do
         [ -z "$v" ] && continue
-        kc_var="KRUSTY_KOTLINC_${v//./_}"
+        kc_var="KRUSTY_KOTLINC_${v//[.-]/_}"
         kc="${!kc_var:-}"
         vendored="$PWD/target/cache/kotlinc/$v/kotlinc/bin/kotlinc"
         [ -z "$kc" ] && [ -x "$vendored" ] && kc="$vendored"
