@@ -67,13 +67,19 @@ impl KeyPath<'_> {
     /// declaration's body: its path enters the call, then the argument, then the lambda. `sibling`
     /// numbers the calls of `callee` the body made before this one, which `DurableKeyVisitor` keys
     /// apart as `call-<callee>:<n>`.
-    pub(super) fn lambda_key(&self, callee: &str, sibling: u32, argument: u32) -> i32 {
+    pub(super) fn lambda_key(
+        &self,
+        lambda: &str,
+        callee: &str,
+        sibling: u32,
+        argument: u32,
+    ) -> i32 {
         let call = match sibling {
             0 => format!("call-{callee}"),
             n => format!("call-{callee}:{n}"),
         };
         java_string_hash(&format!(
-            "fun-$anonymous$()Unit/arg-{argument}/{call}/{}",
+            "fun-{lambda}/arg-{argument}/{call}/{}",
             self.path()
         ))
     }
@@ -108,8 +114,29 @@ mod tests {
             package: "probe",
             file_name: "Probe.kt",
         };
-        assert_eq!(card.lambda_key("Box", 0, 0), -300906309);
-        assert_eq!(card.lambda_key("Box", 1, 0), -1215453532);
+        assert_eq!(
+            card.lambda_key("$anonymous$()Unit", "Box", 0, 0),
+            -300906309
+        );
+        assert_eq!(
+            card.lambda_key("$anonymous$()Unit", "Box", 1, 0),
+            -1215453532
+        );
+    }
+
+    /// The key kotlinc 2.4.21 gave a lambda with a receiver passed to `Box`: its signature leads
+    /// with the receiver's type.
+    #[test]
+    fn a_lambda_with_a_receiver_is_keyed_by_it() {
+        let screen = KeyPath {
+            signature: "Screen()Unit",
+            package: "screens",
+            file_name: "receiverLambdas.kt",
+        };
+        assert_eq!(
+            screen.lambda_key("String.$anonymous$()Unit", "Box", 0, 0),
+            -1501324879
+        );
     }
 
     #[test]
