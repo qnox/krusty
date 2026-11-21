@@ -7,14 +7,16 @@
 use krusty::ir::IrLocalPropertyLayout;
 
 use super::super::super::encode::{Code, Function, Module};
+use super::super::super::runtime::Runtime;
 use super::super::property_registry::AccessorPropertyDefinition;
-use super::{carrier, FileContext, Unsupported};
+use super::{carrier, Body, FileContext, Unsupported};
 
 /// Define the program-wide entries reserved for this file's receiver-less accessor properties.
 pub(super) fn define(
     context: &FileContext<'_>,
     definitions: &[AccessorPropertyDefinition],
     module: &mut Module,
+    runtime: &mut Runtime,
 ) -> Result<(), Unsupported> {
     for definition in definitions {
         let layout = context
@@ -31,6 +33,15 @@ pub(super) fn define(
         };
         let entry = definition.entry;
         let value = carrier(entry.ty)?;
+        if let IrLocalPropertyLayout::TopLevelStorage {
+            storage,
+            getter: None,
+            ..
+        } = layout
+        {
+            storage_entries(context, *storage, entry, module, runtime)?;
+            continue;
+        }
         let getter = getter
             .ok_or_else(|| "an accessor property entry with no getter".to_string())
             .and_then(|getter| accessor(context, getter))?;
@@ -76,4 +87,42 @@ fn accessor(context: &FileContext<'_>, function: krusty::ir::FunId) -> Result<u3
         .copied()
         .flatten()
         .ok_or_else(|| "an accessor property entry whose accessor was not emitted".to_string())
+}
+
+/// The entries of a private block property's storage: its class is initialized first, as a read
+/// or write of the storage inside the class does.
+fn storage_entries(
+    context: &FileContext<'_>,
+    storage: u32,
+    entry: super::super::property_registry::AccessorProperty,
+    module: &mut Module,
+    runtime: &mut Runtime,
+) -> Result<(), Unsupported> {
+    let value = carrier(entry.ty)?;
+    let global = context.globals[storage as usize];
+    let mut body = Body::new(context, module, runtime, &[], Default::default(), entry.ty);
+    body.initialize_static_owner(storage)?;
+    body.code.global_get(global);
+    let Body { code, locals, .. } = body;
+    let ty = module.func_type(Vec::new(), value.into_iter().collect());
+    module.define(entry.getter, Function { ty, locals, code });
+    let Some(setter) = entry.setter else {
+        return Ok(());
+    };
+    let value =
+        value.ok_or_else(|| "a mutable accessor property with no Wasm value".to_string())?;
+    let mut body = Body::new(
+        context,
+        module,
+        runtime,
+        &[entry.ty],
+        Default::default(),
+        krusty::types::Ty::Unit,
+    );
+    body.initialize_static_owner(storage)?;
+    body.code.local_get(0).global_set(global);
+    let Body { code, locals, .. } = body;
+    let ty = module.func_type(vec![value], Vec::new());
+    module.define(setter, Function { ty, locals, code });
+    Ok(())
 }
