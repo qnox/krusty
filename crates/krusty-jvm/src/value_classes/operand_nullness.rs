@@ -3,7 +3,7 @@
 //! `box-impl` or its null-guarded form from these facts.
 
 use krusty::fx_hash::HashMap;
-use krusty::ir::{Callee, ExprId, IrExpr};
+use krusty::ir::{Callee, ExprId, IrExpr, ValueClassAdapter};
 use krusty::types::{Ty, TyKind};
 
 /// Whether the value the expr at `id` produces is statically NON-NULL — so boxing it (`box-impl`) can't
@@ -53,8 +53,11 @@ pub(super) fn operand_nonnull(
         IrExpr::Call {
             callee: call_callee,
             ..
-        } if let Callee::Static { name, .. } = &**call_callee
-            && (name == "constructor-impl" || name == "box-impl") =>
+        } if match &**call_callee {
+            Callee::Static { name, .. } => name == "constructor-impl",
+            Callee::ValueClassAdapter { adapter, .. } => *adapter == ValueClassAdapter::Box,
+            _ => false,
+        } =>
         {
             true
         }
