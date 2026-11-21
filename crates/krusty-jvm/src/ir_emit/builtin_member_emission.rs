@@ -45,6 +45,18 @@ impl Emitter<'_> {
                 let method = self.cw.methodref(&owner, "ordinal", "()I");
                 code.invokevirtual(method, 0, 1);
             }
+            krusty::ir::IrIntrinsic::EnumName => {
+                self.emit_value(receiver, code);
+                self.mark_dispatch_line(expression, code);
+                // As for `ordinal`, the Methodref names the receiver's checked static classifier.
+                let owner = self
+                    .value_ty(receiver)
+                    .obj_internal()
+                    .expect("checked Enum.name receiver has a JVM classifier")
+                    .render();
+                let method = self.cw.methodref(&owner, "name", "()Ljava/lang/String;");
+                code.invokevirtual(method, 0, 1);
+            }
             krusty::ir::IrIntrinsic::NullableAnyToString => {
                 self.emit_string_conversion(expression, receiver, code)
             }

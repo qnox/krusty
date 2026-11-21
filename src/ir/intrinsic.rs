@@ -21,6 +21,9 @@ pub enum IrIntrinsic {
     /// ([`crate::backend::enums`]) when it builds `values()`. Source reads of `ordinal` stay
     /// ordinary property reads.
     EnumOrdinal,
+    /// `kotlin.Enum.name` of a constant, read where a plugin's generated code stores a constant by
+    /// its name. Source reads of `name` stay ordinary property reads.
+    EnumName,
     NullableAnyToString,
     /// Kotlin's compiler-supplied `enumValueOf<T>(name)`. `classifier` may remain a declaration-owned
     /// reified type parameter in the emitted inline template; call-site inline specialization turns

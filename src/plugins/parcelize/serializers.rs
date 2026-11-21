@@ -5,7 +5,7 @@ use crate::ir::{ExprId, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::plugins::runtime_declarations::{
     BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
 };
-use crate::types::{type_name, Ty};
+use crate::types::{type_name, Ty, TypeName};
 
 /// The `Parcel` members one primitive or `String` value is written and read with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,12 +30,14 @@ pub(super) enum ParcelValue {
     /// A specialized primitive array (`IntArray`, ...) of the given element, which `Parcel`
     /// writes and creates itself, `null` included.
     PrimitiveArray(Ty),
+    /// An enum constant, stored as its `name`.
+    Enum(TypeName),
 }
 
 impl ParcelValue {
     /// The value kotlinc's factory serializes a property of type `ty` as, and whether it wraps that
     /// serializer in its null-aware one; `None` for a type this port does not cover yet.
-    pub(super) fn of(ty: Ty) -> Option<(Self, bool)> {
+    pub(super) fn of(ty: Ty, is_enum: &dyn Fn(TypeName) -> bool) -> Option<(Self, bool)> {
         let nullable = ty.is_nullable();
         let value = match ty.non_null() {
             Ty::String => Self::String,
@@ -51,7 +53,10 @@ impl ParcelValue {
             Ty::UShort => Self::UShort,
             Ty::UInt => Self::UInt,
             Ty::ULong => Self::ULong,
-            array => Self::PrimitiveArray(primitive_array_element(array)?),
+            other => match other.nominal_classifier().filter(|name| is_enum(*name)) {
+                Some(name) => Self::Enum(name),
+                None => Self::PrimitiveArray(primitive_array_element(other)?),
+            },
         };
         // `Parcel.writeString` and the array writers write `null` themselves, so kotlinc never
         // wraps a string or an array.
@@ -80,6 +85,7 @@ impl ParcelValue {
             Self::Float => ParcelMember::Float,
             Self::Double => ParcelMember::Double,
             Self::PrimitiveArray(element) => ParcelMember::PrimitiveArray(element),
+            Self::Enum(_) => ParcelMember::String,
             _ => ParcelMember::Int,
         }
     }
@@ -95,6 +101,7 @@ impl ParcelValue {
             Self::UInt => Ty::UInt,
             Self::ULong => Ty::ULong,
             Self::PrimitiveArray(element) => Ty::array(element),
+            Self::Enum(name) => Ty::obj_name(name),
             Self::String => Ty::String,
             Self::Byte => Ty::Byte,
             Self::Int => Ty::Int,
@@ -393,6 +400,17 @@ impl ParcelRuntime {
     fn write_value(&self, ir: &mut IrFile, value: ParcelValue, parcel: u32, arg: ExprId) -> ExprId {
         let receiver = ir.add_expr(IrExpr::GetValue(parcel));
         let arg = match value.signed() {
+            ParcelValue::Enum(_) => {
+                // `value.name`, dispatched on the enum class itself as kotlinc does.
+                ir.add_expr(IrExpr::Call {
+                    callee: Box::new(crate::ir::Callee::Intrinsic {
+                        operation: crate::ir::IrIntrinsic::EnumName,
+                        ret: Ty::String,
+                    }),
+                    dispatch_receiver: Some(arg),
+                    args: Vec::new(),
+                })
+            }
             ParcelValue::Boolean => {
                 // `if (value) 1 else 0`.
                 let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
@@ -413,6 +431,14 @@ impl ParcelRuntime {
         let receiver = ir.add_expr(IrExpr::GetValue(parcel));
         let read = call(ir, self.reader(value.member()), receiver, Vec::new());
         match value.signed() {
+            ParcelValue::Enum(classifier) => {
+                // `Enum.valueOf(readString())`.
+                ir.add_expr(IrExpr::EnumValueOf {
+                    classifier,
+                    arg: read,
+                    declaration: crate::ir::EnumValueOfDeclaration::Member,
+                })
+            }
             ParcelValue::Boolean => {
                 // `readInt() != 0`.
                 let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
