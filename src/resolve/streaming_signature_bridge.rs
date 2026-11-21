@@ -140,8 +140,6 @@ struct ExplicitContextCall {
     argument_types: Vec<Ty>,
 }
 
-const RECURSIVE_INFERENCE_MESSAGE: &str = "type checking has run into a recursive problem. Easiest workaround: specify the types of your declarations explicitly.";
-
 impl ProductionSignatureSemantics<'_> {
     fn failure() -> crate::fir::DiagnosticId {
         crate::fir::DiagnosticId::from_raw(0)
@@ -184,10 +182,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         spelling: &str,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<Ty>, crate::fir::DiagnosticId> {
         let declaration = match self.headers.declarations.anchor(scope.owner) {
             Some(declaration) if declaration.kind == crate::fir::DeclarationKind::Property => {
@@ -500,37 +495,16 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         declaration: crate::fir::DeclarationId,
     ) -> crate::fir::DiagnosticId {
-        let mut diagnostics = self.diagnostics.borrow_mut();
-        if let Some(index) = diagnostics
-            .iter()
-            .position(|diagnostic| diagnostic.declaration == declaration)
-        {
-            return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
+        let message = super::RECURSIVE_INFERENCE_MESSAGE.to_string();
+        match self.signature_origins.get(&declaration) {
+            Some(origin) => self.record_source_diagnostic(declaration, *origin, message),
+            None => self
+                .headers
+                .stub(declaration)
+                .map_or_else(Self::failure, |stub| {
+                    self.record_source_diagnostic_at(declaration, stub.source, stub.range, message)
+                }),
         }
-        let Some(stub) = self.headers.stub(declaration) else {
-            return Self::failure();
-        };
-        let span = self
-            .signature_origins
-            .get(&declaration)
-            .and_then(|origin| match self.headers.signature_origins.get(*origin) {
-                Some(crate::fir::Origin::Source { span, .. }) => Some(span),
-                Some(crate::fir::Origin::Synthetic { cause, .. }) => {
-                    match self.headers.signature_origins.get(cause) {
-                        Some(crate::fir::Origin::Source { span, .. }) => Some(span),
-                        Some(crate::fir::Origin::Synthetic { .. }) | None => None,
-                    }
-                }
-                None => None,
-            })
-            .unwrap_or(stub.range);
-        diagnostics.push(ProductionSignatureDiagnostic::conditional(
-            declaration,
-            stub.source.raw(),
-            span,
-            RECURSIVE_INFERENCE_MESSAGE.to_string(),
-        ));
-        crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
     fn record_missing_signature(
@@ -1633,10 +1607,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         from: Option<crate::fir::SignatureScope>,
         declaration: Option<crate::fir::DeclarationId>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedSignature>, crate::fir::DiagnosticId> {
         self.demanded_source_signature_at(from, declaration, None, demand)
     }
@@ -1646,10 +1617,7 @@ impl ProductionSignatureSemantics<'_> {
         from: Option<crate::fir::SignatureScope>,
         declaration: Option<crate::fir::DeclarationId>,
         origin: Option<crate::fir::OriginId>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedSignature>, crate::fir::DiagnosticId> {
         let Some(declaration) = declaration else {
             return Ok(None);
@@ -1703,10 +1671,7 @@ impl ProductionSignatureSemantics<'_> {
     fn demanded_member_signature(
         &self,
         declaration: Option<crate::fir::DeclarationId>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedSignature>, crate::fir::DiagnosticId> {
         declaration.map_or(Ok(None), |declaration| demand(declaration).map(Some))
     }
@@ -2008,10 +1973,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         super_spelling: &str,
         member_spelling: &str,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let (class_super, interface_supers) = self.direct_super_receivers(scope, super_spelling)?;
         if let Some(receiver) = class_super {
@@ -2044,10 +2006,7 @@ impl ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         type_arguments: &[Ty],
         trailing_lambda: bool,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let (class_super, interface_supers) = self.direct_super_receivers(scope, super_spelling)?;
         // `super.Inner(args)` is a constructor call on an inner classifier inherited through the

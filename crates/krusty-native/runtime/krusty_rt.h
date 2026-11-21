@@ -130,6 +130,13 @@ typedef struct KType {
        typed virtual thunks, for the map entry points below to answer for an object they did not
        make. NULL for every other type. */
     const struct KMapMembers *map_members;
+    /* On a CALLABLE REFERENCE's descriptor: the byte offsets of the fields holding the values it
+       bound for the declaration's context parameters, `reference_context_count` of them, in
+       parameter order. Equality and `hashCode` read them as they read the bound receiver, so two
+       references to one declaration with different contexts are different. NULL, and a count of
+       0, for a reference binding none. */
+    const uint32_t *reference_context_offsets;
+    uint32_t reference_context_count;
 } KType;
 
 /* The read-only members of `Map` a program class answers, each a thunk with the fixed signature
@@ -152,7 +159,9 @@ _Static_assert(offsetof(KType, class_names) == 148, "KType.class_names moved");
 _Static_assert(offsetof(KType, collection_size) == 152, "KType.collection_size moved");
 _Static_assert(offsetof(KType, itable) == 160, "KType.itable moved");
 _Static_assert(offsetof(KType, map_members) == 168, "KType.map_members moved");
-_Static_assert(sizeof(KType) == 176, "KType changed size");
+_Static_assert(offsetof(KType, reference_context_offsets) == 176, "KType.reference_context_offsets moved");
+_Static_assert(offsetof(KType, reference_context_count) == 184, "KType.reference_context_count moved");
+_Static_assert(sizeof(KType) == 192, "KType changed size");
 _Static_assert(offsetof(KMapMembers, entries) == 56, "KMapMembers.entries moved");
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.

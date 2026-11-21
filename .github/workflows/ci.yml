@@ -304,7 +304,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/cache/ser-corpus
+            target/cache/plugin-corpus
             target/cache/ksp-corpus
           key: kotlin-test-corpora-${{ steps.max-version.outputs.version }}
       - name: restore box corpus
@@ -481,7 +481,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/cache/ser-corpus
+            target/cache/plugin-corpus
             target/cache/ksp-corpus
           key: ${{ steps.kotlin-corpora.outputs.cache-primary-key }}
       - name: save box corpus
@@ -793,6 +793,9 @@ jobs:
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['conformance'][format('{0}|{1}', matrix.version, matrix.target)] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     env:
       KRUSTY_BOX_CASE_TIMEOUT_MS: '8000'
+      # Every target row reads the reference plugin and runtime jars the plugin corpora name from
+      # here; the "provision plugin jars" step below fills it before any test runs.
+      KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
       # Each target row keeps its own kotlinc box reference cache; see its restore step.
       BOX_REFERENCES: box-reference-classes-${{ matrix.target != 'jvm' && format('{0}-', matrix.target) || '' }}${{ matrix.version }}
     steps:
@@ -839,10 +842,23 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/cache/ser-corpus/${{ matrix.version }}
+            target/cache/plugin-corpus/*/${{ matrix.version }}
             target/cache/ksp-toolchain
             target/cache/krusty-deps
           key: kotlin-conformance-inputs-v2-${{ matrix.version }}
+      # The atomicfu plugin jar is not in the distribution. A test process fetches a missing jar
+      # under one shared download budget, and a slow transfer used to spend it so that every later
+      # case failed with "needs the atomicfu compiler plugin jar". Provision the jars the
+      # descriptors name here instead, with retries, keyed by the descriptors so a change to a pin
+      # fetches afresh.
+      - name: restore plugin jars (${{ matrix.version }})
+        id: plugin-jars
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: plugin-jars-v1-${{ matrix.version }}-${{ hashFiles('src/plugins/*/boxes/corpus.txt') }}
+      - name: provision plugin jars (${{ matrix.version }})
+        run: scripts/provision-plugin-jars.sh "${{ matrix.version }}"
       - name: restore Wasm target KLIB dependencies (${{ matrix.version }})
         if: startsWith(matrix.target, 'wasm-')
         id: wasm-klibs
@@ -1191,10 +1207,16 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/cache/ser-corpus/${{ matrix.version }}
+            target/cache/plugin-corpus/*/${{ matrix.version }}
             target/cache/ksp-toolchain
             target/cache/krusty-deps
           key: ${{ steps.conformance-inputs.outputs.cache-primary-key }}
+      - name: save plugin jars (${{ matrix.version }})
+        if: matrix.target == 'jvm' && github.ref == 'refs/heads/master' && steps.plugin-jars.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: ${{ steps.plugin-jars.outputs.cache-primary-key }}
       - name: save Wasm target KLIB dependencies (${{ matrix.version }})
         if: startsWith(matrix.target, 'wasm-') && github.ref == 'refs/heads/master' && steps.wasm-klibs.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1587,6 +1609,7 @@ jobs:
           # The SDK setup uses the same Gradle compatibility decision as the test inventory.
           if [ "${{ steps.android.outputs.enabled }}" = true ]; then
             tests="$tests android_variants_compile_through_krusty"
+            tests="$tests android_compose_app_is_compiled_by_krusty_with_a_handoff_for_what_it_refuses"
           fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests

@@ -11,9 +11,11 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::inline_expansion::{InlineBodySplice, InlineOperand, SplicedResult};
 use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
-use crate::libraries::KlibBodyCallable;
+use crate::libraries::{KlibBodyCallable, KlibDependencyCallable};
 use crate::metadata::klib_ir::tree::KlibIrFunction;
-use crate::types::{stored_value_ty, InlineExpansionMode, InlineParameterModifier};
+use crate::types::{
+    stored_value_ty, InlineExpansionMode, InlineParameterModifier, Ty, TyKind, TypeName,
+};
 
 use super::super::decline::KlibBodyDeclineReason;
 use super::super::function_lowering::FunctionHeader;
@@ -24,47 +26,74 @@ fn declares_inline(function: &KlibIrFunction) -> bool {
     function.base.flags & crate::metadata::function_flags::IS_INLINE != 0
 }
 
-/// Declare `function` as an inline callee when it is inline, unless it is the selected `root`:
-/// the root is lowered as the declaration it is, and a call of an inline callee is expanded.
-pub(super) fn declare_callee(
-    ir: &mut IrFile,
-    function: FunId,
-    declaration: &KlibIrFunction,
-    header: &FunctionHeader,
-    selected: Option<KlibBodyCallable<'_>>,
-    root: bool,
-) -> Result<(), KlibBodyDeclineReason> {
-    if root || !declares_inline(declaration) {
-        return Ok(());
+/// A function the unit lowered from its serialized body, with the selected declaration it was
+/// lowered for, that is declared as an inline callee when it is inline.
+pub(super) struct Candidate<'a, 's> {
+    declared: FunId,
+    function: &'a KlibIrFunction,
+    header: &'a FunctionHeader,
+    selected: Option<KlibBodyCallable<'s>>,
+}
+
+impl<'a, 's> Candidate<'a, 's> {
+    pub(super) fn new(
+        declared: FunId,
+        function: &'a KlibIrFunction,
+        header: &'a FunctionHeader,
+        selected: Option<KlibBodyCallable<'s>>,
+    ) -> Self {
+        Self {
+            declared,
+            function,
+            header,
+            selected,
+        }
     }
-    let modifiers = selected.map(KlibBodyCallable::inline_modifiers);
-    declare(ir, function, declaration, header, modifiers)
+
+    /// Declare it, which is `identity`, as one the unit expands at each call, unless it is the
+    /// selected `root`: the root is lowered as the declaration it is, and a call of an inline
+    /// callee is expanded.
+    pub(super) fn declare(
+        &self,
+        ir: &mut IrFile,
+        root: Option<KlibBodyCallable<'_>>,
+        identity: &KlibDependencyCallable,
+        is_interface: &mut dyn FnMut(TypeName) -> Result<bool, KlibBodyDeclineReason>,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        let root = root.is_some_and(|root| root.identity() == identity);
+        if root || !declares_inline(self.function) {
+            return Ok(());
+        }
+        let Self {
+            declared,
+            function,
+            header,
+            selected,
+        } = *self;
+        declare(ir, declared, function, header, selected, is_interface)
+    }
 }
 
 /// Declare `function`, lowered from the serialized inline `declaration` with `header`, as one the
-/// unit expands at each call. `modifiers` are the `crossinline`/`noinline` modifiers of its value
-/// parameters the selected declaration records, which decide the parameters whose lambdas are
-/// expanded. A form whose expansion is not modelled declines the call.
+/// unit expands at each call. The `selected` declaration records the `crossinline`/`noinline`
+/// modifiers of its value parameters, which decide the parameters whose lambdas are expanded, and
+/// the type parameters a call binds. A form whose expansion is not modelled declines the call.
 pub(super) fn declare(
     ir: &mut IrFile,
     function: FunId,
     declaration: &KlibIrFunction,
     header: &FunctionHeader,
-    modifiers: Option<&[InlineParameterModifier]>,
+    selected: Option<KlibBodyCallable<'_>>,
+    is_interface: &mut dyn FnMut(TypeName) -> Result<bool, KlibBodyDeclineReason>,
 ) -> Result<(), KlibBodyDeclineReason> {
-    if !declaration.type_parameters.is_empty() {
-        return Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "a call of a generic inline function",
-        ));
-    }
     if declaration.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0 {
         return Err(KlibBodyDeclineReason::UnsupportedOperation(
             "a call of a suspend inline function",
         ));
     }
     let receiver = header.extension_receiver_index();
-    let modifiers = match modifiers {
-        Some(modifiers) => modifiers.to_vec(),
+    let modifiers = match selected {
+        Some(selected) => selected.inline_modifiers().to_vec(),
         // Only a function-typed parameter's modifier decides its expansion.
         None if header
             .params()
@@ -89,8 +118,88 @@ pub(super) fn declare(
         .expect("a declared function publishes its parameters");
     info.inline_modifiers = modifiers_with_receiver(&modifiers, receiver);
     info.expansion_modes = modes;
+    if !declaration.type_parameters.is_empty() {
+        sign_type_parameters(ir, function, declaration, header, selected, is_interface)?;
+    }
     ir.inline_fns.insert(function);
     ir.inline_only_fns.insert(function);
+    Ok(())
+}
+
+/// Record the type parameters of the generic inline `function`, as checked FIR records a source
+/// declaration's: the identities a call binds and the reified ones a target patches.
+fn sign_type_parameters(
+    ir: &mut IrFile,
+    function: FunId,
+    declaration: &KlibIrFunction,
+    header: &FunctionHeader,
+    selected: Option<KlibBodyCallable<'_>>,
+    is_interface: &mut dyn FnMut(TypeName) -> Result<bool, KlibBodyDeclineReason>,
+) -> Result<(), KlibBodyDeclineReason> {
+    let Some(selected) = selected else {
+        return Err(KlibBodyDeclineReason::UnsupportedOperation(
+            "a call of a generic inline function whose type parameters are not selected",
+        ));
+    };
+    let formals = selected.type_parameters();
+    if formals.len() != declaration.type_parameters.len()
+        || selected
+            .reified_type_parameter_ordinals()
+            .iter()
+            .any(|&ordinal| ordinal as usize >= formals.len())
+    {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(
+            "the inline function's type parameters are not parallel to its selected formals"
+                .to_owned(),
+        ));
+    }
+    let mut type_params = Vec::with_capacity(formals.len());
+    for (index, (formal, serialized)) in
+        formals.iter().zip(&declaration.type_parameters).enumerate()
+    {
+        let TyKind::TyParam(semantic, _) = formal.kind() else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+                "the type parameter `{}` is selected as {formal:?}",
+                serialized.name
+            )));
+        };
+        let mut bounds = Vec::new();
+        for &bound in header
+            .type_parameters()
+            .declared_bounds(semantic.as_str())
+            .unwrap_or_default()
+        {
+            // The implicit `Any?` bound is no declared constraint.
+            if bound == Ty::nullable(Ty::obj("kotlin/Any")) {
+                continue;
+            }
+            // A bound naming another type parameter names no classifier.
+            let interface = match bound.non_null().kotlin_class_internal() {
+                Some(classifier) => is_interface(classifier)?,
+                None => false,
+            };
+            bounds.push((bound, interface));
+        }
+        type_params.push(crate::ir::IrTypeParameter {
+            name: serialized.name.clone(),
+            semantic_name: semantic.as_str().to_owned(),
+            bounds,
+            // Kotlin declares no variance on a function's type parameter.
+            variance: crate::types::TypeVariance::Invariant,
+            reified: selected
+                .reified_type_parameter_ordinals()
+                .contains(&(index as u32)),
+            captured_from_enclosing: false,
+        });
+    }
+    let declared = &ir.functions[function as usize];
+    let signature = crate::ir::IrGenericSig {
+        type_params,
+        params: declared.params.clone(),
+        ret: Some(declared.ret),
+        supers: Vec::new(),
+    };
+    ir.signatures.insert(function, signature);
     Ok(())
 }
 
@@ -288,15 +397,24 @@ impl Expansion {
                 "a recursive inline function",
             ));
         }
-        let none = HashMap::default();
+        let bindings = ir
+            .inline_call_type_arguments
+            .get(&site)
+            .map(|arguments| arguments.iter().cloned().collect::<HashMap<_, _>>())
+            .unwrap_or_default();
+        let reified_bindings = ir
+            .reified_call_subst
+            .get(&site)
+            .map(|arguments| arguments.iter().cloned().collect::<HashMap<_, _>>())
+            .unwrap_or_default();
         let spliced = crate::inline_expansion::splice_inline_body(
             ir,
             InlineBodySplice {
                 function,
                 body,
                 operands,
-                bindings: &none,
-                reified_bindings: &none,
+                bindings: &bindings,
+                reified_bindings: &reified_bindings,
                 statement: false,
                 label_prefix: "$klib_inline$",
             },

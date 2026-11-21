@@ -52,7 +52,6 @@ arrays/forInReversed/reversedArrayReversedArrayOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedReversedOriginalUpdatedInLoopBody.kt
 arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
-arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
 arrays/hashMap.kt
 arrays/indices.kt
 arrays/kt47483.kt
@@ -85,7 +84,6 @@ basics/unchecked_cast6x.kt
 basics/unchecked_cast7.kt
 basics/unchecked_cast9.kt
 basics/unit4.kt
-bce/bceCases.kt
 bce/customGetter.kt
 bce/delegatedProperty.kt
 bce/differentArrays.kt
@@ -275,7 +273,6 @@ classes/kt2417.kt
 classes/kt2566_2.kt
 classes/kt508.kt
 classes/nestedInitBlocksWithLambda.kt
-classes/overloadUnaryOperator.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
 closures/closuresAsSingleton.kt
 closures/kt11634_4.kt
@@ -608,7 +605,6 @@ coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturn.kt
 coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturnInterception.kt
 coroutines/intrinsicSemantics/suspendCoroutineUninterceptedOrReturn.kt
 coroutines/iterateOverArray.kt
-coroutines/kt15016.kt
 coroutines/kt21080.kt
 coroutines/kt21605.kt
 coroutines/kt24135.kt
@@ -692,7 +688,6 @@ coroutines/unitTypeReturn/unitSafeCall.kt
 coroutines/unsafeTransform.kt
 coroutines/varSpilling/fakeInlinerVariables.kt
 coroutines/varSpilling/kt75926.kt
-coroutines/varSpilling/kt79276.kt
 coroutines/varValueConflictsWithTable.kt
 coroutines/varValueConflictsWithTableSameSort.kt
 coroutines/withReceiver.kt
@@ -945,7 +940,6 @@ inference/builderInferenceLeakingVariable.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
 inference/kt35684.kt
 inference/kt39824.kt
-inference/lastExpressionOfLambdaWithNothingConstraint.kt
 inference/overrideDefaultProperty.kt
 inference/pcla/builderCallAsReturnTypeInLocalClass.kt
 inference/pcla/callableReferenceAndCoercionToUnit.kt
@@ -1208,7 +1202,6 @@ inlineClasses/unboxGenericParameter/objectLiteral/primitive.kt
 inlineClasses/unboxParameterOfSuspendLambdaBeforeInvoke.kt
 inlineClasses/unboxParameterOfSuspendLambdaBeforeInvokeGeneric.kt
 inlineClasses/unboxResultParameterWhenCapturingToCrossinlineLambda.kt
-inlineClasses/valueClassInValueClass.kt
 inlineClasses/valueClassInstanceOfNumberAndComparable.kt
 inlineEvaluationOrder/argumentOfCall.kt
 inlineEvaluationOrder/argumentOfCallMultipleInlineCalls.kt
@@ -1342,7 +1335,6 @@ lateinit/notInitialized.kt
 literals/strdedup1.kt
 localClass/innerTakesCapturedFromOuter.kt
 localClass/noPrimaryConstructor.kt
-localClass/tryCatch.kt
 localClasses/closureWithSelfInstantiation.kt
 localClasses/kt4174.kt
 localClasses/kt45383.kt
@@ -1392,15 +1384,10 @@ multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/defaultArguments/withTypeParameter.kt
-multiplatform/k2/exhaustiveness/commonSealedClass.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
-multiplatform/k2/hmpp/expectActualInheritance2-2.kt
-multiplatform/k2/hmpp/expectActualInheritance3-3.kt
-multiplatform/k2/hmpp/expectActualInheritanceTwoLibs.kt
-multiplatform/k2/hmpp/genericTypealiasSameNameTwoLibs.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
 multiplatform/k2/hmpp/inheritanceFromExpected3-3.kt
@@ -1418,7 +1405,6 @@ nameBasedDestructuring/fullFormExtraPropType.kt
 nameBasedDestructuring/shortFormExtraPropType.kt
 nonLocalReturns/suspendConversion.kt
 nothingValue/nothingValueException.kt
-nullCheckOptimization/trivialInstanceOf.kt
 object/constructor0.kt
 object/fields.kt
 object/fields1.kt
@@ -1466,7 +1452,6 @@ properties/accessorForProtectedPropertyWithPrivateSetter.kt
 properties/accessorForProtectedPropertyWithPrivateSetterInObjectLiteral.kt
 properties/accessorForProtectedPropertyWithPrivateSetterViaSuper.kt
 properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
-properties/backingField/backingFieldWithSmartTypeParameters.kt
 properties/backingField/equalsHashCodeWithValueClassExplicitBackingFieldAndSupertype.kt
 properties/backingField/explicitFieldCallableReference.kt
 properties/complexPropertyInitializer.kt
@@ -2288,7 +2273,6 @@ sam/samWithAbstractToString.kt
 sam/samWithAbstractToString2.kt
 sam/samWithAbstractToString3.kt
 sam/topLevelConversions.kt
-sealed/multipleFiles_enabled.kt
 secondaryConstructors/enums.kt
 secondaryConstructors/innerClasses.kt
 secondaryConstructors/innerClassesInheritance.kt
@@ -2445,7 +2429,6 @@ wasm-new-exception-handling/try1.kt
 wasm-new-exception-handling/try2.kt
 wasm-new-exception-handling/try3.kt
 wasm-new-exception-handling/try4.kt
-wasm-new-exception-handling/tryCatch.kt
 wasm-new-exception-handling/tryCatchFinallyWithHandleResult.kt
 wasm-new-exception-handling/tryCatchWithHandleResult.kt
 wasm-new-exception-handling/tryFinallyInsideInlineLambda.kt
@@ -2475,7 +2458,6 @@ wasm-old-exception-handling/try1.kt
 wasm-old-exception-handling/try2.kt
 wasm-old-exception-handling/try3.kt
 wasm-old-exception-handling/try4.kt
-wasm-old-exception-handling/tryCatch.kt
 wasm-old-exception-handling/tryCatchFinallyWithHandleResult.kt
 wasm-old-exception-handling/tryCatchWithHandleResult.kt
 wasm-old-exception-handling/tryFinallyInsideInlineLambda.kt
@@ -2498,7 +2480,6 @@ when/stringOptimization/expression.kt
 when/stringOptimization/nullability.kt
 when/stringOptimization/sameHashCode.kt
 when/stringOptimization/statement.kt
-when/stringOptimization/temporaryVarInWhenByStringIsDisposedProperly.kt
 when/whenSubjectVariable/whenByEnum.kt
 when/whenSubjectVariable/whenByNullableEnum.kt
 when/whenSubjectVariable/whenByString.kt

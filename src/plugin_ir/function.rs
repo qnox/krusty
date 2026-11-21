@@ -1,7 +1,7 @@
 //! One top-level function's checked body as kotlinc's IR: its declaration from the parser's unit
 //! and the index, its statements and expressions from checked FIR.
 
-use krusty_plugin_ir::{
+use krusty_plugin_api::ir::{
     BodyIr, CallIr, CallableIdentity, CallableKind, Callee, Constant, ExpressionIr, ExpressionKind,
     FunctionIr, ParameterIr, StatementIr, ValueId, VariableIr, Visibility,
 };
@@ -152,10 +152,10 @@ fn modifier(function: &FunDecl) -> Option<&'static str> {
 
 /// The first type-use annotation written in `span`: on a parameter, the return type, a local, or a
 /// type argument nested in any of them. [`TypeIdentity`] has room for a type's annotations, but the
-/// encoder does not resolve them and the host does not build them, so an annotated type is refused
+/// encoder does not resolve them, so an annotated type is refused
 /// rather than published as the same type without them.
 ///
-/// [`TypeIdentity`]: krusty_plugin_ir::TypeIdentity
+/// [`TypeIdentity`]: krusty_plugin_api::ir::TypeIdentity
 fn type_annotation(file: &File, span: Span) -> Option<&AnnotationRef> {
     file.type_annotations
         .iter()
@@ -198,7 +198,7 @@ impl BodyEncoder<'_, '_> {
         }
     }
 
-    fn ty(&self, ty: Ty, span: Span) -> Result<krusty_plugin_ir::TypeIdentity, Refusal> {
+    fn ty(&self, ty: Ty, span: Span) -> Result<krusty_plugin_api::ir::TypeIdentity, Refusal> {
         identity(ty, TypeParameters::NONE).map_err(|what| self.refuse(span, what))
     }
 
@@ -670,8 +670,8 @@ fn expression_kind(kind: &FirExprKind) -> String {
 }
 
 /// `span` of the file as kotlinc's offsets into the text it reads.
-fn plugin_span(offsets: &Utf16Offsets, span: Span) -> krusty_plugin_ir::Span {
-    krusty_plugin_ir::Span {
+fn plugin_span(offsets: &Utf16Offsets, span: Span) -> krusty_plugin_api::ir::Span {
+    krusty_plugin_api::ir::Span {
         start: kotlinc_offset(offsets.unit(span.lo)),
         end: kotlinc_offset(offsets.unit(span.hi)),
     }
