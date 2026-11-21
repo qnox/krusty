@@ -10,7 +10,9 @@
 # base which has since dropped entries is not charged with them. The CLI not-applicable lists and the
 # diagnostics not-scored lists are not checked here: they record what the reference kotlinc cannot
 # run in this environment, and the required reference run proves every entry instead.
-# The one exception to "only shrink" is a plugin corpus's `included` inventory
+# A byte-identity list also accepts a row for a key the base did not score yet, in the change that
+# adds that case (see new_byte_identity_keys_removed); every key the base scored only shrinks.
+# The other exception to "only shrink" is a plugin corpus's `included` inventory
 # (src/plugins/<name>/boxes/included): it lists the cases that must pass, so it only GROWS. A change
 # may add entries, never remove one, including by deleting a release's own file when the inherited
 # one lists fewer; otherwise a case that starts failing could be dropped from the list instead of
@@ -107,6 +109,28 @@ approved_migration() {
   fi
 }
 
+# A byte-identity row may arrive with the case it describes: a key the base did not score yet (an
+# owned regression the base does not have, or a case the base's JVM lane did not apply) may be
+# listed in the change that adds it. A key the base already scored only leaves the list. Prints the
+# added keys that remain charged.
+new_byte_identity_keys_removed() {
+  local release=$1 added=$2 not_applicable_from key
+  not_applicable_from=$(reads "$base" tests/box_expected_not_applicable/jvm "$release")
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    case "$key" in
+      regressions/*)
+        git cat-file -e "$base:tests/box_regressions/${key#regressions/}" 2>/dev/null || continue
+        ;;
+    esac
+    if [ -n "$not_applicable_from" ] &&
+      entries "$base:tests/box_expected_not_applicable/jvm/$not_applicable_from.txt" | grep -Fx -- "$key" >/dev/null; then
+      continue
+    fi
+    printf '%s\n' "$key"
+  done <<<"$added"
+}
+
 added_total=0
 removed_total=0
 while read -r lane; do
@@ -131,6 +155,9 @@ while read -r lane; do
       added=$(comm -13 <(entries "$base:$lane/$from.txt") <(entries "$head:$lane/$to.txt"))
     else
       added=""
+    fi
+    if [ "$lane" = tests/box_byte_non_identical/jvm ] && [ -n "$added" ]; then
+      added=$(new_byte_identity_keys_removed "$release" "$added")
     fi
     [ -n "$added" ] || continue
     count=$(wc -l <<<"$added" | tr -d '[:space:]')
