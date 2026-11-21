@@ -1006,7 +1006,7 @@ fun make(value: String): View<CharSequence> = Hidden(value)
 ";
 
 #[test]
-fn a_file_private_class_overrides_the_interfaces_above_its_written_ones() {
+fn a_file_private_class_is_named_and_overrides_the_interfaces_above_its_written_ones() {
     let Some((directory, libraries)) = produce_library("inherited-interface", INHERITED_INTERFACE)
     else {
         return;
@@ -1038,6 +1038,45 @@ fn a_file_private_class_overrides_the_interfaces_above_its_written_ones() {
             "{owner}"
         );
     }
+    let [class] = ir
+        .classes
+        .iter()
+        .enumerate()
+        .filter(|(_, class)| class.fq_name.render().contains("klib-local"))
+        .map(|(id, _)| u32::try_from(id).unwrap())
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one materialized private class")
+    };
+    assert!(ir.classes[class as usize].is_source_declared);
+    assert_eq!(
+        ir.local_class_name_provenance.get(&class),
+        Some(&crate::ir::IrLocalClassNameProvenance {
+            source: crate::ir::IrLocalClassNameRoot::Dependency {
+                package: crate::types::type_name("fixture"),
+            },
+            lexical_owner: None,
+            segments: Box::new(["Hidden".to_owned()]),
+            ordinal: None,
+            parents: Box::new([]),
+        })
+    );
+    let names = crate::backend::class_names::source_class_names(ir, class)
+        .expect("the private class is named");
+    assert_eq!(
+        (names.qualified.as_str(), names.simple.as_str()),
+        ("fixture.Hidden", "Hidden")
+    );
+    // Native's and Wasm's runtime reflection read the same declared name.
+    let reflection = crate::backend::class_names::declared_class(ir, class);
+    assert_eq!(
+        (
+            reflection.package.as_str(),
+            reflection.simple.as_deref(),
+            reflection.qualified.as_deref()
+        ),
+        ("fixture", Some("Hidden"), Some("fixture.Hidden"))
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }
 
@@ -1074,10 +1113,13 @@ fn an_erased_factory_freezes_only_the_private_classes_its_body_constructs() {
         .unwrap();
     let callable = selected.klib_body_callable().unwrap();
     assert_eq!(callable.ret(), Ty::obj("kotlin/Any"));
-    let roots = libraries.declaration_bodies().emitted_body_classifiers(
-        callable.identity(),
-        crate::klib_lowering::EMITTED_CALL_FORMS,
-    );
+    let roots = libraries
+        .declaration_bodies()
+        .emitted_body(
+            callable.identity(),
+            crate::klib_lowering::EMITTED_CALL_FORMS,
+        )
+        .hierarchy_roots;
     assert!(roots.contains(&crate::types::type_name("fixture/Leaf")));
     assert!(!roots.contains(&crate::types::type_name("fixture/Unused")));
     // The declaring header is a hierarchy root, not a new public callable or source candidate.
@@ -1726,6 +1768,206 @@ fn a_declined_secondary_constructor_leaves_its_materialized_class_as_it_was() {
     assert_eq!(again, primary);
     assert_eq!(unit_inventory(&unit), before);
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+const PROCESS_OBJECT: &str = r#"package fixture
+
+private object Counter {
+    private val count: Int = 1
+    override fun toString(): String = "Counter $count"
+}
+
+fun counter(): Any = Counter
+"#;
+
+const PER_THREAD_OBJECT: &str = r#"package fixture
+
+@kotlin.native.concurrent.ThreadLocal
+private object Counter {
+    private val count: Int = 1
+    override fun toString(): String = "Counter $count"
+}
+
+fun counter(): Any = Counter
+"#;
+
+fn lower_counter(
+    name: &str,
+    source_text: &str,
+) -> Option<(
+    DependencyBodyUnit,
+    Result<(), super::super::KlibBodyDeclineReason>,
+)> {
+    let (directory, libraries) = produce_library(name, source_text)?;
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+        "counter",
+    );
+    let [function] = symbols.callables.functions() else {
+        panic!("one producer declaration counter")
+    };
+    let selected = libraries
+        .external_callable(function.callable.external_identity.unwrap())
+        .unwrap();
+    let callable = selected.klib_body_callable().unwrap();
+    let callees = super::super::KlibCalleeFacts::new([callable]);
+    let mut unit = DependencyBodyUnit::default();
+    let lowered = unit
+        .lower_function_with_declarations(
+            callable,
+            libraries.declaration_bodies(),
+            &callees,
+            libraries.intrinsic_facts(),
+            &ProducedExternals::default(),
+            &libraries,
+        )
+        .map(|_| ())
+        .map_err(|decline| decline.reason().clone());
+    let _ = std::fs::remove_dir_all(directory);
+    Some((unit, lowered))
+}
+
+/// A private object is installed as the one process-wide instance only when its declaration
+/// proves that storage. The same object marked per-thread needs an instance and state on every
+/// thread, which the installed class does not carry, so the body stays refused.
+#[test]
+fn official_klib_private_object_storage_is_authenticated() {
+    let Some((unit, lowered)) = lower_counter("process-object", PROCESS_OBJECT) else {
+        return;
+    };
+    assert_eq!(lowered, Ok(()));
+    validated(unit.ir());
+    let objects = unit
+        .ir()
+        .classes
+        .iter()
+        .filter(|class| class.is_object)
+        .count();
+    assert_eq!(objects, 1);
+
+    let (unit, lowered) =
+        lower_counter("per-thread-object", PER_THREAD_OBJECT).expect("the producer ran above");
+    assert_eq!(
+        lowered,
+        Err(super::super::KlibBodyDeclineReason::UnsupportedOperation(
+            "a non-public per-thread object"
+        ))
+    );
+    assert!(unit.ir().classes.iter().all(|class| !class.is_object));
+}
+
+const PRIVATE_INTERFACE: &str = r#"package fixture
+
+private interface Sink {
+    val limit: Int
+    fun accept(value: String): String
+}
+
+private interface Labeled<out V> : Iterable<V>
+
+fun feed(target: Any?, value: String): String =
+    if (target is Sink) target.accept(value) else value
+
+fun <V> labeled(items: Iterable<V>): Boolean = items is Labeled<V>
+"#;
+
+fn lower_fixture_function(
+    name: &str,
+    source_text: &str,
+    function_name: &str,
+) -> Option<(
+    DependencyBodyUnit,
+    Result<(), super::super::KlibBodyDeclineReason>,
+)> {
+    let (directory, libraries) = produce_library(name, source_text)?;
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+        function_name,
+    );
+    let [function] = symbols.callables.functions() else {
+        panic!("one producer declaration {function_name}")
+    };
+    let selected = libraries
+        .external_callable(function.callable.external_identity.unwrap())
+        .unwrap();
+    let callable = selected.klib_body_callable().unwrap();
+    let callees = super::super::KlibCalleeFacts::new([callable]);
+    let mut unit = DependencyBodyUnit::default();
+    let lowered = unit
+        .lower_function_with_declarations(
+            callable,
+            libraries.declaration_bodies(),
+            &callees,
+            libraries.intrinsic_facts(),
+            &ProducedExternals::default(),
+            &libraries,
+        )
+        .map(|_| ())
+        .map_err(|decline| decline.reason().clone());
+    let _ = std::fs::remove_dir_all(directory);
+    Some((unit, lowered))
+}
+
+/// A body may test and call a non-public interface of its own library. The interface is
+/// installed in the unit with its abstract members and no constructor, and its generic form keeps
+/// the supertype a narrowing to it relies on.
+#[test]
+fn official_klib_private_interface_is_installed_for_a_type_test_and_a_member_call() {
+    let Some((unit, lowered)) =
+        lower_fixture_function("private-interface", PRIVATE_INTERFACE, "feed")
+    else {
+        return;
+    };
+    assert_eq!(lowered, Ok(()));
+    validated(unit.ir());
+    let ir = unit.ir();
+    let interfaces = ir
+        .classes
+        .iter()
+        .filter(|class| class.is_interface)
+        .collect::<Vec<_>>();
+    assert_eq!(interfaces.len(), 1);
+    let sink = interfaces[0];
+    assert!(!sink.has_primary_ctor && sink.secondary_ctors.is_empty());
+    let mut methods = sink
+        .methods
+        .iter()
+        .map(|method| {
+            let method = &ir.functions[*method as usize];
+            assert!(
+                method.body.is_none(),
+                "an installed interface member is abstract"
+            );
+            method.name.clone()
+        })
+        .collect::<Vec<_>>();
+    methods.sort();
+    assert_eq!(methods, ["<get-limit>", "accept"]);
+
+    let Some((unit, lowered)) =
+        lower_fixture_function("private-interface-generic", PRIVATE_INTERFACE, "labeled")
+    else {
+        return;
+    };
+    assert_eq!(lowered, Ok(()));
+    validated(unit.ir());
+    let labeled = unit
+        .ir()
+        .classes
+        .iter()
+        .find(|class| class.is_interface)
+        .expect("the generic interface is installed");
+    assert_eq!(labeled.type_params.len(), 1);
+    let supertypes = labeled
+        .supertypes
+        .iter()
+        .map(|supertype| supertype.kotlin_class_internal())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        supertypes,
+        [Some(crate::types::type_name("kotlin/collections/Iterable"))],
+        "the public interface it extends"
+    );
 }
 
 mod hierarchy_publication;

@@ -126,7 +126,9 @@ class Compare(unittest.TestCase):
             " Not run | Passing, tasks on krusty's classes only |",
             '| --- | --- | ---: | ---: | ---: | ---: | ---: |',
             '| p | 0 / 1 | 2 / 5 (40.0%) | 1 | 1 | 1 | 1 / 4 (25.0%) in 1 / 3 tasks |',
-            '| **Total** | | **2 / 5 (40.0%)** | **1** | **1** | **1** | **1 / 4 (25.0%) in 1 / 3 tasks** |',
+            '',
+            "**Total** over 1 project: 2 / 5 (40.0%) passing on krusty's classes, 1 failing, 1 skipped, 1 not run; "
+            "1 / 4 (25.0%) in 1 / 3 tasks on krusty's classes only.",
             '',
             "First tests that pass on kotlinc's classes and not on krusty's:",
             '',
@@ -139,7 +141,7 @@ class RunScript(unittest.TestCase):
     checkout, so the krusty test build cannot read the kotlinc one's. The test build runs on the
     measured outputs, snapshotted before it starts; anything it changes in them is detected."""
 
-    def run_corpus(self, work, gradlew, expected_exit=0):
+    def run_corpus(self, work, gradlew, expected_exit=0, compared=True):
         repo = f'{work}/upstream'
         write(f'{repo}/gradlew', gradlew)
         os.chmod(f'{repo}/gradlew', 0o755)
@@ -150,13 +152,17 @@ class RunScript(unittest.TestCase):
         commit = subprocess.run(git + ['rev-parse', 'HEAD'], check=True, capture_output=True,
                                 text=True).stdout.strip()
         write(f'{work}/projects.tsv', f'p\tfile://{repo}\t{commit}\t.\t21\t-\n')
-        env = dict(os.environ, CORPUS_PROJECTS=f'{work}/projects.tsv')
+        env = dict(os.environ, CORPUS_PROJECTS=f'{work}/projects.tsv', CORPUS_RETRY_PAUSE='0')
         env.pop('CORPUS_PERF', None)
         result = subprocess.run(['bash', os.path.join(HERE, 'run.sh'), 'p', f'{work}/corpus',
                                  '/nonexistent/krusty', '/nonexistent/repository', '0'],
                                 env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, expected_exit, result.stderr)
         self.stderr = result.stderr
+        with open(f'{work}/corpus/logs/STATUS') as f:
+            self.status = f.read().splitlines()
+        if not compared:
+            return None
         with open(f'{work}/corpus/out/p/compare.json') as f:
             return json.load(f)
 
@@ -169,6 +175,39 @@ class RunScript(unittest.TestCase):
                                       expected_exit=1)
         self.assertEqual(project['reference_exit'], 3)
         self.assertIn("p: the reference kotlinc build failed (exit 3); see p.kotlinc.log", self.stderr)
+
+    # The warm-up is the only build that is not offline. This one fails to download on its first
+    # `failures` attempts, then succeeds; every other build records its one compilation.
+    FLAKY_WARMUP = ('#!/bin/sh\n'
+                    'case "$*" in *--offline*) ;; *)\n'
+                    '  n=$(cat "$HOME/attempts" 2>/dev/null || echo 0); echo $((n + 1)) > "$HOME/attempts"\n'
+                    '  if [ "$n" -lt {failures} ]; then\n'
+                    "    echo \"Plugin [id: 'x'] was not found: could not resolve plugin artifact 'x:x:1'\"; exit 1\n"
+                    '  fi;;\n'
+                    'esac\n'
+                    'if [ -n "$CORPUS_COMPILATIONS" ]; then : > "$CORPUS_COMPILATIONS"; fi\n')
+
+    def test_a_warm_up_that_could_not_download_is_retried(self):
+        with tempfile.TemporaryDirectory() as work:
+            os.environ['HOME'], home = work, os.environ.get('HOME')
+            try:
+                project = self.run_corpus(work, self.FLAKY_WARMUP.replace('{failures}', '2'))
+            finally:
+                os.environ['HOME'] = home
+        self.assertEqual(project['reference_exit'], 0)
+        self.assertEqual([line.split(' seconds')[0] for line in self.status if ' warmup ' in line],
+                         ['p warmup exit 1', 'p warmup exit 1', 'p warmup exit 0'])
+
+    def test_a_warm_up_that_never_downloads_stops_the_run(self):
+        with tempfile.TemporaryDirectory() as work:
+            os.environ['HOME'], home = work, os.environ.get('HOME')
+            try:
+                self.run_corpus(work, self.FLAKY_WARMUP.replace('{failures}', '3'), expected_exit=1, compared=False)
+            finally:
+                os.environ['HOME'] = home
+        self.assertEqual([line.split(' seconds')[0] for line in self.status],
+                         ['p warmup exit 1', 'p warmup exit 1', 'p warmup exit 1'])
+        self.assertIn('p: the warm-up could not download what the build needs; see p.warmup.log', self.stderr)
 
     def test_each_test_build_reports_on_its_own_classes(self):
         with tempfile.TemporaryDirectory() as work:
@@ -218,10 +257,11 @@ class RunScript(unittest.TestCase):
             kotlinc=dict(changed=1, examples=['build/classes/A.class']),
             krusty=dict(changed=1, examples=['build/classes/A.class']))))
         # Nothing the test builds ran is counted.
-        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[8:], [
-            '| p | 0 / 0 | unavailable: the kotlinc test build changed 1 measured output files; '
-            'the krusty test build changed 1 measured output files | | | | |',
-            '| **Total** | | **0 / 0** | **0** | **0** | **0** | **0 / 0 in 0 / 0 tasks** |',
+        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[6:], [
+            'Tests not compared, each with the reason its test builds cannot be compared:',
+            '',
+            '- **p** (test builds 0 / 0): the kotlinc test build changed 1 measured output files; '
+            'the krusty test build changed 1 measured output files',
             '',
         ])
 
@@ -253,10 +293,11 @@ class Inventory(unittest.TestCase):
                                   check=True, capture_output=True, text=True).stdout
         self.assertEqual(project['tests'], dict(exit=dict(kotlinc=1, krusty=1),
                                                 unavailable=dict(kotlinc=dict(inventory='missing'))))
-        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[8:], [
-            '| p | 1 / 1 | unavailable: the kotlinc test build listed no test task '
-            '(it failed before Gradle planned its tasks) | | | | |',
-            '| **Total** | | **0 / 0** | **0** | **0** | **0** | **0 / 0 in 0 / 0 tasks** |',
+        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[6:], [
+            'Tests not compared, each with the reason its test builds cannot be compared:',
+            '',
+            '- **p** (test builds 1 / 1): the kotlinc test build listed no test task '
+            '(it failed before Gradle planned its tasks)',
             '',
         ])
 

@@ -532,6 +532,140 @@ fun box(): String {
     );
 }
 
+/// How kotlinc-wasm names the object a lambda converted to a `fun interface` is, which
+/// `kotlin.Any.toString` prints before the identity hash: the qualified name of the classifier
+/// whose member holds the conversion, or else of the file's package, then `sam$`, the interface's
+/// qualified name with `_` for `.`, and `$0`. Inlined code stands in its caller, and a captured
+/// value does not change the name. `String.CASE_INSENSITIVE_ORDER` is converted in the standard
+/// library's `kotlin.text` file. The expected names are kotlinc-wasm's for this program (2.4.21 and
+/// 2.5.0-RC agree), taken by running it there. The JVM and Native name these classes otherwise, so
+/// this is target-owned; `librarySamLambdaComparator.kt` is the portable regression.
+#[test]
+fn wasm_sam_conversions_print_their_class_names() {
+    expect_wasm_box(
+        r##"fun interface F { fun go(x: Int): Int }
+fun interface Runnable2 { fun run() }
+
+class C {
+    fun m(): Any = F { it }
+    inner class I { fun n(): Any = Runnable2 { } }
+    class N { fun k(): Any = F { it } }
+    val v: Any = run { F { it + 1 } }
+}
+
+object O { fun o(): Any = Runnable2 { } }
+
+inline fun inl(): Any = F { it + 2 }
+
+fun name(value: Any): String {
+    val text = "$value"
+    var name = ""
+    var digits = -1
+    for (c in text) {
+        if (digits >= 0) {
+            if (c !in '0'..'9') return "bad hash: $text"
+            digits++
+        } else if (c == '@') {
+            digits = 0
+        } else {
+            name += c
+        }
+    }
+    return if (digits > 0) name else "no hash: $text"
+}
+
+fun box(): String {
+    val i = 3
+    val f: (String, String) -> Int = { _, _ -> 0 }
+    val names = arrayOf(
+        name(F { it }),
+        name(F { it + i }),
+        name(run { F { it } }),
+        name(inl()),
+        name(C().m()),
+        name(C().I().n()),
+        name(C.N().k()),
+        name(C().v),
+        name(O.o()),
+        name(Comparator<String> { _, _ -> 1 }),
+        name(Comparator(f)),
+        name(String.CASE_INSENSITIVE_ORDER),
+    )
+    var result = ""
+    for (name in names) result += if (result.isEmpty()) name else " $name"
+    val expected = "sam\$F$0 sam\$F$0 sam\$F$0 sam\$F$0 C.sam\$F$0 C.I.sam\$Runnable2$0 C.N.sam\$F$0 " +
+        "C.sam\$F$0 O.sam\$Runnable2$0 sam\$kotlin_Comparator$0 sam\$kotlin_Comparator$0 " +
+        "kotlin.text.sam\$kotlin_Comparator$0"
+    return if (result == expected) "OK" else result
+}
+"##,
+        "wasmSamConversionNames",
+    );
+}
+
+/// A lambda another file converts to its own `fun interface` at its top level, one the box
+/// converts, and a `var` erased to `Any` holding one print kotlinc-wasm's class names, whichever
+/// file comes first.
+/// The expected names are kotlinc-wasm's for these two files (2.4.21 and 2.5.0-RC agree), taken by
+/// running them there.
+#[test]
+fn wasm_sam_conversions_reached_from_another_file_print_their_class_names() {
+    let show = r##"fun interface Supplier { fun get(): Int }
+
+fun show(value: Any?): String = value.toString()
+
+fun name(text: String): String {
+    var name = ""
+    var digits = -1
+    for (c in text) {
+        if (digits >= 0) {
+            if (c !in '0'..'9') return "bad hash: $text"
+            digits++
+        } else if (c == '@') {
+            digits = 0
+        } else {
+            name += c
+        }
+    }
+    return if (digits > 0) name else "no hash: $text"
+}
+
+fun box(): String {
+    val supplier = Supplier { 1 }
+    var message: Any = "O"
+    if (supplier.get() == 1) message = supplier
+    val names = name(converted()) + " " + name("$supplier") + " " + name("$message")
+    return if (names == "sam\$Producer$0 sam\$Supplier$0 sam\$Supplier$0") "OK" else names
+}
+"##;
+    let other = r##"fun interface Producer { fun get(): Int }
+
+fun converted(): String = show(Producer { 1 })
+"##;
+    let stem = "wasmSamConversionNamesAcrossFiles";
+    let show_file = (format!("{stem}Show.kt"), show.to_string());
+    let other_file = (format!("{stem}Other.kt"), other.to_string());
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        if !focused_wasm_lane_available(&lane, stem) {
+            return;
+        }
+        for files in [
+            [show_file.clone(), other_file.clone()],
+            [other_file.clone(), show_file.clone()],
+        ] {
+            let outcome = lane.compile_and_run(&std::env::temp_dir(), stem, &files, show);
+            assert_eq!(
+                outcome,
+                Outcome::Pass,
+                "{stem} on {} with {} first",
+                target.name(),
+                files[0].0
+            );
+        }
+    }
+}
+
 /// How kotlinc-wasm codes a captured value class, a nullable value and a shared `var` in a function
 /// value's class name: a value class over a primitive or an unsigned number by `V` and its qualified
 /// name, and a value class over a reference or over another value class, a nullable value and a
@@ -1642,6 +1776,19 @@ fn wasm_data_class_unit_property_uses_units_fixed_hash() {
     expect_wasm_box(
         include_str!("box_regressions/knownPrimaryConstructorRoles.kt"),
         "wasmKnownPrimaryConstructorRoles",
+    );
+}
+
+// PLATFORM-SPECIFIC: the Wasm runtime lays out its own `ArrayList` iterator as a struct that no
+// declared class stands for, so its interface membership is recorded by the backend. Native
+// lowers the stdlib's `ArrayList` instead and does not yet lower `listIterator`; that gap is
+// reported, not excused, and the shared `arrayListIteratorInterfaces.kt` covers `iterator()` on
+// every lane.
+#[test]
+fn wasm_runtime_list_iterator_is_a_list_iterator() {
+    expect_wasm_box(
+        include_str!("wasm_regressions/arrayListListIteratorInterfaces.kt"),
+        "wasmArrayListListIteratorInterfaces",
     );
 }
 

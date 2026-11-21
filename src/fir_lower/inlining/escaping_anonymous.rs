@@ -21,7 +21,7 @@ use crate::types::{ty_subst_keep_unbound, Ty, TypeName};
 mod reified_uses;
 use reified_uses::class_uses_binding;
 
-use super::specialize_inline_copy;
+use crate::inline_expansion::specialize_inline_copy;
 
 /// The inline expansion an anonymous-class copy belongs to.
 pub struct CallSite<'a> {
@@ -2570,7 +2570,7 @@ fn body_uses_values(ir: &crate::ir::IrFile, root: ExprId) -> bool {
         if !seen.insert(expression) {
             continue;
         }
-        if !super::lambda_splice_contract::value_indices(ir.expr(expression)).is_empty() {
+        if !crate::inline_expansion::value_indices(ir.expr(expression)).is_empty() {
             return true;
         }
         if let IrExpr::Lambda { captures, .. } = ir.expr(expression) {

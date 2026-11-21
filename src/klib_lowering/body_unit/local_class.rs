@@ -28,8 +28,67 @@ impl<'s> Linker<'_, 's> {
                 "different dependency identities claim the same materialized classifier".to_owned(),
             ));
         }
-        let class = super::super::same_library_class::installed_class(&prepared);
+        // A same-library superclass is installed first, and the class's constructor passes it the
+        // constructor parameters its delegation names.
+        let superclass = match &prepared.superclass {
+            Some(superclass) => {
+                let declaration = match superclass.constructor {
+                    super::super::same_library_class::SuperclassConstructor::Local(signature) => {
+                        self.link_local_constructor(ir, signature)?.declaration
+                    }
+                    super::super::same_library_class::SuperclassConstructor::Library {
+                        signature,
+                        classifier,
+                    } => {
+                        // The library superclass is extended only where this unit materializes it.
+                        let linked = self.link_constructor(
+                            ir,
+                            signature,
+                            super::ConstructorRole::Delegation,
+                        )?;
+                        if linked.declaration.classifier != classifier
+                            || !self
+                                .classes
+                                .values()
+                                .any(|class| ir.classes[*class as usize].fq_name_id() == classifier)
+                        {
+                            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                                "a superclass this unit does not materialize",
+                            ));
+                        }
+                        linked.declaration
+                    }
+                };
+                let params = declaration.declared_parameters().to_vec();
+                if params.len() != superclass.operands.len() {
+                    return Err(KlibBodyDeclineReason::SignatureMismatch(
+                        "a superclass delegation passes another number of arguments".to_owned(),
+                    ));
+                }
+                let args = superclass
+                    .operands
+                    .iter()
+                    .zip(&params)
+                    .map(|(&slot, &ty)| {
+                        let value = ir.add_expr(IrExpr::GetValue(slot));
+                        ir.set_logical_type(value, ty);
+                        value
+                    })
+                    .collect::<Vec<_>>();
+                Some((declaration.classifier, params, args))
+            }
+            None => None,
+        };
+        let mut class = super::super::same_library_class::installed_class(&prepared);
+        if let Some((name, params, args)) = superclass {
+            class.superclass = name;
+            class.super_ctor_params = params;
+            class.super_args = args;
+        }
         let class_id = ir.add_class(class);
+        if let Some(naming) = prepared.naming.clone() {
+            ir.local_class_name_provenance.insert(class_id, naming);
+        }
         ir.record_declared_class_self_type(prepared.classifier, prepared.self_type);
         let init = declare_function(ir, &prepared.init_header);
         ir.set_method_visibility(init, crate::types::Visibility::Private);
@@ -37,6 +96,8 @@ impl<'s> Linker<'_, 's> {
         ir.note_class_method(class_id, init);
         let receiver = ir.add_expr(IrExpr::GetValue(0));
         ir.set_logical_type(receiver, prepared.self_type);
+        // The initialization takes the constructor's value parameters, after an outer instance.
+        let prefix = usize::from(prepared.outer.is_some());
         let args = prepared
             .init_header
             .params()
@@ -44,7 +105,7 @@ impl<'s> Linker<'_, 's> {
             .enumerate()
             .map(|(index, ty)| {
                 let value = ir.add_expr(IrExpr::GetValue(
-                    u32::try_from(index + 1).expect("a value index fits u32"),
+                    u32::try_from(index + 1 + prefix).expect("a value index fits u32"),
                 ));
                 ir.set_logical_type(value, *ty);
                 Some(value)
@@ -77,6 +138,7 @@ impl<'s> Linker<'_, 's> {
                     receiver_ty: prepared.receiver_ty,
                     fields: prepared.stored.clone(),
                     steps: prepared.steps,
+                    outer: prepared.outer,
                 },
             )),
             static_initialization: None,
@@ -143,6 +205,7 @@ impl<'s> Linker<'_, 's> {
                     function,
                     class: prepared.key.clone(),
                     setter: member.setter,
+                    formals: member.formals.clone(),
                 },
             );
             self.pending.push_back(PendingBody {
@@ -160,6 +223,7 @@ impl<'s> Linker<'_, 's> {
                         declaring: prepared.declaring,
                         receiver: prepared.self_type,
                         fields: prepared.stored.clone(),
+                        outer: prepared.outer,
                     },
                 )),
                 static_initialization: None,
@@ -173,18 +237,32 @@ impl<'s> Linker<'_, 's> {
                 self.sources.declarations,
             )?;
         }
+        // A member the class inherits from a superclass this unit installed or materialized
+        // implements the interface declarations the class reaches only through its supertypes.
+        let inherited = self
+            .sources
+            .bodies
+            .inherited_implementations_of(&prepared.key.module, &prepared.key.signature)
+            .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
+        for (body, implemented) in &inherited {
+            self.record_inherited_implementation(ir, prepared.classifier, body, implemented);
+        }
         let constructor = super::super::same_library_class::LocalConstructor {
             declaration: prepared.declaration.clone(),
             access: prepared.access,
+            object: prepared.object,
         };
         self.local_classes.insert(
             prepared.key,
             super::super::same_library_class::MaterializedLocalClass {
                 class: class_id,
                 classifier: prepared.classifier,
-                constructor: constructor_signature,
-                declaration: prepared.declaration,
-                access: prepared.access,
+                construction: Some(super::super::same_library_class::LocalConstruction {
+                    constructor: constructor_signature,
+                    declaration: prepared.declaration,
+                    access: prepared.access,
+                    object: prepared.object,
+                }),
                 formals: prepared.formals,
                 supertypes: prepared.supertypes,
                 self_type: prepared.self_type,
@@ -192,6 +270,126 @@ impl<'s> Linker<'_, 's> {
             },
         );
         Ok(constructor)
+    }
+
+    /// The constructor a file-local construction invokes: one of a class already installed for
+    /// this library, or the constructor of a class prepared and installed now.
+    pub(super) fn link_constructor_of_local_class(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibIrSignature,
+    ) -> Result<super::super::same_library_class::LocalConstructor, KlibBodyDeclineReason> {
+        let module = self.active_module.clone();
+        let bodies = self.sources.bodies;
+        let callees = self.sources.callees;
+        match super::super::same_library_class::link(
+            super::super::same_library_class::LocalClassSource {
+                bodies,
+                declarations: self.sources.declarations,
+                classes: callees.class_type_oracle(),
+                module: &module,
+                validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
+            },
+            callee,
+            self.local_classes,
+        )? {
+            super::super::same_library_class::LocalLink::Ready(constructor) => Ok(constructor),
+            super::super::same_library_class::LocalLink::Prepared(prepared) => {
+                self.install_local_class(ir, prepared)
+            }
+        }
+    }
+
+    /// Whether `signature` names a non-public interface of this library.
+    pub(super) fn names_local_interface(&self, signature: &KlibIrSignature) -> bool {
+        self.sources
+            .bodies
+            .module_local_class(&self.active_module, signature)
+            .is_some_and(|(_, class)| {
+                crate::metadata::semantic::class_kind(class.base.flags)
+                    == crate::libraries::TypeKind::Interface
+            })
+    }
+
+    /// Install the non-public interface `signature` of this library in the unit, with its abstract
+    /// members declared, so a type test or a member call of it has a class to name.
+    pub(super) fn install_local_interface(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        let module = self.active_module.clone();
+        let bodies = self.sources.bodies;
+        let callees = self.sources.callees;
+        match super::super::same_library_class::link_interface(
+            super::super::same_library_class::LocalClassSource {
+                bodies,
+                declarations: self.sources.declarations,
+                classes: callees.class_type_oracle(),
+                module: &module,
+                validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
+            },
+            signature,
+            self.local_classes,
+        )? {
+            super::super::same_library_class::InterfaceLink::Ready => Ok(()),
+            super::super::same_library_class::InterfaceLink::Prepared(prepared) => {
+                self.install_interface(ir, prepared)
+            }
+        }
+    }
+
+    fn install_interface(
+        &mut self,
+        ir: &mut IrFile,
+        prepared: Box<super::super::same_library_class::PreparedLocalInterface<'s>>,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        if ir.class_id_by_name(prepared.classifier).is_some() {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "different dependency identities claim the same materialized classifier".to_owned(),
+            ));
+        }
+        let class = super::super::same_library_class::installed_interface(&prepared);
+        let class_id = ir.add_class(class);
+        ir.record_declared_class_self_type(prepared.classifier, prepared.self_type);
+        for member in prepared.members {
+            let function = declare_function(ir, &member.header);
+            ir.classes[class_id as usize].methods.push(function);
+            ir.note_class_method(class_id, function);
+            self.local_functions.insert(
+                super::super::same_library_class::LocalIdentity {
+                    module: prepared.key.module.clone(),
+                    signature: member.signature.clone(),
+                },
+                LocalFunction {
+                    function,
+                    class: prepared.key.clone(),
+                    setter: member.setter,
+                    formals: member.formals.clone(),
+                },
+            );
+            publish_overrides(
+                ir,
+                prepared.classifier,
+                function,
+                &member.overrides,
+                self.sources.externals,
+                self.sources.declarations,
+            )?;
+        }
+        self.local_classes.insert(
+            prepared.key,
+            super::super::same_library_class::MaterializedLocalClass {
+                class: class_id,
+                classifier: prepared.classifier,
+                construction: None,
+                formals: prepared.formals,
+                supertypes: prepared.supertypes,
+                self_type: prepared.self_type,
+                class_type_parameters: prepared.class_type_parameters,
+            },
+        );
+        Ok(())
     }
 
     pub(super) fn link_local_member(
@@ -235,9 +433,45 @@ impl<'s> Linker<'_, 's> {
                 "a member is not in its class".to_owned(),
             ));
         }
+        if crate::metadata::semantic::class_kind(class.base.flags)
+            == crate::libraries::TypeKind::Interface
+        {
+            self.install_local_interface(ir, &class.base.symbol.signature)?;
+            return self.linked_local_member(ir, &key);
+        }
         let constructor = class_constructor(class_arena, class)?;
         self.link_local_constructor(ir, &constructor)?;
         self.linked_local_member(ir, &key)
+    }
+
+    /// The object a body of this library reads under the non-public `signature`, installed in
+    /// this unit by its private constructor, which creates its one instance.
+    pub(super) fn install_local_object(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<crate::types::TypeName, KlibBodyDeclineReason> {
+        let module = self.active_module.clone();
+        let Some(classifier) =
+            super::super::same_library_class::classifier(self.sources.bodies, &module, signature)?
+        else {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a file-private object value",
+            ));
+        };
+        let Some((arena, class)) = self.sources.bodies.module_local_class(&module, signature)
+        else {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a file-private object value",
+            ));
+        };
+        let constructor = class_constructor(arena, class)?;
+        if !self.link_local_constructor(ir, &constructor)?.object {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an object value names a class other than an object".to_owned(),
+            ));
+        }
+        Ok(classifier)
     }
 
     pub(super) fn linked_installed_member(
@@ -293,7 +527,7 @@ impl<'s> Linker<'_, 's> {
             .collect();
         Ok(super::super::same_library_class::linked_member(
             class,
-            registered.function,
+            (registered.function, &registered.formals),
             ir,
             defaults,
         ))

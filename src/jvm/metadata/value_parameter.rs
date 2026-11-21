@@ -21,6 +21,7 @@ impl MvpFlags {
     const HAS_TYPE_FACTS: u16 = 1 << 6;
     const NO_INFER: u16 = 1 << 7;
     const NOINLINE: u16 = 1 << 8;
+    const COMPOSABLE_FUN: u16 = 1 << 9;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -75,6 +76,10 @@ impl MvpFlags {
     #[inline]
     pub const fn with_no_infer(self, on: bool) -> Self {
         self.with(Self::NO_INFER, on)
+    }
+    #[inline]
+    pub const fn with_composable_fun(self, on: bool) -> Self {
+        self.with(Self::COMPOSABLE_FUN, on)
     }
 }
 
@@ -136,6 +141,12 @@ impl MetaValueParam {
     #[inline]
     pub fn no_infer(&self) -> bool {
         self.flags.has(MvpFlags::NO_INFER)
+    }
+    /// The declared type carries the Compose runtime's `@Composable` type annotation, so a function
+    /// value of it is compiled with the composer and `$changed` parameters after its own.
+    #[inline]
+    pub fn composable_fun(&self) -> bool {
+        self.flags.has(MvpFlags::COMPOSABLE_FUN)
     }
 }
 

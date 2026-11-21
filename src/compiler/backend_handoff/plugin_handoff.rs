@@ -60,10 +60,20 @@ impl CheckedSourceFacts for HandoffSourceFacts<'_> {
         let fact = self.callables.callable(callable)?;
         Some(DependencyCallableShape {
             inline: fact.inline != crate::libraries::InlineKind::None,
-            receiver: fact.source_receiver.is_some() || fact.context_count > 0,
+            extension: fact.source_receiver.is_some(),
+            context_parameters: fact.context_count > 0,
             defaults: fact.declares_parameter_defaults,
+            synthetic_parameters: synthetic_parameters(&fact.descriptor, &fact.physical_params),
+            composable_parameters: fact.composable_parameters,
         })
     }
+}
+
+/// The parameters a compiled entry with `descriptor` takes after `source`, its source parameters.
+fn synthetic_parameters(descriptor: &str, source: &[Ty]) -> Box<[Ty]> {
+    crate::jvm::jvm_libraries::parse_method_desc(descriptor)
+        .and_then(|(entry, _)| entry.strip_prefix(source).map(Box::from))
+        .unwrap_or_default()
 }
 
 /// The runtime declarations one file's plugins selected, by the declarations the compilation sees.
@@ -241,5 +251,28 @@ mod tests {
         functions.overloads.push(duplicate);
         let mut handoff = HandoffRuntime::new(&declared, &NoClassifiers);
         assert!(handoff.function(&runtime).is_err());
+    }
+}
+
+#[cfg(test)]
+mod synthetic_parameter_tests {
+    use super::synthetic_parameters;
+    use crate::types::Ty;
+
+    #[test]
+    fn the_parameters_after_the_source_ones_are_synthetic() {
+        let tail = synthetic_parameters("(Ljava/lang/String;JII)V", &[Ty::String]);
+        assert_eq!(&*tail, &[Ty::Long, Ty::Int, Ty::Int]);
+    }
+
+    #[test]
+    fn an_entry_that_does_not_begin_with_the_source_parameters_has_none() {
+        assert!(synthetic_parameters("(JII)V", &[Ty::String]).is_empty());
+        assert!(synthetic_parameters("not a descriptor", &[Ty::String]).is_empty());
+    }
+
+    #[test]
+    fn an_entry_of_only_the_source_parameters_has_none() {
+        assert!(synthetic_parameters("(Ljava/lang/String;)V", &[Ty::String]).is_empty());
     }
 }

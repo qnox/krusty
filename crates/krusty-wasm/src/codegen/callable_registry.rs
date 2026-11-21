@@ -120,6 +120,10 @@ impl CallableRegistry {
                 "a constructor's default-argument entry without its declaring file's entry"
                     .to_owned(),
             ),
+            Some(InstanceEntry::TypeTest(classifier)) => Err(format!(
+                "a type test against a class (`{}`) without its declaring file's entry",
+                classifier.render().replace('/', ".")
+            )),
             None => Ok(()),
         }
     }
@@ -258,6 +262,12 @@ impl CallableRegistry {
                 reads.extend(krusty::backend::instance_links::link_constructor_reads(
                     ir,
                     self.source_module.as_deref().unwrap_or_default(),
+                    module_facts,
+                    &mut self.instances,
+                    || wasm.declare(),
+                ));
+                reads.extend(krusty::backend::instance_links::link_type_test_reads(
+                    ir,
                     module_facts,
                     &mut self.instances,
                     || wasm.declare(),
@@ -906,6 +916,7 @@ mod tests {
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
             declares_parameter_defaults: false,
+            composable_parameters: Default::default(),
             annotations: Box::new([]),
         }
     }
@@ -1192,10 +1203,12 @@ mod tests {
                 ir.local_class_name_provenance.insert(
                     class,
                     krusty::ir::IrLocalClassNameProvenance {
-                        source: krusty::ir::IrModuleSource {
-                            source: krusty::fir::SourceFileId::from_raw(1),
-                            package: type_name("demo"),
-                        },
+                        source: krusty::ir::IrLocalClassNameRoot::Source(
+                            krusty::ir::IrModuleSource {
+                                source: krusty::fir::SourceFileId::from_raw(1),
+                                package: type_name("demo"),
+                            },
+                        ),
                         lexical_owner: None,
                         segments: Box::new([]),
                         ordinal: Some(1),
