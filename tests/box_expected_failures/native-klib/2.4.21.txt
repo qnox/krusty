@@ -825,7 +825,6 @@ enum/enumEntryMembers.kt
 enum/enumValueOf.kt
 enum/interfaceCallNoEntryClass.kt
 enum/interfaceCallWithEntryClass.kt
-enum/k54079.kt
 enum/kt38540.kt
 enum/lambdaInDefault.kt
 enum/loop.kt
@@ -851,7 +850,6 @@ evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
 evaluate/intrinsicConst/equals_after.kt
 evaluate/intrinsicConst/lowerAndUpperCase.kt
-evaluate/serialization/typeAnnotation.kt
 exceptions/catch1.kt
 exceptions/catch2.kt
 exceptions/rethrow.kt
@@ -936,18 +934,14 @@ inference/pcla/issues/kt42139.kt
 inference/pcla/issues/kt47052.kt
 inference/pcla/issues/kt48633.kt
 inference/pcla/issues/kt49887.kt
-inference/pcla/issues/kt54767a.kt
-inference/pcla/issues/kt54767b.kt
 inference/pcla/issues/kt64066.kt
 inference/pcla/issues/kt64069.kt
 inference/pcla/issues/kt66229.kt
 inference/pcla/issues/kt74819e.kt
 inference/pcla/memberScope.kt
 inference/pcla/nestedNonExhaustiveIf.kt
-inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inference/pcla/substituteStubTypeIntoCR.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt
-inference/pcla/topDownCompletionBreakedByNonBuilderInferenceSession.kt
 inference/plusAssignInsideLambda.kt
 initializers/correctOrder1.kt
 initializers/correctOrder2.kt
