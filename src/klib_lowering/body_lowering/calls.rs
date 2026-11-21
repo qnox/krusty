@@ -1634,6 +1634,34 @@ impl BodyLowering<'_> {
                 ) {
                     continue;
                 }
+                // The captured type is a subtype of the projection's read type and of every
+                // bound the classifier declares for the slot: `Key<*>` of `Key<E : Element>`
+                // captures an `Element`.
+                let captured_upper_bounds = std::iter::once(read)
+                    .chain(
+                        self.linker
+                            .classifier_parameter_bounds(owner, slot)
+                            .into_iter()
+                            .filter(|bound| !bound.mentions_ty_param()),
+                    )
+                    .collect::<Vec<_>>();
+                // The capture reads as the most specific of them, which is how the producer
+                // serializes the call's type argument.
+                let parameters = self.header.type_parameters();
+                let Some(&captured_read) = captured_upper_bounds.iter().find(|&&upper| {
+                    captured_upper_bounds
+                        .iter()
+                        .all(|&other| self.linker.is_subtype(parameters, upper, other))
+                }) else {
+                    return Err(mismatch(
+                        "a call captures a projection whose bounds have no most specific one",
+                    ));
+                };
+                let projected = if captured_read == read {
+                    projected
+                } else {
+                    Ty::out_projection(captured_read)
+                };
                 let sole = captured.insert(name, projected).is_none()
                     && formals
                         .iter()
@@ -1647,7 +1675,7 @@ impl BodyLowering<'_> {
                         .receiver
                         .is_some_and(|receiver| names(receiver, name))
                     && !names(bound, name)
-                    && self.bounds_admit_capture(linked, name, read);
+                    && self.bounds_admit_capture(linked, name, &captured_upper_bounds);
                 if !sole {
                     return Err(mismatch(
                         "a call captures a projection its other operands or bounds also constrain",
@@ -1661,15 +1689,16 @@ impl BodyLowering<'_> {
 
 impl BodyLowering<'_> {
     /// Whether the selected declaration's complete authenticated bound ledger, not only the
-    /// first bound a type-parameter type carries, admits capturing `read` for its type parameter
-    /// `name`: every bound of `name` admits `read` and names no type parameter, and no bound of
-    /// any other type parameter names `name`, since that peer would constrain the capture too. A
-    /// selection with no complete ledger is no proof.
+    /// first bound a type-parameter type carries, admits the captured type for its type parameter
+    /// `name`, a subtype of each of `captured`: every bound of `name` names no type parameter and
+    /// is a supertype of one of `captured`, and no bound of any other type parameter names
+    /// `name`, since that peer would constrain the capture too. A selection with no complete
+    /// ledger is no proof.
     fn bounds_admit_capture(
         &self,
         linked: &LinkedCallee,
         name: crate::types::TyParamName,
-        read: Ty,
+        captured: &[Ty],
     ) -> bool {
         let Some(ledger) = linked
             .type_parameter_bounds
@@ -1688,9 +1717,10 @@ impl BodyLowering<'_> {
                 }
                 bounds.iter().all(|&bound| {
                     !bound.mentions_ty_param()
-                        && self
-                            .linker
-                            .is_subtype(self.header.type_parameters(), read, bound)
+                        && captured.iter().any(|&upper| {
+                            self.linker
+                                .is_subtype(self.header.type_parameters(), upper, bound)
+                        })
                 })
             })
     }
