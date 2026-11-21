@@ -47,7 +47,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         file_class_names,
         user_defined,
         user_base_classes,
-    } = source_type_universe(files, &*libraries, diags, compact_headers);
+    } = source_type_universe(files, &*libraries, diags, compact_headers, frontend_plugins);
     let DeclaredClassifierInventory {
         legacy_anonymous_lexical_scopes,
         legacy_local_class_tparams,

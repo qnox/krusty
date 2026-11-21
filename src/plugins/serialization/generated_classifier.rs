@@ -1,6 +1,8 @@
 //! Frontend publication of serialization's generated nested classifier.
 
-use crate::plugins::{FrontendCallable, FrontendCallableOwner, FrontendClassContext};
+use crate::plugins::{
+    FrontendCallable, FrontendCallableOwner, FrontendClassContext, FrontendClassNameContext,
+};
 use crate::types::{type_name, GeneratedClassifierFact, GeneratedClassifierKind, Visibility};
 
 use super::{KSERIALIZER_FQ, SERIALIZABLE_FQ};
@@ -73,18 +75,38 @@ pub(super) fn publish_serializer_accessor_declaration(
     });
 }
 
+/// Whether the plugin adds a `Companion` to a class: a `@Serializable` class that is not an object
+/// and declares no companion of its own. The one rule behind both the name the type universe
+/// reserves and the fact published with the class header.
+pub(super) fn generates_companion(
+    annotations: &[crate::types::TypeName],
+    kind: crate::libraries::TypeKind,
+    has_companion: bool,
+) -> bool {
+    annotations
+        .iter()
+        .any(|annotation| annotation.matches(SERIALIZABLE_FQ))
+        && kind != crate::libraries::TypeKind::Object
+        && !has_companion
+}
+
+/// The identities of the nested classifiers the plugin generates for a class, known from the
+/// class's resolved annotations, kind and companion alone.
+pub(super) fn generated_classifier_names(
+    ctx: &FrontendClassNameContext<'_>,
+    names: &mut Vec<crate::types::TypeName>,
+) {
+    if generates_companion(ctx.annotations, ctx.kind, ctx.has_companion) {
+        names.push(ctx.classifier.nested_child("Companion"));
+    }
+}
+
 pub(super) fn publish_generated_classifier_facts(
     ctx: &FrontendClassContext<'_>,
     classifiers: &mut Vec<GeneratedClassifierFact>,
 ) {
     classifiers.extend(generated_serializer_classifier_fact(ctx));
-    if ctx
-        .annotations
-        .iter()
-        .any(|annotation| annotation.matches(SERIALIZABLE_FQ))
-        && ctx.kind != crate::libraries::TypeKind::Object
-        && ctx.companion.is_none()
-    {
+    if generates_companion(ctx.annotations, ctx.kind, ctx.companion.is_some()) {
         classifiers.push(GeneratedClassifierFact {
             classifier: ctx.classifier.nested_child("Companion"),
             lexical_owner: ctx.classifier,

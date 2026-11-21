@@ -124,6 +124,7 @@ pub(in crate::resolve) fn source_type_universe(
     libraries: &dyn SemanticPlatform,
     diags: &mut DiagSink,
     compact_headers: Option<&crate::fir::StreamedHeaderModule>,
+    frontend_plugins: &crate::plugins::PluginHost,
 ) -> SourceTypeUniverse {
     let file_type_aliases = compact_headers.map_or_else(
         || {
@@ -305,7 +306,22 @@ pub(in crate::resolve) fn source_type_universe(
     // import-driven name resolution (there is no global simple-name index): a bare name binds ONLY to a
     // default-import / imported / same-package class, verified to exist via `resolve_type`. Runs BEFORE
     // alias expansion so a user `typealias A = Foo` (Foo a classpath type) finds `Foo` already resolved.
-    let imports_by_file = {
+    //
+    // A frontend plugin generates classifiers (serialization's `Companion`) whose identity depends on
+    // the class's RESOLVED annotations, which only this pass produces. The pass therefore runs once,
+    // the plugins name what they generate from its result, and the pass runs again with those
+    // identities declared, so `Type.Companion` binds like any nested classifier. A source set no
+    // plugin generates for resolves once.
+    let mut generated_classifiers: Option<crate::fx_hash::HashSet<TypeName>> = None;
+    let imports_by_file = loop {
+        let declared_with_generated;
+        let declarations = match &generated_classifiers {
+            Some(generated) => {
+                declared_with_generated = user_defined.union(generated).copied().collect();
+                &declared_with_generated
+            }
+            None => &user_defined,
+        };
         let mut consensus: HashMap<String, Option<TypeName>> = HashMap::default();
         // A classpath `typealias` resolves to its TARGET classifier above. When the target takes a
         // different argument list than the alias declares (`Lens<S, A>` = `PLens<S, S, A, A>`), a use
@@ -315,7 +331,7 @@ pub(in crate::resolve) fn source_type_universe(
             HashMap::default();
         let source_count = compact_headers.map_or(files.len(), |headers| headers.sources.len());
         let mut imports_by_file = Vec::with_capacity(source_count);
-        let enclosing_names = bootstrap_enclosing_names(&user_defined, &source_aliases);
+        let enclosing_names = bootstrap_enclosing_names(declarations, &source_aliases);
         for file_index in 0..source_count {
             let mut imap: HashMap<String, Vec<String>> = HashMap::default();
             for import in source_imports[file_index]
@@ -329,7 +345,7 @@ pub(in crate::resolve) fn source_type_universe(
                 }
             }
             let source = BootstrapSymbolSource {
-                declarations: &user_defined,
+                declarations,
                 aliases: &source_aliases,
                 enclosing_names: &enclosing_names,
                 libraries,
@@ -588,7 +604,23 @@ pub(in crate::resolve) fn source_type_universe(
                 }
             }
         }
-        imports_by_file
+        if generated_classifiers.is_some() {
+            break imports_by_file;
+        }
+        let resolved = imports_by_file
+            .iter()
+            .map(|(file_imports, ..)| file_imports)
+            .collect::<Vec<_>>();
+        let generated = super::generated_classifier_names::generated_classifier_identities(
+            files,
+            compact_headers,
+            frontend_plugins,
+            &resolved,
+        );
+        if generated.is_empty() {
+            break imports_by_file;
+        }
+        generated_classifiers = Some(generated);
     };
 
     // Expand the input files' USER type aliases into class_names (classpath aliases already resolved

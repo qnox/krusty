@@ -229,6 +229,17 @@ pub struct FrontendClassContext<'a> {
     pub declared_functions: &'a [FrontendDeclaredFunction],
 }
 
+/// What the type universe knows of a source class before any member is typed: enough for a plugin
+/// to name the nested classifiers it will generate, so a source spelling can bind to them.
+pub struct FrontendClassNameContext<'a> {
+    pub classifier: TypeName,
+    pub kind: crate::libraries::TypeKind,
+    /// The class declares a companion object of its own.
+    pub has_companion: bool,
+    /// The resolved identities of the annotations written on the class.
+    pub annotations: &'a [TypeName],
+}
+
 /// A function a source class declares itself, as a frontend plugin sees it.
 pub struct FrontendDeclaredFunction {
     pub name: String,
@@ -757,6 +768,16 @@ pub trait IrPlugin {
         &self,
         _ctx: &FrontendClassContext<'_>,
         _classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
+    ) {
+    }
+
+    /// Name the nested classifiers the plugin generates for a class. This is the identity-only
+    /// counterpart of [`Self::publish_frontend_generated_classifiers`], consulted while the type
+    /// universe is built so a source type spelling can name a generated classifier.
+    fn generated_classifier_names(
+        &self,
+        _ctx: &FrontendClassNameContext<'_>,
+        _names: &mut Vec<TypeName>,
     ) {
     }
 
@@ -1526,6 +1547,14 @@ impl PluginHost {
         for plugin in &self.plugins {
             plugin.publish_frontend_generated_classifiers(ctx, classifiers);
         }
+    }
+
+    pub fn generated_classifier_names(&self, ctx: &FrontendClassNameContext<'_>) -> Vec<TypeName> {
+        let mut names = Vec::new();
+        for plugin in &self.plugins {
+            plugin.generated_classifier_names(ctx, &mut names);
+        }
+        names
     }
 
     /// The first plugin selection of a named class's constructor, with every plugin's diagnostics.
