@@ -7,6 +7,8 @@
 //! hash the member's own mangled signature, never its owner, so an inherited member keeps them in
 //! every class.
 
+mod most_specific;
+
 use super::{KlibCalleeOrigin, KlibDeclarationBodies};
 use crate::fx_hash::HashSet;
 use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
@@ -17,7 +19,8 @@ use crate::metadata::klib_ir::KlibIrSignature;
 impl KlibDeclarationBodies {
     /// The one serialized declaration the fake override `declaration` inherits. Of several
     /// inherited declarations, only one with a body is the implementation it inherits; more than
-    /// one is ambiguous.
+    /// one is ambiguous. When none has a body, the fake override is abstract and stands for the
+    /// most specific of them (`most_specific`).
     pub(super) fn inherited_origin(
         &self,
         body_module: &str,
@@ -40,6 +43,15 @@ impl KlibDeclarationBodies {
                     .collect::<Vec<_>>();
                 match implemented.as_slice() {
                     [one] => KlibCalleeOrigin::Exact((*one).clone()),
+                    [] => {
+                        let Some(member) = declaring_member(declaration) else {
+                            return KlibCalleeOrigin::Missing;
+                        };
+                        match self.declaring_class(body_module, member) {
+                            Ok(Some(class)) => self.most_specific(body_module, class, several),
+                            Ok(None) | Err(()) => KlibCalleeOrigin::Ambiguous,
+                        }
+                    }
                     _ => KlibCalleeOrigin::Ambiguous,
                 }
             }
@@ -105,9 +117,11 @@ impl KlibDeclarationBodies {
         declaration: &KlibDeclarationSignature,
     ) -> Result<Vec<KlibDependencyCallable>, ()> {
         let mut found = Vec::new();
-        let mut pending = vec![declaration.clone()];
+        // Breadth first, each class's supertypes in their declared order: the order kotlinc's
+        // fake-override builder meets the inherited declarations in.
+        let mut pending = std::collections::VecDeque::from([declaration.clone()]);
         let mut visited = HashSet::default();
-        while let Some(declaration) = pending.pop() {
+        while let Some(declaration) = pending.pop_front() {
             if !visited.insert(declaration.clone()) {
                 continue;
             }
@@ -142,11 +156,12 @@ impl KlibDeclarationBodies {
     }
 
     /// The members the class `class` (serialized at `signature` in `arena`) inherits from its
-    /// direct interface supertypes without overriding them, each with the one inherited
+    /// supertypes, direct or not, without overriding them, each with the one inherited
     /// declaration that has a body and the bodyless declarations it implements with it:
-    /// `AbstractList` implements `List.contains` with `AbstractCollection.contains`. An interface
-    /// default that nothing else declares implements itself: `CombinedContext` implements
-    /// `CoroutineContext.plus` with it.
+    /// `AbstractList` implements `List.contains` with `AbstractCollection.contains`, and a
+    /// subclass of `AbstractMutableList` implements `List.isEmpty`, which it reaches only through
+    /// `MutableList`, with `AbstractCollection.isEmpty`. An interface default that nothing else
+    /// declares implements itself: `CombinedContext` implements `CoroutineContext.plus` with it.
     pub(crate) fn inherited_implementations(
         &self,
         body_module: &str,
@@ -163,19 +178,36 @@ impl KlibDeclarationBodies {
             .map(|function| function.base.symbol.signature.clone())
             .collect::<HashSet<_>>();
         let mut found = Vec::new();
-        for &supertype in &class.supertypes {
-            let KlibIrType::Simple { classifier, .. } = arena.ty(supertype) else {
+        // Every supertype once, nearest first: a member a supertype redeclares is met through it
+        // before the declaration it redeclares.
+        let mut pending = class
+            .supertypes
+            .iter()
+            .map(|&supertype| (arena, supertype))
+            .collect::<std::collections::VecDeque<_>>();
+        let mut visited = HashSet::default();
+        while let Some((supertype_arena, supertype)) = pending.pop_front() {
+            let KlibIrType::Simple { classifier, .. } = supertype_arena.ty(supertype) else {
                 continue;
             };
             let KlibIrSignature::Public(supertype) = &classifier.signature else {
                 continue;
             };
+            if !visited.insert(supertype.clone()) {
+                continue;
+            }
             let Some((interface_arena, interface)) = self
                 .declaring_class_of(body_module, supertype)
-                .map_err(|()| "an interface supertype is serialized twice")?
+                .map_err(|()| "a supertype is serialized twice")?
             else {
                 continue;
             };
+            pending.extend(
+                interface
+                    .supertypes
+                    .iter()
+                    .map(|&supertype| (interface_arena, supertype)),
+            );
             for function in interface
                 .members
                 .iter()
@@ -213,6 +245,25 @@ impl KlibDeclarationBodies {
             }
         }
         Ok(found)
+    }
+
+    /// [`Self::inherited_implementations`] of the class serialized at `signature` in the producer
+    /// graph rooted at `body_module`; none for a class without a public signature.
+    pub(crate) fn inherited_implementations_of(
+        &self,
+        body_module: &str,
+        signature: &KlibIrSignature,
+    ) -> Result<Vec<(KlibDependencyCallable, Vec<KlibDependencyCallable>)>, &'static str> {
+        let KlibIrSignature::Public(public) = signature else {
+            return Ok(Vec::new());
+        };
+        match self
+            .declaring_class_of(body_module, public)
+            .map_err(|()| "a class is serialized twice")?
+        {
+            Some((arena, class)) => self.inherited_implementations(body_module, arena, class),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// The one class in the producer graph rooted at `body_module` serialized at `signature`.
