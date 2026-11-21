@@ -315,7 +315,13 @@ impl BodyLowering<'_> {
             ));
         };
         let operand = self.expression(operand)?;
-        if self.lowered_type(operand).non_null() != ty || ty.is_nullable() {
+        // A type parameter whose bound admits null asserts to the intersection `T & Any`, which
+        // keeps the parameter's identity; any other operand to its non-null type.
+        let asserted = self
+            .lowered_type(operand)
+            .non_null()
+            .marked_definitely_not_null();
+        if asserted != ty || ty.is_nullable() {
             return Err(mismatch(
                 "`CHECK_NOT_NULL` is typed apart from its operand's non-null type",
             ));
