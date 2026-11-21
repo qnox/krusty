@@ -97,6 +97,11 @@ fn without_restated_variance(classes: &dyn TypeOracle, ty: Ty) -> Ty {
                                 TypeVariance::Out,
                             )
                             | (TyKind::InProjection(inner), TypeVariance::In) => inner,
+                            // An invariant slot's star reads its bound as `out` does, so the
+                            // two spellings of that one projection are one type.
+                            (TyKind::StarProjection(inner), TypeVariance::Invariant) => {
+                                Ty::out_projection(inner)
+                            }
                             _ => argument,
                         };
                     without_restated_variance(classes, argument)
@@ -163,6 +168,30 @@ mod tests {
             projected,
             Ty::obj_args("fixture/Other", &[any]),
         ));
+    }
+
+    #[test]
+    fn an_invariant_slots_star_is_its_bound_read_as_out() {
+        struct Classes;
+        impl TypeOracle for Classes {
+            fn direct_supertypes(&self, _ty: Ty) -> Vec<Ty> {
+                Vec::new()
+            }
+            fn type_param_variance(&self, _owner: TypeName, _index: usize) -> TypeVariance {
+                TypeVariance::Invariant
+            }
+        }
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let star = Ty::obj_args("fixture/Box", &[Ty::star_projection(any)]);
+        let out = Ty::obj_args("fixture/Box", &[Ty::out_projection(any)]);
+        assert!(same_type(Some(&Classes), star, out));
+        assert!(same_type(Some(&Classes), out, star));
+        assert!(!same_type(
+            Some(&Classes),
+            star,
+            Ty::obj_args("fixture/Box", &[any]),
+        ));
+        assert!(!same_type(None, star, out));
     }
 
     #[test]
