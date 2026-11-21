@@ -550,6 +550,25 @@ impl Filler<'_> {
                         }
                     }
                 }
+                // A member of an interface a KLIB unit installed is implemented by the method
+                // that the class declaring it records, at that method's slot.
+                if own {
+                    for edge in &ir.classes[class as usize].installed_interface_overrides {
+                        let key = PlanKey::Installed(edge.overridden);
+                        if self.numbers.number(key).is_none() {
+                            continue;
+                        }
+                        let slot_key = function_key(ir, class, edge.implementation);
+                        let Some(&slot) = table.slots.get(&slot_key) else {
+                            return Err(format!(
+                                "an installed interface member implemented by a method with no \
+                                 slot (`{}`)",
+                                ir.classes[id as usize].fq_name()
+                            ));
+                        };
+                        found.insert(key, Implementation::Slot(slot));
+                    }
+                }
             }
         }
         Ok((found, elsewhere))

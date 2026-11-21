@@ -957,6 +957,14 @@ pub enum IrEnclosure {
 
 /// A class/interface/object declaration (`IrClass`). Instance fields come from the primary
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
+/// A method of a class overriding an abstract member of an interface a KLIB lowering unit
+/// installed in the same file ([`IrClass::installed_interface_overrides`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrInstalledOverride {
+    pub implementation: FunId,
+    pub overridden: FunId,
+}
+
 #[derive(Clone, Debug)]
 pub struct IrClass {
     /// Original checked source context; absent for a class with no source declaration.
@@ -1067,6 +1075,9 @@ pub struct IrClass {
     pub explicit_param_stores: bool,
     /// Instance methods — `FunId`s into `IrFile.functions` (each with `dispatch_receiver = Some`).
     pub methods: Vec<FunId>,
+    /// The members of interfaces a KLIB lowering unit installed that methods of this class
+    /// override. Neither end has a declaration identity, so the edge names both functions.
+    pub installed_interface_overrides: Vec<IrInstalledOverride>,
     pub is_interface: bool,
     /// `true` for a source `fun interface`. This is a language-level classifier fact carried through
     /// IR so emitted Kotlin metadata preserves SAM eligibility for dependent modules.
