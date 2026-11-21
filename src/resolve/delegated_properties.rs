@@ -81,12 +81,83 @@ pub(crate) struct DelegateConventionSite {
     pub(crate) extension_receiver: Option<Ty>,
     pub(crate) dispatch_diagnostic_name: Option<DelegateDispatchDiagnosticName>,
     pub(crate) is_var: bool,
+    /// Written property type. An error-typed convention argument is rendered from this syntax,
+    /// including type arguments a flat name cannot carry.
+    pub(crate) written_property_type: Option<crate::ast::TypeRef>,
+    /// Kotlinc spelling of `written_property_type` after its leaves have been classified.
+    pub(crate) failed_property_display: Option<String>,
 }
 
 #[derive(Clone)]
 pub(crate) enum DelegateDispatchDiagnosticName {
     Source(Box<str>),
     Anonymous,
+}
+
+pub(crate) fn written_property_type(
+    headers: &crate::fir::StreamedHeaderModule,
+    declaration: crate::fir::DeclarationId,
+) -> Option<crate::ast::TypeRef> {
+    let declaration = headers.syntax.declaration(declaration)?;
+    let crate::fir::HeaderDeclarationKind::Property { declared_type, .. } = declaration.kind else {
+        return None;
+    };
+    headers
+        .syntax
+        .transient_written_type_ref(declared_type?, &headers.lookup_names)
+}
+
+/// Diagnostic spelling of one written type leaf.
+///
+/// `resolved` is the classifier identity the name bound to, before type arguments are considered.
+/// A type parameter or typealias is already a resolved name and keeps its source spelling. Anything
+/// else that does not name a classifier is unresolved.
+pub(crate) fn delegate_classifier_display(
+    name: &str,
+    type_parameter: bool,
+    resolved: Option<crate::types::TypeName>,
+    alias: bool,
+) -> Option<String> {
+    if type_parameter {
+        return Some(crate::types::type_parameter_source_name(name).to_string());
+    }
+    if let Some(identity) =
+        super::source_type_resolution::parameterized_classifier_identity(name, resolved)
+    {
+        return Some(identity.segment_ref().replace('$', "."));
+    }
+    alias.then(|| name.rsplit(['.', '/']).next().unwrap_or(name).to_string())
+}
+
+/// Kotlinc's spelling of a written type whose resolution failed. Unresolved leaves are named in
+/// place; arguments, nullability, and function shape stay outside that marker.
+///
+/// `classifier` reports the diagnostic spelling of a leaf whose name resolves to a classifier
+/// identity, a type parameter, or a typealias. `None` is an unresolved leaf.
+pub(crate) fn diagnostic_type_syntax(
+    ty: &crate::ast::TypeRef,
+    mut classifier: impl FnMut(&str) -> Option<String>,
+) -> String {
+    use std::fmt::Write;
+    let mut out = super::source_signature_display::BoundedSourceDisplay::new(usize::MAX);
+    let mut write_leaf = |out: &mut super::source_signature_display::BoundedSourceDisplay,
+                          leaf: &crate::ast::TypeRef| {
+        if leaf.is_star_projection() {
+            return out.write_str("*");
+        }
+        match classifier(&leaf.name) {
+            Some(name) => out.write_str(&name)?,
+            None => {
+                out.write_str("??? (Unresolved qualified name: ")?;
+                out.write_str(&leaf.name.replace('/', "."))?;
+                out.write_str(")")?;
+            }
+        }
+        Ok(())
+    };
+    super::source_signature_display::write_source_type_display_with(&mut out, ty, &mut write_leaf)
+        .expect("unbounded delegate type display");
+    out.finish()
 }
 
 impl DelegateConventionSite {
@@ -104,6 +175,8 @@ impl DelegateConventionSite {
             extension_receiver,
             dispatch_diagnostic_name: None,
             is_var: property.is_var,
+            written_property_type: property.ty.clone(),
+            failed_property_display: None,
         }
     }
 
@@ -116,6 +189,8 @@ impl DelegateConventionSite {
             extension_receiver: None,
             dispatch_diagnostic_name: None,
             is_var,
+            written_property_type: None,
+            failed_property_display: None,
         }
     }
 
@@ -156,7 +231,7 @@ impl DelegateConventionSite {
         if let Some(extension) = self.extension_receiver {
             arguments.push(delegate_diagnostic_ty(extension));
         }
-        arguments.push(delegate_diagnostic_ty(property));
+        arguments.push(self.diagnostic_type(property));
         let arguments = arguments.join(", ");
         format!("{}<{arguments}>", self.flavour())
     }
@@ -171,6 +246,15 @@ impl DelegateConventionSite {
             Some(DelegateDispatchDiagnosticName::Anonymous) => "*".to_string(),
             None => panic!("a delegate dispatch diagnostic must retain its source kind"),
         }
+    }
+
+    fn diagnostic_type(&self, ty: Ty) -> String {
+        if ty.mentions_error() {
+            if let Some(display) = &self.failed_property_display {
+                return display.clone();
+            }
+        }
+        delegate_diagnostic_ty(ty)
     }
 
     fn this_ref_diagnostic_ty(&self, ty: Ty) -> String {
@@ -704,10 +788,14 @@ fn render_delegate_convention_failure(
     value: Option<Ty>,
     failure: DelegateConventionFailure,
 ) -> Option<String> {
+    let unresolved_value = value.is_some_and(|value| {
+        value.mentions_pending()
+            || (value.mentions_error() && site.failed_property_display.is_none())
+    });
     if delegate_ty.mentions_error()
         || delegate_ty.mentions_pending()
         || this_ref.mentions_error()
-        || value.is_some_and(|value| value.mentions_error() || value.mentions_pending())
+        || unresolved_value
     {
         return None;
     }
@@ -723,17 +811,25 @@ fn render_delegate_convention_failure(
         DelegateConventionFailure::NoneApplicable(_, result) => *result,
         DelegateConventionFailure::Missing | DelegateConventionFailure::Ambiguous(_) => None,
     };
-    let applied_reference = property
-        .filter(|property| !property.mentions_error() && !property.mentions_pending())
-        .or(sole_result)
-        .filter(|property| blamed && !property.mentions_error() && !property.mentions_pending())
-        .map(|property| site.applied_reference(property));
+    let named_error = site.failed_property_display.is_some();
+    let applicable_property =
+        |property: &Ty| !property.mentions_pending() && (named_error || !property.mentions_error());
+    let declared_failed = named_error && property.is_none_or(|property| property.mentions_error());
+    let applied_reference = if declared_failed {
+        blamed.then(|| site.applied_reference(Ty::Error))
+    } else {
+        property
+            .filter(applicable_property)
+            .or(sole_result)
+            .filter(|property| blamed && applicable_property(property))
+            .map(|property| site.applied_reference(property))
+    };
     let reference = match applied_reference {
         Some(reference) => reference,
         None => site.star_projected_reference(),
     };
     let mut signature = vec![site.this_ref_diagnostic_ty(this_ref), reference];
-    signature.extend(value.map(delegate_diagnostic_ty));
+    signature.extend(value.map(|value| site.diagnostic_type(value)));
     let signature = format!("{name}({})", signature.join(", "));
     Some(match failure {
         DelegateConventionFailure::Missing => format!(
@@ -980,6 +1076,29 @@ impl Checker<'_> {
         self.diags.error(site.by_span, message);
     }
 
+    fn note_failed_property_syntax(
+        &self,
+        scope: &CheckerScope<'_>,
+        site: &mut DelegateConventionSite,
+        failed: bool,
+    ) {
+        if !failed || site.failed_property_display.is_some() {
+            return;
+        }
+        let Some(written) = site.written_property_type.as_ref() else {
+            return;
+        };
+        site.failed_property_display = Some(diagnostic_type_syntax(written, |name| {
+            let (selection, _, alias, _) = self.select_classifier_binding(scope, name);
+            delegate_classifier_display(
+                name,
+                scope.tparam_contains(name),
+                selection.found(),
+                alias.is_some() || scope.type_alias(name).is_some(),
+            )
+        }));
+    }
+
     fn report_inapplicable_delegate_convention_failure(
         &mut self,
         query: &DelegateConventionQuery<'_>,
@@ -1060,6 +1179,12 @@ impl Checker<'_> {
         // their ordinary declaration-use semantics, while a selected class companion is identified
         // later from the expression's retained singleton lowering.
         self.deprecation_use_sites.mark_companion_delegate(delegate);
+        let mut site = site;
+        self.note_failed_property_syntax(
+            scope,
+            &mut site,
+            expected_property.is_none_or(Ty::mentions_error),
+        );
         let selection = DelegateGetValueSelection {
             provide_ref,
             this_ref,
@@ -1325,6 +1450,8 @@ impl Checker<'_> {
         property_ty: Ty,
         site: DelegateConventionSite,
     ) -> Option<()> {
+        let mut site = site;
+        self.note_failed_property_syntax(scope, &mut site, property_ty.mentions_error());
         let delegate_ty = self.expr_types[delegate.0 as usize];
         crate::trace_compiler!(
             "fir",
