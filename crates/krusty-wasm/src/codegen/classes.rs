@@ -71,9 +71,7 @@ use super::super::runtime::Runtime;
 use super::laid_out_classes::{
     DependencyImplementation, FunctionBridgeEntry, LaidOutClass, LaidOutClasses, Placed,
 };
-use super::lower::{
-    carrier, cell_reference, parameter_carrier, parameter_carrier_of, Unsupported, STRING,
-};
+use super::lower::{carrier, cell_reference, parameter_carrier, Unsupported, STRING};
 
 mod constructor_prefix;
 mod published_slots;
@@ -642,10 +640,7 @@ pub(super) fn method_type(
     };
     let mut params = vec![receiver];
     for parameter in 0..declaration.params.len() {
-        params.push(
-            parameter_carrier(module, ir, function, parameter as u32)?
-                .ok_or_else(|| "a `Unit` parameter".to_string())?,
-        );
+        params.push(parameter_carrier(module, ir, function, parameter as u32)?);
     }
     let results = carrier(declaration.ret)?.into_iter().collect();
     Ok(module.func_type(params, results))
@@ -660,9 +655,7 @@ fn declared_method_type(
 ) -> Result<u32, Unsupported> {
     let mut params = vec![REFERENCE];
     for parameter in parameters {
-        params.push(
-            parameter_carrier_of(*parameter)?.ok_or_else(|| "a `Unit` parameter".to_string())?,
-        );
+        params.push(super::lower::parameter_carrier_of(*parameter)?);
     }
     let results = carrier(result)?.into_iter().collect();
     Ok(module.func_type(params, results))
