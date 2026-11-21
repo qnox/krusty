@@ -1043,7 +1043,7 @@ fn prepare_bodyless_externals(
                 }
             }
         } else {
-            crate::klib_lowering::emitted_body_callables(bodies, &identity)
+            crate::klib_lowering::emitted_body(bodies, &identity).callables
         };
         let mut edges = edges;
         // The objects the body reads are materialized with the members dispatch reaches on them.

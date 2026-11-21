@@ -1113,10 +1113,9 @@ fn an_erased_factory_freezes_only_the_private_classes_its_body_constructs() {
         .unwrap();
     let callable = selected.klib_body_callable().unwrap();
     assert_eq!(callable.ret(), Ty::obj("kotlin/Any"));
-    let roots = libraries.declaration_bodies().emitted_body_classifiers(
-        callable.identity(),
-        crate::klib_lowering::EMITTED_CALL_FORMS,
-    );
+    let roots =
+        crate::klib_lowering::emitted_body(libraries.declaration_bodies(), callable.identity())
+            .hierarchy_roots;
     assert!(roots.contains(&crate::types::type_name("fixture/Leaf")));
     assert!(!roots.contains(&crate::types::type_name("fixture/Unused")));
     // The declaring header is a hierarchy root, not a new public callable or source candidate.
@@ -1372,7 +1371,7 @@ fn a_constructed_class_of_its_own_tree_contributes_its_member_callees() {
     let make = demo.callable("make").identity().clone();
     let helper = demo.callable("helper").identity().clone();
     assert_eq!(
-        crate::klib_lowering::emitted_body_callables(&demo.bodies, &make),
+        crate::klib_lowering::emitted_body(&demo.bodies, &make).callables,
         vec![helper]
     );
 }
@@ -1404,7 +1403,7 @@ fn a_colliding_file_local_symbol_of_another_component_contributes_nothing() {
     let ordinary = demo_with(&shapes, vec![helper_calling_class(helper)], build);
     let make = ordinary.callable("make").identity().clone();
     assert_eq!(
-        crate::klib_lowering::emitted_body_callables(&ordinary.bodies, &make),
+        crate::klib_lowering::emitted_body(&ordinary.bodies, &make).callables,
         vec![ordinary.callable("helper").identity().clone()]
     );
     // The other component serializes the same constructing body but no class at those
@@ -1413,7 +1412,7 @@ fn a_colliding_file_local_symbol_of_another_component_contributes_nothing() {
     let prepared = KlibDeclarationBodies::from_libraries(vec![("demo".to_owned(), prepared)])
         .expect("one library");
     assert_eq!(
-        crate::klib_lowering::emitted_body_callables(&prepared, &make),
+        crate::klib_lowering::emitted_body(&prepared, &make).callables,
         Vec::new()
     );
 }
@@ -1615,7 +1614,7 @@ fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_
         module: "demo".into(),
         declaration: crate::libraries::KlibDeclarationSignature::Public(constructor_key),
     };
-    let before = crate::klib_lowering::emitted_body_callables(&demo.bodies, &constructor);
+    let before = crate::klib_lowering::emitted_body(&demo.bodies, &constructor).callables;
     let facts = demo
         .bodies
         .constructor_initializer_callables(&constructor, crate::klib_lowering::EMITTED_CALL_FORMS);
@@ -1624,7 +1623,7 @@ fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_
         [field_key.clone(), init_key].into_iter().collect()
     );
     assert_eq!(
-        crate::klib_lowering::emitted_body_callables(&demo.bodies, &constructor),
+        crate::klib_lowering::emitted_body(&demo.bodies, &constructor).callables,
         before
     );
     assert!(demo

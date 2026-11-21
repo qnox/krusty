@@ -578,7 +578,6 @@ coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturn.kt
 coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturnInterception.kt
 coroutines/intrinsicSemantics/suspendCoroutineUninterceptedOrReturn.kt
 coroutines/iterateOverArray.kt
-coroutines/kt15016.kt
 coroutines/kt21080.kt
 coroutines/kt21605.kt
 coroutines/kt24135.kt
@@ -1476,7 +1475,6 @@ propertyCallableReference/varClass.kt
 propertyCallableReference/varExtension.kt
 propertyCallableReference/varModule.kt
 ranges/capturedLoopVar.kt
-ranges/contains/evaluationOrderForCollection.kt
 ranges/contains/evaluationOrderForComparableRange.kt
 ranges/contains/evaluationOrderForDownTo.kt
 ranges/contains/evaluationOrderForDownToReversed.kt

@@ -31,14 +31,14 @@ pub(super) fn inherited_getter(linker: &Linker<'_, '_>, callee: &KlibIrSignature
     resolve_inherited_getter(linker.sources.bodies, &linker.active_module, callee)
 }
 
-/// The declarations the calls of the emitted body of `identity` link to: its serialized edges, with
-/// a call of a fake override of a local class resolved to the inherited getter lowering links. A
-/// fake override no unit can resolve keeps its serialized edge, and lowering reports it.
-pub(crate) fn emitted_body_callables(
+/// What the emitted body of `identity` reaches: its serialized edges, with a call of a fake
+/// override of a local class resolved to the inherited getter lowering links. A fake override no
+/// unit can resolve keeps its serialized edge, and lowering reports it.
+pub(crate) fn emitted_body(
     bodies: &KlibDeclarationBodies,
     identity: &KlibDependencyCallable,
-) -> Vec<KlibDependencyCallable> {
-    bodies.emitted_body_callables(identity, super::super::EMITTED_CALL_FORMS, &|callee| {
+) -> crate::klib_libraries::EmittedBody {
+    bodies.emitted_body(identity, super::super::EMITTED_CALL_FORMS, &|callee| {
         resolve_inherited_getter(bodies, &identity.module, callee)
             .ok()
             .flatten()

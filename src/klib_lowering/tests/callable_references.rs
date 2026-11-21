@@ -111,10 +111,9 @@ fn reference_declarations(
         if !visited.insert(identity.clone()) {
             continue;
         }
-        pending.extend(crate::klib_lowering::emitted_body_callables(
-            libraries.declaration_bodies(),
-            &identity,
-        ));
+        pending.extend(
+            crate::klib_lowering::emitted_body(libraries.declaration_bodies(), &identity).callables,
+        );
         if let Some(declaration) = libraries.external_callable_by_dependency(&identity) {
             declarations.push(declaration);
         } else {
