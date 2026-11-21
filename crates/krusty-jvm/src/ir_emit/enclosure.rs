@@ -4,6 +4,10 @@
 use krusty::ir::IrFile;
 use krusty::types::{Ty, TypeName};
 
+mod inline_source_origin;
+
+pub(super) use inline_source_origin::{start_inline_class_source_map, InlineClassOrigin};
+
 use super::{
     class_ctor_jvm_tys, function_descriptor, is_jvm_interface, jvm_tys, method_descriptor,
     secondary_prefix_jvm_tys, static_storage,
@@ -93,22 +97,27 @@ pub(crate) fn realized_property_accessor(
 }
 
 /// Start the identity source map kotlinc writes for a class whose nearest enclosing function is
-/// `inline` (`visitSMAP(…, intoInline = true)`): code inlining that function copies the class and
-/// maps its lines through it. A class one function further in carries none.
+/// `inline` (`visitSMAP(…, intoInline = true)`), or which is a call-site copy of such a class:
+/// code inlining that function copies the class and maps its lines through it. A class one
+/// function further in carries none.
 pub(super) fn start_inline_body_source_map(
     ir: &IrFile,
+    override_results: &crate::override_results::OverrideResults,
     class: &krusty::ir::IrClass,
+    facade: &str,
     writer: &mut krusty::jvm::classfile::ClassWriter,
-) {
+) -> Option<InlineClassOrigin> {
+    let specialized = class
+        .methods
+        .iter()
+        .copied()
+        .find(|method| ir.specialized_functions.contains_key(method));
     let in_inline_body = enclosing_functions(ir, class.enclosure)
         .next()
         .is_some_and(|(function, _)| ir.inline_fns.contains(&function));
-    if in_inline_body {
-        let lines = u16::try_from(ir.source_line_count)
-            .unwrap_or(u16::MAX)
-            .max(1);
-        writer.start_inline_origin_source_map(lines);
-    }
+    (specialized.is_some() || in_inline_body).then(|| {
+        start_inline_class_source_map(ir, override_results, class, specialized, facade, writer)
+    })
 }
 
 /// Whether `class` is declared in an `inline` function's scope, however deeply (kotlinc's
