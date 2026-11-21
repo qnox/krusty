@@ -55,6 +55,7 @@ reference-cache-tests:
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
     bash scripts/test-versioning.sh
+    bash scripts/test-sort-kotlin-versions.sh
     bash scripts/test-install-maven.sh
     bash scripts/test-fetch-conformance-deps.sh
 
@@ -812,11 +813,11 @@ kotlin-versions:
 
 # Comma-separated list of supported Kotlin reference versions (advertised by `krusty -version`).
 supported-kotlin:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | sort -V | paste -sd, -
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | bash scripts/sort-kotlin-versions.sh | paste -sd, -
 
 # Highest supported Kotlin reference version — krusty's release version (without the build suffix).
 max-version:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | sort -V | tail -1
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | bash scripts/sort-kotlin-versions.sh | tail -1
 
 # JSON array of supported Kotlin reference versions, for the GitHub Actions test matrix.
 matrix-json:
