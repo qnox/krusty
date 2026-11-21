@@ -442,9 +442,12 @@ impl Body<'_> {
             self.module,
             self.classifiers,
             member,
-            name,
+            crate::builtin_members::LibraryMemberDeclaration {
+                name,
+                params: fact.declared_params.as_deref().unwrap_or(&fact.params),
+                implementations: &fact.builtin_implementations,
+            },
             &signature,
-            &fact.builtin_implementations,
         )?;
         if let Some(step) = super::array_lists::iterator_step(fact) {
             use super::array_lists::IteratorStep;
