@@ -925,10 +925,10 @@ fn wasm_a_declined_required_inline_body_rejects_the_caller() {
         }
         let outcome =
             lane.compile_modules_and_run(&std::env::temp_dir(), &stem, &units, case.source);
-        assert!(
-            matches!(&outcome, Outcome::Frontend(message)
-                if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
-            "{stem}: {outcome:?}"
+        super::dependency_template_rejections::assert_required_inline_rejection(
+            &stem,
+            &outcome,
+            &super::dependency_template_rejections::declined_count_of(),
         );
     }
 }
@@ -951,10 +951,10 @@ fn wasm_a_declined_required_stdlib_template_rejects_the_caller() {
             &[(format!("{stem}.kt"), src.to_string())],
             src,
         );
-        assert!(
-            matches!(&outcome, Outcome::Frontend(message)
-                if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
-            "{stem}: {outcome:?}"
+        super::dependency_template_rejections::assert_required_inline_rejection(
+            &stem,
+            &outcome,
+            &super::dependency_template_rejections::declined_compare_by("kotlin"),
         );
     }
 }
