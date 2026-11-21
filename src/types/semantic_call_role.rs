@@ -44,6 +44,10 @@ pub enum SemanticCallRole {
     /// role or compiler intrinsic names: an unsigned operation or conversion, or `floorDiv`/`mod`.
     /// kotlinc evaluates a call to it whose operands are constants.
     IntrinsicConstNumeric(ConstNumericOperation),
+    /// The standard library's `kotlin.coroutines.suspendCoroutine`. kotlinc treats it as a
+    /// coroutine intrinsic: the lambda passed to its `crossinline` block stays in the caller's
+    /// scope, so that lambda's body reaches the caller's declarations as the caller does.
+    KotlinSuspendCoroutine,
 }
 
 /// The numeric operation of an [`SemanticCallRole::IntrinsicConstNumeric`] declaration. Operands
