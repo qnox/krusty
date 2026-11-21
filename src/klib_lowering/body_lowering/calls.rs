@@ -45,7 +45,8 @@ impl BodyLowering<'_> {
         if access.symbol.kind != KlibIrSymbolKind::Function {
             return Err(mismatch("a call target's symbol is not a function"));
         }
-        let signature = &access.symbol.signature;
+        let inherited = self.linker.inherited_member(&access.symbol.signature);
+        let signature = inherited.as_ref().unwrap_or(&access.symbol.signature);
         let callee = match signature {
             KlibIrSignature::Public(callee) if !self.linker.links_privately(signature) => callee,
             KlibIrSignature::Accessor(accessor) if !self.linker.links_privately(signature) => {
