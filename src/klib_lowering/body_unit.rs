@@ -1461,6 +1461,32 @@ impl<'s> CallLinker for Linker<'_, 's> {
         Ok((classifier, name))
     }
 
+    fn enum_static_member(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<(TypeName, super::enum_classes::EnumStaticMember)>, KlibBodyDeclineReason>
+    {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        let KlibCalleeOrigin::Exact(identity) = self
+            .sources
+            .bodies
+            .linked_origin(&self.active_module, &signature)
+        else {
+            return Ok(None);
+        };
+        let Some((class, member)) =
+            super::enum_classes::authenticate_static_member(self.sources.bodies, &identity)?
+        else {
+            return Ok(None);
+        };
+        let classifier = class.classifier;
+        if !self.realized_classes.contains(&classifier) {
+            self.materialize_enum_class(ir, class)?;
+        }
+        Ok(Some((classifier, member)))
+    }
+
     fn static_field(
         &mut self,
         ir: &mut IrFile,
