@@ -833,14 +833,8 @@ impl BodyLowering<'_, '_, '_> {
         // shape the receiver is the runtime's own and the walk IS the member.
         if self.file.implements_collection_of(ty)
             && ty.non_null().obj_internal().is_some_and(|internal| {
-                classifier_shapes::mapped_collection(self.file.classifiers, internal).is_some_and(
-                    |collection| {
-                        super::super::super::intrinsics::has_special_bridge(
-                            collection,
-                            signature.name,
-                        )
-                    },
-                )
+                classifier_shapes::mapped_collection(self.file.classifiers, internal)
+                    .is_some_and(|collection| collection.has_special_bridge(signature.name))
             })
         {
             return None;
@@ -1084,9 +1078,9 @@ impl BodyLowering<'_, '_, '_> {
         // argument cannot be what the declaration accepts, and there is no bridge here to put in
         // front of an implementor's arm. Every one of them takes an argument, so the nullary
         // members are untouched.
-        if classifier_shapes::mapped_collection(self.file.classifiers, internal).is_some_and(
-            |collection| super::super::super::intrinsics::has_special_bridge(collection, name),
-        ) {
+        if classifier_shapes::mapped_collection(self.file.classifiers, internal)
+            .is_some_and(|collection| collection.has_special_bridge(name))
+        {
             return None;
         }
         let ty = self.checked_type(receiver)?;
