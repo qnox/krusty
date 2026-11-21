@@ -190,6 +190,15 @@ pub struct IrCallableReference {
     pub reflection_owner: Option<crate::types::TypeName>,
 }
 
+impl IrCallableReference {
+    /// The `captures` slots holding values bound for the declaration's context parameters. They
+    /// are the leading captures, and two references to the same declaration are equal only when
+    /// these values are equal as well, exactly as for the bound receiver.
+    pub fn bound_context_slots(&self) -> std::ops::Range<usize> {
+        0..self.bound_contexts as usize
+    }
+}
+
 impl IrFile {
     /// The checked invocation template of a callable reference consumed as an inline argument.
     /// Callable-reference lowering published the returned expression directly; this projection

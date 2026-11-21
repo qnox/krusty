@@ -936,6 +936,21 @@ pub enum Origin {
 
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
+/// The properties whose getter or setter a platform method is named as: a Java `getA()` is the
+/// getter of `a`, and `setOpen(v)` the setter of `open` or `isOpen`. Each candidate names the
+/// methods that would be the same property's other accessor (`setA` for `getA`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PropertyAccessorRole {
+    pub candidates: Box<[PropertyAccessorCandidate]>,
+    pub setter: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PropertyAccessorCandidate {
+    pub property: String,
+    pub counterparts: Box<[String]>,
+}
+
 #[derive(Clone, Debug)]
 pub struct LibraryCallable {
     /// Stable provider-owned declaration identity. Current-module declarations use FIR's
@@ -972,6 +987,10 @@ pub struct LibraryCallable {
     /// Exact language-level role of this declaration, when target realization needs more than its
     /// stable callable identity. Providers assign it at the declaration boundary.
     pub semantic_role: Option<SemanticCallRole>,
+    /// The property accessor a Java method is, when it overrides an inherited Kotlin property's
+    /// accessor. The Java provider derives the candidate properties from the method's platform
+    /// spelling; the hierarchy confirms one with a Kotlin property declaration.
+    pub property_accessor_role: Option<Box<PropertyAccessorRole>>,
     /// Exact identities of the declarations this callable overrides, as the core member hierarchy
     /// proved them while normalizing the selected family; empty for a declaration that overrides
     /// nothing or was not reached through a hierarchy walk.

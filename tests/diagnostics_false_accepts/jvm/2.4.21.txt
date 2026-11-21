@@ -5,7 +5,6 @@ compiler/testData/diagnostics/tests/AbstractAccessor.kt
 compiler/testData/diagnostics/tests/BacktickNames.kt
 compiler/testData/diagnostics/tests/BacktickNamesOld.kt
 compiler/testData/diagnostics/tests/Casts.kt
-compiler/testData/diagnostics/tests/CovariantOverrideType.kt
 compiler/testData/diagnostics/tests/ExternalAccessors.kt
 compiler/testData/diagnostics/tests/ExternalAndAbstract.kt
 compiler/testData/diagnostics/tests/GenericArgumentConsistency.kt
@@ -77,7 +76,6 @@ compiler/testData/diagnostics/tests/annotations/parameters/expressions/paranthes
 compiler/testData/diagnostics/tests/annotations/referenceOfAnnotatedFunctionInAnnotation.kt
 compiler/testData/diagnostics/tests/annotations/rendering/conflictingOverloads.kt
 compiler/testData/diagnostics/tests/annotations/rendering/multipleInheritedDefaults.kt
-compiler/testData/diagnostics/tests/annotations/rendering/typeMismatchOnOverride.kt
 compiler/testData/diagnostics/tests/annotations/repeatable/containerArguments.kt
 compiler/testData/diagnostics/tests/annotations/repeatable/containerRetention.kt
 compiler/testData/diagnostics/tests/annotations/repeatable/containerTarget.kt
@@ -127,7 +125,6 @@ compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/potential
 compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/samVsDefault.kt
 compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/suspendFunctionTypeVsRunnable.kt
 compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/typeVariableInvariantReturnTypeFeatureDisabled.kt
-compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/typeVariableInvariantReturnTypeFeatureEnabled.kt
 compiler/testData/diagnostics/tests/callResolution/exponentialArraySetWithPlusAssign.kt
 compiler/testData/diagnostics/tests/callResolution/syntheticPropertiesWrongImplicitReceiver.kt
 compiler/testData/diagnostics/tests/callableReference/bound/controlFlow.kt
@@ -425,7 +422,6 @@ compiler/testData/diagnostics/tests/delegation/clashes/returnTypeMismatch.kt
 compiler/testData/diagnostics/tests/delegation/clashes/varOverriddenByVal.kt
 compiler/testData/diagnostics/tests/delegation/covariantOverrides/fromClass.kt
 compiler/testData/diagnostics/tests/delegation/covariantOverrides/irrelevant.kt
-compiler/testData/diagnostics/tests/delegation/covariantOverrides/kt13952.kt
 compiler/testData/diagnostics/tests/delegation/covariantOverrides/simple.kt
 compiler/testData/diagnostics/tests/delegation/kt40510.kt
 compiler/testData/diagnostics/tests/deprecated/deprecatedSinceKotlin/checkValuesAreParseableAsVersion.kt
@@ -767,7 +763,6 @@ compiler/testData/diagnostics/tests/j+k/internalClash.kt
 compiler/testData/diagnostics/tests/j+k/invisibleFake.kt
 compiler/testData/diagnostics/tests/j+k/invisibleFake2.kt
 compiler/testData/diagnostics/tests/j+k/javaLangStringCtr.kt
-compiler/testData/diagnostics/tests/j+k/kjkImplicitReturnType.kt
 compiler/testData/diagnostics/tests/j+k/kjkimplicitTypesCrash.kt
 compiler/testData/diagnostics/tests/j+k/kt2394.kt
 compiler/testData/diagnostics/tests/j+k/kt2641.kt
@@ -1061,7 +1056,6 @@ compiler/testData/diagnostics/tests/override/AbstractVarNotImplemented.kt
 compiler/testData/diagnostics/tests/override/ComplexValRedeclaration.kt
 compiler/testData/diagnostics/tests/override/ConflictingPropertySignatureFromSuperclass.kt
 compiler/testData/diagnostics/tests/override/DefaultParameterValueInOverride.kt
-compiler/testData/diagnostics/tests/override/Delegation.kt
 compiler/testData/diagnostics/tests/override/ExtendFunctionClass.kt
 compiler/testData/diagnostics/tests/override/FakeOverrideDifferentDeclarationSignatures.kt
 compiler/testData/diagnostics/tests/override/FakeOverrideModality1.kt
@@ -1127,13 +1121,10 @@ compiler/testData/diagnostics/tests/platformTypes/notNullTypeParameter/enhanceme
 compiler/testData/diagnostics/tests/platformTypes/nullabilityWarnings/throw.kt
 compiler/testData/diagnostics/tests/platformTypes/safeCall.kt
 compiler/testData/diagnostics/tests/platformTypes/typeEnhancement/supertypeDifferentParameterNullability.kt
-compiler/testData/diagnostics/tests/platformTypes/typeEnhancement/supertypeDifferentReturnNullability.kt
 compiler/testData/diagnostics/tests/privateInFile/visibility.kt
 compiler/testData/diagnostics/tests/privateSetterSmartcastsToPublicSetter.kt
 compiler/testData/diagnostics/tests/problems/definitelyNotNullAndOriginalType.kt
-compiler/testData/diagnostics/tests/problems/inaccessibleJavaGetter.kt
 compiler/testData/diagnostics/tests/problems/kt14687.kt
-compiler/testData/diagnostics/tests/problems/kt32063.kt
 compiler/testData/diagnostics/tests/problems/kt4597.kt
 compiler/testData/diagnostics/tests/problems/kt49700.kt
 compiler/testData/diagnostics/tests/problems/kt60725.kt
@@ -1563,7 +1554,6 @@ compiler/testData/diagnostics/testsWithStdLib/properties/backingField/explicitBa
 compiler/testData/diagnostics/testsWithStdLib/properties/backingField/explicitBackingFieldWithJvmField.kt
 compiler/testData/diagnostics/testsWithStdLib/properties/backingField/explicitBackingFieldsInInlineAccessors.kt
 compiler/testData/diagnostics/testsWithStdLib/properties/backingField/explicitBackingFieldsInInlineWithAnonymousFunction.kt
-compiler/testData/diagnostics/testsWithStdLib/properties/backingField/explicitBackingFieldsInInlineWithAnonymousObject.kt
 compiler/testData/diagnostics/testsWithStdLib/properties/backingField/explicitBackingFieldsInInlineWithAnonymousObjectAndGetter.kt
 compiler/testData/diagnostics/testsWithStdLib/properties/backingField/explicitBackingFieldsInInlineWithAnonymousObjectAndVararg.kt
 compiler/testData/diagnostics/testsWithStdLib/properties/backingField/explicitBackingFieldsInInlineWithVisibilityFromOverriddenFun.kt
@@ -1574,7 +1564,6 @@ compiler/testData/diagnostics/testsWithStdLib/properties/backingField/explicitFi
 compiler/testData/diagnostics/testsWithStdLib/properties/backingField/randomWeirdBackingFields.kt
 compiler/testData/diagnostics/testsWithStdLib/purelyImplementedCollection/intersectionOfPrimitiveBasedFunctions.kt
 compiler/testData/diagnostics/testsWithStdLib/regression/ea65206.kt
-compiler/testData/diagnostics/testsWithStdLib/regression/ea66827_dataClassWrongToString.kt
 compiler/testData/diagnostics/testsWithStdLib/resolve/ambiguousTypeReferences/constructorVsSyntheticValuesPrioritized.kt
 compiler/testData/diagnostics/testsWithStdLib/resolve/forEachInLocalClass.kt
 compiler/testData/diagnostics/testsWithStdLib/restrictSuspension/contextParameters.kt
