@@ -4,6 +4,8 @@ tools/krusty-bazel/intellij/*.patch whitespace=-blank-at-eol,-blank-at-eof
 # the driver installed git merges them line by line.
 tests/box_expected_failures/** merge=sorted-set
 tests/box_expected_not_applicable/** merge=sorted-set
+src/plugins/*/boxes/included/** merge=sorted-set
+src/plugins/*/boxes/expected_not_applicable/** merge=sorted-set
 tests/bytecode_listing_expected_failures/** merge=sorted-set
 tests/bytecode_text_expected_failures/** merge=sorted-set
 tests/cli_expected_failures/** merge=sorted-set

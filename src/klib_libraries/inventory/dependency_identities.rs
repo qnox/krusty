@@ -168,7 +168,7 @@ impl DependencyIdentities {
             let Some(module) = &class.module else {
                 continue;
             };
-            for (position, constructor) in class.constructors.iter().enumerate() {
+            for (position, constructor) in class.declared_constructors().enumerate() {
                 entries(&mut index.constructors, module, &constructor.signature)
                     .push((classifier, position));
             }
@@ -178,8 +178,7 @@ impl DependencyIdentities {
                 .map(|function| &function.signature)
                 .chain(
                     class
-                        .constructors
-                        .iter()
+                        .declared_constructors()
                         .map(|constructor| &constructor.signature),
                 );
             for signature in signatures {
@@ -219,7 +218,8 @@ impl DependencyIdentities {
         first(&self.properties, module, accessor)
     }
 
-    /// The class of `module` with a constructor serialized under `signature`, and its position.
+    /// The class of `module` with a constructor serialized under `signature`, and its position among
+    /// the class's declared constructors.
     pub(super) fn constructor(
         &self,
         module: &str,

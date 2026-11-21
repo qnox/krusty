@@ -130,6 +130,13 @@ typedef struct KType {
        typed virtual thunks, for the map entry points below to answer for an object they did not
        make. NULL for every other type. */
     const struct KMapMembers *map_members;
+    /* On a CALLABLE REFERENCE's descriptor: the byte offsets of the fields holding the values it
+       bound for the declaration's context parameters, `reference_context_count` of them, in
+       parameter order. Equality and `hashCode` read them as they read the bound receiver, so two
+       references to one declaration with different contexts are different. NULL, and a count of
+       0, for a reference binding none. */
+    const uint32_t *reference_context_offsets;
+    uint32_t reference_context_count;
 } KType;
 
 /* The read-only members of `Map` a program class answers, each a thunk with the fixed signature
@@ -152,7 +159,9 @@ _Static_assert(offsetof(KType, class_names) == 148, "KType.class_names moved");
 _Static_assert(offsetof(KType, collection_size) == 152, "KType.collection_size moved");
 _Static_assert(offsetof(KType, itable) == 160, "KType.itable moved");
 _Static_assert(offsetof(KType, map_members) == 168, "KType.map_members moved");
-_Static_assert(sizeof(KType) == 176, "KType changed size");
+_Static_assert(offsetof(KType, reference_context_offsets) == 176, "KType.reference_context_offsets moved");
+_Static_assert(offsetof(KType, reference_context_count) == 184, "KType.reference_context_count moved");
+_Static_assert(sizeof(KType) == 192, "KType changed size");
 _Static_assert(offsetof(KMapMembers, entries) == 56, "KMapMembers.entries moved");
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.
@@ -899,6 +908,12 @@ kt_int kt_string_compare_to(KRef a, KRef b);
    both ranges are already within their strings (Kotlin/Native's `unsafeRangeEquals`). */
 kt_boolean kt_string_range_equals(KRef self, kt_int self_offset, KRef other, kt_int other_offset,
                                   kt_int length);
+
+/* Kotlin/Native's `indexOfString` and `indexOfChar`: the first UTF-16 unit offset at or after
+   `from` (a negative start counts from zero) where `other` or `ch` occurs, or -1. */
+kt_int kt_string_index_of_string(KRef self, KRef other, kt_int from);
+kt_int kt_string_index_of_char(KRef self, kt_char ch, kt_int from);
+kt_int kt_string_last_index_of_char(KRef self, kt_char ch, kt_int from);
 
 /* `s.removeSuffix(suffix)`: the receiver without it, cut by UTF-16 unit as `endsWith` and
    `substring` are; either may be a `StringBuilder`. A string that does not end there comes back

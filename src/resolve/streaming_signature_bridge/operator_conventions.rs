@@ -26,10 +26,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         local_operator: Option<crate::fir::ResolvedTy>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         if let Some(result) =
             self.select_receiver_operator_rung(scope, receiver, spelling, arguments, true, demand)?
@@ -102,10 +99,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         members: bool,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
         let selected = self.with_resolver(scope, |resolver| {
             let (mut functions, _) = resolver
@@ -237,9 +231,7 @@ pub(super) fn selects_in_place_assignment(
     receiver: crate::fir::ResolvedTy,
     argument: crate::fir::ResolvedTy,
     local_operator: Option<crate::fir::ResolvedTy>,
-    demand: &mut dyn FnMut(
-        crate::fir::DeclarationId,
-    ) -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+    demand: &mut crate::fir::SignatureDemand<'_>,
 ) -> bool {
     let spelling = match operator {
         crate::fir::SigBinaryOperator::Add => "plusAssign",
@@ -288,9 +280,7 @@ pub(super) fn select_binary(
     origin: crate::fir::OriginId,
     lhs: crate::fir::ResolvedTy,
     rhs: crate::fir::ResolvedTy,
-    demand: &mut dyn FnMut(
-        crate::fir::DeclarationId,
-    ) -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+    demand: &mut crate::fir::SignatureDemand<'_>,
 ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
     let convention = match operator {
         crate::fir::SigBinaryOperator::Add => Some(("plus", false)),
