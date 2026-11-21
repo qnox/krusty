@@ -1178,6 +1178,9 @@ pub enum FirExprKind {
         function_type: ResolvedTy,
         reflective: bool,
         extension_receiver: Option<FirReceiver>,
+        /// Values selected at the reference site for the local function's leading context
+        /// parameters, bound into the reference exactly as for any other declaration.
+        context_arguments: Box<[FirReceiver]>,
         adaptation: Option<Box<FirReferenceAdaptation>>,
     },
     /// Reflection value supplied to a checked local delegated-property convention call: the
@@ -1481,11 +1484,16 @@ impl FirExprKind {
                             + adaptation.storage_payload_bytes()
                     })
             }
-            FirExprKind::LocalCallableReference { adaptation, .. } => {
-                adaptation.as_deref().map_or(0, |adaptation| {
-                    std::mem::size_of::<FirReferenceAdaptation>()
-                        + adaptation.storage_payload_bytes()
-                })
+            FirExprKind::LocalCallableReference {
+                context_arguments,
+                adaptation,
+                ..
+            } => {
+                context_arguments.len() * std::mem::size_of::<FirReceiver>()
+                    + adaptation.as_deref().map_or(0, |adaptation| {
+                        std::mem::size_of::<FirReferenceAdaptation>()
+                            + adaptation.storage_payload_bytes()
+                    })
             }
             FirExprKind::Call(call) => call.storage_payload_bytes(),
             FirExprKind::ConstructorCall(call) => call.storage_payload_bytes(),
@@ -1775,6 +1783,14 @@ pub struct FirBody {
     /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
     /// old value.
     postfix_updates: HashSet<FirExprId>,
+    /// Context arguments checking selected from the scope rather than from the call's source
+    /// arguments: a read of a context parameter or an implicit receiver, passed where the callee
+    /// takes it. An explicit context argument is an ordinary source argument and is not listed.
+    implicit_context_arguments: HashSet<FirExprId>,
+    /// Explicit context arguments (`receiver().f(context = value())`) the call evaluates after its
+    /// extension receiver, as they are written, although they are passed before it. kotlinc does so
+    /// since 2.5; earlier releases evaluate a call's operands in the order they are passed.
+    receiver_ordered_context_arguments: HashSet<FirExprId>,
     /// Conversion origins that realize, in place, a call of an inline function kotlinc inlines
     /// (`Char.code`'s getter): the conversion is the end of an inlined call.
     inlined_call_conversions: HashSet<OriginId>,
@@ -1858,6 +1874,8 @@ impl FirBody {
             generated_class_provenance: HashMap::default(),
             source_forms: HashMap::default(),
             postfix_updates: HashSet::default(),
+            implicit_context_arguments: HashSet::default(),
+            receiver_ordered_context_arguments: HashSet::default(),
             inlined_call_conversions: HashSet::default(),
             lifting_site: None,
             declaration_span: None,
@@ -2561,6 +2579,22 @@ impl FirBody {
 
     pub(crate) fn is_postfix_update(&self, block: FirExprId) -> bool {
         self.postfix_updates.contains(&block)
+    }
+
+    pub(crate) fn record_implicit_context_argument(&mut self, value: FirExprId) {
+        self.implicit_context_arguments.insert(value);
+    }
+
+    pub(crate) fn is_implicit_context_argument(&self, value: FirExprId) -> bool {
+        self.implicit_context_arguments.contains(&value)
+    }
+
+    pub(crate) fn record_receiver_ordered_context_argument(&mut self, value: FirExprId) {
+        self.receiver_ordered_context_arguments.insert(value);
+    }
+
+    pub(crate) fn is_receiver_ordered_context_argument(&self, value: FirExprId) -> bool {
+        self.receiver_ordered_context_arguments.contains(&value)
     }
 
     pub(crate) fn record_inlined_call_conversion(&mut self, origin: OriginId) {

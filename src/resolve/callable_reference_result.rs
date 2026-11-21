@@ -75,24 +75,8 @@ impl<'a> Checker<'a> {
                 if signature.source_receiver.is_some() {
                     return false;
                 }
-                let Some((params, ret)) = self.contextual_local_function_reference_shape(
-                    &signature,
-                    None,
-                    &expected.params,
-                    expected.ret,
-                ) else {
-                    return false;
-                };
-                let call_sig = CallSig {
-                    param_defaults: signature.param_defaults,
-                    required: signature.required,
-                    vararg: signature.vararg(),
-                    vararg_index: signature.vararg_index,
-                    ..CallSig::default()
-                };
-                self.callable_ref_parameter_plan(&params, &call_sig, &expected.params)
-                    .is_some()
-                    && self.reference_result_fits(ret, expected)
+                self.adapted_local_reference_shape(&signature, expected)
+                    .is_some_and(|shape| self.reference_result_fits(shape.ret, expected))
             }));
         }
         let candidates = self.resolver().top_level_candidates(name);
