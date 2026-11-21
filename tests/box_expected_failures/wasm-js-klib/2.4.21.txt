@@ -877,7 +877,6 @@ inference/pcla/builderCallAsReturnTypeInLocalClass.kt
 inference/pcla/callableReferenceAndCoercionToUnit.kt
 inference/pcla/callableReferencesProperCompletion.kt
 inference/pcla/issues/kt42139.kt
-inference/pcla/issues/kt45083.kt
 inference/pcla/issues/kt47052.kt
 inference/pcla/issues/kt49887.kt
 inference/pcla/issues/kt54400b.kt
