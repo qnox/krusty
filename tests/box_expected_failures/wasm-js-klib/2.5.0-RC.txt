@@ -770,7 +770,6 @@ delegatedProperty/delegateToConstructorParameter.kt
 delegatedProperty/delegateToFailingCastReceiver.kt
 delegatedProperty/delegateToSingleton/delegateToSingleton.kt
 delegatedProperty/delegateToSmartCastReceiver.kt
-delegatedProperty/delegatedByExtensionMemberProperty.kt
 delegatedProperty/delegatedByExtensionProperty.kt
 delegatedProperty/delegatedOverride.kt
 delegatedProperty/genericDelegateUncheckedCast1.kt

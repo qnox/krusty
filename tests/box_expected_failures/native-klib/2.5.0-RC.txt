@@ -109,7 +109,6 @@ boxingOptimization/foldRange.kt
 boxingOptimization/kt19767_2.kt
 boxingOptimization/kt5844.kt
 boxingOptimization/kt6842.kt
-boxingOptimization/maxMinByOrNull.kt
 boxingOptimization/nullCheck.kt
 boxingOptimization/progressions.kt
 boxingOptimization/safeCallWithElvis.kt

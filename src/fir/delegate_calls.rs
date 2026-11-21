@@ -17,9 +17,10 @@ use super::{FirCallTarget, FirTypeSubstitution, ResolvedTy};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirDelegateCall {
     pub target: FirCallTarget,
-    /// Type arguments fixed by convention selection for a current-module callable. Same-file
-    /// inline expansion consumes these directly; lowering must not infer them again from the
-    /// accessor template's operands.
+    /// Type arguments fixed by convention selection: by module type parameter for a current-module
+    /// callable, by declaration ordinal for a dependency one, as an ordinary checked call records
+    /// them. Same-file inline expansion and dependency calls consume these directly; lowering must
+    /// not infer them again from the accessor template's operands.
     pub substitutions: Box<[FirTypeSubstitution]>,
     /// The value parameters the checker SELECTED, in order, with the extension receiver already
     /// taken out — the applied shape (`setValue(…, newValue: T)` at `T := Long` is `Long` here).
