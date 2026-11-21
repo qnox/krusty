@@ -1,7 +1,6 @@
 //! Selection of the `invoke` convention on a callee value. No applicable `invoke` is a typed
 //! outcome, not a failure, so a bare call's tower can move on to its later levels.
 
-use super::super::classifier_associated::Demand;
 use super::*;
 
 impl ProductionSignatureSemantics<'_> {
@@ -11,7 +10,7 @@ impl ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
         callee: crate::fir::ResolvedTy,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::InvokeSelection, crate::fir::DiagnosticId> {
         crate::trace_compiler!(
             "signature",
@@ -175,7 +174,7 @@ impl ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
         callee: crate::fir::ResolvedTy,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         match self.select_value_invoke(scope, origin, callee, arguments, demand)? {
             crate::fir::InvokeSelection::Selected(result) => Ok(result),

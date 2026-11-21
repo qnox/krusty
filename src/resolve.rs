@@ -11635,7 +11635,7 @@ impl<'a> Checker<'a> {
     /// the argument is there to bind. So a function-typed parameter is matched on ARITY, and only its
     /// components that are NOT the erased top are judged.
     fn member_argument_score(&self, expected: Ty, actual: Ty) -> Option<usize> {
-        if expected == actual {
+        if callable_candidate_selection::is_exact_argument_rank(expected, actual) {
             return Some(4);
         }
         if actual == Ty::Null {
@@ -35159,6 +35159,24 @@ impl<'a> Checker<'a> {
             property.getter_visibility,
             property.setter_visibility,
         );
+        if property.context_count > 0 && !self.file.language.callable_references_to_contextual {
+            return Some(
+                self.report_context_property_reference(
+                    expression,
+                    &property.name,
+                    reference_context_arguments::ContextualPropertyDisplay {
+                        context_names: &property.context_names,
+                        context_types: property.context_types(),
+                        extension_receiver: property
+                            .extension_facade
+                            .as_ref()
+                            .and_then(|_| property.getter.params.first().copied()),
+                        property_type: property.prop_ty,
+                        mutable: property.setter.is_some(),
+                    },
+                ),
+            );
+        }
         if !self.property_reference_exposes_setter(&property, receiver) {
             property.setter = None;
         }
@@ -52713,12 +52731,25 @@ impl<'a> Checker<'a> {
                     .resolver()
                     .top_level_properties(&name)
                     .into_iter()
-                    .filter(|property| {
-                        property.kind == crate::libraries::PropKind::TopLevel
-                            && property.context_count == 0
-                    })
+                    .filter(|property| property.kind == crate::libraries::PropKind::TopLevel)
                     .collect::<Vec<_>>();
                 if let [property] = top_level_properties.as_slice() {
+                    if property.context_count > 0
+                        && !self.file.language.callable_references_to_contextual
+                    {
+                        let context = property.getter.params[..property.context_count].to_vec();
+                        return self.report_context_property_reference(
+                            e,
+                            &name,
+                            reference_context_arguments::ContextualPropertyDisplay {
+                                context_names: &property.context_param_names,
+                                context_types: &context,
+                                extension_receiver: None,
+                                property_type: property.ty,
+                                mutable: property.setter.is_some(),
+                            },
+                        );
+                    }
                     if let Some(ty) =
                         self.property_ref_ty(0, property.setter.is_some(), &[property.ty])
                     {

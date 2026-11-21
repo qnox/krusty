@@ -228,9 +228,11 @@ fn property_plan(
         binding: _,
         dispatch_receiver,
         extension_receiver,
+        context_arguments: _,
         mutable,
         substitutions,
         adaptation,
+        function_type: _,
     } = &**checked_op
     else {
         return Err(None);

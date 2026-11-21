@@ -425,6 +425,15 @@ pub(super) fn emit_dependencies<B: Backend>(
             .materialized_classes()
             .map(|(classifier, identity)| (classifier, identity.clone()))
             .collect::<Vec<_>>();
+        let value_classes = materialized
+            .iter()
+            .filter(|(classifier, _)| {
+                unit.ir()
+                    .class_id_by_name(*classifier)
+                    .is_some_and(|class| unit.ir().classes[class as usize].is_value)
+            })
+            .map(|(classifier, _)| *classifier)
+            .collect::<crate::fx_hash::HashSet<_>>();
         for (classifier, identity) in &materialized {
             // Current-module representation facts take precedence in the checked backend view.
             // They cannot describe an unrelated imported class with the same unqualified key.
@@ -443,6 +452,11 @@ pub(super) fn emit_dependencies<B: Backend>(
                 .get(classifier)
                 .or_else(|| support_state.materializing_classes.get(classifier))
             {
+                if previous == identity && value_classes.contains(classifier) {
+                    // A value class's members spread over units; each one re-reads the class an
+                    // earlier unit published and emits only its own members.
+                    continue;
+                }
                 let message = if previous == identity {
                     "cannot materialize an imported class twice in separate dependency support units"
                 } else {
@@ -678,7 +692,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         };
         if let Some(protocol) = symbols
             .char_sequence_protocol()
-            .filter(|_| backend.reads_appended_char_sequences())
+            .filter(|_| backend.appends_char_sequences_by_index())
         {
             if let Err(error) = callables.freeze_char_sequence_protocol(protocol, platform) {
                 diags.error(
@@ -759,6 +773,11 @@ pub(super) fn emit_dependencies<B: Backend>(
                 .get(classifier)
                 .or_else(|| support_state.materializing_classes.get(classifier))
             {
+                if previous == identity && value_classes.contains(classifier) {
+                    // A value class's members spread over units; each one re-reads the class an
+                    // earlier unit published and emits only its own members.
+                    continue;
+                }
                 let message = if previous == identity {
                     "cannot materialize an imported class twice in separate dependency support units"
                 } else {

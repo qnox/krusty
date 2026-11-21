@@ -166,9 +166,16 @@ pub enum IrCheckedOperation {
         binding: crate::fir::FirCallableReferenceBinding,
         dispatch_receiver: Option<ExprId>,
         extension_receiver: Option<ExprId>,
+        /// Values the reference site bound for the declaration's leading context parameters, in
+        /// declaration order (`CallableReferencesToContextual`).
+        context_arguments: Vec<ExprId>,
         mutable: bool,
         substitutions: Vec<IrCheckedSubstitution>,
         adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
+        /// The function type a source reference is a value of (`(T) -> V` for a `KProperty1<T, V>`
+        /// one), as the checker selected it. `None` for a delegated property's metadata argument,
+        /// which is no function value.
+        function_type: Option<Ty>,
     },
 }
 

@@ -699,6 +699,7 @@ fn external_property_function_reference_is_materialized_without_lookup() {
                 conversion: None,
             }),
             extension_receiver: None,
+            context_arguments: Box::default(),
             mutable: false,
             substitutions: Box::new([]),
             adaptation: None,

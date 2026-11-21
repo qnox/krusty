@@ -143,6 +143,10 @@ impl Backend for WasmBackend {
         Some(krusty::backend::CommonIrPreparation {
             counted_loops: COUNTED_LOOPS,
             enums: krusty::backend::enums::Contract::KotlinWasm,
+            // Every reference object is a function value (`crate::callable_references`), a
+            // `KProperty` one included: its entry reads the property, and its `get` forwards to
+            // that entry.
+            property_reference_values: true,
         })
     }
 
@@ -182,7 +186,7 @@ impl Backend for WasmBackend {
     /// Both stdlibs read an appended sequence's `length`: the WASI one copies that many indexed
     /// `Char`s, and the JS one checks `appendRange`'s bounds against it before it appends the
     /// sequence's `toString` (`crate::char_sequence_appends`).
-    fn reads_appended_char_sequences(&self) -> bool {
+    fn appends_char_sequences_by_index(&self) -> bool {
         true
     }
 
@@ -264,6 +268,11 @@ impl Backend for WasmBackend {
         krusty::backend::construction_entries::publish_constructors(
             &mut file.ir,
             (file.module_name, file.classifiers.module()),
+            &mut file.dependency_exports,
+        );
+        krusty::backend::construction_entries::publish_type_tests(
+            &mut file.ir,
+            file.classifiers.module(),
             &mut file.dependency_exports,
         );
         krusty::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);

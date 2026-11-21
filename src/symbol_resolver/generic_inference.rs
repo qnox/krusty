@@ -15,6 +15,8 @@ pub(crate) use common_supertype::{
     common_super_types, published_declaration_type, reified_runtime_type, ReifiedDeclarations,
 };
 mod conditional_result;
+mod declaration_comparison;
+pub(crate) use declaration_comparison::generic_declaration_accepts_parameters_of;
 mod intersection_fixation;
 pub(crate) use intersection_fixation::with_intersection_upper_types;
 mod postponed_result;

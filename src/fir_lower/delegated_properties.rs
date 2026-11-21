@@ -788,9 +788,11 @@ fn delegated_property_reference(
             },
             dispatch_receiver: None,
             extension_receiver: None,
+            context_arguments: Vec::new(),
             mutable: flags.has(DeclarationFlags::MUTABLE),
             substitutions: Vec::new(),
             adaptation: None,
+            function_type: None,
         },
     )));
     // The node is the value passed to `getValue`/`setValue`/`provideDelegate`. A backend reads

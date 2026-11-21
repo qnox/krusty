@@ -161,6 +161,16 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The continuation interception this linker's selected declaration of `callee` is:
+    /// Kotlin/Wasm's `interceptedIntrinsic`, which a body expands to its coroutine class's own
+    /// interception.
+    fn intercepted_continuation(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<super::intercepted_continuation::InterceptedContinuationExpansion>> {
+        Ok(None)
+    }
+
     /// The continuation intrinsic this linker's selected declaration of `callee` is: Native's
     /// `getContinuation`/`returnIfSuspended`, which a body realizes as its suspension point.
     fn continuation_intrinsic(
@@ -322,6 +332,15 @@ pub(super) trait CallLinker {
 
     /// The function a file-local call invokes: a top-level function private to the lowered
     /// body's file, or a member of a file-local class. Template linkers keep the refusal.
+    /// The getter of an inherited property that a call of the fake override `callee` of a local
+    /// class stands for. `None` when `callee` is no such fake override.
+    fn inherited_getter(
+        &self,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<Option<crate::metadata::klib_ir::KlibIrSignature>> {
+        Ok(None)
+    }
+
     fn link_local_function(
         &mut self,
         _ir: &mut IrFile,

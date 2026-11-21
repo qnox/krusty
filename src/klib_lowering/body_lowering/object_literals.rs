@@ -252,20 +252,21 @@ impl<'a> BodyLowering<'a> {
             .iter()
             .map(|(field, ty, _, is_final)| (&field.base.symbol, *ty, *is_final))
             .collect::<Vec<_>>();
+        let storage = ObjectStorage {
+            declaring: &class.base.symbol,
+            first_index: capture_count,
+            fields: storage,
+            properties: super::super::class_storage::backed_properties(&class.members),
+        };
         self.lower_members(
             class,
             class_id,
             owner,
             &supertypes,
             &capture_fields,
-            &ObjectStorage {
-                declaring: &class.base.symbol,
-                first_index: capture_count,
-                fields: storage,
-                properties: super::super::class_storage::backed_properties(&class.members),
-            },
+            &storage,
         )?;
-        self.initialize_object(class_id, owner, &capture_fields, &stored)?;
+        self.initialize_object(class, class_id, owner, &capture_fields, &storage, &stored)?;
         let mut args = Vec::with_capacity(captures.len());
         let mut params = Vec::with_capacity(captures.len());
         for capture in &captures {
@@ -568,6 +569,35 @@ impl<'a> BodyLowering<'a> {
                 receiver,
             }));
         }
+        // The instance a member's body reads as `this` is no declared parameter, yet an object
+        // literal written in the member reads it as the enclosing instance.
+        if let Some(value) = self.header.value(symbol) {
+            let receiver = self
+                .header
+                .capture_parameter(
+                    symbol,
+                    0,
+                    crate::ir::IrCapturingCallable::LocalFunction,
+                    &self
+                        .ir
+                        .fn_params
+                        .get(&self.function.function)
+                        .expect("a body publishes its parameters")
+                        .captured_receivers,
+                    false,
+                )?
+                .and_then(|parameter| parameter.receiver);
+            if receiver.is_none() {
+                return Err(mismatch("an object literal captures an unnamed receiver"));
+            }
+            return Ok(Some(Capture {
+                symbol: (*symbol).clone(),
+                name: "this$0".to_owned(),
+                ty: self.header.slot_type(value.index),
+                crossinline: None,
+                receiver,
+            }));
+        }
         if let Some(local) = self.locals.get(symbol) {
             if local.mutable {
                 return unsupported("an object literal capturing a mutable local");
@@ -834,12 +864,33 @@ impl<'a> BodyLowering<'a> {
     /// captured values are its fields.
     fn enter_initializer(
         &mut self,
+        class: &KlibIrClass,
+        class_id: ClassId,
+        owner: TypeName,
         captures: &HashMap<KlibIrSymbol, CaptureField>,
-    ) -> MemberFrame<'a> {
+        storage: &ObjectStorage<'a>,
+    ) -> Lowered<MemberFrame<'a>> {
         let mut locals = super::super::local_values::LocalValues::after(0);
-        locals.anonymous_slot();
-        MemberFrame {
-            instance_storage: self.instance_storage.take(),
+        // An initializer reads the object itself, and the properties it stores, through the
+        // class's own receiver, as a member does through its dispatch receiver.
+        match &class.this_receiver {
+            Some(receiver) => {
+                locals.temporary(&receiver.base.symbol, Ty::obj_name(owner))?;
+            }
+            None => {
+                locals.anonymous_slot();
+            }
+        }
+        let fields = super::instance_storage::InstanceStorageFrame::object_member(
+            class_id,
+            storage.declaring,
+            storage.first_index,
+            storage.fields.iter().copied(),
+            storage.properties.clone(),
+            Ty::obj_name(owner),
+        );
+        Ok(MemberFrame {
+            instance_storage: self.instance_storage.replace(fields),
             locals: std::mem::replace(&mut self.locals, locals),
             captures: std::mem::replace(&mut self.captures, captures.clone()),
             member_return: self.member_return.take(),
@@ -848,21 +899,23 @@ impl<'a> BodyLowering<'a> {
             returnable_targets: std::mem::take(&mut self.returnable_targets),
             returnable_frames: std::mem::take(&mut self.returnable_frames),
             null_proven: std::mem::take(&mut self.null_proven),
-        }
+        })
     }
 
     /// Stores each property with storage's initializer into its field, in declaration order.
     fn initialize_object(
         &mut self,
+        class: &KlibIrClass,
         class_id: ClassId,
         owner: TypeName,
         captures: &HashMap<KlibIrSymbol, CaptureField>,
+        storage: &ObjectStorage<'a>,
         stored: &[(&KlibIrField, Ty, u32, bool)],
     ) -> Lowered<()> {
         if stored.iter().all(|(field, ..)| field.initializer.is_none()) {
             return Ok(());
         }
-        let frame = self.enter_initializer(captures);
+        let frame = self.enter_initializer(class, class_id, owner, captures, storage)?;
         let lowered = self.object_initializers(class_id, owner, stored);
         self.exit_member(frame);
         let body = self.ir.add_expr(IrExpr::Block {

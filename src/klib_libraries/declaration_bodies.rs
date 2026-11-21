@@ -626,6 +626,43 @@ impl KlibDeclarationBodies {
         self.libraries[library].file_package(file)
     }
 
+    /// The class `module` itself serializes under `signature`, whichever kind of signature names
+    /// it. `None` unless exactly one class has it.
+    pub(crate) fn module_declared_class<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
+        let library = *self.modules.get(module)?;
+        let mut found = None;
+        for class in self.libraries[library].classes_with_signature(signature) {
+            if found.replace(class).is_some() {
+                return None;
+            }
+        }
+        found.or_else(|| self.libraries[library].local_class(signature))
+    }
+
+    /// What the serialized file-local `signature` of `module` records beside its table slot.
+    pub(crate) fn module_file_local_origin(
+        &self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<&crate::metadata::klib_ir::KlibFileLocalOrigin> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].file_local_origin(signature)
+    }
+
+    /// The public function `module` itself serializes under `signature`.
+    pub(crate) fn module_public_function<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a KlibIrArena, &'a KlibIrFunction)> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].function(signature)
+    }
+
     /// The file-local function `module` itself serializes under `signature`.
     pub(crate) fn module_local_function<'a>(
         &'a self,
@@ -898,6 +935,40 @@ impl KlibDeclarationBodies {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The direct member functions, constructors excluded, of the one public class `signature`
+    /// in `module`'s producer graph, with the module that serializes it. `None` unless exactly one
+    /// class has the signature.
+    pub(crate) fn public_class_functions(
+        &self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> Option<(String, &KlibIrArena, Vec<&KlibIrFunction>)> {
+        let wanted = KlibIrSignature::Public(signature.clone());
+        let mut found = None;
+        for owner in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&owner) else {
+                continue;
+            };
+            for (arena, class) in self.libraries[library].classes_with_signature(&wanted) {
+                if found.replace((owner.clone(), arena, class)).is_some() {
+                    return None;
+                }
+            }
+        }
+        let (owner, arena, class) = found?;
+        let functions = class
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                KlibIrMember::Function(function) => {
+                    Some(arena.function(*function)).filter(|function| !function.constructor)
+                }
+                _ => None,
+            })
+            .collect();
+        Some((owner, arena, functions))
     }
 
     /// The class in `module`'s producer graph that directly declares `signature`.

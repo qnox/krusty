@@ -6,11 +6,12 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use krusty_plugin_host::{
+use krusty_plugin_api::ir::{
     BodyIr, CallIr, CallableIdentity, CallableKind, Callee, ClassName, Classifier, Constant,
-    ExpressionIr, ExpressionKind, FileIr, FunctionIr, Host, HostError, HostRuntime, ModuleIr,
-    ParameterIr, SessionRequest, Span, StatementIr, TypeIdentity, ValueId, VariableIr, Visibility,
+    ExpressionIr, ExpressionKind, FileIr, FunctionIr, ModuleIr, ParameterIr, Span, StatementIr,
+    TypeIdentity, ValueId, VariableIr, Visibility,
 };
+use krusty_plugin_host::{Host, HostError, HostRuntime, SessionRequest};
 
 #[path = "../../crates/krusty-plugin-host/tests/support/mod.rs"]
 mod support;
@@ -501,8 +502,7 @@ fn krusty_ir_at(
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
     );
-    let module =
-        krusty::hosted_plugin_ir::plugin_module_ir(analysis, &stems, paths, "main", &mut diags);
+    let module = krusty::plugin_ir::plugin_module_ir(analysis, &stems, paths, "main", &mut diags);
     (module, diags)
 }
 

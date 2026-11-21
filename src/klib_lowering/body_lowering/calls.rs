@@ -16,8 +16,8 @@ use super::{
 };
 use crate::fir::FirTypeParameterRef;
 use crate::ir::{
-    Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrExpr, IrIntrinsic,
-    IrPropertyDispatch,
+    Callee, ExprId, IrBinOp, IrCheckedOperation, IrCheckedSubstitution, IrConst, IrExpr,
+    IrIntrinsic, IrPropertyDispatch,
 };
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{
@@ -45,7 +45,8 @@ impl BodyLowering<'_> {
         if access.symbol.kind != KlibIrSymbolKind::Function {
             return Err(mismatch("a call target's symbol is not a function"));
         }
-        let signature = &access.symbol.signature;
+        let inherited = self.linker.inherited_getter(&access.symbol.signature)?;
+        let signature = inherited.as_ref().unwrap_or(&access.symbol.signature);
         let callee = match signature {
             KlibIrSignature::Public(callee) if !self.linker.links_privately(signature) => callee,
             KlibIrSignature::Accessor(accessor) if !self.linker.links_privately(signature) => {
@@ -104,6 +105,9 @@ impl BodyLowering<'_> {
                 if let Some(intrinsic) = self.linker.continuation_intrinsic(&signature)? {
                     return self.continuation_intrinsic_call(intrinsic, access, ty);
                 }
+                if let Some(expansion) = self.linker.intercepted_continuation(&signature)? {
+                    return self.intercepted_continuation_call(expansion, access, ty);
+                }
                 if let Some(primitive) = self.linker.common_primitive(&signature)? {
                     return self.primitive_call(primitive, access, ty);
                 }
@@ -139,6 +143,19 @@ impl BodyLowering<'_> {
         ty: Ty,
     ) -> Lowered<ExprId> {
         use super::super::primitive_calls::CommonPrimitive;
+        if primitive.operation == CommonPrimitive::EmptyArray {
+            if access.type_arguments.len() != 1 || !ty.is_reference_array() {
+                return Err(mismatch(
+                    "an empty array factory is called with another shape than its declaration's",
+                ));
+            }
+            let size = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            let array = self.ir.add_expr(IrExpr::NewArray {
+                array_type: ty,
+                size,
+            });
+            return Ok(self.typed(array, ty));
+        }
         if !access.type_arguments.is_empty() {
             return Err(mismatch("a common primitive is called with type arguments"));
         }
@@ -203,7 +220,7 @@ impl BodyLowering<'_> {
                 )))
             }
             // A numeric conversion, as checked FIR lowers the source conversion.
-            CommonPrimitive::ArrayLiteral => {
+            CommonPrimitive::ArrayLiteral | CommonPrimitive::EmptyArray => {
                 return Err(mismatch(
                     "an array factory is called with a dispatch receiver",
                 ))
@@ -748,6 +765,19 @@ impl BodyLowering<'_> {
                 declaration: Some((&declared_parameters, &declared_formals)),
             },
         )?;
+        self.linked_call_with_operands(linked, operands, dispatch, Some(access))
+    }
+
+    /// A call of `linked` with the operands its call site supplies, dispatched as `dispatch`.
+    /// `access` is the serialized call whose type arguments an expanded inline callee binds; a
+    /// call the lowering synthesizes has none.
+    fn linked_call_with_operands(
+        &mut self,
+        linked: LinkedCallee,
+        operands: CallOperands,
+        dispatch: CallDispatch,
+        access: Option<&KlibIrMemberAccess>,
+    ) -> Lowered<ExprId> {
         let mut callee = linked.callee;
         if let Callee::External { params, ret, .. } = &mut callee {
             (*params, *ret) = (operands.params, operands.ret);
@@ -786,6 +816,12 @@ impl BodyLowering<'_> {
             }
         }
         let singleton_dispatch = linked.singleton_dispatch;
+        let expanded = match &callee {
+            Callee::Local(function) if self.ir.inline_only_fns.contains(function) => {
+                Some(*function)
+            }
+            _ => None,
+        };
         let external = match &callee {
             Callee::External { target, .. } => Some(*target),
             _ => None,
@@ -820,6 +856,9 @@ impl BodyLowering<'_> {
                 args,
             }),
         };
+        if let (Some(function), Some(access)) = (expanded, access) {
+            self.record_inline_type_arguments(call, function, access)?;
+        }
         if let Some(result) = suspend_result {
             self.ir.suspend_calls.insert(call, result);
         }
@@ -977,6 +1016,104 @@ impl BodyLowering<'_> {
                 "a continuation intrinsic call has another operand shape",
             )),
         }
+    }
+
+    /// `interceptedIntrinsic<T>(cont)`, expanded as kotlinc's `BuiltInsLowering` expands it:
+    /// `cont` evaluated once, then `if (cont is CoroutineImpl) (cont as CoroutineImpl).intercepted()
+    /// else cont`, the member call linked as any call of it a body makes.
+    fn intercepted_continuation_call(
+        &mut self,
+        expansion: super::super::intercepted_continuation::InterceptedContinuationExpansion,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let selected = expansion.call;
+        let [Some(type_argument)] = access.type_arguments.as_slice() else {
+            return Err(mismatch(
+                "a continuation interception has another type-argument shape",
+            ));
+        };
+        let type_argument = self.semantic(*type_argument)?;
+        let mut bindings = crate::fx_hash::HashMap::default();
+        bindings.insert(selected.formal, type_argument);
+        let substitute = |ty: Ty| crate::types::ty_subst_formals(ty, &[selected.formal], &bindings);
+        let params = selected
+            .params
+            .iter()
+            .map(|&ty| substitute(ty))
+            .collect::<Vec<_>>();
+        let operands = self.call_operands(
+            access,
+            ty,
+            CalleeShape {
+                receiver: None,
+                params: &params,
+                ret: substitute(selected.result),
+                context_count: 0,
+                class_type_parameters: &[],
+                parameter_defaults: &[],
+                declaration: None,
+            },
+        )?;
+        let (&[continuation], &[continuation_type]) =
+            (operands.args.as_slice(), operands.params.as_slice())
+        else {
+            return Err(mismatch(
+                "a continuation interception has another operand shape",
+            ));
+        };
+        let linked = self.linker.link(self.ir, &expansion.member)?;
+        if linked.receiver.is_none()
+            || linked.context_count != 0
+            || !linked.params.is_empty()
+            || !linked.type_parameters.is_empty()
+            || !linked.class_type_parameters.is_empty()
+        {
+            return Err(mismatch("the intercepting member has another call shape"));
+        }
+        let coroutine = Ty::obj_name(super::super::intercepted_continuation::coroutine_class());
+        let slot = self.locals.anonymous_slot();
+        let declaration = self.ir.add_expr(IrExpr::Variable {
+            index: slot,
+            ty: continuation_type,
+            init: Some(continuation),
+            named: false,
+        });
+        let read = self.ir.add_expr(IrExpr::GetValue(slot));
+        let matches = self.ir.instance_check(false, read, coroutine);
+        let read = self.ir.add_expr(IrExpr::GetValue(slot));
+        let receiver = self.ir.add_expr(IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::CastNonNull,
+            arg: read,
+            type_operand: coroutine,
+        });
+        let receiver = self.typed(receiver, coroutine);
+        let intercepted_type = linked.ret;
+        let intercepted = self.linked_call_with_operands(
+            linked,
+            CallOperands {
+                receiver: Some(receiver),
+                args: Vec::new(),
+                omitted: Vec::new(),
+                receiver_type: Some(coroutine),
+                params: Vec::new(),
+                ret: intercepted_type,
+            },
+            CallDispatch::Virtual,
+            None,
+        )?;
+        let intercepted = self.coercion(intercepted, operands.ret);
+        let unchanged = self.ir.add_expr(IrExpr::GetValue(slot));
+        let unchanged = self.typed(unchanged, operands.ret);
+        let result = self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(matches), intercepted), (None, unchanged)],
+        });
+        let result = self.typed(result, operands.ret);
+        let block = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![declaration],
+            value: Some(result),
+        });
+        Ok(self.typed(block, operands.ret))
     }
 
     /// A call of a dependency property's accessor, lowered as checked FIR lowers a source access
@@ -1265,6 +1402,47 @@ impl BodyLowering<'_> {
             ));
         }
         Ok(applied)
+    }
+
+    /// The type arguments `call` of the inline function `function` binds, under the selected
+    /// semantic identities of the function's type parameters, which its body's types name, for the
+    /// expansion to specialize that body with.
+    fn record_inline_type_arguments(
+        &mut self,
+        call: ExprId,
+        function: crate::ir::FunId,
+        access: &KlibIrMemberAccess,
+    ) -> Lowered<()> {
+        let Some(signature) = self.ir.signatures.get(&function) else {
+            return Ok(());
+        };
+        if signature.type_params.len() != access.type_arguments.len() {
+            return Err(mismatch(
+                "a call passes another number of type arguments than its inline callee declares",
+            ));
+        }
+        let formals = signature
+            .type_params
+            .iter()
+            .map(|formal| (formal.semantic_name.clone(), formal.reified))
+            .collect::<Vec<_>>();
+        let mut bound = Vec::with_capacity(formals.len());
+        let mut reified = Vec::new();
+        for ((name, is_reified), argument) in formals.into_iter().zip(&access.type_arguments) {
+            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call that leaves a type argument unset",
+            ))?;
+            let value = self.semantic(argument)?;
+            if is_reified {
+                reified.push((name.clone(), value));
+            }
+            bound.push((name, value));
+        }
+        if !reified.is_empty() {
+            self.ir.reified_call_subst.insert(call, reified);
+        }
+        self.ir.inline_call_type_arguments.insert(call, bound);
+        Ok(())
     }
 
     /// `linked` at the call's type arguments: each of the callee's type parameters bound to the

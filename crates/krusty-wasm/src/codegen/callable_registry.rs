@@ -120,6 +120,10 @@ impl CallableRegistry {
                 "a constructor's default-argument entry without its declaring file's entry"
                     .to_owned(),
             ),
+            Some(InstanceEntry::TypeTest(classifier)) => Err(format!(
+                "a type test against a class (`{}`) without its declaring file's entry",
+                classifier.render().replace('/', ".")
+            )),
             None => Ok(()),
         }
     }
@@ -258,6 +262,12 @@ impl CallableRegistry {
                 reads.extend(krusty::backend::instance_links::link_constructor_reads(
                     ir,
                     self.source_module.as_deref().unwrap_or_default(),
+                    module_facts,
+                    &mut self.instances,
+                    || wasm.declare(),
+                ));
+                reads.extend(krusty::backend::instance_links::link_type_test_reads(
+                    ir,
                     module_facts,
                     &mut self.instances,
                     || wasm.declare(),
