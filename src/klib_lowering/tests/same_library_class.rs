@@ -1846,4 +1846,118 @@ fn official_klib_private_object_storage_is_authenticated() {
     assert!(unit.ir().classes.iter().all(|class| !class.is_object));
 }
 
+const PRIVATE_INTERFACE: &str = r#"package fixture
+
+private interface Sink {
+    val limit: Int
+    fun accept(value: String): String
+}
+
+private interface Labeled<out V> : Iterable<V>
+
+fun feed(target: Any?, value: String): String =
+    if (target is Sink) target.accept(value) else value
+
+fun <V> labeled(items: Iterable<V>): Boolean = items is Labeled<V>
+"#;
+
+fn lower_fixture_function(
+    name: &str,
+    source_text: &str,
+    function_name: &str,
+) -> Option<(
+    DependencyBodyUnit,
+    Result<(), super::super::KlibBodyDeclineReason>,
+)> {
+    let (directory, libraries) = produce_library(name, source_text)?;
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+        function_name,
+    );
+    let [function] = symbols.callables.functions() else {
+        panic!("one producer declaration {function_name}")
+    };
+    let selected = libraries
+        .external_callable(function.callable.external_identity.unwrap())
+        .unwrap();
+    let callable = selected.klib_body_callable().unwrap();
+    let callees = super::super::KlibCalleeFacts::new([callable]);
+    let mut unit = DependencyBodyUnit::default();
+    let lowered = unit
+        .lower_function_with_declarations(
+            callable,
+            libraries.declaration_bodies(),
+            &callees,
+            libraries.intrinsic_facts(),
+            &ProducedExternals::default(),
+            &libraries,
+        )
+        .map(|_| ())
+        .map_err(|decline| decline.reason().clone());
+    let _ = std::fs::remove_dir_all(directory);
+    Some((unit, lowered))
+}
+
+/// A body may test and call a non-public interface of its own library. The interface is
+/// installed in the unit with its abstract members and no constructor, and its generic form keeps
+/// the supertype a narrowing to it relies on.
+#[test]
+fn official_klib_private_interface_is_installed_for_a_type_test_and_a_member_call() {
+    let Some((unit, lowered)) =
+        lower_fixture_function("private-interface", PRIVATE_INTERFACE, "feed")
+    else {
+        return;
+    };
+    assert_eq!(lowered, Ok(()));
+    validated(unit.ir());
+    let ir = unit.ir();
+    let interfaces = ir
+        .classes
+        .iter()
+        .filter(|class| class.is_interface)
+        .collect::<Vec<_>>();
+    assert_eq!(interfaces.len(), 1);
+    let sink = interfaces[0];
+    assert!(!sink.has_primary_ctor && sink.secondary_ctors.is_empty());
+    let mut methods = sink
+        .methods
+        .iter()
+        .map(|method| {
+            let method = &ir.functions[*method as usize];
+            assert!(
+                method.body.is_none(),
+                "an installed interface member is abstract"
+            );
+            method.name.clone()
+        })
+        .collect::<Vec<_>>();
+    methods.sort();
+    assert_eq!(methods, ["<get-limit>", "accept"]);
+
+    let Some((unit, lowered)) =
+        lower_fixture_function("private-interface-generic", PRIVATE_INTERFACE, "labeled")
+    else {
+        return;
+    };
+    assert_eq!(lowered, Ok(()));
+    validated(unit.ir());
+    let labeled = unit
+        .ir()
+        .classes
+        .iter()
+        .find(|class| class.is_interface)
+        .expect("the generic interface is installed");
+    assert_eq!(labeled.type_params.len(), 1);
+    let supertypes = labeled
+        .supertypes
+        .iter()
+        .map(|supertype| supertype.kotlin_class_internal())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        supertypes,
+        [Some(crate::types::type_name("kotlin/collections/Iterable"))],
+        "the public interface it extends"
+    );
+}
+
 mod hierarchy_publication;
