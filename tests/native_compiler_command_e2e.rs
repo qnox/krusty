@@ -463,8 +463,14 @@ fn a_multiplatform_source_set_compiles_its_fragments_into_one_program() {
             "-Xfragments=common,native",
             "-Xfragment-refines=native:common",
         ])
-        .arg(format!("-Xfragment-sources=common:{}", common_source.display()))
-        .arg(format!("-Xfragment-sources=native:{}", native_source.display()))
+        .arg(format!(
+            "-Xfragment-sources=common:{}",
+            common_source.display()
+        ))
+        .arg(format!(
+            "-Xfragment-sources=native:{}",
+            native_source.display()
+        ))
         .arg("-o")
         .arg(scratch.join("app"))
         .arg(&common_source)
