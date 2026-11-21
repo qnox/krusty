@@ -151,6 +151,11 @@ impl BodyLowering<'_> {
             return Ok(proven);
         }
         let arg = self.expression(argument)?;
+        self.implicit_cast_of(arg, target, ty)
+    }
+
+    /// The lowered `arg` implicitly cast to `target`, typed `ty`; see [`Self::implicit_cast`].
+    pub(super) fn implicit_cast_of(&mut self, arg: ExprId, target: Ty, ty: Ty) -> Lowered<ExprId> {
         let actual = self.lowered_type(arg);
         if super::is_value_of(actual, target) {
             return Ok(arg);
