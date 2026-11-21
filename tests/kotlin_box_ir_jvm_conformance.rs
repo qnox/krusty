@@ -899,6 +899,21 @@ fn compose_captured_local_read_is_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_receiver_lambdas_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("receiverLambdas");
+}
+
+#[test]
+fn compose_receiver_invoke_trivia_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("receiverInvokeTrivia");
+}
+
+#[test]
+fn compose_library_receiver_lambdas_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("libraryReceiverLambdas");
+}
+
+#[test]
 fn compose_function_type_parameters_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("functionTypeParameters");
 }

@@ -1,5 +1,5 @@
 //! The module's own declarations as the IR krusty hands kotlinc compiler plugins
-//! ([`krusty_plugin_ir::ModuleIr`]), built from Pass 2's checked FIR.
+//! ([`krusty_plugin_api::ir::ModuleIr`]), built from Pass 2's checked FIR.
 //!
 //! Checked FIR keeps what kotlinc's fir2ir output keeps and common IR has already lowered away
 //! (string templates, operator calls, constants as written), so the plugin IR is built from it,
@@ -22,7 +22,7 @@ pub(crate) struct Refusal {
     what: String,
 }
 
-/// The [`ModuleIr`](krusty_plugin_ir::ModuleIr) of an analyzed source set whose inputs are at
+/// The [`ModuleIr`](krusty_plugin_api::ir::ModuleIr) of an analyzed source set whose inputs are at
 /// `paths` (one per input, as kotlinc names the files, parallel to `stems`). Pass 2 checks and
 /// lowers the module as an ordinary compilation does, without a target; its diagnostics, and a
 /// refusal of code the plugin IR cannot spell yet, go to `diags`, and then there is no IR. So does
@@ -33,7 +33,7 @@ pub fn plugin_module_ir(
     paths: &[String],
     module_name: &str,
     diags: &mut DiagSink,
-) -> Option<krusty_plugin_ir::ModuleIr> {
+) -> Option<krusty_plugin_api::ir::ModuleIr> {
     if paths.len() != stems.len() {
         diags.error(
             Span::new(0, 0),

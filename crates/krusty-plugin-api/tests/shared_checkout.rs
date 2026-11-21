@@ -12,7 +12,7 @@ impl Checkouts {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "krusty-plugin-ir-checkouts-{}-{nonce}",
+            "krusty-plugin-api-checkouts-{}-{nonce}",
             std::process::id()
         ));
         fs::create_dir(&root).unwrap();
@@ -21,8 +21,7 @@ impl Checkouts {
 
     fn write(&self, name: &str, field: &str) -> PathBuf {
         let root = self.0.join(name);
-        let source = root.join("model/src");
-        fs::create_dir_all(&source).unwrap();
+        fs::create_dir(&root).unwrap();
         fs::create_dir(root.join("src")).unwrap();
         fs::create_dir(root.join(".cargo")).unwrap();
         fs::write(
@@ -33,17 +32,17 @@ impl Checkouts {
         fs::write(
             root.join("Cargo.toml"),
             "[package]\nname = \"checkout-consumer\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\
-             [dependencies]\nkrusty-plugin-ir = { path = \"model\" }\n\
-             [workspace]\nmembers = [\"model\"]\n",
+             [dependencies]\nkrusty-plugin-api = { path = \"crates/krusty-plugin-api\" }\n\
+             [workspace]\nmembers = [\"crates/krusty-plugin-api\", \"crates/krusty-names\"]\n",
         )
         .unwrap();
-        fs::write(root.join("model/Cargo.toml"), include_str!("../Cargo.toml")).unwrap();
-        let model = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        for file in ["lib.rs", "identity.rs", "ksp.rs", "module.rs"] {
-            fs::copy(model.join(file), source.join(file)).unwrap();
+        // Distinct compatible checkouts publish distinct APIs. Copy the actual crates, laid out as
+        // the workspace lays them out, so a cache-identity fix must live in production code.
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        for krate in ["krusty-plugin-api", "krusty-names"] {
+            copy_crate(&crates.join(krate), &root.join("crates").join(krate));
         }
-        // Distinct compatible checkouts publish distinct model APIs. Copy the actual crate root,
-        // including its build inputs, so a cache-identity fix must live in production code.
+        let source = root.join("crates/krusty-plugin-api/src");
         let library = fs::read_to_string(source.join("lib.rs")).unwrap();
         fs::write(
             source.join("lib.rs"),
@@ -54,7 +53,7 @@ impl Checkouts {
             root.join("src/main.rs"),
             format!(
                 "fn main() {{\n\
-                 let value = krusty_plugin_ir::CheckoutProbe {{ {field}: 1 }};\n\
+                 let value = krusty_plugin_api::CheckoutProbe {{ {field}: 1 }};\n\
                  println!(\"{field}:{{}}\", value.{field});\n\
                  }}\n"
             ),
@@ -113,6 +112,25 @@ impl Checkouts {
     }
 }
 
+/// A crate's manifest and sources; its tests and build output stay behind.
+fn copy_crate(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    fs::copy(from.join("Cargo.toml"), to.join("Cargo.toml")).unwrap();
+    copy_tree(&from.join("src"), &to.join("src"));
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &to.join(entry.file_name()));
+        } else {
+            fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
 fn older_source_times(directory: &Path) {
     for entry in fs::read_dir(directory).unwrap() {
         let entry = entry.unwrap();
@@ -146,7 +164,7 @@ fn run(checkout: &Path, target: &Path, field: &str) {
         .env("CARGO_TARGET_DIR", target)
         .env("CARGO_INCREMENTAL", "0")
         .env("CARGO_BUILD_JOBS", "1");
-    // These independent, dependency-free fixtures exercise Cargo's own cache, not the parent
+    // These independent fixtures exercise Cargo's own cache, not the parent
     // compiler's coverage flags or compiler wrappers.
     for variable in [
         "RUSTFLAGS",
@@ -170,7 +188,7 @@ fn run(checkout: &Path, target: &Path, field: &str) {
 }
 
 #[test]
-fn shared_target_rebuilds_plugin_ir_when_checkout_changes() {
+fn shared_target_rebuilds_plugin_api_when_checkout_changes() {
     let checkouts = Checkouts::new();
     // Create both before either build: a sibling's older mtimes cannot prove its contents match.
     let first = checkouts.write("first", "first");

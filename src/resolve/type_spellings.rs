@@ -145,6 +145,12 @@ pub(in crate::resolve) fn spelling_of_ref_with(
                 )
             })
             .collect();
+        if spelled.fun_receiver_starts_here() {
+            if let Some(receiver) = args.first_mut() {
+                receiver.annotations.clear();
+                receiver.parameter_name = None;
+            }
+        }
         if !spelled.fun_suspend() {
             args.push(
                 spelled
