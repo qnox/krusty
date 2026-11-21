@@ -836,6 +836,9 @@ fn is_materialized_class_member(
     if class.is_value {
         return Ok(true);
     }
+    if class.kind == crate::libraries::TypeKind::Enum {
+        return Ok(crate::klib_lowering::materializes_enum_class(bodies, class));
+    }
     if class.kind == crate::libraries::TypeKind::Object {
         return Ok(object_initialization(platform, bodies, callees, class)?.is_some());
     }
@@ -1035,6 +1038,7 @@ pub(super) fn member_class_constructors(
     match selected.class_contract() {
         Some(class)
             if !class.is_value
+                && class.kind != crate::libraries::TypeKind::Enum
                 && class.emits_members()
                 && selected.kind() == ExternalCallableKind::Member =>
         {

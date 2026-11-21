@@ -117,6 +117,11 @@ impl BodyLowering<'_> {
         if operator == BuiltinOperator::CheckNotNull {
             return self.not_null_assertion(access, ty);
         }
+        if operator == BuiltinOperator::NoWhenBranchMatched {
+            return unsupported(
+                "`noWhenBranchMatchedException` outside an exhaustive `when`'s `else`",
+            );
+        }
         if !access.type_arguments.is_empty() {
             return Err(mismatch(
                 "a built-in operator is called with type arguments",
@@ -535,6 +540,7 @@ impl BodyLowering<'_> {
                 | BuiltinOperator::IsNan { .. }
                 | BuiltinOperator::NumericConversion { .. }
                 | BuiltinOperator::CheckNotNull
+                | BuiltinOperator::NoWhenBranchMatched
                 | BuiltinOperator::DataClassArrayMember(_),
                 _,
             ) => {
