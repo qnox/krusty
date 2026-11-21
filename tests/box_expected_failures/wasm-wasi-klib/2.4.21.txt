@@ -52,7 +52,6 @@ arrays/forInReversed/reversedArrayReversedArrayOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedReversedOriginalUpdatedInLoopBody.kt
 arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
-arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
 arrays/indices.kt
 arrays/kt47483.kt
 arrays/multiArrayConstructors.kt
@@ -83,7 +82,6 @@ basics/unchecked_cast6x.kt
 basics/unchecked_cast7.kt
 basics/unchecked_cast9.kt
 basics/unit4.kt
-bce/bceCases.kt
 bce/customGetter.kt
 bce/delegatedProperty.kt
 bce/differentArrays.kt
@@ -268,7 +266,6 @@ classes/comanionObjectFieldVsClassField.kt
 classes/kt1538.kt
 classes/kt2566_2.kt
 classes/nestedInitBlocksWithLambda.kt
-classes/overloadUnaryOperator.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
 closures/closuresAsSingleton.kt
 closures/kt11634_4.kt
@@ -2264,7 +2261,6 @@ serialization/serializedEnumOrdinal.kt
 serialization/serializedVararg.kt
 size/helloWorld.kt
 size/objectsOptimization.kt
-smartCasts/smartcastFromGenericToString.kt
 specialBuiltins/bridges.kt
 specialBuiltins/emptyList.kt
 specialBuiltins/enumAsOrdinaled.kt
@@ -2453,7 +2449,6 @@ when/stringOptimization/expression.kt
 when/stringOptimization/nullability.kt
 when/stringOptimization/sameHashCode.kt
 when/stringOptimization/statement.kt
-when/stringOptimization/temporaryVarInWhenByStringIsDisposedProperly.kt
 when/whenSubjectVariable/whenByEnum.kt
 when/whenSubjectVariable/whenByNullableEnum.kt
 when/whenSubjectVariable/whenByString.kt
