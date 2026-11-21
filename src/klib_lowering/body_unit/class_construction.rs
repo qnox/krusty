@@ -20,7 +20,7 @@ impl<'u, 's> Linker<'u, 's> {
             self.sources.callees,
         )?
         else {
-            return self.materialize_primary_delegation(ir, identity, selected);
+            return self.materialize_own_delegation(ir, identity, selected);
         };
         self.materialize_plan(ir, identity, plan)
     }
@@ -261,18 +261,19 @@ impl<'u, 's> Linker<'u, 's> {
         Ok(())
     }
 
-    /// A secondary constructor delegating to its class's primary constructor: the primary
-    /// constructor materializes the class, and the class gains a secondary constructor that
-    /// delegates to it with the delegation's arguments, then runs a private function holding the
-    /// secondary constructor's own statements. A class whose primary initialization is not
-    /// admitted keeps its target boundary.
-    fn materialize_primary_delegation(
+    /// A secondary constructor delegating to another constructor of its class: the delegation's
+    /// target, materialized first, reaches the primary constructor that materializes the class,
+    /// and the class gains a secondary constructor that delegates to the target with the
+    /// delegation's arguments, then runs a private function holding the secondary constructor's
+    /// own statements. A class whose primary initialization is not admitted keeps its target
+    /// boundary.
+    fn materialize_own_delegation(
         &mut self,
         ir: &mut IrFile,
         identity: &KlibDependencyCallable,
         selected: KlibBodyCallable<'s>,
     ) -> Result<(), KlibBodyDeclineReason> {
-        let Some(delegation) = super::super::class_initialization::primary_delegation(
+        let Some(delegation) = super::super::class_initialization::own_delegation(
             selected,
             self.sources.bodies,
             self.sources.callees,
@@ -280,10 +281,10 @@ impl<'u, 's> Linker<'u, 's> {
         else {
             return Ok(());
         };
-        self.materialize_class(ir, &delegation.primary, delegation.primary_selected)?;
-        let class = *self.classes.get(&delegation.primary).ok_or_else(|| {
+        self.materialize_class(ir, &delegation.target, delegation.target_selected)?;
+        let class = *self.classes.get(&delegation.target).ok_or_else(|| {
             KlibBodyDeclineReason::SignatureMismatch(
-                "an admitted primary constructor materialized no class".to_owned(),
+                "an admitted delegation target materialized no class".to_owned(),
             )
         })?;
         let fields = delegation
@@ -335,14 +336,31 @@ impl<'u, 's> Linker<'u, 's> {
             args,
         });
         ir.set_logical_type(run, Ty::Unit);
-        let delegate = crate::ir::CtorDelegateTarget::This {
-            target_params: ir.classes[class as usize]
-                .ctor_args
-                .iter()
-                .map(|parameter| parameter.ty)
-                .collect(),
-            target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
-            default_masks: Vec::new(),
+        // The target is the primary constructor, or the materialized secondary one at its place.
+        let delegate = match self
+            .constructors
+            .get(&delegation.target)
+            .and_then(|constructor| constructor.secondary)
+        {
+            Some(secondary) => crate::ir::CtorDelegateTarget::This {
+                target_params: ir.classes[class as usize].secondary_ctors[secondary]
+                    .params
+                    .clone(),
+                target: crate::ir::IrConstructorTarget {
+                    ordinal: u32::try_from(secondary + 1).expect("a constructor ordinal fits u32"),
+                    access: crate::ir::IrConstructorAccess::Unrestricted,
+                },
+                default_masks: Vec::new(),
+            },
+            None => crate::ir::CtorDelegateTarget::This {
+                target_params: ir.classes[class as usize]
+                    .ctor_args
+                    .iter()
+                    .map(|parameter| parameter.ty)
+                    .collect(),
+                target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                default_masks: Vec::new(),
+            },
         };
         let secondaries = &mut ir.classes[class as usize].secondary_ctors;
         secondaries.push(materialized_secondary(
@@ -369,7 +387,7 @@ impl<'u, 's> Linker<'u, 's> {
             function,
             initialization: Some((
                 class,
-                super::PendingInitialization::PrimaryDelegation {
+                super::PendingInitialization::OwnDelegation {
                     secondary,
                     arguments: delegation.arguments,
                 },
