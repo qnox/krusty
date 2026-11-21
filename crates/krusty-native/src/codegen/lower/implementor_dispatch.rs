@@ -441,9 +441,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return true;
         }
         let ty = Ty::obj_name(internal);
-        let bridge = self.file.mapped_collection(ty).is_some_and(|collection| {
-            super::super::super::intrinsics::has_special_bridge(collection, signature.name)
-        });
+        let bridge = self
+            .file
+            .mapped_collection(ty)
+            .is_some_and(|collection| collection.has_special_bridge(signature.name));
         bridge && !matches!(signature.ret, Ty::Boolean | Ty::Int)
     }
 
@@ -518,9 +519,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let bridge = self
             .file
             .mapped_collection(Ty::obj_name(internal))
-            .is_some_and(|collection| {
-                super::super::super::intrinsics::has_special_bridge(collection, signature.name)
-            });
+            .is_some_and(|collection| collection.has_special_bridge(signature.name));
         // A runtime collection is not one of the classes above. The member's own runtime function
         // is the remaining arm; an abstract-method trap would be a call the program did make.
         let collection = self.checked_type(call.receiver).and_then(|ty| {

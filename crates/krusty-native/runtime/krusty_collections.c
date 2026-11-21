@@ -36,6 +36,7 @@ static const uint32_t kt_list_offsets[] = {offsetof(KList, elements)};
                               .vtable_length = 3};
 
 static const KType *const kt_iterable_bases[] = {&kt_type_iterable_interface};
+static const KType *const kt_iterator_bases[] = {&kt_type_iterator_interface};
 static const KType *const kt_mutable_iterable_bases[] = {&kt_type_iterable_interface};
 static const KType *const kt_collection_bases[] = {&kt_type_iterable_interface};
 static const KType *const kt_mutable_collection_bases[] = {
@@ -48,6 +49,7 @@ static const KType *const kt_mutable_list_bases[] = {
     &kt_type_mutable_iterable_interface, &kt_type_iterable_interface};
 
 KT_ROOT_INTERFACE(kt_type_iterator_interface, "Iterator")
+KT_INTERFACE(kt_type_list_iterator_interface, "ListIterator", kt_iterator_bases)
 KT_ROOT_INTERFACE(kt_type_iterable_interface, "Iterable")
 KT_INTERFACE(kt_type_mutable_iterable_interface, "MutableIterable", kt_mutable_iterable_bases)
 KT_INTERFACE(kt_type_collection_interface, "Collection", kt_collection_bases)
@@ -71,6 +73,8 @@ static const KType *const kt_mutable_list_interfaces[] = {
     &kt_type_mutable_iterable_interface, &kt_type_iterable_interface,
     &kt_type_random_access_interface};
 static const KType *const kt_iterator_interfaces[] = {&kt_type_iterator_interface};
+static const KType *const kt_list_iterator_interfaces[] = {&kt_type_list_iterator_interface,
+                                                           &kt_type_iterator_interface};
 
 static kt_boolean kt_list_equals(KRef self, KRef other);
 static kt_int kt_list_hash_code(KRef self);
@@ -289,22 +293,29 @@ static const uint32_t kt_list_iterator_offsets[] = {offsetof(KListIterator, list
 /* An iterator answers `kotlin.Any`'s three members by identity, as Kotlin's own iterators do. Its
    class is Kotlin/Native's: a read-only list's is the anonymous iterator `Array.asList` answers
    (`listOf(a, b)` is `a, b` as a list), a growable one's `ArrayList`'s nested `Itr`. */
-#define KT_LIST_ITERATOR_TYPE                                                                      \
+#define KT_LIST_ITERATOR_TYPE(bases)                                                               \
     .instance_size = sizeof(KListIterator), .reference_count = 1,                                  \
     .reference_offsets = kt_list_iterator_offsets, .super = &kt_type_any, .vtable = kt_any_vtable, \
-    .vtable_length = 3, .interfaces = kt_iterator_interfaces,                                      \
-    .interface_count = sizeof(kt_iterator_interfaces) / sizeof(KType *)
+    .vtable_length = 3, .interfaces = bases, .interface_count = sizeof(bases) / sizeof(KType *)
 const KType kt_type_list_iterator = {KT_ANONYMOUS("kotlin.collections.Iterator"),
-                                     KT_LIST_ITERATOR_TYPE};
-static const KType kt_type_array_list_iterator = {KT_NAMED("kotlin.collections.ArrayList.", "Itr"),
-                                                  KT_LIST_ITERATOR_TYPE};
+                                     KT_LIST_ITERATOR_TYPE(kt_iterator_interfaces)};
+/* `ArrayList.iterator()` and `listIterator()` answer the same `Itr`, which is a `ListIterator`. */
+static const KType kt_type_array_list_iterator = {
+    KT_NAMED("kotlin.collections.ArrayList.", "Itr"),
+    KT_LIST_ITERATOR_TYPE(kt_list_iterator_interfaces)};
+/* The `listIterator()` of a read-only list, which is a `ListIterator` and not a mutable one. */
+static const KType kt_type_read_only_list_iterator = {
+    KT_ANONYMOUS("kotlin.collections.ListIterator"),
+    KT_LIST_ITERATOR_TYPE(kt_list_iterator_interfaces)};
 /* `EnumEntriesList` is an `AbstractList`, and its iterator is that class's own. */
 static const KType kt_type_abstract_list_iterator = {
-    KT_NAMED("kotlin.collections.AbstractList.", "IteratorImpl"), KT_LIST_ITERATOR_TYPE};
+    KT_NAMED("kotlin.collections.AbstractList.", "IteratorImpl"),
+    KT_LIST_ITERATOR_TYPE(kt_iterator_interfaces)};
 
 static kt_boolean kt_is_list_iterator(KRef value) {
     return value != NULL && (value->header.type == &kt_type_list_iterator ||
                              value->header.type == &kt_type_array_list_iterator ||
+                             value->header.type == &kt_type_read_only_list_iterator ||
                              value->header.type == &kt_type_abstract_list_iterator);
 }
 
@@ -952,6 +963,32 @@ KRef kt_list_iterator(KRef list) {
     iterator->at = 0;
     iterator->modifications = kt_list_version(list);
     return (KRef)iterator;
+}
+
+/* `listIterator(index)`: the iterator of `kt_list_iterator`, whose next element is the one at
+   `index`. An index outside `0..size` raises, as Kotlin/Native's `ArrayList.listIterator` does. */
+KRef kt_list_list_iterator(KRef list, kt_int index) {
+    kt_int size = kt_list_size(list);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    if (index < 0 || index > size) {
+        kt_index_out_of_bounds(index, size);
+        return NULL;
+    }
+    KRef iterator = kt_list_iterator(list);
+    /* A read-only list's and an enum's entries' iterators implement `Iterator` alone; this one
+       is a `ListIterator` too. The growable list's already is. */
+    if (iterator->header.type == &kt_type_list_iterator ||
+        iterator->header.type == &kt_type_abstract_list_iterator) {
+        iterator->header.type = &kt_type_read_only_list_iterator;
+    }
+    ((KListIterator *)iterator)->at = index;
+    return iterator;
+}
+
+KRef kt_list_list_iterator_from_start(KRef list) {
+    return kt_list_list_iterator(list, 0);
 }
 
 /* `cursor < size`, as Kotlin/Native's `ArrayList` iterator answers it (`Itr.hasNext` in the
