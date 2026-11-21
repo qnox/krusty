@@ -135,16 +135,7 @@ const REIFIED_SUPERTYPE: &str =
 #[test]
 fn an_object_whose_supertype_names_a_reified_parameter_is_regenerated_like_kotlinc() {
     let classes = common::classes_against_kotlinc_module(&[("Reified.kt", REIFIED_SUPERTYPE)]);
-    assert_eq!(
-        classes.krusty.keys().collect::<Vec<_>>(),
-        classes.reference.keys().collect::<Vec<_>>()
-    );
-    for name in classes.reference.keys() {
-        assert!(
-            classes.krusty.get(name) == classes.reference.get(name),
-            "{name} differs from kotlinc's bytes"
-        );
-    }
+    assert_eq!(classes.differences(), Vec::<String>::new());
 }
 
 #[test]
