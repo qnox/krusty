@@ -468,6 +468,13 @@ the same release-inheritance rule as the box inventories.
 Regenerate a plugin's lists with
 `KRUSTY_BLESS_BOX_EXPECTATIONS=1 ./run-tests.sh --test conformance plugin_box_corpora_match`.
 
+`scripts/provision-plugin-jars.sh [version]` fetches every Maven jar the descriptors name (the reference
+plugin jar and the runtime jars the distribution does not ship) into `KRUSTY_DEPS_CACHE` (`$HOME/.cache/krusty-deps` when unset, the
+same default the tests read; export one value for both), with
+retries, and fails when one cannot be fetched. A test process fetches a missing jar lazily under one
+shared download budget, so a slow transfer there starves every later case; the conformance rows run
+this script first, with a cache keyed by the descriptors.
+
 ## CLI Corpus Ratchet
 
 `kotlin_cli_jvm_conformance` (in the `conformance` binary) runs Kotlin's own command-line test
