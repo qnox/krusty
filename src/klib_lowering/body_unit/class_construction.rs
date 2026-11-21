@@ -810,14 +810,18 @@ impl<'u, 's> Linker<'u, 's> {
             .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
         for (body, implemented) in &inherited {
             // The inherited body belongs to a superclass this unit materialized; its member may
-            // not be declared yet when no body calls it (`Itr.remove` under `KeysItr`).
+            // not be declared yet when no body calls it (`Itr.remove` under `KeysItr`). A body an
+            // earlier unit emitted is that unit's export, declared with the superclass there.
             let from_class = matches!(
                 self.sources.bodies.member_owner(body),
                 crate::klib_libraries::LocatedMember::One { class, .. }
                     if crate::metadata::semantic::class_kind(class.base.flags)
                         == crate::libraries::TypeKind::Class
             );
-            if from_class && self.declared_member(body).is_none() {
+            if from_class
+                && self.declared_member(body).is_none()
+                && !self.sources.externals.contains_key(body)
+            {
                 if let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) {
                     let selected = callables[0];
                     let (arena, function) =
