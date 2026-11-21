@@ -84,7 +84,6 @@ basics/unchecked_cast5.kt
 basics/unchecked_cast6x.kt
 basics/unchecked_cast7.kt
 basics/unchecked_cast9.kt
-basics/unit4.kt
 bce/customGetter.kt
 bce/delegatedProperty.kt
 bce/differentArrays.kt
@@ -1299,8 +1298,6 @@ inlineClasses/defaultParameterValues/inlineClassPrimaryConstructorGeneric.kt
 inlineClasses/defaultParameterValues/inlineClassSecondaryConstructorGeneric.kt
 inlineClasses/dnnInValue.kt
 inlineClasses/equalsEvaluationOrderPrimitiveGeneric.kt
-inlineClasses/funInterface/mangledSamWrappers.kt
-inlineClasses/funInterface/mangledSamWrappersGeneric.kt
 inlineClasses/functionNameMangling/reflectionForFunctionWithMangledName.kt
 inlineClasses/functionNameMangling/reflectionForFunctionWithMangledNameGeneric.kt
 inlineClasses/functionNameMangling/reflectionForPropertyOfInlineClassType.kt
