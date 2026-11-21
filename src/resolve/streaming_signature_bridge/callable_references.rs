@@ -23,10 +23,7 @@ impl ProductionSignatureSemantics<'_> {
         receiver: crate::fir::ResolvedTy,
         unbound: bool,
         expected: &'static crate::types::FnSig,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         candidates.retain(|candidate| candidate.kind == crate::libraries::FnKind::Extension);
         for candidate in &mut candidates {
@@ -83,10 +80,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         candidates: Vec<crate::libraries::FunctionInfo>,
         expected: &'static crate::types::FnSig,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let selected =
             self.applicable_receiverless_reference_types(scope, candidates, expected, demand)?;
@@ -103,10 +97,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         candidates: Vec<crate::libraries::FunctionInfo>,
         expected: &'static crate::types::FnSig,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Vec<Ty>, crate::fir::DiagnosticId> {
         let mut candidates_with_finalized_signatures = Vec::with_capacity(candidates.len());
         for mut candidate in candidates {

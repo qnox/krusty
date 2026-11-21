@@ -170,7 +170,8 @@ impl Runtime {
             string,
             object_equals,
         );
-        let callable_references = CallableReferences::declare(module, &objects, object_equals);
+        let callable_references =
+            CallableReferences::declare(module, &objects, object_equals, references);
         let string_concat = module.declare();
         let hashing = Hashing::declare(module);
         let class_tokens = ClassTokens::declare(
@@ -279,7 +280,7 @@ impl Runtime {
             .struct_new(self.string);
     }
 
-    fn ascii_constant(&mut self, module: &mut Module, code: &mut Code, text: &str) {
+    pub(crate) fn ascii_constant(&mut self, module: &mut Module, code: &mut Code, text: &str) {
         let units = text.encode_utf16().collect::<Vec<_>>();
         self.string_constant(module, code, &units);
     }

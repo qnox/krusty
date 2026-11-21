@@ -15,7 +15,6 @@
 //! AST vs IR (see the doc): declaration/supertype generation belongs before type checking so
 //! generated symbols resolve. Body and expression rewriting belongs at the IR level.
 
-pub mod assignment;
 pub mod atomicfu;
 pub mod class_metadata;
 pub mod cli;
@@ -23,6 +22,7 @@ pub mod compose;
 mod convention;
 pub mod deps;
 pub mod parcelize;
+pub mod plugin_order;
 mod plugin_release;
 pub use plugin_release::PluginRelease;
 pub mod registry;
@@ -1094,7 +1094,7 @@ fn triggered(ir: &IrFile, plugins: &registry::NativePlugins, ctx: &PluginContext
     });
     uses_serialization
         || ir.compose.is_some()
-        || ir.atomicfu.is_some()
+        || ir.plugin_facts.contains::<atomicfu::AtomicfuFileFacts>()
         || ir.parcelize.is_some()
         || !ctx
             .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))

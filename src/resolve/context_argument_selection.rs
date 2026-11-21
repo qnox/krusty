@@ -121,7 +121,7 @@ impl super::Checker<'_> {
             // A narrowed receiver keeps its actual receiver-path identity. A lexical context
             // parameter with an escaped `this` name must not become that receiver's flow proof.
             let narrowed_receiver = self
-                .this_narrow
+                .current_receiver_narrowing(scope)
                 .or_else(|| self.lookup_path_narrowing(scope, &self.current_receiver_path(scope)?));
             if let Some(actual) = narrowed_receiver.filter(|actual| matches(*actual, want)) {
                 let receiver = self
