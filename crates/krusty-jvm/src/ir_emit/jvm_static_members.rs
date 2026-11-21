@@ -327,10 +327,12 @@ impl Emitter<'_> {
     /// Whether `expression` reads a static member's receiver value: the singleton's instance
     /// field, which a `getstatic` loads, as kotlinc loads `INSTANCE` for `this`.
     pub(super) fn reads_singleton_receiver(&self, expression: ExprId) -> bool {
-        matches!(
-            self.ir.expr(expression),
-            IrExpr::GetValue(value) if self.singleton_receiver_value(*value).is_some()
-        )
+        match self.ir.expr(expression) {
+            IrExpr::GetValue(value) => self.singleton_receiver_value(*value).is_some(),
+            // Naming the instance is loading it, as kotlinc does for the `this` it stands for.
+            IrExpr::SingletonValue { .. } => true,
+            _ => false,
+        }
     }
 
     /// Whether `expression` reads a local value or parameter: no code a discarded receiver must
