@@ -78,15 +78,18 @@ impl<'a> FileLowering<'a> {
         class: ClassId,
         base: &str,
     ) -> Result<(DataId, Option<String>), Unsupported> {
-        // A support unit names the descriptors of the dependency classes a source file extends,
-        // which that file's descriptors point at as their superclass's, and of the objects whose
-        // single instance it hands to other files, which may ask that instance its class.
+        // A support unit names the descriptor of every library classifier it materializes. Each
+        // class is materialized once in the program, so any later unit that extends it, asks an
+        // object its class, or checks `is`/`as` against it (an inlined body may test a class the
+        // source never names) links this one definition.
         let named = match self.unit_kind {
             krusty::backend::CheckedIrUnitKind::Source => {
                 !self.ir.local_class_name_provenance.contains_key(&class)
             }
             krusty::backend::CheckedIrUnitKind::DependencySupport => {
-                self.exported.contains(&class) || self.exports_singleton(class)
+                self.dependency_signatures.classifier(class).is_some()
+                    || self.exported.contains(&class)
+                    || self.exports_singleton(class)
             }
         };
         if !named {
