@@ -139,3 +139,26 @@ fn a_superclass_no_file_declares_is_declined_unless_the_target_owns_it() {
     .expect("tables");
     assert_eq!(owned.table(error).superclass, None);
 }
+
+#[test]
+fn a_value_classs_own_member_that_overrides_nothing_takes_no_table_slot() {
+    // Every support unit that emits some of a value class's members must lay its table out
+    // alike, so a member no one overrides is called directly and carries no slot.
+    let mut plain = IrFile::default();
+    let ordinary = class(&mut plain, "Box", "kotlin/Any", 0);
+    add_method(
+        &mut plain,
+        ordinary,
+        function("own", "Box", vec![], Ty::Int, false),
+    );
+    let mut value = IrFile::default();
+    let boxed = class(&mut value, "Box", "kotlin/Any", 0);
+    value.classes[boxed as usize].is_value = true;
+    add_method(
+        &mut value,
+        boxed,
+        function("own", "Box", vec![], Ty::Int, false),
+    );
+    let slots = |ir: &IrFile, class| tables(ir).expect("tables").table(class).vtable.len();
+    assert_eq!(slots(&plain, ordinary), slots(&value, boxed) + 1);
+}
