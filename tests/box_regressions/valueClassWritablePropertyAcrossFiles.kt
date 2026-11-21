@@ -26,7 +26,8 @@ fun box(): String {
     val count = Count(7)
     wrap.stored = count
     if (sink.last != count) return "fail setter boxes"
-    if (wrap.stored != count) return "fail getter keeps the box"
+    if (wrap.stored !is Count) return "fail getter keeps the box"
+    if (wrap.stored != count) return "fail getter value"
     wrap.total = 5
     if (wrap.total != 5) return "fail primitive property"
     if (sink.last != 5) return "fail stored primitive"
