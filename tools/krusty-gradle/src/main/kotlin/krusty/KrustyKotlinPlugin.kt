@@ -228,6 +228,7 @@ private fun replaceKotlinJvmCompiles(
             compileTaskPath.set(kotlinTask.path)
             compilerArguments.set(kotlincArguments)
             pluginRefusals.set(request.map(KotlincRequest::refusals))
+            toolchainRefusals.convention(emptyList())
             compilerPluginClasspath.from(kotlinTask.pluginClasspath)
             compilerPluginOptions.set(compilerPluginArguments)
             kotlinPluginVersion.set(pluginVersion)
@@ -323,18 +324,30 @@ private fun replaceKotlinJvmCompiles(
             val selectedJavaVersion = launcher
                 .map { it.metadata.languageVersion.asInt().toString() }
                 .orElse(project.provider { JavaVersion.current().majorVersion })
+            val kotlinJavaVersion = kotlinTask.kotlinJavaToolchainProvider
+                .flatMap { it.javaVersion }
+                .map { it.majorVersion }
+                .orElse(selectedJavaVersion)
             for (compilation in compilations) {
                 compilation.configure {
                     jdkHome.set(selectedJdkHome)
                     javaVersion.set(selectedJavaVersion)
-                    kotlinJavaVersion.set(
-                        kotlinTask.kotlinJavaToolchainProvider
-                            .flatMap { it.javaVersion }
-                            .map { it.majorVersion }
-                            .orElse(selectedJavaVersion),
-                    )
+                    this.kotlinJavaVersion.set(kotlinJavaVersion)
                 }
             }
+            // KGP compiles against the Kotlin task's own Java toolchain (`kotlinJavaToolchain`),
+            // which defaults to the project's. Its JDK home is no public KGP API, so a compile that
+            // sets a different one is left to kotlinc, which compiles it against that JDK.
+            supportCheck.configure {
+                toolchainRefusals.set(
+                    kotlinJavaVersion.zip(selectedJavaVersion) { kotlin, java ->
+                        listOfNotNull(kotlinJavaToolchainRefusal(kotlin, java))
+                    },
+                )
+            }
+            // KGP checks the Kotlin JVM target against the Java task's targetCompatibility, whose
+            // convention follows `options.release`. It is read as a value: a mapped task provider
+            // would make the compile depend on the Java task, which depends on the compile.
             if (android) {
                 // An Android variant is no Java source set. kotlinc reads the Java sources the
                 // variant's javac task compiles, generated ones (BuildConfig, AIDL) included; that
@@ -348,12 +361,7 @@ private fun replaceKotlinJvmCompiles(
                 for (compilation in compilations) {
                     compilation.configure {
                         javaSourceFiles.from(javaCompile.map { it.source })
-                        javaTarget.set(
-                            javaCompile.flatMap { task ->
-                                task.options.release.map { it.toString() }
-                                    .orElse(project.provider { task.targetCompatibility })
-                            },
-                        )
+                        javaTarget.set(javaCompile.flatMap { task -> project.provider { task.targetCompatibility } })
                     }
                 }
             }
@@ -364,12 +372,7 @@ private fun replaceKotlinJvmCompiles(
                     for (compilation in compilations) {
                         compilation.configure {
                             javaSourceFiles.from(sourceSet.allJava)
-                            javaTarget.set(
-                                javaCompile.flatMap { task ->
-                                    task.options.release.map { it.toString() }
-                                        .orElse(project.provider { task.targetCompatibility })
-                                },
-                            )
+                            javaTarget.set(javaCompile.flatMap { task -> project.provider { task.targetCompatibility } })
                         }
                     }
                 }
@@ -467,12 +470,20 @@ abstract class KrustyCompilation : DefaultTask() {
     @get:PathSensitive(PathSensitivity.NONE)
     abstract val binary: RegularFileProperty
 
-    /** The Kotlin and Java sources krusty compiles, in path order. */
+    /**
+     * The Kotlin and Java sources krusty compiles, in path order. None without a Kotlin source:
+     * KGP's task then has no source and compiles nothing, so neither Java sources nor the JVM
+     * target are checked.
+     */
     protected fun sources(): List<File> {
-        validateJvmTargets(kotlinTarget.get(), javaTarget.get(), targetValidationMode.get()) {
-            logger.warn(it)
-        }
         val kotlinSources = sourceFiles.asFileTree.files.map(::normalized).sortedBy(File::getAbsolutePath)
+        if (kotlinSources.isEmpty()) return emptyList()
+        jvmTargetMismatch(kotlinTarget.get(), javaTarget.get())?.let { mismatch ->
+            when (targetValidationMode.get()) {
+                "ERROR" -> throw GradleException(mismatch)
+                "WARNING" -> logger.warn(mismatch)
+            }
+        }
         val unsupported = kotlinSources.filter { it.extension != "kt" }
         if (unsupported.isNotEmpty()) {
             throw GradleException(
@@ -509,11 +520,9 @@ abstract class KrustyCompilation : DefaultTask() {
                 arguments.add("-Xfragment-refines=" + fragmentRefines.get().joinToString(","))
             }
         }
-        if (javaVersion.get() != kotlinJavaVersion.get()) {
-            throw GradleException(
-                "Kotlin task Java ${kotlinJavaVersion.get()} differs from Gradle Java toolchain ${javaVersion.get()}",
-            )
-        }
+        // The support check leaves such a compile to kotlinc; krusty never compiles it against
+        // another JDK.
+        kotlinJavaToolchainRefusal(kotlinJavaVersion.get(), javaVersion.get())?.let { throw GradleException(it) }
         val pluginVersion = supportedKotlinPluginVersion(kotlinPluginVersion.get())
         arguments.add("-Xkotlin-reference-version=$pluginVersion")
         if ("-no-jdk" !in arguments) {
@@ -725,6 +734,10 @@ abstract class KrustySupportCheckTask @Inject constructor(
     @get:Input
     abstract val pluginRefusals: ListProperty<String>
 
+    /** Why krusty cannot compile against the Kotlin task's Java toolchain; empty when it can. */
+    @get:Input
+    abstract val toolchainRefusals: ListProperty<String>
+
     @get:Classpath
     abstract val compilerPluginClasspath: ConfigurableFileCollection
 
@@ -743,7 +756,7 @@ abstract class KrustySupportCheckTask @Inject constructor(
 
     @TaskAction
     fun check() {
-        val refusedByPlugin = pluginRefusals.get()
+        val refusedByPlugin = pluginRefusals.get() + toolchainRefusals.get()
         if (refusedByPlugin.isNotEmpty()) {
             record(refusedByPlugin)
             return
@@ -811,16 +824,29 @@ private fun pluginOptionArguments(configs: List<CompilerPluginConfig>): List<Str
         }
     }
 
-private fun validateJvmTargets(kotlin: String, java: String, mode: String, warn: (String) -> Unit) {
-    fun normalized(value: String): String = value.removePrefix("1.")
-    if (normalized(kotlin) == normalized(java) || mode == "IGNORE") return
-    val message = "Kotlin JVM target $kotlin differs from Java target $java"
-    if (mode == "WARNING") {
-        warn(message)
-    } else {
-        throw GradleException(message)
+/**
+ * KGP's check of a Kotlin JVM target against its Java compile task's `targetCompatibility`: the
+ * Java value is normalized by KGP's own table, the Kotlin one is compared as it is.
+ */
+internal fun jvmTargetMismatch(kotlin: String, java: String): String? {
+    val normalizedJava = when (java) {
+        "6" -> "1.6"
+        "7" -> "1.7"
+        "8" -> "1.8"
+        "1.9" -> "9"
+        else -> java
     }
+    return if (normalizedJava == kotlin) null else "Kotlin JVM target $kotlin differs from Java target $java"
 }
+
+/** Why krusty cannot compile against a Kotlin task's own Java toolchain, or null when it can. */
+internal fun kotlinJavaToolchainRefusal(kotlinJava: String, gradleJava: String): String? =
+    if (kotlinJava == gradleJava) {
+        null
+    } else {
+        "Kotlin task Java toolchain $kotlinJava differs from Gradle Java toolchain $gradleJava, " +
+            "whose JDK is the only one krusty receives"
+    }
 
 /**
  * The kotlinc arguments krusty receives for a compile, derived from its structured task inputs and
