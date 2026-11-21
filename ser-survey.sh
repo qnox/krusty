@@ -4,7 +4,7 @@
 set -u
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 KR="$ROOT/target/release/krusty"
-CORPUS="$ROOT/target/cache/ser-corpus/2.4.0/plugins/kotlinx-serialization/testData/boxIr"
+CORPUS="$ROOT/target/cache/plugin-corpus/serialization/2.4.0/plugins/kotlinx-serialization/testData/boxIr"
 STDLIB="$ROOT/target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-stdlib.jar"
 KTEST="$ROOT/target/cache/kotlinc/2.4.0/kotlinc/lib/kotlin-test.jar"
 # krusty, like kotlinc, synthesizes serializers only when the plugin is requested.
