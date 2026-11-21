@@ -116,11 +116,16 @@ enum Operation {
     StringGet,
     /// The order of a string and another (`String.compareTo`).
     StringCompare,
+    /// The characters of a string between two indices (`String.subSequence`).
+    StringSubSequence,
     /// The order of the value a box holds and the value another box of its class holds
     /// (`Int.compareTo(Int)`).
     Compare,
     /// A builder member the runtime realizes (`StringBuilder.append(Char)`).
     Builder(BuilderMember),
+    /// The builder's entry for a member it does not realize while no builder exists: nothing can
+    /// call it, and a program constructing a builder declines a call through the member.
+    Unreachable,
     /// A call of the runtime function realizing a list member (`ArrayList.add(E)`), which takes
     /// the member's parameters, this many with the receiver, as they are carried. With `bound`,
     /// the index the member takes first must stay within it, or the runtime
@@ -240,6 +245,9 @@ impl Runtime {
             }
         }
         if let Some(operation) = string {
+            if matches!(operation, Operation::StringSubSequence) {
+                self.string_sub_sequence(module, classifiers)?;
+            }
             let function =
                 self.define_implementation(module, member, Receiver::String, operation)?;
             self.objects
@@ -261,7 +269,20 @@ impl Runtime {
                     self.objects.interfaces.implement(class, member, function)?;
                 }
                 Some(Err(reason)) => match class {
-                    RuntimeClass::StringBuilder => self.unanswered_builder_member(member, reason),
+                    RuntimeClass::StringBuilder => {
+                        let function = self.define_implementation(
+                            module,
+                            member,
+                            Receiver::Runtime,
+                            Operation::Unreachable,
+                        )?;
+                        self.objects.interfaces.implement(
+                            self.string_builders.class,
+                            member,
+                            function,
+                        )?;
+                        self.unanswered_builder_member(member, reason);
+                    }
                     // A list member the runtime does not realize keeps the empty slot it had
                     // before the list answered any interface member. Declining it would decline
                     // every program constructing a list and reaching, say, `MutableList.set`
@@ -398,6 +419,18 @@ impl Runtime {
                     .local_get(1)
                     .ref_cast(false, HeapType::Concrete(self.string))
                     .call(compare);
+            }
+            (Receiver::String, Operation::StringSubSequence) => {
+                let slice = self
+                    .defined_string_sub_sequence()
+                    .ok_or("a string slice implemented before its function")?;
+                code.ref_cast(false, HeapType::Concrete(self.string))
+                    .local_get(1)
+                    .local_get(2)
+                    .call(slice);
+            }
+            (Receiver::Runtime, Operation::Unreachable) => {
+                code.unreachable();
             }
             (Receiver::Box(form), Operation::Convert(to)) => {
                 form.emit_unbox(&mut code);
@@ -596,6 +629,13 @@ fn operation(
                 && *results == [ValType::I32] =>
         {
             Ok(Operation::StringCompare)
+        }
+        (Representation::String, Some(BackendCompilerIntrinsic::StringSubSequence))
+            if *declaration.params == [Ty::Int, Ty::Int]
+                && params[1..] == [ValType::I32, ValType::I32]
+                && *results == [crate::objects::REFERENCE] =>
+        {
+            Ok(Operation::StringSubSequence)
         }
         (_, Some(operation)) => Err(format!(
             "a library member {} overrides as {operation:?}",
