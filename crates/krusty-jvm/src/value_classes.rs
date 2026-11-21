@@ -835,18 +835,18 @@ pub(crate) fn lower_value_classes(
                 f.name = mangled;
                 renamed_functions.insert(fid as u32);
             }
-            if lower_value_member {
+            // The carrier takes `this`'s slot zero, which keeps its value-class identity so
+            // boundaries box `this` as `X`; a computed accessor is already static from synthesis.
+            if lower_value_member || realized_members.accessors.contains_key(&(fid as u32)) {
                 let owner = f
                     .dispatch_receiver
-                    .expect("a value-class member has a dispatch receiver");
-                let carrier = under.get(&owner).copied().unwrap_or(Ty::Error);
-                parameter_guards::prepend_carrier(f, carrier);
-                f.is_static = true;
-                lowered_value_members.insert(fid as u32);
-                // The former `this` and the new explicit carrier are both slot zero. Source value
-                // parameters consequently retain their existing slots (1..). Keep the slot's semantic
-                // value-class identity: its function parameter independently carries the physical `U`,
-                // while representation boundaries still need to box `this` as `X`, never as U's wrapper.
+                    .expect("a value-class member has a receiver");
+                if lower_value_member {
+                    let carrier = under.get(&owner).copied().unwrap_or(Ty::Error);
+                    parameter_guards::prepend_carrier(f, carrier);
+                    f.is_static = true;
+                    lowered_value_members.insert(fid as u32);
+                }
                 slot_types[fid].insert(0, Ty::obj_name(owner));
             }
         }
