@@ -653,6 +653,67 @@ impl KlibDeclarationBodies {
         self.libraries[library].file_local_origin(signature)
     }
 
+    /// The public identity the file-scoped composite `signature` of `module` wraps.
+    pub(crate) fn module_file_composite_public(
+        &self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<&crate::metadata::id_signature::KlibPublicIdSignature> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].file_composite_public(signature)
+    }
+
+    /// The file-scoped signature of `module` that wraps the public identity `public`.
+    pub(crate) fn module_file_composite_of(
+        &self,
+        module: &str,
+        public: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> Option<&KlibIrSignature> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].file_composite_of(public)
+    }
+
+    /// The functions a class private to its file inherits under the file-scoped composite
+    /// `callee` of `module`, or `None` when `callee` is no such fake override.
+    ///
+    /// kotlinc's member ids hash the member's own mangled signature, never its owner, so the
+    /// inherited declaration is the one of a supertype that has the same member identity.
+    pub(crate) fn module_inherited_composite_functions(
+        &self,
+        module: &str,
+        callee: &KlibIrSignature,
+    ) -> Option<Vec<KlibIrSignature>> {
+        if self.module_local_function(module, callee).is_some() {
+            return None;
+        }
+        let member = self.module_file_composite_public(module, callee)?;
+        let owner = self.module_file_composite_of(module, &member.owner_class()?)?;
+        let (arena, class) = self.module_local_class(module, owner)?;
+        let mut matching = Vec::new();
+        let mut pending = arena.direct_supertype_signatures(class);
+        let mut seen = crate::fx_hash::HashSet::default();
+        while let Some(supertype) = pending.pop() {
+            if !seen.insert(supertype.clone()) {
+                continue;
+            }
+            if let KlibIrSignature::Public(class) = &supertype {
+                if let Some(inherited) = member.as_member_of(class) {
+                    let inherited = KlibIrSignature::Public(inherited);
+                    if self.module_public_function(module, &inherited).is_some() {
+                        matching.push(inherited);
+                    }
+                }
+            }
+            // A supertype this module does not serialize declares no member to inherit here.
+            if let Some((supertype_arena, supertype_class)) =
+                self.module_declared_class(module, &supertype)
+            {
+                pending.extend(supertype_arena.direct_supertype_signatures(supertype_class));
+            }
+        }
+        Some(matching)
+    }
+
     /// The public function `module` itself serializes under `signature`.
     pub(crate) fn module_public_function<'a>(
         &'a self,
@@ -1011,7 +1072,16 @@ impl KlibDeclarationBodies {
         };
         arena
             .call_symbols_in_body(function)
-            .filter_map(|symbol| declaration_signature(&symbol.signature))
+            .map(|symbol| {
+                // A call of a fake override of a class private to its file reaches the
+                // declaration that class inherits.
+                match self.module_inherited_composite_functions(&identity.module, &symbol.signature)
+                {
+                    Some(inherited) if inherited.len() == 1 => inherited[0].clone(),
+                    _ => symbol.signature.clone(),
+                }
+            })
+            .filter_map(|signature| declaration_signature(&signature))
             .filter_map(
                 |declaration| match self.linked_origin(&identity.module, &declaration) {
                     KlibCalleeOrigin::Exact(callee) => Some(callee),
@@ -1086,7 +1156,16 @@ impl KlibDeclarationBodies {
         let callables = inventory
             .callables
             .into_iter()
-            .filter_map(|symbol| declaration_signature(&symbol.signature))
+            .map(|symbol| {
+                // A call of a fake override of a class private to its file reaches the
+                // declaration that class inherits.
+                match self.module_inherited_composite_functions(&identity.module, &symbol.signature)
+                {
+                    Some(mut inherited) if inherited.len() == 1 => inherited.remove(0),
+                    _ => symbol.signature.clone(),
+                }
+            })
+            .filter_map(|signature| declaration_signature(&signature))
             .filter_map(
                 |declaration| match self.linked_origin(&identity.module, &declaration) {
                     KlibCalleeOrigin::Exact(callee) => Some(callee),

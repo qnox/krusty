@@ -54,6 +54,21 @@ pub struct KlibIrArena {
 }
 
 impl KlibIrArena {
+    /// The serialized signatures of the direct supertypes of `class`.
+    pub(crate) fn direct_supertype_signatures(&self, class: &KlibIrClass) -> Vec<KlibIrSignature> {
+        class
+            .supertypes
+            .iter()
+            .rev()
+            .filter_map(|&supertype| match self.ty(supertype) {
+                KlibIrType::Simple { classifier, .. } => Some(classifier.signature.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+impl KlibIrArena {
     pub fn expr(&self, id: KlibIrExprId) -> &KlibIrExpr {
         &self.exprs[id.index()]
     }

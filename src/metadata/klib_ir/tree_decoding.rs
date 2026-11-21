@@ -65,6 +65,9 @@ pub struct KlibIrModuleTrees {
     local_classes: HashMap<KlibIrSignature, (usize, KlibIrClassId)>,
     /// The container and id each file-local signature of this library serializes.
     file_local_origins: HashMap<KlibIrSignature, super::symbols::KlibFileLocalOrigin>,
+    /// The public identity a file-scoped composite signature wraps.
+    file_composite_publics:
+        HashMap<KlibIrSignature, crate::metadata::id_signature::KlibPublicIdSignature>,
     classes: super::class_index::KlibIrClassIndex,
 }
 
@@ -174,6 +177,25 @@ impl KlibIrModuleTrees {
         }
         let package = self.file_package(*file)?;
         Some((package, tree.arena.class(class)))
+    }
+
+    /// The public identity the file-scoped composite `signature` wraps: a member of a class
+    /// private to its file that no declaration of the library defines.
+    pub(crate) fn file_composite_public(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> Option<&crate::metadata::id_signature::KlibPublicIdSignature> {
+        self.file_composite_publics.get(signature)
+    }
+
+    /// The file-scoped signature that wraps the public identity `public`.
+    pub(crate) fn file_composite_of(
+        &self,
+        public: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> Option<&KlibIrSignature> {
+        self.file_composite_publics
+            .iter()
+            .find_map(|(signature, wrapped)| (wrapped == public).then_some(signature))
     }
 
     /// Every file-local class this library serializes, with the arena that owns it.
@@ -541,6 +563,9 @@ fn read_declaration_trees_from(
         module
             .file_local_origins
             .extend(file.signatures.take_origins());
+        module
+            .file_composite_publics
+            .extend(file.signatures.take_composites());
     }
     module.index()?;
     for (tree, function, identity) in prepared_roots {
