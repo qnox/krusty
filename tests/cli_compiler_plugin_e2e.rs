@@ -642,7 +642,40 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "@Composable fun Greeting(content: @Composable () -> Unit) {\nval saved = content\n}\n",
         &[],
         "3:13: error: krusty's Compose compiler plugin does not support a composable lambda \
-         parameter used other than by calling it or passing it to a composable call yet",
+         parameter used other than by calling it or passing it to a composable lambda parameter \
+         yet",
+    );
+    assert_compose_rejects(
+        "compose-plain-lambda-value",
+        "fun keep(content: @Composable () -> Unit) {\nval saved = content\n}\n",
+        &[],
+        "3:1: error: krusty's Compose compiler plugin does not support a composable lambda \
+         parameter used other than by calling it or passing it to a composable lambda parameter \
+         yet",
+    );
+    assert_compose_rejects(
+        "compose-plain-lambda-to-plain-parameter",
+        "fun keep(content: @Composable () -> Unit) {\nprintln(content)\n}\n",
+        &[],
+        "3:1: error: krusty's Compose compiler plugin does not support a composable lambda \
+         parameter used other than by calling it or passing it to a composable lambda parameter \
+         yet",
+    );
+    assert_compose_rejects(
+        "compose-capturing-lambda-to-plain-function",
+        "@Composable fun Show(text: String) {}\nfun keep(content: @Composable () -> Unit) {}\n\
+         @Composable fun Greeting(text: String) {\nkeep { Show(text) }\n}\n",
+        &[],
+        "6:6: error: krusty's Compose compiler plugin does not support a capturing composable \
+         lambda passed from a composable body to a function that is not composable yet",
+    );
+    assert_compose_rejects(
+        "compose-plain-capturing-lambda",
+        "@Composable fun Show(text: String) {}\nfun keep(content: @Composable () -> Unit) {}\n\
+         fun enter(text: String) {\nkeep { Show(text) }\n}\n",
+        &[],
+        "6:6: error: krusty's Compose compiler plugin does not support a composable lambda that \
+         captures a value, passed from a function that is not composable yet",
     );
     assert_compose_rejects(
         "compose-recursive-lambda",
@@ -724,6 +757,14 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "import lib.Frame\n@Composable fun Wrapper(content: @Composable () -> Unit) {\nFrame(content)\n}\n",
         "5:1: error: krusty's Compose compiler plugin does not support a composable lambda \
          parameter passed to a library composable yet",
+    );
+    assert_compose_library_call_rejects(
+        "compose-plain-library-forwarded-lambda",
+        "fun setContent(content: @Composable () -> Unit) {}\n",
+        "import lib.setContent\nfun host(content: @Composable () -> Unit) {\nsetContent(content)\n}\n",
+        "5:1: error: krusty's Compose compiler plugin does not support a composable lambda \
+         parameter of a function that is not composable passed to a function of another file or \
+         a library yet",
     );
     assert_compose_rejects(
         "compose-generic-value-class-field",
