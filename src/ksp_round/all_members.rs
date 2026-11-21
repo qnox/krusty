@@ -15,7 +15,7 @@
 
 use std::cell::RefCell;
 
-use krusty_plugin_ir::{
+use krusty_plugin_api::ksp::{
     KspClass, KspClassKind, KspClasspath, KspDeclaration, KspDeclarationOrigin, KspFile,
     KspFunction, KspFunctionKind, KspMember, KspModifier, KspOverridee, KspTypeDeclaration,
 };

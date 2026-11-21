@@ -63,6 +63,8 @@ pub struct KlibIrModuleTrees {
     local_functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
     /// File-local classes, meaningful only inside this library.
     local_classes: HashMap<KlibIrSignature, (usize, KlibIrClassId)>,
+    /// The container and id each file-local signature of this library serializes.
+    file_local_origins: HashMap<KlibIrSignature, super::symbols::KlibFileLocalOrigin>,
     classes: super::class_index::KlibIrClassIndex,
 }
 
@@ -145,6 +147,14 @@ impl KlibIrModuleTrees {
         let (tree, class) = *self.local_classes.get(signature)?;
         let arena = &self.trees[tree].arena;
         Some((arena, arena.class(class)))
+    }
+
+    /// What the serialized file-local `signature` records beside its table slot.
+    pub(crate) fn file_local_origin(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> Option<&super::symbols::KlibFileLocalOrigin> {
+        self.file_local_origins.get(signature)
     }
 
     /// The package of the top-level class private to its file that this library serializes
@@ -528,6 +538,9 @@ fn read_declaration_trees_from(
                 .files
                 .push(u32::try_from(index).expect("file count fits u32"));
         }
+        module
+            .file_local_origins
+            .extend(file.signatures.take_origins());
     }
     module.index()?;
     for (tree, function, identity) in prepared_roots {

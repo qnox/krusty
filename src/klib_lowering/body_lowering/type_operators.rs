@@ -53,12 +53,7 @@ impl BodyLowering<'_> {
                 if ty != target {
                     return Err(mismatch("a cast is typed apart from its target"));
                 }
-                // A cast to a non-null type also rejects `null`.
-                if target.is_nullable() {
-                    IrTypeOp::Cast
-                } else {
-                    IrTypeOp::CastNonNull
-                }
+                IrTypeOp::cast_to(target)
             }
             other => return unsupported(type_operator_name(other)),
         };

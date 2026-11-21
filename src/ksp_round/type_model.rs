@@ -1,7 +1,7 @@
 //! KSP's type model of a declaration header: resolved types become [`KspType`]s naming classifiers
 //! by KSP's qualified names and type parameters by their owner.
 
-use krusty_plugin_ir::{
+use krusty_plugin_api::ksp::{
     KspModifier, KspType, KspTypeArgument, KspTypeDeclaration, KspTypeParameter, KspVariance,
 };
 
@@ -313,7 +313,7 @@ mod tests {
     use crate::ast::Decl;
     use crate::diag::DiagSink;
     use crate::frontend::FrontendSpelled as Spelled;
-    use krusty_plugin_ir::{KspType, KspTypeArgument};
+    use krusty_plugin_api::ksp::{KspType, KspTypeArgument};
 
     /// Which levels of `List<String>`, or of `String` when `generic` is false, the top-level
     /// property `name` of `source` leaves unannotated: the type, then its argument.

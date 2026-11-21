@@ -322,6 +322,15 @@ pub(super) trait CallLinker {
 
     /// The function a file-local call invokes: a top-level function private to the lowered
     /// body's file, or a member of a file-local class. Template linkers keep the refusal.
+    /// The getter of an inherited property that a call of the fake override `callee` of a local
+    /// class stands for. `None` when `callee` is no such fake override.
+    fn inherited_getter(
+        &self,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<Option<crate::metadata::klib_ir::KlibIrSignature>> {
+        Ok(None)
+    }
+
     fn link_local_function(
         &mut self,
         _ir: &mut IrFile,
