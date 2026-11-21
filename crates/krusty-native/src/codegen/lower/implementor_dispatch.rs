@@ -282,6 +282,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 signature.name
             ));
         }
+        if let Some(reason) = self.file.unimplementable_interface_members.get(&identity) {
+            return Err(declined!("{reason}"));
+        }
         Ok((
             self.file.dependency_interface_number(identity),
             declared_member_params,
@@ -496,7 +499,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return None;
         }
         let declared = self.file.implementors_of(internal);
-        if declared.is_empty() {
+        // With no class of its own behind the type (a dependency body realized apart from the
+        // classes that inherit it), the interface stub still reaches every implementation record.
+        if declared.is_empty() && stub.is_none() {
             return None;
         }
         let implementors: Vec<ImplementorArm> = declared

@@ -1441,6 +1441,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.sources.callees.same_type(left, right)
     }
 
+    fn classifier_parameter_bounds(&self, owner: TypeName, index: usize) -> Vec<Ty> {
+        self.sources
+            .callees
+            .classifier_parameter_bounds(owner, index)
+    }
+
     fn link_constructor(
         &mut self,
         ir: &mut IrFile,
