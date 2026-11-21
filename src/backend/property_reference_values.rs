@@ -23,25 +23,16 @@ use crate::ir::{
     IrCheckedSubstitution, IrExpr, IrFile, IrFunction, IrLocalPropertyLayout, IrPropertyDispatch,
     IrPropertyFunctionReference, IrTypeOp,
 };
-use crate::types::{SemanticCallRole, Ty, TyKind};
+use crate::types::{Ty, TyKind};
 
 /// Realize every source `KProperty` reference of `ir` as a function value.
 ///
 /// A delegated property's `KProperty` argument is the delegate's metadata, not a source value,
 /// and stays checked.
 ///
-/// A mutable reference gets its write adapter only when the unit writes through some mutable
-/// reference. Each `set` member is named by a call through it, as `get` is, so a unit with no
-/// such call has no member a writer could implement, and a writer would make the property's
-/// setter an emission root of its own.
+/// A mutable reference gets its write adapter: another file of the program may write through it,
+/// and a producer's unit cannot tell, so the writer cannot depend on this unit's own calls.
 pub fn realize(ir: &mut IrFile) {
-    let writes = ir.semantic_call_roles.values().any(|role| {
-        matches!(
-            role,
-            SemanticCallRole::KotlinPropertyReferenceSet(_)
-                | SemanticCallRole::KotlinPropertyReferenceDelegateSet(_)
-        )
-    });
     for id in 0..ir.exprs.len() as ExprId {
         let IrExpr::Checked(checked) = ir.expr(id) else {
             continue;
@@ -73,7 +64,6 @@ pub fn realize(ir: &mut IrFile) {
             binding: *binding,
             bound,
             mutable: *mutable,
-            writable: *mutable && writes,
             contexts,
             substitutions: substitutions.clone(),
             function_type: *function_type,
@@ -91,8 +81,6 @@ struct Reference {
     /// The bound receiver, and whether it is the property's extension receiver.
     bound: Option<(ExprId, bool)>,
     mutable: bool,
-    /// The reference is mutable and the unit writes through some mutable reference.
-    writable: bool,
     /// The context values the reference site binds, in declaration order. The adapters take them
     /// as their leading captured parameters.
     contexts: Vec<ExprId>,
@@ -151,7 +139,7 @@ fn function_value(ir: &mut IrFile, reference: Reference) -> Option<IrExpr> {
     let own_from = shape.contexts.len() as u32 + u32::from(captured);
     let adapter = add_adapter(ir, params, signature.ret, body, own_from);
     let writer = reference
-        .writable
+        .mutable
         .then(|| writer(ir, &reference, &shape, captured))
         .flatten();
     Some(IrExpr::CallableReference(Box::new(IrCallableReference {

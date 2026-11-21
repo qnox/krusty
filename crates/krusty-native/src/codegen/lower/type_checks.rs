@@ -359,6 +359,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
     }
 
+    /// What a cast to `ty` is checked against: a type parameter is only its bound at run time.
+    fn cast_bound(ty: Ty) -> Ty {
+        match ty.non_null().kind() {
+            TyKind::TyParam(_, bound) => bound,
+            _ => ty,
+        }
+    }
+
     /// The descriptor a CAST to `ty` must be checked against, or `None` when the cast is a
     /// representation change rather than a question about an object.
     ///
@@ -373,10 +381,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // run time and exactly what kotlinc checks: `fun <T : CharSequence> f(x: Any?) = x as T`
         // rejects a non-`CharSequence` inside `f`, before the call site's own cast to the argument
         // it was given. An unbounded parameter bounds at `Any?`, where there is nothing to check.
-        let ty = match ty.non_null().kind() {
-            TyKind::TyParam(_, bound) => bound,
-            _ => ty,
-        };
+        let ty = Self::cast_bound(ty);
         let target = ty.non_null();
         if let Some(class) = target
             .obj_internal()
@@ -403,7 +408,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(descriptor) = self.checked_cast_target(ty)? else {
             return Ok(value);
         };
-        let helper = if ty.is_nullable() {
+        // The bound of a type parameter keeps its own nullability: `T : CharSequence?` admits null
+        // although the bare `T` does not say so.
+        let helper = if ty.is_nullable() || Self::cast_bound(ty).is_nullable() {
             "kt_cast"
         } else {
             "kt_cast_non_null"

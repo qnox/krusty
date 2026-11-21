@@ -1410,6 +1410,16 @@ impl Body<'_> {
         self.classifiers.is_subclassifier(array_list, interface)
     }
 
+    /// Whether the runtime's list iterator, whose class the program does not declare, is below the
+    /// library interface `interface`: it is a `MutableListIterator`, as `ArrayList`'s own is.
+    fn runtime_array_list_iterator_is_below(&self, interface: TypeName) -> bool {
+        let Some(iterator) = Ty::obj("kotlin/collections/MutableListIterator").obj_internal()
+        else {
+            return false;
+        };
+        self.classifiers.is_subclassifier(iterator, interface)
+    }
+
     /// Replace the reference on the stack with whether it is an instance of the library interface
     /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
     /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
@@ -1424,6 +1434,7 @@ impl Body<'_> {
                 .classifiers
                 .is_subclassifier(krusty::types::wk::string_builder(), interface),
             array_list: self.runtime_array_list_is_below(interface),
+            array_list_iterator: self.runtime_array_list_iterator_is_below(interface),
         };
         self.runtime
             .builtin_instances(interface, subtypes, laid_out);
@@ -1562,12 +1573,36 @@ impl Body<'_> {
                 }
                 (None, None) => match self.library_interface_of_type(tested) {
                     Some(interface) => self.library_interface_test(interface, nullable),
-                    None => {
-                        return Err(format!("a type test against `{}`", super::describe(tested)));
-                    }
+                    None => return self.cross_file_type_test(tested, nullable),
                 },
             },
         }
+        Ok(())
+    }
+
+    /// Replace the reference on the stack with whether it is an instance of `tested`, a class
+    /// another file of the module declares: the answer of the entry that file realizes, which
+    /// alone knows the class's layout. A null is an instance only of a nullable `tested`.
+    fn cross_file_type_test(&mut self, tested: Ty, nullable: bool) -> Result<(), Unsupported> {
+        let refused = || format!("a type test against `{}`", super::describe(tested));
+        let classifier = tested.non_null().obj_internal().ok_or_else(refused)?;
+        let entry = self
+            .calls
+            .instance(&krusty::backend::instance_links::InstanceEntry::TypeTest(
+                classifier,
+            ))
+            .ok_or_else(refused)?;
+        if !nullable {
+            self.code.call(entry);
+            return Ok(());
+        }
+        let value = self.local(REFERENCE);
+        self.code
+            .local_tee(value)
+            .call(entry)
+            .local_get(value)
+            .ref_is_null()
+            .op(OR32);
         Ok(())
     }
 
