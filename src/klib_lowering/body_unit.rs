@@ -40,6 +40,7 @@ mod class_construction;
 pub(crate) use class_construction::superclass_constructor_ordinal;
 mod constructor_linking;
 mod enum_materialization;
+mod fake_overrides;
 #[cfg(test)]
 mod initializer_capability_tests;
 mod inline_functions;
@@ -1358,6 +1359,10 @@ impl<'s> CallLinker for Linker<'_, 's> {
         callee: &KlibIrSignature,
     ) -> Result<super::same_library_class::LocalConstructor, KlibBodyDeclineReason> {
         self.link_constructor_of_local_class(ir, callee)
+    }
+
+    fn inherited_getter(&self, callee: &KlibIrSignature) -> fake_overrides::Inherited {
+        fake_overrides::inherited_getter(self, callee)
     }
 
     fn link_local_function(
