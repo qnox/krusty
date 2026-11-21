@@ -3508,8 +3508,8 @@ fn typed_suspension_operands(
                         None => crate::ir_emit::parse_physical_method_desc(descriptor)?.0,
                     }
                 }
-                // Realized into `Callee::Special` before this pass runs.
-                Callee::Super { .. } => return None,
+                // Realized into an ordinary call before this pass runs.
+                Callee::Super { .. } | Callee::ValueClassAdapter { .. } => return None,
                 Callee::Special {
                     owner, descriptor, ..
                 } => {
