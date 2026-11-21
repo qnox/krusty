@@ -162,8 +162,11 @@ pub(super) fn lower_file(
         tables: module_tables,
     } = state;
     for property in &ir.statics {
-        if property.owner.is_some() {
-            return Err("a static property of a class".to_string());
+        // An owner places a companion's `const val` on its outer class for the JVM; a Wasm global
+        // has no class to be placed in. Only when its initializer runs could depend on the owner,
+        // and a constant's cannot observe it. Any other property a class owns still declines.
+        if property.owner.is_some() && !property.is_const {
+            return Err("a non-`const` static property of a class".to_string());
         }
         if property.is_lateinit {
             return Err("a `lateinit` top-level property".to_string());
