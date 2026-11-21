@@ -43,13 +43,10 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         if !visited.insert(identity.clone()) {
             continue;
         }
+        let emitted = bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
         classifier_roots.extend(bodies.type_classifiers_in_body(&identity));
-        classifier_roots.extend(
-            bodies.emitted_body_classifiers(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
-        );
-        for (signature, name) in
-            bodies.emitted_body_sam_classifiers(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
-        {
+        classifier_roots.extend(emitted.hierarchy_roots);
+        for (signature, name) in emitted.sam_classifiers {
             let key = (identity.module.clone(), signature.clone());
             if sam_declarations.contains_key(&key) {
                 continue;
@@ -62,17 +59,11 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         }
         pending.extend(bodies.direct_callees(&identity));
         pending.extend(bodies.overridden_callables(&identity));
-        pending.extend(
-            bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
-        );
+        pending.extend(emitted.callables);
 
         // An object the body reads as a value is materialized with its initialization and the
         // members dispatch reaches, as the emission closure walks it.
-        pending.extend(read_object_callees(
-            source,
-            bodies,
-            &bodies.emitted_body_objects(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
-        ));
+        pending.extend(read_object_callees(source, bodies, &emitted.objects));
 
         // A reached constructor's initialization is serialized on its owning class. These are
         // declaration facts only: common class initialization still selects executable roots.
@@ -111,6 +102,11 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         let Some(selected) = realization.klib_body_callable() else {
             continue;
         };
+        // A continuation interception's call expands to its coroutine class's own interception.
+        match crate::klib_lowering::expansion_member(selected, bodies) {
+            Ok(member) => pending.extend(member),
+            Err(_) => return Err(external),
+        }
         semantic_types.extend(selected.params().iter().copied());
         semantic_types.push(selected.ret());
         semantic_types.extend(selected.type_parameters().iter().copied());

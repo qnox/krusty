@@ -833,9 +833,14 @@ dependencies = [
  "flate2",
  "krusty-cli",
  "krusty-jvm",
+ "krusty-names",
  "krusty-native",
+ "krusty-plugin-allopen",
+ "krusty-plugin-api",
+ "krusty-plugin-assignment",
  "krusty-plugin-host",
- "krusty-plugin-ir",
+ "krusty-plugin-noarg",
+ "krusty-plugin-sam-with-receiver",
  "krusty-test-modules",
  "krusty-wasm",
  "libc",
@@ -902,6 +907,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "krusty-names"
+version = "0.0.1"
+dependencies = [
+ "ahash",
+]
+
+[[package]]
 name = "krusty-native"
 version = "0.0.1"
 dependencies = [
@@ -915,17 +927,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "krusty-plugin-allopen"
+version = "0.0.1"
+dependencies = [
+ "krusty-plugin-api",
+]
+
+[[package]]
+name = "krusty-plugin-api"
+version = "0.0.1"
+dependencies = [
+ "krusty-names",
+]
+
+[[package]]
+name = "krusty-plugin-assignment"
+version = "0.0.1"
+dependencies = [
+ "krusty-plugin-api",
+]
+
+[[package]]
 name = "krusty-plugin-host"
 version = "0.0.1"
 dependencies = [
- "krusty-plugin-ir",
+ "krusty-plugin-api",
  "sha2",
  "zip",
 ]
 
 [[package]]
-name = "krusty-plugin-ir"
+name = "krusty-plugin-noarg"
 version = "0.0.1"
+dependencies = [
+ "krusty-plugin-api",
+]
+
+[[package]]
+name = "krusty-plugin-sam-with-receiver"
+version = "0.0.1"
+dependencies = [
+ "krusty-plugin-api",
+]
 
 [[package]]
 name = "krusty-test-modules"

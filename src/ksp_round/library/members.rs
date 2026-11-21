@@ -9,7 +9,7 @@
 //! modifiers from its facts: the visibility, the modality (an accessor's only when it is not
 //! `open`), `infix`, and `operator` together with `override`.
 
-use krusty_plugin_ir::{
+use krusty_plugin_api::ksp::{
     KspAccessor, KspAnnotation, KspDeclaration, KspDeclarationOrigin, KspFunction, KspFunctionKind,
     KspMember, KspModifier, KspOrigin, KspOverridee, KspParameter, KspProperty, KspType,
     KspTypeArgument, KspTypeSlot,

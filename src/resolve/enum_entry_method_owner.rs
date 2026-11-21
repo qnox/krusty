@@ -6,6 +6,26 @@ pub(super) fn for_entry(enum_owner: TypeName, entry: &str) -> TypeName {
     enum_owner.nested_child(entry)
 }
 
+/// Whether `declaration` is a method of an enum entry. Pass 1 publishes that header even when
+/// the enum is a local class; the checker reads it while walking the entry.
+pub(super) fn is_entry_method(
+    headers: &crate::fir::StreamedHeaderModule,
+    declaration: crate::fir::DeclarationId,
+) -> bool {
+    headers.stub(declaration).is_some_and(|stub| {
+        stub.kind == crate::fir::DeclarationKind::Function
+            && headers
+                .declarations
+                .anchor(declaration)
+                .and_then(|anchor| anchor.owner)
+                .is_some_and(|owner| {
+                    headers
+                        .stub(owner)
+                        .is_some_and(|owner| owner.kind == crate::fir::DeclarationKind::EnumEntry)
+                })
+    })
+}
+
 /// Authenticate the canonical semantic owner from the selected declared entry, never by decoding
 /// an expected physical name or treating the base enum as its anonymous subclass.
 pub(crate) fn owns_storage(

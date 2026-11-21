@@ -95,6 +95,13 @@ struct Started {
 }
 
 impl Started {
+    /// The module's bytes, once every slot the runtime declared has a body.
+    fn encode(&mut self) -> Vec<u8> {
+        self.runtime
+            .define_unreachable_list_value_members(&mut self.module);
+        self.module.encode()
+    }
+
     fn new(target: WasmTarget) -> Self {
         let mut module = Module::default();
         // The object model's types come first, so their indices are the ones `lower` names.
@@ -136,6 +143,10 @@ impl Backend for WasmBackend {
         Some(krusty::backend::CommonIrPreparation {
             counted_loops: COUNTED_LOOPS,
             enums: krusty::backend::enums::Contract::KotlinWasm,
+            // Every reference object is a function value (`crate::callable_references`), a
+            // `KProperty` one included: its entry reads the property, and its `get` forwards to
+            // that entry.
+            property_reference_values: true,
         })
     }
 
@@ -172,10 +183,11 @@ impl Backend for WasmBackend {
         ]
     }
 
-    /// The WASI stdlib's `StringBuilder.append(CharSequence?)` copies the sequence's `length`
-    /// indexed `Char`s; the JS one appends its `toString` (`crate::string_builders`).
+    /// Both stdlibs read an appended sequence's `length`: the WASI one copies that many indexed
+    /// `Char`s, and the JS one checks `appendRange`'s bounds against it before it appends the
+    /// sequence's `toString` (`crate::char_sequence_appends`).
     fn appends_char_sequences_by_index(&self) -> bool {
-        self.target == WasmTarget::Wasi
+        true
     }
 
     /// The runtime's `ArrayList` walks a collection argument with its `iterator()` and asks it
@@ -256,6 +268,11 @@ impl Backend for WasmBackend {
         krusty::backend::construction_entries::publish_constructors(
             &mut file.ir,
             (file.module_name, file.classifiers.module()),
+            &mut file.dependency_exports,
+        );
+        krusty::backend::construction_entries::publish_type_tests(
+            &mut file.ir,
+            file.classifiers.module(),
             &mut file.dependency_exports,
         );
         krusty::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
@@ -442,7 +459,7 @@ impl Backend for WasmBackend {
         );
         started.module.export_function("_start", start);
         vec![
-            (format!("{module_name}.wasm"), started.module.encode()),
+            (format!("{module_name}.wasm"), started.encode()),
             (
                 format!("{module_name}.mjs"),
                 started.host.loader(module_name).into_bytes(),

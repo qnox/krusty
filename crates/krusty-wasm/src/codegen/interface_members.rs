@@ -67,6 +67,13 @@ pub(super) fn accessor_types(ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
     }
 }
 
+/// The parameters and result of a property accessor of a value of type `ty` on a member extension
+/// whose receiver is `receiver`: the receiver comes first, then (for a setter) the value.
+fn extension_accessor_types(receiver: Option<Ty>, ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
+    let (value, result) = accessor_types(ty, setter);
+    (receiver.into_iter().chain(value).collect(), result)
+}
+
 /// What every recording of one file reads.
 pub(super) struct Recording<'a> {
     pub(super) ir: &'a IrFile,
@@ -119,23 +126,19 @@ pub(super) fn dependency_member(
     module: &mut Module,
     fact: &BackendCallableFact,
     role: MemberRole,
-) -> Option<DependencyMember> {
-    let identity = library_member_identity(fact, role)?;
-    if let Some(member) = interfaces.identified(&identity) {
-        return Some(DependencyMember {
-            member,
-            library: false,
-        });
-    }
-    let signature = library_member_signature(fact, role).ok()?;
-    let owner = library_member_owner(fact)?;
-    let member = interfaces
-        .library(module, owner, &identity, signature)
-        .ok()?;
-    Some(DependencyMember {
+) -> Result<Option<DependencyMember>, Unsupported> {
+    let Some(identity) = library_member_identity(fact, role) else {
+        return Ok(None);
+    };
+    let published = interfaces.identified(&identity).is_some();
+    let signature = library_member_signature(fact, role)?;
+    let owner = library_member_owner(fact)
+        .ok_or("an interface member without its checked declaring classifier")?;
+    let member = interfaces.library(module, owner, &identity, signature)?;
+    Ok(Some(DependencyMember {
         member,
-        library: true,
-    })
+        library: !published,
+    }))
 }
 
 /// Publish the identities of the file's interface members and record what its classes implement.
@@ -251,11 +254,13 @@ fn publish_identities(
         let declaration = &ir.functions[*function as usize];
         let signature = member_signature(&declaration.params, declaration.ret)?;
         let member = numbered(recording, program, number, signature)?;
-        program
-            .runtime
-            .objects
-            .interfaces
-            .publish(member_identity(identity), member)?;
+        program.runtime.objects.interfaces.publish(
+            member_identity(identity),
+            declaration
+                .dispatch_receiver
+                .ok_or("an interface publication without its checked declaring owner")?,
+            member,
+        )?;
     }
     let mut properties = ir.local_property_layouts.iter().collect::<Vec<_>>();
     properties.sort_unstable_by_key(|(property, _)| **property);
@@ -300,11 +305,19 @@ fn publish_identities(
                 _ => continue,
             };
             let member = numbered(recording, program, number, signature)?;
-            program
-                .runtime
-                .objects
-                .interfaces
-                .publish(identity, member)?;
+            program.runtime.objects.interfaces.publish(
+                identity,
+                match layout {
+                    IrLocalPropertyLayout::Member { owner, .. }
+                    | IrLocalPropertyLayout::MemberExtension { owner, .. } => *owner,
+                    _ => {
+                        return Err(
+                            "an interface property publication without its declaring owner".into(),
+                        )
+                    }
+                },
+                member,
+            )?;
         }
     }
     Ok(())
@@ -794,23 +807,37 @@ impl FileRecorder<'_, '_, '_> {
                         }
                     }
                 }
-                let Some(member) = self.dependency_member(target, MemberRole::Function) else {
+                let Some(member) = self.dependency_member(target, MemberRole::Function)? else {
                     continue;
                 };
                 if self.implements(member.member) {
                     continue;
                 }
-                let implemented = match self.function_edge_implementation(
-                    owner,
-                    edge,
-                    numbered,
-                    (&edge.declared_parameters, edge.declared_result),
-                ) {
-                    Ok(Some(carried)) => self.implement_carried(member.member, carried),
-                    // An abstract class's abstract override implements nothing; each concrete
-                    // subclass's table holds the body.
-                    Ok(None) => continue,
-                    Err(reason) => Err(reason),
+                // A default the interface publishes, which the class does not override, is its own
+                // implementation: the exported body, not a slot of the class.
+                let implemented = if edge.implementation == edge.overridden
+                    && edge.implementation_function.is_some_and(|function| {
+                        ir.functions[function as usize].dispatch_receiver
+                            != Some(ir.classes[owner as usize].fq_name_id())
+                    }) {
+                    self.dependency_default_implementation(
+                        member,
+                        target,
+                        edge.implementation_function,
+                    )
+                } else {
+                    match self.function_edge_implementation(
+                        owner,
+                        edge,
+                        numbered,
+                        (&edge.declared_parameters, edge.declared_result),
+                    ) {
+                        Ok(Some(carried)) => self.implement_carried(member.member, carried),
+                        // An abstract class's abstract override implements nothing; each concrete
+                        // subclass's table holds the body.
+                        Ok(None) => continue,
+                        Err(reason) => Err(reason),
+                    }
                 };
                 self.settle(member, implemented)?;
             }
@@ -825,29 +852,13 @@ impl FileRecorder<'_, '_, '_> {
                     InheritedMemberName::PropertyGetter(_) => MemberRole::Getter,
                     InheritedMemberName::PropertySetter(_) => MemberRole::Setter,
                 };
-                let Some(member) = self.dependency_member(declaration, role) else {
+                let Some(member) = self.dependency_member(declaration, role)? else {
                     continue;
                 };
                 if self.implements(member.member) {
                     continue;
                 }
-                let function = self
-                    .recording
-                    .callables
-                    .callable(declaration)
-                    .and_then(|fact| fact.dependency_callable.as_ref())
-                    .and_then(|identity| self.program.callables.dependency(identity))
-                    .ok_or_else(|| {
-                        self.declined("a default a dependency's interface declares with no body")
-                    });
-                let implemented = match function {
-                    Ok(function) => self.record_implementation(
-                        member.member,
-                        function,
-                        DependencyImplementation::Function(function),
-                    ),
-                    Err(reason) => Err(reason),
-                };
+                let implemented = self.dependency_default_implementation(member, declaration, None);
                 self.settle(member, implemented)?;
             }
             current = self.classes.tables.table(owner).superclass;
@@ -888,6 +899,35 @@ impl FileRecorder<'_, '_, '_> {
             }
         }
         Ok(())
+    }
+
+    /// Record the body of the default `declaration` as what the class implements `member` with:
+    /// the function this file declares for it (`declared`), or else the one an earlier module
+    /// exported.
+    fn dependency_default_implementation(
+        &mut self,
+        member: DependencyMember,
+        declaration: krusty::fir::ExternalCallableId,
+        declared: Option<krusty::ir::FunId>,
+    ) -> Result<(), Unsupported> {
+        let function = declared
+            .and_then(|function| self.recording.functions.get(function as usize).copied())
+            .flatten()
+            .or_else(|| {
+                self.recording
+                    .callables
+                    .callable(declaration)
+                    .and_then(|fact| fact.dependency_callable.as_ref())
+                    .and_then(|identity| self.program.callables.dependency(identity))
+            })
+            .ok_or_else(|| {
+                self.declined("a default a dependency's interface declares with no body")
+            })?;
+        self.record_implementation(
+            member.member,
+            function,
+            DependencyImplementation::Function(function),
+        )
     }
 
     /// The function `owner` implements the dependency member `edge` overrides with: its own or
@@ -968,7 +1008,7 @@ impl FileRecorder<'_, '_, '_> {
             let ResolvedPropertyOverrideTarget::External(target) = edge.overridden else {
                 continue;
             };
-            if !edge.overridden_is_interface || edge.declared_receiver.is_some() {
+            if !edge.overridden_is_interface {
                 continue;
             }
             let roles = [false, true]
@@ -980,7 +1020,7 @@ impl FileRecorder<'_, '_, '_> {
                 } else {
                     MemberRole::Getter
                 };
-                let Some(member) = self.dependency_member(target, role) else {
+                let Some(member) = self.dependency_member(target, role)? else {
                     continue;
                 };
                 if self.implements(member.member) {
@@ -1030,8 +1070,13 @@ impl FileRecorder<'_, '_, '_> {
                 }
             }
         };
-        let declared_types = accessor_types(edge.declared_type, setter);
-        let implemented_types = accessor_types(edge.implementation_type, setter);
+        let declared_types =
+            extension_accessor_types(edge.declared_receiver, edge.declared_type, setter);
+        let implemented_types = extension_accessor_types(
+            edge.implementation_receiver,
+            edge.implementation_type,
+            setter,
+        );
         let declared = member_signature(&declared_types.0, declared_types.1)?;
         let implemented = member_signature(&implemented_types.0, implemented_types.1)?;
         let placed = placed
@@ -1057,8 +1102,10 @@ impl FileRecorder<'_, '_, '_> {
         &mut self,
         target: krusty::fir::ExternalCallableId,
         role: MemberRole,
-    ) -> Option<DependencyMember> {
-        let fact = self.recording.callables.callable(target)?;
+    ) -> Result<Option<DependencyMember>, Unsupported> {
+        let Some(fact) = self.recording.callables.callable(target) else {
+            return Ok(None);
+        };
         dependency_member(
             &mut self.program.runtime.objects.interfaces,
             self.program.module,

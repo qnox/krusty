@@ -390,6 +390,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.file.type_descriptor(target)
     }
 
+    /// Check the erased `value` against `ty` as a cast to `ty` does, answering the value itself.
+    ///
+    /// A reference-held target the runtime names is a question about the object, so a value of
+    /// another class raises `ClassCastException` before the caller writes it. Any other target is a
+    /// representation change that the caller's own coercion realizes.
+    pub(super) fn check_erased_value(
+        &mut self,
+        value: Value,
+        ty: Ty,
+    ) -> Result<Value, Unsupported> {
+        let Some(descriptor) = self.checked_cast_target(ty)? else {
+            return Ok(value);
+        };
+        let helper = if ty.is_nullable() {
+            "kt_cast"
+        } else {
+            "kt_cast_non_null"
+        };
+        let descriptor = self.data_address(descriptor);
+        let checked = self.runtime_call(helper, &[any(), any()], any(), &[value, descriptor])?;
+        checked.ok_or_else(|| declined!("a `{helper}` that answers no value"))
+    }
+
     /// The descriptor an `is`/`!is` operation asks the runtime about.
     ///
     /// A checked function type names its semantic arity marker. Keep that substitution at the
@@ -863,9 +886,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         // `ArrayList()`, the runtime's growable list. Declared in no file either, like `Any` and
         // the throwables above, so the runtime allocates it rather than the generator laying one
-        // out. The capacity overload is a HINT with nothing observable depending on it; a copy
-        // constructor takes a collection and declines, because sharing that collection's storage
-        // would let a write through the new list reach it.
+        // out. The capacity overload is a HINT with nothing observable depending on it. The copy
+        // constructor takes any collection and walks it into storage of the new list's own, so a
+        // later write to either list is not seen by the other.
         if self.file.standard_collection_implementation(internal)
             == Some(super::classifier_shapes::StandardCollectionImplementation::List)
         {
@@ -884,6 +907,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         any(),
                         &[capacity],
                     )
+                }
+                ([argument], Some([only])) if only.is_reference() => {
+                    let elements = self.reference(*argument)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call("kt_mutable_list_copy_of", &[any()], any(), &[elements])
                 }
                 _ => Err(declined!("this constructor of `{name}`")),
             };

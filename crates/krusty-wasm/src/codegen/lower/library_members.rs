@@ -12,11 +12,12 @@
 //! entry its module exports. A published class dispatches through its producer-owned class table
 //! even when a concrete member also has an executable export, preserving virtual overrides.
 
+use crate::callable_references::{AccessorShape, PropertyAccess};
 use krusty::backend::interface_identity::property_member_identity;
 use krusty::backend::{BackendCallableFact, BackendPropertyFact, CheckedBackendCallables};
 use krusty::libraries::ExternalCallableKind;
 use krusty::libraries::MemberRealization;
-use krusty::types::{SemanticCallableOwner, TypeName};
+use krusty::types::{SemanticCallRole, SemanticCallableOwner, TypeName};
 
 use super::super::super::objects::{slot_field, REFERENCE};
 use super::super::interface_members::{accessor_types, member_signature, Signature};
@@ -101,16 +102,18 @@ pub(in crate::codegen) fn library_member_signature(
     match role {
         MemberRole::Function | MemberRole::Getter => member_signature(params, result),
         MemberRole::Setter => {
-            let (params, result) = accessor_types(result, true);
-            member_signature(&params, result)
+            // The getter's declared parameters are its extension receiver, if it has one, which
+            // the setter takes before the value.
+            let (value, result) = accessor_types(result, true);
+            member_signature(&[params, value.as_slice()].concat(), result)
         }
     }
 }
 
 /// Whether a call of `fact` with a dispatch receiver at `expression` goes through its library
 /// member: a member of a library classifier that dispatches on its receiver, with no `published`
-/// body to call and no compiler operation realizing it (`KClass.simpleName`), which an
-/// interface's classes or the builtin classes below it implement.
+/// body to call (an interface's member dispatches whatever its default publishes) and no compiler
+/// operation realizing it (`KClass.simpleName`), which an interface's classes or the builtin classes below it implement.
 pub(in crate::codegen) fn dispatches_through_library_member(
     ir: &IrFile,
     callables: &CheckedBackendCallables,
@@ -118,7 +121,10 @@ pub(in crate::codegen) fn dispatches_through_library_member(
     fact: &BackendCallableFact,
     published: bool,
 ) -> bool {
-    !published
+    // A published body is the one a call reaches directly, except an interface's default: the
+    // receiver's class may override it, and a class that inherits it reaches the body from its
+    // own record.
+    (!published || fact.owner_is_interface)
         && fact.kind == ExternalCallableKind::Member
         && fact.member_realization == MemberRealization::Dispatch
         && fact.compiler_operation().is_none()
@@ -380,12 +386,37 @@ impl Body<'_> {
         if fact.builtin_implementations.iter().any(|implementation| {
             super::string_builders::is_string_builder_type(implementation.receiver)
         }) {
-            self.record_char_sequence_reads()?;
+            self.record_char_sequence_reads(false)?;
         }
         let member = self.library_member_of(&fact, identity, role, &name)?;
         if reference_name {
             self.runtime.reference_name_member(self.module, member)?;
         }
+        let accessor = match fact.semantic_role {
+            Some(SemanticCallRole::KotlinPropertyReferenceGet(arity))
+                if usize::from(arity) == args.len() =>
+            {
+                Some(PropertyAccess::Read)
+            }
+            Some(SemanticCallRole::KotlinPropertyReferenceSet(arity))
+                if usize::from(arity) + 1 == args.len() =>
+            {
+                Some(PropertyAccess::Write)
+            }
+            _ => None,
+        };
+        if let Some(access) = accessor {
+            self.runtime.property_reference_accessor_member(
+                self.module,
+                member,
+                AccessorShape {
+                    access,
+                    operands: args.len(),
+                },
+            )?;
+        }
+        self.runtime
+            .null_receiver_throws(self.module, self.classifiers)?;
         self.value(receiver, objects::any())?;
         for (&arg, &param) in args.iter().zip(params) {
             self.value(arg, param)?;

@@ -165,11 +165,11 @@ impl ValueClassBody<'_> {
             rhs: null,
         });
         let receiver = ir.add_expr(IrExpr::GetValue(temporary));
-        let (method, method_descriptor, args) = match coding {
+        let (method, method_descriptor, args, encoded_parameters) = match coding {
             Coding::Direct {
                 encode: (method, method_descriptor),
                 ..
-            } => (method, method_descriptor, vec![value]),
+            } => (method, method_descriptor, vec![value], vec![*ty]),
             Coding::Serializer {
                 serializer,
                 nullable,
@@ -188,6 +188,10 @@ impl ValueClassBody<'_> {
                     method,
                     "(Lkotlinx/serialization/SerializationStrategy;Ljava/lang/Object;)V",
                     vec![serializer, value],
+                    vec![
+                        class_ty("kotlinx/serialization/SerializationStrategy"),
+                        Ty::nullable(class_ty("kotlin/Any")),
+                    ],
                 )
             }
         };
@@ -200,6 +204,8 @@ impl ValueClassBody<'_> {
             dispatch_receiver: Some(receiver),
             args,
         });
+        ir.call_declared_params
+            .insert(encode, encoded_parameters.into_boxed_slice());
         let null_result = ir.add_expr(IrExpr::UnitInstance);
         let guarded = ir.add_expr(IrExpr::When {
             branches: vec![(Some(absent), null_result), (None, encode)],

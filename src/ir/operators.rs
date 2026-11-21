@@ -86,3 +86,39 @@ pub enum IrTypeOp {
     /// is visible and testable, not hidden in codegen.
     ImplicitCoercion,
 }
+
+impl IrTypeOp {
+    /// The operator of a checked `as` cast to `target`. A cast to a type parameter follows the
+    /// parameter's upper-bound nullability. Kotlin's implicit bound is `Any?`, so `value as E` in
+    /// an unconstrained generic body must let `null` reach an instantiation such as `E = String?`;
+    /// only `<E : Any>` or `E & Any` requires the runtime null check. The checked target already
+    /// carries that distinction.
+    pub fn cast_to(target: crate::types::Ty) -> IrTypeOp {
+        if target.is_nullable() || (target.is_ty_param() && target.upper_bound_admits_null()) {
+            IrTypeOp::Cast
+        } else {
+            IrTypeOp::CastNonNull
+        }
+    }
+}
+
+#[cfg(test)]
+mod cast_operator_tests {
+    use super::IrTypeOp;
+    use crate::types::Ty;
+
+    #[test]
+    fn a_cast_admits_null_exactly_where_the_target_does() {
+        let any = Ty::obj("kotlin/Any");
+        let cases = [
+            (Ty::String, IrTypeOp::CastNonNull),
+            (Ty::nullable(Ty::String), IrTypeOp::Cast),
+            // The implicit bound `Any?` lets `null` reach `E = String?`.
+            (Ty::ty_param("E", Ty::nullable(any)), IrTypeOp::Cast),
+            (Ty::ty_param("E", any), IrTypeOp::CastNonNull),
+        ];
+        for (target, expected) in cases {
+            assert_eq!(IrTypeOp::cast_to(target), expected, "{target:?}");
+        }
+    }
+}

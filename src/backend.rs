@@ -26,6 +26,7 @@ pub mod local_properties;
 mod module_facts;
 pub mod module_links;
 pub mod property_entries;
+pub mod property_reference_values;
 pub mod range_constructions;
 pub mod reference_names;
 mod source_class_members;
@@ -61,7 +62,7 @@ pub use entry::{Entry, BOX_RESULT_FRAME};
 
 pub use module_facts::{
     BackendClassifierFact, BackendClassifierSource, BackendFactError, BackendModuleFacts,
-    CheckedBackendClassifiers, EnumEntriesAccessor, UndeterminedType,
+    CheckedBackendClassifiers, DependencyImplementor, EnumEntriesAccessor, UndeterminedType,
 };
 pub use source_class_members::{
     SourceClassMembers, SourceFunctionSignature, SourceMemberFunction, SourceMemberProperty,
@@ -129,6 +130,10 @@ pub type Artifact = (String, Vec<u8>);
 pub struct CommonIrPreparation {
     pub counted_loops: counted_loops::CountedLoopPolicy,
     pub enums: enums::Contract,
+    /// Realize each source `KProperty` reference as a function value
+    /// ([`property_reference_values::realize`]) instead of leaving it to the target's own
+    /// reference objects.
+    pub property_reference_values: bool,
 }
 
 /// An unsupported checked shape or a failed invariant during common-IR preparation.
@@ -234,10 +239,11 @@ pub trait Backend {
         Vec::new()
     }
 
-    /// Whether this target's `StringBuilder` appends a `CharSequence` by reading its `length` and
-    /// each indexed `Char` (Kotlin/Wasm WASI) rather than by rendering it with `toString`
-    /// (Kotlin/Wasm JS). The handoff then freezes those `CharSequence` members for the target to
-    /// call ([`CheckedBackendCallables::char_sequence_protocol`]).
+    /// Whether this target's `StringBuilder` reads an appended `CharSequence` through its members:
+    /// its `length` and each indexed `Char` (Kotlin/Wasm WASI), or its `length` ahead of a
+    /// `toString` rendering (Kotlin/Wasm JS's ranged append). The handoff then freezes those
+    /// `CharSequence` members for the target to call
+    /// ([`CheckedBackendCallables::char_sequence_protocol`]).
     fn appends_char_sequences_by_index(&self) -> bool {
         false
     }
