@@ -198,11 +198,11 @@ with `changedInstance`, and one decided only when the function runs by the calle
 with a call passing the `$stable` of its class. Every
 other mode is an explicit decline at its declaration or call: a function with a receiver, a default
 argument that is not a constant, a vararg, or another
-result, any other composable function type or use of a composable lambda parameter, recursion
+result, a composable function type that returns a value, takes context receivers, takes ten or more values or is `suspend`, any other use of a composable lambda parameter, recursion
 through lambda parameters, an explicit applier target, a call argument the pass cannot classify as constant, passed on or computed, a grouping annotation (`@NonRestartableComposable`, `@NonSkippableComposable`,
 `@ReadOnlyComposable`, `@ExplicitGroupsComposable`), a call to a composable of another file of
 the module, a call to a library composable that takes a receiver, declares default arguments, a
-function-typed parameter other than `@Composable () -> Unit`, returns a result or is `inline`, a composable
+function-typed parameter that is not a composable function type, returns a result or is `inline`, a composable
 lambda that captures a composable lambda parameter or passes a captured local to a composable call, holds
 another lambda or is empty, a composable
 whose lambda numbering another lambda or overload shares, and a class whose stability its file
