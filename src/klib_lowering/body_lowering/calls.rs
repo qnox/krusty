@@ -315,7 +315,13 @@ impl BodyLowering<'_> {
             ));
         };
         let operand = self.expression(operand)?;
-        if self.lowered_type(operand).non_null() != ty || ty.is_nullable() {
+        // A type parameter whose bound admits null asserts to the intersection `T & Any`, which
+        // keeps the parameter's identity; any other operand to its non-null type.
+        let asserted = self
+            .lowered_type(operand)
+            .non_null()
+            .marked_definitely_not_null();
+        if asserted != ty || ty.is_nullable() {
             return Err(mismatch(
                 "`CHECK_NOT_NULL` is typed apart from its operand's non-null type",
             ));
@@ -799,6 +805,12 @@ impl BodyLowering<'_> {
             }
         }
         let singleton_dispatch = linked.singleton_dispatch;
+        let expanded = match &callee {
+            Callee::Local(function) if self.ir.inline_only_fns.contains(function) => {
+                Some(*function)
+            }
+            _ => None,
+        };
         let external = match &callee {
             Callee::External { target, .. } => Some(*target),
             _ => None,
@@ -833,6 +845,9 @@ impl BodyLowering<'_> {
                 args,
             }),
         };
+        if let Some(function) = expanded {
+            self.record_inline_type_arguments(call, function, access)?;
+        }
         if let Some(result) = suspend_result {
             self.ir.suspend_calls.insert(call, result);
         }
@@ -1334,6 +1349,47 @@ impl BodyLowering<'_> {
             ));
         }
         Ok(applied)
+    }
+
+    /// The type arguments `call` of the inline function `function` binds, under the selected
+    /// semantic identities of the function's type parameters, which its body's types name, for the
+    /// expansion to specialize that body with.
+    fn record_inline_type_arguments(
+        &mut self,
+        call: ExprId,
+        function: crate::ir::FunId,
+        access: &KlibIrMemberAccess,
+    ) -> Lowered<()> {
+        let Some(signature) = self.ir.signatures.get(&function) else {
+            return Ok(());
+        };
+        if signature.type_params.len() != access.type_arguments.len() {
+            return Err(mismatch(
+                "a call passes another number of type arguments than its inline callee declares",
+            ));
+        }
+        let formals = signature
+            .type_params
+            .iter()
+            .map(|formal| (formal.semantic_name.clone(), formal.reified))
+            .collect::<Vec<_>>();
+        let mut bound = Vec::with_capacity(formals.len());
+        let mut reified = Vec::new();
+        for ((name, is_reified), argument) in formals.into_iter().zip(&access.type_arguments) {
+            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call that leaves a type argument unset",
+            ))?;
+            let value = self.semantic(argument)?;
+            if is_reified {
+                reified.push((name.clone(), value));
+            }
+            bound.push((name, value));
+        }
+        if !reified.is_empty() {
+            self.ir.reified_call_subst.insert(call, reified);
+        }
+        self.ir.inline_call_type_arguments.insert(call, bound);
+        Ok(())
     }
 
     /// `linked` at the call's type arguments: each of the callee's type parameters bound to the

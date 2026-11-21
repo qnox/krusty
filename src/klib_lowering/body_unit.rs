@@ -1576,12 +1576,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
-        match self.sources.declarations.classifier(name) {
-            Some(record) => Ok(record.is_interface()),
-            None => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+        let record = self.sources.declarations.classifier(name);
+        record.map(|record| record.is_interface()).ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(format!(
                 "an object literal's supertype {name:?} is not a selected classifier"
-            ))),
-        }
+            ))
+        })
     }
 
     fn link_accessor(
@@ -2481,8 +2481,8 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
-        let root = self.root.is_some_and(|root| root.identity() == identity);
-        inline_functions::declare_callee(ir, declared, function, &header, selected, root)?;
+        let callee = inline_functions::Candidate::new(declared, function, &header, selected);
+        callee.declare(ir, self.root, identity, &mut |name| self.is_interface(name))?;
         self.functions.insert(identity.clone(), declared);
         if let Some(formals) = self.private_members.get_mut(identity) {
             *formals = header.own_formals(function);
