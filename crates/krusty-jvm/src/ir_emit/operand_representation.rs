@@ -12,6 +12,9 @@ pub(super) enum ErasedResult {
     Coerced { call: krusty::ir::ExprId, slot: Ty },
     /// A function value's `invoke`, whose result is `Object`.
     Invocation,
+    /// A suspension point's erased `Object` result, which kotlinc coerces only for a consumer
+    /// that needs a narrower type (see [`Emitter::erased_suspension_point`]).
+    Suspension,
 }
 
 /// How a reference value reaches a consumer's reference type.
@@ -25,6 +28,39 @@ pub(super) enum ReferenceCoercion {
 }
 
 impl Emitter<'_> {
+    /// Materialize an assignment value at the slot's consumption boundary. The flag says
+    /// that a FunctionN invocation already fills an erased target slot and needs no adaptation.
+    pub(super) fn emit_assignment_operand(
+        &mut self,
+        value: ExprId,
+        jt: Ty,
+        code: &mut CodeBuilder,
+    ) -> (Ty, bool) {
+        // An erased `FunctionN.invoke` stored into an `Object` slot stays `Object`.
+        // The consumer after the store narrows it; casting at the store would put
+        // the checkcast inside the protected range.
+        // `FunctionN.invoke` returns `Object` even when the function type says
+        // `Unit`. A `Unit` consumer pops that object; an `Object` slot stores it.
+        let keep_erased_invoke = jvm_is_erased_top(jt)
+            && matches!(
+                self.ir.expr(value),
+                IrExpr::InvokeFunction { ret, .. } if *ret != Ty::Nothing
+            );
+        if keep_erased_invoke {
+            self.erased_invocations.insert(value);
+        }
+        // Any other value reaches the slot as a declaration's initializer does,
+        // in the slot an erased result leaves.
+        let source = if keep_erased_invoke {
+            self.emit_value(value, code);
+            self.erased_invocations.remove(&value);
+            self.value_ty(value)
+        } else {
+            self.emit_consumed_operand(value, code)
+        };
+        (source, keep_erased_invoke)
+    }
+
     /// Read a boxed mutable local at either its declared value type or its holder field type.
     ///
     /// Ordinary consumers need the `ObjectRef.element` value narrowed to the checked reference
@@ -76,6 +112,9 @@ impl Emitter<'_> {
         // bound needs narrowing; eagerly emitting the coercion can cast `Comparable` to `String`
         // and then back to `Comparable` for a function that returns the bound itself.
         let source = if matches!(
+            self.erased_reference_result(expression),
+            Some(ErasedResult::Suspension)
+        ) || matches!(
             self.erased_reference_result(expression),
             Some(ErasedResult::Coerced { call, slot })
                 if !jvm_is_erased_top(ir_ty_to_jvm(&slot))
@@ -185,6 +224,10 @@ impl Emitter<'_> {
                 self.emit_deferred_coercion(expression, call, code);
                 slot
             }
+            Some(ErasedResult::Suspension) => {
+                self.emit_erased_suspension(expression, code);
+                Ty::obj("java/lang/Object")
+            }
             Some(ErasedResult::Invocation) => {
                 // Scoped to this one emission: a copy of the node emitted elsewhere (a `finally`
                 // body) narrows as usual.
@@ -235,6 +278,22 @@ impl Emitter<'_> {
                     ReferenceCoercion::Cast(_)
                 )
         };
+        // A point's reference result reaches every consumer in the slot the point leaves. A
+        // scalar or value-class result is unboxed by the point itself when it closes.
+        let value = self.value_ty(expression);
+        if ir_ty_to_jvm(&value).is_reference()
+            && !self.is_value_class_ty(&value)
+            && self
+                .erased_suspension_point(expression)
+                .and_then(|point| self.transformed_result(point))
+                .is_some_and(|result| {
+                    ir_ty_to_jvm(&result).is_reference()
+                        && !self.is_value_class_ty(&result)
+                        && narrows(Ty::obj("java/lang/Object"), result)
+                })
+        {
+            return Some(ErasedResult::Suspension);
+        }
         match self.ir.expr(expression) {
             krusty::ir::IrExpr::TypeOp {
                 op: krusty::ir::IrTypeOp::ImplicitCoercion,
