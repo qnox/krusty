@@ -62,7 +62,7 @@ pub use entry::{Entry, BOX_RESULT_FRAME};
 
 pub use module_facts::{
     BackendClassifierFact, BackendClassifierSource, BackendFactError, BackendModuleFacts,
-    CheckedBackendClassifiers, EnumEntriesAccessor, UndeterminedType,
+    CheckedBackendClassifiers, DependencyImplementor, EnumEntriesAccessor, UndeterminedType,
 };
 pub use source_class_members::{
     SourceClassMembers, SourceFunctionSignature, SourceMemberFunction, SourceMemberProperty,
