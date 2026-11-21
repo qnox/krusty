@@ -581,7 +581,6 @@ coroutines/kt46813.kt
 coroutines/kt49168.kt
 coroutines/kt51530.kt
 coroutines/kt51718.kt
-coroutines/kt55494.kt
 coroutines/lastExpressionIsLoop.kt
 coroutines/lastStatementInc.kt
 coroutines/lastStementAssignment.kt
@@ -594,7 +593,6 @@ coroutines/multiModule/inlineMultiModule.kt
 coroutines/multiModule/inlineMultiModuleOverride.kt
 coroutines/multiModule/inlineMultiModuleWithController.kt
 coroutines/multiModule/inlineMultiModuleWithInnerInlining.kt
-coroutines/multiModule/simple.kt
 coroutines/multipleInvokeCalls.kt
 coroutines/multipleInvokeCallsInsideInlineLambda1.kt
 coroutines/multipleInvokeCallsInsideInlineLambda2.kt
