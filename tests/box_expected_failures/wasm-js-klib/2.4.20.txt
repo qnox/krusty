@@ -212,7 +212,6 @@ callableReference/property/kt14330_2.kt
 callableReference/property/kt15447.kt
 callableReference/property/nullableExtensionProperty.kt
 callableReference/property/privateSetOuterClass.kt
-callableReference/property/privateSetterInsideClass.kt
 callableReference/property/simpleMutableExtension.kt
 callableReference/property/simpleMutableMember.kt
 callableReference/property/simpleMutableTopLevel.kt
