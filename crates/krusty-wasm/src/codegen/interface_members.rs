@@ -807,14 +807,27 @@ impl FileRecorder<'_, '_, '_> {
                         }
                     }
                 }
-                let Some(member) = self.dependency_member(target, MemberRole::Function)? else {
+                // An accessor overriding an interface property's implements that property's.
+                let role = match self
+                    .recording
+                    .callables
+                    .callable(target)
+                    .and_then(|fact| fact.klib_body_accessor.as_ref())
+                {
+                    Some(accessor) if accessor.is_setter() => MemberRole::Setter,
+                    Some(_) => MemberRole::Getter,
+                    None => MemberRole::Function,
+                };
+                let Some(member) = self.dependency_member(target, role)? else {
                     continue;
                 };
                 if self.implements(member.member) {
                     continue;
                 }
                 // A default the interface publishes, which the class does not override, is its own
-                // implementation: the exported body, not a slot of the class.
+                // implementation: the exported body, not a slot of the class. So is an inherited
+                // default overriding the member, such as `CoroutineContext.Element.fold` for
+                // `CoroutineContext.fold`.
                 let implemented = if edge.implementation == edge.overridden
                     && edge.implementation_function.is_some_and(|function| {
                         ir.functions[function as usize].dispatch_receiver
@@ -825,6 +838,8 @@ impl FileRecorder<'_, '_, '_> {
                         target,
                         edge.implementation_function,
                     )
+                } else if let Some(default) = self.inherited_interface_default(edge) {
+                    self.dependency_default_implementation(member, default, None)
                 } else {
                     match self.function_edge_implementation(
                         owner,
@@ -928,6 +943,24 @@ impl FileRecorder<'_, '_, '_> {
             function,
             DependencyImplementation::Function(function),
         )
+    }
+
+    /// The dependency interface default the class implements `edge`'s member with, when it
+    /// inherits that default (directly or through a library superclass) without overriding it.
+    fn inherited_interface_default(
+        &self,
+        edge: &krusty::ir::IrFunctionOverride,
+    ) -> Option<krusty::fir::ExternalCallableId> {
+        let ResolvedFunctionOverrideTarget::External(implementation) = edge.implementation else {
+            return None;
+        };
+        let fact = self.recording.callables.callable(implementation)?;
+        (edge.implementation_function.is_none()
+            && fact.owner_is_interface
+            && fact
+                .klib_body_declaration_modifiers
+                .is_some_and(|modifiers| !modifiers.is_abstract()))
+        .then_some(implementation)
     }
 
     /// The function `owner` implements the dependency member `edge` overrides with: its own or
