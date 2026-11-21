@@ -1499,12 +1499,36 @@ impl Body<'_> {
                 }
                 (None, None) => match self.library_interface_of_type(tested) {
                     Some(interface) => self.library_interface_test(interface, nullable),
-                    None => {
-                        return Err(format!("a type test against `{}`", super::describe(tested)));
-                    }
+                    None => return self.cross_file_type_test(tested, nullable),
                 },
             },
         }
+        Ok(())
+    }
+
+    /// Replace the reference on the stack with whether it is an instance of `tested`, a class
+    /// another file of the module declares: the answer of the entry that file realizes, which
+    /// alone knows the class's layout. A null is an instance only of a nullable `tested`.
+    fn cross_file_type_test(&mut self, tested: Ty, nullable: bool) -> Result<(), Unsupported> {
+        let refused = || format!("a type test against `{}`", super::describe(tested));
+        let classifier = tested.non_null().obj_internal().ok_or_else(refused)?;
+        let entry = self
+            .calls
+            .instance(&krusty::backend::instance_links::InstanceEntry::TypeTest(
+                classifier,
+            ))
+            .ok_or_else(refused)?;
+        if !nullable {
+            self.code.call(entry);
+            return Ok(());
+        }
+        let value = self.local(REFERENCE);
+        self.code
+            .local_tee(value)
+            .call(entry)
+            .local_get(value)
+            .ref_is_null()
+            .op(OR32);
         Ok(())
     }
 

@@ -266,6 +266,11 @@ impl Backend for WasmBackend {
             (file.module_name, file.classifiers.module()),
             &mut file.dependency_exports,
         );
+        krusty::backend::construction_entries::publish_type_tests(
+            &mut file.ir,
+            file.classifiers.module(),
+            &mut file.dependency_exports,
+        );
         krusty::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
         if let Err(error) =
             krusty::backend::property_entries::realize(&mut file.ir, &mut file.dependency_exports)

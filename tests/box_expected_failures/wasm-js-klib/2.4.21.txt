@@ -608,7 +608,6 @@ coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturn.kt
 coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturnInterception.kt
 coroutines/intrinsicSemantics/suspendCoroutineUninterceptedOrReturn.kt
 coroutines/iterateOverArray.kt
-coroutines/kt15016.kt
 coroutines/kt21080.kt
 coroutines/kt21605.kt
 coroutines/kt24135.kt
@@ -945,7 +944,6 @@ inference/builderInferenceLeakingVariable.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
 inference/kt35684.kt
 inference/kt39824.kt
-inference/lastExpressionOfLambdaWithNothingConstraint.kt
 inference/overrideDefaultProperty.kt
 inference/pcla/builderCallAsReturnTypeInLocalClass.kt
 inference/pcla/callableReferenceAndCoercionToUnit.kt
@@ -1208,7 +1206,6 @@ inlineClasses/unboxGenericParameter/objectLiteral/primitive.kt
 inlineClasses/unboxParameterOfSuspendLambdaBeforeInvoke.kt
 inlineClasses/unboxParameterOfSuspendLambdaBeforeInvokeGeneric.kt
 inlineClasses/unboxResultParameterWhenCapturingToCrossinlineLambda.kt
-inlineClasses/valueClassInValueClass.kt
 inlineClasses/valueClassInstanceOfNumberAndComparable.kt
 inlineEvaluationOrder/argumentOfCall.kt
 inlineEvaluationOrder/argumentOfCallMultipleInlineCalls.kt
@@ -1392,14 +1389,10 @@ multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/defaultArguments/withTypeParameter.kt
-multiplatform/k2/exhaustiveness/commonSealedClass.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
-multiplatform/k2/hmpp/expectActualInheritance2-2.kt
-multiplatform/k2/hmpp/expectActualInheritance3-3.kt
-multiplatform/k2/hmpp/expectActualInheritanceTwoLibs.kt
 multiplatform/k2/hmpp/genericTypealiasSameNameTwoLibs.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
@@ -1418,7 +1411,6 @@ nameBasedDestructuring/fullFormExtraPropType.kt
 nameBasedDestructuring/shortFormExtraPropType.kt
 nonLocalReturns/suspendConversion.kt
 nothingValue/nothingValueException.kt
-nullCheckOptimization/trivialInstanceOf.kt
 object/constructor0.kt
 object/fields.kt
 object/fields1.kt
@@ -2288,7 +2280,6 @@ sam/samWithAbstractToString.kt
 sam/samWithAbstractToString2.kt
 sam/samWithAbstractToString3.kt
 sam/topLevelConversions.kt
-sealed/multipleFiles_enabled.kt
 secondaryConstructors/enums.kt
 secondaryConstructors/innerClasses.kt
 secondaryConstructors/innerClassesInheritance.kt
