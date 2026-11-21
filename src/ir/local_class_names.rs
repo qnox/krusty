@@ -507,6 +507,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
         | Callee::ClassStaticWithDefaults { owner, .. }
         | Callee::ClassStaticDefault { owner, .. }
         | Callee::Static { owner, .. }
+        | Callee::ValueClassAdapter { owner, .. }
         | Callee::Special { owner, .. } => name(owner, names),
         Callee::Intrinsic { operation, ret } => {
             *ret = ty(*ret, names);
