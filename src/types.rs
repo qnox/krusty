@@ -611,6 +611,16 @@ impl Ty {
         }
     }
 
+    /// The intersection `T & Any` of a type parameter whose bound admits null, as a KLIB
+    /// serializes a definitely-non-null type. Any other type is already as non-null as it can be.
+    pub fn marked_definitely_not_null(self) -> Ty {
+        if self.is_ty_param() && self.upper_bound_admits_null() {
+            Ty::from(TyKind::DefinitelyNotNull(self))
+        } else {
+            self
+        }
+    }
+
     /// The constraint a nullable formal position contributes.
     ///
     /// Concrete types contribute their non-null form. A type parameter whose bound admits null

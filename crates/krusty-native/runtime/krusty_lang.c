@@ -825,6 +825,21 @@ kt_boolean kt_reference_equals(KRef self, KRef other) {
     if (mine == NULL || mine != other->header.type->reference_target) {
         return false;
     }
+    const KType *type = self->header.type;
+    if (type->reference_context_count != other->header.type->reference_context_count) {
+        return false;
+    }
+    for (uint32_t index = 0; index < type->reference_context_count; index++) {
+        KRef mine_context = *(KRef *)((uint8_t *)self + type->reference_context_offsets[index]);
+        KRef other_context =
+            *(KRef *)((uint8_t *)other + other->header.type->reference_context_offsets[index]);
+        if (!kt_equals(mine_context, other_context)) {
+            return false;
+        }
+        if (kt_raised()) {
+            return false;
+        }
+    }
     return kt_equals(kt_reference_receiver(self), kt_reference_receiver(other));
 }
 
@@ -834,6 +849,15 @@ kt_int kt_reference_hash_code(KRef self) {
        times 31 leaves the signed range for nearly every address, and signed overflow is undefined
        in C, which would leave two equal references free to hash differently. */
     uint32_t hash = (uint32_t)(uintptr_t)self->header.type->reference_target;
+    const KType *type = self->header.type;
+    for (uint32_t index = 0; index < type->reference_context_count; index++) {
+        KRef context = *(KRef *)((uint8_t *)self + type->reference_context_offsets[index]);
+        kt_int context_hash = context == NULL ? 0 : kt_hash_code(context);
+        if (kt_raised()) {
+            return 0;
+        }
+        hash = 31u * hash + (uint32_t)context_hash;
+    }
     KRef receiver = kt_reference_receiver(self);
     if (receiver != NULL) {
         /* The receiver's `hashCode` is the program's, and one that raised answered nothing to
