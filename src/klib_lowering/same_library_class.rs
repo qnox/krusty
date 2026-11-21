@@ -33,9 +33,9 @@ use crate::klib_libraries::{KlibDeclarationBodies, LocatedClass, LocatedMember};
 use crate::libraries::{KlibBodyClassParameters, KlibDependencyCallable, TypeKind};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
-    KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction,
-    KlibIrMember, KlibIrMemberAccess, KlibIrStatement, KlibIrType, KlibIrTypeParameter,
-    KlibIrVariance,
+    KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprId, KlibIrExprKind,
+    KlibIrFunction, KlibIrMember, KlibIrMemberAccess, KlibIrStatement, KlibIrType,
+    KlibIrTypeParameter, KlibIrVariance,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::metadata::semantic::{
@@ -98,6 +98,8 @@ pub(super) struct LocalInitialize<'a> {
     pub(super) fields: Vec<LocalStoredField<'a>>,
     pub(super) steps: Vec<InitializationStep<'a>>,
     pub(super) outer: Option<OuterInstance<'a>>,
+    /// The arguments the constructor passes its superclass's constructor.
+    pub(super) superclass_arguments: Vec<KlibIrExprId>,
 }
 
 /// The field frame of one member of a file-local class.
@@ -433,11 +435,11 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) object: bool,
 }
 
-/// A same-library superclass constructor a class's constructor delegates to, and the slot of the
-/// class constructor's parameter each of its arguments passes.
+/// A same-library superclass constructor a class's constructor delegates to, and the serialized
+/// argument it passes for each of its parameters.
 pub(super) struct LocalSuperclass<'a> {
     pub(super) constructor: SuperclassConstructor<'a>,
-    pub(super) operands: Vec<u32>,
+    pub(super) arguments: Vec<KlibIrExprId>,
 }
 
 /// The constructor a same-library class's constructor delegates to.
@@ -1177,11 +1179,8 @@ fn prepare_class<'a>(
     let superclass = local_superclass(
         source,
         LocalDelegation {
-            arena,
-            function,
             delegation,
             superclass,
-            outer: outer_instance,
         },
     )?;
     let class_type_parameters = formals
@@ -1191,8 +1190,15 @@ fn prepare_class<'a>(
             _ => Err(mismatch("a non-public class type parameter has no symbol")),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let init_header =
-        local_initializer_header(function, receiver, self_type, arena, &types, &resolve)?;
+    let init_header = local_initializer_header(
+        function,
+        receiver,
+        self_type,
+        outer_instance.map(|_| params[0]),
+        arena,
+        &types,
+        &resolve,
+    )?;
     let class_type_parameter_bounds = bounds.clone();
     Ok(PreparedLocalClass {
         key,
@@ -1262,27 +1268,21 @@ fn file_private_naming(
 
 /// A class's constructor delegation to the constructor of its same-library superclass, and what
 /// it checks that delegation against.
-struct LocalDelegation<'a, 'o> {
-    arena: &'a KlibIrArena,
-    function: &'a KlibIrFunction,
+struct LocalDelegation<'a> {
     delegation: Option<&'a KlibIrMemberAccess>,
     superclass: Option<TypeName>,
-    outer: Option<OuterInstance<'o>>,
 }
 
-/// The same-library superclass a class's constructor delegates to, with the constructor slot of
-/// each argument it passes. The delegation passes the constructor's own parameters, an inner
-/// class its outer instance among them; any other argument keeps the class unsupported.
+/// The same-library superclass a class's constructor delegates to, with the serialized argument
+/// it passes for each of that constructor's parameters. The class's initializer evaluates them in
+/// the constructor's frame, as it evaluates the rest of the constructor's body.
 fn local_superclass<'a>(
     source: LocalClassSource<'a, '_>,
-    delegation: LocalDelegation<'a, '_>,
+    delegation: LocalDelegation<'a>,
 ) -> Result<Option<LocalSuperclass<'a>>, KlibBodyDeclineReason> {
     let LocalDelegation {
-        arena,
-        function,
         delegation,
         superclass,
-        outer,
     } = delegation;
     let (access, superclass) = match (delegation, superclass) {
         (None, None) => return Ok(None),
@@ -1319,20 +1319,6 @@ fn local_superclass<'a>(
             }
         },
     };
-    let prefix = u32::from(outer.is_some());
-    let slot = |symbol: &KlibIrSymbol| -> Option<u32> {
-        if let Some(outer) = outer {
-            let receiver = function.dispatch_receiver.as_ref();
-            if symbol == outer.symbol || receiver.is_some_and(|r| &r.base.symbol == symbol) {
-                return Some(1);
-            }
-        }
-        function
-            .regular_parameters
-            .iter()
-            .position(|parameter| &parameter.base.symbol == symbol)
-            .map(|index| 1 + prefix + u32::try_from(index).expect("a parameter index fits u32"))
-    };
     let arguments = match &access.arguments {
         KlibIrArguments::Flat(values) => values.clone(),
         KlibIrArguments::Split {
@@ -1350,25 +1336,17 @@ fn local_superclass<'a>(
             ))
         }
     };
-    let operands = arguments
+    let arguments = arguments
         .into_iter()
         .map(|argument| {
-            let argument = argument.ok_or(unsupported(
+            argument.ok_or(unsupported(
                 "a superclass delegation leaving a parameter to its default",
-            ))?;
-            match &arena.expr(argument).kind {
-                KlibIrExprKind::GetValue { symbol, .. } => slot(symbol).ok_or(unsupported(
-                    "a superclass constructor argument other than a constructor parameter",
-                )),
-                _ => Err(unsupported(
-                    "a superclass constructor argument other than a constructor parameter",
-                )),
-            }
+            ))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(LocalSuperclass {
         constructor,
-        operands,
+        arguments,
     }))
 }
 
