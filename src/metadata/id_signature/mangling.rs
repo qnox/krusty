@@ -263,9 +263,118 @@ pub fn accessor_signature<T: SignatureType>(
     property: &PropertyShape<'_, T>,
     accessor: Accessor<'_, T>,
 ) -> Result<KlibAccessorIdSignature, ManglingError> {
-    let (name, params) = match accessor {
-        Accessor::Getter => (format!("<get-{}>", property.name), Vec::new()),
-        Accessor::Setter { value } => (format!("<set-{}>", property.name), vec![value]),
+    let name = accessor_name(property, &accessor);
+    let mangled = mangle_accessor(
+        &container.scopes(&property.type_parameters),
+        property,
+        &accessor,
+    )?;
+    let property_signature = property_signature(container, property)?;
+    let mask = property_signature.mask;
+    Ok(KlibAccessorIdSignature::new(
+        property_signature,
+        name,
+        city_hash::city_hash64(mangled.as_bytes()),
+        mask,
+    ))
+}
+
+/// A declaration a local or anonymous class is nested in, as the mangler's scope stack holds it.
+pub enum LocalContainer<'a, T: SignatureType> {
+    /// A class: it is mangled into nothing, but its type parameters are a scope.
+    Class(Vec<TypeParameterShape<'a, T>>),
+    Callable(CallableShape<'a, T>),
+    Property(PropertyShape<'a, T>),
+    Accessor(PropertyShape<'a, T>, Accessor<'a, T>),
+}
+
+impl<'a, T: SignatureType> LocalContainer<'a, T> {
+    fn type_parameters(&self) -> &[TypeParameterShape<'a, T>] {
+        match self {
+            Self::Class(type_parameters) => type_parameters,
+            Self::Callable(callable) => &callable.type_parameters,
+            Self::Property(property) | Self::Accessor(property, _) => &property.type_parameters,
+        }
+    }
+}
+
+/// A member a local or anonymous class inherits without overriding it.
+pub enum LocalMember<'a, 's, T: SignatureType> {
+    Callable(&'s CallableShape<'a, T>),
+    Property(&'s PropertyShape<'a, T>),
+    Accessor(&'s PropertyShape<'a, T>, Accessor<'a, T>),
+}
+
+impl<'a, T: SignatureType> LocalMember<'a, '_, T> {
+    fn type_parameters(&self) -> &[TypeParameterShape<'a, T>] {
+        match self {
+            Self::Callable(callable) => &callable.type_parameters,
+            Self::Property(property) | Self::Accessor(property, _) => &property.type_parameters,
+        }
+    }
+}
+
+/// The id of the file-local signature kotlinc gives the fake override of `member` in a local class
+/// nested in `containers`, outermost first and ending with the class itself. A local class is not
+/// part of its members' public identity, so the id hashes what surrounds it instead: the mangled
+/// callables around the class followed by the mangled member, with every class left out.
+///
+/// The declarations are mangled in one stack of type-parameter scopes, as kotlinc visits them: the
+/// member's own scope is container 0, the class around it 1, and so on outward, so a type
+/// parameter of an enclosing function is spelled by how many declarations it is from the member.
+pub fn local_fake_override_id<T: SignatureType>(
+    containers: &[LocalContainer<'_, T>],
+    member: &LocalMember<'_, '_, T>,
+) -> Result<u64, ManglingError> {
+    let scopes = std::iter::once(member.type_parameters())
+        .chain(containers.iter().rev().map(LocalContainer::type_parameters))
+        .collect::<Vec<_>>();
+    let mut mangled = String::new();
+    for container in containers {
+        match container {
+            LocalContainer::Class(_) => {}
+            LocalContainer::Callable(callable) => {
+                mangled.push_str(&mangle_callable(&scopes, callable)?)
+            }
+            LocalContainer::Property(property) => {
+                mangled.push_str(&mangle_property(&scopes, property)?)
+            }
+            LocalContainer::Accessor(property, accessor) => {
+                mangled.push_str(&mangle_accessor(&scopes, property, accessor)?)
+            }
+        }
+    }
+    match member {
+        LocalMember::Callable(callable) => mangled.push_str(&mangle_callable(&scopes, callable)?),
+        LocalMember::Property(property) => mangled.push_str(&mangle_property(&scopes, property)?),
+        LocalMember::Accessor(property, accessor) => {
+            mangled.push_str(&mangle_accessor(&scopes, property, accessor)?)
+        }
+    }
+    Ok(city_hash::city_hash64(mangled.as_bytes()))
+}
+
+fn accessor_name<T>(property: &PropertyShape<'_, T>, accessor: &Accessor<'_, T>) -> String
+where
+    T: SignatureType,
+{
+    match accessor {
+        Accessor::Getter => format!("<get-{}>", property.name),
+        Accessor::Setter { .. } => format!("<set-{}>", property.name),
+    }
+}
+
+/// An accessor is mangled as a function named `<get-name>` or `<set-name>` with the property's
+/// contexts, receiver and type parameters.
+fn mangle_accessor<T: SignatureType>(
+    scopes: &Scopes<'_, '_, T>,
+    property: &PropertyShape<'_, T>,
+    accessor: &Accessor<'_, T>,
+) -> Result<String, ManglingError> {
+    let name = accessor_name(property, accessor);
+    let params = match accessor {
+        Accessor::Getter => Vec::new(),
+        Accessor::Setter { value } => vec![*value],
     };
     let function = CallableShape {
         name: &name,
@@ -277,15 +386,7 @@ pub fn accessor_signature<T: SignatureType>(
         expect: property.expect,
         placement: property.placement,
     };
-    let mangled = mangle_callable(&container.scopes(&function.type_parameters), &function)?;
-    let property_signature = property_signature(container, property)?;
-    let mask = property_signature.mask;
-    Ok(KlibAccessorIdSignature::new(
-        property_signature,
-        name,
-        city_hash::city_hash64(mangled.as_bytes()),
-        mask,
-    ))
+    mangle_callable(scopes, &function)
 }
 
 type Scopes<'s, 'a, T> = [&'s [TypeParameterShape<'a, T>]];

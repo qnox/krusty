@@ -15,7 +15,9 @@ use std::ops::RangeInclusive;
 
 use crate::klib::KlibArchive;
 
-use super::symbols::{string, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind, SignatureTable};
+use super::symbols::{
+    string, KlibIrLocalOrigin, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind, SignatureTable,
+};
 use super::tree::{
     KlibIrAnnotation, KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrBranch, KlibIrCatch,
     KlibIrClass, KlibIrClassId, KlibIrDeclarationBase, KlibIrEnumEntry, KlibIrExpr, KlibIrExprId,
@@ -64,9 +66,16 @@ pub struct KlibIrModuleTrees {
     /// File-local classes, meaningful only inside this library.
     local_classes: HashMap<KlibIrSignature, (usize, KlibIrClassId)>,
     classes: super::class_index::KlibIrClassIndex,
+    /// Where each file-local declaration of a file sits, by file and slot.
+    local_origins: HashMap<(u32, u32), KlibIrLocalOrigin>,
 }
 
 impl KlibIrModuleTrees {
+    /// The container and id the serializer gave the file-local declaration at `slot` of `file`.
+    pub fn local_origin(&self, file: u32, slot: u32) -> Option<&KlibIrLocalOrigin> {
+        self.local_origins.get(&(file, slot))
+    }
+
     /// The decoded trees themselves, to rebuild a module from rewritten copies.
     #[cfg(test)]
     pub(crate) fn into_trees(self) -> Vec<KlibIrDeclarationTree> {
@@ -527,6 +536,10 @@ fn read_declaration_trees_from(
             module
                 .files
                 .push(u32::try_from(index).expect("file count fits u32"));
+        }
+        let file_index = u32::try_from(index).expect("file count fits u32");
+        for (slot, origin) in file.signatures.take_local_origins() {
+            module.local_origins.insert((file_index, slot), origin);
         }
     }
     module.index()?;

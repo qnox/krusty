@@ -13,8 +13,9 @@ mod metadata_declarations;
 
 pub use mangling::{
     accessor_signature, callable_signature, class_signature, enum_entry_signature,
-    property_signature, Accessor, CallableShape, ClassScope, DeclarationContainer, ManglingError,
-    Placement, PropertyShape, SignatureType, TypeParameterShape, TypeView,
+    local_fake_override_id, property_signature, Accessor, CallableShape, ClassScope,
+    DeclarationContainer, LocalContainer, LocalMember, ManglingError, Placement, PropertyShape,
+    SignatureType, TypeParameterShape, TypeView,
 };
 pub use metadata_declarations::{
     constructor_signature, enum_class_member_signatures, member_property_accessor_signature,

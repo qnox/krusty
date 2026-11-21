@@ -330,6 +330,15 @@ pub(super) trait CallLinker {
         unsupported("a call of a file-private declaration")
     }
 
+    /// The declaration the fake override `callee`, a file-local call of a member a local class
+    /// inherits, is of; `None` when `callee` is no such fake override.
+    fn inherited_local_member(
+        &self,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<Option<crate::metadata::klib_ir::KlibIrSignature>> {
+        Ok(None)
+    }
+
     /// The dependency property a call of its accessor `callee` reads or writes.
     fn link_accessor(
         &mut self,

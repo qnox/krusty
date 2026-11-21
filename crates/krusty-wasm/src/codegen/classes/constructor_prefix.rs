@@ -119,14 +119,15 @@ fn receiver_lambda(argument: &IrCtorArg) -> bool {
     ) && matches!(argument.ty.kind(), TyKind::Obj(_, _))
 }
 
-// An extension receiver (`this@f`) is the object the named callable received. A checked source
+// An extension receiver (`this@f`) is the object the named callable received, a function value
+// included: `suspend () -> T` as an extension receiver is an ordinary reference. A checked source
 // capture proves it with its receiver identity. A class a support unit lowers from a library body
 // has no checked identity at all, which the registry comparison already requires of it.
 fn callable_receiver(argument: &IrCtorArg) -> bool {
     matches!(
         argument.capture_identity,
         None | Some(ClassCaptureIdentity::Receiver(_))
-    ) && matches!(argument.ty.kind(), TyKind::Obj(_, _))
+    ) && matches!(argument.ty.kind(), TyKind::Obj(_, _) | TyKind::Fun(_))
 }
 
 // A source enclosing receiver is an ordinary reference only after its selected declaration,

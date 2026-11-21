@@ -24,6 +24,7 @@ use crate::metadata::klib_ir::{
 use crate::types::{type_name_child, TypeName};
 
 mod inheritance;
+mod local_inheritance;
 pub(crate) use inheritance::member_signature;
 
 /// The decoded function declarations of a set of KLIB libraries, joined by exact signature.
@@ -490,7 +491,18 @@ impl KlibDeclarationBodies {
         declaration: &KlibDeclarationSignature,
     ) -> KlibCalleeOrigin {
         match self.callee_origin(body_module, declaration) {
-            KlibCalleeOrigin::Missing => self.inherited_origin(body_module, declaration),
+            KlibCalleeOrigin::Missing => match self
+                .local_inherited_signature(body_module, &ir_signature(declaration))
+                .ok()
+                .flatten()
+                .as_ref()
+                .and_then(declaration_signature)
+            {
+                // A member a local class inherits is the declaration it inherits, the one the
+                // call itself is lowered to.
+                Some(inherited) => self.callee_origin(body_module, &inherited),
+                None => self.inherited_origin(body_module, declaration),
+            },
             origin => origin,
         }
     }

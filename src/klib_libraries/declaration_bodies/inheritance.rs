@@ -216,7 +216,7 @@ impl KlibDeclarationBodies {
     }
 
     /// The one class in the producer graph rooted at `body_module` serialized at `signature`.
-    fn declaring_class_of(
+    pub(super) fn declaring_class_of(
         &self,
         body_module: &str,
         signature: &KlibPublicIdSignature,
@@ -247,7 +247,7 @@ impl KlibDeclarationBodies {
     }
 
     /// The one class in the producer graph rooted at `body_module` that declares `member`.
-    fn declaring_class(
+    pub(super) fn declaring_class(
         &self,
         body_module: &str,
         member: &KlibPublicIdSignature,

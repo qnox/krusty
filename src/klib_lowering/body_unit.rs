@@ -1321,6 +1321,16 @@ impl<'s> CallLinker for Linker<'_, 's> {
         super::site_containers::site_container(self.sources.bodies, &self.active_identity)
     }
 
+    fn inherited_local_member(
+        &self,
+        callee: &KlibIrSignature,
+    ) -> Result<Option<KlibIrSignature>, KlibBodyDeclineReason> {
+        self.sources
+            .bodies
+            .local_inherited_signature(&self.active_module, callee)
+            .map_err(KlibBodyDeclineReason::UnsupportedOperation)
+    }
+
     fn links_privately(&self, callee: &KlibIrSignature) -> bool {
         matches!(
             callee,

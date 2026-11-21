@@ -13,6 +13,7 @@
 
 use super::wire::{message, unique_bytes, unique_varint};
 use super::KlibIrDecodeError;
+use crate::fx_hash::HashMap;
 use crate::metadata::id_signature::{
     decode_public_id_signature, KlibAccessorIdSignature, KlibPublicIdSignature,
 };
@@ -73,6 +74,16 @@ pub enum KlibIrSignature {
     FileLocal { file: u32, slot: u32 },
 }
 
+/// Where a file-local declaration the serializer numbered itself sits: the signature it is
+/// nested in, and the id the serializer gave it there. A local declaration's own slot says nothing
+/// else; the id of a fake override a local class inherits is a hash of what surrounds the class
+/// and the member, which is the only thing that names the member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KlibIrLocalOrigin {
+    pub container: KlibIrSignature,
+    pub id: u64,
+}
+
 /// One decoded symbol reference.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct KlibIrSymbol {
@@ -86,6 +97,9 @@ pub(super) struct SignatureTable<'a> {
     entries: &'a [&'a [u8]],
     strings: &'a [String],
     decoded: Vec<Option<KlibIrSignature>>,
+    /// The slots being decoded, so a container that leads back to its own member is an error.
+    decoding: Vec<bool>,
+    origins: HashMap<u32, KlibIrLocalOrigin>,
     prepared_inline: bool,
 }
 
@@ -114,6 +128,8 @@ impl<'a> SignatureTable<'a> {
             entries,
             strings,
             decoded: vec![None; entries.len()],
+            decoding: vec![false; entries.len()],
+            origins: HashMap::default(),
             prepared_inline,
         }
     }
@@ -158,9 +174,23 @@ impl<'a> SignatureTable<'a> {
         if let Some(signature) = &self.decoded[slot] {
             return Ok(signature.clone());
         }
-        let signature = self.decode(slot)?;
+        if std::mem::replace(&mut self.decoding[slot], true) {
+            return Err(KlibIrDecodeError::malformed(
+                ENTRY,
+                0,
+                format!("signature {slot} is nested in itself"),
+            ));
+        }
+        let signature = self.decode(slot);
+        self.decoding[slot] = false;
+        let signature = signature?;
         self.decoded[slot] = Some(signature.clone());
         Ok(signature)
+    }
+
+    /// Where every file-local declaration decoded so far sits, by slot.
+    pub(super) fn take_local_origins(&mut self) -> HashMap<u32, KlibIrLocalOrigin> {
+        std::mem::take(&mut self.origins)
     }
 
     fn decode(&mut self, slot: usize) -> Result<KlibIrSignature, KlibIrDecodeError> {
@@ -196,6 +226,26 @@ impl<'a> SignatureTable<'a> {
                     property, name, hash, mask,
                 )));
             }
+        }
+        // IdSignature.private_sig: a declaration numbered inside its container.
+        if let Some(private) = unique_bytes(&fields, 2, "file-local signature", ENTRY)? {
+            let private_offset = private.value_offset;
+            let private = message(private.value, ENTRY, private_offset)?;
+            let container = unique_varint(&private, 1, "file-local signature container", ENTRY)?;
+            let id = unique_varint(&private, 2, "file-local signature id", ENTRY)?;
+            let (Some(container), Some(id)) = (container, id) else {
+                return Err(KlibIrDecodeError::malformed(
+                    ENTRY,
+                    private_offset,
+                    format!("file-local signature {slot} misses a required field"),
+                ));
+            };
+            let container_slot = self.slot(container, "file-local signature container")?;
+            let container = self.signature(container_slot)?;
+            self.origins.insert(
+                u32::try_from(slot).expect("a table slot fits u32"),
+                KlibIrLocalOrigin { container, id },
+            );
         }
         // Kotlin 2.4's prepared-inline component gives its private copied function a
         // `Composite(File(<dummy>), Public(copy))` signature. Project the exact inner identity only
@@ -340,6 +390,58 @@ mod tests {
         assert_eq!(identity.package().segments(), ["fixture"]);
         assert_eq!(identity.declaration().segments(), ["probe"]);
         assert_eq!(identity.member_id(), Some(0x14ab_8f30_859f_59a9));
+    }
+
+    fn private_signature(container: u64, id: u64) -> Vec<u8> {
+        let mut private = Vec::new();
+        varint_field(&mut private, 1, container);
+        varint_field(&mut private, 2, id);
+        let mut signature = Vec::new();
+        bytes_field(&mut signature, 2, &private);
+        signature
+    }
+
+    #[test]
+    fn a_file_local_declaration_records_the_signature_it_is_nested_in_and_its_id() {
+        let function = public_signature();
+        let class = private_signature(0, 10);
+        let member = private_signature(1, u64::MAX - 5);
+        let entries = [function.as_slice(), class.as_slice(), member.as_slice()];
+        let strings = ["fixture".to_owned(), "probe".to_owned()];
+        let mut table = SignatureTable::new(3, &entries, &strings);
+
+        let symbol = table.symbol(2 << 8).expect("the nested member decodes");
+        assert_eq!(
+            symbol.signature,
+            KlibIrSignature::FileLocal { file: 3, slot: 2 }
+        );
+        let origins = table.take_local_origins();
+        assert_eq!(
+            origins.get(&2),
+            Some(&KlibIrLocalOrigin {
+                container: KlibIrSignature::FileLocal { file: 3, slot: 1 },
+                id: u64::MAX - 5,
+            })
+        );
+        let Some(KlibIrLocalOrigin {
+            container: KlibIrSignature::Public(enclosing),
+            id: 10,
+        }) = origins.get(&1)
+        else {
+            panic!("the class is nested in the public function")
+        };
+        assert_eq!(enclosing.declaration().segments(), ["probe"]);
+    }
+
+    #[test]
+    fn a_file_local_declaration_nested_in_itself_is_malformed() {
+        let looped = private_signature(0, 1);
+        let entries = [looped.as_slice()];
+        let strings = ["fixture".to_owned()];
+        let error = SignatureTable::new(0, &entries, &strings)
+            .symbol(0)
+            .expect_err("a signature that contains itself has no identity");
+        assert!(error.to_string().contains("is nested in itself"), "{error}");
     }
 
     #[test]

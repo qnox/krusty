@@ -280,3 +280,142 @@ fn a_companion_extension_names_its_class_and_a_companion_block_member_is_static(
         "a companion extension has no extension receiver of its own"
     );
 }
+
+// The ids below were read from KLIBs kotlinc 2.4.0 wrote for a local or anonymous class that reads
+// `x`, a `protected var x` of its abstract base, with the class declared in the callable named.
+// The fake override of the base's property has a file-local signature whose id is the hash of the
+// mangled enclosing callables followed by the mangled member, never of the class around either.
+
+/// The anonymous class itself, which has no type parameters and contributes nothing to a mangle.
+fn anonymous() -> LocalContainer<'static, Model> {
+    LocalContainer::Class(Vec::new())
+}
+
+fn int() -> Model {
+    Model::Class("kotlin.Int", Vec::new())
+}
+
+fn property(name: &str) -> PropertyShape<'_, Model> {
+    PropertyShape {
+        name,
+        contexts: Vec::new(),
+        receiver: None,
+        type_parameters: Vec::new(),
+        expect: false,
+        placement: Placement::Ordinary,
+    }
+}
+
+fn getter_id(enclosing: &[LocalContainer<'_, Model>], property: &PropertyShape<'_, Model>) -> u64 {
+    local_fake_override_id(
+        enclosing,
+        &LocalMember::Accessor(property, Accessor::Getter),
+    )
+    .unwrap()
+}
+
+fn property_id(
+    enclosing: &[LocalContainer<'_, Model>],
+    property: &PropertyShape<'_, Model>,
+) -> u64 {
+    local_fake_override_id(enclosing, &LocalMember::Property(property)).unwrap()
+}
+
+#[test]
+fn a_local_fake_override_hashes_the_enclosing_function_and_the_member() {
+    // `fun f1(): Base = object : Base() { fun g() = x }`
+    let f1 = function("f1", Vec::new(), Vec::new());
+    let enclosing = [LocalContainer::Callable(f1), anonymous()];
+    let x = property("x");
+    assert_eq!(property_id(&enclosing, &x), 10_984_052_984_426_534_210);
+    assert_eq!(getter_id(&enclosing, &x), 9_179_919_559_361_952);
+    // The member's name is part of the hash; the enclosing function's too.
+    let z = property("z");
+    assert_eq!(property_id(&enclosing, &z), 18_108_682_745_126_236_731);
+    assert_eq!(getter_id(&enclosing, &z), 7_207_252_995_869_796_036);
+    let h1 = [
+        LocalContainer::Callable(function("h1", Vec::new(), Vec::new())),
+        anonymous(),
+    ];
+    assert_eq!(property_id(&h1, &x), 4_434_011_103_877_386_964);
+    assert_eq!(getter_id(&h1, &x), 2_735_225_705_581_274_376);
+}
+
+#[test]
+fn a_local_fake_override_hashes_the_enclosing_signature() {
+    let x = property("x");
+    // `fun f1(a: Int)`
+    let int = int();
+    let with_parameter = [
+        LocalContainer::Callable(function("f1", vec![&int], Vec::new())),
+        anonymous(),
+    ];
+    assert_eq!(property_id(&with_parameter, &x), 17_108_885_059_283_319_996);
+    assert_eq!(getter_id(&with_parameter, &x), 6_697_465_021_281_376_322);
+    // `fun Int.f1()`
+    let mut extension = function("f1", Vec::new(), Vec::new());
+    extension.receiver = Some(&int);
+    let extension = [LocalContainer::Callable(extension), anonymous()];
+    assert_eq!(property_id(&extension, &x), 12_329_581_560_742_381_903);
+    assert_eq!(getter_id(&extension, &x), 1_366_439_468_820_729_687);
+}
+
+#[test]
+fn a_local_fake_override_hashes_every_enclosing_function_outermost_first() {
+    // `fun f1() = object : Base() { fun h() = object : Base() { fun g() = x } }`
+    let nested = [
+        LocalContainer::Callable(function("f1", Vec::new(), Vec::new())),
+        anonymous(),
+        LocalContainer::Callable(function("h", Vec::new(), Vec::new())),
+        anonymous(),
+    ];
+    let x = property("x");
+    assert_eq!(property_id(&nested, &x), 16_714_787_241_981_942_725);
+    assert_eq!(getter_id(&nested, &x), 11_212_709_492_557_475_373);
+}
+
+#[test]
+fn a_local_fake_override_of_a_class_in_a_property_initializer_hashes_the_property() {
+    // `val top: Base = object : Base() { fun g() = x }`
+    let top = property("top");
+    let enclosing = [LocalContainer::Property(top), anonymous()];
+    let x = property("x");
+    assert_eq!(property_id(&enclosing, &x), 8_282_028_456_856_797_756);
+    assert_eq!(getter_id(&enclosing, &x), 6_209_393_031_143_520_207);
+}
+
+#[test]
+fn a_local_fake_override_of_a_class_in_no_function_hashes_the_member_alone() {
+    // `class C { init { object : Base() { fun g() = x } } }`
+    let x = property("x");
+    let enclosing = [anonymous()];
+    assert_eq!(property_id(&enclosing, &x), 10_386_213_217_731_204_037);
+    assert_eq!(getter_id(&enclosing, &x), 1_482_705_010_654_679_335);
+}
+
+#[test]
+fn a_local_fake_override_of_a_class_in_an_accessor_hashes_the_accessor() {
+    // `var Int.prop: Base get() = object : Base() { fun g() = x }`
+    let int = int();
+    let mut prop = property("prop");
+    prop.receiver = Some(&int);
+    let enclosing = [
+        LocalContainer::Accessor(prop, Accessor::Getter),
+        anonymous(),
+    ];
+    let x = property("x");
+    assert_eq!(property_id(&enclosing, &x), 13_094_006_450_331_863_484);
+    assert_eq!(getter_id(&enclosing, &x), 4_728_227_314_972_451_266);
+}
+
+#[test]
+fn a_type_parameter_of_the_enclosing_function_is_spelled_by_its_depth_from_the_member() {
+    // `fun <T> f1(t: T): Base = object : Base() { fun g() = x }`: the member is container 0, the
+    // anonymous class 1 and `f1` 2.
+    let t = Model::Parameter(0);
+    let f1 = function("f1", vec![&t], vec![unbounded(0)]);
+    let enclosing = [LocalContainer::Callable(f1), anonymous()];
+    let x = property("x");
+    assert_eq!(property_id(&enclosing, &x), 265_036_390_071_337_564);
+    assert_eq!(getter_id(&enclosing, &x), 5_786_552_929_254_620_021);
+}
