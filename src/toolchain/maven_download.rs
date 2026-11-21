@@ -38,8 +38,8 @@ pub(super) struct DownloadOutcome {
 
 /// Download `url` into `dest`, retrying under `policy` until `deadline`. No attempt starts after the
 /// deadline, and a running attempt is cut off at it. When no attempt completed, the second value is
-/// why the last one failed: curl's own message (which names the HTTP status a server refused with)
-/// or the deadline that stopped the retries.
+/// why the last one failed: curl's own message, the status, server address and final URL of the
+/// refusal, or the deadline that stopped the retries.
 pub(super) fn download(
     url: &str,
     dest: &Path,
@@ -61,6 +61,7 @@ pub(super) fn download(
             .arg(seconds(policy.connect_timeout.min(max_time)))
             .arg("--max-time")
             .arg(seconds(max_time))
+            .args(["-w", "%{http_code} %{remote_ip} %{url_effective}"])
             .arg("-o")
             .arg(dest)
             .arg(url)
@@ -78,10 +79,14 @@ pub(super) fn download(
             Ok(output) => {
                 let message = String::from_utf8_lossy(&output.stderr);
                 let message = message.trim();
-                failure = Some(if message.is_empty() {
+                let message = if message.is_empty() {
                     format!("curl exited with {}", output.status)
                 } else {
                     message.to_string()
+                };
+                failure = Some(match answered_by(&output.stdout) {
+                    Some(answer) => format!("{message} ({answer})"),
+                    None => message,
                 });
             }
             Err(error) => failure = Some(format!("curl could not start: {error}")),
@@ -99,6 +104,16 @@ pub(super) fn download(
         },
         failure,
     )
+}
+
+/// Who refused: the status, server address and final URL curl reports through `-w` (the address
+/// and URL after redirects are what tell a mirror or proxy from Central itself). `None` when the
+/// request never reached a server, where curl prints a zero status.
+fn answered_by(stdout: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut fields = text.trim().splitn(3, ' ');
+    let (status, address, url) = (fields.next()?, fields.next()?, fields.next()?);
+    (status != "000").then(|| format!("HTTP {status} from {address} for {url}"))
 }
 
 fn seconds(duration: Duration) -> String {
@@ -248,8 +263,11 @@ mod tests {
             }
         );
         assert_eq!(
-            failure.as_deref(),
-            Some("curl: (22) The requested URL returned error: 500")
+            failure,
+            Some(format!(
+                "curl: (22) The requested URL returned error: 500 \
+                 (HTTP 500 from 127.0.0.1 for {url})"
+            ))
         );
     }
 
