@@ -1087,6 +1087,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::ResultFailure(_)
                 | krusty::libraries::CompilerIntrinsic::TextTrim
                 | krusty::libraries::CompilerIntrinsic::StringCompare
+                | krusty::libraries::CompilerIntrinsic::StringSubSequence
                 | krusty::libraries::CompilerIntrinsic::CollectionSizeOrDefault
                 | krusty::libraries::CompilerIntrinsic::StartCoroutineUninterceptedOrReturn,
             ) => {
