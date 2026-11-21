@@ -105,6 +105,9 @@ impl BodyLowering<'_> {
                 if let Some(intrinsic) = self.linker.continuation_intrinsic(&signature)? {
                     return self.continuation_intrinsic_call(intrinsic, access, ty);
                 }
+                if let Some(expansion) = self.linker.intercepted_continuation(&signature)? {
+                    return self.intercepted_continuation_call(expansion, access, ty);
+                }
                 if let Some(primitive) = self.linker.common_primitive(&signature)? {
                     return self.primitive_call(primitive, access, ty);
                 }
@@ -768,6 +771,19 @@ impl BodyLowering<'_> {
                 declaration: Some((&declared_parameters, &declared_formals)),
             },
         )?;
+        self.linked_call_with_operands(linked, operands, dispatch, Some(access))
+    }
+
+    /// A call of `linked` with the operands its call site supplies, dispatched as `dispatch`.
+    /// `access` is the serialized call whose type arguments an expanded inline callee binds; a
+    /// call the lowering synthesizes has none.
+    fn linked_call_with_operands(
+        &mut self,
+        linked: LinkedCallee,
+        operands: CallOperands,
+        dispatch: CallDispatch,
+        access: Option<&KlibIrMemberAccess>,
+    ) -> Lowered<ExprId> {
         let mut callee = linked.callee;
         if let Callee::External { params, ret, .. } = &mut callee {
             (*params, *ret) = (operands.params, operands.ret);
@@ -846,7 +862,7 @@ impl BodyLowering<'_> {
                 args,
             }),
         };
-        if let Some(function) = expanded {
+        if let (Some(function), Some(access)) = (expanded, access) {
             self.record_inline_type_arguments(call, function, access)?;
         }
         if let Some(result) = suspend_result {
@@ -1011,6 +1027,104 @@ impl BodyLowering<'_> {
                 "a continuation intrinsic call has another operand shape",
             )),
         }
+    }
+
+    /// `interceptedIntrinsic<T>(cont)`, expanded as kotlinc's `BuiltInsLowering` expands it:
+    /// `cont` evaluated once, then `if (cont is CoroutineImpl) (cont as CoroutineImpl).intercepted()
+    /// else cont`, the member call linked as any call of it a body makes.
+    fn intercepted_continuation_call(
+        &mut self,
+        expansion: super::super::intercepted_continuation::InterceptedContinuationExpansion,
+        access: &KlibIrMemberAccess,
+        ty: Ty,
+    ) -> Lowered<ExprId> {
+        let selected = expansion.call;
+        let [Some(type_argument)] = access.type_arguments.as_slice() else {
+            return Err(mismatch(
+                "a continuation interception has another type-argument shape",
+            ));
+        };
+        let type_argument = self.semantic(*type_argument)?;
+        let mut bindings = crate::fx_hash::HashMap::default();
+        bindings.insert(selected.formal, type_argument);
+        let substitute = |ty: Ty| crate::types::ty_subst_formals(ty, &[selected.formal], &bindings);
+        let params = selected
+            .params
+            .iter()
+            .map(|&ty| substitute(ty))
+            .collect::<Vec<_>>();
+        let operands = self.call_operands(
+            access,
+            ty,
+            CalleeShape {
+                receiver: None,
+                params: &params,
+                ret: substitute(selected.result),
+                context_count: 0,
+                class_type_parameters: &[],
+                parameter_defaults: &[],
+                declaration: None,
+            },
+        )?;
+        let (&[continuation], &[continuation_type]) =
+            (operands.args.as_slice(), operands.params.as_slice())
+        else {
+            return Err(mismatch(
+                "a continuation interception has another operand shape",
+            ));
+        };
+        let linked = self.linker.link(self.ir, &expansion.member)?;
+        if linked.receiver.is_none()
+            || linked.context_count != 0
+            || !linked.params.is_empty()
+            || !linked.type_parameters.is_empty()
+            || !linked.class_type_parameters.is_empty()
+        {
+            return Err(mismatch("the intercepting member has another call shape"));
+        }
+        let coroutine = Ty::obj_name(super::super::intercepted_continuation::coroutine_class());
+        let slot = self.locals.anonymous_slot();
+        let declaration = self.ir.add_expr(IrExpr::Variable {
+            index: slot,
+            ty: continuation_type,
+            init: Some(continuation),
+            named: false,
+        });
+        let read = self.ir.add_expr(IrExpr::GetValue(slot));
+        let matches = self.ir.instance_check(false, read, coroutine);
+        let read = self.ir.add_expr(IrExpr::GetValue(slot));
+        let receiver = self.ir.add_expr(IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::CastNonNull,
+            arg: read,
+            type_operand: coroutine,
+        });
+        let receiver = self.typed(receiver, coroutine);
+        let intercepted_type = linked.ret;
+        let intercepted = self.linked_call_with_operands(
+            linked,
+            CallOperands {
+                receiver: Some(receiver),
+                args: Vec::new(),
+                omitted: Vec::new(),
+                receiver_type: Some(coroutine),
+                params: Vec::new(),
+                ret: intercepted_type,
+            },
+            CallDispatch::Virtual,
+            None,
+        )?;
+        let intercepted = self.coercion(intercepted, operands.ret);
+        let unchanged = self.ir.add_expr(IrExpr::GetValue(slot));
+        let unchanged = self.typed(unchanged, operands.ret);
+        let result = self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(matches), intercepted), (None, unchanged)],
+        });
+        let result = self.typed(result, operands.ret);
+        let block = self.ir.add_expr(IrExpr::Block {
+            stmts: vec![declaration],
+            value: Some(result),
+        });
+        Ok(self.typed(block, operands.ret))
     }
 
     /// A call of a dependency property's accessor, lowered as checked FIR lowers a source access
