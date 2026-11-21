@@ -1398,8 +1398,8 @@ jobs:
   # Fills the Gradle cache the build-tools matrix reads. Every matrix job resolves the Build Tools
   # API of its own Kotlin release from Maven Central, and a release no master run has resolved yet
   # (a new one under test) is in no restored cache, so all rows fetched at once and Central answered
-  # 429. This job resolves every release's dependencies serially, retrying a refusal after a wait, and
-  # saves the cache for the rows that follow. Unlike the other Gradle caches it saves on a queue
+  # 429. This job resolves every release's dependencies serially, without retrying a refusal (Central
+  # extends a block for every request made during it), and saves the cache for the rows that follow. Unlike the other Gradle caches it saves on a queue
   # branch too: the rows are in the same run, so they see an entry their own branch saved.
   build-tools-deps:
     needs: [build-tool-bins]
@@ -1424,15 +1424,7 @@ jobs:
         run: |
           set -euo pipefail
           while read -r kotlin; do
-            for attempt in 1 2 3 4 5; do
-              if tools/krusty-build-tools/gradlew --no-daemon -p tools/krusty-build-tools -PkotlinVersion="$kotlin" resolveDependencies; then
-                continue 2
-              fi
-              echo "::warning::resolving Kotlin $kotlin failed (attempt $attempt); waiting before the next"
-              sleep $((attempt * 60))
-            done
-            echo "resolving Kotlin $kotlin failed after 5 attempts" >&2
-            exit 1
+            tools/krusty-build-tools/gradlew --no-daemon -p tools/krusty-build-tools -PkotlinVersion="$kotlin" resolveDependencies
           done < <(just kotlin-versions)
       - name: check for new Gradle files
         id: gradle-grown
