@@ -461,7 +461,7 @@ pub(super) fn classifier_name(module: &str, signature: &KlibIrSignature) -> Opti
         KlibIrSignature::Public(public) => {
             return super::klib_types::classifier_name(public).ok();
         }
-        KlibIrSignature::Accessor(_) => return None,
+        KlibIrSignature::Accessor(_) | KlibIrSignature::TypeParameter { .. } => return None,
     };
     Some(
         TypeName::ROOT
@@ -716,7 +716,9 @@ fn constructor_class(
         KlibIrSignature::FileLocal { .. } | KlibIrSignature::Public(_) => {
             Ok(classifier.signature.clone())
         }
-        KlibIrSignature::Accessor(_) => Err(non_public_type()),
+        KlibIrSignature::Accessor(_) | KlibIrSignature::TypeParameter { .. } => {
+            Err(non_public_type())
+        }
     }
 }
 
