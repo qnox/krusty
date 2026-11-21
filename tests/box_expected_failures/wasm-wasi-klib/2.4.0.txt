@@ -171,11 +171,9 @@ callableReference/adaptedReferences/inlineVararg.kt
 callableReference/adaptedReferences/innerConstructorWithVararg.kt
 callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
-callableReference/adaptedReferences/suspendConversion/extensionTypeProperty.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithContextParameterAsAPropertyType.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithExtensionProperty.kt
 callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction.kt
-callableReference/adaptedReferences/suspendConversion/withContextParameterAsAPropertyType.kt
 callableReference/adaptedReferences/unboundReferences.kt
 callableReference/adaptedReferences/unitCoercionOverloads.kt
 callableReference/arrayOfNulls.kt
@@ -186,7 +184,6 @@ callableReference/bound/multiCase.kt
 callableReference/callableReferenceOfCompanionConst.kt
 callableReference/callableReferencetoInnerAndLocal.kt
 callableReference/equality/conversionCombinations.kt
-callableReference/equality/kpropertyWithCapturingInequality.kt
 callableReference/function/booleanNotIntrinsic.kt
 callableReference/function/enumValueOfMethod.kt
 callableReference/function/genericCallableReferenceArgumentsNonJVM.kt
@@ -200,21 +197,8 @@ callableReference/generticReferences.kt
 callableReference/kt52270.kt
 callableReference/property/accessorForPropertyWithPrivateSetter.kt
 callableReference/property/delegated.kt
-callableReference/property/delegatedMutable.kt
 callableReference/property/extensionPropertyWithExtensionReceiver.kt
-callableReference/property/extensionPropertyWithExtensionType.kt
-callableReference/property/javaBeanConvention.kt
-callableReference/property/kt12044.kt
-callableReference/property/kt12982_protectedPropertyReference.kt
-callableReference/property/kt14330.kt
-callableReference/property/kt14330_2.kt
-callableReference/property/kt15447.kt
 callableReference/property/nullableExtensionProperty.kt
-callableReference/property/privateSetOuterClass.kt
-callableReference/property/privateSetterInsideClass.kt
-callableReference/property/simpleMutableExtension.kt
-callableReference/property/simpleMutableMember.kt
-callableReference/property/simpleMutableTopLevel.kt
 casts/asForConstants.kt
 casts/asToNothing.kt
 casts/asUnit.kt
@@ -537,7 +521,6 @@ coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturn.kt
 coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturnInterception.kt
 coroutines/intrinsicSemantics/suspendCoroutineUninterceptedOrReturn.kt
 coroutines/iterateOverArray.kt
-coroutines/kt15016.kt
 coroutines/kt21080.kt
 coroutines/kt21605.kt
 coroutines/kt24135.kt
@@ -862,7 +845,6 @@ inference/pcla/builderCallAsReturnTypeInLocalClass.kt
 inference/pcla/callableReferenceAndCoercionToUnit.kt
 inference/pcla/callableReferencesProperCompletion.kt
 inference/pcla/issues/kt42139.kt
-inference/pcla/issues/kt45083.kt
 inference/pcla/issues/kt47052.kt
 inference/pcla/issues/kt49887.kt
 inference/pcla/issues/kt54400b.kt
@@ -1026,12 +1008,6 @@ inlineClasses/callableReferences/inlineClassInternalPrimaryVal.kt
 inlineClasses/callableReferences/inlineClassInternalPrimaryValGeneric.kt
 inlineClasses/callableReferences/inlineClassPrivatePrimaryVal.kt
 inlineClasses/callableReferences/inlineClassPrivatePrimaryValGeneric.kt
-inlineClasses/callableReferences/inlineClassTypeBoundMemberVar.kt
-inlineClasses/callableReferences/inlineClassTypeBoundMemberVarGeneric.kt
-inlineClasses/callableReferences/inlineClassTypeMemberVar.kt
-inlineClasses/callableReferences/inlineClassTypeMemberVarGeneric.kt
-inlineClasses/callableReferences/inlineClassTypeTopLevelVar.kt
-inlineClasses/callableReferences/inlineClassTypeTopLevelVarGeneric.kt
 inlineClasses/castInsideWhenExpression.kt
 inlineClasses/castInsideWhenExpressionGeneric.kt
 inlineClasses/constructorCallableReference.kt
@@ -1065,8 +1041,6 @@ inlineClasses/inlineClassCollection/inlineMapOfInlineClassGeneric.kt
 inlineClasses/inlineClassCollection/inlineMutableCollectionBulkAdd.kt
 inlineClasses/inlineClassInStringTemplate.kt
 inlineClasses/inlineClassInStringTemplateGeneric.kt
-inlineClasses/inlineClassPropertyReferenceGetAndSet.kt
-inlineClasses/inlineClassPropertyReferenceGetAndSetGeneric.kt
 inlineClasses/interfaceDelegation/kt38337.kt
 inlineClasses/interfaceDelegation/kt38337Generic.kt
 inlineClasses/interfaceDelegation/memberExtValDelegationWithInlineClassParameterTypes.kt
@@ -1080,8 +1054,6 @@ inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClas
 inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClassParameterTypesGeneric.kt
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypes.kt
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypesGeneric.kt
-inlineClasses/kt25750.kt
-inlineClasses/kt25750Generic.kt
 inlineClasses/kt25771.kt
 inlineClasses/kt27096.kt
 inlineClasses/kt27096Generic.kt
@@ -2069,7 +2041,6 @@ reflection/kClassCompanion.kt
 reflection/methodsFromAny/functionEqualsHashCode.kt
 reflection/methodsFromAny/propertyEqualsHashCode.kt
 reflection/noReflectAtRuntime/methodsFromAny/delegatedProperty.kt
-reflection/noReflectAtRuntime/propertyGetSetName.kt
 reflection/noReflectAtRuntime/propertyInstanceof.kt
 reflection/noReflectAtRuntime/simpleClassLiterals.kt
 reflection/typeOf/arrayOfNullableReified.kt
@@ -2228,7 +2199,6 @@ suspendConversion/suspendAndFunConversionInDisabledMode.kt
 suspendConversion/suspendConversionWithFunInterfaces.kt
 syntheticAccessors/accessorForAbstractProtected.kt
 syntheticAccessors/accessorForProtectedInvokeVirtual.kt
-syntheticAccessors/accessorForProtectedPropertyReference.kt
 syntheticAccessors/kt10047.kt
 syntheticAccessors/kt9958.kt
 syntheticAccessors/kt9958Interface.kt

@@ -526,6 +526,8 @@ impl<'a> FileLowering<'a> {
             })
             .transpose()?;
         let name = self.declare_local_function(&format!("{base}_name"), &[any()], any())?;
+        let to_string =
+            self.declare_local_function(&format!("{base}_to_string"), &[any()], any())?;
 
         let mut vtable = self.any_vtable()?;
         // Kotlin compares two references by the declaration they name and the receiver they bind.
@@ -534,6 +536,7 @@ impl<'a> FileLowering<'a> {
         let marker = self.reference_identity_marker(identity)?;
         vtable[0] = self.runtime_member_import("kt_reference_equals")?;
         vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
+        vtable[2] = to_string;
         vtable.push(getter);
         vtable.push(match setter {
             Some(setter) => setter,
@@ -600,6 +603,7 @@ impl<'a> FileLowering<'a> {
             self.define_reference_set(setter, &base, &site, receiver_offset)?;
         }
         self.define_reference_name(name, &base, &site.name)?;
+        self.define_reference_to_string(to_string, &base, &site.name)?;
 
         let singleton = match site.bound {
             Some(_) => None,
@@ -811,6 +815,30 @@ impl<'a> FileLowering<'a> {
     }
 
     /// `name(self)`: the property's Kotlin name.
+    /// `toString(self)`: a property reference prints as `property NAME (Kotlin reflection is not
+    /// available)`, which is what kotlinc-native's references print.
+    fn define_reference_to_string(
+        &mut self,
+        id: FuncId,
+        base: &str,
+        property: &str,
+    ) -> Result<(), Unsupported> {
+        let signature = self.signature_of(&[any()], any())?;
+        let text = format!("property {property} (Kotlin reflection is not available)").into_bytes();
+        self.emit_function(
+            id,
+            signature,
+            any(),
+            &format!("{base}_to_string"),
+            &mut |body, _| {
+                let value = body.string_literal(&text)?;
+                body.builder.ins().return_(&[value]);
+                body.terminate();
+                Ok(())
+            },
+        )
+    }
+
     pub(super) fn define_reference_name(
         &mut self,
         id: FuncId,
