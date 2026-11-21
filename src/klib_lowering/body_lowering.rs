@@ -332,6 +332,15 @@ pub(super) trait CallLinker {
 
     /// The function a file-local call invokes: a top-level function private to the lowered
     /// body's file, or a member of a file-local class. Template linkers keep the refusal.
+    /// The getter of an inherited property that a call of the fake override `callee` of a local
+    /// class stands for. `None` when `callee` is no such fake override.
+    fn inherited_getter(
+        &self,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<Option<crate::metadata::klib_ir::KlibIrSignature>> {
+        Ok(None)
+    }
+
     fn link_local_function(
         &mut self,
         _ir: &mut IrFile,
@@ -796,6 +805,7 @@ impl<'a> BodyLowering<'a> {
             } if matches!(
                 origin.as_str(),
                 "INLINE_ARGS_CONTAINER"
+                    | "ARGUMENTS_REORDERING_FOR_CALL"
                     | "WHEN"
                     | "PLUSEQ"
                     | "MINUSEQ"
@@ -830,7 +840,7 @@ impl<'a> BodyLowering<'a> {
                 origin: Some(origin),
             } if origin == "OBJECT_LITERAL" => return self.object_literal(statements),
             KlibIrExprKind::Block { .. } => {
-                return unsupported("a block of a compiler-introduced form")
+                return unsupported("a block of a compiler-introduced form");
             }
             KlibIrExprKind::Composite { .. } => return unsupported("a composite block"),
             KlibIrExprKind::ReturnableBlock {

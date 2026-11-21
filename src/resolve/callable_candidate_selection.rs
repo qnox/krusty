@@ -265,12 +265,8 @@ impl Checker<'_> {
                                 .copied()
                                 .unwrap_or(false)
                         {
-                            if let Some(TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) =
-                                signature
-                                    .params
-                                    .get(declaration_parameter)
-                                    .copied()
-                                    .map(|ty| ty.non_null().kind())
+                            if let TyKind::TyParam(formal, _) | TyKind::Var(formal, _) =
+                                declared.non_null().kind()
                             {
                                 let intersection = self
                                     .expr_access_path(args[argument])
@@ -1577,6 +1573,12 @@ impl Checker<'_> {
                     // a real ambiguity into “none applicable.”
                     if self.lambda_probe_ty(scope, argument) == Some(Ty::Error) {
                         CallArgKind::LambdaLiteral(Ty::Error)
+                    } else if let Some(intersection) =
+                        self.flow_intersection_argument(scope, argument)
+                    {
+                        // A stable path proven to be several types is applicable to a parameter
+                        // of any one of them, as it was when the candidate was admitted.
+                        CallArgKind::Typed(intersection)
                     } else {
                         self.call_arg_kind(scope, argument)
                     }

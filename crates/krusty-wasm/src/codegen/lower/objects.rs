@@ -710,6 +710,8 @@ impl Body<'_> {
         if call.params.len() != args.len() {
             return Err("a call whose arguments do not match its parameters".into());
         }
+        self.runtime
+            .null_receiver_throws(self.module, self.classifiers)?;
         self.value(receiver, any())?;
         for (arg, param) in args.iter().zip(&call.params) {
             self.value(*arg, *param)?;
@@ -763,17 +765,21 @@ impl Body<'_> {
             .struct_get(object, 0);
     }
 
-    /// A call to member `function` of this file: through its class's dispatch slot when it has
-    /// one, as an override reached through the receiver's own table answers it, and directly
-    /// otherwise.
+    /// A call to member `function` of this file. Common lowering already dispatches an
+    /// overridable function and leaves a `super` call direct, so a function with a body is
+    /// called directly here. A bodiless (abstract) member has nothing to call directly: it is
+    /// reached through its class's dispatch slot, as an override the receiver's own table
+    /// answers.
     pub(super) fn local_member_call(
         &mut self,
         function: FunId,
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
-        let class = self.ir.functions[function as usize]
+        let declaration = &self.ir.functions[function as usize];
+        let class = declaration
             .dispatch_receiver
+            .filter(|_| declaration.body.is_none())
             .and_then(|owner| self.classes.and(self.ir.class_id_by_name(owner)));
         if let Some(class) = class {
             let tables = &self.file_classes()?.tables;
@@ -921,7 +927,7 @@ impl Body<'_> {
                                 class, *property, false, receiver, args,
                             ),
                         _ if args.is_empty() => self.property_read(None, *property, Some(receiver)),
-                        _ => Err("a property getter call with arguments".to_string()),
+                        _ => self.context_member_accessor(*property, false, receiver, args),
                     },
                     IrVirtualTarget::PropertySetter(ResolvedPropertyOverrideTarget::Module(
                         property,
@@ -933,7 +939,7 @@ impl Body<'_> {
                         _ if args.len() == 1 => {
                             self.property_write(None, *property, Some(receiver), args[0])
                         }
-                        _ => Err("a property setter call with the wrong arguments".to_string()),
+                        _ => self.context_member_accessor(*property, true, receiver, args),
                     },
                     _ => Err("a call to a library member".to_string()),
                 }
@@ -954,9 +960,68 @@ impl Body<'_> {
                 params,
                 ret,
                 ..
-            } => self.dependency_super_call(*target, params.len(), *ret, receiver, args),
+            } => match self.ir.dependency_methods.get(target) {
+                // The dependency member is a method of a class this file materializes.
+                Some(&function) => self.direct_member_call(function, receiver, args),
+                None => self.dependency_super_call(*target, params.len(), *ret, receiver, args),
+            },
             Callee::Super { .. } => Err("a `super` call to a library member".to_string()),
             _ => Err("a member call through this calling convention".to_string()),
+        }
+    }
+
+    /// A getter or setter of a class member property that declares context parameters: `args` are
+    /// its contexts, then, for the setter, the written value.
+    fn context_member_accessor(
+        &mut self,
+        property: PropertyId,
+        setter: bool,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let (class, index) = self.member_property(None, property)?;
+        let Some(IrLocalPropertyLayout::Member {
+            context_parameters,
+            ty,
+            ..
+        }) = self.ir.local_property_layouts.get(&property).cloned()
+        else {
+            return Err(
+                "an accessor call with arguments on a property that is not a class member"
+                    .to_string(),
+            );
+        };
+        let mut params = context_parameters;
+        if setter {
+            params.push(ty);
+        }
+        if params.len() != args.len() {
+            return Err("an accessor call whose arguments do not match its parameters".to_string());
+        }
+        let declared = self.ir.classes[class as usize].properties[index].clone();
+        let slot = local_property_target(self.ir, class, index)
+            .filter(|_| !self.ir.classes[class as usize].is_value)
+            .and_then(|target| {
+                let key = if setter {
+                    SlotKey::Setter(target)
+                } else {
+                    SlotKey::Getter(target)
+                };
+                self.file_classes().ok()?.tables.slot(class, &key)
+            });
+        if let Some(slot) = slot {
+            return self.dispatch(class, slot, receiver, args, &params, None);
+        }
+        match if setter {
+            declared.setter
+        } else {
+            declared.getter
+        } {
+            Some(accessor) => self.direct_member_call(accessor, receiver, args),
+            None => Err(format!(
+                "a property with context parameters and no accessor (`{}`)",
+                declared.name
+            )),
         }
     }
 
@@ -1242,8 +1307,13 @@ impl Body<'_> {
             .referenced_module_properties
             .get(&target)
             .ok_or_else(|| "a cross-file property with no module record".to_string())?;
-        if reference.owner.is_some()
-            || reference.extension_receiver.is_some()
+        // A `companion { }` block property is a static of its owner: its recorded owner and
+        // receiver coordinate name that class, which its storage takes no receiver for.
+        let block = matches!(
+            reference.placement,
+            krusty::ir::IrStaticPlacement::CompanionBlock { .. }
+        );
+        if (!block && (reference.owner.is_some() || reference.extension_receiver.is_some()))
             || !reference.context_parameters.is_empty()
         {
             return Err("a cross-file property storage with a receiver".to_string());

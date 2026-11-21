@@ -1361,7 +1361,7 @@ impl ProductionSignatureSemantics<'_> {
                 super::super::member_extension_selection::MemberExtensionLambdaShape::Selected(
                     selected,
                 ) => {
-                    shape = Some(selected);
+                    shape = Some(*selected);
                     break;
                 }
                 super::super::member_extension_selection::MemberExtensionLambdaShape::Ambiguous => {

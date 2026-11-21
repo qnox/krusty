@@ -146,6 +146,15 @@ impl IrPropertyFunctionReference {
     }
 }
 
+/// A value-class context a function reference binds, which the physical target takes as the
+/// class's underlying.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoundContextUnbox {
+    pub value_class: TypeName,
+    /// The declared context type is nullable: `null` stays `null` rather than being unboxed.
+    pub nullable: bool,
+}
+
 /// The selected constructor declaration, retained independently of its invocation adapter.
 #[derive(Clone, Copy, Debug)]
 pub enum IrConstructorReferenceDeclaration {
@@ -191,6 +200,15 @@ pub struct IrCallableReference {
     /// Classifier an unbound inherited instance member was written on. Realization uses this
     /// identity directly. Every other reference, including a member extension, leaves it empty.
     pub reflection_owner: Option<crate::types::TypeName>,
+}
+
+impl IrCallableReference {
+    /// The `captures` slots holding values bound for the declaration's context parameters. They
+    /// are the leading captures, and two references to the same declaration are equal only when
+    /// these values are equal as well, exactly as for the bound receiver.
+    pub fn bound_context_slots(&self) -> std::ops::Range<usize> {
+        0..self.bound_contexts as usize
+    }
 }
 
 impl IrFile {
@@ -356,6 +374,10 @@ pub struct FuncRef {
     /// (`Z(42)::ext`). The receiver is stored boxed as `Object`; the emitter `checkcast`s it to the box
     /// class then `unbox-impl`s it to the underlying before the mangled `invokestatic ext-<hash>(under)`.
     pub staticbound_recv_unbox: Option<TypeName>,
+    /// Per value bound for a leading context parameter: the value class whose underlying the
+    /// physical target takes. The value is stored boxed in `boundContextArguments`; `invoke`
+    /// unboxes it before the target call.
+    pub bound_context_unbox: Vec<Option<BoundContextUnbox>>,
     /// The carrier's own specialized `invoke`: a common-IR instance method of this class whose body
     /// calls the referenced declaration directly, as kotlinc's `FunctionReferenceLowering` builds
     /// it. The backend then writes that method and the erased `FunctionN.invoke` bridge to it

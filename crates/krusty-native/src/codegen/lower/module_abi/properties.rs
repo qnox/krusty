@@ -32,7 +32,6 @@ struct PropertyDeclaration {
     /// with no receiver.
     companion_block: bool,
     flags: DeclarationFlags,
-    visibility: krusty::types::Visibility,
 }
 
 #[derive(Clone, Copy)]
@@ -115,9 +114,6 @@ fn plan(declaration: &PropertyDeclaration) -> Result<PropertyAbi, Unsupported> {
     }
     if flags.has(DeclarationFlags::EXPECT) {
         return Err("a cross-file `expect` property".into());
-    }
-    if declaration.visibility == krusty::types::Visibility::Private {
-        return Err("a private property of another file".into());
     }
     let placement = match declaration.owner {
         _ if declaration.companion_block => PropertyPlacement::CompanionBlock,
@@ -206,7 +202,6 @@ impl FileLowering<'_> {
                 || !record.context_parameters.is_empty(),
             companion_block,
             flags: record.flags,
-            visibility: record.visibility,
         };
         plan(&declaration)
     }
@@ -260,7 +255,6 @@ impl FileLowering<'_> {
             receiver_parameters,
             companion_block: checked.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER),
             flags: checked.flags,
-            visibility: checked.visibility,
         })
     }
 
@@ -425,12 +419,11 @@ impl FileLowering<'_> {
                     body.top_level_write_value(&target, value)?;
                 }
                 LocalRealization::Member {
-                    value_class: true, ..
+                    class,
+                    index,
+                    value_class: true,
                 } => {
-                    return Err(format!(
-                        "internal: a writable property of a value class (`{name}`)"
-                    )
-                    .into());
+                    body.value_property_write_of(class, index, params[0], params[1])?;
                 }
                 LocalRealization::Member { class, index, .. } => {
                     let stored = body.written_property_ty(class, index)?;

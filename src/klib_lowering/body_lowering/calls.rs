@@ -33,8 +33,8 @@ use super::super::decline::KlibBodyDeclineReason;
 enum CallDispatch {
     /// Through the receiver's dispatch table when a subclass may override the member.
     Virtual,
-    /// To the declared implementation itself: a `super` call.
-    Direct,
+    /// To the declared implementation itself: a `super` call through the qualifier.
+    Direct(crate::types::TypeName),
 }
 
 impl BodyLowering<'_> {
@@ -45,7 +45,8 @@ impl BodyLowering<'_> {
         if access.symbol.kind != KlibIrSymbolKind::Function {
             return Err(mismatch("a call target's symbol is not a function"));
         }
-        let signature = &access.symbol.signature;
+        let inherited = self.linker.inherited_getter(&access.symbol.signature)?;
+        let signature = inherited.as_ref().unwrap_or(&access.symbol.signature);
         let callee = match signature {
             KlibIrSignature::Public(callee) if !self.linker.links_privately(signature) => callee,
             KlibIrSignature::Accessor(accessor) if !self.linker.links_privately(signature) => {
@@ -529,10 +530,20 @@ impl BodyLowering<'_> {
                     }
                     _ => None,
                 };
-                membership.map_or_else(
-                    || unsupported("a `!in` of another form than a membership in a range literal"),
-                    Ok,
-                )
+                if let Some(membership) = membership {
+                    return Ok(membership);
+                }
+                // Any other `!in` negates the `contains` call the membership is.
+                let negates_membership = matches!(
+                    &expression.kind,
+                    KlibIrExprKind::Call { access, .. }
+                        if access.origin.as_deref() == Some("NOT_IN")
+                );
+                if !negates_membership {
+                    return Err(mismatch("a `!in` negates no membership call"));
+                }
+                let operand = self.operand(operand, Ty::Boolean)?;
+                Ok(self.ir.add_negation(operand))
             }
             Some(_) => unsupported("a negation of another form than `!`, `!=` or `!==`"),
         }
@@ -647,7 +658,53 @@ impl BodyLowering<'_> {
         if !self.linker.declares_implementation(callee)? {
             return Err(mismatch("a `super` call names an abstract member"));
         }
-        self.linked_call_with(linked, access, ty, CallDispatch::Direct)
+        let qualifier = classifier_name(qualifier)?;
+        self.linked_call_with(linked, access, ty, CallDispatch::Direct(qualifier))
+    }
+
+    /// The call without dispatch of `function`, the method this unit emits for the `qualifier`'s
+    /// member, on `receiver`: the dependency member it implements is the `super` call's
+    /// declaration.
+    fn super_callee(
+        &self,
+        function: crate::ir::FunId,
+        qualifier: crate::types::TypeName,
+        receiver: ExprId,
+    ) -> Lowered<Callee> {
+        let mut implemented = self
+            .ir
+            .dependency_methods
+            .iter()
+            .filter(|(_, &method)| method == function)
+            .map(|(&declaration, _)| declaration);
+        let (Some(declaration), None) = (implemented.next(), implemented.next()) else {
+            return Err(mismatch(
+                "a `super` call's member is not exactly one method of its class",
+            ));
+        };
+        let dispatch_owner = self
+            .lowered_type(receiver)
+            .kotlin_class_internal()
+            .ok_or_else(|| mismatch("a `super` call's receiver is not a class instance"))?;
+        let declared = &self.ir.functions[function as usize];
+        Ok(Callee::Super {
+            qualifier,
+            owner: qualifier,
+            dispatch_owner,
+            enclosing_dispatch: false,
+            kind: crate::ir::IrSuperCallKind::Function,
+            name: declared.name.clone(),
+            params: declared.params.clone(),
+            ret: declared.ret,
+            interface: false,
+            realization: crate::libraries::MemberRealization::Dispatch,
+            descriptor: String::new(),
+            declaration: Some(crate::fir::ResolvedFunctionOverrideTarget::External(
+                declaration,
+            )),
+            defaults: Vec::new(),
+            source_member: None,
+        })
     }
 
     /// A call of a dependency function, which the unit lowers too.
@@ -695,15 +752,18 @@ impl BodyLowering<'_> {
                 declaration: Some((&declared_parameters, &declared_formals)),
             },
         )?;
-        self.linked_call_with_operands(linked, operands, dispatch)
+        self.linked_call_with_operands(linked, operands, dispatch, Some(access))
     }
 
     /// A call of `linked` with the operands its call site supplies, dispatched as `dispatch`.
+    /// `access` is the serialized call whose type arguments an expanded inline callee binds; a
+    /// call the lowering synthesizes has none.
     fn linked_call_with_operands(
         &mut self,
         linked: LinkedCallee,
         operands: CallOperands,
         dispatch: CallDispatch,
+        access: Option<&KlibIrMemberAccess>,
     ) -> Lowered<ExprId> {
         let mut callee = linked.callee;
         if let Callee::External { params, ret, .. } = &mut callee {
@@ -732,7 +792,23 @@ impl BodyLowering<'_> {
             };
         }
         let (dispatch_receiver, args) = (operands.receiver, operands.args);
+        // A backend calls a method with a dispatch slot through it, so a `super` call of one
+        // names the dependency member the method implements, which is called without dispatch.
+        if let (CallDispatch::Direct(qualifier), Callee::Local(function), Some(receiver)) =
+            (dispatch, &callee, dispatch_receiver)
+        {
+            let function = *function;
+            if self.ir.overridable_method(function).is_some() {
+                callee = self.super_callee(function, qualifier, receiver)?;
+            }
+        }
         let singleton_dispatch = linked.singleton_dispatch;
+        let expanded = match &callee {
+            Callee::Local(function) if self.ir.inline_only_fns.contains(function) => {
+                Some(*function)
+            }
+            _ => None,
+        };
         let external = match &callee {
             Callee::External { target, .. } => Some(*target),
             _ => None,
@@ -740,7 +816,7 @@ impl BodyLowering<'_> {
         // A member dispatch reaches on an instance of a class this unit materializes, which a
         // subclass may override, is called through the class's dispatch table.
         let overridable = match (&callee, dispatch_receiver) {
-            _ if dispatch == CallDispatch::Direct => None,
+            _ if matches!(dispatch, CallDispatch::Direct(_)) => None,
             (Callee::Local(function), Some(receiver)) => self
                 .ir
                 .overridable_method(*function)
@@ -767,6 +843,9 @@ impl BodyLowering<'_> {
                 args,
             }),
         };
+        if let (Some(function), Some(access)) = (expanded, access) {
+            self.record_inline_type_arguments(call, function, access)?;
+        }
         if let Some(result) = suspend_result {
             self.ir.suspend_calls.insert(call, result);
         }
@@ -1008,6 +1087,7 @@ impl BodyLowering<'_> {
                 ret: intercepted_type,
             },
             CallDispatch::Virtual,
+            None,
         )?;
         let intercepted = self.coercion(intercepted, operands.ret);
         let unchanged = self.ir.add_expr(IrExpr::GetValue(slot));
@@ -1232,14 +1312,10 @@ impl BodyLowering<'_> {
                 }
             }
         };
-        // Without class bindings the shape is already at the call's type arguments, which may
-        // name the caller's own type parameters; erasing them would lose the call's types.
+        // The shape is already at the call's type arguments, which may name the caller's own type
+        // parameters; only the class's type parameters are the receiver's to bind.
         let substitute = |declared: Ty| {
-            if bindings.is_empty() {
-                declared
-            } else {
-                declared.substitute_erased(&bindings)
-            }
+            crate::types::ty_subst_formals(declared, callee.class_type_parameters, &bindings)
         };
         // A result read through a projected receiver argument (`Array<out T>.get`) is that
         // projection's read type, as a source call's result is; a nullable result reads its
@@ -1315,6 +1391,47 @@ impl BodyLowering<'_> {
         Ok(applied)
     }
 
+    /// The type arguments `call` of the inline function `function` binds, under the selected
+    /// semantic identities of the function's type parameters, which its body's types name, for the
+    /// expansion to specialize that body with.
+    fn record_inline_type_arguments(
+        &mut self,
+        call: ExprId,
+        function: crate::ir::FunId,
+        access: &KlibIrMemberAccess,
+    ) -> Lowered<()> {
+        let Some(signature) = self.ir.signatures.get(&function) else {
+            return Ok(());
+        };
+        if signature.type_params.len() != access.type_arguments.len() {
+            return Err(mismatch(
+                "a call passes another number of type arguments than its inline callee declares",
+            ));
+        }
+        let formals = signature
+            .type_params
+            .iter()
+            .map(|formal| (formal.semantic_name.clone(), formal.reified))
+            .collect::<Vec<_>>();
+        let mut bound = Vec::with_capacity(formals.len());
+        let mut reified = Vec::new();
+        for ((name, is_reified), argument) in formals.into_iter().zip(&access.type_arguments) {
+            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a call that leaves a type argument unset",
+            ))?;
+            let value = self.semantic(argument)?;
+            if is_reified {
+                reified.push((name.clone(), value));
+            }
+            bound.push((name, value));
+        }
+        if !reified.is_empty() {
+            self.ir.reified_call_subst.insert(call, reified);
+        }
+        self.ir.inline_call_type_arguments.insert(call, bound);
+        Ok(())
+    }
+
     /// `linked` at the call's type arguments: each of the callee's type parameters bound to the
     /// argument the call serializes for it, as checked FIR lowering records a source call of the
     /// generic declaration, with the same substituted parameters, result and substitutions.
@@ -1366,13 +1483,15 @@ impl BodyLowering<'_> {
                 let value = self.semantic(argument)?;
                 bindings.insert(*parameter, bound(parameter, value));
             }
+            // A member of a generic class keeps naming its class's type parameters, which
+            // [`Self::call_operands`] binds from the dispatch receiver's type.
+            let formals = linked.type_parameters.clone();
+            let substitute = |ty: Ty| crate::types::ty_subst_formals(ty, &formals, &bindings);
             for param in &mut linked.params {
-                *param = param.substitute_erased(&bindings);
+                *param = substitute(*param);
             }
-            linked.ret = linked.ret.substitute_erased(&bindings);
-            linked.receiver = linked
-                .receiver
-                .map(|receiver| receiver.substitute_erased(&bindings));
+            linked.ret = substitute(linked.ret);
+            linked.receiver = linked.receiver.map(substitute);
             return Ok(linked);
         }
         let Callee::External {
