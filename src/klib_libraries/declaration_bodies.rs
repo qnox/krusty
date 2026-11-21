@@ -1077,16 +1077,23 @@ impl KlibDeclarationBodies {
     /// declaration facts, not executable callees, since a private constructor is intentionally
     /// absent from the public callable inventory even when its class is materialized with this
     /// body.
+    ///
+    /// `inherited` names the declaration a call of a fake override of a local class stands for,
+    /// which lowering links in place of the signature the body serializes.
     pub(crate) fn emitted_body(
         &self,
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+        inherited: &dyn Fn(&KlibIrSignature) -> Option<KlibIrSignature>,
     ) -> EmittedBody {
         let inventory = self.emitted_body_symbols(identity, forms);
         let callables = inventory
             .callables
             .into_iter()
-            .filter_map(|symbol| declaration_signature(&symbol.signature))
+            .filter_map(|symbol| {
+                let resolved = inherited(&symbol.signature);
+                declaration_signature(resolved.as_ref().unwrap_or(&symbol.signature))
+            })
             .filter_map(
                 |declaration| match self.linked_origin(&identity.module, &declaration) {
                     KlibCalleeOrigin::Exact(callee) => Some(callee),
@@ -1122,22 +1129,13 @@ impl KlibDeclarationBodies {
         }
     }
 
-    /// The callable edges of [`Self::emitted_body`].
-    pub(crate) fn emitted_body_callables(
-        &self,
-        identity: &KlibDependencyCallable,
-        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
-    ) -> Vec<KlibDependencyCallable> {
-        self.emitted_body(identity, forms).callables
-    }
-
     /// The objects of [`Self::emitted_body`].
     pub(crate) fn emitted_body_objects(
         &self,
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibPublicIdSignature> {
-        self.emitted_body(identity, forms).objects
+        self.emitted_body(identity, forms, &|_| None).objects
     }
 
     /// Callable, object, SAM and hierarchy inventories cover exactly the same emitted roots: the

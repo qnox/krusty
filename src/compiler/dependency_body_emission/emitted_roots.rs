@@ -162,7 +162,7 @@ pub(super) fn declarations(
                 && !externals.contains_key(&identity)
                 && crate::klib_lowering::is_private_class_member(bodies, &identity, class)
         }) {
-            let emitted = bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+            let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
             state.pending.extend(
                 emitted
                     .callables
@@ -183,7 +183,7 @@ pub(super) fn declarations(
         // it is emitted with that body. One an earlier unit already emitted is that unit's export
         // instead, an exact external edge which keeps its declaration authentication below.
         if bodies.is_library_private(&identity) && !externals.contains_key(&identity) {
-            let emitted = bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+            let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
             state
                 .pending
                 .extend(emitted.callables.into_iter().map(|callee| (callee, None)));
@@ -220,8 +220,7 @@ pub(super) fn declarations(
             match platform.external_callable_by_dependency(&identity) {
                 Some(declaration) => declaration,
                 None if raw_header_capability && known_target.is_none() => {
-                    let emitted =
-                        bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+                    let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
                     state
                         .pending
                         .extend(emitted.callables.into_iter().map(|callee| (callee, None)));
@@ -416,7 +415,7 @@ pub(super) fn declarations(
             if let Some(class) = member_object(platform, &identity) {
                 walk_object(platform, bodies, &facts, class, &mut state)?;
             }
-            let emitted = bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+            let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
             read_values(platform, bodies, &facts, &emitted.objects, &mut state)?;
             let member_class = selected
                 .class_contract()

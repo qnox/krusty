@@ -41,6 +41,7 @@ pub(crate) use class_construction::superclass_constructor_ordinal;
 mod constructor_linking;
 mod enum_materialization;
 mod fake_overrides;
+pub(crate) use fake_overrides::emitted_body;
 #[cfg(test)]
 mod initializer_capability_tests;
 mod inline_functions;
