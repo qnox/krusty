@@ -225,6 +225,21 @@ before) and extends an older cache that lacks it; a run without it fails instead
 against another JDK. A mock-JDK run cannot see divergences that only appear against a modern JDK
 surface, so those need their own repository tests.
 
+## JVM Byte-Identity Ratchet
+
+`tests/box_byte_non_identical/jvm/<version>.txt` lists, per exact Kotlin release, the box cases whose
+emitted `.class` files are not byte-for-byte kotlinc's (a release without a file reads its
+predecessor's). Plugin box cases run in the same lane, so Compose, atomicfu and serialization are
+covered by the same list. A full JVM conformance run, the one that writes the JVM byte report and
+reference-compiles every applicable case, judges it in both directions: a case that is not identical
+and not listed has regressed, and a listed case that is identical now must be removed. For every case
+the base already scored the list only shrinks (`scripts/check-outcome-lists.sh`): a case that
+diverges again is a failure, never a new row. A case new to the JVM lane (an owned regression the
+base does not have, or a case the base's JVM not-applicable list excluded) may be listed in the
+change that adds it.
+Refresh it after fixing divergences with `KRUSTY_BLESS_BOX_BYTE_IDENTITY=1` on a full local run
+(refused under CI).
+
 ## Box Outcome Ratchet
 
 The generic ratchet is keyed by platform and exact Kotlin version:
