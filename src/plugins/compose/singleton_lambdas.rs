@@ -60,12 +60,16 @@ pub(super) fn memoize(
         }
         stores.push(store);
         let declaration = &mut ir.classes[class_id as usize];
-        declaration
-            .fields
-            .push(IrField::new(name.clone(), runtime::composable_lambda()));
-        declaration
-            .properties
-            .push(property(&name, index, initializer));
+        declaration.fields.push(IrField::new(
+            name.clone(),
+            runtime::composable_function(&lambda.parameter_types()),
+        ));
+        declaration.properties.push(property(
+            &name,
+            index,
+            initializer,
+            &lambda.parameter_types(),
+        ));
         declaration.methods.push(lambda.implementation);
         read_from_singletons(ir, lambda, singletons, &name);
         let (written, _) = &ir.lifted_functions[&lambda.implementation];
@@ -101,12 +105,17 @@ fn instance(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda
     ir.add_expr(IrExpr::TypeOp {
         op: IrTypeOp::ImplicitCoercion,
         arg: created,
-        type_operand: runtime::composable_lambda(),
+        type_operand: runtime::composable_function(&lambda.parameter_types()),
     })
 }
 
 /// The `internal val` holding one singleton.
-fn property(name: &str, field: u32, initializer: ExprId) -> IrProperty {
+fn property(
+    name: &str,
+    field: u32,
+    initializer: ExprId,
+    parameters: &[crate::types::Ty],
+) -> IrProperty {
     IrProperty {
         origin: crate::ir::IrPropertyOrigin::Declaration,
         name: name.to_string(),
@@ -117,7 +126,7 @@ fn property(name: &str, field: u32, initializer: ExprId) -> IrProperty {
         source_order: field,
         decl_line: 0,
         accessor_lines: crate::ir::IrAccessorLines::default(),
-        ty: runtime::composable_lambda(),
+        ty: runtime::composable_function(parameters),
         type_params: Vec::new(),
         visibility: Visibility::Internal,
         return_value_status: Default::default(),
@@ -153,7 +162,7 @@ fn read_from_singletons(
         receiver: Some(instance),
         owner: singletons,
         name: name.to_string(),
-        ty: runtime::composable_lambda(),
+        ty: runtime::composable_function(&lambda.parameter_types()),
         interface: false,
         operation: None,
     });

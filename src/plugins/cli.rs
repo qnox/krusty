@@ -17,10 +17,10 @@
 /// The real kotlinc plugin ids (the `<id>` in `-P plugin:<id>:...`).
 pub const SERIALIZATION_PLUGIN_ID: &str = "org.jetbrains.kotlinx.serialization";
 pub const KSP_PLUGIN_ID: &str = "com.google.devtools.ksp.symbol-processing";
-pub const ALLOPEN_PLUGIN_ID: &str = "org.jetbrains.kotlin.allopen";
-pub const NOARG_PLUGIN_ID: &str = "org.jetbrains.kotlin.noarg";
-pub const SAM_WITH_RECEIVER_PLUGIN_ID: &str = "org.jetbrains.kotlin.samWithReceiver";
-pub const ASSIGNMENT_PLUGIN_ID: &str = "org.jetbrains.kotlin.assignment";
+pub const ALLOPEN_PLUGIN_ID: &str = krusty_plugin_allopen::PLUGIN_ID;
+pub const NOARG_PLUGIN_ID: &str = krusty_plugin_noarg::PLUGIN_ID;
+pub const SAM_WITH_RECEIVER_PLUGIN_ID: &str = krusty_plugin_sam_with_receiver::PLUGIN_ID;
+pub const ASSIGNMENT_PLUGIN_ID: &str = krusty_plugin_assignment::PLUGIN_ID;
 pub const COMPOSE_PLUGIN_ID: &str = "androidx.compose.compiler.plugins.kotlin";
 pub const ATOMICFU_PLUGIN_ID: &str = "org.jetbrains.kotlinx.atomicfu";
 pub const PARCELIZE_PLUGIN_ID: &str = "org.jetbrains.kotlin.parcelize";
@@ -34,13 +34,7 @@ pub const KAPT_PLUGIN_ID: &str = "org.jetbrains.kotlin.kapt3";
 /// The plugin id kotlinc shows for an `-Xcompiler-plugin` option, which names no plugin.
 pub const MODERN_OPTION_ID: &str = "<NO_ID>";
 
-/// One `-P plugin:<id>:<key>=<value>` option.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PluginOption {
-    pub id: String,
-    pub key: String,
-    pub value: String,
-}
+pub use krusty_plugin_api::PluginOption;
 
 /// One `-Xcompiler-plugin=<jar>,<jar>[=<key>=<value>,<key>=<value>]` registration (kotlinc's modern,
 /// experimental syntax). Its options carry no plugin id: they configure the plugin those jars load.
@@ -59,6 +53,10 @@ pub struct PluginConfig {
     pub options: Vec<PluginOption>,
     /// `-Xcompiler-plugin=` registrations, in order.
     pub compiler_plugins: Vec<CompilerPluginSpec>,
+    /// `-Xcompiler-plugin-order=` values, in order. kotlinc parses them as it loads the plugins
+    /// ([`super::plugin_order::parse_constraints`]), so an unparsable one is a plugin error, not an
+    /// argument error.
+    pub order_constraints: Vec<String>,
     /// Switches kotlinc rejects, in its words. A driver must fail on any of them rather than compile
     /// with the plugin configuration it could not read.
     pub errors: Vec<String>,
@@ -72,6 +70,7 @@ impl PluginConfig {
             plugin_jars: Vec::new(),
             options: Vec::new(),
             compiler_plugins: Vec::new(),
+            order_constraints: Vec::new(),
             errors: Vec::new(),
         }
     }
@@ -94,7 +93,8 @@ impl PluginConfig {
     /// - `-Xplugin=<jar>,<jar>` — repeatable; kotlinc splits the value on `,` only (a `:` is part of
     ///   the path: `-Xplugin=a.jar:b.jar` names one non-existent jar);
     /// - `-P plugin:<id>:<key>=<value>` and `-P=plugin:…`;
-    /// - `-Xcompiler-plugin=<jar>,<jar>[=<key>=<value>,…]` — repeatable, one plugin per switch.
+    /// - `-Xcompiler-plugin=<jar>,<jar>[=<key>=<value>,…]` — repeatable, one plugin per switch;
+    /// - `-Xcompiler-plugin-order=<before>><after>` — repeatable, one constraint per switch.
     ///
     /// Call [`PluginConfig::finish`] once every argument has been offered.
     pub fn accept(&mut self, argument: &str, next: impl FnOnce() -> Option<String>) -> bool {
@@ -110,6 +110,8 @@ impl PluginConfig {
                     .map(|(key, value)| (key.to_string(), value.to_string()))
                     .collect(),
             });
+        } else if let Some(raw) = argument.strip_prefix("-Xcompiler-plugin-order=") {
+            self.order_constraints.push(raw.to_string());
         } else if let Some(spec) = argument.strip_prefix("-P=") {
             self.push_spec(spec);
         } else if argument == "-P" {

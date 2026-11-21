@@ -206,6 +206,15 @@ impl std::fmt::Display for KlibDeclarationBodiesError {
 
 impl std::error::Error for KlibDeclarationBodiesError {}
 
+/// What one emitted body reaches; see [`KlibDeclarationBodies::emitted_body`]. Declaration roots
+/// never become executable call obligations merely by sharing this walk with callable edges.
+pub(crate) struct EmittedBody {
+    pub(crate) callables: Vec<KlibDependencyCallable>,
+    pub(crate) objects: Vec<KlibPublicIdSignature>,
+    pub(crate) sam_classifiers: Vec<(KlibPublicIdSignature, TypeName)>,
+    pub(crate) hierarchy_roots: Vec<TypeName>,
+}
+
 /// Distinct inventories from one authenticated emitted-body traversal. Declaration roots never
 /// become executable call obligations merely by sharing this walk with callable symbols.
 #[derive(Default)]
@@ -600,10 +609,58 @@ impl KlibDeclarationBodies {
         self.libraries[library].local_class(signature)
     }
 
+    /// The top-level class private to its file that `module` itself serializes under the
+    /// file-local `signature`, with the package of that file.
+    pub(crate) fn module_file_private_class<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a [String], &'a KlibIrClass)> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].file_private_class(signature)
+    }
+
     /// The package segments of the serialized file `file` of `module`.
     pub(crate) fn module_file_package(&self, module: &str, file: u32) -> Option<&[String]> {
         let library = *self.modules.get(module)?;
         self.libraries[library].file_package(file)
+    }
+
+    /// The class `module` itself serializes under `signature`, whichever kind of signature names
+    /// it. `None` unless exactly one class has it.
+    pub(crate) fn module_declared_class<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
+        let library = *self.modules.get(module)?;
+        let mut found = None;
+        for class in self.libraries[library].classes_with_signature(signature) {
+            if found.replace(class).is_some() {
+                return None;
+            }
+        }
+        found.or_else(|| self.libraries[library].local_class(signature))
+    }
+
+    /// What the serialized file-local `signature` of `module` records beside its table slot.
+    pub(crate) fn module_file_local_origin(
+        &self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<&crate::metadata::klib_ir::KlibFileLocalOrigin> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].file_local_origin(signature)
+    }
+
+    /// The public function `module` itself serializes under `signature`.
+    pub(crate) fn module_public_function<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a KlibIrArena, &'a KlibIrFunction)> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].function(signature)
     }
 
     /// The file-local function `module` itself serializes under `signature`.
@@ -880,6 +937,40 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
+    /// The direct member functions, constructors excluded, of the one public class `signature`
+    /// in `module`'s producer graph, with the module that serializes it. `None` unless exactly one
+    /// class has the signature.
+    pub(crate) fn public_class_functions(
+        &self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> Option<(String, &KlibIrArena, Vec<&KlibIrFunction>)> {
+        let wanted = KlibIrSignature::Public(signature.clone());
+        let mut found = None;
+        for owner in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&owner) else {
+                continue;
+            };
+            for (arena, class) in self.libraries[library].classes_with_signature(&wanted) {
+                if found.replace((owner.clone(), arena, class)).is_some() {
+                    return None;
+                }
+            }
+        }
+        let (owner, arena, class) = found?;
+        let functions = class
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                KlibIrMember::Function(function) => {
+                    Some(arena.function(*function)).filter(|function| !function.constructor)
+                }
+                _ => None,
+            })
+            .collect();
+        Some((owner, arena, functions))
+    }
+
     /// The class in `module`'s producer graph that directly declares `signature`.
     ///
     /// The match is the function's serialized symbol, including a property accessor. Two classes
@@ -1008,16 +1099,26 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
-    /// Exact module-qualified edges of the bodies common lowering structurally emits, including
-    /// reached closure implementations. The supplied operation policy does not grant intrinsic
-    /// authority; original direct inventories remain the authority for that separate decision.
-    pub(crate) fn emitted_body_callables(
+    /// What the emitted body of `identity` reaches, from one traversal of its emitted roots.
+    ///
+    /// The callable edges are exact module-qualified edges of the bodies common lowering
+    /// structurally emits, including reached closure implementations. The supplied operation
+    /// policy does not grant intrinsic authority; original direct inventories remain the authority
+    /// for that separate decision. The objects are the public objects whose values the body reads,
+    /// through the closures `forms` lowers with it and the members of the file-local classes it
+    /// constructs. The SAM classifiers are the public functional interfaces its SAM conversions
+    /// name. The hierarchy roots are the public supertypes of the private classes it constructs:
+    /// declaration facts, not executable callees, since a private constructor is intentionally
+    /// absent from the public callable inventory even when its class is materialized with this
+    /// body.
+    pub(crate) fn emitted_body(
         &self,
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
-    ) -> Vec<KlibDependencyCallable> {
-        let symbols = self.emitted_body_symbols(identity, forms).callables;
-        symbols
+    ) -> EmittedBody {
+        let inventory = self.emitted_body_symbols(identity, forms);
+        let callables = inventory
+            .callables
             .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(
@@ -1026,35 +1127,18 @@ impl KlibDeclarationBodies {
                     KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
                 },
             )
-            .collect()
-    }
-
-    /// The public objects whose values the emitted body of `identity` reads, through the
-    /// closures `forms` lowers with it and the members of the file-local classes it constructs.
-    pub(crate) fn emitted_body_objects(
-        &self,
-        identity: &KlibDependencyCallable,
-        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
-    ) -> Vec<KlibPublicIdSignature> {
-        let objects = self.emitted_body_symbols(identity, forms).objects;
+            .collect();
         let mut seen = crate::fx_hash::HashSet::default();
-        objects
+        let objects = inventory
+            .objects
             .into_iter()
             .filter_map(|symbol| match &symbol.signature {
                 KlibIrSignature::Public(signature) => Some(signature.clone()),
                 _ => None,
             })
             .filter(|signature| seen.insert(signature.clone()))
-            .collect()
-    }
-
-    /// Public functional interfaces named by emitted SAM conversions, from the same roots as calls.
-    pub(crate) fn emitted_body_sam_classifiers(
-        &self,
-        identity: &KlibDependencyCallable,
-        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
-    ) -> Vec<(KlibPublicIdSignature, TypeName)> {
-        self.emitted_body_symbols(identity, forms)
+            .collect();
+        let sam_classifiers = inventory
             .sam_declarations
             .into_iter()
             .filter_map(|symbol| match &symbol.signature {
@@ -1063,19 +1147,31 @@ impl KlibDeclarationBodies {
                 }
                 _ => None,
             })
-            .collect()
+            .collect();
+        EmittedBody {
+            callables,
+            objects,
+            sam_classifiers,
+            hierarchy_roots: inventory.public_hierarchy_roots,
+        }
     }
 
-    /// Public hierarchy roots of the private classes the emitted body constructs. These are
-    /// declaration facts, not executable callees: a private constructor is intentionally absent
-    /// from the public callable inventory even when its class is materialized with this body.
-    pub(crate) fn emitted_body_classifiers(
+    /// The callable edges of [`Self::emitted_body`].
+    pub(crate) fn emitted_body_callables(
         &self,
         identity: &KlibDependencyCallable,
         forms: crate::metadata::klib_ir::tree::EmittedCallForms,
-    ) -> Vec<TypeName> {
-        self.emitted_body_symbols(identity, forms)
-            .public_hierarchy_roots
+    ) -> Vec<KlibDependencyCallable> {
+        self.emitted_body(identity, forms).callables
+    }
+
+    /// The objects of [`Self::emitted_body`].
+    pub(crate) fn emitted_body_objects(
+        &self,
+        identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
+    ) -> Vec<KlibPublicIdSignature> {
+        self.emitted_body(identity, forms).objects
     }
 
     /// Callable, object, SAM and hierarchy inventories cover exactly the same emitted roots: the

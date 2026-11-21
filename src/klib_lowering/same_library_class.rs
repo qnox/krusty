@@ -136,6 +136,8 @@ pub(super) struct PreparedMember<'a> {
     pub(super) visibility: Visibility,
     /// Whether the function is its property's setter.
     pub(super) setter: bool,
+    /// The function's own type parameters and their declared bounds, which a call binds.
+    pub(super) formals: Vec<(crate::types::TyParamName, Vec<Ty>)>,
 }
 
 /// An overridden member, joined by its checked dependency identity.
@@ -416,6 +418,9 @@ pub(super) struct PreparedLocalClass<'a> {
     /// The same-library superclass the constructor delegates to; `Any` otherwise.
     pub(super) superclass: Option<LocalSuperclass<'a>>,
     pub(super) open: bool,
+    /// How Kotlin names a top-level class private to its file: in its file's package, by its
+    /// declared name. Any other file-local class has no name of its own here.
+    pub(super) naming: Option<crate::ir::IrLocalClassNameProvenance>,
     /// Whether the class is an object, whose one instance its singleton value reads.
     pub(super) object: bool,
 }
@@ -606,7 +611,7 @@ fn applied_local_supertype(
 /// The call shape of a member already declared for `class`.
 pub(super) fn linked_member(
     class: &MaterializedLocalClass,
-    function: crate::ir::FunId,
+    (function, formals): (crate::ir::FunId, &[(crate::types::TyParamName, Vec<Ty>)]),
     ir: &crate::ir::IrFile,
     defaults: Vec<bool>,
 ) -> super::body_lowering::LinkedCallee {
@@ -618,8 +623,8 @@ pub(super) fn linked_member(
         ret: declared.ret,
         context_count: 0,
         singleton_dispatch: None,
-        type_parameters: Vec::new(),
-        type_parameter_bounds: Some(Vec::new()),
+        type_parameters: formals.iter().map(|(name, _)| *name).collect(),
+        type_parameter_bounds: Some(formals.iter().map(|(_, bounds)| bounds.clone()).collect()),
         class_type_parameters: class.class_type_parameters.clone(),
         parameter_defaults: defaults,
         edge: super::CallEdge::default(),
@@ -799,6 +804,7 @@ fn prepare_class<'a>(
         class_name,
         outer,
     } = declaration;
+    let naming = file_private_naming(source.bodies, &key);
     if declaration_modality(class.base.flags).is_abstract() {
         return Err(unsupported("a non-public abstract class"));
     }
@@ -985,10 +991,7 @@ fn prepare_class<'a>(
                 declaration
             }
         },
-        access: match declaration_visibility(function.base.flags) {
-            Visibility::Private => IrConstructorAccess::Private,
-            _ => IrConstructorAccess::Unrestricted,
-        },
+        access: constructor_access(function),
         formals,
         class_type_parameters,
         class_type_parameter_bounds,
@@ -1003,7 +1006,27 @@ fn prepare_class<'a>(
         outer: outer_instance,
         superclass,
         open: declaration_modality(class.base.flags) != KotlinModality::Final,
+        naming,
         object,
+    })
+}
+
+/// The naming provenance of the class `key` names when it is a top-level class private to its
+/// file: rooted in that file's package, with no lexical owner and no ordinal.
+fn file_private_naming(
+    bodies: &KlibDeclarationBodies,
+    key: &LocalIdentity,
+) -> Option<crate::ir::IrLocalClassNameProvenance> {
+    let (package, class) = bodies.module_file_private_class(&key.module, &key.signature)?;
+    let package = package.iter().fold(TypeName::ROOT, |parent, segment| {
+        crate::types::type_name_child(parent, segment)
+    });
+    Some(crate::ir::IrLocalClassNameProvenance {
+        source: crate::ir::IrLocalClassNameRoot::Dependency { package },
+        lexical_owner: None,
+        segments: Box::new([class.name.clone()]),
+        ordinal: None,
+        parents: Box::new([]),
     })
 }
 
@@ -1293,11 +1316,13 @@ fn prepare_member<'a>(
         }
         None => return Err(unsupported("a member of a non-public class without a body")),
     };
+    let header = local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?;
     Ok(PreparedMember {
         signature: function.base.symbol.signature.clone(),
         symbol: &function.base.symbol,
         statements,
-        header: local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?,
+        formals: header.own_formals(function),
+        header,
         overrides: member_overrides(function, scope)?,
         visibility: declaration_visibility(function.base.flags),
         setter,
@@ -1429,13 +1454,11 @@ fn member_overrides(
             }
             Err(reason) => return Err(mismatch(reason)),
         }
-        if !declared.type_parameters.is_empty() || declared.constructor {
-            return Err(unsupported(
-                "an override of a generic or constructor declaration",
-            ));
+        if declared.constructor {
+            return Err(unsupported("an override of a constructor declaration"));
         }
         let mut formals = Vec::new();
-        let declared_types = bind_interface_parameters(owner, |parameter| {
+        let mut declared_types = bind_interface_parameters(owner, |parameter| {
             let formal = Ty::ty_param(
                 crate::types::metadata_type_parameter(&parameter.name),
                 Ty::nullable(Ty::obj("kotlin/Any")),
@@ -1443,6 +1466,19 @@ fn member_overrides(
             formals.push(formal);
             Ok(formal)
         })?;
+        // The overridden declaration's own type parameters stay formals of its signature; only
+        // its class's are applied.
+        for parameter in &declared.type_parameters {
+            let formal = Ty::ty_param(
+                crate::types::metadata_type_parameter(&parameter.name),
+                Ty::nullable(Ty::obj("kotlin/Any")),
+            );
+            if !declared_types.bind(&parameter.base.symbol, formal) {
+                return Err(mismatch(
+                    "an overridden declaration repeats a type parameter",
+                ));
+            }
+        }
         let declared_signature =
             interface_signature(owner_arena, declared, &declared_types, scope.resolve)?;
         if declared_signature.parameters.len() != function.regular_parameters.len() {
@@ -1715,6 +1751,14 @@ fn non_public_type() -> KlibBodyDeclineReason {
     KlibBodyDeclineReason::UnsupportedType("a type of a non-public class")
 }
 
+/// Who may call the serialized constructor `function`.
+pub(super) fn constructor_access(function: &KlibIrFunction) -> IrConstructorAccess {
+    match declaration_visibility(function.base.flags) {
+        Visibility::Private => IrConstructorAccess::Private,
+        _ => IrConstructorAccess::Unrestricted,
+    }
+}
+
 /// The construction target recorded for a same-library primary constructor.
 pub(super) fn construction_target(access: IrConstructorAccess) -> IrConstructorTarget {
     IrConstructorTarget { ordinal: 0, access }
@@ -1725,8 +1769,10 @@ pub(super) fn construction_target(access: IrConstructorAccess) -> IrConstructorT
 pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
     let mut class = IrClass::synthetic(prepared.classifier);
     // A class private to its enclosing class is a member classifier its public signature names,
-    // as its source declares it; a file-local one has no name of its own here.
-    class.is_source_declared = matches!(prepared.key.signature, KlibIrSignature::Public(_));
+    // as its source declares it, and a top-level class private to its file is named by its
+    // provenance; any other file-local one has no name of its own here.
+    class.is_source_declared =
+        matches!(prepared.key.signature, KlibIrSignature::Public(_)) || prepared.naming.is_some();
     class.supertypes = prepared.supertypes.clone();
     for interface in &prepared.interfaces {
         class.interfaces.push_name(*interface);

@@ -183,15 +183,16 @@ impl Checker<'_> {
             };
             // A vararg element takes its ELEMENT type only when the argument is passed
             // POSITIONALLY: kotlinc accepts `@Filt("a")` but rejects `@Filt(value = "a")`, where
-            // naming the parameter demands the array itself.
+            // naming the parameter demands the array itself. That array, named or spread, is the
+            // vararg parameter's type: `Array<out String>` for `vararg value: String`, Kotlin or Java.
             let named = name.is_some();
-            let expected =
-                if parameters.vararg == Some(index) && !named && !self.file.is_spread_arg(argument)
-                {
-                    declared.array_read_elem().unwrap_or(*declared)
-                } else {
-                    *declared
-                };
+            let expected = if parameters.vararg != Some(index) {
+                *declared
+            } else if !named && !self.file.is_spread_arg(argument) {
+                declared.array_read_elem().unwrap_or(*declared)
+            } else {
+                crate::metadata::vararg_recorded_type(*declared)
+            };
             // An annotation array literal has no type independently of its selected element. Check
             // each ELEMENT against that declared element type: otherwise a class literal or enum
             // entry inside one is never resolved, and an element-typed expectation (a vararg element
@@ -212,7 +213,7 @@ impl Checker<'_> {
         expected: Ty,
     ) {
         if let Expr::AnnotationArrayLiteral(elements) = self.file.expr(argument).clone() {
-            let Some(element_ty) = expected.non_null().array_elem() else {
+            let Some(element_ty) = expected.non_null().array_read_elem() else {
                 self.expect_assignable(
                     expected,
                     Ty::array(Ty::obj("kotlin/Any")),
@@ -227,7 +228,9 @@ impl Checker<'_> {
             self.set(argument, expected);
             return;
         }
+        self.annotation_argument_depth += 1;
         let actual = self.check_annotation_value_expression(scope, argument, expected);
+        self.annotation_argument_depth -= 1;
         self.expect_assignable(expected, actual, self.span(argument), "annotation argument");
     }
 

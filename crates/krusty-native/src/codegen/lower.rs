@@ -695,16 +695,10 @@ impl<'a> FileLowering<'a> {
         if let Some(owner) = function.dispatch_receiver {
             // A value class's member takes the VALUE as `this`; its box reaches it through a
             // bridge. Every other member takes the object, as a reference.
-            params.push(match self.value_receiver(owner) {
-                Some(value) => value,
-                None if self.ir.class_id_by_name(owner).is_some() => any(),
-                None => {
-                    return Err(declined!(
-                        "a method of `{}`, which is not declared in this file",
-                        owner.render()
-                    ))
-                }
-            });
+            // An owner this file does not declare is a library classifier whose members the
+            // dependency unit lowers as functions of the instance (an interface's default body),
+            // so its receiver is the instance reference too.
+            params.push(self.value_receiver(owner).unwrap_or_else(any));
         }
         params.extend(super::super::captures::carried_parameters(self.ir, id));
         self.signature_of(&params, function.ret)
@@ -2224,13 +2218,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let (owner, name) = self
                     .range_getter(*target, *receiver)
                     .expect("checked by the guard");
-                if self.range_has_source_implementor(*receiver) {
-                    return Err(declined!(
-                        "the member `{name}` of a range type this file implements itself"
-                    ));
-                }
-                self.range_property_member(owner, &name, *receiver, *result)
-                    .expect("a range member, by the guard")
+                self.range_property_through_implementors(*target, owner, &name, *receiver, *result)
             }
             IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::ExternalPropertyRead {

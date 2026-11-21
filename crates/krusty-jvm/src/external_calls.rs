@@ -1078,6 +1078,9 @@ fn realize_expressions(
             ) => {
                 unreachable!("a Native continuation intrinsic cannot reach JVM call realization")
             }
+            Some(krusty::libraries::CompilerIntrinsic::InterceptedContinuation) => {
+                unreachable!("a Wasm continuation intrinsic cannot reach JVM call realization")
+            }
             Some(
                 krusty::libraries::CompilerIntrinsic::UnsignedDivide { .. }
                 | krusty::libraries::CompilerIntrinsic::UnsignedRemainder { .. }
@@ -1105,6 +1108,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::RadixToString { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayStorageCopy
                 | krusty::libraries::CompilerIntrinsic::StringRangeEquals
+                | krusty::libraries::CompilerIntrinsic::StringIndexOf { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayCopy { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayGet
                 | krusty::libraries::CompilerIntrinsic::ArraySet

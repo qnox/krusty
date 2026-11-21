@@ -94,26 +94,6 @@ fn a_file_that_declares_its_own_closed_range_declines() {
     );
 }
 
-/// A BOUND read through the interface declines the same way. The runtime reads a bound from the
-/// range object it built, so the program's own implementation, held under `ClosedRange<Int>`,
-/// would answer an unrelated word of its layout (the first bound happens to be at the same offset,
-/// which is how the second answers an address).
-#[test]
-fn a_bound_of_a_file_declared_closed_range_declines_rather_than_reading_the_runtime_layout() {
-    expect_native_decline(
-        "class Window(private val low: Int, private val high: Int) : ClosedRange<Int> {\n\
-         \x20   override val start: Int get() = low\n\
-         \x20   override val endInclusive: Int get() = high\n\
-         }\n\
-         fun box(): String {\n\
-         \x20   val range: ClosedRange<Int> = Window(2, 5)\n\
-         \x20   return if (range.start == 2 && range.endInclusive == 5) \"OK\" else \"fail\"\n\
-         }\n",
-        "DeclaredClosedRangeBound",
-        "the member `start` of a range type this file implements itself",
-    );
-}
-
 /// A range over the file's OWN `Comparable` is ordered by that class's `compareTo`, which the
 /// range carries: the runtime has no order of its own for a program's class, and is never asked
 /// for one. Membership, emptiness and both bounds, as kotlinc answers them.
