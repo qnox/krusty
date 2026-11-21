@@ -198,13 +198,18 @@ impl Checker<'_> {
                 let constructor = index
                     .owned_declaration(declaration, crate::fir::DeclarationKind::Constructor, 0)
                     .expect("an accepted source value class must retain its primary constructor");
+                // An unpublishable parameter type (an unresolved reference) is not a signature.
+                // The parameter-type checks have no type to follow; the unresolved diagnostic
+                // already stands. The kind still drives the checks that read no parameter type.
                 let parameters = index
                     .signature(constructor)
-                    .expect("a source value class must retain its primary-constructor signature")
-                    .parameters
-                    .iter()
-                    .map(|parameter| parameter.get())
-                    .collect();
+                    .map_or_else(Vec::new, |signature| {
+                        signature
+                            .parameters
+                            .iter()
+                            .map(|parameter| parameter.get())
+                            .collect()
+                    });
                 return Some(SelectedValueClass { kind, parameters });
             }
             return record

@@ -89,6 +89,16 @@ fn value_class_parameter_shapes_match_kotlinc() {
 }
 
 #[test]
+fn unresolved_value_class_parameter_keeps_the_unresolved_diagnostic() {
+    assert_matches_kotlinc(
+        "@JvmInline\nvalue class Box(val item: Missing)\nfun use(box: Box) = box.item\n",
+        &[],
+        &["2:27: unresolved reference 'Missing'."],
+        &[],
+    );
+}
+
+#[test]
 fn source_typealias_recursion_is_checked_without_substituting_type_arguments() {
     assert_matches_kotlinc(
         "typealias A = R\n@JvmInline value class R(val x: A)\n",
