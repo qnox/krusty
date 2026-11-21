@@ -157,6 +157,12 @@ done
 
 if [ "${#e2e_modules[@]}" -gt 0 ]; then
   step "changed e2e modules: ${e2e_modules[*]}"
+  # An e2e module that spawns the CLI runs the gate build of it, as run-tests.sh passes it.
+  if [ -z "${KRUSTY_BIN:-}" ]; then
+    cargo build --profile gate -p krusty-cli --bin krusty
+    target_root="${CARGO_TARGET_DIR:-$repo_root/target}"
+    export KRUSTY_BIN="$target_root/gate/krusty"
+  fi
   run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$(binary e2e test)" "${e2e_modules[@]}"
 fi
 
