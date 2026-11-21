@@ -3,15 +3,16 @@
 
 use super::*;
 
-/// Whether the expr at `id` is an UNBOXED value-class value of class `x` (a `constructor-impl`/
-/// `unbox-impl` result, or an identity block over one).
+/// Whether the expr at `id` is an UNBOXED value-class value of class `x` (a `constructor-impl`
+/// result, or an identity block over one).
 fn is_unboxed_vc(exprs: &[IrExpr], id: ExprId, x: TypeName) -> bool {
     match &exprs[id as usize] {
         IrExpr::Call {
             callee: call_callee,
             ..
         } if let Callee::Static { owner, name, .. } = &**call_callee
-            && (*owner == x && (name == "constructor-impl" || name == "unbox-impl")) =>
+            && *owner == x
+            && name == "constructor-impl" =>
         {
             true
         }
@@ -22,31 +23,31 @@ fn is_unboxed_vc(exprs: &[IrExpr], id: ExprId, x: TypeName) -> bool {
 
 /// At a value-producing (return) position, box an unboxed `X` with `box-impl`, recursing through
 /// `when`/block tails so each branch is boxed (a `null` branch is left alone).
-pub(super) fn box_tail(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) {
+pub(super) fn box_tail(ir: &mut IrFile, id: ExprId, x: TypeName) {
     match &ir.exprs[id as usize] {
         IrExpr::When { branches } => {
             let rs: Vec<ExprId> = branches.iter().map(|(_, r)| *r).collect();
             for r in rs {
-                box_tail(ir, r, x, under);
+                box_tail(ir, r, x);
             }
         }
         IrExpr::Block { value: Some(v), .. } => {
             let v = *v;
-            box_tail(ir, v, x, under);
+            box_tail(ir, v, x);
         }
         // A statement-only block (`{ … ; return x }`) tails on its last statement.
         IrExpr::Block { value: None, stmts } => {
             if let Some(&last) = stmts.last() {
-                box_tail(ir, last, x, under);
+                box_tail(ir, last, x);
             }
         }
         IrExpr::Return(Some(v)) => {
             let v = *v;
-            box_tail(ir, v, x, under);
+            box_tail(ir, v, x);
         }
         _ => {
             if is_unboxed_vc(&ir.exprs, id, x) {
-                box_wrap(ir, id, x, under);
+                box_wrap(ir, id, x);
             }
         }
     }
@@ -118,7 +119,6 @@ pub(super) fn restore_boxed_suspension_tails(
 /// EVERY unboxed tail — `this`, a captured field, a library call returning the unboxed underlying — since
 /// the declared value-class return `X` fixes what the box must be. Uniform across all value classes.
 pub(super) fn box_ref_tail(ir: &mut IrFile, id: ExprId, x: TypeName, inputs: ReprInputs<'_>) {
-    let under = inputs.under;
     // A structural intrinsic point may contain an inlined user block whose own tail has a different
     // type (`suspendCoroutineUninterceptedOrReturn<T> { ... }` may end in a `Unit` block). Its exact physical result belongs
     // to the point as a whole; never recurse through that semantic boundary and reinterpret the block
@@ -154,7 +154,7 @@ pub(super) fn box_ref_tail(ir: &mut IrFile, id: ExprId, x: TypeName, inputs: Rep
             // Already a boxed `X` (a `box-impl` result, a call/slot typed `X`, a `?.`-`when` box) → leave it;
             // otherwise the tail is the unboxed underlying and must be boxed to `X`.
             if !inputs.over(ir).is_boxed_vc(id, x) {
-                box_wrap(ir, id, x, under);
+                box_wrap(ir, id, x);
             }
         }
     }
@@ -174,7 +174,6 @@ pub(super) fn box_nullable_vc_tail(
     inputs: ReprInputs<'_>,
     is_tail: bool,
 ) {
-    let under = inputs.under;
     let recur = |ir: &mut IrFile, e: ExprId, t: bool| box_nullable_vc_tail(ir, e, x, inputs, t);
     match ir.exprs[id as usize].clone() {
         // Control flow whose branch RESULTS are tails (they inherit `is_tail`); a `when`/`if` CONDITION
@@ -250,7 +249,7 @@ pub(super) fn box_nullable_vc_tail(
                 );
                 let already_boxed = inputs.over(ir).is_boxed_vc(id, x);
                 if (logical_is_x || repr_unboxed_x) && !already_boxed {
-                    box_wrap(ir, id, x, under);
+                    box_wrap(ir, id, x);
                 }
             }
         }

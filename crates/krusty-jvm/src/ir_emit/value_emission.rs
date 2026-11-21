@@ -733,6 +733,9 @@ impl super::Emitter<'_> {
                 Callee::Super { .. } => {
                     unreachable!("a super call must be realized before JVM emission")
                 }
+                Callee::ValueClassAdapter { .. } => {
+                    unreachable!("a value-class adapter must be realized before JVM emission")
+                }
                 Callee::Local(fid) => {
                     self.emit_static_function_call(e, *fid, None, args, code);
                 }
