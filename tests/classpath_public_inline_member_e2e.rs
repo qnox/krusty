@@ -72,3 +72,24 @@ fun box(): String {
 "#,
     );
 }
+
+#[test]
+fn a_public_inline_member_reading_its_outer_instance_stays_a_call_from_another_package() {
+    common::expect_box_ok_against(
+        "public_inline_member_outer_instance",
+        r#"
+package a
+
+class E(val x: String) {
+    inner class Inner {
+        inline fun foo(y: String) = x + y
+    }
+}
+"#,
+        r#"
+import a.*
+
+fun box(): String = E("O").Inner().foo("K").let { if (it == "OK") it else "fail: $it" }
+"#,
+    );
+}

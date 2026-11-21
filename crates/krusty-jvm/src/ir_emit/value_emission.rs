@@ -1078,6 +1078,37 @@ impl super::Emitter<'_> {
                     }
                     let mut physical_params = parse_descriptor_params(&descriptor)
                         .expect("static call descriptor must be valid");
+                    // A public inline member kept as a real call when its body is not inlined:
+                    // the handle is the opaque static one, but the declaration is a member and
+                    // dispatches on its receiver.
+                    if let (Some(recv), true) = (*dispatch_receiver, inline.can_inline()) {
+                        let ret = ty_from_descriptor_ret(&descriptor);
+                        if let Err(mismatch) = self.emit_descriptor_virtual_operands(
+                            e,
+                            crate::ir_emit::call_operands::VirtualCallTarget {
+                                owner: &owner,
+                                name: &name,
+                                descriptor: &descriptor,
+                            },
+                            recv,
+                            &args,
+                            &physical_params,
+                            code,
+                        ) {
+                            self.bail_descriptor_arity(&mismatch, ret, code);
+                            return;
+                        }
+                        let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
+                        self.mark_call_start(e, code);
+                        if self.bodies.owner_is_interface_name(owner_identity) {
+                            let m = self.cw.interface_methodref(&owner, &name, &descriptor);
+                            code.invokeinterface(m, aw, slot_words(ret) as i32);
+                        } else {
+                            let m = self.cw.methodref(&owner, &name, &descriptor);
+                            code.invokevirtual(m, aw, slot_words(ret) as i32);
+                        }
+                        return;
+                    }
                     let (physical_args, leading_non_argument_operands) =
                         match dispatch_receiver.as_ref() {
                             Some(&recv) if physical_params.len() == args.len() + 1 => {
