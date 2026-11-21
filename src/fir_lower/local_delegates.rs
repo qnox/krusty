@@ -13,6 +13,8 @@ use crate::ir::{
 };
 use crate::types::Ty;
 
+use super::source_calls::dependency_inline::DependencyInlineCall;
+use super::source_calls::DependencyTemplateSelection;
 use super::{BodyLowering, FirLoweringFailure};
 
 struct LocalDelegateAccessorRequest<'a> {
@@ -285,17 +287,7 @@ impl BodyLowering<'_> {
                 )
                 .map_err(|_| FirLoweringFailure::InvalidLocalDelegatePlan(self.body.owner()));
             }
-            let checked = arguments
-                .iter()
-                .enumerate()
-                .map(|(parameter, &(value, _))| {
-                    Ok(IrCheckedArgument::Expression {
-                        parameter: u32::try_from(parameter)
-                            .map_err(|_| FirLoweringFailure::ValueIdentityOverflow)?,
-                        value,
-                    })
-                })
-                .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
+            let checked = checked_delegate_arguments(&arguments)?;
             let selected_parameters = call
                 .parameters
                 .iter()
@@ -319,6 +311,24 @@ impl BodyLowering<'_> {
                 .ok_or(FirLoweringFailure::MissingCallable(target))??;
             return Ok(expression);
         }
+        if let FirCallTarget::External {
+            declaration: target,
+            inline,
+            ..
+        } = &call.target
+        {
+            match self.dependency_template_selection(*target, *inline) {
+                DependencyTemplateSelection::Expand(template) => {
+                    return self.dependency_delegate_call(
+                        *target, template, call, delegate, dispatch, &arguments,
+                    );
+                }
+                DependencyTemplateSelection::Missing => {
+                    return Err(FirLoweringFailure::UnsupportedExternalCall(*target));
+                }
+                DependencyTemplateSelection::Ordinary => {}
+            }
+        }
         super::delegated_properties::delegated_call_with_dispatch(
             self.index,
             self.ir,
@@ -330,6 +340,65 @@ impl BodyLowering<'_> {
         )
         .map_err(|_| FirLoweringFailure::InvalidLocalDelegatePlan(self.body.owner()))
     }
+}
+
+impl BodyLowering<'_> {
+    /// Expand a delegate convention that selected an inline dependency function from its
+    /// template, as a source call of that function is expanded.
+    fn dependency_delegate_call(
+        &mut self,
+        target: crate::fir::ExternalCallableId,
+        template: super::DependencyInlineTemplate,
+        call: &FirDelegateCall,
+        delegate: crate::ir::ExprId,
+        dispatch: Option<crate::ir::ExprId>,
+        arguments: &[(crate::ir::ExprId, Ty)],
+    ) -> Result<crate::ir::ExprId, FirLoweringFailure> {
+        let checked = checked_delegate_arguments(arguments)?;
+        let parameter_types = call
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>();
+        let (dispatch_receiver, dispatch_type, extension_receiver) = if call.extension {
+            (
+                dispatch,
+                call.dispatch_receiver.as_ref().and_then(dispatch_type),
+                Some(delegate),
+            )
+        } else {
+            (Some(delegate), Some(call.receiver.get()), None)
+        };
+        self.dependency_inline_call(DependencyInlineCall {
+            target,
+            template,
+            parameter_types: &parameter_types,
+            dispatch_receiver,
+            dispatch_type,
+            extension_receiver,
+            extension_receiver_parameter: None,
+            arguments: &checked,
+            substitutions: &call.substitutions,
+        })
+        .ok_or(FirLoweringFailure::UnsupportedExternalCall(target))
+    }
+}
+
+/// A convention's operands as checked arguments of its value parameters, in order.
+fn checked_delegate_arguments(
+    arguments: &[(crate::ir::ExprId, Ty)],
+) -> Result<Vec<IrCheckedArgument>, FirLoweringFailure> {
+    arguments
+        .iter()
+        .enumerate()
+        .map(|(parameter, &(value, _))| {
+            Ok(IrCheckedArgument::Expression {
+                parameter: u32::try_from(parameter)
+                    .map_err(|_| FirLoweringFailure::ValueIdentityOverflow)?,
+                value,
+            })
+        })
+        .collect()
 }
 
 fn dispatch_type(receiver: &FirDelegateDispatchReceiver) -> Option<Ty> {
