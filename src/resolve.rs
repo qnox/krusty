@@ -411,7 +411,7 @@ mod resolved_bound_view;
 mod type_argument_arity;
 mod uninferred_call_results;
 mod upper_bound_violations;
-mod value_class_parameters;
+mod value_class_declaration;
 mod variance_conflicts;
 mod when_exhaustiveness;
 mod when_flow;
@@ -40614,7 +40614,7 @@ impl<'a> Checker<'a> {
         }
         self.validate_class_superclass(d, cl, current_owner, body_local_class);
         if !self.fragment.is_type_use_annotations() {
-            self.check_value_class_parameters(scope, cl, current_owner);
+            self.check_value_class_declaration(scope, cl, current_owner);
         }
         // A plain nested class cuts the receiver chain; an `inner class` keeps `this@Outer`, and so
         // does a LOCAL class — it is entered from the body it was written in and captures the

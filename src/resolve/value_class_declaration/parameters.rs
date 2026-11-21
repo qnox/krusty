@@ -36,7 +36,7 @@ enum Recursion {
 
 /// The target-aware value-class kind selected during signature collection.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SelectedValueClassKind {
+pub(super) enum SelectedValueClassKind {
     Inline,
     Full,
 }
@@ -44,8 +44,8 @@ enum SelectedValueClassKind {
 /// Target-aware value-class classification and the semantic primary-constructor parameter types
 /// selected with it. Full classes have one entry per field; inline classes have their one
 /// underlying property.
-struct SelectedValueClass {
-    kind: SelectedValueClassKind,
+pub(super) struct SelectedValueClass {
+    pub(super) kind: SelectedValueClassKind,
     parameters: Vec<Ty>,
 }
 
@@ -177,7 +177,7 @@ impl Checker<'_> {
     /// Read the selected kind from the declaration representation owned by this checker mode. The
     /// authoritative checker consumes stable declaration flags; pre-finalization inference consumes
     /// the same decision from its temporary signature graph. Neither path reinterprets target rules.
-    fn selected_value_class(
+    pub(super) fn selected_value_class(
         &self,
         owner: TypeName,
         record: &LibraryType,
