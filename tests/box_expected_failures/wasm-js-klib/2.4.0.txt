@@ -661,7 +661,6 @@ coroutines/suspendFunImportedFromObject.kt
 coroutines/suspendFunctionAsCoroutine/handleException.kt
 coroutines/suspendFunctionAsCoroutine/ifExpressionInsideCoroutine_1_3.kt
 coroutines/suspendFunctionAsCoroutine/inline.kt
-coroutines/suspendFunctionAsCoroutine/inlineTwoReceivers.kt
 coroutines/suspendFunctionAsCoroutine/noinlineTwoReceivers.kt
 coroutines/suspendFunctionAsCoroutine/operators.kt
 coroutines/suspendFunctionAsCoroutine/privateFunctions.kt
@@ -1412,7 +1411,6 @@ multiplatform/k2/internalOverride2.kt
 multiplatform/k2/kt66970.kt
 nameBasedDestructuring/fullFormExtraPropType.kt
 nameBasedDestructuring/shortFormExtraPropType.kt
-nonLocalReturns/suspendConversion.kt
 nothingValue/nothingValueException.kt
 nullCheckOptimization/trivialInstanceOf.kt
 object/constructor0.kt
@@ -2300,7 +2298,6 @@ regressions/lambdaWrongReturnType.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
 regressions/multimodule/inlineBuiltString.kt
-regressions/multimodule/inlineTextTrim.kt
 regressions/multimodule/inlineTodoDefaultMessage.kt
 regressions/multimodule/multimoduleDirectCollectionIterator.kt
 regressions/objectInsideDelegation.kt
