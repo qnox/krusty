@@ -79,7 +79,16 @@ pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>
                 ty
             }
         }
-        Some(JavaNullability::Nullable) => Ty::nullable(ty),
+        // `@Nullable Iterable<T>` is `(Mutable)Iterable<T!>?`: the qualifier fixes nullability only,
+        // so the collection keeps the mutability its Java type leaves open.
+        Some(JavaNullability::Nullable) => {
+            let ty = ty.non_null();
+            if super::super::jvm_class_map::platform_flexible_upper_bound(ty) != ty {
+                Ty::nullable(Ty::mutability_flexible(ty))
+            } else {
+                Ty::nullable(ty)
+            }
+        }
         None => Ty::platform_nullable(ty),
     }
 }
