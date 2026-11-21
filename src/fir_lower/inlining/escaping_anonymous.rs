@@ -2061,7 +2061,9 @@ fn consume_trivially_spliceable_lambdas(
         let Some(function) = ir.functions.get(lambda.impl_fn as usize) else {
             return Err(malformed(class_name));
         };
-        if ir.suspend_funs.contains(&lambda.impl_fn) {
+        if ir.suspend_funs.contains(&lambda.impl_fn)
+            || constructor_reads_parameter(ir, class, pending_property_roots, lambda.parameter)
+        {
             continue;
         }
         let parameters = function.params.len();
@@ -2122,6 +2124,38 @@ fn consume_trivially_spliceable_lambdas(
     }
     let after = ir.classes[class as usize].fields.len();
     u32::try_from(before.saturating_sub(after)).map_err(|_| malformed(class_name))
+}
+
+/// Whether constructor code (the init body and property initializers) reads constructor
+/// parameter `parameter`. Such code reads a lambda the object keeps in a field from the parameter,
+/// not from the field, and the copy's constructor code is cloned from the declaration's when the
+/// copy is published, so a lambda it reads stays a constructor argument the code can invoke.
+fn constructor_reads_parameter(
+    ir: &crate::ir::IrFile,
+    class: ClassId,
+    pending_property_roots: &[ExprId],
+    parameter: usize,
+) -> bool {
+    let Ok(parameter) = u32::try_from(parameter) else {
+        return true;
+    };
+    // Value 0 is `this`; parameter `i` is value `i + 1`.
+    let slot = parameter + 1;
+    let mut pending = pending_property_roots.to_vec();
+    pending.extend(ir.classes[class as usize].init_body);
+    let mut seen = HashSet::default();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        match ir.expr(expression) {
+            IrExpr::GetValue(read) if *read == slot => return true,
+            // A nested lambda's body is its own frame; its capture operands are evaluated here.
+            IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
+            _ => crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child)),
+        }
+    }
+    false
 }
 
 /// Replace one capturing lambda with one stored field per capture, and splice its body at each
