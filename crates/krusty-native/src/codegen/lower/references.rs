@@ -586,7 +586,11 @@ impl<'a> FileLowering<'a> {
                 instantiable: true,
                 superclass: any_type,
                 interfaces: &markers,
-                reference_target: Some((marker, receiver_offset.unwrap_or(0))),
+                reference_target: Some(super::objects::ReferenceTarget {
+                    marker,
+                    receiver_offset: receiver_offset.unwrap_or(0),
+                    context_offsets: Vec::new(),
+                }),
                 walk: super::objects::WalkMembers::default(),
                 qualified_name: None,
                 simple_name: None,

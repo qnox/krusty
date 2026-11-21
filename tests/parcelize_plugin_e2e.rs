@@ -54,6 +54,20 @@ public final class Parcel {
     public float readFloat() { return (Float) next(); }
     public void writeDouble(double value) { values.add(value); }
     public double readDouble() { return (Double) next(); }
+    public void writeIntArray(int[] value) { values.add(value == null ? null : value.clone()); }
+    public int[] createIntArray() { return (int[]) next(); }
+    public void writeByteArray(byte[] value) { values.add(value == null ? null : value.clone()); }
+    public byte[] createByteArray() { return (byte[]) next(); }
+    public void writeLongArray(long[] value) { values.add(value == null ? null : value.clone()); }
+    public long[] createLongArray() { return (long[]) next(); }
+    public void writeFloatArray(float[] value) { values.add(value == null ? null : value.clone()); }
+    public float[] createFloatArray() { return (float[]) next(); }
+    public void writeDoubleArray(double[] value) { values.add(value == null ? null : value.clone()); }
+    public double[] createDoubleArray() { return (double[]) next(); }
+    public void writeBooleanArray(boolean[] value) { values.add(value == null ? null : value.clone()); }
+    public boolean[] createBooleanArray() { return (boolean[]) next(); }
+    public void writeCharArray(char[] value) { values.add(value == null ? null : value.clone()); }
+    public char[] createCharArray() { return (char[]) next(); }
 }
 "#;
 
@@ -93,6 +107,39 @@ class User(
     val level: Int?,
 ) : Parcelable
 
+@Parcelize
+class Scalars(
+    val flag: Boolean,
+    val maybeFlag: Boolean?,
+    val small: Short,
+    val maybeSmall: Short?,
+    val letter: Char,
+    val maybeLetter: Char?,
+) : Parcelable
+
+@Parcelize
+class Unsigned(
+    val byte: UByte,
+    val short: UShort,
+    val int: UInt,
+    val long: ULong,
+    val maybeInt: UInt?,
+    val maybeLong: ULong?,
+    val maybeByte: UByte?,
+    val maybeShort: UShort?,
+) : Parcelable
+
+@Parcelize
+class Arrays(
+    val ints: IntArray,
+    val bytes: ByteArray,
+    val longs: LongArray?,
+    val floats: FloatArray,
+    val doubles: DoubleArray,
+    val flags: BooleanArray?,
+    val chars: CharArray,
+) : Parcelable
+
 class Outer {
     @Parcelize
     class Point(val x: Int, val y: Long?) : Parcelable
@@ -109,6 +156,10 @@ fun <T : Parcelable> roundTrip(value: T, type: Class<T>): T {
     return creator(type).createFromParcel(parcel)
 }
 
+fun ub(value: Int): UByte = value.toUByte()
+
+fun us(value: Int): UShort = value.toUShort()
+
 fun box(): String {
     val user = User("ann", null, 30, 7L, 1, 1.5f, 2.5, null)
     if (user.describeContents() != 0) return "describeContents"
@@ -121,13 +172,47 @@ fun box(): String {
     val point = roundTrip(Outer.Point(3, 4L), Outer.Point::class.java)
     if (point.x != 3 || point.y != 4L) return "point"
     if (roundTrip(Outer.Point(1, null), Outer.Point::class.java).y != null) return "point null"
+    val scalars = roundTrip(Scalars(true, null, -7, 9, 'k', null), Scalars::class.java)
+    if (!scalars.flag || scalars.maybeFlag != null) return "booleans"
+    if (scalars.small != (-7).toShort() || scalars.maybeSmall != 9.toShort()) return "shorts"
+    if (scalars.letter != 'k' || scalars.maybeLetter != null) return "chars"
+    val others = roundTrip(Scalars(false, true, 0, null, '\u00e9', 'z'), Scalars::class.java)
+    if (others.flag || others.maybeFlag != true || others.maybeSmall != null) return "other scalars"
+    if (others.letter != '\u00e9' || others.maybeLetter != 'z') return "other chars"
+    val unsigned = roundTrip(
+        Unsigned(ub(200), us(60000), 4000000000u, 18000000000000000000uL, null, 5uL, ub(7), null),
+        Unsigned::class.java,
+    )
+    if (unsigned.byte != 200.toUByte() || unsigned.short != 60000.toUShort()) return "small unsigned"
+    if (unsigned.int != 4000000000u || unsigned.long != 18000000000000000000uL) return "unsigned"
+    if (unsigned.maybeInt != null || unsigned.maybeLong != 5uL) return "nullable unsigned"
+    if (unsigned.maybeByte != 7.toUByte() || unsigned.maybeShort != null) return "nullable small"
+    val arrays = roundTrip(
+        Arrays(
+            intArrayOf(1, -2),
+            byteArrayOf(3),
+            null,
+            floatArrayOf(1.5f),
+            doubleArrayOf(2.5, 3.5),
+            booleanArrayOf(true, false),
+            charArrayOf('a', 'b'),
+        ),
+        Arrays::class.java,
+    )
+    if (!arrays.ints.contentEquals(intArrayOf(1, -2)) || !arrays.bytes.contentEquals(byteArrayOf(3))) {
+        return "int and byte arrays"
+    }
+    if (arrays.longs != null || !arrays.floats.contentEquals(floatArrayOf(1.5f))) return "arrays"
+    if (!arrays.doubles.contentEquals(doubleArrayOf(2.5, 3.5))) return "double array"
+    if (!arrays.flags!!.contentEquals(booleanArrayOf(true, false))) return "boolean array"
+    if (!arrays.chars.contentEquals(charArrayOf('a', 'b'))) return "char array"
     val users = creator(User::class.java).newArray(2)
     if (users.size != 2 || users[0] != null) return "newArray"
     return "OK"
 }
 "#;
 
-/// Strings, primitives and their nullable forms, top-level and nested classes: `describeContents`,
+/// Strings, primitives (booleans, shorts, chars and unsigned integers and primitive arrays included) and their nullable forms, top-level and nested classes: `describeContents`,
 /// `writeToParcel`, `CREATOR` and its local `Creator` class with their bridges, generic signature
 /// and debug tables match kotlinc's, and each class reads back what it wrote.
 #[test]

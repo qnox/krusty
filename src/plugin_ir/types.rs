@@ -1,6 +1,8 @@
 //! Checked types as kotlinc's IR spells them in a [`TypeIdentity`].
 
-use krusty_plugin_ir::{ClassName, Classifier, TypeArgument, TypeIdentity, TypeParameterOwner};
+use krusty_plugin_api::ir::{
+    ClassName, Classifier, TypeArgument, TypeIdentity, TypeParameterOwner,
+};
 
 use crate::types::{Ty, TyKind, TypeName};
 
