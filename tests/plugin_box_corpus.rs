@@ -18,11 +18,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use krusty::conformance::plugin_corpus::{self, PluginCorpus};
+use krusty::conformance::plugin_corpus::{self, CaseCheck, PluginCorpus};
 use rayon::prelude::*;
 
 use super::box_jvm_compile::compile_box_case;
 use super::box_ratchet::{self, Outcome};
+use super::kotlin_box_ir_jvm_conformance::krusty_classes_matching_reference;
 use super::{box_reference_classes, common};
 
 const INCLUDED: &str = "included";
@@ -119,19 +120,27 @@ struct Case {
     stem: String,
 }
 
-fn run_case(case: &Case, stubs: &[PathBuf]) -> Result<Outcome, String> {
+fn run_case(case: &Case, check: CaseCheck, stubs: &[PathBuf]) -> Result<Outcome, String> {
     let prepared = krusty::conformance::prepare_test_source(
         &case.source,
         krusty::conformance::TestTarget::Jvm,
     );
-    if box_reference_classes::checked_prepared_box_with(&prepared, &case.stem, stubs).is_err() {
+    match check {
+        CaseCheck::Box => run_box_case(case, &prepared, stubs),
+        CaseCheck::Classes => run_classes_case(case, &prepared, stubs),
+    }
+}
+
+/// The case compiles with krusty and returns `"OK"` from `box()`.
+fn run_box_case(case: &Case, prepared: &str, stubs: &[PathBuf]) -> Result<Outcome, String> {
+    if box_reference_classes::checked_prepared_box_with(prepared, &case.stem, stubs).is_err() {
         return Ok(Outcome::NotApplicable);
     }
-    let mut classpath = common::classpath_jars_for(&prepared);
+    let mut classpath = common::classpath_jars_for(prepared);
     classpath.extend_from_slice(stubs);
     let jdk = common::jdk_modules();
     let compiled = match compile_box_case(
-        &prepared,
+        prepared,
         &case.stem,
         &classpath,
         Some(jdk.as_path()),
@@ -147,6 +156,19 @@ fn run_case(case: &Case, stubs: &[PathBuf]) -> Result<Outcome, String> {
         Some("OK") => Ok(Outcome::Pass),
         other => Err(format!("box() returned {other:?}")),
     }
+}
+
+/// The case compiles to exactly the classes the reference compiler emits. A case the reference
+/// itself rejects is not applicable.
+fn run_classes_case(case: &Case, prepared: &str, stubs: &[PathBuf]) -> Result<Outcome, String> {
+    let Ok(reference) = box_reference_classes::reference_classes_with(prepared, &case.stem, stubs)
+    else {
+        return Ok(Outcome::NotApplicable);
+    };
+    let mut classpath = common::classpath_jars_for(prepared);
+    classpath.extend_from_slice(stubs);
+    krusty_classes_matching_reference(prepared, &case.stem, &classpath, &reference)
+        .map(|_| Outcome::Pass)
 }
 
 fn render(
@@ -237,9 +259,10 @@ fn run_corpus(corpus: &PluginCorpus) {
     let results: Vec<(String, Result<Outcome, String>)> = cases
         .par_iter()
         .map(|case| {
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_case(case, &stubs)))
-                    .unwrap_or_else(|_| Err("compiler panic".to_string()));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_case(case, corpus.check, &stubs)
+            }))
+            .unwrap_or_else(|_| Err("compiler panic".to_string()));
             (case.key.clone(), result)
         })
         .collect();
