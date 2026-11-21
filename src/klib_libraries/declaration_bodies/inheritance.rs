@@ -83,7 +83,15 @@ impl KlibDeclarationBodies {
         body_module: &str,
         declaration: &KlibDeclarationSignature,
     ) -> Result<Vec<KlibDependencyCallable>, &'static str> {
-        let mut found = self.overridden_declarations(body_module, declaration)?;
+        let found = self.overridden_declarations(body_module, declaration)?;
+        self.override_closure(found)
+    }
+
+    /// `found` and every declaration its declarations override in turn.
+    fn override_closure(
+        &self,
+        mut found: Vec<KlibDependencyCallable>,
+    ) -> Result<Vec<KlibDependencyCallable>, &'static str> {
         let mut next = 0;
         while let Some(identity) = found.get(next).cloned() {
             next += 1;
@@ -110,10 +118,38 @@ impl KlibDeclarationBodies {
         body_module: &str,
         declaration: &KlibDeclarationSignature,
     ) -> Result<Vec<KlibDependencyCallable>, ()> {
+        self.inherited_through(
+            body_module,
+            std::collections::VecDeque::from([declaration.clone()]),
+        )
+    }
+
+    /// Every serialized declaration the member `member` of the class `class` (in `arena`)
+    /// inherits through each direct supertype of the class, as [`Self::inherited`] follows a fake
+    /// override from its declaring class.
+    fn inherited_in_class(
+        &self,
+        body_module: &str,
+        arena: &KlibIrArena,
+        class: &KlibIrClass,
+        member: &KlibDeclarationSignature,
+    ) -> Result<Vec<KlibDependencyCallable>, ()> {
+        let pending = public_supertypes(arena, class)
+            .filter_map(|supertype| as_member_of(member, supertype))
+            .collect();
+        self.inherited_through(body_module, pending)
+    }
+
+    /// Every serialized declaration the `pending` member declarations reach, each followed
+    /// through the direct supertypes of its declaring class until a serialized one is reached.
+    fn inherited_through(
+        &self,
+        body_module: &str,
+        mut pending: std::collections::VecDeque<KlibDeclarationSignature>,
+    ) -> Result<Vec<KlibDependencyCallable>, ()> {
         let mut found = Vec::new();
         // Breadth first, each class's supertypes in their declared order: the order kotlinc's
         // fake-override builder meets the inherited declarations in.
-        let mut pending = std::collections::VecDeque::from([declaration.clone()]);
         let mut visited = HashSet::default();
         while let Some(declaration) = pending.pop_front() {
             if !visited.insert(declaration.clone()) {
@@ -133,15 +169,10 @@ impl KlibDeclarationBodies {
             let Some((arena, class, member)) = self.member_class(body_module, &declaration)? else {
                 continue;
             };
-            for &supertype in &class.supertypes {
-                let KlibIrType::Simple { classifier, .. } = arena.ty(supertype) else {
-                    continue;
-                };
-                let KlibIrSignature::Public(supertype) = &classifier.signature else {
-                    continue;
-                };
-                pending.extend(as_member_of(&member, supertype));
-            }
+            pending.extend(
+                public_supertypes(arena, class)
+                    .filter_map(|supertype| as_member_of(&member, supertype)),
+            );
         }
         Ok(found)
     }
@@ -159,15 +190,36 @@ impl KlibDeclarationBodies {
         arena: &KlibIrArena,
         class: &KlibIrClass,
     ) -> Result<Vec<(KlibDependencyCallable, Vec<KlibDependencyCallable>)>, &'static str> {
-        let KlibIrSignature::Public(signature) = &class.base.symbol.signature else {
+        let Some(signature) = self.class_identity(body_module, &class.base.symbol.signature) else {
             return Ok(Vec::new());
         };
-        let declared = class
+        let signature = &signature;
+        // A member of a class private to its file is declared under its file-private signature,
+        // compared here by the public identity it scopes to the file.
+        let mut declared = HashSet::default();
+        for function in class
             .members
             .iter()
             .flat_map(|member| member_functions(arena, member))
-            .map(|function| function.base.symbol.signature.clone())
-            .collect::<HashSet<_>>();
+        {
+            let declaration = &function.base.symbol.signature;
+            match declaration {
+                KlibIrSignature::FileLocal { .. } => {
+                    match self.class_identity(body_module, declaration) {
+                        Some(identity) => {
+                            declared.insert(KlibIrSignature::Public(identity));
+                        }
+                        // A declaration that overrides nothing overrides no inherited member.
+                        None if function.overridden.is_empty() => {}
+                        // One of unknown identity could override any inherited member.
+                        None => return Ok(Vec::new()),
+                    }
+                }
+                _ => {
+                    declared.insert(declaration.clone());
+                }
+            }
+        }
         let mut found = Vec::new();
         // Every supertype once, nearest first: a member a supertype redeclares is met through it
         // before the declaration it redeclares.
@@ -213,7 +265,15 @@ impl KlibDeclarationBodies {
                 if declared.contains(&ir_signature(&inherited)) {
                     continue;
                 }
-                let declarations = self.overridden_closure(body_module, &inherited)?;
+                // The class itself, not its signature, roots the walk: a class private to its
+                // file is found by no signature of the member it inherits.
+                let reached = self
+                    .inherited_in_class(body_module, arena, class, &inherited)
+                    .map_err(|()| "an overridden declaration's class is not unique")?;
+                if reached.is_empty() {
+                    return Err("an overridden declaration reaches no serialized declaration");
+                }
+                let declarations = self.override_closure(reached)?;
                 let mut bodies = declarations
                     .iter()
                     .filter(|identity| self.function_has_body(identity) == Some(true));
@@ -244,15 +304,39 @@ impl KlibDeclarationBodies {
         Ok(found)
     }
 
+    /// The public identity of the class or member declaration `signature` of a body in
+    /// `body_module`: a public signature itself, or the identity a file-private one scopes to its
+    /// file. `None` for an accessor or a file-local declaration of no public identity.
+    fn class_identity(
+        &self,
+        body_module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<KlibPublicIdSignature> {
+        match signature {
+            KlibIrSignature::Public(signature) => Some(signature.clone()),
+            KlibIrSignature::FileLocal { .. } => {
+                let library = *self.modules.get(body_module)?;
+                self.libraries[library]
+                    .file_private_identity(signature)
+                    .cloned()
+            }
+            // An accessor or type parameter signature names no class.
+            _ => None,
+        }
+    }
+
     /// [`Self::inherited_implementations`] of the class serialized at `signature` in the producer
-    /// graph rooted at `body_module`; none for a class without a public signature.
+    /// graph rooted at `body_module`: a public class, or a class private to its file.
     pub(crate) fn inherited_implementations_of(
         &self,
         body_module: &str,
         signature: &KlibIrSignature,
     ) -> Result<Vec<(KlibDependencyCallable, Vec<KlibDependencyCallable>)>, &'static str> {
         let KlibIrSignature::Public(public) = signature else {
-            return Ok(Vec::new());
+            return match self.module_local_class(body_module, signature) {
+                Some((arena, class)) => self.inherited_implementations(body_module, arena, class),
+                None => Ok(Vec::new()),
+            };
         };
         match self
             .declaring_class_of(body_module, public)
@@ -357,6 +441,22 @@ impl KlibDeclarationBodies {
         }
         Ok(found)
     }
+}
+
+/// The public classes `class` (in `arena`) names as direct supertypes, in declared order.
+fn public_supertypes<'a>(
+    arena: &'a KlibIrArena,
+    class: &'a KlibIrClass,
+) -> impl Iterator<Item = &'a KlibPublicIdSignature> {
+    class.supertypes.iter().filter_map(|&supertype| {
+        let KlibIrType::Simple { classifier, .. } = arena.ty(supertype) else {
+            return None;
+        };
+        match &classifier.signature {
+            KlibIrSignature::Public(supertype) => Some(supertype),
+            _ => None,
+        }
+    })
 }
 
 /// The declaration a member function or property accessor symbol names. Only these take part
