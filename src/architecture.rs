@@ -870,6 +870,16 @@ mod tests {
                 let mut budget = provider.to_vec();
                 budget.push("symbol_resolver");
                 assert_allowed_crate_modules_in_file(&path, &budget);
+            } else if path
+                == source_path("src/klib_libraries/declaration_bodies/inheritance/most_specific.rs")
+            {
+                // The most specific of several inherited abstract declarations is the one whose
+                // result is a subtype of every other's: the provider normalizes the serialized
+                // headers and compares them by the one shared subtyping relation instead of a
+                // subtype algebra of its own.
+                let mut budget = provider.to_vec();
+                budget.push("assignable");
+                assert_allowed_crate_modules_in_file(&path, &budget);
             } else if path == source_path("src/klib_libraries/shared_trees.rs") {
                 // Decoded archive trees stay resident in the count-bounded cache the JVM classpath
                 // also uses for its per-entry facts. `lru` is a leaf container, not a layer.

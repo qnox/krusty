@@ -52,7 +52,6 @@ arrays/forInReversed/reversedArrayReversedArrayOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedReversedOriginalUpdatedInLoopBody.kt
 arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
-arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
 arrays/hashMap.kt
 arrays/indices.kt
 arrays/kt47483.kt
@@ -85,7 +84,6 @@ basics/unchecked_cast6x.kt
 basics/unchecked_cast7.kt
 basics/unchecked_cast9.kt
 basics/unit4.kt
-bce/bceCases.kt
 bce/customGetter.kt
 bce/delegatedProperty.kt
 bce/differentArrays.kt
@@ -239,7 +237,6 @@ classes/kt2417.kt
 classes/kt2566_2.kt
 classes/kt508.kt
 classes/nestedInitBlocksWithLambda.kt
-classes/overloadUnaryOperator.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
 closures/closuresAsSingleton.kt
 closures/kt11634_4.kt
@@ -650,7 +647,6 @@ coroutines/unitTypeReturn/unitSafeCall.kt
 coroutines/unsafeTransform.kt
 coroutines/varSpilling/fakeInlinerVariables.kt
 coroutines/varSpilling/kt75926.kt
-coroutines/varSpilling/kt79276.kt
 coroutines/varValueConflictsWithTable.kt
 coroutines/varValueConflictsWithTableSameSort.kt
 coroutines/withReceiver.kt
@@ -1281,7 +1277,6 @@ lateinit/notInitialized.kt
 literals/strdedup1.kt
 localClass/innerTakesCapturedFromOuter.kt
 localClass/noPrimaryConstructor.kt
-localClass/tryCatch.kt
 localClasses/closureWithSelfInstantiation.kt
 localClasses/kt4174.kt
 localClasses/kt45383.kt
@@ -1335,7 +1330,6 @@ multiplatform/k2/expectStatic.kt
 multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
-multiplatform/k2/hmpp/genericTypealiasSameNameTwoLibs.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
 multiplatform/k2/hmpp/inheritanceFromExpected3-3.kt
@@ -1398,7 +1392,6 @@ properties/accessorForProtectedPropertyWithPrivateSetter.kt
 properties/accessorForProtectedPropertyWithPrivateSetterInObjectLiteral.kt
 properties/accessorForProtectedPropertyWithPrivateSetterViaSuper.kt
 properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
-properties/backingField/backingFieldWithSmartTypeParameters.kt
 properties/backingField/equalsHashCodeWithValueClassExplicitBackingFieldAndSupertype.kt
 properties/complexPropertyInitializer.kt
 properties/const/constPropertyAccessor.kt
@@ -2370,7 +2363,6 @@ wasm-new-exception-handling/try1.kt
 wasm-new-exception-handling/try2.kt
 wasm-new-exception-handling/try3.kt
 wasm-new-exception-handling/try4.kt
-wasm-new-exception-handling/tryCatch.kt
 wasm-new-exception-handling/tryCatchFinallyWithHandleResult.kt
 wasm-new-exception-handling/tryCatchWithHandleResult.kt
 wasm-new-exception-handling/tryFinallyInsideInlineLambda.kt
@@ -2400,7 +2392,6 @@ wasm-old-exception-handling/try1.kt
 wasm-old-exception-handling/try2.kt
 wasm-old-exception-handling/try3.kt
 wasm-old-exception-handling/try4.kt
-wasm-old-exception-handling/tryCatch.kt
 wasm-old-exception-handling/tryCatchFinallyWithHandleResult.kt
 wasm-old-exception-handling/tryCatchWithHandleResult.kt
 wasm-old-exception-handling/tryFinallyInsideInlineLambda.kt
@@ -2423,7 +2414,6 @@ when/stringOptimization/expression.kt
 when/stringOptimization/nullability.kt
 when/stringOptimization/sameHashCode.kt
 when/stringOptimization/statement.kt
-when/stringOptimization/temporaryVarInWhenByStringIsDisposedProperly.kt
 when/whenSubjectVariable/whenByEnum.kt
 when/whenSubjectVariable/whenByNullableEnum.kt
 when/whenSubjectVariable/whenByString.kt
