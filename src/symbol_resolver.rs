@@ -1357,6 +1357,17 @@ impl<'a> SymbolResolver<'a> {
                 .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
                 .collect();
         }
+        // The receiver is the property's only specificity position. A tie then goes to a
+        // non-generic declaration over a generic one, as for every other callable family:
+        // `PipelineContext<*, PipelineCall>.call` beats `<C> PipelineContext<*, C>.call`.
+        retain_most_specific_declarations(&self.src, None, &mut candidates, |(_, property)| {
+            (
+                property.receiver,
+                &[][..],
+                !property.formals.is_empty(),
+                None,
+            )
+        });
         match candidates.as_mut_slice() {
             [(_, property)] => Ok(Some(specialize_property(
                 &self.src,
