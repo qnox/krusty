@@ -368,6 +368,12 @@ impl Body<'_> {
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
+        // A value class is final and none of its members can be overridden, and the receiver
+        // need not be its box: a target-carried one (`UIntArray`) is the target's own value.
+        // Its members are called directly, never through a table.
+        if self.ir.classes[class as usize].is_value {
+            return self.direct_method_call(class, function, receiver, args);
+        }
         let tables = &self.file_classes()?.tables;
         if tables.table(class).direct_methods.contains(&function) {
             return self.direct_method_call(class, function, receiver, args);
@@ -704,6 +710,8 @@ impl Body<'_> {
         if call.params.len() != args.len() {
             return Err("a call whose arguments do not match its parameters".into());
         }
+        self.runtime
+            .null_receiver_throws(self.module, self.classifiers)?;
         self.value(receiver, any())?;
         for (arg, param) in args.iter().zip(&call.params) {
             self.value(*arg, *param)?;
@@ -755,6 +763,34 @@ impl Body<'_> {
         self.code
             .ref_cast(false, HeapType::Concrete(object))
             .struct_get(object, 0);
+    }
+
+    /// A call to member `function` of this file. Common lowering already dispatches an
+    /// overridable function and leaves a `super` call direct, so a function with a body is
+    /// called directly here. A bodiless (abstract) member has nothing to call directly: it is
+    /// reached through its class's dispatch slot, as an override the receiver's own table
+    /// answers.
+    pub(super) fn local_member_call(
+        &mut self,
+        function: FunId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let declaration = &self.ir.functions[function as usize];
+        let class = declaration
+            .dispatch_receiver
+            .filter(|_| declaration.body.is_none())
+            .and_then(|owner| self.classes.and(self.ir.class_id_by_name(owner)));
+        if let Some(class) = class {
+            let tables = &self.file_classes()?.tables;
+            let key = function_key(self.ir, class, function);
+            if !tables.table(class).direct_methods.contains(&function)
+                && tables.slot(class, &key).is_some()
+            {
+                return self.dispatch_function(class, function, receiver, args);
+            }
+        }
+        self.direct_member_call(function, receiver, args)
     }
 
     /// A call to member `function` of this file, without dispatch.
@@ -924,7 +960,11 @@ impl Body<'_> {
                 params,
                 ret,
                 ..
-            } => self.dependency_super_call(*target, params.len(), *ret, receiver, args),
+            } => match self.ir.dependency_methods.get(target) {
+                // The dependency member is a method of a class this file materializes.
+                Some(&function) => self.direct_member_call(function, receiver, args),
+                None => self.dependency_super_call(*target, params.len(), *ret, receiver, args),
+            },
             Callee::Super { .. } => Err("a `super` call to a library member".to_string()),
             _ => Err("a member call through this calling convention".to_string()),
         }
@@ -1022,12 +1062,15 @@ impl Body<'_> {
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less read of `{}`", property.name))?;
-        let slot = local_property_target(self.ir, class, index).and_then(|target| {
-            self.file_classes()
-                .ok()?
-                .tables
-                .slot(class, &SlotKey::Getter(target))
-        });
+        // A value class's property is final: it is accessed directly, as its members are called.
+        let slot = local_property_target(self.ir, class, index)
+            .filter(|_| !self.ir.classes[class as usize].is_value)
+            .and_then(|target| {
+                self.file_classes()
+                    .ok()?
+                    .tables
+                    .slot(class, &SlotKey::Getter(target))
+            });
         if let Some(slot) = slot {
             return self.dispatch(class, slot, receiver, &[], &[], None);
         }
@@ -1106,12 +1149,15 @@ impl Body<'_> {
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less write of `{}`", property.name))?;
-        let slot = local_property_target(self.ir, class, index).and_then(|target| {
-            self.file_classes()
-                .ok()?
-                .tables
-                .slot(class, &SlotKey::Setter(target))
-        });
+        // A value class's property is final: it is accessed directly, as its members are called.
+        let slot = local_property_target(self.ir, class, index)
+            .filter(|_| !self.ir.classes[class as usize].is_value)
+            .and_then(|target| {
+                self.file_classes()
+                    .ok()?
+                    .tables
+                    .slot(class, &SlotKey::Setter(target))
+            });
         if let Some(slot) = slot {
             return self.dispatch(class, slot, receiver, &[value], &[property.ty], None);
         }
@@ -1206,8 +1252,13 @@ impl Body<'_> {
             .referenced_module_properties
             .get(&target)
             .ok_or_else(|| "a cross-file property with no module record".to_string())?;
-        if reference.owner.is_some()
-            || reference.extension_receiver.is_some()
+        // A `companion { }` block property is a static of its owner: its recorded owner and
+        // receiver coordinate name that class, which its storage takes no receiver for.
+        let block = matches!(
+            reference.placement,
+            krusty::ir::IrStaticPlacement::CompanionBlock { .. }
+        );
+        if (!block && (reference.owner.is_some() || reference.extension_receiver.is_some()))
             || !reference.context_parameters.is_empty()
         {
             return Err("a cross-file property storage with a receiver".to_string());
@@ -1295,6 +1346,15 @@ impl Body<'_> {
             .then_some(name)
     }
 
+    /// Whether the runtime's `ArrayList`, whose class the program does not declare, is below the
+    /// library interface `interface`, by the frontend's supertype traversal.
+    fn runtime_array_list_is_below(&self, interface: TypeName) -> bool {
+        let Some(array_list) = Ty::obj("kotlin/collections/ArrayList").obj_internal() else {
+            return false;
+        };
+        self.classifiers.is_subclassifier(array_list, interface)
+    }
+
     /// Replace the reference on the stack with whether it is an instance of the library interface
     /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
     /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
@@ -1304,11 +1364,14 @@ impl Body<'_> {
             return;
         }
         let subtypes = self.classifiers.builtin_subtypes(interface);
-        let string_builder = self
-            .classifiers
-            .is_subclassifier(krusty::types::wk::string_builder(), interface);
+        let laid_out = crate::builtin_instances::RuntimeLayouts {
+            string_builder: self
+                .classifiers
+                .is_subclassifier(krusty::types::wk::string_builder(), interface),
+            array_list: self.runtime_array_list_is_below(interface),
+        };
         self.runtime
-            .builtin_instances(interface, subtypes, string_builder);
+            .builtin_instances(interface, subtypes, laid_out);
         self.interface_test(interface, nullable);
     }
 

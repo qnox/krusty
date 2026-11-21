@@ -18,6 +18,7 @@ use krusty::types::TypeName;
 
 #[cfg(test)]
 mod layout_tests;
+mod map_members;
 mod walking;
 pub(super) use walking::WalkMembers;
 
@@ -56,7 +57,9 @@ pub(super) mod ktype {
     /// The interface table; see the note on `KType`. Absent for a type implementing no interface
     /// of the program.
     pub const ITABLE: u32 = 160;
-    pub const SIZE: usize = 168;
+    /// The `Map` members of a class of the program implementing it; see the note on `KType`.
+    pub const MAP_MEMBERS: u32 = 168;
+    pub const SIZE: usize = 176;
 }
 
 const CLASS_NAMES_MEMBER: u32 = 1;
@@ -681,6 +684,7 @@ impl<'a> FileLowering<'a> {
             ),
             (ktype::QUALIFIED_NAME, qualified_name_data),
             (ktype::SIMPLE_NAME, simple_name_data),
+            (ktype::MAP_MEMBERS, walk.map_members),
         ] {
             let Some(data) = data else {
                 continue;
@@ -2613,6 +2617,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(self
             .convert(value, Some(stored), property.ty)?
             .map(|value| (value, property.ty)))
+    }
+
+    /// Write a property of a value class through its declared setter. The receiver is the carrier,
+    /// which that setter takes directly exactly as the getter does; a value class has no dispatch
+    /// slot or object header to write through.
+    pub(super) fn value_property_write_of(
+        &mut self,
+        class: ClassId,
+        index: usize,
+        carrier: Value,
+        value: Value,
+    ) -> Result<(), Unsupported> {
+        let property = self.file.ir.classes[class as usize].properties[index].clone();
+        let Some(setter) = property.setter else {
+            return Err(declined!(
+                "a value-class property written without a setter (`{}`)",
+                property.name
+            ));
+        };
+        let id = self.file.functions[setter as usize].expect("a setter has a body");
+        let func_ref = self.func_ref(id);
+        self.emit_call(func_ref, &[carrier, value])?;
+        Ok(())
     }
 
     /// [`Self::property_read`] with the receiver already evaluated — what a synthesized body has.

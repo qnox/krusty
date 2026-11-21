@@ -2072,7 +2072,7 @@ fn preinferred_local_enum_keeps_its_semantic_owner() {
         &LangFeatures::new(),
         &mut diagnostics,
     );
-    assert_eq!(diagnostics.diags.len(), 2, "{:?}", diagnostics.diags);
+    assert_eq!(diagnostics.diags.len(), 3, "{:?}", diagnostics.diags);
     assert!(diagnostics
         .diags
         .iter()
@@ -2084,6 +2084,7 @@ fn preinferred_local_enum_keeps_its_semantic_owner() {
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>(),
         [
+            "modifier 'enum' is not applicable to 'local class'.",
             "unresolved reference 'Missing'.",
             "unresolved reference 'Choice'.",
         ]

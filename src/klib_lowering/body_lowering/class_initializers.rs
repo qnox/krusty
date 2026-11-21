@@ -67,11 +67,11 @@ impl<'a> BodyLowering<'a> {
         Ok(body)
     }
 
-    /// A secondary constructor of the materialized `class` delegating to its primary
-    /// constructor: the delegation's arguments become the arguments of the class's secondary
+    /// A secondary constructor of the materialized `class` delegating to another of its
+    /// constructors: the delegation's arguments become the arguments of the class's secondary
     /// constructor `secondary`, then its own statements run as a member of the class does,
-    /// reading and writing the fields and backed properties of the receiver `member`.
-    pub(in super::super) fn delegate_to_primary(
+    /// reading and writing the receiver's `fields`.
+    pub(in super::super) fn delegate_within_class(
         mut self,
         class: ClassId,
         secondary: usize,
@@ -87,14 +87,17 @@ impl<'a> BodyLowering<'a> {
             .zip(&declared.fields)
             .map(|(field, declared)| (&field.base.symbol, declared.ty, declared.is_final()))
             .collect::<Vec<_>>();
-        let primary = declared
-            .ctor_args
-            .iter()
-            .map(|parameter| parameter.ty)
-            .collect::<Vec<_>>();
-        if primary.len() != arguments.len() {
+        let crate::ir::CtorDelegateTarget::This { target_params, .. } =
+            &declared.secondary_ctors[secondary].delegate
+        else {
             return Err(mismatch(
-                "a primary constructor delegation passes another number of arguments",
+                "a delegation within the class reaches another class's constructor",
+            ));
+        };
+        let target = target_params.clone();
+        if target.len() != arguments.len() {
+            return Err(mismatch(
+                "a delegation within the class passes another number of arguments",
             ));
         }
         self.instance_storage = Some(super::instance_storage::InstanceStorageFrame::member(
@@ -109,7 +112,7 @@ impl<'a> BodyLowering<'a> {
         // constructor does.
         let arguments = arguments
             .iter()
-            .zip(primary)
+            .zip(target)
             .map(|(&argument, ty)| self.operand(argument, ty))
             .collect::<Lowered<Vec<_>>>()?;
         self.ir.classes[class as usize].secondary_ctors[secondary].delegate_args = arguments;
@@ -129,6 +132,7 @@ impl<'a> BodyLowering<'a> {
                 &plan.fields,
             ),
         );
+        self.read_outer_instance(plan.class, plan.outer);
         let mut stmts = Vec::new();
         for step in &plan.steps {
             let statement = match step {
@@ -156,6 +160,27 @@ impl<'a> BodyLowering<'a> {
             member.receiver,
             &member.fields,
         ));
+        self.read_outer_instance(member.class, member.outer);
         self
+    }
+
+    /// An inner class's bodies read the outer class's `this` from the field its constructor
+    /// stores the outer instance in.
+    fn read_outer_instance(
+        &mut self,
+        class: crate::ir::ClassId,
+        outer: Option<super::super::same_library_class::OuterInstance<'a>>,
+    ) {
+        if let Some(outer) = outer {
+            let class_name = self.ir.classes[class as usize].fq_name_id();
+            self.captures.insert(
+                outer.symbol.clone(),
+                super::object_literals::CaptureField {
+                    class,
+                    index: outer.field,
+                    class_name,
+                },
+            );
+        }
     }
 }

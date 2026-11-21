@@ -70,6 +70,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageCopy
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
+        || operation == krusty::backend::BackendCompilerIntrinsic::StringPlus
         || operation
             == krusty::backend::BackendCompilerIntrinsic::StartCoroutineUninterceptedOrReturn
         || matches!(
@@ -166,13 +167,9 @@ pub(super) fn lower_file(
             return Err("a `lateinit` top-level property".to_string());
         }
     }
-    let globals = property_registry.prepare_file(ir, |ty| {
-        let Some(value) = carrier(ty)? else {
-            return Err("a `Unit` top-level property".to_string());
-        };
-        Ok(module.global(value))
-    })?;
-    let class_initializers = class_statics::ClassInitializers::declare(ir, module)?;
+    let globals = property_registry.prepare_file(ir, module, carrier)?;
+    let class_initializers =
+        class_statics::ClassInitializers::declare(ir, module, property_registry)?;
     let member_property_definitions = property_registry.prepare_member_properties(ir, module)?;
     let accessor_property_definitions =
         property_registry.prepare_accessor_properties(ir, module)?;
@@ -1482,6 +1479,37 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::StringPlus)
+                }) =>
+            {
+                // The member `String.plus(Any?)` and the extension `String?.plus(Any?)` are the
+                // concatenation a template makes of its two operands.
+                let (receiver, other) =
+                    match (dispatch_receiver, args.as_slice(), *extension_receiver_parameter) {
+                        (Some(receiver), [other], None) => (receiver, *other),
+                        (None, [receiver, other], Some(0)) => (*receiver, *other),
+                        _ => {
+                            return Err("an authenticated `String.plus` with malformed operands"
+                                .into())
+                        }
+                    };
+                self.string_of(receiver)?;
+                self.string_of(other)?;
+                self.code.call(self.runtime.string_concat);
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
             } if let Callee::External { target, params, .. } = &**call_callee
@@ -1571,7 +1599,7 @@ impl<'a> Body<'a> {
                             && array_lists::realized_array_list_member(fact))
                 }) =>
             {
-                self.array_list_call(*target, receiver, &args)?;
+                self.array_list_call(id, *target, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1753,7 +1781,16 @@ impl<'a> Body<'a> {
                 receiver,
                 class,
                 index,
-            } => self.field_read(receiver, class, index)?,
+            } => {
+                self.field_read(receiver, class, index)?;
+                // A field that stores `kotlin.Unit`'s instance and is read where the checked use
+                // is `Unit` has no carrier there: the stored reference is discarded, as any value
+                // converted to a type without a carrier is.
+                let stored = self.ir.classes[class as usize].fields[index as usize].ty;
+                if carrier(stored)?.is_some() && self.carrier_of(id)?.is_none() {
+                    self.code.drop_();
+                }
+            }
             IrExpr::SetField {
                 receiver,
                 class,
@@ -1961,7 +1998,7 @@ impl<'a> Body<'a> {
                                 .and_then(|property| self.callables.callable(property.getter))
                                 .is_some_and(array_lists::realized_array_list_member))) =>
             {
-                self.array_list_property(*target, *receiver)?;
+                self.array_list_property(id, *target, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::PropertyWrite {
@@ -1981,7 +2018,7 @@ impl<'a> Body<'a> {
                 dispatch_receiver: Some(receiver),
                 args,
             } if let Callee::Local(function) = &**call_callee => {
-                self.direct_member_call(*function, receiver, &args)?
+                self.local_member_call(*function, receiver, &args)?
             }
             IrExpr::Call {
                 callee: ref call_callee,

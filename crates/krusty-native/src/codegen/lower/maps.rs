@@ -9,7 +9,9 @@
 //! the member — the position `lists.rs` already takes, and for the same reason: `get` is declared
 //! on `Map`, which a user class may implement, and keying on the owner would send a user's object
 //! into the runtime. A file that declares such an implementation is declined at every member asked
-//! of a type it implements itself, before this is reached.
+//! of a type it implements itself, before this is reached. The runtime answers a map member of a
+//! class of the program implementing `Map` through that class's own members, which its type
+//! descriptor publishes.
 
 use super::*;
 use krusty::types::TyKind;
@@ -375,11 +377,12 @@ impl BodyLowering<'_, '_, '_> {
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let ty = self.checked_type(receiver)?;
-        // A file that declares its own map, set or entry puts an object of ITS own behind that
-        // type, and the runtime would read a header that is not there. No static type tells the
-        // two apart within a shape, so a receiver of a shape the file implements declines — the
-        // same position `lists.rs` takes, and by the same test.
-        if self.file.implements_collection_of(ty) {
+        // A file that declares its own set or entry puts an object of ITS own behind that type,
+        // and the runtime would read a header that is not there. No static type tells the two
+        // apart within a shape, so a receiver of a shape the file implements declines — the same
+        // position `lists.rs` takes, and by the same test. A map is the exception: the runtime
+        // asks a program class implementing `Map` for its own members (`KType.map_members`).
+        if self.file.implements_collection_of(ty) && !is_map(self.file, ty) {
             return None;
         }
         let declaration = signature.owner.semantic_classifier().and_then(|owner| {
@@ -427,7 +430,8 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
     ) -> Option<MapProperty> {
         let ty = self.checked_type(receiver)?;
-        if self.file.implements_collection_of(ty)
+        // As for a member call: only a map's runtime reads answer for the program's maps too.
+        if (self.file.implements_collection_of(ty) && !is_map(self.file, ty))
             || !(is_map(self.file, ty) || is_set(self.file, ty) || is_map_entry(self.file, ty))
         {
             return None;

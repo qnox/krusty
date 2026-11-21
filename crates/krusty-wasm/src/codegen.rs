@@ -95,6 +95,13 @@ struct Started {
 }
 
 impl Started {
+    /// The module's bytes, once every slot the runtime declared has a body.
+    fn encode(&mut self) -> Vec<u8> {
+        self.runtime
+            .define_unreachable_list_value_members(&mut self.module);
+        self.module.encode()
+    }
+
     fn new(target: WasmTarget) -> Self {
         let mut module = Module::default();
         // The object model's types come first, so their indices are the ones `lower` names.
@@ -162,15 +169,27 @@ impl Backend for WasmBackend {
     }
 
     /// The runtime's `StringBuilder` answers the `Appendable` and `CharSequence` members it
-    /// overrides (`crate::builtin_members`).
+    /// overrides, and its `ArrayList` the collection members (`crate::builtin_members`).
     fn dispatched_dependency_classes(&self) -> Vec<krusty::backend::DependencyClassifier> {
-        vec![crate::string_builders::class()]
+        vec![
+            crate::string_builders::class(),
+            krusty::types::Ty::obj("kotlin/collections/ArrayList")
+                .obj_internal()
+                .expect("a classifier type"),
+        ]
     }
 
-    /// The WASI stdlib's `StringBuilder.append(CharSequence?)` copies the sequence's `length`
-    /// indexed `Char`s; the JS one appends its `toString` (`crate::string_builders`).
-    fn appends_char_sequences_by_index(&self) -> bool {
-        self.target == WasmTarget::Wasi
+    /// Both stdlibs read an appended sequence's `length`: the WASI one copies that many indexed
+    /// `Char`s, and the JS one checks `appendRange`'s bounds against it before it appends the
+    /// sequence's `toString` (`crate::char_sequence_appends`).
+    fn reads_appended_char_sequences(&self) -> bool {
+        true
+    }
+
+    /// The runtime's `ArrayList` walks a collection argument with its `iterator()` and asks it
+    /// `contains`, whatever class it is (`crate::array_lists`).
+    fn reads_collections_through_interfaces(&self) -> bool {
+        true
     }
 
     fn realizes_dependency_intrinsic(
@@ -431,7 +450,7 @@ impl Backend for WasmBackend {
         );
         started.module.export_function("_start", start);
         vec![
-            (format!("{module_name}.wasm"), started.module.encode()),
+            (format!("{module_name}.wasm"), started.encode()),
             (
                 format!("{module_name}.mjs"),
                 started.host.loader(module_name).into_bytes(),
