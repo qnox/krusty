@@ -233,6 +233,15 @@ pub(super) fn transform(ir: &mut IrFile) {
     for lambda in &facts.lambdas {
         add_lambda_composer_parameters(ir, lambda);
         let slots = Slots::lambda(lambda);
+        for inner in &facts.lambdas {
+            if inner.memoization
+                == (Memoization::Remembered {
+                    caller: lambda.implementation,
+                })
+            {
+                remember(ir, &facts.runtime, inner, slots);
+            }
+        }
         for site in &lambda.calls {
             pass_composer(ir, slots, &callees, site);
         }
@@ -358,6 +367,23 @@ fn add_lambda_composer_parameters(ir: &mut IrFile, lambda: &ComposableLambda) {
     if let Some(template) = template {
         retire_library_calls(ir, template);
     }
+    // Another expression for the same implementation, a copy the lowering made of the body that
+    // wrote it, carries a form of the lambda too.
+    let copies = (0..ir.exprs.len() as ExprId)
+        .filter(|&copy| {
+            matches!(
+                ir.exprs[copy as usize],
+                IrExpr::Lambda { impl_fn, inline_body: Some(_), .. } if impl_fn == function
+            )
+        })
+        .collect::<Vec<_>>();
+    for copy in copies {
+        if let IrExpr::Lambda { inline_body, .. } = &mut ir.exprs[copy as usize] {
+            if let Some(template) = inline_body.take() {
+                retire_library_calls(ir, template);
+            }
+        }
+    }
 }
 
 /// Empty the library composable calls of a lambda's dropped inline form. Nothing emits that form,
@@ -372,6 +398,14 @@ fn retire_library_calls(ir: &mut IrFile, template: ExprId) {
                 library.push(expression);
                 continue;
             }
+        }
+        // A lambda written in the form carries a form of its own.
+        if let IrExpr::Lambda {
+            inline_body: Some(body),
+            ..
+        } = ir.exprs[expression as usize]
+        {
+            pending.push(body);
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }

@@ -934,6 +934,11 @@ fn compose_captured_lambdas_in_plain_functions_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_layout_calls_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("layoutCalls");
+}
+
+#[test]
 fn compose_generic_field_stability_is_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("genericFieldStability");
 }
