@@ -502,7 +502,12 @@ impl Emitter<'_> {
             return_type: "V".to_string(),
             value_class_return: None,
             captured: 0..0,
-            capture_names: self.capture_names(argument, lambda.impl_fn, lambda.captures.len()),
+            capture_names: self.capture_names(
+                argument,
+                lambda.impl_fn,
+                lambda.captures.len(),
+                lambda.suspend,
+            ),
             default_class: None,
             suspend: lambda.suspend,
             // The shape's body is only a `return`; no adapter wrote a landing after it.

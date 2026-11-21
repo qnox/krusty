@@ -233,6 +233,7 @@ fn copied_constructor_code_rewrites_a_shared_operand_once() {
         caller_source_name: "caller".into(),
         inline_callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
         inline_callee_source_name: "callee".into(),
+        inline_callee_default_entry: false,
         crossinline_operands: Vec::new(),
         parent: None,
         method_clones: Default::default(),
