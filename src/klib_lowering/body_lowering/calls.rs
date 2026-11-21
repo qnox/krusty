@@ -1285,7 +1285,18 @@ impl BodyLowering<'_> {
             crate::types::TyKind::Nullable(inner) => Ty::nullable(inner.projection_read_ty()),
             _ => substitute(callee.ret).projection_read_ty(),
         };
-        let ret = if self.linker.same_type(ret, ty) {
+        // A read through a star projection is bounded by the class parameter's declared bound,
+        // which the producer's checked type states and a star's own read type (`Any?`) does not.
+        let read_through_star = matches!(
+            substitute(callee.ret).kind(),
+            crate::types::TyKind::StarProjection(_)
+        );
+        let ret = if self.linker.same_type(ret, ty)
+            || (read_through_star
+                && self
+                    .linker
+                    .is_subtype(self.header.type_parameters(), ty, ret))
+        {
             ty
         } else {
             return Err(mismatch("a call is typed apart from its callee's result"));

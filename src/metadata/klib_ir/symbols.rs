@@ -99,6 +99,7 @@ pub(super) struct SignatureTable<'a> {
     decoded: Vec<Option<KlibIrSignature>>,
     prepared_inline: bool,
     origins: std::collections::HashMap<KlibIrSignature, KlibFileLocalOrigin>,
+    composites: std::collections::HashMap<KlibIrSignature, KlibPublicIdSignature>,
 }
 
 impl<'a> SignatureTable<'a> {
@@ -128,7 +129,15 @@ impl<'a> SignatureTable<'a> {
             decoded: vec![None; entries.len()],
             prepared_inline,
             origins: std::collections::HashMap::new(),
+            composites: std::collections::HashMap::new(),
         }
+    }
+
+    /// The public identities that file-scoped composite signatures decoded so far wrap.
+    pub(super) fn take_composites(
+        &mut self,
+    ) -> std::collections::HashMap<KlibIrSignature, KlibPublicIdSignature> {
+        std::mem::take(&mut self.composites)
     }
 
     /// The origins of the file-local signatures decoded so far.
@@ -249,6 +258,26 @@ impl<'a> SignatureTable<'a> {
             file: self.file,
             slot: u32::try_from(slot).expect("a table slot fits u32"),
         };
+        // A member of a class private to its file (a fake override it inherits) is serialized as
+        // `Composite(File, Public)`: it stays file-local here, and the exact public identity it
+        // wraps is kept beside it for the linker to resolve against the class's supertypes.
+        if !self.prepared_inline {
+            if let Some(composite) = unique_bytes(&fields, 5, "composite signature", ENTRY)? {
+                let composite = message(composite.value, ENTRY, composite.value_offset)?;
+                let container =
+                    unique_varint(&composite, 1, "composite signature container", ENTRY)?;
+                let inner = unique_varint(&composite, 2, "composite inner signature", ENTRY)?;
+                if let (Some(container), Some(inner)) = (container, inner) {
+                    let container = self.slot(container, "composite signature container")?;
+                    let inner = self.slot(inner, "composite inner signature")?;
+                    if self.is_file_signature(container)? {
+                        if let Some(public) = self.direct_public_signature(inner)? {
+                            self.composites.insert(local.clone(), public);
+                        }
+                    }
+                }
+            }
+        }
         if let Some(private) = unique_bytes(&fields, 2, "file-local signature", ENTRY)? {
             let private = message(private.value, ENTRY, private.value_offset)?;
             let container = unique_varint(&private, 1, "file-local container", ENTRY)?;
