@@ -175,11 +175,7 @@ callableReference/adaptedReferences/innerConstructorWithVararg.kt
 callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
 callableReference/adaptedReferences/suspendConversion/extensionTypeProperty.kt
-callableReference/adaptedReferences/suspendConversion/inlineWithContextParameter.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithContextParameterAsAPropertyType.kt
-callableReference/adaptedReferences/suspendConversion/inlineWithContextParameterAsASupertype.kt
-callableReference/adaptedReferences/suspendConversion/inlineWithExtensionAsASuperType.kt
-callableReference/adaptedReferences/suspendConversion/inlineWithExtensionFunction.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithExtensionProperty.kt
 callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction.kt
 callableReference/adaptedReferences/suspendConversion/withContextParameterAsAPropertyType.kt
@@ -441,13 +437,11 @@ coroutines/falseUnitCoercion.kt
 coroutines/featureIntersection/breakWithNonEmptyStack.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/genericCallableReferencesWithNullableTypes.kt
-coroutines/featureIntersection/callableReference/longArgs.kt
 coroutines/featureIntersection/funInterface.kt
 coroutines/featureIntersection/funInterface/kt47549.kt
 coroutines/featureIntersection/funInterface/kt47549_1.kt
 coroutines/featureIntersection/funInterface/kt49294.kt
 coroutines/featureIntersection/funInterface/kt50950.kt
-coroutines/featureIntersection/inlineSuspendFinally.kt
 coroutines/featureIntersection/overrideInInlineClass.kt
 coroutines/featureIntersection/safeCallOnTwoReceivers.kt
 coroutines/featureIntersection/safeCallOnTwoReceiversLong.kt
@@ -592,7 +586,6 @@ coroutines/intrinsicSemantics/coroutineContext.kt
 coroutines/intrinsicSemantics/coroutineContextReceiver.kt
 coroutines/intrinsicSemantics/intercepted.kt
 coroutines/intrinsicSemantics/releaseIntercepted.kt
-coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturn.kt
 coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturnInterception.kt
 coroutines/intrinsicSemantics/suspendCoroutineUninterceptedOrReturn.kt
 coroutines/iterateOverArray.kt
@@ -649,7 +642,6 @@ coroutines/suspendDefaultImpl.kt
 coroutines/suspendFunImportedFromObject.kt
 coroutines/suspendFunctionAsCoroutine/handleException.kt
 coroutines/suspendFunctionAsCoroutine/ifExpressionInsideCoroutine_1_3.kt
-coroutines/suspendFunctionAsCoroutine/inline.kt
 coroutines/suspendFunctionAsCoroutine/operators.kt
 coroutines/suspendFunctionAsCoroutine/privateFunctions.kt
 coroutines/suspendFunctionAsCoroutine/superCall.kt
@@ -660,7 +652,6 @@ coroutines/suspendFunctionAsSupertype.kt
 coroutines/suspendFunctionAsSupertypeCall.kt
 coroutines/suspendFunctionAsSupertypeWithInlinedFunInKlib.kt
 coroutines/suspendFunctionTypeCall/manyParametersNoCapture.kt
-coroutines/suspendInlineReference.kt
 coroutines/suspensionInsideSafeCallWithElvis.kt
 coroutines/tailCallOptimizations/crossinline.kt
 coroutines/tailCallOptimizations/innerObjectRetransformation.kt
@@ -1392,7 +1383,6 @@ multiplatform/k2/internalOverride2.kt
 multiplatform/k2/kt66970.kt
 nameBasedDestructuring/fullFormExtraPropType.kt
 nameBasedDestructuring/shortFormExtraPropType.kt
-nonLocalReturns/suspendConversion.kt
 nothingValue/nothingValueException.kt
 object/constructor0.kt
 object/fields.kt

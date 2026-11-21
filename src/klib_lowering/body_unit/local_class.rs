@@ -661,7 +661,64 @@ fn class_constructor(
     ))
 }
 
-impl Linker<'_, '_> {
+impl<'s> Linker<'_, 's> {
+    /// Whether an earlier unit of the program materialized the class of the member `candidate`:
+    /// it published the initialization of each of the class's constructors.
+    pub(super) fn class_realized_earlier(&self, candidate: KlibBodyCallable<'s>) -> bool {
+        let Some(constructors) = candidate.class_contract().and_then(|class| {
+            super::super::class_initialization::initializing_constructors(
+                class,
+                self.sources.bodies,
+            )
+        }) else {
+            return false;
+        };
+        !constructors.is_empty()
+            && constructors.iter().all(|identity| {
+                self.sources
+                    .externals
+                    .get(identity)
+                    .is_some_and(|external| {
+                        matches!(
+                            external.realization,
+                            DependencyExternalRealization::AllocatingConstructor
+                                | DependencyExternalRealization::ConstructorInitializer
+                        )
+                    })
+            })
+    }
+
+    /// Whether `declaration` is a member with a dispatch receiver of a non-public class of the
+    /// same library, which no provider records. An earlier unit installed the class with all its
+    /// members and published each under its identity, so a call of one retains the dispatch
+    /// operand of its serialized declaration, as a call of any member emitted as part of its
+    /// class does.
+    pub(super) fn is_published_member(
+        &self,
+        identity: &KlibDependencyCallable,
+        arena: &KlibIrArena,
+        declaration: &KlibIrFunction,
+        unselected: bool,
+    ) -> bool {
+        let KlibDeclarationSignature::Public(signature) = &identity.declaration else {
+            return false;
+        };
+        unselected
+            && declaration.dispatch_receiver.is_some()
+            && self
+                .sources
+                .bodies
+                .module_class_declaring(
+                    &identity.module,
+                    &crate::metadata::klib_ir::KlibIrSignature::Public(signature.clone()),
+                )
+                .is_some_and(|(class_arena, class)| {
+                    std::ptr::eq(arena, class_arena)
+                        && crate::metadata::semantic::declaration_visibility(class.base.flags)
+                            != crate::types::Visibility::Public
+                })
+    }
+
     /// The member `identity` of a public class this unit installed, which every call in the
     /// unit reaches directly: the class is final, so no override can replace it.
     pub(super) fn installed_member(
