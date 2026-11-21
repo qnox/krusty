@@ -92,6 +92,10 @@ impl TemplateCallees<'_> {
         super::type_evidence::same_type(Some(self.hierarchy()), left, right)
     }
 
+    fn classifier_parameter_bounds(&self, owner: crate::types::TypeName, index: usize) -> Vec<Ty> {
+        super::type_evidence::classifier_parameter_bounds(Some(self.hierarchy()), owner, index)
+    }
+
     fn constructor_bound(
         &self,
         parameters: &super::klib_types::KlibTypeParameters,
@@ -647,6 +651,10 @@ impl CallLinker for TemplateCalls<'_> {
 
     fn same_type(&self, left: Ty, right: Ty) -> bool {
         self.callees.same_type(left, right)
+    }
+
+    fn classifier_parameter_bounds(&self, owner: crate::types::TypeName, index: usize) -> Vec<Ty> {
+        self.callees.classifier_parameter_bounds(owner, index)
     }
 
     fn link_constructor(
