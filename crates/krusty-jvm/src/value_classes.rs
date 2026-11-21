@@ -341,6 +341,10 @@ pub(crate) fn lower_value_classes(
     let value_class_ids: Vec<u32> = (0..ir.classes.len() as u32)
         .filter(|&i| ir.classes[i as usize].is_value)
         .collect();
+    // Each source function's parameters as declared, before synthesis gives a member its carrier. A
+    // function synthesis adds has no entry: it is a static that already lists its carrier first.
+    let source_function_params: Vec<Vec<Ty>> =
+        ir.functions.iter().map(|f| f.params.clone()).collect();
 
     // Exact identities of members whose JVM realization synthesis already finalized.
     let mut realized_members = synth_members::SynthesizedValueMembers::default();
@@ -831,18 +835,18 @@ pub(crate) fn lower_value_classes(
                 f.name = mangled;
                 renamed_functions.insert(fid as u32);
             }
-            if lower_value_member {
+            // The carrier takes `this`'s slot zero, which keeps its value-class identity so
+            // boundaries box `this` as `X`; a computed accessor is already static from synthesis.
+            if lower_value_member || realized_members.accessors.contains_key(&(fid as u32)) {
                 let owner = f
                     .dispatch_receiver
-                    .expect("a value-class member has a dispatch receiver");
-                let carrier = under.get(&owner).copied().unwrap_or(Ty::Error);
-                parameter_guards::prepend_carrier(f, carrier);
-                f.is_static = true;
-                lowered_value_members.insert(fid as u32);
-                // The former `this` and the new explicit carrier are both slot zero. Source value
-                // parameters consequently retain their existing slots (1..). Keep the slot's semantic
-                // value-class identity: its function parameter independently carries the physical `U`,
-                // while representation boundaries still need to box `this` as `X`, never as U's wrapper.
+                    .expect("a value-class member has a receiver");
+                if lower_value_member {
+                    let carrier = under.get(&owner).copied().unwrap_or(Ty::Error);
+                    parameter_guards::prepend_carrier(f, carrier);
+                    f.is_static = true;
+                    lowered_value_members.insert(fid as u32);
+                }
                 slot_types[fid].insert(0, Ty::obj_name(owner));
             }
         }
@@ -2178,7 +2182,12 @@ pub(crate) fn lower_value_classes(
                     fq[*class as usize],
                     fid,
                     args.clone(),
-                    None,
+                    Some(match source_function_params.get(fid as usize) {
+                        Some(declared) => declared.clone().into_boxed_slice(),
+                        None => declared_params[fid as usize][1..]
+                            .to_vec()
+                            .into_boxed_slice(),
+                    }),
                 ))
             }
             // `x.getV()` getter: identity on an unboxed value, `unbox-impl()` on a boxed one.
@@ -3020,14 +3029,12 @@ pub(crate) fn lower_value_classes(
                 &under,
                 &mut ops,
             );
-            if let IrExpr::Call { callee, args, .. } = &ir.exprs[id as usize] {
+            if let IrExpr::Call { args, .. } = &ir.exprs[id as usize] {
                 call_arguments::record_boundaries(
-                    callee,
-                    args,
                     ir.call_declared_params
                         .get(&id)
                         .map(|parameters| parameters.as_ref()),
-                    recv_is_ref_vc,
+                    args,
                     &under,
                     &repr_ctx,
                     &mut ops,

@@ -421,6 +421,13 @@ fn expect_native_klib_box(source: &str, stem: &str) {
     assert_eq!(outcome, Outcome::Pass, "{stem}");
 }
 
+/// The receiver-reuse program starts its suspend lambda through the stdlib KLIB's `startCoroutine`.
+#[test]
+fn native_apply_receiver_single_store_runs() {
+    let source = include_str!("box_regressions/applyReceiverSingleStore.kt");
+    expect_native_klib_box(source, "nativeApplyReceiverSingleStore");
+}
+
 fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
     if let Some(reason) = not_applicable(source) {
         return Outcome::NotApplicable(reason);

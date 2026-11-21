@@ -870,6 +870,16 @@ mod tests {
                 let mut budget = provider.to_vec();
                 budget.push("symbol_resolver");
                 assert_allowed_crate_modules_in_file(&path, &budget);
+            } else if path
+                == source_path("src/klib_libraries/declaration_bodies/inheritance/most_specific.rs")
+            {
+                // The most specific of several inherited abstract declarations is the one whose
+                // result is a subtype of every other's: the provider normalizes the serialized
+                // headers and compares them by the one shared subtyping relation instead of a
+                // subtype algebra of its own.
+                let mut budget = provider.to_vec();
+                budget.push("assignable");
+                assert_allowed_crate_modules_in_file(&path, &budget);
             } else if path == source_path("src/klib_libraries/shared_trees.rs") {
                 // Decoded archive trees stay resident in the count-bounded cache the JVM classpath
                 // also uses for its per-entry facts. `lru` is a leaf container, not a layer.
@@ -1243,8 +1253,8 @@ mod tests {
     }
 
     #[test]
-    fn the_hosted_plugin_ir_reads_only_checked_fir_and_its_declarations() {
-        // It encodes Pass 2's checked bodies for kotlinc plugins in the plugin host: checked FIR,
+    fn the_plugin_ir_reads_only_checked_fir_and_its_declarations() {
+        // It encodes Pass 2's checked bodies for IR plugins through the plugin API: checked FIR,
         // the declarations' syntax and resolved index, and the platform's description of a
         // dependency. It never resolves, lowers or reaches a backend.
         let allowed = [
@@ -1256,8 +1266,8 @@ mod tests {
             "libraries",
             "types",
         ];
-        assert_allowed_crate_modules("src/hosted_plugin_ir.rs", &allowed);
-        assert_allowed_crate_modules_in_tree("src/hosted_plugin_ir", &allowed);
+        assert_allowed_crate_modules("src/plugin_ir.rs", &allowed);
+        assert_allowed_crate_modules_in_tree("src/plugin_ir", &allowed);
     }
 
     #[test]
@@ -1338,7 +1348,7 @@ mod tests {
                 "features",
                 "frontend",
                 // Compiler plugins consume this public projection of the module's checked FIR.
-                "hosted_plugin_ir",
+                "plugin_ir",
                 "ir",
                 "js",
                 "jvm",

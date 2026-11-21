@@ -1368,6 +1368,14 @@ fn wasm_suspend_function_values_are_function_values() {
     expect_wasm_box(src, "suspendFunctionValue");
 }
 
+/// The shared receiver-reuse program, including its non-suspending suspend lambda.
+#[test]
+fn wasm_apply_receiver_single_store_runs() {
+    let src = include_str!("box_regressions/applyReceiverSingleStore.kt");
+    expect_reference_box(src, "applyReceiverSingleStore");
+    expect_wasm_box(src, "applyReceiverSingleStore");
+}
+
 // A lambda or callable reference converted to a `fun interface` becomes an object of that
 // interface whose member forwards to the function value.
 #[test]
@@ -1776,6 +1784,19 @@ fn wasm_data_class_unit_property_uses_units_fixed_hash() {
     expect_wasm_box(
         include_str!("box_regressions/knownPrimaryConstructorRoles.kt"),
         "wasmKnownPrimaryConstructorRoles",
+    );
+}
+
+// PLATFORM-SPECIFIC: the Wasm runtime lays out its own `ArrayList` iterator as a struct that no
+// declared class stands for, so its interface membership is recorded by the backend. Native
+// lowers the stdlib's `ArrayList` instead and does not yet lower `listIterator`; that gap is
+// reported, not excused, and the shared `arrayListIteratorInterfaces.kt` covers `iterator()` on
+// every lane.
+#[test]
+fn wasm_runtime_list_iterator_is_a_list_iterator() {
+    expect_wasm_box(
+        include_str!("wasm_regressions/arrayListListIteratorInterfaces.kt"),
+        "wasmArrayListListIteratorInterfaces",
     );
 }
 

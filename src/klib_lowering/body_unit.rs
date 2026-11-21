@@ -40,6 +40,7 @@ mod class_construction;
 pub(crate) use class_construction::superclass_constructor_ordinal;
 mod constructor_linking;
 mod enum_materialization;
+mod fake_overrides;
 #[cfg(test)]
 mod initializer_capability_tests;
 mod inline_functions;
@@ -1340,30 +1341,28 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.install_local_object(ir, signature)
     }
 
+    fn is_local_interface(&self, signature: &KlibIrSignature) -> bool {
+        self.names_local_interface(signature)
+    }
+
+    fn link_local_interface(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        self.install_local_interface(ir, signature)
+    }
+
     fn link_local_constructor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibIrSignature,
     ) -> Result<super::same_library_class::LocalConstructor, KlibBodyDeclineReason> {
-        let module = self.active_module.clone();
-        let bodies = self.sources.bodies;
-        let callees = self.sources.callees;
-        match super::same_library_class::link(
-            super::same_library_class::LocalClassSource {
-                bodies,
-                declarations: self.sources.declarations,
-                classes: callees.class_type_oracle(),
-                module: &module,
-                validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
-            },
-            callee,
-            self.local_classes,
-        )? {
-            super::same_library_class::LocalLink::Ready(constructor) => Ok(constructor),
-            super::same_library_class::LocalLink::Prepared(prepared) => {
-                self.install_local_class(ir, prepared)
-            }
-        }
+        self.link_constructor_of_local_class(ir, callee)
+    }
+
+    fn inherited_getter(&self, callee: &KlibIrSignature) -> fake_overrides::Inherited {
+        fake_overrides::inherited_getter(self, callee)
     }
 
     fn link_local_function(
@@ -1576,12 +1575,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
-        match self.sources.declarations.classifier(name) {
-            Some(record) => Ok(record.is_interface()),
-            None => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+        let record = self.sources.declarations.classifier(name);
+        record.map(|record| record.is_interface()).ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(format!(
                 "an object literal's supertype {name:?} is not a selected classifier"
-            ))),
-        }
+            ))
+        })
     }
 
     fn link_accessor(
@@ -2481,8 +2480,8 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
-        let root = self.root.is_some_and(|root| root.identity() == identity);
-        inline_functions::declare_callee(ir, declared, function, &header, selected, root)?;
+        let callee = inline_functions::Candidate::new(declared, function, &header, selected);
+        callee.declare(ir, self.root, identity, &mut |name| self.is_interface(name))?;
         self.functions.insert(identity.clone(), declared);
         if let Some(formals) = self.private_members.get_mut(identity) {
             *formals = header.own_formals(function);
