@@ -50,10 +50,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
         origin: crate::fir::OriginId,
         _expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<SelectedValue, crate::fir::DiagnosticId> {
         crate::trace_compiler!(
             "signature",

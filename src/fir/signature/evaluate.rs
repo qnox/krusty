@@ -32,7 +32,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
         declaration: DeclarationId,
         result: SigExprId,
         graph: &SignatureGraph,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedSignature, DiagnosticId> {
         /// Recover integer-constant provenance from nodes whose types have already been resolved.
         /// Binary folding is delegated to semantic policy after `select_binary` populated `memo`;
@@ -145,7 +145,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             semantics: &S,
             argument: &'a SigCallArgument,
             graph: &'a SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<SigCallArgumentProbe<'a>, DiagnosticId> {
@@ -235,7 +235,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             argument: &'a SigCallArgument,
             expectation: Option<ResolvedTy>,
             graph: &'a SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedSigCallArgument<'a>, DiagnosticId> {
@@ -631,7 +631,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             expression: SigExprId,
             expected: Option<ResolvedTy>,
             graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedTy, DiagnosticId> {
@@ -945,7 +945,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             expression: SigExprId,
             expected: ResolvedTy,
             graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Option<Result<ResolvedTy, DiagnosticId>> {
@@ -965,7 +965,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             expression: SigExprId,
             result_constraint: SignatureCallResultConstraint,
             graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Option<Result<ResolvedTy, DiagnosticId>> {
@@ -1329,7 +1329,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             semantics: &S,
             expression: SigExprId,
             graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedTy, DiagnosticId> {

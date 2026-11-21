@@ -541,6 +541,10 @@ pub trait ExplicitHeaderSemantics {
     ) -> Result<(), DiagnosticId>;
 }
 
+/// Demand for a declaration's signature while an expression that needs it is evaluated.
+pub type SignatureDemand<'demand> =
+    dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId> + 'demand;
+
 /// Semantic adapter for signature-constraint evaluation.
 ///
 /// The implementation belongs beside the normal resolver/checker and must route calls, members,
@@ -553,7 +557,7 @@ pub trait SignatureConstraintEvaluator {
         declaration: DeclarationId,
         result: SigExprId,
         graph: &SignatureGraph,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedSignature, DiagnosticId>;
 
     /// Create the declaration-local diagnostic emitted for an unanchored inference cycle.
@@ -663,7 +667,7 @@ pub trait SignatureSemantics:
         spelling: &str,
         origin: OriginId,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     /// A call argument's materialized type with the formals its own inputs left unfixed named as
@@ -692,7 +696,7 @@ pub trait SignatureSemantics:
         // Final selection must not retry that root as a value.
         qualified_namespace: bool,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     fn call_argument_expectations(
@@ -710,7 +714,7 @@ pub trait SignatureSemantics:
         // Keep all-typed contextual shaping alive for an active sibling-refinement fixed point.
         refresh_typed_postponed: bool,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId>;
 
     fn select_callable_reference(
@@ -719,7 +723,7 @@ pub trait SignatureSemantics:
         spelling: &str,
         origin: OriginId,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     fn select_bound_callable_reference(
@@ -730,7 +734,7 @@ pub trait SignatureSemantics:
         receiver: ResolvedTy,
         unbound: bool,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     /// Select the declaration behind the compiler-defined `::property.isInitialized` operation.
@@ -745,7 +749,7 @@ pub trait SignatureSemantics:
         origin: OriginId,
         receiver: Option<ResolvedTy>,
         unbound: bool,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     /// Decide whether a syntactically qualified class-literal receiver starts with a value at the
@@ -801,7 +805,7 @@ pub trait SignatureSemantics:
         origin: OriginId,
         receiver: ResolvedTy,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     fn select_member_call(
@@ -814,7 +818,7 @@ pub trait SignatureSemantics:
         type_arguments: &[ResolvedTy],
         trailing_lambda: bool,
         result_constraint: Option<SignatureCallResultConstraint>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedMemberCall, DiagnosticId>;
     fn member_call_argument_expectations(
         &self,
@@ -827,7 +831,7 @@ pub trait SignatureSemantics:
         trailing_lambda: bool,
         refresh_typed_postponed: bool,
         result_constraint: Option<SignatureCallResultConstraint>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId>;
 
     fn select_binary(
@@ -837,7 +841,7 @@ pub trait SignatureSemantics:
         origin: OriginId,
         lhs: ResolvedTy,
         rhs: ResolvedTy,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     /// Select the `opAssign` convention for a simple-name augmented assignment without emitting a
@@ -851,7 +855,7 @@ pub trait SignatureSemantics:
         _receiver: ResolvedTy,
         _argument: ResolvedTy,
         _local_operator: Option<ResolvedTy>,
-        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        _demand: &mut SignatureDemand<'_>,
     ) -> bool {
         false
     }
@@ -891,7 +895,7 @@ pub trait SignatureSemantics:
         origin: OriginId,
         callee: ResolvedTy,
         arguments: &[ResolvedSigCallArgument<'_>],
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<InvokeSelection, DiagnosticId>;
 
     fn invoke_argument_expectations(
@@ -946,7 +950,7 @@ pub trait SignatureSemantics:
         delegate: ResolvedTy,
         expected: Option<ResolvedTy>,
         site: ResolvedSignatureDelegateSite,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     fn least_upper_bound(

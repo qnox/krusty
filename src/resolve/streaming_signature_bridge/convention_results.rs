@@ -63,10 +63,7 @@ impl ProductionSignatureSemantics<'_> {
         result: Ty,
         arguments: &[Ty],
         expected_result: Option<Ty>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         if let Some(signature) =
             self.demanded_member_signature(selected.stable_declaration, demand)?
