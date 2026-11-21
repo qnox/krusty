@@ -986,7 +986,7 @@ impl BodyLowering<'_, '_, '_> {
         let local = self.file.implementors_of(owner);
         let mut implementors = Vec::with_capacity(local.len());
         for &class in &local {
-            let Some(arm) = self.external_property_getter_slot(class, getter, ret) else {
+            let Some(arm) = self.external_property_getter_slot(class, getter) else {
                 return Err(self.undispatched_reference_read(owner));
             };
             implementors.push(arm);
