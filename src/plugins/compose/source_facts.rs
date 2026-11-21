@@ -350,7 +350,10 @@ pub(super) fn record(
             .statements
             .iter()
             .copied()
-            .filter(|&statement| calls.contains_key(&statement) || invoked(statement).is_some())
+            .filter_map(|statement| {
+                let call = initializing_call(ir, statement, &calls);
+                (calls.contains_key(&call) || invoked(call).is_some()).then_some(call)
+            })
             .collect::<Vec<_>>();
         direct_calls.extend(direct.iter().copied());
         let lambda_arguments = lambda_arguments(ir, source, &direct, composable);
@@ -1705,7 +1708,8 @@ impl BodyScope<'_> {
             .statements
             .iter()
             .copied()
-            .filter(|statement| self.calls.contains_key(statement))
+            .map(|statement| initializing_call(ir, statement, self.calls))
+            .filter(|call| self.calls.contains_key(call))
             .collect::<Vec<_>>();
         direct_calls.extend(direct.iter().copied());
         if let Some(what) = unsupported_body_expression(ir, body.block, &[], &[]) {
@@ -1888,6 +1892,21 @@ fn composable_arity(
             .iter()
             .any(|argument| spelled_mentions(argument, composable)))
     .then_some(signature.params.len() as u32)
+}
+
+/// The expression of `statement` that makes its composable call: the statement itself, or the
+/// initializer of the local `val` it declares.
+fn initializing_call(
+    ir: &IrFile,
+    statement: ExprId,
+    calls: &HashMap<ExprId, ComposableCall>,
+) -> ExprId {
+    match ir.exprs[statement as usize] {
+        IrExpr::Variable {
+            init: Some(init), ..
+        } if calls.contains_key(&init) => init,
+        _ => statement,
+    }
 }
 
 /// A default argument the pass does not apply yet: one that is not a constant, which kotlinc
