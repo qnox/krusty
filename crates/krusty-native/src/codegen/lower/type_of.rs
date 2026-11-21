@@ -341,7 +341,7 @@ impl BodyLowering<'_, '_, '_> {
         let module_implementors = self.file.module_facts.dependency_implementors(ktype);
         if module_implementors
             .iter()
-            .any(|&file| file != self.file.source)
+            .any(|implementor| implementor.file != self.file.source)
         {
             return Err(declined!(
                 "a `KType` member read where another file implements `KType`"

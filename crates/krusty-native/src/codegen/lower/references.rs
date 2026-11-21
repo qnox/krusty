@@ -962,8 +962,72 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let property = self.file.callables.property(target)?;
-        let role = self.file.callables.callable(property.getter)?.semantic_role;
-        self.reference_member(role, receiver, &[], property.result)
+        let getter = self.file.callables.callable(property.getter)?;
+        let slot = reference_slot(getter.semantic_role, 0)?;
+        let owner = getter.physical_owner;
+        Some(self.reference_property_read(slot, owner, property.getter, receiver, property.result))
+    }
+
+    /// A reflection property read whose receiver may be a class of the module rather than a
+    /// reference object: `KCallable.name` on a class that implements `KProperty` by delegation or
+    /// override. Such a class lays its table out as a class, so the reference-object slot means
+    /// something else in it. Each class of the module that can stand behind the getter's owner is
+    /// tested first and enters its own getter: one of this file through its laid-out slot, one of
+    /// another file through the slot the module plan gives it. Any other object is a reference
+    /// object and answers from its fixed slot.
+    fn reference_property_read(
+        &mut self,
+        slot: u32,
+        owner: krusty::types::TypeName,
+        getter: krusty::fir::ExternalCallableId,
+        receiver: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let local = self.file.implementors_of(owner);
+        let mut implementors = Vec::with_capacity(local.len());
+        for &class in &local {
+            let Some(arm) = self.external_property_getter_slot(class, getter, ret) else {
+                return Err(self.undispatched_reference_read(owner));
+            };
+            implementors.push(arm);
+        }
+        // The module's other files, by the dependency classifiers their classes name: the owner
+        // itself or one of its dependency subtypes, such as `KProperty` for `KCallable.name`.
+        let mut remote = Vec::new();
+        for (dependency, classes) in self.file.module_facts.dependency_implementor_roots() {
+            if !self.file.is_subclassifier(dependency, owner) {
+                continue;
+            }
+            for implementor in classes {
+                if implementor.file != self.file.source && !remote.contains(&implementor.class) {
+                    remote.push(implementor.class);
+                }
+            }
+        }
+        for class in remote {
+            let Some(arm) = self.planned_property_getter_slot(class, getter, ret)? else {
+                return Err(self.undispatched_reference_read(owner));
+            };
+            implementors.push(arm);
+        }
+        if implementors.is_empty() {
+            return self.reference_call(slot, receiver, &[], ret);
+        }
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.dispatch_by_implementor_with(&implementors, object, &[], ret, false, |body, object| {
+            body.reference_slot_call(slot, object, Vec::new(), ret)
+        })
+    }
+
+    fn undispatched_reference_read(&self, owner: krusty::types::TypeName) -> Unsupported {
+        declined!(
+            "a read of a `{}` member where the module implements it with a class whose override \
+             cannot be dispatched to",
+            owner.render().replace('/', ".")
+        )
     }
 
     /// `p.getValue(thisRef, property)` and `p.setValue(thisRef, property, value)`.
@@ -1060,6 +1124,17 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
+        self.reference_slot_call(slot, object, arguments, ret)
+    }
+
+    /// Enter `slot` of the reference object `object` with `arguments`, each already a reference.
+    fn reference_slot_call(
+        &mut self,
+        slot: u32,
+        object: Value,
+        mut arguments: Vec<Value>,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
         // `get()` on a BOUND reference passes no receiver and the body ignores the slot anyway; a
         // null keeps one signature for both shapes.
         let expected = usize::from(slot == SET) + 1;
