@@ -797,6 +797,19 @@ impl<'u, 's> Linker<'u, 's> {
             if from_class && self.declared_member(body).is_none() {
                 if let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) {
                     let selected = callables[0];
+                    // A superclass an earlier unit realized keeps its members there: this unit's
+                    // class inherits them from that class, and the edge names the earlier unit's
+                    // member by its frozen declaration.
+                    if self.class_realized_earlier(selected) {
+                        self.record_inherited_implementation(
+                            ir,
+                            owner,
+                            body,
+                            Some(selected),
+                            implemented,
+                        );
+                        continue;
+                    }
                     let (arena, function) =
                         self.sources.bodies.function(body).ok_or_else(|| {
                             KlibBodyDeclineReason::SignatureMismatch(
@@ -806,7 +819,7 @@ impl<'u, 's> Linker<'u, 's> {
                     self.declare(ir, body, Some(selected), arena, function)?;
                 }
             }
-            self.record_inherited_implementation(ir, owner, body, implemented);
+            self.record_inherited_implementation(ir, owner, body, None, implemented);
         }
         Ok(())
     }
@@ -842,12 +855,31 @@ impl<'u, 's> Linker<'u, 's> {
         ir: &mut IrFile,
         owner: crate::types::TypeName,
         body: &KlibDependencyCallable,
+        realized: Option<KlibBodyCallable<'s>>,
         implemented: &[KlibDependencyCallable],
     ) {
-        let Some(method) = self.declared_member(body) else {
-            return;
+        // The implementation's own method when this unit declared it, and otherwise the
+        // declaration the earlier unit exported (`realized`), which the edge names by callable.
+        let (method, name, params, result) = match realized {
+            None => {
+                let Some(method) = self.declared_member(body) else {
+                    return;
+                };
+                let function = &ir.functions[method as usize];
+                (
+                    Some(method),
+                    function.name.clone(),
+                    function.params.clone(),
+                    function.ret,
+                )
+            }
+            Some(selected) => (
+                None,
+                selected.name().to_owned(),
+                selected.params().to_vec(),
+                selected.ret(),
+            ),
         };
-        let name = ir.functions[method as usize].name.clone();
         for declared in implemented {
             let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(declared)
             else {
@@ -881,15 +913,11 @@ impl<'u, 's> Linker<'u, 's> {
             if records.iter().any(|edge| edge.overridden == overridden) {
                 continue;
             }
-            let (params, result) = (
-                ir.functions[method as usize].params.clone(),
-                ir.functions[method as usize].ret,
-            );
             records.push(crate::ir::IrFunctionOverride {
                 implementation: crate::fir::ResolvedFunctionOverrideTarget::External(
                     implementation,
                 ),
-                implementation_function: Some(method),
+                implementation_function: method,
                 implementation_owner: owner,
                 overridden,
                 overridden_owner: interface,
@@ -901,7 +929,7 @@ impl<'u, 's> Linker<'u, 's> {
                 declared_result: overridden_declaration.ret(),
                 applied_parameters: overridden_declaration.params().to_vec(),
                 applied_result: overridden_declaration.ret(),
-                implementation_parameters: params,
+                implementation_parameters: params.clone(),
                 implementation_parameter_identities: Vec::new(),
                 overridden_parameter_identities: overridden_declaration
                     .parameter_identities()
