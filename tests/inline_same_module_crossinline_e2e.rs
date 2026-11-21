@@ -163,3 +163,28 @@ fn a_body_keeping_a_crossinline_lambda_as_a_value_is_routed_before_inlining() {
     let sources = fixture_sources(KEPT_AS_VALUE, &["KeptAsValue.kt"]);
     common::expect_box_same_as_kotlinc(&sources[0].1, "KeptAsValue");
 }
+
+const CONSTRUCTOR_LAMBDAS: &str =
+    include_str!("box_regressions/compiledCrossinline/constructorLambdas.kt");
+
+// PLATFORM-SPECIFIC: the copies' constructor descriptors and field order are JVM class layout.
+#[test]
+fn a_regenerated_constructor_inlines_the_lambdas_it_invokes_like_kotlinc() {
+    let files = fixture_sources(CONSTRUCTOR_LAMBDAS, &["ConstructorLambdas.kt"]);
+    let sources = files
+        .iter()
+        .map(|(name, text)| (name.as_str(), text.as_str()))
+        .collect::<Vec<_>>();
+    let classes = common::classes_against_kotlinc_module(&sources);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+#[test]
+fn a_regenerated_constructor_inlining_the_lambdas_it_invokes_runs() {
+    let files = fixture_sources(CONSTRUCTOR_LAMBDAS, &["ConstructorLambdas.kt"]);
+    let sources = files
+        .iter()
+        .map(|(name, text)| (name.as_str(), text.as_str()))
+        .collect::<Vec<_>>();
+    common::expect_box_ok_files_with_stdlib(&sources, "ConstructorLambdasKt");
+}

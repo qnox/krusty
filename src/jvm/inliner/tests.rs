@@ -928,7 +928,7 @@ impl AnonymousObjects for NumberingObjects {
         &mut self,
         class: &str,
         desc: &str,
-        _lambdas: &[ObjectLambda<'_>],
+        lambdas: &[ObjectLambda<'_>],
         _suspend_values: &[usize],
         _prior_classes: &[(String, String)],
     ) -> Result<RegeneratedObject, InlineError> {
@@ -937,6 +937,7 @@ impl AnonymousObjects for NumberingObjects {
         Ok(RegeneratedObject {
             name: format!("Main$g$$inlined$f${n}"),
             constructor_desc: format!("({})V", "I".repeat(n)),
+            lambda_order: (0..lambdas.len()).collect(),
             reified_parameters_remain: false,
         })
     }
@@ -951,6 +952,7 @@ impl AnonymousObjects for NumberingObjects {
         Ok(RegeneratedObject {
             name: format!("Main$g$$inlined$f${n}"),
             constructor_desc: "()V".to_string(),
+            lambda_order: Vec::new(),
             reified_parameters_remain: false,
         })
     }

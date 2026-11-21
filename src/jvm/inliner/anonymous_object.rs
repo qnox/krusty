@@ -161,6 +161,9 @@ pub struct Regenerated {
     pub bytes: Vec<u8>,
     /// The regenerated constructor's descriptor, which the call site now calls.
     pub constructor_desc: String,
+    /// The order the constructor takes the call's lambdas' captured values in, as positions in
+    /// the call's lambdas.
+    pub lambda_order: Vec<usize>,
     /// A method of the copy still calls `reifiedOperationMarker`.
     pub reified_parameters_remain: bool,
     /// The classes the copy regenerated in turn: the continuations of its suspend methods.
@@ -354,7 +357,12 @@ pub fn regenerate(
     let mut plan = constructor::extract(&constructor_code, old, &declared, call_desc)?;
     // Preserve the original constructor frame before lambda fields are removed.
     let suspend_value_fields = plan.argument_fields(call_desc, regeneration.suspend_values)?;
-    let (lambdas, renamed_outer) = plan_lambdas(&mut plan, old, call_desc, regeneration)?;
+    let PlannedLambdas {
+        lambdas,
+        order: lambda_order,
+        renamed_outer,
+        constructor_reads: constructor_reads_lambda,
+    } = plan_lambdas(&mut plan, old, call_desc, regeneration)?;
     plan.desc = remapper.map_desc(&plan.desc)?;
     for field in &mut plan.fields {
         field.desc = remapper.map_desc(&field.desc)?;
@@ -377,14 +385,14 @@ pub fn regenerate(
         .map_err(RegenerationError::Copy)?;
     }
     // kotlinc's `MethodInliner` transforms the constructor first: the objects it constructs are
-    // the copy's first ones, enclosed by the new constructor. What is left of its body reads no
-    // lambda, so only those objects are regenerated.
+    // the copy's first ones, enclosed by the new constructor, and a lambda it invokes while the
+    // object is initialized is inlined there.
     let mut nested = Vec::new();
     let mut sam_wrappers = Vec::new();
     let regenerates_objects = plan.body.instructions().any(|insn| {
         references_other_regenerated_class(insn, regeneration.classes, old, &continuations)
     });
-    let body = if regenerates_objects {
+    let body = if regenerates_objects || constructor_reads_lambda {
         let mut body = plan.body.clone();
         body.desc.clone_from(&plan.desc);
         let mut objects = NestedObjects {
@@ -402,7 +410,7 @@ pub fn regenerate(
             body,
             new,
             false,
-            &[],
+            &lambdas,
             &mut remapper,
             &mut lines,
             &mut objects,
@@ -680,6 +688,7 @@ pub fn regenerate(
     Ok(Regenerated {
         bytes: cw.finish(),
         constructor_desc: plan.desc,
+        lambda_order,
         reified_parameters_remain,
         nested,
         sam_wrappers,
@@ -750,6 +759,19 @@ fn remap_declaration(
     Ok(())
 }
 
+/// What [`plan_lambdas`] decided for the call's lambdas.
+#[derive(Default)]
+struct PlannedLambdas<'a> {
+    /// The lambdas, in the order the copy's constructor takes their captured values.
+    lambdas: Vec<FieldLambda<'a>>,
+    /// That order, as positions in the call's lambdas.
+    order: Vec<usize>,
+    /// The object's own outer instance's new name, when a lambda captures one too.
+    renamed_outer: Option<String>,
+    /// Whether what is left of the original constructor reads a lambda.
+    constructor_reads: bool,
+}
+
 /// The lambdas the copy inlines, each with the original's field for it and the copy's fields for
 /// its captured values, which `plan` now takes in the lambdas' place
 /// (`extractParametersMappingAndPatchConstructor`). A captured value's field is named after it with
@@ -768,9 +790,9 @@ fn plan_lambdas<'a>(
     old: &str,
     call_desc: &str,
     regeneration: &Regeneration<'a>,
-) -> Result<(Vec<FieldLambda<'a>>, Option<String>), RegenerationError> {
+) -> Result<PlannedLambdas<'a>, RegenerationError> {
     if regeneration.lambdas.is_empty() {
-        return Ok((Vec::new(), None));
+        return Ok(PlannedLambdas::default());
     }
     let mut names = FieldNames::of(regeneration.original);
     let lambdas_capture_outer = regeneration.lambdas.iter().any(|passed| {
@@ -793,8 +815,18 @@ fn plan_lambdas<'a>(
             renamed_outer = Some(renamed);
         }
     }
+    let arguments: Vec<usize> = regeneration
+        .lambdas
+        .iter()
+        .map(|passed| passed.argument)
+        .collect();
+    let order = plan.lambda_order(call_desc, &arguments)?;
+    let arguments: Vec<usize> = order.iter().map(|&position| arguments[position]).collect();
     let mut lambdas = Vec::with_capacity(regeneration.lambdas.len());
-    for passed in regeneration.lambdas {
+    for passed in order
+        .iter()
+        .map(|&position| &regeneration.lambdas[position])
+    {
         let types = passed
             .lambda
             .captured_types()
@@ -823,20 +855,21 @@ fn plan_lambdas<'a>(
             captured,
         });
     }
-    let arguments: Vec<usize> = regeneration
-        .lambdas
-        .iter()
-        .map(|passed| passed.argument)
-        .collect();
     let recaptured: Vec<(String, String)> = lambdas
         .iter()
         .flat_map(|lambda| lambda.captured.iter().cloned())
         .collect();
-    let fields = plan.inline_lambdas(call_desc, &arguments, &recaptured)?;
+    let (fields, constructor_reads) =
+        plan.inline_lambdas(old, call_desc, &arguments, &recaptured)?;
     for (lambda, field) in lambdas.iter_mut().zip(fields) {
         lambda.field = field;
     }
-    Ok((lambdas, renamed_outer))
+    Ok(PlannedLambdas {
+        lambdas,
+        order,
+        renamed_outer,
+        constructor_reads,
+    })
 }
 
 /// Refuse what the ported stages do not regenerate yet.

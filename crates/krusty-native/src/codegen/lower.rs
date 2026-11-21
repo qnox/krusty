@@ -782,7 +782,9 @@ impl<'a> FileLowering<'a> {
                     // inline expansion's specialized copy), is reachable from no other file, and
                     // an inline function that declares it realizes it again in each file it is
                     // expanded into, under the same name. It stays inside the file.
-                    krusty::backend::CheckedIrUnitKind::Source if self.symbols.file_local[index] => {
+                    krusty::backend::CheckedIrUnitKind::Source
+                        if self.symbols.file_local[index] =>
+                    {
                         Linkage::Local
                     }
                     krusty::backend::CheckedIrUnitKind::Source

@@ -416,6 +416,7 @@ impl AnonymousObjects for CallObjects<'_> {
             return Ok(RegeneratedObject {
                 name: new_class,
                 constructor_desc: constructor_desc.to_string(),
+                lambda_order: (0..lambdas.len()).collect(),
                 reified_parameters_remain: false,
             });
         }
@@ -474,6 +475,7 @@ impl AnonymousObjects for CallObjects<'_> {
         Ok(RegeneratedObject {
             name: new_class,
             constructor_desc: regenerated.constructor_desc,
+            lambda_order: regenerated.lambda_order,
             reified_parameters_remain: regenerated.reified_parameters_remain,
         })
     }
