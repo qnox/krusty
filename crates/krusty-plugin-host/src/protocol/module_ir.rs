@@ -7,7 +7,7 @@ use std::io;
 use super::{
     malformed, put_callable, put_list, put_str, put_type, read_callable, read_type, Payload,
 };
-use krusty_plugin_ir::{
+use krusty_plugin_api::ir::{
     BodyIr, CallIr, Callee, Constant, ExpressionIr, ExpressionKind, FileIr, FunctionIr, ModuleIr,
     ParameterIr, Span, StatementIr, ValueId, VariableIr, Visibility,
 };
@@ -265,7 +265,7 @@ fn put_u32(payload: &mut Vec<u8>, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krusty_plugin_ir::{ClassName, Classifier, TypeIdentity};
+    use krusty_plugin_api::ir::{ClassName, Classifier, TypeIdentity};
 
     fn int() -> TypeIdentity {
         TypeIdentity {

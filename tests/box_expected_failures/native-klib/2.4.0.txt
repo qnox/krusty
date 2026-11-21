@@ -199,7 +199,6 @@ classLiteral/bound/primitives.kt
 classes/kt1538.kt
 classes/kt2566_2.kt
 classes/kt3001.kt
-classes/overloadUnaryOperator.kt
 classes/typedDelegation.kt
 closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
@@ -265,7 +264,6 @@ controlStructures/breakContinueInExpressions/inlinedBreakContinue/lambdaPassedTo
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/loopWithinInlineFunction.kt
 controlStructures/breakContinueInExpressions/kt17384.kt
 controlStructures/factorialTest.kt
-controlStructures/forInArrayWithIndex/forInArrayOfObjectArrayWithIndex.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexContinuesAsUnmodified.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNotDestructured.kt
@@ -584,7 +582,6 @@ coroutines/kt15930.kt
 coroutines/kt21080.kt
 coroutines/kt21605.kt
 coroutines/kt24135.kt
-coroutines/kt25912.kt
 coroutines/kt28844.kt
 coroutines/kt41394.kt
 coroutines/kt42028.kt
@@ -726,7 +723,6 @@ coroutines/unitTypeReturn/suspendNonLocalReturn.kt
 coroutines/unitTypeReturn/suspendReturn.kt
 coroutines/unitTypeReturn/unitSafeCall.kt
 coroutines/unsafeTransform.kt
-coroutines/varCaptuedInCoroutineIntrinsic.kt
 coroutines/varSpilling/fakeInlinerVariables.kt
 coroutines/varSpilling/kt19475.kt
 coroutines/varSpilling/kt38925.kt
@@ -1070,7 +1066,6 @@ inlineClasses/functionNameMangling/reflectionForFunctionWithMangledName.kt
 inlineClasses/functionNameMangling/reflectionForFunctionWithMangledNameGeneric.kt
 inlineClasses/functionNameMangling/reflectionForPropertyOfInlineClassType.kt
 inlineClasses/functionNameMangling/reflectionForPropertyOfInlineClassTypeGeneric.kt
-inlineClasses/genericVararg2ndConstructor.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClass.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClassGeneric.kt
 inlineClasses/inlineClassCollection/inlineListOfInlineClass.kt
@@ -1266,7 +1261,6 @@ multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
-multiplatform/k2/hmpp/genericTypealiasSameNameTwoLibs.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
 multiplatform/k2/hmpp/inheritanceFromExpected3-3.kt
@@ -1317,7 +1311,6 @@ properties/accessorForProtectedPropertyWithPrivateSetter.kt
 properties/accessorForProtectedPropertyWithPrivateSetterInObjectLiteral.kt
 properties/accessorForProtectedPropertyWithPrivateSetterViaSuper.kt
 properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
-properties/backingField/backingFieldWithSmartTypeParameters.kt
 properties/complexPropertyInitializer.kt
 properties/eagerInitializationGlobal1.kt
 properties/eagerInitializationGlobal2.kt
@@ -1985,7 +1978,6 @@ reflection/types/innerGenericArguments.kt
 reflection/types/typeArguments.kt
 reflection/types/useSiteVariance.kt
 regressions/floatingRangeContainsMixedWidths.kt
-regressions/kt15196.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
 regressions/kt2246.kt
@@ -2128,10 +2120,8 @@ unsignedTypes/forInUnsignedRangeWithCoercion.kt
 unsignedTypes/inUnsignedDownTo.kt
 unsignedTypes/kt47716.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
-vararg/kt37715.kt
 vararg/spreadCopiesArray.kt
 vararg/useSuspendFunResultAsVararg.kt
-vararg/varargInTailrec.kt
 volatile/atomicArrayIntrinsics.kt
 volatile/crossModuleIntrinsic.kt
 volatile/intrinsicWithInlineFunction.kt
@@ -2155,7 +2145,6 @@ when/stringOptimization/expression.kt
 when/stringOptimization/nullability.kt
 when/stringOptimization/sameHashCode.kt
 when/stringOptimization/statement.kt
-when/stringOptimization/temporaryVarInWhenByStringIsDisposedProperly.kt
 when/whenSubjectVariable/whenByEnum.kt
 when/whenSubjectVariable/whenByNullableEnum.kt
 when/whenSubjectVariable/whenByString.kt

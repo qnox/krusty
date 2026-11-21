@@ -26,7 +26,15 @@ pub(super) fn composer() -> Ty {
 /// The type `ComposerParamTransformer` gives a composable `() -> Unit` value: a function of the
 /// caller's composer and `$changed`.
 pub(super) fn composable_lambda() -> Ty {
-    Ty::fun(vec![composer(), Ty::Int], Ty::Unit)
+    composable_function(&[])
+}
+
+/// The type `ComposerParamTransformer` gives a composable function value that takes `parameters`
+/// (its receiver first): the same function of them, then the caller's composer and `$changed`.
+pub(super) fn composable_function(parameters: &[Ty]) -> Ty {
+    let mut physical = parameters.to_vec();
+    physical.extend([composer(), Ty::Int]);
+    Ty::fun(physical, Ty::Unit)
 }
 
 /// The runtime functions a restartable function calls.
