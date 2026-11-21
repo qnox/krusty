@@ -7,7 +7,7 @@
 
 use std::io::{self, Read, Write};
 
-use krusty_plugin_ir::{
+use krusty_plugin_api::ir::{
     CallableIdentity, CallableKind, ClassName, Classifier, ModuleIr, TypeArgument, TypeIdentity,
     TypeParameterOwner,
 };
