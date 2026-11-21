@@ -1,13 +1,12 @@
 //! The actual instance/constructor parameter frame of a serialized class initializer.
 
-use super::super::class_initialization::ClassInitialization;
+use super::super::class_headers::ClassMemberHeader;
 use super::*;
 
 pub(in super::super) fn initializer_header(
-    plan: &ClassInitialization<'_, '_>,
+    header: &ClassMemberHeader<'_, '_>,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
-    let receiver = plan
-        .header
+    let receiver = header
         .class
         .this_receiver
         .as_ref()
@@ -23,7 +22,7 @@ pub(in super::super) fn initializer_header(
     );
     let mut params = Vec::new();
     let mut identities = Vec::new();
-    for (ordinal, parameter) in plan.header.function.regular_parameters.iter().enumerate() {
+    for (ordinal, parameter) in header.function.regular_parameters.iter().enumerate() {
         let index = u32::try_from(ordinal + 1).expect("constructor parameters fit u32");
         if values
             .insert(
@@ -41,28 +40,24 @@ pub(in super::super) fn initializer_header(
                     .to_owned(),
             ));
         }
-        params.push(semantic_type(
-            plan.header.arena,
-            &plan.header.types,
-            parameter.ty,
-        )?);
+        params.push(semantic_type(header.arena, &header.types, parameter.ty)?);
         identities.push(IrParameterIdentity::source(parameter.name.clone()));
     }
     let count = params.len();
     Ok(FunctionHeader {
-        name: plan.header.function.name.clone(),
+        name: header.function.name.clone(),
         params,
         ret: Ty::Unit,
         identities,
         context_count: 0,
         extension_receiver: false,
         dispatch_receiver: None,
-        receiver_slot: Some(plan.header.contract.classifier),
+        receiver_slot: Some(header.contract.classifier),
         value_receiver: None,
         singleton_extension_unread_receiver: None,
         values,
         defaults: vec![None; count],
-        type_parameters: plan.header.types.clone(),
+        type_parameters: header.types.clone(),
         erasures: HashMap::default(),
         erased_result: None,
     })
@@ -117,11 +112,8 @@ pub(in super::super) fn local_member_header(
             "a constructor is not a member function of its class".to_owned(),
         ));
     }
-    if !function.type_parameters.is_empty() {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "a generic member of a non-public class",
-        ));
-    }
+    // A member's own type parameters are formals of its frame beside its class's.
+    let types = &declared_type_parameters::own(function, arena, types.clone(), resolve)?;
     if !function.context_parameters.is_empty()
         || function.extension_receiver.is_some()
         || function.companion_extension_class.is_some()

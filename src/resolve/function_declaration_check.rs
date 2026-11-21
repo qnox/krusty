@@ -149,6 +149,9 @@ impl Checker<'_> {
             .then_some(finalized_extension_receiver)
             .flatten();
         let spellings = self.finalized_declaration_spellings_for_binding(stable_declaration);
+        // A companion extension's receiver names the classifier's companion scope, not a type.
+        let bare_receiver = self
+            .allow_bare_outermost_type(f.receiver.as_ref().filter(|_| f.is_companion_extension()));
         let extension_receiver = f.receiver.as_ref().map(|reference| {
             if let Some(receiver) = finalized_extension_receiver {
                 self.record_or_bind_deferred_declaration_type(
@@ -175,6 +178,7 @@ impl Checker<'_> {
                 self.type_ref_ty(scope, reference)
             }
         });
+        self.restore_bare_outermost_type(bare_receiver);
         if let Some(recv_ref) = &f.receiver {
             let receiver = extension_receiver.expect("receiver was resolved");
             self.this_labels.push((
@@ -527,6 +531,7 @@ impl Checker<'_> {
             } else {
                 self.check_fun_body(scope, f, stable_declaration);
             }
+            self.check_inline_parameter_usages(scope, f);
         }
         if (!self.signature_defaults_only || default_owned_method) && f.ret.is_none() {
             if let (Some(declaration), FunBody::Expr(body)) = (stable_declaration, &f.body) {
@@ -760,6 +765,9 @@ impl Checker<'_> {
         // Extension function: look up in ext_funs table; set this_ty to the receiver type.
         let prev_extension_receiver = self.this_extension_receiver;
         // `this` inside the body and inside every parameter default is the extension receiver.
+        // A companion extension's receiver names the classifier's companion scope, not a type.
+        let bare_receiver = self
+            .allow_bare_outermost_type(f.receiver.as_ref().filter(|_| f.is_companion_extension()));
         let extension_receiver = f.receiver.as_ref().map(|r| {
             if let Some(receiver) = finalized_extension_receiver {
                 self.record_or_bind_deferred_declaration_type(
@@ -788,6 +796,7 @@ impl Checker<'_> {
                 self.check_declaration_type(scope, r)
             }
         });
+        self.restore_bare_outermost_type(bare_receiver);
         let context_receivers = f
             .params
             .iter()
@@ -1028,6 +1037,7 @@ impl Checker<'_> {
             } else if check_ordinary_body {
                 self.check_fun_body(scope, f, stable_declaration);
             }
+            self.check_inline_parameter_usages(scope, f);
         }
         if !self.signature_defaults_only && check_ordinary_body && f.ret.is_none() {
             if let (Some(declaration), FunBody::Expr(body)) = (stable_declaration, &f.body) {

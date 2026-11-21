@@ -244,6 +244,8 @@ fn run_backend_passes_after_plugins(
         lambda_modes,
     } = target;
     let facades = file_classes.map(|classes| &classes.containers[..]);
+    // kotlinc's lambda-offset lowering runs after the plugins' IR extensions, over their output.
+    crate::lambda_offsets::patch(ir, &facts.property_realizations);
     // Every later pass reads a type parameter's JVM carrier off its occurrences. Select it once,
     // from the declarations' complete bounds, before any of them runs.
     crate::enclosing_capture_storage::realize(ir).map_err(SkipReason::CallArguments)?;
@@ -348,12 +350,15 @@ fn run_backend_passes_after_plugins(
     let abstract_overrides = crate::abstract_builtin_overrides::select(ir, classpath, classifiers)?;
     crate::bridges::derive_bridges(
         ir,
-        classpath,
         callables,
         &facts.override_results,
         &mut facts.function_argument_arrays,
         facts.jvm_default,
-        &abstract_overrides,
+        &crate::bridges::SuperclassSources {
+            classpath,
+            module: classifiers.module(),
+            abstract_overrides: &abstract_overrides,
+        },
     )?;
     crate::collection_barriers::select(
         ir,
@@ -973,6 +978,7 @@ struct BackendReadyIr<'a> {
     multifile_facade: Option<String>,
     package: String,
     signature_symbols: &'a dyn BackendClassifierSource,
+    source_member_annotations: &'a krusty::backend::SourceMemberAnnotations,
     dependency_callables: krusty::backend::CheckedBackendCallables,
     inner_class_resolver: krusty::jvm::classfile::InnerClassResolver,
     pass_facts: BackendPassFacts,
@@ -1048,6 +1054,7 @@ impl JvmBackend {
         if crate::declaration_collisions::validate(
             &ir,
             &pass_facts.override_results,
+            &callables,
             &pass_facts.property_reference_realizations.delegated_arrays,
             diags,
         )
@@ -1094,6 +1101,7 @@ impl JvmBackend {
                 multifile_facade,
                 package,
                 signature_symbols: &classifiers,
+                source_member_annotations: classifiers.module().source_member_annotations(),
                 dependency_callables: callables,
                 inner_class_resolver,
                 pass_facts,
@@ -1121,6 +1129,7 @@ impl JvmBackend {
             multifile_facade,
             package,
             signature_symbols,
+            source_member_annotations,
             dependency_callables,
             inner_class_resolver,
             pass_facts,
@@ -1189,6 +1198,7 @@ impl JvmBackend {
             crate::ir_emit::CheckedEmitFacts {
                 metadata: emit_metadata,
                 signature_symbols,
+                source_member_annotations,
                 dependency_callables: &dependency_callables,
                 property_realizations: &pass_facts.property_realizations,
                 property_reference_realizations: &pass_facts.property_reference_realizations,

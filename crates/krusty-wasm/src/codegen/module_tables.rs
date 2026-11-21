@@ -6,9 +6,14 @@
 //! class's IR, and it may come later, so the type is not the declaring file's to build: every file
 //! reads it from here, built from the plan's slot signatures (Pass 1's headers,
 //! `krusty::backend::class_tables::module_slots`), and the declaring file lays its table out as
-//! this type. A class implementing a function type extends the function value table of its
-//! arity, as its declaring file lays it out. A class the plan does not cover, a body-local one
-//! among them, is typed by its file alone, and no other file dispatches through it.
+//! this type. A class the plan does not cover, a body-local one among them, is typed by its file
+//! alone, and no other file dispatches through it.
+//!
+//! A dependency class a support unit materializes is one class of the whole program, so its table
+//! type is too: every module's plan, and the support unit laying it out, take the one type the
+//! first of them built ([`ModuleTables::dependency`]). Otherwise a module class extending it
+//! would extend a second, unrelated type, and a call in a support body casting to the first would
+//! trap.
 
 use krusty::fx_hash::HashMap;
 
@@ -16,9 +21,8 @@ use krusty::backend::class_tables::module_slots::{ModuleSlotPlan, PlannedSignatu
 use krusty::types::TypeName;
 
 use super::super::encode::{Module, SubType};
-use super::super::function_values::FunctionShapes;
 use super::super::objects::{ObjectRoot, REFERENCE};
-use super::lower::{carrier, Unsupported};
+use super::lower::{carrier, parameter_carrier_of, Unsupported};
 
 /// One class's table type and the function type of each of its slots, `None` for an untyped one.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,14 +31,92 @@ pub(super) struct ModuleTable {
     pub(super) slot_types: Vec<Option<u32>>,
 }
 
-/// The table types built so far from the current module's plan, by class. A new plan starts an
-/// empty one.
+/// The table types built so far from the current module's plan, by class, and the dependency
+/// classes' of the whole program. A new plan starts with only the dependency classes'.
 #[derive(Default)]
 pub(super) struct ModuleTables {
     tables: HashMap<TypeName, Result<ModuleTable, Unsupported>>,
+    published: HashMap<TypeName, Result<ModuleTable, Unsupported>>,
+    dependencies: HashMap<TypeName, ModuleTable>,
 }
 
 impl ModuleTables {
+    /// Begin a new plan, forgetting the previous plan's tables but not the dependency classes'.
+    ///
+    /// The plan's dependency classes bind current-provider names to layouts selected by exact
+    /// frozen class identities; provider-local names never outlive the plan. A dependency class
+    /// no producer has laid out yet takes the program's one table type
+    /// ([`Self::dependency`]).
+    pub(super) fn enter_plan(
+        &mut self,
+        classes: &krusty::backend::class_tables::module_classes::ModuleClasses,
+        classifiers: &dyn krusty::backend::BackendClassifierSource,
+        layouts: &super::laid_out_classes::LaidOutClasses,
+    ) {
+        self.tables.clear();
+        self.published.clear();
+        for (name, _) in classes.iter() {
+            if !classes.is_dependency_class(name) {
+                continue;
+            }
+            let Some(identity) = classifiers
+                .classifier(name)
+                .and_then(|fact| fact.klib_identity.clone())
+            else {
+                self.published.insert(
+                    name,
+                    Err("a dependency class without its selected declaration identity".into()),
+                );
+                continue;
+            };
+            match layouts.published_layout(&identity) {
+                Ok(Some(layout)) => {
+                    self.published.insert(
+                        name,
+                        Ok(ModuleTable {
+                            table_type: layout.table_type,
+                            slot_types: layout.slot_types.clone(),
+                        }),
+                    );
+                }
+                Err(reason) => {
+                    self.published.insert(name, Err(reason));
+                }
+                Ok(None) => {}
+            }
+        }
+    }
+
+    /// The table type of the dependency class `class`, carried with `slot_types`: the one an
+    /// earlier module or support unit built for it, or else `build`'s, which every later one then
+    /// takes.
+    pub(super) fn dependency(
+        &mut self,
+        class: TypeName,
+        slot_types: &[Option<u32>],
+        build: impl FnOnce() -> u32,
+    ) -> Result<u32, Unsupported> {
+        if let Some(known) = self.dependencies.get(&class) {
+            if known.slot_types != slot_types {
+                return Err(format!(
+                    "a dependency class whose table two modules lay out differently (`{}`)",
+                    // Boundary conversion for a diagnostic.
+                    class.render().replace('/', ".")
+                ));
+            }
+            return Ok(known.table_type);
+        }
+        let table_type = build();
+        self.dependencies.insert(
+            class,
+            ModuleTable {
+                table_type,
+                slot_types: slot_types.to_vec(),
+            },
+        );
+        Ok(table_type)
+    }
+
     /// The table of `class`, building it (and its superclasses') the first time a file asks;
     /// `None` when the plan does not cover the class.
     pub(super) fn table(
@@ -43,37 +125,80 @@ impl ModuleTables {
         class: TypeName,
         module: &mut Module,
         objects: &ObjectRoot,
-        functions: &mut FunctionShapes,
     ) -> Option<Result<ModuleTable, Unsupported>> {
         if let Some(table) = self.tables.get(&class) {
             return Some(table.clone());
         }
         let planned = plan.table(class)?;
         let table = match planned {
-            Ok(planned) => self.build(plan, planned, module, objects, functions),
+            Ok(planned) => {
+                let published = self.published.get(&class).cloned();
+                match published {
+                    Some(Ok(table)) => {
+                        self.validate_published(plan, planned, table, module, objects)
+                    }
+                    Some(Err(reason)) => Err(reason),
+                    None => self.build(plan, class, planned, module, objects),
+                }
+            }
             Err(reason) => Err(reason.to_owned()),
         };
         self.tables.insert(class, table.clone());
         Some(table)
     }
 
+    /// Preserve the producer's nominal type, checking every consumer-known physical frame.
+    fn validate_published(
+        &self,
+        plan: &ModuleSlotPlan,
+        planned: &krusty::backend::class_tables::module_slots::PlannedTable,
+        table: ModuleTable,
+        module: &mut Module,
+        objects: &ObjectRoot,
+    ) -> Result<ModuleTable, Unsupported> {
+        if planned.len() as usize != table.slot_types.len() {
+            return Err("a published class table with a different physical slot count".into());
+        }
+        for slot in 0..planned.len() {
+            let expected = match plan
+                .slot_signature(planned, slot)
+                .ok_or("a published slot without its selected member signature")?
+            {
+                PlannedSignature::Untyped => continue,
+                PlannedSignature::Any(member) => objects.any_slot_types[member.slot() as usize],
+                PlannedSignature::Member { parameters, result } => {
+                    let mut params = vec![REFERENCE];
+                    for &parameter in parameters {
+                        params.push(parameter_carrier_of(parameter)?.ok_or("a `Unit` parameter")?);
+                    }
+                    module.func_type(params, carrier(result)?.into_iter().collect())
+                }
+            };
+            if table.slot_types[slot as usize] != Some(expected) {
+                return Err(
+                    "a selected member frame differing from its published physical slot".into(),
+                );
+            }
+        }
+        Ok(table)
+    }
+
     fn build(
         &mut self,
         plan: &ModuleSlotPlan,
+        class: TypeName,
         planned: &krusty::backend::class_tables::module_slots::PlannedTable,
         module: &mut Module,
         objects: &ObjectRoot,
-        functions: &mut FunctionShapes,
     ) -> Result<ModuleTable, Unsupported> {
         let parent = match planned.superclass {
             Some(superclass) => Some(
-                self.table(plan, superclass, module, objects, functions)
+                self.table(plan, superclass, module, objects)
                     .ok_or("a planned superclass the plan does not cover")??,
             ),
             None => None,
         };
         let mut slot_types = Vec::with_capacity(planned.len() as usize);
-        let mut shape = None;
         for slot in 0..planned.len() {
             let own = match plan
                 .slot_signature(planned, slot)
@@ -83,15 +208,10 @@ impl ModuleTables {
                     Some(objects.any_slot_types[member.slot() as usize])
                 }
                 PlannedSignature::Untyped => None,
-                PlannedSignature::FunctionInvoke { arity } => {
-                    let function = functions.shape(module, objects, arity);
-                    shape = Some(function);
-                    Some(function.invoke)
-                }
                 PlannedSignature::Member { parameters, result } => {
                     let mut params = vec![REFERENCE];
                     for &parameter in parameters {
-                        params.push(carrier(parameter)?.ok_or("a `Unit` parameter")?);
+                        params.push(parameter_carrier_of(parameter)?.ok_or("a `Unit` parameter")?);
                     }
                     Some(module.func_type(params, carrier(result)?.into_iter().collect()))
                 }
@@ -110,19 +230,26 @@ impl ModuleTables {
                 (_, own) => own,
             });
         }
-        let table_type = module.subtype(SubType {
-            composite: super::classes::table_struct(
-                &slot_types,
-                objects.itable,
-                objects.type_infos.ty,
-            ),
-            supertype: Some(match (&parent, shape) {
-                (Some(parent), _) => parent.table_type,
-                (None, Some(shape)) => shape.table,
-                (None, None) => objects.any_table,
-            }),
-            open: true,
-        });
+        let mut declare = || {
+            module.subtype(SubType {
+                composite: super::classes::table_struct(
+                    &slot_types,
+                    objects.itable,
+                    objects.type_infos.ty,
+                ),
+                supertype: Some(
+                    parent
+                        .as_ref()
+                        .map_or(objects.function_table, |parent| parent.table_type),
+                ),
+                open: true,
+            })
+        };
+        let table_type = if planned.is_dependency() {
+            self.dependency(class, &slot_types, declare)?
+        } else {
+            declare()
+        };
         Ok(ModuleTable {
             table_type,
             slot_types,

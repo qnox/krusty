@@ -60,10 +60,10 @@ pub(super) fn declared_receiver(class: &KlibBodyClassContract) -> Ty {
     }
 }
 
-pub(super) fn authenticate<'a, 'b>(
+/// Provider-owned class identity, independently of whether this compilation loaded its IR.
+pub(super) fn authenticate_contract<'a>(
     selected: KlibBodyCallable<'a>,
-    bodies: &'b KlibDeclarationBodies,
-) -> Result<ClassMemberHeader<'a, 'b>, KlibBodyDeclineReason> {
+) -> Result<&'a KlibBodyClassContract, KlibBodyDeclineReason> {
     let class = selected
         .class_contract()
         .ok_or_else(|| mismatch("a selected member has no provider-owned class contract"))?;
@@ -83,6 +83,15 @@ pub(super) fn authenticate<'a, 'b>(
             "the class identity disagrees with its selected member",
         ));
     }
+    Ok(class)
+}
+
+pub(super) fn authenticate<'a, 'b>(
+    selected: KlibBodyCallable<'a>,
+    bodies: &'b KlibDeclarationBodies,
+) -> Result<ClassMemberHeader<'a, 'b>, KlibBodyDeclineReason> {
+    let class = authenticate_contract(selected)?;
+    let class_is_singleton = selected.singleton_classifier() == Some(class.classifier);
     let member = bodies
         .class_member_header(
             selected.identity(),
@@ -204,46 +213,86 @@ pub(super) fn authenticate_private_member<'a, 'b>(
     })
 }
 
+/// The raw header of the private primary constructor of the object `class`, which no provider
+/// records: an object's instance is created only by its own declaration. The constructor must be
+/// a direct member of that exact class header, private, and take no value.
+pub(super) fn authenticate_object_constructor<'a, 'b>(
+    class: &'a KlibBodyClassContract,
+    bodies: &'b KlibDeclarationBodies,
+) -> Result<Option<ClassMemberHeader<'a, 'b>>, KlibBodyDeclineReason> {
+    let Some(primary) = class
+        .primary_constructor
+        .as_ref()
+        .filter(|_| class.kind == crate::libraries::TypeKind::Object)
+    else {
+        return Ok(None);
+    };
+    if class.signature.member_id().is_some()
+        || classifier_name(&class.signature)? != class.classifier
+    {
+        return Err(mismatch(
+            "an object's identity disagrees with its classifier",
+        ));
+    }
+    let identity = crate::libraries::KlibDependencyCallable {
+        module: class.module.clone(),
+        declaration: crate::libraries::KlibDeclarationSignature::Public(primary.clone()),
+    };
+    // An object of a module compiled from source alongside has no serialized declaration: its
+    // own file lays it out, never a support unit.
+    let Some(member) = bodies
+        .class_member_header(&identity, &class.signature, Some(KlibAccessorRole::Getter))
+        .map_err(mismatch)?
+    else {
+        return Ok(None);
+    };
+    if member.class.base.symbol.kind != KlibIrSymbolKind::Class
+        || !member.function.constructor
+        || crate::metadata::semantic::declaration_visibility(member.function.base.flags)
+            != crate::types::Visibility::Private
+        || !member.function.regular_parameters.is_empty()
+    {
+        return Err(mismatch(
+            "an object's primary constructor is not its private constructor taking no value",
+        ));
+    }
+    let (types, formals) = bind_class_parameters(&class.parameters, member.arena, member.class)?;
+    Ok(Some(ClassMemberHeader {
+        contract: class,
+        arena: member.arena,
+        function: member.function,
+        class: member.class,
+        types,
+        formals,
+    }))
+}
+
 fn bind_class_parameters(
     parameters: &KlibBodyClassParameters,
     arena: &KlibIrArena,
     raw_class: &KlibIrClass,
 ) -> Result<(KlibTypeParameters, Vec<String>), KlibBodyDeclineReason> {
-    let count = parameters.formals.len();
-    if parameters.own_count != count {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "captured class type parameters",
-        ));
-    }
-    if raw_class.type_parameters.len() != count
-        || parameters.bounds.len() != count
-        || parameters.variances.len() != count
-    {
+    let formals = class_parameter_identities(parameters)?;
+    let count = formals.len();
+    if raw_class.type_parameters.len() != count {
         return Err(mismatch(
             "the serialized class formals are not parallel to the provider contract",
         ));
     }
     let mut types = KlibTypeParameters::default();
-    let mut identities = HashSet::default();
-    let mut formals = Vec::with_capacity(count);
     for (index, parameter) in raw_class.type_parameters.iter().enumerate() {
-        let TyKind::TyParam(identity, _) = parameters.formals[index].kind() else {
-            return Err(mismatch("a selected class formal is not a type parameter"));
-        };
         let variance = match parameters.variances[index] {
             TypeVariance::Invariant => KlibIrVariance::Invariant,
             TypeVariance::In => KlibIrVariance::In,
             TypeVariance::Out => KlibIrVariance::Out,
         };
-        if !identities.insert(identity)
-            || parameter.base.symbol.kind != KlibIrSymbolKind::TypeParameter
+        if parameter.base.symbol.kind != KlibIrSymbolKind::TypeParameter
             || !types.bind(&parameter.base.symbol, parameters.formals[index])
             || parameter.is_reified()
             || parameter.variance() != Some(variance)
         {
             return Err(mismatch("the serialized class formal identity, variance or reification disagrees with its provider"));
         }
-        formals.push(identity.as_str().to_owned());
     }
     for (index, parameter) in raw_class.type_parameters.iter().enumerate() {
         let bounds = parameter
@@ -256,11 +305,41 @@ fn bind_class_parameters(
                 "the serialized class upper bounds disagree with its provider",
             ));
         }
-        if !types.record_bounds(parameters.formals[index], parameters.bounds[index].clone()) {
+        if !types.record_bounds(parameters.formals[index], parameters.bounds[index].clone())
+            || !types.record_variance(parameters.formals[index], parameters.variances[index])
+        {
             return Err(mismatch("a class repeats a semantic formal identity"));
         }
     }
     Ok((types, formals))
+}
+
+/// The provider's class formals are also the declared frame for an already emitted initializer.
+/// Raw-header binding and retained declarations use the same normalized identity validation.
+pub(super) fn class_parameter_identities(
+    parameters: &KlibBodyClassParameters,
+) -> Result<Vec<String>, KlibBodyDeclineReason> {
+    let count = parameters.formals.len();
+    if parameters.own_count != count {
+        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+            "captured class type parameters",
+        ));
+    }
+    if parameters.bounds.len() != count || parameters.variances.len() != count {
+        return Err(mismatch("the selected class formal facts are not parallel"));
+    }
+    let mut identities = HashSet::default();
+    let mut formals = Vec::with_capacity(count);
+    for formal in &parameters.formals {
+        let TyKind::TyParam(identity, _) = formal.kind() else {
+            return Err(mismatch("a selected class formal is not a type parameter"));
+        };
+        if !identities.insert(identity) {
+            return Err(mismatch("a class repeats a semantic formal identity"));
+        }
+        formals.push(identity.as_str().to_owned());
+    }
+    Ok(formals)
 }
 
 fn normalized_bounds(bounds: &[Ty]) -> Vec<Ty> {

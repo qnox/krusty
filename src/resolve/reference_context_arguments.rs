@@ -23,10 +23,13 @@ impl Checker<'_> {
         callable_reference_selection::specialize_candidate_with_type_arguments(
             &source,
             function,
-            bound_contexts,
             extension_receiver,
-            expected_params,
-            expected_ret,
+            callable_reference_selection::ReferenceExpectation {
+                params: expected_params,
+                ret: expected_ret,
+                bound_contexts,
+                type_variable_inputs: self.active_reference_type_variable_inputs(),
+            },
             |actual, bound| self.generic_bound_admits(actual, bound),
         )
     }
@@ -88,7 +91,7 @@ impl Checker<'_> {
         candidates: &CallableRefCandidates,
         unbound_receiver: Option<Ty>,
     ) -> Option<Ty> {
-        if expected.is_some() || !self.file.callable_references_to_contextual {
+        if expected.is_some() || !self.file.language.callable_references_to_contextual {
             return expected;
         }
         let member = candidates.method.as_ref()?;
@@ -149,7 +152,7 @@ impl Checker<'_> {
         &self,
         function: &crate::libraries::FunctionInfo,
     ) -> usize {
-        if self.file.callable_references_to_contextual {
+        if self.file.language.callable_references_to_contextual {
             function.context_count
         } else {
             0
@@ -183,7 +186,7 @@ impl Checker<'_> {
         e: ExprId,
         ty: Ty,
     ) -> Ty {
-        if ty == Ty::Error || !self.file.callable_references_to_contextual {
+        if ty == Ty::Error || !self.file.language.callable_references_to_contextual {
             return ty;
         }
         let Some(context_types) = self.reference_context_types(e) else {

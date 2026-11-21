@@ -19,12 +19,35 @@ use crate::ir::{
 pub struct ReferencedDependencies {
     pub callables: BTreeSet<ExternalCallableId>,
     pub properties: BTreeSet<ExternalPropertyId>,
+    /// Implemented/inherited SAM declarations are header evidence, not calls of their bodies.
+    pub sam_declarations: BTreeSet<ExternalCallableId>,
 }
 
 pub fn referenced_dependencies(ir: &IrFile) -> ReferencedDependencies {
     let mut referenced = ReferencedDependencies::default();
     for expression in &ir.exprs {
         referenced.expression(ir, expression);
+    }
+    for expression in crate::ir::emitted_body_roots(ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+    {
+        if let IrExpr::Lambda {
+            sam: Some(target), ..
+        } = ir.expr(expression)
+        {
+            for method in std::iter::once(Some(target.method_target)).chain(
+                target
+                    .dispatch_methods
+                    .iter()
+                    .chain(&target.default_methods)
+                    .map(|frame| frame.method),
+            ) {
+                if let Some(crate::ir::IrSamMethod::External(identity)) = method {
+                    referenced.sam_declarations.insert(identity);
+                }
+            }
+        }
     }
     referenced.callables.extend(
         ir.external_super_constructors
@@ -41,6 +64,19 @@ pub fn referenced_dependencies(ir: &IrFile) -> ReferencedDependencies {
         referenced.property_override(edge.overridden);
     }
     for default in ir.inherited_defaults.values().flatten() {
+        // Annotation origin is declaration evidence only. It freezes an exact method header;
+        // executable dependency roots continue to come from `default.body` and emitted calls.
+        if let Some(origin) = default.annotation_origin {
+            match origin {
+                crate::fir::InheritedDefaultAnnotationOrigin::Function(target) => {
+                    referenced.function_override(target)
+                }
+                crate::fir::InheritedDefaultAnnotationOrigin::Getter(target)
+                | crate::fir::InheritedDefaultAnnotationOrigin::Setter(target) => {
+                    referenced.property_override(target)
+                }
+            }
+        }
         match default.body {
             crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration)
             | crate::fir::InheritedDefaultBody::DependencyHolder(declaration) => {
@@ -234,6 +270,7 @@ impl ReferencedDependencies {
             | Callee::CrossFile { .. }
             | Callee::Module { .. }
             | Callee::ModuleDefaultEntry { .. }
+            | Callee::ModuleConstructorDefaultEntry { .. }
             | Callee::Static { .. }
             | Callee::Virtual { .. }
             | Callee::Super { .. }
@@ -281,7 +318,9 @@ impl ReferencedDependencies {
             | IrCheckedOperation::BackingFieldRead { .. }
             | IrCheckedOperation::BackingFieldWrite { .. }
             | IrCheckedOperation::ComparableRangeContains { .. }
-            | IrCheckedOperation::IllegalProgressionStep { .. } => {}
+            | IrCheckedOperation::IllegalProgressionStep { .. }
+            | IrCheckedOperation::AtomicField { .. }
+            | IrCheckedOperation::AtomicArrayElement { .. } => {}
         }
     }
 

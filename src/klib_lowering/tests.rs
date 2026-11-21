@@ -8,6 +8,7 @@ mod body_forms;
 mod callable_references;
 mod callee_headers;
 mod captured_projections;
+mod checked_member_edges;
 mod closure_frames;
 mod closure_producers;
 mod constructor_calls;
@@ -19,6 +20,7 @@ mod elvis_blocks;
 mod enum_entries;
 mod for_loop_bindings;
 mod generic_receiver_hierarchy;
+mod inline_calls;
 mod inline_templates;
 mod object_literal_overrides;
 mod object_literals;
@@ -27,7 +29,10 @@ mod primitive_calls;
 mod range_membership_producers;
 mod returnable_blocks;
 mod safe_calls;
+mod sam_conversions;
+mod sam_dispatch;
 mod same_library_class;
+mod support;
 mod target_calls;
 mod target_members;
 mod value_class_members;
@@ -59,6 +64,8 @@ use crate::metadata::semantic::{KotlinFunction, KotlinPackage};
 use crate::metadata::semantic::{KotlinFunctionTypeShape, KotlinType};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{type_name, Ty, TyKind, TypeName, Visibility};
+
+use support::checked_template_facts;
 
 /// The fact the backend handoff freezes for the one function of `package` named `name` with this
 /// receiver and these value parameters.
@@ -550,7 +557,7 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
                 .map(|catch| format!(
                     " catch(v{} {:?}: {}) {}",
                     catch.var,
-                    catch.binding.as_ref().map(|binding| binding.name.as_str()),
+                    catch.binding.as_ref().map(|binding| &binding.name),
                     type_name_of(catch.ty),
                     render(ir, catch.body)
                 ))
@@ -602,6 +609,7 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
                 arguments,
                 parameters,
                 result,
+                substitutions: _,
                 source_receiver,
             } => format!(
                 "{}.read<{dispatch:?}>({}; {}): {} on {}",
@@ -1643,6 +1651,16 @@ pub(super) fn non_overriding_edges<'a>(
         .collect()
 }
 
+pub(super) fn checked_backend_klib_facts(
+    facts: crate::ir::CheckedKlibDependencyFacts,
+) -> CheckedBackendCallables {
+    let mut checked = CheckedBackendCallables::default();
+    checked
+        .record_klib_dependency_facts(facts)
+        .expect("test KLIB facts are consistent");
+    checked
+}
+
 // --- The Kotlin/Native stdlib -----------------------------------------------------------------
 
 pub(super) fn distribution_root() -> Option<PathBuf> {
@@ -2382,7 +2400,7 @@ fn member_of(package: &[&str], class: &str, name: &str) -> KlibPublicIdSignature
 
 #[test]
 fn only_a_declared_function_invocation_has_invocation_semantics() {
-    use super::klib_types::function_invocation_arity;
+    use super::klib_types::{function_invocation_arity, suspend_function_invocation_arity};
     assert_eq!(
         function_invocation_arity(&member_of(&["kotlin"], "Function1", "invoke")),
         Some(1)
@@ -2405,6 +2423,14 @@ fn only_a_declared_function_invocation_has_invocation_semantics() {
             "invoke"
         )),
         None
+    );
+    assert_eq!(
+        suspend_function_invocation_arity(&member_of(
+            &["kotlin", "coroutines"],
+            "SuspendFunction1",
+            "invoke"
+        )),
+        Some(1)
     );
     assert_eq!(
         function_invocation_arity(&member_of(&["kotlin", "reflect"], "KFunction1", "invoke")),

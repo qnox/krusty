@@ -19,6 +19,7 @@ use crate::types::{Ty, TypeName, TypeVariance};
 pub enum BackendFactError {
     UnpublishableClassifier(TypeName, UndeterminedType),
     IncompleteClassifier(TypeName),
+    IncompleteAnnotation(TypeName),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +50,34 @@ pub trait BackendClassifierSource {
                 .map(|record| record.declaration_name.clone()),
             crate::libraries::ClassifierDeclarationKey::TypeAlias(_) => None,
         }
+    }
+
+    /// Whether `ancestor` is `classifier` or one of the supertypes its facts publish, transitively.
+    fn is_subclassifier(&self, classifier: TypeName, ancestor: TypeName) -> bool {
+        is_subclassifier(self, classifier, ancestor)
+    }
+
+    /// Every interface `classifier` is a proper subclassifier of, through the supertypes its facts
+    /// publish, transitively: the interfaces an instance of `classifier` is an instance of.
+    fn inherited_interfaces(&self, classifier: TypeName) -> Vec<TypeName> {
+        let mut interfaces = Vec::new();
+        let mut pending = self
+            .classifier(classifier)
+            .map(|fact| fact.supertypes.to_vec())
+            .unwrap_or_default();
+        let mut seen = crate::fx_hash::HashSet::default();
+        while let Some(next) = pending.pop() {
+            if !seen.insert(next) {
+                continue;
+            }
+            if let Some(fact) = self.classifier(next) {
+                if fact.is_interface() {
+                    interfaces.push(next);
+                }
+                pending.extend(fact.supertypes.iter().copied());
+            }
+        }
+        interfaces
     }
 
     /// Every builtin class (`String`, a primitive, an unsigned integer) whose classifier is a
@@ -93,6 +122,8 @@ fn is_subclassifier(
 /// parser-backed member identities cannot be represented here.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BackendClassifierFact {
+    /// Exact selected-provider classifier identity, independent of constructor selections.
+    pub klib_identity: Option<crate::libraries::KlibClassIdentity>,
     pub runtime_exception: Option<crate::libraries::RuntimeExceptionLayout>,
     pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub access: crate::libraries::ClassifierAccess,
@@ -169,6 +200,7 @@ struct SourceDeclaration {
 impl BackendClassifierFact {
     fn from_library(classifier: TypeName, shape: &LibraryType) -> Self {
         Self {
+            klib_identity: shape.klib_identity.clone(),
             runtime_exception: shape.runtime_exception,
             declaration_name: shape.declaration_name.clone(),
             access: shape.access,
@@ -245,6 +277,7 @@ pub struct BackendModuleFacts {
     /// The superclass and instance functions of every named source classifier, whichever file
     /// declares it: exactly the classifiers of [`Self::classifiers`].
     source_class_members: HashMap<TypeName, super::source_class_members::SourceClassMembers>,
+    source_member_annotations: super::source_class_members::SourceMemberAnnotations,
     /// Each dependency classifier the module's own classes stand behind, with the file of every
     /// source class that can be an instance of it, body-local ones included.
     dependency_implementors: HashMap<TypeName, Box<[crate::fir::SourceFileId]>>,
@@ -295,6 +328,8 @@ impl BackendModuleFacts {
         let mut generated_classifiers = Vec::new();
         let mut source_supertypes = HashMap::default();
         let mut source_class_members = HashMap::default();
+        let mut source_member_annotations =
+            super::source_class_members::SourceMemberAnnotations::default();
         let mut source_enum_constants = HashMap::default();
         let mut source_constructors = HashSet::default();
         let mut actualized_expects = HashMap::default();
@@ -327,6 +362,14 @@ impl BackendModuleFacts {
                         .has(crate::fir::DeclarationFlags::ANNOTATION_CLASS)
                     && !header.flags.has(crate::fir::DeclarationFlags::ABSTRACT)
             });
+            let declared_supertypes = classifier
+                .declared_supertypes()
+                .filter_map(|ty| {
+                    crate::libraries::function_classifiers::supertype_classifier(ty.get())
+                        .non_null()
+                        .obj_internal()
+                })
+                .collect::<Box<[_]>>();
             source_supertypes.insert(
                 classifier.classifier,
                 (
@@ -334,10 +377,7 @@ impl BackendModuleFacts {
                         .then(|| index.declaration_anchor(declaration))
                         .flatten()
                         .map(|anchor| anchor.source),
-                    classifier
-                        .declared_supertypes()
-                        .filter_map(|ty| ty.get().non_null().obj_internal())
-                        .collect::<Box<[_]>>(),
+                    declared_supertypes.clone(),
                 ),
             );
             if index.is_body_local_declaration(declaration) {
@@ -416,10 +456,7 @@ impl BackendModuleFacts {
                 kind,
                 crate::libraries::TypeKind::Interface | crate::libraries::TypeKind::Annotation
             );
-            let mut direct_supertypes = classifier
-                .declared_supertypes()
-                .filter_map(|ty| ty.get().non_null().obj_internal())
-                .collect::<Vec<_>>();
+            let mut direct_supertypes = declared_supertypes.into_vec();
             if direct_supertypes.is_empty()
                 && classifier.classifier != crate::types::type_name("kotlin/Any")
             {
@@ -489,6 +526,7 @@ impl BackendModuleFacts {
             let companion = source_companion(index, declaration);
             let qualified_name = source_qualified_name(index, declaration);
             let fact = BackendClassifierFact {
+                klib_identity: None,
                 runtime_exception: None,
                 declaration_name: classifier.declaration_name.clone(),
                 access: declaration_header.visibility.into(),
@@ -550,6 +588,7 @@ impl BackendModuleFacts {
                 inherited_defaults
                     .insert(classifier.classifier, defaults.to_vec().into_boxed_slice());
             }
+            source_member_annotations.record_class(index, declaration)?;
             source_class_members.insert(
                 classifier.classifier,
                 super::source_class_members::from_resolved_index(
@@ -580,6 +619,7 @@ impl BackendModuleFacts {
                 .collect(),
             classes: Default::default(),
             source_class_members,
+            source_member_annotations,
             dependency_implementors: dependency_implementors(&source_supertypes),
             source_enum_constants,
             source_constructors,
@@ -631,6 +671,7 @@ impl BackendModuleFacts {
             file_annotations: HashMap::default(),
             classes: Default::default(),
             source_class_members: HashMap::default(),
+            source_member_annotations: Default::default(),
             dependency_implementors: HashMap::default(),
             source_enum_constants: HashMap::default(),
             source_constructors: HashSet::default(),
@@ -643,8 +684,8 @@ impl BackendModuleFacts {
         self.classifiers.get(&classifier).cloned()
     }
 
-    /// Whether a file of this module declares `instance`: an object, a constant of an enum, or a
-    /// constructor another file may build through.
+    /// Whether a file of this module declares `instance`: an object, a constant of an enum or one
+    /// of its `values()` and `valueOf`, or a constructor another file may build through.
     pub fn declares_instance(&self, instance: &super::instance_links::InstanceEntry) -> bool {
         match instance {
             super::instance_links::InstanceEntry::Object(classifier) => self
@@ -655,8 +696,20 @@ impl BackendModuleFacts {
                 .source_enum_constants
                 .get(&constant.classifier)
                 .is_some_and(|constants| constants.contains(&constant.name)),
-            super::instance_links::InstanceEntry::Constructor { declaration, .. } => {
+            super::instance_links::InstanceEntry::EnumMember { classifier, .. } => {
+                self.source_enum_constants.contains_key(classifier)
+            }
+            super::instance_links::InstanceEntry::Constructor { declaration, .. }
+            | super::instance_links::InstanceEntry::ConstructorDefaults { declaration, .. } => {
                 self.source_constructors.contains(declaration)
+            }
+            super::instance_links::InstanceEntry::TypeTest(classifier) => {
+                self.classifiers.get(classifier).is_some_and(|fact| {
+                    fact.source
+                        && !fact.is_interface()
+                        && !fact.is_enum()
+                        && fact.kind != crate::libraries::TypeKind::Object
+                })
             }
         }
     }
@@ -712,6 +765,12 @@ impl BackendModuleFacts {
 
     pub fn source_value_classes(&self) -> &HashMap<TypeName, Ty> {
         &self.source_value_classes
+    }
+
+    pub fn source_member_annotations(
+        &self,
+    ) -> &super::source_class_members::SourceMemberAnnotations {
+        &self.source_member_annotations
     }
 
     pub fn metadata_readable_value_classes(&self) -> &HashSet<TypeName> {
@@ -1309,6 +1368,59 @@ mod tests {
             assert_eq!(class.declaration_name, fact.declaration_name);
         }
         facts
+    }
+
+    #[test]
+    fn frozen_function_supertypes_keep_their_checked_classifier() {
+        let facts = classifier_name_snapshot(
+            "package ownership.functions\n\
+             fun interface Plain { fun invoke(value: Int): Int }\n\
+             fun interface Callable : (Int) -> Int { override fun invoke(value: Int): Int }\n\
+             interface Suspending : suspend (Int) -> Int\n",
+        );
+        for (name, parent) in [
+            ("Plain", "kotlin/Any"),
+            ("Callable", "kotlin/Function1"),
+            ("Suspending", "kotlin/coroutines/SuspendFunction1"),
+        ] {
+            let classifier =
+                crate::types::type_name_child(crate::types::type_name("ownership/functions"), name);
+            assert_eq!(
+                facts.classifier(classifier).unwrap().supertypes.as_ref(),
+                &[crate::types::type_name(parent)],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn inherited_interfaces_follow_published_supertypes_through_superclasses() {
+        let facts = classifier_name_snapshot(
+            "package ownership.inherited\n\
+             interface Root\n\
+             interface Middle : Root\n\
+             interface Side\n\
+             abstract class Base : Middle\n\
+             open class Leaf : Base(), Side\n\
+             class Plain\n",
+        );
+        let name = |name| {
+            crate::types::type_name_child(crate::types::type_name("ownership/inherited"), name)
+        };
+        let classifiers =
+            CheckedBackendClassifiers::new(&facts, &crate::libraries::EmptySymbolSource);
+        let interfaces = |classifier| {
+            let mut found = classifiers.inherited_interfaces(name(classifier));
+            found.sort_by_key(|interface| interface.render());
+            found
+        };
+        assert_eq!(
+            interfaces("Leaf"),
+            [name("Middle"), name("Root"), name("Side")]
+        );
+        assert_eq!(interfaces("Base"), [name("Middle"), name("Root")]);
+        assert_eq!(interfaces("Middle"), [name("Root")]);
+        assert_eq!(interfaces("Plain"), Vec::<crate::types::TypeName>::new());
     }
 
     #[test]

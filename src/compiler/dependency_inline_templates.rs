@@ -34,10 +34,21 @@ impl DependencyInlineTemplates for KlibInlineTemplates {
     ) -> Option<DependencyInlineTemplate> {
         let realization = self.platform.external_callable(target)?;
         let bodies = self.platform.klib_dependency_body_facts()?;
+        let selected = realization.klib_body_callable()?;
+        let checked = crate::resolve::for_checked_klib_bodies(
+            self.platform.as_ref(),
+            bodies.bodies(),
+            [selected],
+            // A template reads only the checked type hierarchy, never builtin implementations.
+            &[],
+        )
+        .ok()?;
+        checked.type_hierarchy()?;
         let callees = TemplateCallees {
             declarations: bodies.bodies(),
             references: bodies.references(),
             source: self.platform.as_ref(),
+            dependency_facts: &checked,
         };
         let Some(template) =
             lower_inline_template(ir, &realization, bodies.inline_bodies(), callees)

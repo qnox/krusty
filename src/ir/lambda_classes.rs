@@ -33,10 +33,6 @@ pub struct IrLambdaClass {
     /// implementation's lambda-origin record. `None` means kotlinc's unlabeled `<this>` spelling;
     /// a backend formats a present label at the local-variable boundary.
     pub extension_receiver_label: Option<String>,
-    /// The inline function whose default argument this lambda implements. The JVM realization
-    /// records it before replacing the lambda expression; emission uses it for the `$default`
-    /// enclosure, source map, and metadata ABI flag without searching the rewritten body.
-    pub inline_default_owner: Option<FunId>,
     /// The function whose `$default` stub builds this lambda as a default argument value, inline
     /// or not: the class's `EnclosingMethod` is that stub.
     pub default_stub_owner: Option<FunId>,
@@ -80,6 +76,9 @@ pub struct IrLambdaClass {
     /// lambda: `invoke` is then that interface's method, under the method's name, and the bridge
     /// adapts the method's declared shape rather than `FunctionN.invoke`.
     pub sam: Option<Box<IrSamTarget>>,
+    /// A synthesized callable-reference implementation, rather than a source SAM lambda.
+    /// Its class is synthetic and captures enclosing formals without redeclaring SAM formals.
+    pub sam_reference: bool,
 }
 
 /// One captured value a lambda class stores in a field.

@@ -5,6 +5,27 @@
 
 use super::*;
 
+/// What the `inline` function rules track while bodies are checked. Inference may check one
+/// call or body more than once, so each rule reports an expression once.
+#[derive(Default)]
+pub(super) struct InlineAccessState {
+    /// How many public or protected `inline` functions are being checked. A call to a
+    /// non-public-API function inside one is rejected. An `internal` or `private` inline body is
+    /// not this boundary.
+    public_api_depth: u32,
+    /// Calls already reported for the public-API access rule.
+    reported_public_api_calls: HashSet<ExprId>,
+    /// Inline-parameter reads already reported as illegal usages.
+    reported_parameter_usages: HashSet<ExprId>,
+}
+
+impl InlineAccessState {
+    /// Whether the illegal usage `read` of an inline parameter is reported for the first time.
+    pub(super) fn first_parameter_usage_report(&mut self, read: ExprId) -> bool {
+        self.reported_parameter_usages.insert(read)
+    }
+}
+
 impl Checker<'_> {
     /// Public or protected visibility, or `@PublishedApi` on an `internal` declaration. The
     /// annotation is the resolved classifier identity already stored on the candidate, never the
@@ -40,14 +61,14 @@ impl Checker<'_> {
     ) -> bool {
         let entered = self.declaration_is_public_api_inline(scope, function);
         if entered {
-            self.public_api_inline_depth += 1;
+            self.inline_access.public_api_depth += 1;
         }
         entered
     }
 
     pub(super) fn leave_public_api_inline(&mut self, entered: bool) {
         if entered {
-            self.public_api_inline_depth -= 1;
+            self.inline_access.public_api_depth -= 1;
         }
     }
 
@@ -61,10 +82,10 @@ impl Checker<'_> {
         callee_is_public_api: bool,
         inline: InlineKind,
     ) {
-        if self.public_api_inline_depth == 0 || callee_is_public_api {
+        if self.inline_access.public_api_depth == 0 || callee_is_public_api {
             return;
         }
-        if !self.public_inline_access_calls.insert(call) {
+        if !self.inline_access.reported_public_api_calls.insert(call) {
             return;
         }
         let message = if inline.can_inline() {

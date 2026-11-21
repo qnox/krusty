@@ -64,6 +64,10 @@ impl Checker<'_> {
             site,
         );
         let postpone_lambda_body = expected.is_none()
+            && signature
+                .params
+                .iter()
+                .any(|&input| !Self::type_is_lexically_fixed(scope, input))
             && self.postponed_argument_depth != 0
             && matches!(self.file.expr(*argument), Expr::Lambda { .. })
             && matches!(expected_callable.kind(), TyKind::Fun(shape) if self.contextual_lambda_accepts_function_shape(*argument, shape));
@@ -500,7 +504,10 @@ mod tests {
             context_count: 0,
             has_receiver: false,
             suspend: false,
+            requires_object_dispatch: false,
             overridden_results: Vec::new(),
+            dispatch_methods: Vec::new(),
+            default_methods: Vec::new(),
             kotlin_interface: true,
             parameter_identities: Box::new([]),
             type_parameters: Vec::new(),

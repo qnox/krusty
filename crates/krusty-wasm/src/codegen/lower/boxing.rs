@@ -21,13 +21,23 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// Read the `ty` value out of the box the frontend checked the reference on the stack is.
-    pub(super) fn unbox(&mut self, ty: Ty) -> Result<(), Unsupported> {
-        let form = match scalar_carrier(ty)? {
+    /// The box of the scalar `ty`'s values, declared on first use; `None` for a type carried as a
+    /// reference.
+    pub(super) fn boxed_form(
+        &mut self,
+        ty: Ty,
+    ) -> Result<Option<crate::boxes::BoxForm>, Unsupported> {
+        Ok(match scalar_carrier(ty)? {
             Some(value) => self.runtime.box_form(self.module, ty, value)?,
             None => None,
-        }
-        .ok_or_else(|| format!("a reference read as a `{}` value", describe(ty)))?;
+        })
+    }
+
+    /// Read the `ty` value out of the box the frontend checked the reference on the stack is.
+    pub(super) fn unbox(&mut self, ty: Ty) -> Result<(), Unsupported> {
+        let form = self
+            .boxed_form(ty)?
+            .ok_or_else(|| format!("a reference read as a `{}` value", describe(ty)))?;
         form.emit_unbox(&mut self.code);
         Ok(())
     }
@@ -44,33 +54,16 @@ impl Body<'_> {
     ) -> Result<(), Unsupported> {
         let nullable = matches!(target.kind(), TyKind::Nullable(_));
         let scalar = target.non_null();
-        let form = match scalar_carrier(scalar)? {
-            Some(value) => self.runtime.box_form(self.module, scalar, value)?,
-            None => None,
-        }
-        .ok_or_else(|| format!("a reference cast to a `{}` value", describe(target)))?;
-        let failure = self.runtime.exception_class(
-            self.module,
-            self.classifiers,
-            krusty::libraries::RuntimeExceptionKind::ClassCast.classifier(),
-        )?;
+        let form = self
+            .boxed_form(scalar)?
+            .ok_or_else(|| format!("a reference cast to a `{}` value", describe(target)))?;
         self.value(arg, any())?;
         let value = self.local(REFERENCE);
         self.code
             .local_tee(value)
-            .ref_test(nullable, HeapType::Concrete(form.structure))
-            .op(EQZ32)
-            .if_(BlockType::Empty);
-        self.runtime.exceptions.construct_class(
-            &mut self.code,
-            failure,
-            None,
-            self.runtime.string,
-        )?;
-        self.code
-            .throw(self.runtime.exceptions.tag)
-            .end()
-            .local_get(value);
+            .ref_test(nullable, HeapType::Concrete(form.structure));
+        self.throw_class_cast_unless()?;
+        self.code.local_get(value);
         if !nullable {
             form.emit_unbox(&mut self.code);
         }

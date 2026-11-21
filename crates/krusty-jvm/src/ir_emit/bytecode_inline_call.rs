@@ -85,6 +85,8 @@ pub(super) const REIFIED_BODY_ON_BYTE_SPLICE: &str =
 /// cannot splice the body around them.
 const VALUE_USED_LITERAL_UNSPLICED: &str =
     "an inline body that takes a literal lambda as a value cannot be spliced around it";
+const VALUE_USED_REFERENCE_UNSPLICED: &str =
+    "an inline body that takes a callable reference as a value cannot be spliced around it";
 pub(super) const DEFAULT_BRIDGE_REQUIRES_METHOD_INLINER: &str =
     "a default bridge whose lambda requires the byte splice is not supported";
 
@@ -313,6 +315,7 @@ impl Emitter<'_> {
             body: &body,
             reified,
             defaults: defaults.as_ref(),
+            same_module: false,
         };
         self.inline_call_with_body(&inline_call, base, code)
     }
@@ -444,6 +447,16 @@ impl Emitter<'_> {
                 self.run.set_inline_bail(reason);
                 return InlineCallOutcome::HandledWithError;
             }
+        }
+        // The bridge passes each literal as a function object, which a lambda becomes. A callable
+        // reference placed as a literal is only its template: it has no function object to pass.
+        if inline_call
+            .args
+            .iter()
+            .any(|&argument| matches!(self.ir.expr(argument), IrExpr::CallableReference(_)))
+        {
+            self.run.set_inline_bail(VALUE_USED_REFERENCE_UNSPLICED);
+            return InlineCallOutcome::HandledWithError;
         }
         if let Err(reason) = ensure_no_unexpanded_default_masks(inline_call.defaults) {
             self.run.set_emit_error(reason.to_string());
@@ -602,7 +615,12 @@ impl Emitter<'_> {
         call: &ClasspathInlineCall<'_, '_>,
         code: &mut CodeBuilder,
     ) -> Option<()> {
-        let ClasspathInlineCall { target, args, .. } = *call;
+        let ClasspathInlineCall {
+            target,
+            args,
+            same_module,
+            ..
+        } = *call;
         if code.is_dead() {
             return Some(());
         }
@@ -617,7 +635,7 @@ impl Emitter<'_> {
                 return None;
             }
         };
-        if let Some(shape) = inliner::unsupported_shape(&callee) {
+        if let Some(shape) = inliner::unsupported_shape(&callee, same_module) {
             krusty::trace_compiler!("splice", "unified inliner declines {shape:?}");
             return None;
         }
@@ -734,7 +752,7 @@ impl Emitter<'_> {
             let crossinline = index
                 .checked_sub(leading_non_argument_operands)
                 .and_then(|parameter| {
-                    crate::inline_parameters::is_crossinline_parameter(
+                    crate::inline_parameters::crossinline_literal_moves(
                         self.ir,
                         call_expression,
                         parameter,
@@ -1870,6 +1888,8 @@ pub(super) struct ClasspathInlineCall<'a, 't> {
     pub reified: &'a krusty::jvm::reified_arguments::ReifiedArguments,
     /// The masks of a default bridge call, which resolve the bridge's header before it is inlined.
     pub defaults: Option<&'a inliner::DefaultMasks>,
+    /// The body is the compiled body of a same-module inline function.
+    pub same_module: bool,
 }
 
 /// A call on its way through the port, with what the call site decided per parameter.

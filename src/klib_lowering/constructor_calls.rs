@@ -22,6 +22,12 @@ pub(super) struct ConstructorDeclaration {
     class_parameters: KlibBodyClassParameters,
     defaults: ParamFlags,
     pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
+    /// Whether a support unit materializes the class with its members, so that a source class may
+    /// extend it. A class the target represents is not, and is the target's to lay out.
+    pub(super) class_emits_members: bool,
+    /// Whether the constructor's first parameter is the outer instance of an inner class, which
+    /// a call supplies as its dispatch receiver ahead of the value arguments.
+    pub(super) enclosing_instance: bool,
 }
 
 fn mismatch(detail: &str) -> KlibBodyDeclineReason {
@@ -43,16 +49,7 @@ pub(super) fn authenticate(
     selected: KlibBodyCallable<'_>,
     bodies: &KlibDeclarationBodies,
 ) -> Result<ConstructorDeclaration, KlibBodyDeclineReason> {
-    if selected.kind() != ExternalCallableKind::Constructor
-        || selected.ret() != Ty::Unit
-        || selected.generic_signature().is_some()
-        || !selected.type_parameters().is_empty()
-        || !selected.reified_type_parameter_ordinals().is_empty()
-    {
-        return Err(mismatch(
-            "a constructor has an incompatible selected invocation contract",
-        ));
-    }
+    let declaration = authenticate_declaration(selected)?;
     let header = class_headers::authenticate(selected, bodies)?;
     let function = header.function;
     require_constructor_kind(function)?;
@@ -82,14 +79,7 @@ pub(super) fn authenticate(
             "the serialized constructor header disagrees with its declaration",
         ));
     }
-    let defaults = selected
-        .parameter_defaults()
-        .ok_or_else(|| mismatch("a constructor has no known declared default parameters"))?;
-    if defaults.len() != selected.params().len() {
-        return Err(mismatch(
-            "constructor default flags are not parallel to its parameters",
-        ));
-    }
+    let defaults = declaration.defaults;
     let mut symbols = HashSet::default();
     let mut varargs = VarargParameters::default();
     for (index, parameter) in function.regular_parameters.iter().enumerate() {
@@ -134,12 +124,105 @@ pub(super) fn authenticate(
             "a constructor result is not its declared class application",
         ));
     }
+    Ok(declaration)
+}
+
+/// Declaration authentication for an already defined initializer. This does not authorize
+/// materialization or allocation: the caller must hold the exact producer-definition capability.
+/// A known serialized declaration still follows the complete ordinary authentication path.
+pub(super) fn authenticate_retained(
+    selected: KlibBodyCallable<'_>,
+    bodies: &KlibDeclarationBodies,
+) -> Result<ConstructorDeclaration, KlibBodyDeclineReason> {
+    let declaration = authenticate_declaration(selected)?;
+    let class = class_headers::authenticate_contract(selected)?;
+    let known_class = bodies
+        .class_header(&selected.identity().module, &class.signature)
+        .map_err(mismatch)?
+        .is_some();
+    if known_class || bodies.function(selected.identity()).is_some() {
+        return authenticate(selected, bodies);
+    }
+    if class.kind != crate::libraries::TypeKind::Class
+        || class.is_value
+        || class.is_inner
+        || class.is_expect
+    {
+        return Err(mismatch(
+            "an emitted initializer has an incompatible declaring class",
+        ));
+    }
+    class_headers::class_parameter_identities(&class.parameters)?;
+    Ok(declaration)
+}
+
+fn authenticate_declaration(
+    selected: KlibBodyCallable<'_>,
+) -> Result<ConstructorDeclaration, KlibBodyDeclineReason> {
+    if selected.kind() != ExternalCallableKind::Constructor
+        || selected.name() != "<init>"
+        || selected.ret() != Ty::Unit
+        || selected.generic_signature().is_some()
+        || !selected.type_parameters().is_empty()
+        || !selected.reified_type_parameter_ordinals().is_empty()
+    {
+        return Err(mismatch(
+            "a constructor has an incompatible selected invocation contract",
+        ));
+    }
+    let class = class_headers::authenticate_contract(selected)?;
+    if selected.context_count() != 0
+        || selected.accessor().is_some()
+        || selected.singleton_dispatch().is_some()
+        || selected.singleton_classifier().is_some()
+        || selected.companion_receiver().is_some()
+        || selected.declaration_owner()
+            != Some(crate::types::SemanticCallableOwner::Classifier(
+                class.classifier,
+            ))
+        || selected.parameter_identities().len() != selected.params().len()
+    {
+        return Err(mismatch(
+            "a constructor has an incompatible declared parameter frame",
+        ));
+    }
+    let defaults = selected
+        .parameter_defaults()
+        .ok_or_else(|| mismatch("a constructor has no known declared default parameters"))?;
+    if defaults.len() != selected.params().len() {
+        return Err(mismatch(
+            "constructor default flags are not parallel to its parameters",
+        ));
+    }
+    let mut parameters = HashSet::default();
+    for parameter in selected.parameter_identities() {
+        let ResolvedParameterIdentity::Source(name) = parameter else {
+            return Err(mismatch(
+                "a constructor has incompatible declared parameter identities",
+            ));
+        };
+        if !parameters.insert(name.as_ref()) {
+            return Err(mismatch(
+                "a constructor has incompatible declared parameter identities",
+            ));
+        }
+    }
+    if selected
+        .vararg_index()
+        .is_some_and(|ordinal| ordinal >= selected.params().len())
+    {
+        return Err(mismatch(
+            "a constructor has an invalid declared vararg ordinal",
+        ));
+    }
     Ok(ConstructorDeclaration {
-        classifier: header.contract.classifier,
+        classifier: class.classifier,
         params: selected.params().to_vec(),
-        class_parameters: header.contract.parameters.clone(),
+        class_parameters: class.parameters.clone(),
         defaults,
         semantic_role: selected.semantic_role(),
+        class_emits_members: class.emits_members(),
+        enclosing_instance: false,
     })
 }
 
@@ -266,7 +349,15 @@ impl ConstructorDeclaration {
             class_parameters,
             defaults,
             semantic_role: None,
+            class_emits_members: true,
+            enclosing_instance: false,
         }
+    }
+
+    /// The same declaration of an inner class, whose first parameter is its outer instance.
+    pub(super) fn with_enclosing_instance(mut self) -> Self {
+        self.enclosing_instance = true;
+        self
     }
 
     pub(super) fn default_allowed(&self, ordinal: usize) -> bool {
@@ -351,6 +442,8 @@ mod tests {
             },
             defaults: ParamFlags::repeat(false, count),
             semantic_role: None,
+            class_emits_members: true,
+            enclosing_instance: false,
         }
     }
 

@@ -53,11 +53,17 @@ pub struct KlibIrDeclarationTree {
 #[derive(Debug, Default)]
 pub struct KlibIrModuleTrees {
     trees: Vec<KlibIrDeclarationTree>,
+    /// The serialized file each tree of [`Self::trees`] is a top-level declaration of, by tree
+    /// index: the file a file-local signature of that file names.
+    files: Vec<u32>,
+    /// The package each serialized file declares, by file index.
+    packages: Vec<Vec<String>>,
     functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
     /// File-local functions, meaningful only inside this library.
     local_functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
     /// File-local classes, meaningful only inside this library.
     local_classes: HashMap<KlibIrSignature, (usize, KlibIrClassId)>,
+    classes: super::class_index::KlibIrClassIndex,
 }
 
 impl KlibIrModuleTrees {
@@ -91,15 +97,44 @@ impl KlibIrModuleTrees {
     }
 
     /// The top-level function private to its file that a body of this module calls under the
-    /// file-local `signature`: the declaration of its own tree, not a member or a local function.
+    /// file-local `signature`: the declaration of its own tree, or an accessor of the top-level
+    /// property its tree declares, not a member or a local function.
     pub fn file_private_function(
         &self,
         signature: &KlibIrSignature,
     ) -> Option<(&KlibIrArena, &KlibIrFunction)> {
         let (tree, function) = *self.local_functions.get(signature)?;
         let tree = &self.trees[tree];
-        (tree.declaration == KlibIrMember::Function(function))
+        tree.declaration
+            .declares_top_level(function)
             .then(|| (&tree.arena, tree.arena.function(function)))
+    }
+
+    /// The serialized file whose top-level declaration, or top-level property accessor, is the
+    /// function this module serializes under `signature`. `None` for a member, a local function
+    /// or a signature the module does not serialize.
+    pub(crate) fn top_level_file(&self, signature: &KlibIrSignature) -> Option<u32> {
+        let functions = match signature {
+            KlibIrSignature::FileLocal { .. } => &self.local_functions,
+            KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_) => &self.functions,
+        };
+        let (tree, function) = *functions.get(signature)?;
+        self.trees[tree]
+            .declaration
+            .declares_top_level(function)
+            .then(|| self.files[tree])
+    }
+
+    /// The package segments of the serialized file `file` (`IrFile.fq_name`).
+    pub(crate) fn file_package(&self, file: u32) -> Option<&[String]> {
+        self.packages.get(file as usize).map(Vec::as_slice)
+    }
+
+    /// Every tree with the serialized file it is a top-level declaration of, in serialized order.
+    pub(crate) fn trees_with_files(
+        &self,
+    ) -> impl Iterator<Item = (u32, &KlibIrDeclarationTree)> + '_ {
+        self.files.iter().copied().zip(&self.trees)
     }
 
     /// The file-local class this library serializes under `signature`.
@@ -110,6 +145,90 @@ impl KlibIrModuleTrees {
         let (tree, class) = *self.local_classes.get(signature)?;
         let arena = &self.trees[tree].arena;
         Some((arena, arena.class(class)))
+    }
+
+    /// The package of the top-level class private to its file that this library serializes
+    /// under the file-local `signature`, together with that class. A class local to a body or
+    /// nested in another class is not one.
+    pub(crate) fn file_private_class(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> Option<(&[String], &super::tree::KlibIrClass)> {
+        let KlibIrSignature::FileLocal { file, .. } = signature else {
+            return None;
+        };
+        let (tree, class) = *self.local_classes.get(signature)?;
+        let tree = &self.trees[tree];
+        if tree.declaration != KlibIrMember::Class(class) {
+            return None;
+        }
+        let package = self.file_package(*file)?;
+        Some((package, tree.arena.class(class)))
+    }
+
+    /// Every file-local class this library serializes, with the arena that owns it.
+    pub(crate) fn local_classes(
+        &self,
+    ) -> impl Iterator<Item = (&KlibIrArena, &super::tree::KlibIrClass)> {
+        self.local_classes.values().map(|&(tree, class)| {
+            let arena = &self.trees[tree].arena;
+            (arena, arena.class(class))
+        })
+    }
+
+    /// Every class serialized under `signature`, including enum-entry classes and the classes
+    /// nested in them.
+    pub(crate) fn classes_with_signature(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> impl Iterator<Item = (&KlibIrArena, &KlibIrClass)> {
+        self.classes
+            .with_signature(signature)
+            .iter()
+            .map(|at| self.class_at(*at))
+    }
+
+    /// Every class that directly declares a function, constructor or property accessor under
+    /// `signature`, with that function.
+    pub(crate) fn classes_declaring_function(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> impl Iterator<Item = (&KlibIrArena, &KlibIrClass, &KlibIrFunction)> {
+        self.classes
+            .declaring_function(signature)
+            .iter()
+            .map(|&(at, function)| {
+                let (arena, class) = self.class_at(at);
+                (arena, class, arena.function(function))
+            })
+    }
+
+    /// Every class that directly declares the enum entry `signature`.
+    pub(crate) fn classes_declaring_enum_entry(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> impl Iterator<Item = (&KlibIrArena, &KlibIrClass)> {
+        self.classes
+            .declaring_enum_entry(signature)
+            .iter()
+            .map(|at| self.class_at(*at))
+    }
+
+    /// Every public class, outside enum entries, whose paths are `member`'s owner path
+    /// ([`KlibPublicIdSignature::owner_path`]).
+    pub(crate) fn classes_owning_member(
+        &self,
+        member: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> impl Iterator<Item = (&KlibIrArena, &KlibIrClass)> {
+        self.classes
+            .owning_member(member)
+            .iter()
+            .map(|at| self.class_at(*at))
+    }
+
+    fn class_at(&self, at: super::class_index::ClassAt) -> (&KlibIrArena, &KlibIrClass) {
+        let arena = &self.trees[at.tree].arena;
+        (arena, arena.class(at.class))
     }
 
     pub fn function_count(&self) -> usize {
@@ -138,10 +257,12 @@ impl KlibIrModuleTrees {
     #[cfg(test)]
     pub(crate) fn from_trees(trees: Vec<KlibIrDeclarationTree>) -> Result<Self, KlibIrDecodeError> {
         let mut module = Self {
+            files: vec![0; trees.len()],
             trees,
             ..Self::default()
         };
         module.index()?;
+        module.classes = super::class_index::KlibIrClassIndex::of(&module.trees);
         Ok(module)
     }
 
@@ -195,6 +316,62 @@ impl KlibIrModuleTrees {
                 }
             }
         }
+        self.index_private_classes()
+    }
+
+    /// A class nested in a private class, or private itself, is linkable only by the bodies of
+    /// the library that declares it, as a file-local class is: no consumer names it, and no
+    /// provider publishes it. It is indexed with the file-local declarations, together with its
+    /// constructors and members, under the public signatures it serializes.
+    fn index_private_classes(&mut self) -> Result<(), KlibIrDecodeError> {
+        let mut classes = Vec::new();
+        let mut functions = Vec::new();
+        for (tree_index, tree) in self.trees.iter().enumerate() {
+            let mut pending = vec![(&tree.declaration, false)];
+            while let Some((member, enclosing_private)) = pending.pop() {
+                let KlibIrMember::Class(id) = member else {
+                    continue;
+                };
+                let class = tree.arena.class(*id);
+                let private = enclosing_private
+                    || crate::metadata::semantic::declaration_visibility(class.base.flags)
+                        == crate::types::Visibility::Private;
+                pending.extend(class.members.iter().map(|member| (member, private)));
+                if !private
+                    || class.base.symbol.kind != KlibIrSymbolKind::Class
+                    || !matches!(class.base.symbol.signature, KlibIrSignature::Public(_))
+                {
+                    continue;
+                }
+                classes.push((class.base.symbol.signature.clone(), (tree_index, *id)));
+                for member in &class.members {
+                    let ids = match member {
+                        KlibIrMember::Function(id) => vec![*id],
+                        KlibIrMember::Property(property) => {
+                            property.getter.into_iter().chain(property.setter).collect()
+                        }
+                        _ => Vec::new(),
+                    };
+                    for id in ids {
+                        let signature = &tree.arena.function(id).base.symbol.signature;
+                        // A file-local member is already indexed by its own signature.
+                        if !matches!(signature, KlibIrSignature::FileLocal { .. }) {
+                            functions.push((signature.clone(), (tree_index, id)));
+                        }
+                    }
+                }
+            }
+        }
+        for (signature, entry) in classes {
+            if let Some((previous, _)) = self.local_classes.insert(signature.clone(), entry) {
+                return Err(duplicate(previous, entry.0, &signature));
+            }
+        }
+        for (signature, entry) in functions {
+            if let Some((previous, _)) = self.local_functions.insert(signature.clone(), entry) {
+                return Err(duplicate(previous, entry.0, &signature));
+            }
+        }
         Ok(())
     }
 
@@ -223,6 +400,14 @@ impl KlibIrModuleTrees {
         }
         Ok(())
     }
+}
+
+fn duplicate(previous: usize, tree: usize, signature: &KlibIrSignature) -> KlibIrDecodeError {
+    KlibIrDecodeError::malformed(
+        DECLARATIONS,
+        0,
+        format!("declaration trees {previous} and {tree} both define {signature:?}"),
+    )
 }
 
 /// Decode every top-level declaration tree a KLIB serializes.
@@ -302,7 +487,8 @@ fn read_declaration_trees_from(
                 .map(|tables| entries(&tables[index], FILE_ENTRIES).map(|entries| entries.len()))
                 .transpose()?,
         };
-        let declaration_ids = ir_file_declaration_ids(&mut file, &files[index])?;
+        let (declaration_ids, package) = ir_file_declaration_ids(&mut file, &files[index])?;
+        module.packages.push(package);
         let declarations = declaration_index(&declarations[index])?;
         for id in declaration_ids {
             let bytes = declarations.get(&id).ok_or_else(|| {
@@ -338,25 +524,36 @@ fn read_declaration_trees_from(
                 arena: decoder.arena,
                 declaration,
             });
+            module
+                .files
+                .push(u32::try_from(index).expect("file count fits u32"));
         }
     }
     module.index()?;
     for (tree, function, identity) in prepared_roots {
         module.remap_prepared_root(tree, function, identity)?;
     }
+    module.classes = super::class_index::KlibIrClassIndex::of(&module.trees);
     Ok(module)
 }
 
-/// Validate an `IrFile`'s own provenance before decoding declarations from it. Kotlin 2.4.21
-/// requires one of fields 2 and 7 when consuming a produced KLIB; older inputs may omit both, but
-/// an id that is present must resolve in this file's `fileEntries.knf` table.
+/// Validate an `IrFile`'s own provenance before decoding declarations from it, and read its
+/// declaration ids and package. Kotlin 2.4.21 requires one of fields 2 and 7 when consuming a
+/// produced KLIB; older inputs may omit both, but an id that is present must resolve in this
+/// file's `fileEntries.knf` table.
 fn ir_file_declaration_ids(
     file: &mut FileTables<'_>,
     bytes: &[u8],
-) -> Result<Vec<u64>, KlibIrDecodeError> {
+) -> Result<(Vec<u64>, Vec<String>), KlibIrDecodeError> {
     let ir_file = Msg::parse(bytes, 0, FILES)?;
-    TreeDecoder::new(file).file_reference(&ir_file, 2, 7)?;
-    ir_file.packed(1, "declaration ids")
+    let decoder = TreeDecoder::new(file);
+    decoder.file_reference(&ir_file, 2, 7)?;
+    let package = ir_file
+        .packed(3, "file package")?
+        .into_iter()
+        .map(|segment| decoder.string(segment, "file package"))
+        .collect::<Result<_, _>>()?;
+    Ok((ir_file.packed(1, "declaration ids")?, package))
 }
 
 /// The identity of the declaration `msg` serializes, read from its base without decoding the rest.
@@ -1967,7 +2164,20 @@ mod tests {
         push_varint(9, &mut declaration_ids);
         let mut valid = bytes_field(1, &declaration_ids);
         valid.extend(varint_field(7, 0));
-        assert_eq!(ir_file_declaration_ids(&mut file, &valid).unwrap(), [9]);
+        assert_eq!(
+            ir_file_declaration_ids(&mut file, &valid).unwrap(),
+            (vec![9], Vec::new())
+        );
+        // `IrFile.fq_name` names the file's package by string-table indices.
+        let mut package = Vec::new();
+        push_varint(0, &mut package);
+        push_varint(3, &mut package);
+        let mut packaged = valid.clone();
+        packaged.extend(bytes_field(3, &package));
+        assert_eq!(
+            ir_file_declaration_ids(&mut file, &packaged).unwrap(),
+            (vec![9], vec!["kotlin".to_string(), "value".to_string()])
+        );
 
         let mut absent = bytes_field(1, &declaration_ids);
         absent.extend(varint_field(7, 1));
@@ -1977,6 +2187,36 @@ mod tests {
                 .to_string(),
             "invalid KLIB IR files.knf at byte 0: file entry 1 is absent from fileEntries.knf"
         );
+    }
+
+    #[test]
+    fn ir_file_field_3_spells_the_package_of_its_declarations() {
+        let strings = declaration_strings();
+        let signatures: Vec<&[u8]> = Vec::new();
+        let mut file = FileTables {
+            strings: &strings,
+            signatures: SignatureTable::new(0, &signatures, &strings),
+            types: Vec::new(),
+            bodies: Vec::new(),
+            file_entries: Some(1),
+        };
+        let mut declaration_ids = Vec::new();
+        push_varint(9, &mut declaration_ids);
+        let mut package = Vec::new();
+        push_varint(0, &mut package);
+        push_varint(6, &mut package);
+        let mut bytes = bytes_field(1, &declaration_ids);
+        bytes.extend(bytes_field(3, &package));
+        bytes.extend(varint_field(7, 0));
+        let (ids, package) = ir_file_declaration_ids(&mut file, &bytes).unwrap();
+        assert_eq!(package, ["kotlin".to_owned(), "Marker".to_owned()]);
+        assert_eq!(ids, [9]);
+
+        let mut absent = Vec::new();
+        push_varint(7, &mut absent);
+        let mut bytes = bytes_field(3, &absent);
+        bytes.extend(varint_field(7, 0));
+        assert!(ir_file_declaration_ids(&mut file, &bytes).is_err());
     }
 
     #[test]

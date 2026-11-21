@@ -245,7 +245,9 @@ impl SignatureConstraintExtractor {
             if self.graph.constraint(stub.id).is_some() {
                 continue;
             }
-            if stub.flags.has(super::DeclarationFlags::LOCAL_CLASS) {
+            if stub.flags.has(super::DeclarationFlags::LOCAL_CLASS)
+                && !super::signature_source::source_enum_entry_function(file, stub.range)
+            {
                 continue;
             }
             let Some(expression) = source_signature_expression(file, stub) else {
@@ -2695,6 +2697,15 @@ impl SignatureConstraintExtractor {
             });
             let this = self.graph.add_expr(SigExpr::Value(selection));
             bindings.insert("this".into(), this);
+            // `this@label` names this literal's own receiver, however many receiver literals
+            // nest inside it, so it binds to this literal rather than to the innermost rung.
+            let labeled_receiver = return_label.as_deref().map(|label| {
+                let receiver = self
+                    .graph
+                    .add_expr(SigExpr::ContextualReceiver(declaration));
+                bindings.insert(format!("this@{label}").into_boxed_str(), receiver);
+                receiver
+            });
             self.lexical_values.push(bindings);
             self.lambda_returns.push(CompactLambdaReturnScope {
                 label: return_label.clone(),
@@ -2711,6 +2722,7 @@ impl SignatureConstraintExtractor {
             return Ok(self.graph.add_expr(SigExpr::ContextualFunction {
                 parameters,
                 result,
+                labeled_receiver,
                 scope,
                 implicit_it: params.is_empty(),
                 suspend: file.suspend_lambdas.contains(&expression.0),
@@ -2732,6 +2744,9 @@ impl SignatureConstraintExtractor {
         if let Some(receiver) = receiver {
             parameter_types.insert(context_count as usize, receiver);
             bindings.insert("this".into(), receiver);
+            if let Some(label) = return_label.as_deref() {
+                bindings.insert(format!("this@{label}").into_boxed_str(), receiver);
+            }
         }
         self.lexical_values.push(bindings);
         self.lambda_returns.push(CompactLambdaReturnScope {

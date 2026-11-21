@@ -1,7 +1,6 @@
 //! Final source-argument mapping for already selected calls.
 
 use super::*;
-use crate::types::TyKind;
 
 #[cfg(test)]
 #[path = "vararg_default_tests.rs"]
@@ -150,7 +149,11 @@ impl BodyFirChecker<'_> {
             )
         })?;
         let mut substitutions = HashMap::default();
+        let mut approximations = HashMap::default();
         for (ordinal, value) in self.info.materialized_call_type_arguments(expression) {
+            let approximation = self
+                .info
+                .published_call_type_argument_approximation(expression, ordinal);
             let ordinal = u32::try_from(ordinal).map_err(|_| {
                 self.failure(
                     self.file.expr_span(expression),
@@ -184,6 +187,9 @@ impl BodyFirChecker<'_> {
                     )
                 })?;
             substitutions.insert(name.to_owned(), value);
+            if let Some(approximation) = approximation {
+                approximations.insert(name.to_owned(), approximation);
+            }
         }
         if signature.parameters.len() != fallback.len() {
             return Err(self.failure(
@@ -196,11 +202,18 @@ impl BodyFirChecker<'_> {
         // Callable type arguments are recorded separately, so apply those on top. Starting again
         // from the declaration signature here discarded the receiver substitution and forced
         // lowering to reconstruct it from syntax/receiver types.
+        // A slot inferred to an intersection publishes its approximation wherever the declaration
+        // names that slot's type parameter.
         Ok(fallback
             .iter()
             .copied()
-            .map(|parameter| {
-                crate::symbol_resolver::ty_subst_keep_unbound(parameter, &substitutions)
+            .zip(signature.parameters.iter())
+            .map(|(parameter, declared)| {
+                let parameter =
+                    crate::symbol_resolver::ty_subst_keep_unbound(parameter, &substitutions);
+                crate::types::ty_replace_formals_along(declared.get(), parameter, &|name| {
+                    approximations.get(name).copied()
+                })
             })
             .collect())
     }
@@ -1331,32 +1344,19 @@ impl BodyFirChecker<'_> {
         target: ResolvedTy,
         cause: OriginId,
     ) -> Option<FirConversion> {
-        let actual_ty = actual.get().canonical_semantic();
-        let target_ty = target.get().canonical_semantic();
-        if actual_ty == target_ty || matches!(actual_ty, Ty::Nothing | Ty::Null) {
-            return None;
-        }
-        let kind = if target_ty == Ty::Unit {
-            FirConversionKind::CoerceToUnit
-        } else if target_ty.accepts_numeric(actual_ty) {
-            FirConversionKind::NumericWidening { to: target }
-        } else if matches!(
-            actual_ty.non_null().kind(),
-            TyKind::Intersection(parts) if parts
-                .iter()
-                .any(|part| part.non_null() == target_ty.non_null())
-        ) {
+        use crate::types::ValueConversion;
+        let kind = match crate::types::value_conversion(actual.get(), target.get())? {
+            ValueConversion::CoerceToUnit => FirConversionKind::CoerceToUnit,
+            ValueConversion::NumericWidening => FirConversionKind::NumericWidening { to: target },
             // Resolution has selected the declaration on one exact constituent of a semantic
             // intersection. Preserve the source value and publish the selected dispatch view as
             // an explicit checked conversion; lowering must not rediscover the member owner.
-            FirConversionKind::SmartCast { to: target }
-        } else if target_ty.is_nullable() || (!actual_ty.is_reference() && target_ty.is_reference())
-        {
-            FirConversionKind::NullabilityWidening { to: target }
-        } else if actual_ty.is_reference() && !target_ty.is_reference() {
-            FirConversionKind::SmartCast { to: target }
-        } else {
-            return None;
+            ValueConversion::IntersectionView | ValueConversion::ReferenceNarrowing => {
+                FirConversionKind::SmartCast { to: target }
+            }
+            ValueConversion::NullabilityWidening => {
+                FirConversionKind::NullabilityWidening { to: target }
+            }
         };
         Some(FirConversion {
             origin: cause,
@@ -1693,28 +1693,47 @@ impl BodyFirChecker<'_> {
                 .map(resolved)
                 .collect::<Result<Box<[_]>, _>>()
         };
-        let method_target = match sam.declaration {
-            Some(crate::symbol_resolver::SamMethodDeclaration::Module(declaration)) => {
-                crate::fir::FirSamMethod::Declared(
-                    crate::fir::ResolvedFunctionOverrideTarget::Module(
-                        self.index
-                            .callable_for_declaration(declaration)
-                            .ok_or_else(|| {
-                                self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
-                            })?
-                            .id,
-                    ),
-                )
-            }
-            Some(crate::symbol_resolver::SamMethodDeclaration::External(callable)) => {
-                crate::fir::FirSamMethod::Declared(
-                    crate::fir::ResolvedFunctionOverrideTarget::External(callable),
-                )
-            }
-            Some(crate::symbol_resolver::SamMethodDeclaration::FunctionTypeInvoke) => {
-                crate::fir::FirSamMethod::FunctionTypeInvoke
-            }
-            None => return Err(self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)),
+        let method = |declaration| -> Result<_, BodyCheckFailure> {
+            Ok(match declaration {
+                Some(crate::symbol_resolver::SamMethodDeclaration::Module(declaration)) => {
+                    Some(crate::fir::FirSamMethod::Declared(
+                        crate::fir::ResolvedFunctionOverrideTarget::Module(
+                            self.index
+                                .callable_for_declaration(declaration)
+                                .ok_or_else(|| {
+                                    self.failure(
+                                        span,
+                                        BodyCheckFailureKind::MissingStableCallTarget,
+                                    )
+                                })?
+                                .id,
+                        ),
+                    ))
+                }
+                Some(crate::symbol_resolver::SamMethodDeclaration::External(callable)) => {
+                    Some(crate::fir::FirSamMethod::Declared(
+                        crate::fir::ResolvedFunctionOverrideTarget::External(callable),
+                    ))
+                }
+                Some(crate::symbol_resolver::SamMethodDeclaration::FunctionTypeInvoke) => {
+                    Some(crate::fir::FirSamMethod::FunctionTypeInvoke)
+                }
+                None => None,
+            })
+        };
+        let method_target = method(sam.declaration)?
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
+        let frames = |declarations: &[crate::symbol_resolver::SamMethodFrame]| {
+            declarations
+                .iter()
+                .map(|declaration| {
+                    Ok(crate::fir::FirSamMethodFrame {
+                        method: method(declaration.declaration)?,
+                        parameters: resolved_all(&declaration.parameters)?,
+                        result: resolved(declaration.result)?,
+                    })
+                })
+                .collect::<Result<Box<[_]>, BodyCheckFailure>>()
         };
         Ok(FirSamConversion {
             classifier: sam.internal,
@@ -1730,7 +1749,10 @@ impl BodyFirChecker<'_> {
             has_receiver: sam.has_receiver,
             suspend: sam.suspend,
             source_suspend,
+            requires_object_dispatch: sam.requires_object_dispatch,
             overridden_results: resolved_all(&sam.overridden_results)?,
+            dispatch_methods: frames(&sam.dispatch_methods)?,
+            default_methods: frames(&sam.default_methods)?,
             nullable,
             kotlin_interface: sam.kotlin_interface,
             parameter_identities: sam.parameter_identities.clone(),

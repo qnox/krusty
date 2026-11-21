@@ -37,6 +37,13 @@ pub(super) struct MemberRef(u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ClassRef(u32);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InstanceTest {
+    Classifier(TypeName),
+    FunctionInvoke(usize),
+    SuspendFunction(usize),
+}
+
 /// The program's interface members, their implementations and the interfaces' instances.
 #[derive(Default)]
 pub(super) struct InterfaceDispatch {
@@ -44,15 +51,20 @@ pub(super) struct InterfaceDispatch {
     /// Each member by the module that numbered it and its number there.
     numbered: HashMap<(String, u32), MemberRef>,
     /// Each member a source module published an identity for, by that identity.
-    identities: HashMap<Vec<u8>, MemberRef>,
+    identities: HashMap<Vec<u8>, (MemberRef, TypeName)>,
     /// Each member of a library classifier something names, by its KLIB identity.
-    library: HashMap<Vec<u8>, MemberRef>,
+    library: HashMap<Vec<u8>, (MemberRef, TypeName)>,
+    /// Runtime callable protocols, interned by their checked physical arity.
+    function_invokes: HashMap<usize, MemberRef>,
     classes: Vec<ClassRecord>,
     /// The `is` function of each interface something tests, in the order they were asked for.
-    tests: Vec<(TypeName, u32)>,
+    tests: Vec<(InstanceTest, u32)>,
     /// Each runtime representation with no interface table, by its struct, and the interfaces
     /// its values are instances of.
     representations: Vec<(u32, Vec<TypeName>)>,
+    /// The function that throws the Kotlin `NullPointerException`, which every stub calls on a
+    /// `null` receiver once a call site has recorded it; until then a `null` receiver traps.
+    null_receiver: Option<u32>,
 }
 
 struct Member {
@@ -68,8 +80,10 @@ struct Member {
     /// Why a class implementing this library member has no implementation this generator can
     /// write: a call through the member declines with it.
     unimplementable: Option<String>,
-    /// The library classifier declaring this member, whose every instance must implement it.
-    library_owner: Option<TypeName>,
+    /// Declaring nominal classifiers of its exact identities, including published aliases.
+    /// Every instance of each classifier must implement this member.
+    declaring_owners: Vec<TypeName>,
+    protocol_arity: Option<usize>,
 }
 
 struct ClassRecord {
@@ -78,6 +92,8 @@ struct ClassRecord {
     /// The global its dispatch table reads its interface table from.
     itable: u32,
     interfaces: Vec<TypeName>,
+    function_arities: Vec<usize>,
+    suspend_arities: Vec<usize>,
 }
 
 /// How a stub reaches the implementations of its member.
@@ -134,9 +150,44 @@ impl InterfaceDispatch {
             implementations: Vec::new(),
             representations: Vec::new(),
             unimplementable: None,
-            library_owner: None,
+            declaring_owners: Vec::new(),
+            protocol_arity: None,
         });
         member
+    }
+
+    /// The common physical callable protocol. Its arguments and result are erased references;
+    /// declaration identities remain separate and are never synthesized from this arity.
+    pub(super) fn function_invoke(&mut self, module: &mut Module, arity: usize) -> MemberRef {
+        if let Some(&member) = self.function_invokes.get(&arity) {
+            return member;
+        }
+        let member = self.unnumbered(module, (vec![REFERENCE; arity + 1], vec![REFERENCE]));
+        self.members[member.0 as usize].protocol_arity = Some(arity);
+        self.function_invokes.insert(arity, member);
+        member
+    }
+
+    /// Membership is authenticated independently of whether an invocation can be emitted.
+    pub(super) fn function_instance_of(&mut self, class: ClassRef, arity: usize, suspend: bool) {
+        let arities = &mut self.classes[class.0 as usize].function_arities;
+        if !arities.contains(&arity) {
+            arities.push(arity);
+        }
+        if suspend {
+            let arities = &mut self.classes[class.0 as usize].suspend_arities;
+            if !arities.contains(&arity) {
+                arities.push(arity);
+            }
+        }
+    }
+
+    pub(super) fn suspend_function_test(&mut self, module: &mut Module, arity: usize) -> u32 {
+        self.instance_test(module, InstanceTest::SuspendFunction(arity))
+    }
+
+    pub(super) fn function_test(&mut self, module: &mut Module, arity: usize) -> u32 {
+        self.instance_test(module, InstanceTest::FunctionInvoke(arity))
     }
 
     /// The member `owner` declares whose KLIB identity is `identity`
@@ -150,43 +201,77 @@ impl InterfaceDispatch {
         identity: &[u8],
         (params, results): (Vec<ValType>, Vec<ValType>),
     ) -> Result<MemberRef, String> {
-        // A member a source module published is that module's: its classes implement it by
-        // number, so a call through it must not name a second member for the same identity.
-        if let Some(&member) = self.identities.get(identity) {
-            return Ok(member);
-        }
-        if let Some(&member) = self.library.get(identity) {
+        // The same exact declaration must retain its owner and prototype when its numbered
+        // source publication and a dependency view meet. Aliased declarations may share a member,
+        // but every declaring interface contributes its instance-completeness obligation.
+        let known = self
+            .identities
+            .get(identity)
+            .or_else(|| self.library.get(identity))
+            .copied();
+        let member = if let Some((member, declared_owner)) = known {
+            if declared_owner != owner {
+                return Err("one interface identity has two declaring owners".into());
+            }
             let known = &self.members[member.0 as usize];
             if known.params != params || known.results != results {
-                return Err("a library member carried two ways".to_string());
+                return Err("a library member carried two ways".into());
             }
-            return Ok(member);
+            member
+        } else {
+            self.unnumbered(module, (params, results))
+        };
+        let owners = &mut self.members[member.0 as usize].declaring_owners;
+        if !owners.contains(&owner) {
+            owners.push(owner);
         }
-        let member = self.unnumbered(module, (params, results));
-        self.members[member.0 as usize].library_owner = Some(owner);
-        self.library.insert(identity.to_vec(), member);
+        self.library.insert(identity.to_vec(), (member, owner));
         Ok(member)
     }
 
-    /// Publish `identity` as `member`'s, for a dependent module to name it by.
-    pub(super) fn publish(&mut self, identity: Vec<u8>, member: MemberRef) -> Result<(), String> {
-        match self.identities.insert(identity, member) {
-            Some(previous) if previous != member => {
-                Err("two interface members published one identity".to_string())
-            }
-            _ => Ok(()),
+    /// Publish the checked declaring owner beside the exact exported identity. This does not
+    /// mark a call or manufacture an implementation; it authenticates a later dependency join.
+    pub(super) fn publish(
+        &mut self,
+        identity: Vec<u8>,
+        owner: TypeName,
+        member: MemberRef,
+    ) -> Result<(), String> {
+        if self
+            .identities
+            .get(&identity)
+            .or_else(|| self.library.get(&identity))
+            .is_some_and(|known| *known != (member, owner))
+        {
+            return Err("two interface declarations published one identity".into());
         }
+        let owners = &mut self.members[member.0 as usize].declaring_owners;
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+        self.identities.insert(identity, (member, owner));
+        Ok(())
     }
 
     /// The member a source module published `identity` for; `None` for a member of a library
     /// interface, which no stub calls.
     pub(super) fn identified(&self, identity: &[u8]) -> Option<MemberRef> {
-        self.identities.get(identity).copied()
+        self.identities.get(identity).map(|(member, _)| *member)
     }
 
     /// The function type `member` is carried as.
     pub(super) fn ty(&self, member: MemberRef) -> u32 {
         self.members[member.0 as usize].ty
+    }
+
+    /// Record the function a stub calls on a `null` receiver.
+    pub(super) fn throw_on_null_receiver(&mut self, thrower: u32) {
+        self.null_receiver.get_or_insert(thrower);
+    }
+
+    /// Whether a stub's `null` receiver already throws.
+    pub(super) fn throws_on_null_receiver(&self) -> bool {
+        self.null_receiver.is_some()
     }
 
     /// The stub a call through `member` goes to.
@@ -212,6 +297,8 @@ impl InterfaceDispatch {
             ancestors,
             itable,
             interfaces: Vec::new(),
+            function_arities: Vec::new(),
+            suspend_arities: Vec::new(),
         });
         (class, itable)
     }
@@ -285,21 +372,34 @@ impl InterfaceDispatch {
             if let Some(reason) = &member.unimplementable {
                 return Some(reason.clone());
             }
-            let Some(owner) = member.library_owner else {
-                continue;
-            };
-            let unimplemented = self.classes.iter().enumerate().any(|(class, record)| {
-                record.interfaces.contains(&owner)
-                    && !member
-                        .implementations
-                        .iter()
-                        .any(|(known, _)| known.0 as usize == class)
-            });
-            if unimplemented {
-                return Some(format!(
-                    "a call of a `{}` member on an instance that does not implement it",
-                    owner.render()
-                ));
+            if let Some(arity) = member.protocol_arity {
+                let unimplemented = self.classes.iter().enumerate().any(|(class, record)| {
+                    record.function_arities.contains(&arity)
+                        && !member
+                            .implementations
+                            .iter()
+                            .any(|(known, _)| known.0 as usize == class)
+                });
+                if unimplemented {
+                    return Some(format!(
+                        "a callable of arity {arity} with no emitted invocation"
+                    ));
+                }
+            }
+            for owner in &member.declaring_owners {
+                let unimplemented = self.classes.iter().enumerate().any(|(class, record)| {
+                    record.interfaces.contains(owner)
+                        && !member
+                            .implementations
+                            .iter()
+                            .any(|(known, _)| known.0 as usize == class)
+                });
+                if unimplemented {
+                    return Some(format!(
+                        "a call of a `{}` member on an instance that does not implement it",
+                        owner.render()
+                    ));
+                }
             }
         }
         None
@@ -335,6 +435,10 @@ impl InterfaceDispatch {
 
     /// `(ref null eq) -> i32`: whether a value is an instance of `interface`.
     pub(super) fn test(&mut self, module: &mut Module, interface: TypeName) -> u32 {
+        self.instance_test(module, InstanceTest::Classifier(interface))
+    }
+
+    fn instance_test(&mut self, module: &mut Module, interface: InstanceTest) -> u32 {
         if let Some((_, function)) = self.tests.iter().find(|(known, _)| *known == interface) {
             return *function;
         }
@@ -373,7 +477,7 @@ impl InterfaceDispatch {
             stubs.push((stub, member, shape));
         }
         for (stub, member, shape) in stubs {
-            let code = stub_body(member, &shape, objects);
+            let code = stub_body(member, &shape, objects, self.null_receiver);
             module.define(
                 stub,
                 Function {
@@ -458,16 +562,21 @@ impl InterfaceDispatch {
 
     /// `ref.test` of every representation and struct implementing `interface`, but a subtype of
     /// a struct already tested.
-    fn test_body(&self, interface: TypeName) -> Code {
+    fn test_body(&self, interface: InstanceTest) -> Code {
         let implementors = self
             .classes
             .iter()
-            .filter(|class| class.interfaces.contains(&interface))
+            .filter(|class| match interface {
+                InstanceTest::Classifier(classifier) => class.interfaces.contains(&classifier),
+                InstanceTest::FunctionInvoke(arity) => class.function_arities.contains(&arity),
+                InstanceTest::SuspendFunction(arity) => class.suspend_arities.contains(&arity),
+            })
             .collect::<Vec<_>>();
         let mut code = Code::default();
         code.i32_const(0);
         for (structure, interfaces) in &self.representations {
-            if interfaces.contains(&interface) {
+            if matches!(interface, InstanceTest::Classifier(classifier) if interfaces.contains(&classifier))
+            {
                 code.local_get(0)
                     .ref_test(false, HeapType::Concrete(*structure))
                     .op(OR32);
@@ -498,8 +607,24 @@ fn forward(code: &mut Code, member: &Member) {
     }
 }
 
-fn stub_body(member: &Member, shape: &Shape, objects: &ObjectRoot) -> Code {
+fn stub_body(
+    member: &Member,
+    shape: &Shape,
+    objects: &ObjectRoot,
+    null_receiver: Option<u32>,
+) -> Code {
     let mut code = Code::default();
+    // A call on `null` throws the Kotlin NPE, as an invocation on the JVM does, once every
+    // argument has been evaluated.
+    if let Some(thrower) = null_receiver {
+        code.local_get(0).ref_is_null().if_(BlockType::Empty);
+        code.call(thrower).end();
+    }
+    if member.protocol_arity.is_some() {
+        // Invocation evaluates every argument before checking the receiver, including when one
+        // implementation lets the dispatch use a direct call and never reads its receiver.
+        code.local_get(0).ref_as_non_null().drop_();
+    }
     // A representation with no interface table answers before the table is read.
     for &(structure, function) in &member.representations {
         code.local_get(0)
@@ -548,3 +673,6 @@ fn stub_body(member: &Member, shape: &Shape, objects: &ObjectRoot) -> Code {
     }
     code
 }
+
+#[cfg(test)]
+mod tests;

@@ -513,16 +513,20 @@ impl ProductionSignatureSemantics<'_> {
             // graph remains typed until the checker reports the class-literal error.
         }
         if formals.len() != reference.targs.len() {
-            self.record_source_diagnostic_at(
+            // Unconditional: a superclass that fails here still publishes its classifier header.
+            let (span, identity, message) = super::super::type_argument_arity::alias_arity_report(
+                (&self.headers.syntax, scope.source),
+                reference,
+                identity,
+                &formals,
+                expansion,
+            );
+            self.record_unconditional_diagnostic_at(
                 scope.owner,
                 scope.source,
-                reference.span,
-                format!(
-                    "wrong number of type arguments for type alias '{}': expected {}, found {}.",
-                    reference.name,
-                    formals.len(),
-                    reference.targs.len()
-                ),
+                span,
+                identity,
+                message,
             );
             return Some(Ty::Error);
         }
@@ -944,10 +948,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         qualifier: &str,
         origin: crate::fir::OriginId,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         // A CLASSIFIER prefix is a namespace, not a value: `A.E.OK` reads the entry `OK` of the
         // nested enum `A.E`, and only the last classifier in the path denotes a value at all. Take
@@ -983,6 +984,9 @@ impl ProductionSignatureSemantics<'_> {
                         self, scope, segment, origin, receiver, None, demand,
                     ) {
                         Ok(next) => receiver = next,
+                        Err(failure) if failure.in_progress_declaration().is_some() => {
+                            return Err(failure)
+                        }
                         Err(_) => resolved = false,
                     }
                 }
@@ -993,6 +997,9 @@ impl ProductionSignatureSemantics<'_> {
                         self, scope, segment, origin, receiver, None, demand,
                     ) {
                         Ok(next) => receiver = next,
+                        Err(failure) if failure.in_progress_declaration().is_some() => {
+                            return Err(failure)
+                        }
                         Err(_) => {
                             resolved = false;
                             break;
@@ -1357,7 +1364,7 @@ impl ProductionSignatureSemantics<'_> {
                 super::super::member_extension_selection::MemberExtensionLambdaShape::Selected(
                     selected,
                 ) => {
-                    shape = Some(selected);
+                    shape = Some(*selected);
                     break;
                 }
                 super::super::member_extension_selection::MemberExtensionLambdaShape::Ambiguous => {
@@ -1419,10 +1426,7 @@ impl ProductionSignatureSemantics<'_> {
         trailing_lambda: bool,
         refresh_typed_postponed: bool,
         expected: Option<Ty>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
         let call = super::semantics::ReceiverLevelCall {
             scope,
@@ -1453,7 +1457,7 @@ impl ProductionSignatureSemantics<'_> {
             // operation used by final call selection so an explicit or lazily inferred member
             // function type can contextualize its arguments without duplicating member lookup.
             if let Some(callee) =
-                self.selected_member_property_type(scope, receiver, spelling, None, demand)?
+                self.invoke_callee_property_type(scope, receiver, spelling, demand)?
             {
                 if let Ok(expectations) = self.invoke_argument_expectations_for_refresh(
                     scope,

@@ -95,6 +95,13 @@ struct Started {
 }
 
 impl Started {
+    /// The module's bytes, once every slot the runtime declared has a body.
+    fn encode(&mut self) -> Vec<u8> {
+        self.runtime
+            .define_unreachable_list_value_members(&mut self.module);
+        self.module.encode()
+    }
+
     fn new(target: WasmTarget) -> Self {
         let mut module = Module::default();
         // The object model's types come first, so their indices are the ones `lower` names.
@@ -128,24 +135,61 @@ impl Backend for WasmBackend {
         true
     }
 
-    fn lowers_coroutines_on_common_ir(&self) -> bool {
-        true
+    fn capability_decline(&self, construct: &str) -> String {
+        format!("{DECLINE_PREFIX}{construct} yet")
+    }
+
+    fn common_ir_preparation(&self) -> Option<krusty::backend::CommonIrPreparation> {
+        Some(krusty::backend::CommonIrPreparation {
+            counted_loops: COUNTED_LOOPS,
+            enums: krusty::backend::enums::Contract::KotlinWasm,
+        })
     }
 
     fn numbers_slots(&self) -> bool {
         true
     }
 
-    /// The runtime lays out text, its builders and its exception classes itself: a library
-    /// body of one of their members reads a layout this target does not have, and a library
-    /// class extending one of the exceptions delegates to the runtime's constructor.
+    /// The runtime lays out text, its builders, its exception classes and `Unit`'s one instance
+    /// itself: a library body of one of their members reads a layout this target does not have,
+    /// a library class extending one of the exceptions delegates to the runtime's constructor,
+    /// and a library body's `Unit` value is the runtime's, as a source reference of it is.
     fn represents_dependency_classifier(
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
+        // `Unit`'s value is the runtime's own, as a source reference of it is. Every enum
+        // constant is laid out with the runtime's `kotlin.Enum` base, so its members are too.
         classifier == krusty::types::wk::string()
+            || classifier == krusty::types::wk::kotlin_enum()
+            || classifier == krusty::types::wk::unit()
             || lower::is_string_builder(classifier)
+            || lower::is_array_list(classifier)
             || lower::runtime_lays_out(classifier)
+    }
+
+    /// The runtime's `StringBuilder` answers the `Appendable` and `CharSequence` members it
+    /// overrides, and its `ArrayList` the collection members (`crate::builtin_members`).
+    fn dispatched_dependency_classes(&self) -> Vec<krusty::backend::DependencyClassifier> {
+        vec![
+            crate::string_builders::class(),
+            krusty::types::Ty::obj("kotlin/collections/ArrayList")
+                .obj_internal()
+                .expect("a classifier type"),
+        ]
+    }
+
+    /// Both stdlibs read an appended sequence's `length`: the WASI one copies that many indexed
+    /// `Char`s, and the JS one checks `appendRange`'s bounds against it before it appends the
+    /// sequence's `toString` (`crate::char_sequence_appends`).
+    fn appends_char_sequences_by_index(&self) -> bool {
+        true
+    }
+
+    /// The runtime's `ArrayList` walks a collection argument with its `iterator()` and asks it
+    /// `contains`, whatever class it is (`crate::array_lists`).
+    fn reads_collections_through_interfaces(&self) -> bool {
+        true
     }
 
     fn realizes_dependency_intrinsic(
@@ -153,6 +197,39 @@ impl Backend for WasmBackend {
         operation: krusty::backend::BackendCompilerIntrinsic,
     ) -> bool {
         lower::is_direct_operation(operation)
+    }
+
+    /// An array classifier's `storage` property is this target's own array storage.
+    fn realizes_dependency_getter(
+        &self,
+        signature: krusty::backend::DependencyGetterSignature<'_>,
+    ) -> bool {
+        lower::realizes_storage_getter(signature)
+    }
+
+    fn emitted_constructor_initializer(
+        &self,
+        state: &mut Self::State,
+        declaration: &krusty::backend::ConstructorInitializerDeclaration,
+    ) -> bool {
+        if state.declined {
+            return false;
+        }
+        let Some(started) = state.started.as_mut() else {
+            return false;
+        };
+        let Ok(Some((owner, _, signature))) = started
+            .classes
+            .published_initializer(&declaration.constructor, &started.module)
+        else {
+            return false;
+        };
+        owner == &declaration.class
+            && laid_out_classes::constructor_frame_matches(
+                &mut started.module,
+                &declaration.parameters,
+                signature,
+            )
     }
 
     fn lower_ir_file(
@@ -184,27 +261,14 @@ impl Backend for WasmBackend {
             decline(state, "a `main` that takes its arguments".to_string());
             return Vec::new();
         }
-        krusty::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
-        // Before default arguments: a constant leaving constructor arguments out is then an
-        // ordinary construction for that lowering.
-        krusty::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
-        krusty::backend::enums::realize(&mut file.ir, krusty::backend::enums::Contract::KotlinWasm);
-        krusty::backend::default_arguments::realize(
-            &mut file.ir,
-            &mut file.callables,
-            |function| file.dependency_exports.callable(function).is_some(),
-        );
-        // After default arguments, so a `$default` entry's call of the declaration is the one
-        // that gains the continuation, and before dispatch entries, which copy the signature.
-        if let Err(declined) =
-            krusty::backend::coroutines::add_continuation_parameters(&mut file.ir)
-        {
-            decline(state, declined.construct().to_string());
-            return Vec::new();
-        }
         krusty::backend::construction_entries::publish_constructors(
             &mut file.ir,
             (file.module_name, file.classifiers.module()),
+            &mut file.dependency_exports,
+        );
+        krusty::backend::construction_entries::publish_type_tests(
+            &mut file.ir,
+            file.classifiers.module(),
             &mut file.dependency_exports,
         );
         krusty::backend::construction_entries::realize(&mut file.ir, &mut file.dependency_exports);
@@ -228,19 +292,40 @@ impl Backend for WasmBackend {
             // cross-file reservations from the current source module.
             started.callables.enter_source_module(file.module_name);
             started.properties.enter_source_module(file.module_name);
-            started.classes.enter_source_module(file.module_name);
+            started.classes.enter_source_module(
+                file.module_name,
+                &file.ir,
+                &file.callables,
+                &file.classifiers,
+                &mut started.module,
+            );
         } else {
-            started.classes.enter_dependency_support();
+            started.classes.enter_dependency_support(
+                &file.ir,
+                &file.callables,
+                &file.classifiers,
+                &mut started.module,
+            );
         }
         if state
             .slot_plan
             .as_ref()
             .is_none_or(|(module, _)| module != file.module_name)
         {
-            let plan = classes::module_plan(file.classifiers.module().classes(), &file.classifiers);
+            let plan = classes::module_plan(
+                file.classifiers.module().classes(),
+                &file.classifiers,
+                &file.callables,
+                &started.classes,
+            );
             state.slot_plan = Some((file.module_name.to_owned(), plan));
-            // The table types are built from the plan, so they are that module's too.
-            started.tables = Default::default();
+            // The table types are built from the plan, so they are that module's too, except a
+            // dependency class's, which is the whole program's.
+            started.tables.enter_plan(
+                file.classifiers.module().classes(),
+                &file.classifiers,
+                &started.classes,
+            );
         }
         let plan = &state.slot_plan.as_ref().expect("planned just above").1;
         let lowered = match lower::lower_file(
@@ -370,7 +455,7 @@ impl Backend for WasmBackend {
         );
         started.module.export_function("_start", start);
         vec![
-            (format!("{module_name}.wasm"), started.module.encode()),
+            (format!("{module_name}.wasm"), started.encode()),
             (
                 format!("{module_name}.mjs"),
                 started.host.loader(module_name).into_bytes(),
@@ -396,10 +481,33 @@ mod tests {
     mod reference_array_size;
 
     use super::{WasmBackend, WasmTarget};
-    use krusty::backend::{Artifact, Entry};
+    use krusty::backend::{Artifact, Backend, CommonIrPreparationError, Entry};
     use krusty::diag::DiagSink;
     use krusty::libraries::EmptySymbolSource;
     use krusty::source::SourceInput;
+
+    /// A suspend shape common preparation cannot lower is this backend's capability decline,
+    /// reported with the prefix the box lanes classify declines by, never as an internal error.
+    #[test]
+    fn a_common_preparation_suspend_decline_is_a_wasm_capability_decline() {
+        let backend = WasmBackend::new(WasmTarget::Js);
+        let mut diags = DiagSink::new();
+        backend.report_common_ir_preparation_error(
+            &CommonIrPreparationError::Suspend(
+                krusty::backend::coroutines::ContinuationDecline::Suspends,
+            ),
+            &mut diags,
+        );
+        let messages = diags
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            ["krusty: the wasm backend does not support a suspend function that suspends yet"]
+        );
+    }
 
     /// Compile `sources`, the file stemmed `Main` first and then `Other1`, `Other2`, …, into a
     /// program starting in `entry`.
@@ -409,6 +517,26 @@ mod tests {
         sources: &[&str],
     ) -> (Vec<Artifact>, Vec<String>) {
         compile_program_with_provider(target, entry, sources, Box::new(EmptySymbolSource))
+    }
+
+    /// [`compile_program`] against the exact target stdlib, which declares the runtime
+    /// exceptions a checked cast throws.
+    fn compile_program_with_stdlib(
+        target: WasmTarget,
+        entry: Entry,
+        sources: &[&str],
+    ) -> (Vec<Artifact>, Vec<String>) {
+        use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+        let path = krusty::toolchain::kotlin_stdlib_klib(
+            krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
+        )
+        .expect("the exact target stdlib must be provisioned");
+        let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+            path,
+            KlibStdlibSemantics::Wasm,
+        )])
+        .unwrap();
+        compile_program_with_provider(target, entry, sources, Box::new(libraries))
     }
 
     fn compile_program_with_provider(
@@ -453,8 +581,67 @@ mod tests {
         compile_program(target, Entry::Box, &[source])
     }
 
+    /// A class delegated property whose getter is reached from a file that also captures an
+    /// anonymous object. The property reference passed to `getValue` keeps the plan's checked
+    /// type, so wasm can lower the accessor instead of declining the expression.
+    #[test]
+    fn delegate_capture_discovery_box_compiles() {
+        use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+        let source = include_str!("../../../tests/box_regressions/delegateCaptureDiscovery.kt");
+        for target in WasmTarget::ALL {
+            let path = krusty::toolchain::kotlin_stdlib_klib(
+                krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
+            )
+            .expect("the exact target stdlib must be provisioned");
+            let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+                path,
+                KlibStdlibSemantics::Wasm,
+            )])
+            .unwrap();
+            let (artifacts, diagnostics) =
+                compile_program_with_provider(target, Entry::Box, &[source], Box::new(libraries));
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            let directory = std::env::temp_dir().join(format!(
+                "delegate-capture-{}-{}",
+                target.name(),
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&directory).unwrap();
+            for (name, bytes) in &artifacts {
+                std::fs::write(directory.join(name), bytes).unwrap();
+            }
+            let loader = artifacts
+                .iter()
+                .find(|(name, _)| name.ends_with(".mjs"))
+                .expect("wasm loader")
+                .0
+                .as_str();
+            let output = std::process::Command::new("node")
+                .arg("--no-warnings")
+                .arg(directory.join(loader))
+                .output()
+                .expect("node runs the wasm box");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "{target:?} exit {:?}\n{stdout}{stderr}",
+                output.status.code()
+            );
+            assert_eq!(
+                stdout,
+                format!("{}OK", krusty::backend::BOX_RESULT_FRAME),
+                "{target:?} complete framed box result"
+            );
+            assert!(stderr.is_empty(), "{target:?} box stderr: {stderr:?}");
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
+
     /// A file dispatching `toString` on an erased receiver, and another file creating a value
     /// whose `toString` this target has no body for, decline together, whichever file comes first.
+    /// A lambda converted to a `fun interface` inside a local class is such a value: kotlinc-wasm
+    /// names its class after the local class, a name this target does not spell yet.
     #[test]
     fn an_erased_to_string_declines_on_another_files_unprinted_value() {
         let show = "fun show(value: Any?): String = value.toString()\n\
@@ -463,15 +650,53 @@ mod tests {
             "{}a `toString` of `kotlin.Any?` reaching an object another file creates yet",
             super::DECLINE_PREFIX
         )];
+        let other = "fun interface Supplier { fun get(): Int }\n\
+                     fun converted(): String {\n\
+                     class Local { fun make(): Any = Supplier { 1 } }\n\
+                     return show(Local().make()) }";
+        for target in WasmTarget::ALL {
+            for sources in [[show, other], [other, show]] {
+                let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
+                assert_eq!(diagnostics, expected, "{sources:?}");
+                assert!(outputs.is_empty());
+            }
+        }
+    }
+
+    /// A lambda another file converts to a `fun interface` at its top level prints the class name
+    /// kotlinc-wasm gives it, so an erased `toString` reaching it is lowered, whichever file comes
+    /// first. `wasm_sam_conversions_reached_from_another_file_print_their_class_names` in
+    /// `tests/kotlin_box_wasm_conformance.rs` runs the printed names against kotlinc-wasm's.
+    #[test]
+    fn an_erased_to_string_reaches_another_files_sam_value() {
+        let show = "fun show(value: Any?): String = value.toString()\n\
+                    fun box(): String = \"OK\"";
+        let other = "fun interface Supplier { fun get(): Int }\n\
+                     fun converted(): String = show(Supplier { 1 })";
+        for target in WasmTarget::ALL {
+            for sources in [[show, other], [other, show]] {
+                let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
+                assert_eq!(diagnostics, Vec::<String>::new(), "{sources:?}");
+                assert!(!outputs.is_empty(), "{sources:?}");
+            }
+        }
+    }
+
+    /// A floating box prints its value, so another file boxing one leaves an erased `toString`
+    /// compilable.
+    #[test]
+    fn an_erased_to_string_prints_another_files_floating_box() {
+        let show = "fun show(value: Any?): String = value.toString()\n\
+                    fun box(): String = \"OK\"";
         for other in [
             "fun double(): String = show(1.5)",
-            "fun function(): String = show { 1 }",
+            "fun float(): String = show(1.5f)",
         ] {
             for target in WasmTarget::ALL {
                 for sources in [[show, other], [other, show]] {
                     let (outputs, diagnostics) = compile_program(target, Entry::Box, &sources);
-                    assert_eq!(diagnostics, expected, "{sources:?}");
-                    assert!(outputs.is_empty());
+                    assert_eq!(diagnostics, Vec::<String>::new(), "{sources:?}");
+                    assert!(!outputs.is_empty(), "{sources:?}");
                 }
             }
         }
@@ -486,18 +711,35 @@ mod tests {
             krusty::conformance::TestTarget::WasmJs,
         );
         for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile(target, &source);
+            let (outputs, diagnostics) =
+                compile_program_with_stdlib(target, Entry::Box, &[&source]);
             assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
             assert!(!outputs.is_empty(), "{target:?}");
         }
     }
 
-    /// A function value converted to a `fun interface` is an instance of it with no `toString`
-    /// body, so rendering a value of that interface declines.
+    /// A function value converted to a `fun interface` prints the class name kotlinc-wasm gives
+    /// it, so rendering a value of that interface is lowered.
+    #[test]
+    fn a_fun_interface_to_string_prints_a_converted_function_value() {
+        let source = "fun interface Supplier { fun get(): Int }\n\
+                      fun box(): String { val supplier = Supplier { 1 }\n\
+                      return if (\"$supplier\" == \"\") \"empty\" else \"OK\" }";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            assert!(!outputs.is_empty(), "{target:?}");
+        }
+    }
+
+    /// A function value converted to a `fun interface` in a local class is an instance of it with
+    /// no `toString` body, so rendering a value of that interface declines.
     #[test]
     fn a_fun_interface_to_string_declines_on_a_converted_function_value() {
         let source = "fun interface Supplier { fun get(): Int }\n\
-                      fun box(): String { val supplier = Supplier { 1 }\n\
+                      fun box(): String {\n\
+                      class Local { fun make(): Supplier = Supplier { 1 } }\n\
+                      val supplier = Local().make()\n\
                       return if (\"$supplier\" == \"\") \"empty\" else \"OK\" }";
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile(target, source);
@@ -505,7 +747,7 @@ mod tests {
                 diagnostics,
                 vec![format!(
                     "{}a `toString` of `Supplier` reaching a runtime object this target cannot \
-                     print yet",
+                     print; first witness: a lambda converted to `Supplier` yet",
                     super::DECLINE_PREFIX
                 )]
             );
@@ -528,12 +770,16 @@ mod tests {
     }
 
     /// A `var` can be assigned anything after its initializer, so rendering it still declines
-    /// while the file creates a function value.
+    /// while the file creates a function value with no `toString` body, one converted to a
+    /// `fun interface` in a local class.
     #[test]
     fn an_erased_to_string_of_a_reassigned_var_declines() {
-        let source = "fun box(): String { val supplier = { 1 }\n\
+        let source = "fun interface Supplier { fun get(): Int }\n\
+                      fun box(): String {\n\
+                      class Local { fun make(): Supplier = Supplier { 1 } }\n\
+                      val supplier = Local().make()\n\
                       var message: Any = \"O\"\n\
-                      if (supplier() == 2) message = supplier\n\
+                      if (supplier.get() == 2) message = supplier\n\
                       return \"$message\" + \"K\" }";
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile(target, source);
@@ -541,11 +787,41 @@ mod tests {
                 diagnostics,
                 vec![format!(
                     "{}a `toString` of `kotlin.Any` reaching a runtime object this target cannot \
-                     print yet",
+                     print; first witness: a lambda converted to `Supplier` yet",
                     super::DECLINE_PREFIX
                 )]
             );
             assert!(outputs.is_empty());
+        }
+    }
+
+    /// A `var` that may hold a function value converted to a `fun interface` at the file's level
+    /// renders it by the class name kotlinc-wasm gives it, so the erased `toString` is lowered.
+    #[test]
+    fn an_erased_to_string_of_a_reassigned_var_prints_a_sam_value() {
+        let source = "fun interface Supplier { fun get(): Int }\n\
+                      fun box(): String { val supplier = Supplier { 1 }\n\
+                      var message: Any = \"O\"\n\
+                      if (supplier.get() == 2) message = supplier\n\
+                      return \"$message\" + \"K\" }";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            assert!(!outputs.is_empty(), "{target:?}");
+        }
+    }
+
+    /// A lambda and a reference to a function print their class names, as kotlinc-wasm's do, so an
+    /// erased `toString` reaching them is lowered.
+    #[test]
+    fn an_erased_to_string_reaches_named_function_values() {
+        let source = "fun show(value: Any?): String = value.toString()\n\
+                      fun box(): String = if (show { 1 } == \"\" || show(::show) == \"\") \
+                      \"fail\" else \"OK\"";
+        for target in WasmTarget::ALL {
+            let (outputs, diagnostics) = compile(target, source);
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            assert!(!outputs.is_empty(), "{target:?}");
         }
     }
 
@@ -659,7 +935,7 @@ mod tests {
     fn a_class_implementing_an_interface_of_another_file_is_dispatched_and_tested() {
         // Backend contract: interface members are numbered per module, not per file.
         for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile_program(
+            let (outputs, diagnostics) = compile_program_with_stdlib(
                 target,
                 Entry::Box,
                 &[
@@ -680,7 +956,7 @@ mod tests {
     #[test]
     fn an_interface_member_with_two_implementations_compiles_to_one_module() {
         for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile_program(
+            let (outputs, diagnostics) = compile_program_with_stdlib(
                 target,
                 Entry::Box,
                 &[
@@ -696,9 +972,9 @@ mod tests {
     }
 
     #[test]
-    fn a_local_class_of_another_files_inline_function_is_realized_again_by_its_caller() {
-        // The caller's expansion realizes the template's anonymous class as its own: its members
-        // bind no module identity, so the declaring file's realization stays the only one.
+    fn a_local_class_cloned_from_another_files_inline_template_compiles_in_each_file() {
+        // Backend contract: the clone realizes the template's callables a second time, and each
+        // file binds them to its own clone's functions.
         for target in WasmTarget::ALL {
             let (outputs, diagnostics) = compile_program(
                 target,
@@ -755,11 +1031,14 @@ mod tests {
     #[test]
     fn a_class_compiles_to_one_module_on_both_targets() {
         for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile(
+            let (outputs, diagnostics) = compile_program_with_stdlib(
                 target,
-                "open class Box(val value: String) { open fun get() = value }\n\
+                Entry::Box,
+                &[
+                    "open class Box(val value: String) { open fun get() = value }\n\
                  class Wrapped(value: String) : Box(value) { override fun get() = value }\n\
                  fun box(): String = (Wrapped(\"OK\") as Box).get()",
+                ],
             );
             assert_eq!(diagnostics, Vec::<String>::new());
             assert_eq!(outputs.len(), 2);

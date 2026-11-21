@@ -61,6 +61,120 @@ pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
     }
 }
 
+/// These semantic errors do not invalidate the parsed declaration inventory or suppress body
+/// checking. Report them only after the caller records its parser-failure state.
+pub(super) fn validate_after_parsing(file: &File, parser_error: bool, diags: &mut DiagSink) {
+    // The brackets were parsed. Report the language gate only after `parse_error` is captured,
+    // so the file's declarations still join the module for every other file.
+    for span in file
+        .destructuring
+        .ungated_bracket_spans
+        .iter()
+        .copied()
+        .chain(file.destructuring.ungated_full_form_spans.iter().copied())
+    {
+        diags.error(
+            span,
+            "the feature \"name based destructuring\" is only available since language version 2.5",
+        );
+    }
+    for span in file.destructuring.ungated_short_form_spans.iter().copied() {
+        diags.error(
+            span,
+            "the feature \"enable name based destructuring short form\" is experimental and \
+             should be enabled explicitly. This can be done by supplying the compiler \
+             argument '-Xname-based-destructuring=complete', but note that no stability \
+             guarantees are provided.",
+        );
+    }
+    // The body check does not run for a syntax-error file. Members still owe the same body
+    // requirement as a top-level function; only the sentence differs. The top-level sentence is
+    // reported for a syntax-error file too — `fun broken(` at EOF is still a function without a
+    // body. A script keeps its previous exemption.
+    if parser_error {
+        report_member_functions_without_bodies(file, diags);
+    }
+    if !file.is_script {
+        report_top_level_functions_without_bodies(file, diags);
+    }
+}
+
+fn function_body_status(
+    function: &crate::ast::FunDecl,
+    is_abstract: bool,
+    is_expect: bool,
+) -> crate::declaration_validation::FunctionBodyStatus {
+    crate::declaration_validation::FunctionBodyStatus {
+        has_body: !matches!(function.body, crate::ast::FunBody::None),
+        is_abstract,
+        is_external: function.is_external(),
+        is_expect,
+        is_companion_block_member: function.is_companion_block_member(),
+    }
+}
+
+fn declaration_is_expect(file: &File, declaration: crate::ast::DeclId) -> bool {
+    file.expect_decls
+        .iter()
+        .any(|expected| expected.declaration == declaration)
+}
+
+fn report_top_level_functions_without_bodies(file: &File, diags: &mut DiagSink) {
+    for &declaration in &file.decls {
+        let Decl::Fun(function) = file.decl(declaration) else {
+            continue;
+        };
+        // A failed name parse (`fun` with nothing after it) is not a function this requirement
+        // reports. That file's diagnostics stay the three syntax errors the recovery test pins.
+        if function.name == "<error>" {
+            continue;
+        }
+        if !crate::declaration_validation::function_requires_body(function_body_status(
+            function,
+            function.is_abstract(),
+            declaration_is_expect(file, declaration),
+        )) {
+            continue;
+        }
+        diags.error_named(
+            function.span,
+            crate::diag::names::NON_MEMBER_FUNCTION_NO_BODY,
+            format!("function '{}' must have a body.", function.name),
+        );
+    }
+}
+
+fn report_member_functions_without_bodies(file: &File, diagnostics: &mut DiagSink) {
+    for &declaration in &file.decls {
+        let Decl::Class(class) = file.decl(declaration) else {
+            continue;
+        };
+        let owner_is_expect = declaration_is_expect(file, declaration);
+        for function in &class.methods {
+            if function.name == "<error>" {
+                continue;
+            }
+            // Interface members are abstract by the classifier's kind. An expect classifier's
+            // members are expect declarations even though each one is not marked abstract.
+            if !crate::declaration_validation::function_requires_body(function_body_status(
+                function,
+                function.is_abstract() || class.is_interface(),
+                owner_is_expect,
+            )) {
+                continue;
+            }
+            diagnostics.error_named(
+                function.span,
+                crate::diag::names::NON_ABSTRACT_FUNCTION_WITH_NO_BODY,
+                format!(
+                    "function '{}' without a body must be abstract.",
+                    function.name
+                ),
+            );
+        }
+    }
+}
+
 fn validate_type_alias(alias: &crate::ast::TypeAliasDecl, diagnostics: &mut DiagSink) {
     for diagnostic in crate::declaration_validation::type_alias_diagnostics(alias) {
         diagnostics.error(diagnostic.span, diagnostic.message.to_string());
@@ -197,6 +311,52 @@ fn validate_expect_property(
     if let Some(setter) = &property.setter {
         if setter.body.is_some() {
             diagnostics.error(setter.span, body_message());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::diag::{DiagSink, Severity};
+    use crate::features::LangFeatures;
+    use crate::source::SourceInput;
+
+    #[test]
+    fn a_declaration_error_retains_the_inventory_and_checked_body_in_trimmed_analysis() {
+        for source in [
+            "fun missing(): String\nval wrong: String = 1\n",
+            "val wrong: String = 1\nfun missing(): String\n",
+        ] {
+            let inputs = [SourceInput::kotlin(source)];
+            let mut diagnostics = DiagSink::new();
+            let analysis = crate::frontend::analyze_source_set_prefix_with_features_trimmed(
+                &inputs,
+                1,
+                1,
+                crate::frontend::PlatformProvider::jvm(Box::new(
+                    crate::libraries::EmptySymbolSource,
+                )),
+                &LangFeatures::new(),
+                &mut diagnostics,
+            );
+            assert!(analysis.streamed.is_some());
+            assert!(analysis.types[0].is_some());
+            assert_eq!(diagnostics.diags.len(), 2, "{:?}", diagnostics.diags);
+            assert!(diagnostics.diags.iter().all(|diagnostic| {
+                diagnostic.file == 0 && diagnostic.severity == Severity::Error
+            }));
+            let messages = diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                messages,
+                [
+                    "function 'missing' must have a body.",
+                    "initializer type mismatch: expected 'String', actual 'Int'.",
+                ]
+            );
         }
     }
 }

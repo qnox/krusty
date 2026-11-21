@@ -46,15 +46,27 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
+lint: smoke-selection-tests versioning-tests runner-profile-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
 
 # The CI step that drops kotlinc reference inventories no recent run read, before master saves them.
 reference-cache-tests:
     bash scripts/test-prune-reference-cache.sh
 
+# The smoke check's lane selection, against a disposable repository with deleted and renamed paths.
+smoke-selection-tests:
+    bash scripts/test-smoke-selection.sh
+
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
     bash scripts/test-versioning.sh
+    bash scripts/test-sort-kotlin-versions.sh
+    bash scripts/test-install-maven.sh
+    bash scripts/test-fetch-conformance-deps.sh
+    bash scripts/test-check-intellij-patch.sh
+
+# The CI runner profile's machine and contention report, against stand-in /proc and /sys trees.
+runner-profile-tests:
+    bash scripts/test-runner-profile.sh
 
 # The release job's signing key id selection, against keys generated in a throwaway keyring, its
 # Maven Central upload, against a stand-in Gradle build and Central Portal, and the Gradle wrapper
@@ -181,6 +193,13 @@ test-fast:
     export KRUSTY_TEST_EXCLUDE="conformance"
     ./run-tests.sh
 
+# Pre-push smoke check (scripts/smoke.sh): attribution and outcome lists, rustfmt and the baselines,
+# one build of the test binaries, lib tests, the changed e2e modules, and a sampled box slice plus
+# the owned regressions on the lanes the change can affect. BASE is the PR's base: master, the parent
+# PR's branch, or the branch's own remote head to check only unpushed commits.
+smoke BASE="origin/master":
+    bash scripts/smoke.sh "{{BASE}}"
+
 # Run ONLY the Kotlin box/codegen conformance suite, plain (no coverage instrumentation) — the
 # "conformance without coverage" half of the pre-push gate. Provisions kotlinc + corpus via the
 # harness. The suite is internally rayon-parallel, so it uses all cores on its own.
@@ -215,7 +234,7 @@ conformance-one VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     v="{{VERSION}}"
-    kc_var="KRUSTY_KOTLINC_${v//./_}"
+    kc_var="KRUSTY_KOTLINC_${v//[.-]/_}"
     kc="${!kc_var:-}"
     vendored="$PWD/target/cache/kotlinc/$v/kotlinc/bin/kotlinc"
     [ -z "$kc" ] && [ -x "$vendored" ] && kc="$vendored"
@@ -358,7 +377,7 @@ klib-semantics VERSION=`just max-version`:
 
 # Provision the Kotlin codegen/box conformance corpus into one cached dir (target/cache/box-corpus/<ver>/) and
 # print the path to compiler/testData/codegen/box. The same checkout carries the command-line corpus,
-# compiler/testData/cli, beside it. Blobless + sparse clone of just that directory at
+# compiler/testData/cli, and the diagnostics test data, compiler/testData/diagnostics, beside it. Blobless + sparse clone of just that directory at
 # the matching tag — small and idempotent (no-op once present, cheap to cache). Mirrors `kotlinc`:
 # the conformance test FAILS (not skips) without it, so the harness provisions it rather than
 # silently skipping. The same checkout carries JetBrains' mock JDK,
@@ -402,8 +421,9 @@ box-corpus VERSION=`just max-version`:
         git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs $bytecode_dirs "${selection_dirs[@]}" >&2
     }
     # Kotlin's command-line test corpus (`.args`/`.out` pairs) and the third-party annotation
-    # sources some of its cases put on the classpath; kotlin_cli_jvm_conformance runs it.
-    cli_dirs="compiler/testData/cli third-party/annotations third-party/java8-annotations third-party/jsr305"
+    # sources some of its cases put on the classpath; kotlin_cli_jvm_conformance runs it. Its
+    # diagnostics test data, which kotlin_diagnostics_jvm_conformance scores by false accepts.
+    cli_dirs="compiler/testData/cli third-party/annotations third-party/java8-annotations third-party/jsr305 compiler/testData/diagnostics/tests compiler/testData/diagnostics/testsWithStdLib compiler/testData/diagnostics/helpers"
     # Kotlin's bytecode-shape corpora: instruction-count expectations over textified class files
     # (bytecodeText) and whole-class declaration listings (bytecodeListing);
     # kotlin_bytecode_text_conformance and kotlin_bytecode_listing_conformance run them.
@@ -456,9 +476,9 @@ box-corpus VERSION=`just max-version`:
         exit 1
     fi
     if [ -n "$mock_dir" ]; then
-        # A cache provisioned before the mock JDK, the CLI corpus, the bytecode corpora or the
-        # generator sources were needed: extend it rather than accept it.
-        echo "adding the mock JDK, CLI corpus, bytecode corpora and generator sources to Kotlin v${ver}…" >&2
+        # A cache provisioned before the mock JDK, the CLI corpus, the diagnostics test data, the
+        # bytecode corpora or the generator sources were needed: extend it rather than accept it.
+        echo "adding the mock JDK, CLI corpus, diagnostics test data, bytecode corpora and generator sources to Kotlin v${ver}…" >&2
         git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs $bytecode_dirs "${selection_dirs[@]}" >&2 \
             || { echo "failed to extend the v${ver} corpus checkout" >&2; exit 1; }
     else
@@ -483,26 +503,39 @@ box-corpus VERSION=`just max-version`:
     done
     echo "$box"
 
-# Provision the kotlinx.serialization compiler-plugin box corpus (plugins/kotlinx-serialization/
-# testData/boxIr) from JetBrains/kotlin at the matching tag — blobless+sparse, idempotent. The
-# reference suite our own serialization conformance tests mirror (and must meet-or-exceed). Point
-# KRUSTY_SER_BOXIR_DIR at the printed path.
-ser-corpus VERSION=`just max-version`:
+# The compiler plugins whose descriptor names an upstream box corpus, one per line.
+plugin-corpora:
+    @grep -l '^upstream' src/plugins/*/boxes/corpus.txt | sed 's|src/plugins/\([^/]*\)/boxes/corpus.txt|\1|'
+
+# Provision a compiler plugin's upstream box corpus: the `upstream` and `support` paths its descriptor
+# (src/plugins/<name>/boxes/corpus.txt) names, from JetBrains/kotlin at the matching tag —
+# blobless+sparse, idempotent. These are the reference suites our own plugin conformance tests mirror
+# (and must meet-or-exceed). Prints the checkout root; each `upstream` path is below it.
+plugin-corpus PLUGIN VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
+    plugin="{{PLUGIN}}"
     ver="{{VERSION}}"
-    root="$PWD/target/cache/ser-corpus/$ver"
-    box="$root/plugins/kotlinx-serialization/testData/boxIr"
-    if [ -d "$box" ]; then echo "$box"; exit 0; fi
-    echo "cloning kotlinx.serialization boxIr corpus (v${ver})…" >&2
+    descriptor="$(ls src/plugins/"$plugin"/boxes/corpus.txt 2>/dev/null || true)"
+    [ -n "$descriptor" ] || { echo "no plugin corpus descriptor for $plugin" >&2; exit 1; }
+    mapfile -t upstream < <(sed -n 's/^\(upstream\|support\)[[:space:]]*=[[:space:]]*//p' "$descriptor")
+    [ "${#upstream[@]}" -gt 0 ] || { echo "plugin $plugin names no upstream corpus" >&2; exit 1; }
+    root="$PWD/target/cache/plugin-corpus/$plugin/$ver"
+    complete=1
+    for dir in "${upstream[@]}"; do [ -e "$root/$dir" ] || complete=0; done
+    if [ "$complete" = 1 ]; then echo "$root"; exit 0; fi
+    echo "cloning the $plugin box corpus (v${ver})…" >&2
     rm -rf "$root"
     while read -r name; do unset "$name"; done < <(git rev-parse --local-env-vars)
     git clone --depth 1 --filter=blob:none --sparse --branch "v${ver}" \
         https://github.com/JetBrains/kotlin.git "$root" >&2 \
         || { echo "failed to clone JetBrains/kotlin v${ver}" >&2; rm -rf "$root"; exit 1; }
-    git -C "$root" sparse-checkout set plugins/kotlinx-serialization/testData >&2
-    [ -d "$box" ] || { echo "serialization boxIr dir missing after sparse checkout: $box" >&2; exit 1; }
-    echo "$box"
+    # Non-cone patterns: an `upstream` entry is a directory but a `support` entry is one file.
+    git -C "$root" sparse-checkout set --no-cone "${upstream[@]/#//}" >&2
+    for dir in "${upstream[@]}"; do
+        [ -e "$root/$dir" ] || { echo "$plugin corpus path missing after sparse checkout: $dir" >&2; exit 1; }
+    done
+    echo "$root"
 
 # Provision the KSP reference test corpus (google/ksp kotlin-analysis-api/testData + its test-utils
 # processors) — shallow+sparse, idempotent. The authoritative KSP capability suite our own KSP
@@ -552,7 +585,7 @@ test-all *ARGS:
     declare -a pids=() tags=()
     while read -r v; do
         [ -z "$v" ] && continue
-        kc_var="KRUSTY_KOTLINC_${v//./_}"
+        kc_var="KRUSTY_KOTLINC_${v//[.-]/_}"
         kc="${!kc_var:-}"
         vendored="$PWD/target/cache/kotlinc/$v/kotlinc/bin/kotlinc"
         [ -z "$kc" ] && [ -x "$vendored" ] && kc="$vendored"
@@ -583,7 +616,7 @@ test-all *ARGS:
 # Build the krusty-build library test binary and print its path. Gradle lanes run this prebuilt
 # binary; they do not compile krusty again.
 #
-# CI builds this right after `just conformance-bin-and-cli`, and must reuse that build's krusty.
+# CI builds this right after `just tool-test-bin`, and must reuse that build's krusty.
 # Selecting krusty-cli's binary here keeps the Native backend in the graph: without it bumpalo
 # (under zopfli) loses Cranelift's `allocator-api2` feature and krusty, which links zopfli,
 # compiled a second time (484 s of a 1157 s build). krusty-build's own dev-dependencies add the
@@ -618,13 +651,15 @@ conformance-bin:
     set -euo pipefail
     scripts/cargo-test-binary.sh conformance --test conformance
 
-# CI's tool-bins job: the conformance binary and the `krusty` CLI (target/gate/krusty) from one
-# Cargo invocation. The CLI alone resolves libc, object and once_cell without the features the
-# root package's dev-dependencies add, so building the two apart compiled krusty twice.
-conformance-bin-and-cli:
+# CI's tool-bins job: the conformance and e2e binaries and the `krusty` CLI (target/gate/krusty)
+# from one Cargo invocation, printing the TARGET test binary (`conformance` or `e2e`). The CLI alone
+# resolves libc, object and once_cell without the features the root package's dev-dependencies
+# add, so building them apart compiled krusty twice. The same selection again only prints the
+# other target: Cargo finds nothing to rebuild.
+tool-test-bin TARGET:
     #!/usr/bin/env bash
     set -euo pipefail
-    scripts/cargo-test-binary.sh --build conformance -p krusty-cli -p krusty --test conformance --bin krusty
+    scripts/cargo-test-binary.sh --build "{{TARGET}}" -p krusty-cli -p krusty --test conformance --test e2e --bin krusty
 
 # Run the codegen/box conformance suite and print the case report "<pct> <passed> <applicable>":
 # applicable cases whose box() returns "OK". The same run's JVM byte report "<pct> <matched> <total>",
@@ -682,6 +717,14 @@ conformance-regressions BIN VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     bash scripts/conformance-regressions.sh "{{BIN}}" "{{VERSION}}"
+
+# Run the diagnostics test data lane (kotlinc's diagnostics cases, scored by false accepts) with the
+# binary from `conformance-bin`. Ordinary runs ignore it; CI runs this for the newest supported
+# Kotlin. Bless with KRUSTY_BLESS_DIAGNOSTICS_EXPECTATIONS=1. A sibling `krusty` next to BIN is the CLI.
+diagnostics-conformance BIN VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash scripts/diagnostics-conformance.sh "{{BIN}}" "{{VERSION}}"
 
 # Run focused Native conformance tests only after provisioning the exact Native distribution whose
 # stdlib KLIB owns their semantics. The corpus itself remains in `native-conformance-run`.
@@ -776,11 +819,11 @@ kotlin-versions:
 
 # Comma-separated list of supported Kotlin reference versions (advertised by `krusty -version`).
 supported-kotlin:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | sort -V | paste -sd, -
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | bash scripts/sort-kotlin-versions.sh | paste -sd, -
 
 # Highest supported Kotlin reference version — krusty's release version (without the build suffix).
 max-version:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | sort -V | tail -1
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | bash scripts/sort-kotlin-versions.sh | tail -1
 
 # JSON array of supported Kotlin reference versions, for the GitHub Actions test matrix.
 matrix-json:

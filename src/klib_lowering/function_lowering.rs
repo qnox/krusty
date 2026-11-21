@@ -30,6 +30,7 @@ pub(super) use class_initializers::{
 };
 mod declared_type_parameters;
 pub(super) use closure_headers::{closure_header, CaptureParameter};
+pub(super) use declared_type_parameters::file_private_formals;
 mod reference_headers;
 pub(super) use reference_headers::reference_header;
 pub(super) mod vararg_parameters;
@@ -73,6 +74,25 @@ pub(super) struct FunctionHeader {
 }
 
 impl FunctionHeader {
+    /// The formals this header bound for `function`'s own type parameters, with their bounds.
+    pub(super) fn own_formals(
+        &self,
+        function: &KlibIrFunction,
+    ) -> Vec<(crate::types::TyParamName, Vec<Ty>)> {
+        function
+            .type_parameters
+            .iter()
+            .filter_map(|parameter| {
+                let formal = self.type_parameters.bound(&parameter.base.symbol)?;
+                let TyKind::TyParam(name, _) = formal.kind() else {
+                    return None;
+                };
+                let bounds = self.type_parameters.declared_bounds(name.as_str())?;
+                Some((name, bounds.to_vec()))
+            })
+            .collect()
+    }
+
     pub(super) fn result(&self) -> Ty {
         self.ret
     }
@@ -202,6 +222,7 @@ pub(super) fn prepared_inline_header(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
+    validate_selected_function_modifiers(Some(selected), function)?;
     if function.base.symbol.kind != KlibIrSymbolKind::Function {
         return Err(mismatch(
             "the serialized declaration's symbol is not a function".to_owned(),
@@ -558,9 +579,21 @@ pub(super) fn raw_function_header_with_class(
             "a constructor",
         ));
     }
+    validate_selected_function_modifiers(selected, function)?;
+    let type_parameters =
+        declared_type_parameters::bind(selected, arena, function, class_parameters)?;
+    header(selected, purpose, type_parameters, arena, function)
+}
+
+/// Authenticate serialized function flags against the exact selected declaration for both raw
+/// bodies and prepared inline copies. Prepared suspend templates use the latter path too.
+fn validate_selected_function_modifiers(
+    selected: Option<KlibBodyCallable<'_>>,
+    function: &KlibIrFunction,
+) -> Result<(), KlibBodyDeclineReason> {
     if let Some(modifiers) = selected.and_then(KlibBodyCallable::declaration_modifiers) {
-        // Serialized FunctionFlags reuse the function declaration prefix. Accessor metadata has
-        // a different inline/external layout and has already been normalized by its provider.
+        // Serialized FunctionFlags reuse the function declaration prefix; accessor metadata has a
+        // different layout and has already been normalized by its provider.
         use crate::metadata::function_flags;
         let flags = function.base.flags;
         if modifiers.is_inline != (flags & function_flags::IS_INLINE != 0)
@@ -574,9 +607,7 @@ pub(super) fn raw_function_header_with_class(
             ));
         }
     }
-    let type_parameters =
-        declared_type_parameters::bind(selected, arena, function, class_parameters)?;
-    header(selected, purpose, type_parameters, arena, function)
+    Ok(())
 }
 
 fn header(
@@ -711,12 +742,13 @@ fn header(
                 Some(serialized)
             }
             (Some(receiver), Some(selected))
-                if selected.class_contract().is_some_and(
-                    crate::libraries::KlibBodyClassContract::emits_receiver_members,
-                ) =>
+                if selected.class_contract().is_some_and(|class| {
+                    class.emits_receiver_members() || class.emits_default_members()
+                }) =>
             {
                 // A builtin type's member is a function of its receiver value, which its body
-                // reads as the value the target carries.
+                // reads as the value the target carries; an interface's default body is a
+                // function of the implementing instance, typed as the interface.
                 let serialized = semantic_type(arena, types, receiver.ty)?;
                 if selected.declaration_owner()
                     != serialized
@@ -926,7 +958,7 @@ fn serialized_identity(
 }
 
 /// The origin a producer records for a property accessor it generates.
-const DEFAULT_PROPERTY_ACCESSOR: &str = "DEFAULT_PROPERTY_ACCESSOR";
+pub(super) const DEFAULT_PROPERTY_ACCESSOR: &str = "DEFAULT_PROPERTY_ACCESSOR";
 
 /// The parameter identities of `selected`, after checking that it describes the serialized
 /// declaration: the same name, parameter list, parameter types and identities, and result.
@@ -1111,6 +1143,28 @@ fn mismatch(detail: String) -> KlibBodyDeclineReason {
 /// Declare the function to `ir`, with the parameter facts checked FIR lowering publishes for a
 /// top-level function. Its body is attached once lowered: a call cycle reaches the declaration
 /// before its body exists.
+/// The frame of a function the compiler adds to run part of a file's initialization: no receiver
+/// or parameters, and a `Unit` result.
+pub(super) fn initialization_header(name: &str) -> FunctionHeader {
+    FunctionHeader {
+        name: name.to_owned(),
+        params: Vec::new(),
+        ret: Ty::Unit,
+        identities: Vec::new(),
+        context_count: 0,
+        extension_receiver: false,
+        dispatch_receiver: None,
+        receiver_slot: None,
+        value_receiver: None,
+        singleton_extension_unread_receiver: None,
+        values: HashMap::default(),
+        defaults: Vec::new(),
+        type_parameters: KlibTypeParameters::default(),
+        erasures: HashMap::default(),
+        erased_result: None,
+    }
+}
+
 pub(super) fn declare_function(ir: &mut IrFile, header: &FunctionHeader) -> FunId {
     let function = ir.add_fun(IrFunction {
         name: header.name.clone(),

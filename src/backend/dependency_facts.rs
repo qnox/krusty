@@ -6,9 +6,13 @@
 //! callable's or property's facts without asking the provider about it while it emits. It covers
 //! callables and properties only; dependency classifiers still reach a backend through
 //! `CheckedBackendClassifiers`, which asks the provider. It answers only for an identity the IR
-//! already holds: there is no lookup by name, owner, or signature.
+//! already holds or its immutable inherited class headers selected. Header-only identities remain
+//! separate from executable body roots. There is no lookup by name, owner, or signature.
 
 mod references;
+
+#[cfg(test)]
+mod declaration_identity_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use references::referenced_dependencies;
@@ -17,7 +21,9 @@ use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
 
 pub use crate::fir::BuiltinImplementation;
-use crate::fir::{ExternalCallableId, ExternalPropertyId};
+use crate::fir::{
+    CharSequenceProtocol, CollectionProtocol, ExternalCallableId, ExternalPropertyId,
+};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
 /// A dependency classifier a target may represent itself
@@ -112,12 +118,36 @@ pub struct BackendCallableFact {
     pub klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
     /// Whether a source parameter declares a default value, as the provider's declaration says.
     pub declares_parameter_defaults: bool,
+    /// Per logical parameter, whether its declared type is a function type annotated `@Composable`.
+    pub composable_parameters: crate::libraries::ParamFlags,
     /// Qualified identities of the annotations the provider recorded on this declaration. A
     /// compiler plugin keys its own calling convention on them (Compose's `@Composable`).
     pub annotations: Box<[TypeName]>,
 }
 
 impl BackendCallableFact {
+    /// The selected declaration's virtual slot identity, including its authenticated accessor
+    /// role when a serialized property accessor is represented as an ordinary IR call.
+    pub fn member_slot_identity(&self) -> Option<Vec<u8>> {
+        let identity = self.dependency_callable.as_ref()?;
+        match self.klib_body_accessor.as_ref() {
+            Some(accessor) => super::interface_identity::property_member_identity(
+                identity,
+                accessor.role == crate::libraries::KlibAccessorRole::Setter,
+            ),
+            None => Some(super::interface_identity::member_identity(identity)),
+        }
+    }
+
+    /// The name of the property whose getter this serialized accessor is, as its provider
+    /// decoded it.
+    pub fn getter_of(&self) -> Option<&str> {
+        self.klib_body_accessor
+            .as_ref()
+            .filter(|accessor| accessor.role == crate::libraries::KlibAccessorRole::Getter)
+            .map(|accessor| &*accessor.name)
+    }
+
     /// The selected operation shared by declaration and member realization views.
     pub fn compiler_operation(&self) -> Option<crate::libraries::CompilerIntrinsic> {
         self.compiler_intrinsic
@@ -149,6 +179,11 @@ impl BackendCallableFact {
     /// Whether this selected callable has a source extension receiver parameter.
     pub fn is_extension(&self) -> bool {
         self.kind == ExternalCallableKind::Extension
+    }
+
+    /// Whether this exact dependency declaration initializes its declaring class.
+    pub fn is_constructor(&self) -> bool {
+        self.kind == ExternalCallableKind::Constructor
     }
 
     /// Whether this exact dependency declaration is an instance member.
@@ -275,6 +310,7 @@ impl BackendCallableFact {
                 generic_signature: self.generic_sig.as_deref(),
                 type_parameters: &self.klib_body_type_parameters,
                 reified_type_parameter_ordinals: &self.reified_type_parameter_ordinals,
+                inline_modifiers: &self.inline_modifiers,
                 compiler_intrinsic: self.compiler_operation(),
                 range_construction: self.member_realization.range_construction(),
                 declaration_modifiers: self.klib_body_declaration_modifiers,
@@ -348,8 +384,53 @@ mod tests {
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
             declares_parameter_defaults: false,
+            composable_parameters: Default::default(),
             annotations: Box::new([]),
         }
+    }
+
+    #[test]
+    fn dependency_accessor_calls_keep_their_property_slot_identity() {
+        use crate::backend::interface_identity::property_member_identity;
+        use crate::libraries::{KlibAccessorRole, KlibBodyAccessor};
+        use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
+        let mut fact = extension_fact();
+        let identity = KlibDependencyCallable {
+            module: "producer".into(),
+            declaration: KlibDeclarationSignature::Accessor(KlibAccessorIdSignature::new(
+                KlibPublicIdSignature::classifier(crate::types::type_name("sample/Owner.value")),
+                "physicalAccessor".into(),
+                11,
+                0,
+            )),
+        };
+        fact.dependency_callable = Some(identity.clone());
+        let mut slot_identities = Vec::new();
+        for (role, setter) in [
+            (KlibAccessorRole::Getter, false),
+            (KlibAccessorRole::Setter, true),
+        ] {
+            fact.klib_body_accessor = Some(KlibBodyAccessor {
+                property: ExternalPropertyId::from_raw(3),
+                role,
+                name: "value".into(),
+            });
+            assert_eq!(
+                fact.member_slot_identity(),
+                property_member_identity(&identity, setter)
+            );
+            assert_ne!(
+                fact.member_slot_identity(),
+                Some(super::super::interface_identity::member_identity(&identity))
+            );
+            slot_identities.push(fact.member_slot_identity());
+        }
+        assert_ne!(slot_identities[0], slot_identities[1]);
+        fact.klib_body_accessor = None;
+        assert_eq!(
+            fact.member_slot_identity(),
+            Some(super::super::interface_identity::member_identity(&identity))
+        );
     }
 
     #[test]
@@ -391,6 +472,65 @@ mod tests {
         assert_eq!(
             callables.callables[&identity].builtin_implementations,
             expected
+        );
+    }
+
+    #[test]
+    fn graph_builtin_facts_compare_only_after_selected_evidence_is_recorded() {
+        let identity = ExternalCallableId::from_raw(1);
+        let expected = vec![BuiltinImplementation {
+            receiver: Ty::obj("kotlin/String"),
+            declaration: None,
+        }]
+        .into_boxed_slice();
+        let mut callables = accessor_facts();
+        let fact = callables.callables.get_mut(&identity).unwrap();
+        fact.kind = ExternalCallableKind::Member;
+        fact.declaration_owner = Some(SemanticCallableOwner::Classifier(crate::types::type_name(
+            "kotlin/CharSequence",
+        )));
+        assert!(fact.builtin_implementations.is_empty());
+        let mut graph_implementations = HashMap::default();
+        graph_implementations.insert(identity, expected.clone());
+        let graph = crate::ir::CheckedKlibDependencyFacts::new(
+            graph_implementations,
+            HashMap::default(),
+            None,
+        );
+        callables
+            .record_klib_dependency_facts(graph)
+            .expect("an uninitialized frozen slot is not contradictory evidence");
+        let mut selected = HashMap::default();
+        selected.insert(identity, expected.clone());
+        callables
+            .record_checked_builtin_implementations(&selected)
+            .unwrap();
+        assert_eq!(
+            callables.callables[&identity].builtin_implementations,
+            expected
+        );
+        // Both proofs are nonempty; retaining one real proof must never hide a conflicting one.
+        selected.insert(
+            identity,
+            vec![BuiltinImplementation {
+                receiver: Ty::obj("kotlin/Int"),
+                declaration: None,
+            }]
+            .into_boxed_slice(),
+        );
+        assert_eq!(
+            callables.record_checked_builtin_implementations(&selected),
+            Err(identity)
+        );
+        assert_eq!(
+            callables.callables[&identity].builtin_implementations,
+            expected
+        );
+        let conflicting_graph =
+            crate::ir::CheckedKlibDependencyFacts::new(selected, HashMap::default(), None);
+        assert_eq!(
+            callables.record_klib_dependency_facts(conflicting_graph),
+            Err(identity)
         );
     }
 
@@ -452,6 +592,7 @@ mod tests {
                 vec![Ty::String, Ty::Float]
             },
             result: Ty::Long,
+            substitutions: Vec::new(),
             source_receiver: None,
         }
     }
@@ -498,6 +639,7 @@ mod tests {
             arguments: vec![20, 30],
             parameters: vec![Ty::String, Ty::Int],
             result: Ty::Unit,
+            substitutions: Vec::new(),
             source_receiver: None,
         };
         let access = facts.dependency_accessor(&operation).unwrap();
@@ -511,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_accessors_do_not_invent_setters_or_generic_substitutions() {
+    fn dependency_accessors_require_exact_generic_substitutions() {
         let mut facts = accessor_facts();
         let mut operation = property_read(Some(10));
         if let crate::ir::IrCheckedOperation::ExternalPropertyRead { dispatch, .. } = &mut operation
@@ -541,15 +683,102 @@ mod tests {
             ret: Ty::Long,
             return_policy: Default::default(),
         }));
-        let operation = property_read(Some(10));
-        assert_eq!(
+        let mut operation = property_read(Some(10));
+        let crate::ir::IrCheckedOperation::ExternalPropertyRead { substitutions, .. } =
+            &mut operation
+        else {
+            unreachable!()
+        };
+        *substitutions = vec![crate::ir::IrCheckedSubstitution {
+            parameter: crate::fir::FirTypeParameterRef::External {
+                callable: ExternalCallableId::from_raw(1),
+                ordinal: 0,
+            },
+            reified: false,
+            value: Ty::Int,
+            reified_runtime: Ty::Int,
+            additional_bounds: Vec::new(),
+        }];
+        assert!(matches!(
             facts
                 .dependency_accessor(&operation)
                 .unwrap()
                 .callee()
-                .unwrap_err(),
-            "a dependency property without checked generic substitutions"
-        );
+                .unwrap(),
+            crate::ir::Callee::External { substitutions, .. } if substitutions.len() == 1
+        ));
+        let crate::ir::IrCheckedOperation::ExternalPropertyRead { substitutions, .. } =
+            &mut operation
+        else {
+            unreachable!()
+        };
+        substitutions[0].parameter = crate::fir::FirTypeParameterRef::External {
+            callable: ExternalCallableId::from_raw(2),
+            ordinal: 0,
+        };
+        assert!(facts
+            .dependency_accessor(&operation)
+            .unwrap()
+            .callee()
+            .is_err());
+
+        // A write is authenticated against the selected setter, not the property's getter. The
+        // two accessors can each own ordinal zero, but those are different declaration formals.
+        facts
+            .callables
+            .get_mut(&ExternalCallableId::from_raw(2))
+            .unwrap()
+            .generic_sig = Some(Box::new(GenericSig {
+            formals: vec![crate::types::TyParamName::new("setter-T")],
+            formal_bounds: vec![Vec::new()],
+            receiver: None,
+            params: vec![Ty::Int],
+            ret: Ty::Unit,
+            return_policy: Default::default(),
+        }));
+        let mut operation = crate::ir::IrCheckedOperation::ExternalPropertyWrite {
+            target: ExternalPropertyId::from_raw(0),
+            dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+            receiver: Some(10),
+            arguments: vec![20, 30],
+            parameters: vec![Ty::String, Ty::Int],
+            result: Ty::Unit,
+            substitutions: vec![crate::ir::IrCheckedSubstitution {
+                parameter: crate::fir::FirTypeParameterRef::External {
+                    callable: ExternalCallableId::from_raw(2),
+                    ordinal: 0,
+                },
+                reified: false,
+                value: Ty::String,
+                reified_runtime: Ty::String,
+                additional_bounds: Vec::new(),
+            }],
+            source_receiver: None,
+        };
+        assert!(matches!(
+            facts
+                .dependency_accessor(&operation)
+                .unwrap()
+                .callee()
+                .unwrap(),
+            crate::ir::Callee::External { target, substitutions, .. }
+                if target == ExternalCallableId::from_raw(2) && substitutions.len() == 1
+        ));
+        let crate::ir::IrCheckedOperation::ExternalPropertyWrite { substitutions, .. } =
+            &mut operation
+        else {
+            unreachable!()
+        };
+        substitutions[0].parameter = crate::fir::FirTypeParameterRef::External {
+            callable: ExternalCallableId::from_raw(1),
+            ordinal: 0,
+        };
+        assert!(facts
+            .dependency_accessor(&operation)
+            .unwrap()
+            .callee()
+            .is_err());
+
         facts
             .properties
             .get_mut(&ExternalPropertyId::from_raw(0))
@@ -562,6 +791,7 @@ mod tests {
             arguments: vec![20, 30],
             parameters: vec![Ty::String, Ty::Int],
             result: Ty::Unit,
+            substitutions: Vec::new(),
             source_receiver: None,
         };
         assert!(facts.dependency_accessor(&operation).is_none());
@@ -616,6 +846,7 @@ mod tests {
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
             declares_parameter_defaults: false,
+            composable_parameters: Default::default(),
             annotations: Box::new([]),
         };
         assert!(fact.matches_dependency_body_call(&[Ty::Int], None, true));
@@ -666,20 +897,103 @@ struct SingletonEdge {
     class_contract: Option<crate::libraries::KlibBodyClassContract>,
 }
 
+/// The physical method header of a dependency member, as its provider realized it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DependencyMemberHeader {
+    pub physical_owner: TypeName,
+    pub name: String,
+    pub physical_name: Option<String>,
+    pub descriptor: String,
+}
+
+impl DependencyMemberHeader {
+    pub fn physical_name(&self) -> &str {
+        self.physical_name.as_deref().unwrap_or(&self.name)
+    }
+}
+
 /// The frozen dependency facts of one checked file. It holds a fact for every dependency callable
 /// and property identity the file's IR references, including the accessors of each property.
 #[derive(Debug, Default)]
 pub struct CheckedBackendCallables {
     callables: HashMap<ExternalCallableId, BackendCallableFact>,
+    /// SAM slot headers never grant executable dependency or export obligations.
+    sam_declarations: HashMap<ExternalCallableId, BackendCallableFact>,
+    /// Header-only declaration identities never participate in executable dependency closure.
+    member_declarations: HashMap<ExternalCallableId, KlibDependencyCallable>,
+    /// The method headers of dependency members a target compares by signature only (a member
+    /// slot's declarations): never called, so never an executable dependency or a dispatch.
+    member_headers: HashMap<ExternalCallableId, DependencyMemberHeader>,
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
+    /// The checker-owned immutable snapshot of this file's reached KLIB declarations.
+    klib_dependency_facts: crate::ir::CheckedKlibDependencyFacts,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
     singleton_selections: HashMap<ExternalCallableId, Vec<SingletonEdge>>,
     /// The runtime declarations native plugins selected at the handoff for their generated code,
     /// with the parameters a plugin's transform appended to each.
     plugin_runtime: HashMap<ExternalCallableId, Box<[Ty]>>,
+    char_sequence_protocol: Option<CharSequenceProtocol>,
+    collection_protocol: Option<CollectionProtocol>,
 }
 
 impl CheckedBackendCallables {
+    /// The classifiers declaring the member callables this file selected: the classes whose
+    /// layout a call of one of them dispatches through.
+    pub fn declaring_classifiers(&self) -> impl Iterator<Item = TypeName> + '_ {
+        self.callables
+            .values()
+            .filter_map(|callable| match callable.declaration_owner {
+                Some(SemanticCallableOwner::Classifier(owner)) if callable.is_member_function() => {
+                    Some(owner)
+                }
+                _ => None,
+            })
+    }
+
+    /// The runtime declarations native plugins selected, to reapply their ABI annotations after a
+    /// common lowering rewrites IR and the checked dependency view is rebuilt.
+    pub(crate) fn plugin_runtime_bindings(&self) -> Vec<(ExternalCallableId, Box<[Ty]>)> {
+        self.plugin_runtime
+            .iter()
+            .map(|(&identity, appended)| (identity, appended.clone()))
+            .collect()
+    }
+
+    /// Store the checked graph before completing the source callable facts. Only another checked
+    /// graph is evidence at this stage: freshly frozen callable implementation slots are empty.
+    /// Source-vs-graph consistency is checked when actual selected implementations are recorded.
+    pub(crate) fn record_klib_dependency_facts(
+        &mut self,
+        facts: crate::ir::CheckedKlibDependencyFacts,
+    ) -> Result<(), ExternalCallableId> {
+        for (&identity, implementations) in facts.builtin_implementations() {
+            if self
+                .klib_dependency_facts
+                .builtin_implementations()
+                .get(&identity)
+                .is_some_and(|previous| previous != implementations)
+            {
+                return Err(identity);
+            }
+        }
+        self.klib_dependency_facts = facts;
+        Ok(())
+    }
+
+    pub(crate) fn klib_builtin_implementations(
+        &self,
+    ) -> &HashMap<ExternalCallableId, Box<[BuiltinImplementation]>> {
+        self.klib_dependency_facts.builtin_implementations()
+    }
+
+    pub(crate) fn klib_dependency_facts(&self) -> &crate::ir::CheckedKlibDependencyFacts {
+        &self.klib_dependency_facts
+    }
+
+    pub(crate) fn klib_type_hierarchy(&self) -> Option<&crate::ir::CheckedKlibTypeFacts> {
+        self.klib_dependency_facts.type_hierarchy()
+    }
+
     /// Whether native plugins selected `identity` at the handoff for the code they generate.
     pub fn is_plugin_runtime_callable(&self, identity: ExternalCallableId) -> bool {
         self.plugin_runtime.contains_key(&identity)
@@ -748,6 +1062,127 @@ impl CheckedBackendCallables {
         }
     }
 
+    /// Freeze declarations used to plan inherited slots without making their bodies roots.
+    pub(crate) fn freeze_with_class_declarations(
+        ir: &crate::ir::IrFile,
+        provider: &dyn SymbolSource,
+        classes: &super::class_tables::module_classes::ModuleClasses,
+    ) -> Result<Self, DependencyFactError> {
+        use super::class_tables::module_classes::ModuleMember;
+        use crate::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
+        let mut facts = Self::freeze(ir, provider)?;
+        let identities = classes
+            .iter()
+            .flat_map(|(_, class)| class.members.iter())
+            .filter_map(|member| match member {
+                ModuleMember::Function {
+                    callable: ResolvedFunctionOverrideTarget::External(identity),
+                    ..
+                }
+                | ModuleMember::Property {
+                    property: ResolvedPropertyOverrideTarget::External(identity),
+                    ..
+                } => Some(*identity),
+                _ => None,
+            });
+        facts.freeze_declaration_identities(identities, |identity| {
+            provider
+                .external_callable(identity)
+                .map(|declaration| declaration.dependency_callable)
+                .ok_or(DependencyFactError::UnknownCallable(identity))
+        })?;
+        facts.freeze_member_headers(ir, provider)?;
+        Ok(facts)
+    }
+
+    /// Freeze the header of every dependency member of the file's member slots that the file does
+    /// not otherwise reference. A slot member is declaration evidence only: a target compares its
+    /// method header and never calls it.
+    fn freeze_member_headers(
+        &mut self,
+        ir: &crate::ir::IrFile,
+        provider: &dyn SymbolSource,
+    ) -> Result<(), DependencyFactError> {
+        let identities = ir
+            .function_slot_families
+            .values()
+            .flatten()
+            .flat_map(|family| family.slots.iter().flatten())
+            .filter_map(|function| match function.target {
+                crate::fir::ResolvedFunctionOverrideTarget::External(identity) => Some(identity),
+                crate::fir::ResolvedFunctionOverrideTarget::Module(_) => None,
+            });
+        for identity in identities {
+            if self.callables.contains_key(&identity) || self.member_headers.contains_key(&identity)
+            {
+                continue;
+            }
+            let callable = provider
+                .external_callable(identity)
+                .ok_or(DependencyFactError::UnknownCallable(identity))?
+                .callable;
+            self.member_headers.insert(
+                identity,
+                DependencyMemberHeader {
+                    physical_owner: callable.owner,
+                    name: callable.name,
+                    physical_name: callable.physical_name,
+                    descriptor: callable.descriptor,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// The physical header of a dependency member the file references or compares.
+    pub fn member_header(&self, identity: ExternalCallableId) -> Option<DependencyMemberHeader> {
+        match self.callables.get(&identity) {
+            Some(callable) => Some(DependencyMemberHeader {
+                physical_owner: callable.physical_owner,
+                name: callable.name.clone(),
+                physical_name: callable.physical_name.clone(),
+                descriptor: callable.descriptor.clone(),
+            }),
+            None => self.member_headers.get(&identity).cloned(),
+        }
+    }
+
+    fn freeze_declaration_identities(
+        &mut self,
+        identities: impl IntoIterator<Item = ExternalCallableId>,
+        mut declaration: impl FnMut(
+            ExternalCallableId,
+        )
+            -> Result<Option<KlibDependencyCallable>, DependencyFactError>,
+    ) -> Result<(), DependencyFactError> {
+        for identity in identities {
+            if self.callables.contains_key(&identity)
+                || self.member_declarations.contains_key(&identity)
+            {
+                continue;
+            }
+            if let Some(key) = declaration(identity)? {
+                self.member_declarations.insert(identity, key);
+            }
+        }
+        Ok(())
+    }
+
+    /// An authenticated declaration key, independently of whether its body is emitted.
+    pub fn declaration_identity(
+        &self,
+        identity: ExternalCallableId,
+    ) -> Option<&KlibDependencyCallable> {
+        match self.callables.get(&identity) {
+            Some(callable) => callable.dependency_callable.as_ref(),
+            None => self
+                .sam_declarations
+                .get(&identity)
+                .and_then(|fact| fact.dependency_callable.as_ref())
+                .or_else(|| self.member_declarations.get(&identity)),
+        }
+    }
+
     /// Copy the provider's facts for every dependency identity `ir` references.
     pub fn freeze(
         ir: &crate::ir::IrFile,
@@ -755,49 +1190,16 @@ impl CheckedBackendCallables {
     ) -> Result<Self, DependencyFactError> {
         let referenced = references::referenced_dependencies(ir);
         let mut facts = Self::default();
-        let mut callable = |identity| provider.external_callable(identity);
         for property in referenced.properties {
-            let realization = provider
-                .external_property(property)
-                .ok_or(DependencyFactError::UnknownProperty(property))?;
-            let compile_time_constant = realization
-                .compile_time_constant
-                .as_ref()
-                .map(|constant| {
-                    crate::ir::IrConst::from_library_constant(constant)
-                        .ok_or(DependencyFactError::InvalidPropertyConstant(property))
-                })
-                .transpose()?;
-            let owner = facts
-                .freeze_callable(realization.getter, &mut callable)?
-                .physical_owner;
-            let getter = provider
-                .external_callable(realization.getter)
-                .ok_or(DependencyFactError::UnknownCallable(realization.getter))?
-                .callable;
-            let result = getter
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.ret)
-                .or(getter.declared_ret)
-                .unwrap_or(getter.ret);
-            if let Some(setter) = realization.setter {
-                facts.freeze_callable(setter, &mut callable)?;
-            }
-            facts.properties.insert(
-                property,
-                BackendPropertyFact {
-                    name: realization.name.into_boxed_str(),
-                    getter: realization.getter,
-                    setter: realization.setter,
-                    owner,
-                    result,
-                    declares_value_class_storage: realization.declares_value_class_storage,
-                    compile_time_constant,
-                },
-            );
+            facts.freeze_property(property, provider)?;
         }
-        facts.freeze_callables(referenced.callables, callable)?;
+        let mut callable = |identity| provider.external_callable(identity);
+        facts.freeze_callables(referenced.callables, &mut callable)?;
+        for identity in referenced.sam_declarations {
+            if !facts.callables.contains_key(&identity) {
+                Self::freeze_callable_in(&mut facts.sam_declarations, identity, &mut callable)?;
+            }
+        }
         let mut singleton_dispatches = ir
             .external_singleton_dispatches
             .iter()
@@ -832,6 +1234,104 @@ impl CheckedBackendCallables {
         Ok(facts)
     }
 
+    /// Freeze the dependency property `property` with its accessors.
+    fn freeze_property(
+        &mut self,
+        property: ExternalPropertyId,
+        provider: &dyn SymbolSource,
+    ) -> Result<(), DependencyFactError> {
+        let mut callable = |identity| provider.external_callable(identity);
+        let realization = provider
+            .external_property(property)
+            .ok_or(DependencyFactError::UnknownProperty(property))?;
+        let compile_time_constant = realization
+            .compile_time_constant
+            .as_ref()
+            .map(|constant| {
+                crate::ir::IrConst::from_library_constant(constant)
+                    .ok_or(DependencyFactError::InvalidPropertyConstant(property))
+            })
+            .transpose()?;
+        let owner = self
+            .freeze_callable(realization.getter, &mut callable)?
+            .physical_owner;
+        let getter = provider
+            .external_callable(realization.getter)
+            .ok_or(DependencyFactError::UnknownCallable(realization.getter))?
+            .callable;
+        let result = getter
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.ret)
+            .or(getter.declared_ret)
+            .unwrap_or(getter.ret);
+        if let Some(setter) = realization.setter {
+            self.freeze_callable(setter, &mut callable)?;
+        }
+        self.properties.insert(
+            property,
+            BackendPropertyFact {
+                name: realization.name.into_boxed_str(),
+                getter: realization.getter,
+                setter: realization.setter,
+                owner,
+                result,
+                declares_value_class_storage: realization.declares_value_class_storage,
+                compile_time_constant,
+            },
+        );
+        Ok(())
+    }
+
+    /// Freeze the `CharSequence` members resolution selected for a target whose `StringBuilder`
+    /// reads an appended sequence through them
+    /// ([`crate::backend::Backend::appends_char_sequences_by_index`]); no source call need name
+    /// them.
+    pub(crate) fn freeze_char_sequence_protocol(
+        &mut self,
+        protocol: CharSequenceProtocol,
+        provider: &dyn SymbolSource,
+    ) -> Result<(), DependencyFactError> {
+        self.freeze_property(protocol.length, provider)?;
+        let mut callable = |identity| provider.external_callable(identity);
+        self.freeze_callable(protocol.get, &mut callable)?;
+        self.char_sequence_protocol = Some(protocol);
+        Ok(())
+    }
+
+    /// The `CharSequence` members the handoff froze for a target that appends a sequence through
+    /// them; `None` for every other target.
+    pub fn char_sequence_protocol(&self) -> Option<CharSequenceProtocol> {
+        self.char_sequence_protocol
+    }
+
+    /// Freeze the collection members a target's own list reads another collection through
+    /// ([`crate::backend::Backend::reads_collections_through_interfaces`]); no source call need
+    /// name them.
+    pub(crate) fn freeze_collection_protocol(
+        &mut self,
+        protocol: CollectionProtocol,
+        provider: &dyn SymbolSource,
+    ) -> Result<(), DependencyFactError> {
+        let mut callable = |identity| provider.external_callable(identity);
+        for member in [
+            protocol.iterator,
+            protocol.has_next,
+            protocol.next,
+            protocol.contains,
+        ] {
+            self.freeze_callable(member, &mut callable)?;
+        }
+        self.collection_protocol = Some(protocol);
+        Ok(())
+    }
+
+    /// The collection members the handoff froze for a target whose list reads another collection
+    /// through them; `None` for every other target.
+    pub fn collection_protocol(&self) -> Option<CollectionProtocol> {
+        self.collection_protocol
+    }
+
     /// Copy checker-produced builtin implementation facts for every selected external member.
     /// A missing identity is an incomplete frontend handoff and must fail closed.
     pub fn record_checked_builtin_implementations(
@@ -850,6 +1350,14 @@ impl CheckedBackendCallables {
             let Some(selected) = implementations.get(&identity) else {
                 return Err(identity);
             };
+            if self
+                .klib_dependency_facts
+                .builtin_implementations()
+                .get(&identity)
+                .is_some_and(|graph| graph != selected)
+            {
+                return Err(identity);
+            }
             fact.builtin_implementations = selected.clone();
         }
         Ok(())
@@ -917,7 +1425,17 @@ impl CheckedBackendCallables {
             ExternalCallableId,
         ) -> Option<crate::libraries::ExternalCallableRealization>,
     ) -> Result<&BackendCallableFact, DependencyFactError> {
-        let fact = match self.callables.entry(identity) {
+        Self::freeze_callable_in(&mut self.callables, identity, provider)
+    }
+
+    fn freeze_callable_in<'a>(
+        declarations: &'a mut HashMap<ExternalCallableId, BackendCallableFact>,
+        identity: ExternalCallableId,
+        provider: &mut impl FnMut(
+            ExternalCallableId,
+        ) -> Option<crate::libraries::ExternalCallableRealization>,
+    ) -> Result<&'a BackendCallableFact, DependencyFactError> {
+        let fact = match declarations.entry(identity) {
             Entry::Occupied(fact) => fact.into_mut(),
             Entry::Vacant(slot) => {
                 let realization =
@@ -934,6 +1452,7 @@ impl CheckedBackendCallables {
                 let klib_body_vararg_index = realization.klib_body_vararg_index;
                 let klib_body_parameter_defaults = realization.klib_body_parameter_defaults;
                 let declares_parameter_defaults = realization.declares_parameter_defaults;
+                let composable_parameters = realization.composable_parameters;
                 let callable = realization.callable;
                 let annotations = callable.annotations.into_boxed_slice();
                 slot.insert(BackendCallableFact {
@@ -980,6 +1499,7 @@ impl CheckedBackendCallables {
                     klib_body_vararg_index,
                     klib_body_parameter_defaults,
                     declares_parameter_defaults,
+                    composable_parameters,
                     annotations,
                 })
             }
@@ -993,22 +1513,11 @@ impl CheckedBackendCallables {
         self.callables.get(&identity)
     }
 
-    /// The exact external members referenced by this checked IR unit, in stable identity order.
-    pub(crate) fn external_member_identities(&self) -> Vec<ExternalCallableId> {
-        let mut identities = self
-            .callables
-            .iter()
-            .filter_map(|(&identity, callable)| {
-                (callable.kind == ExternalCallableKind::Member
-                    && matches!(
-                        callable.declaration_owner,
-                        Some(SemanticCallableOwner::Classifier(_))
-                    ))
-                .then_some(identity)
-            })
-            .collect::<Vec<_>>();
-        identities.sort_unstable_by_key(|identity| identity.raw());
-        identities
+    /// A SAM declaration's frozen header, without selecting an executable dependency body.
+    pub fn sam_declaration(&self, identity: ExternalCallableId) -> Option<&BackendCallableFact> {
+        self.callables
+            .get(&identity)
+            .or_else(|| self.sam_declarations.get(&identity))
     }
 
     /// The fact for a dependency property identity this file's IR holds. `None` means the identity

@@ -2,7 +2,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import Base from "../layouts/Base.astro";
-import { gist, readFigure } from "../lib/figures";
 import { collectMetrics } from "../../scripts/metrics.mjs";
 
 const repo = "https://github.com/qnox/krusty";
@@ -33,33 +32,49 @@ const kotlinVersions = readFileSync(resolve(process.cwd(), "../kotlin-versions")
   .filter((version) => version && !version.startsWith("#"));
 const newestKotlin = kotlinVersions[kotlinVersions.length - 1];
 
+// One Kotlin version's codegen/box reports, as collectMetrics returns them.
+interface BoxVersion {
+  jvm: { passed: number; applicable: number } | null;
+  bytes: { matched: number; total: number } | null;
+  native: { passed: number; applicable: number } | null;
+}
+
 const figures = [
   {
     id: "conformance",
-    file: "krusty-conformance.json",
+    report: (v: BoxVersion) => v.jvm && { count: v.jvm.passed, of: v.jvm.applicable },
     label: "JVM conformance",
     unit: "cases pass",
     explain: "Cases whose box() returns OK on krusty's bytecode. CI fails when any applicable JVM case stops passing.",
   },
   {
     id: "bytes",
-    file: "krusty-jvm-byte-equality.json",
+    report: (v: BoxVersion) => v.bytes && { count: v.bytes.matched, of: v.bytes.total },
     label: "JVM byte equality",
     unit: "class-file bytes match",
     explain: "A progress gauge, not a share of identical classes. Each class counts only its bytes before the first difference from kotlinc's, over the longer of the two files; a failing case counts zero. 100% means every class is identical.",
   },
   {
     id: "native",
-    file: "krusty-native-conformance.json",
+    report: (v: BoxVersion) => v.native && { count: v.native.passed, of: v.native.applicable },
     label: "Native conformance",
     unit: "cases pass",
     experimental: true,
     explain: "Native-applicable cases that compile against the Kotlin/Native stdlib, link, run and return OK.",
   },
 ];
-const values = await Promise.all(figures.map((figure) => readFigure(figure.file)));
+// The codegen/box figures for the newest Kotlin version CI reported, from the same reports the
+// deploy packages as the README badge endpoints (krustythecompiler.dev/badges/).
+const metrics = collectMetrics(process.env.KRUSTY_METRICS_INPUT);
+const newestBox = metrics.box?.versions[0] ?? null;
+const measuredKotlin = newestBox?.version ?? newestKotlin;
+const tenths = (count: number, of: number) => (of === 0 ? 0 : Math.floor((count * 1000) / of) / 10);
+const values = figures.map((figure) => {
+  const report = newestBox && figure.report(newestBox);
+  return report ? { pct: tenths(report.count, report.of).toFixed(1), ...report } : null;
+});
 // The headline real-project figure, from the same nightly data as the metrics page.
-const corpusTotal = collectMetrics(process.env.KRUSTY_METRICS_INPUT).corpus?.total;
+const corpusTotal = metrics.corpus?.total;
 const identicalTenths = corpusTotal && corpusTotal.classes ? Math.floor((corpusTotal.identical * 1000) / corpusTotal.classes) / 10 : null;
 const fmt = (n: number) => n.toLocaleString("en-US");
 
@@ -85,7 +100,7 @@ const buildSystems: { name: string; level: Level; html: string }[] = [
   {
     name: "Kotlin Build Tools API",
     level: "partial",
-    html: `<code>krusty-build-tools-&lt;version&gt;-kotlin-&lt;kotlin&gt;.jar</code> in each release stands in for <code>kotlin-build-tools-impl</code> in a build tool that loads the API from a classpath. JVM toolchain and in-process execution only. See <a href="${blob("tools/krusty-build-tools/README.md")}">tools/krusty-build-tools</a>.`,
+    html: `<code>krusty-build-tools-&lt;version&gt;-kotlin-&lt;kotlin&gt;.jar</code> in each release stands in for <code>kotlin-build-tools-impl</code> in a build tool that loads the API from a classpath. JVM toolchain only, under the in-process or daemon execution policy. See <a href="${blob("tools/krusty-build-tools/README.md")}">tools/krusty-build-tools</a>.`,
   },
   {
     name: "Bazel",
@@ -107,7 +122,7 @@ const plugins: { name: string; level: Level; html: string }[] = [
   {
     name: "KSP (KSP2)",
     level: "partial",
-    html: "Through a build system. Under Gradle, KSP's own <code>kspKotlin</code> task runs the processors and krusty compiles what they generate (Gradle 8 or newer). Under the Kotlin Toolchain, only generated classes and resources are picked up. The plain command line rejects KSP.",
+    html: "Through a build system. Under Gradle, KSP's own <code>kspKotlin</code> task runs the processors and krusty compiles what they generate (Gradle 8 or newer). Under the Kotlin Toolchain, krusty compiles the generated Kotlin sources and picks up generated classes and resources; generated Java sources are not compiled yet. The plain command line rejects KSP.",
   },
   {
     name: "kapt",
@@ -159,7 +174,7 @@ const plugins: { name: string; level: Level; html: string }[] = [
   <section class="band band-alt" id="measured" aria-labelledby="measured-title">
     <div class="wrap">
       <div class="section-head">
-        <p class="eyebrow">Kotlin {newestKotlin} · as shown on the README badges</p>
+        <p class="eyebrow">Kotlin {measuredKotlin} · as shown on the README badges</p>
         <h2 id="measured-title">Measured against kotlinc's own tests</h2>
         <p>
           Master builds compile Kotlin's <code>codegen/box</code> test suite with krusty and with
@@ -171,14 +186,14 @@ const plugins: { name: string; level: Level; html: string }[] = [
         {figures.map((figure, i) => {
           const value = values[i];
           return (
-            <article class="tile figure" data-file={figure.file} data-unit={figure.unit} data-missing={value ? undefined : ""}>
+            <article class="tile">
               <h3 class="tile-label">{figure.label}{figure.experimental && <span class="tag">Experimental</span>}</h3>
-              <p class="tile-value" data-part="value">{value ? `${value.pct}%` : "–"}</p>
+              <p class="tile-value">{value ? `${value.pct}%` : "–"}</p>
               <div class="meter" role="img" aria-label={value ? `${value.pct}%` : "not available"} style={`--value: ${value ? value.pct : 0}%`}>
                 <span />
               </div>
-              <p class="tile-meta" data-part="meta">
-                {value ? `${fmt(value.count)} of ${fmt(value.of)} ${figure.unit}` : "Loading the latest figure"}
+              <p class="tile-meta">
+                {value ? `${fmt(value.count)} of ${fmt(value.of)} ${figure.unit}` : "Not measured"}
               </p>
               <p class="figure-explain">{figure.explain}</p>
             </article>
@@ -379,31 +394,6 @@ plugins {'{'}
     </div>
   </section>
 </Base>
-
-<script define:vars={{ gist }}>
-  // Re-read the figures from the source the README badges read, so a page built days ago shows
-  // what the badges show. On failure the build-time figures stay; a tile the build could not fill
-  // either says so instead of loading forever.
-  const pattern = /^(\d+(?:\.\d+)?)% \((\d+)\/(\d+)(?: bytes)?\)$/;
-  for (const tile of document.querySelectorAll(".figure")) {
-    fetch(gist + tile.dataset.file, { cache: "no-cache" })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((body) => {
-        const match = body && typeof body.message === "string" ? pattern.exec(body.message) : null;
-        if (!match) throw new Error("no figure");
-        const [, pct, count, of] = match;
-        const fmt = (n) => Number(n).toLocaleString("en-US");
-        tile.querySelector('[data-part="value"]').textContent = `${pct}%`;
-        tile.querySelector('[data-part="meta"]').textContent = `${fmt(count)} of ${fmt(of)} ${tile.dataset.unit}`;
-        const meter = tile.querySelector(".meter");
-        meter.style.setProperty("--value", `${pct}%`);
-        meter.setAttribute("aria-label", `${pct}%`);
-      })
-      .catch(() => {
-        if (tile.hasAttribute("data-missing")) tile.querySelector('[data-part="meta"]').textContent = "Figure unavailable";
-      });
-  }
-</script>
 
 <style>
   .hero {

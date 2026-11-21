@@ -34,6 +34,9 @@ pub struct GradleBuildAction {
     pub tasks: Vec<String>,
     pub arguments: Vec<String>,
     pub timeout: Duration,
+    /// JVM the project daemon uses to compile the injected init script.
+    /// `None` keeps the client's JVM.
+    pub java_home: Option<PathBuf>,
 }
 
 /// One coordinate for `RepositorySystem`.
@@ -54,10 +57,19 @@ pub struct MavenExclusion {
     pub artifact: String,
 }
 
+/// A remote repository from the project's `jarRepositories.xml`. IntelliJ's embedder
+/// resolves against these, not only Maven Central.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MavenRepository {
+    pub id: String,
+    pub url: String,
+}
+
 /// Every artifact of one resolve. The client sends this as a single request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MavenBatch {
     pub artifacts: Vec<MavenArtifactRequest>,
+    pub repositories: Vec<MavenRepository>,
 }
 
 #[derive(Serialize)]
@@ -67,12 +79,15 @@ struct GradleWire<'a> {
     project_dir: &'a Path,
     tasks: &'a [String],
     arguments: &'a [String],
+    #[serde(rename = "javaHome", skip_serializing_if = "Option::is_none")]
+    java_home: Option<&'a Path>,
 }
 
 #[derive(Serialize)]
 struct MavenWire<'a> {
     kind: &'static str,
     artifacts: &'a [MavenArtifactRequest],
+    repositories: &'a [MavenRepository],
 }
 
 #[derive(serde::Deserialize)]
@@ -82,18 +97,23 @@ struct ToolResponse {
     stderr: String,
 }
 
+pub(super) fn gradle_request(action: &GradleBuildAction) -> io::Result<String> {
+    serde_json::to_string(&GradleWire {
+        kind: "gradle",
+        project_dir: &action.project_dir,
+        tasks: &action.tasks,
+        arguments: &action.arguments,
+        java_home: action.java_home.as_deref(),
+    })
+    .map_err(io::Error::other)
+}
+
 pub fn run_gradle(action: &GradleBuildAction) -> io::Result<CommandOutput> {
     debug_assert_eq!(action.distribution, Distribution::BuildDistribution);
     if let Some(response) = test_gradle(action) {
         return response;
     }
-    let line = serde_json::to_string(&GradleWire {
-        kind: "gradle",
-        project_dir: &action.project_dir,
-        tasks: &action.tasks,
-        arguments: &action.arguments,
-    })
-    .map_err(io::Error::other)?;
+    let line = gradle_request(action)?;
     let response = transact(ClientKind::Gradle, &line, action.timeout)?;
     Ok(CommandOutput {
         status: response.status,
@@ -109,6 +129,7 @@ pub fn resolve_maven(batch: &MavenBatch) -> io::Result<()> {
     let line = serde_json::to_string(&MavenWire {
         kind: "maven",
         artifacts: &batch.artifacts,
+        repositories: &batch.repositories,
     })
     .map_err(io::Error::other)?;
     // A missing artifact is recorded by the caller from the files on disk. The resolver still
@@ -253,6 +274,13 @@ fn slot(kind: ClientKind) -> &'static Mutex<Option<LiveClient>> {
     }
 }
 
+/// The one stdout line the tooling client is allowed to emit. Maven prints
+/// `[WARNING] The POM for ... is invalid` on stdout while a resolve is still running;
+/// that line does not deserialize, and treating it as the response stops the batch.
+fn is_tool_response(line: &str) -> bool {
+    serde_json::from_str::<ToolResponse>(line).is_ok()
+}
+
 fn transact(kind: ClientKind, line: &str, timeout: Duration) -> io::Result<ToolResponse> {
     let mutex = slot(kind);
     let mut slot = mutex
@@ -379,6 +407,11 @@ fn spawn(kind: ClientKind) -> io::Result<LiveClient> {
                             line.pop();
                         }
                     }
+                    // A resolver warning is not the response. Waiting for the JSON line lets the
+                    // rest of the batch finish; taking the warning ends the request.
+                    if !is_tool_response(&line) {
+                        continue;
+                    }
                     if sender.send(Ok(line)).is_err() {
                         break;
                     }
@@ -500,26 +533,71 @@ fn is_tooling_api_jar(name: &str) -> bool {
 }
 
 fn maven_classpath_jars() -> io::Result<Vec<PathBuf>> {
-    jars_in(&maven_lib()?)
+    let lib = maven_lib()?;
+    let mut jars = jars_in(&lib)?;
+    // The embedder container loads plexus-classworlds from Maven's boot directory.
+    if let Some(home) = lib.parent() {
+        let boot = home.join("boot");
+        if boot.is_dir() {
+            jars.extend(jars_in(&boot)?);
+        }
+    }
+    Ok(jars)
 }
 
 fn maven_lib() -> io::Result<PathBuf> {
     for variable in ["MAVEN_HOME", "M2_HOME"] {
         if let Ok(home) = std::env::var(variable) {
-            let lib = PathBuf::from(home).join("lib");
-            if lib.join("maven-resolver-api.jar").is_file() {
+            if let Some(lib) = embedder_lib(Path::new(&home)) {
                 return Ok(lib);
             }
         }
     }
-    let system = PathBuf::from("/usr/share/maven/lib");
-    if system.join("maven-resolver-api.jar").is_file() {
-        return Ok(system);
+    if let Some(lib) = embedder_lib(Path::new("/usr/share/maven")) {
+        return Ok(lib);
+    }
+    // The Maven the plugin jobs install is on PATH. Its lib jars are versioned
+    // (`maven-resolver-api-1.9.24.jar`), unlike the unversioned names in a distro package.
+    if let Some(path) = std::env::var_os("PATH") {
+        if let Some(lib) = embedder_lib_on_path(&path) {
+            return Ok(lib);
+        }
     }
     Err(io::Error::other("Maven embedder jars are not installed"))
 }
 
-fn gradle_user_home() -> PathBuf {
+fn embedder_lib(home: &Path) -> Option<PathBuf> {
+    let lib = home.join("lib");
+    has_resolver_api(&lib).then_some(lib)
+}
+
+fn embedder_lib_on_path(path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path).find_map(|dir| {
+        if !dir.join("mvn").is_file() {
+            return None;
+        }
+        dir.parent().and_then(embedder_lib)
+    })
+}
+
+fn has_resolver_api(lib: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(lib) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.path().is_file() && is_resolver_api_name(&entry.file_name()))
+}
+
+fn is_resolver_api_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name == "maven-resolver-api.jar"
+        || (name.starts_with("maven-resolver-api-") && name.ends_with(".jar"))
+}
+
+pub(super) fn gradle_user_home() -> PathBuf {
     if let Ok(home) = std::env::var("GRADLE_USER_HOME") {
         return PathBuf::from(home);
     }
@@ -590,6 +668,7 @@ fn log_tail(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::testing::TempTree;
 
     #[test]
     fn the_gradle_client_opens_a_tooling_connection() {
@@ -606,14 +685,111 @@ mod tests {
 
     #[test]
     fn the_maven_client_calls_the_resolver() {
-        assert!(MAVEN_CLIENT.contains("repositorySystem.resolveArtifact("));
+        assert!(MAVEN_CLIENT.contains("system.resolveArtifact("));
         assert!(MAVEN_CLIENT.contains("new ArtifactRequest("));
-        assert!(MAVEN_CLIENT.contains("repositorySystem.resolveDependencies("));
+        assert!(MAVEN_CLIENT.contains("system.resolveDependencies("));
         assert!(MAVEN_CLIENT.contains("new DependencyRequest("));
         assert!(MAVEN_CLIENT.contains("Maven3XServerEmbedder.resolveArtifacts"));
+        assert!(MAVEN_CLIENT.contains("DefaultRepositorySystemSessionFactory"));
+        assert!(MAVEN_CLIENT.contains("newRepositorySession"));
+        assert!(MAVEN_CLIENT.contains("populateFromSettings"));
+        assert!(MAVEN_CLIENT.contains("RepositoryUtils.toRepos"));
+        assert!(!MAVEN_CLIENT.contains("MavenRepositorySystemUtils.newSession"));
+        assert!(!MAVEN_CLIENT.contains("DefaultMirrorSelector"));
         assert!(!MAVEN_CLIENT.contains("ProcessBuilder"));
         assert!(!MAVEN_CLIENT.contains("mvn"));
         assert!(!MAVEN_CLIENT.contains("dependency:resolve"));
+        assert!(MAVEN_CLIENT.contains("Protocol.capture()"));
+        assert!(GRADLE_CLIENT.contains("Protocol.capture()"));
+    }
+
+    #[test]
+    fn a_maven_pom_warning_is_not_the_protocol_response() {
+        let warning = "[WARNING] The POM for com.hankcs:aho-corasick-double-array-trie:jar:1.2.3 is invalid, transitive dependencies (if any) will not be available, enable debug logging for more details";
+        assert!(!is_tool_response(warning));
+        assert!(is_tool_response(
+            r#"{"status":1,"stdout":"","stderr":"missing"}"#
+        ));
+    }
+
+    #[test]
+    fn an_official_distribution_on_path_is_the_embedder() {
+        let tree = TempTree::new("maven-official-home");
+        let home = tree.directory("apache-maven");
+        let lib = tree.directory("apache-maven/lib");
+        let bin = tree.directory("apache-maven/bin");
+        assert!(embedder_lib(&home).is_none());
+        tree.write("apache-maven/lib/maven-core.jar", "");
+        assert!(embedder_lib(&home).is_none());
+        tree.write("apache-maven/bin/mvn", "");
+        assert!(embedder_lib_on_path(bin.as_os_str()).is_none());
+        tree.write("apache-maven/lib/maven-resolver-api-1.9.24.jar", "");
+        assert_eq!(embedder_lib(&home).as_deref(), Some(lib.as_path()));
+        assert_eq!(
+            embedder_lib_on_path(bin.as_os_str()).as_deref(),
+            Some(lib.as_path())
+        );
+
+        let packaged = tree.directory("share/maven");
+        tree.write("share/maven/lib/maven-resolver-api.jar", "");
+        assert_eq!(
+            embedder_lib(&packaged).as_deref(),
+            Some(packaged.join("lib").as_path())
+        );
+    }
+
+    #[test]
+    fn project_repositories_are_normalized_through_the_session() {
+        let jars = maven_classpath_jars().expect("Maven embedder jars");
+        let directory =
+            std::env::temp_dir().join(format!("krusty-maven-normalize-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let client = directory.join("MavenResolverClient.java");
+        let protocol = directory.join("Protocol.java");
+        let test = directory.join("ProjectRepositoryNormalizationTest.java");
+        std::fs::write(&client, MAVEN_CLIENT).unwrap();
+        std::fs::write(&protocol, PROTOCOL).unwrap();
+        std::fs::write(
+            &test,
+            include_str!("../../java/krusty/tooling/ProjectRepositoryNormalizationTest.java"),
+        )
+        .unwrap();
+        let compile_path = std::env::join_paths(&jars).unwrap();
+        let javac = std::process::Command::new(java_bin("javac"))
+            .arg("-encoding")
+            .arg("UTF-8")
+            .arg("-proc:none")
+            .arg("-cp")
+            .arg(&compile_path)
+            .arg("-d")
+            .arg(&directory)
+            .arg(&protocol)
+            .arg(&client)
+            .arg(&test)
+            .output()
+            .expect("javac");
+        assert!(
+            javac.status.success(),
+            "javac: {}",
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let mut runtime_jars = vec![directory.clone()];
+        runtime_jars.extend(jars);
+        let runtime = std::env::join_paths(&runtime_jars).unwrap();
+        let java = std::process::Command::new(java_bin("java"))
+            .arg("-cp")
+            .arg(&runtime)
+            .arg("krusty.tooling.ProjectRepositoryNormalizationTest")
+            .output()
+            .expect("java");
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            java.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
     }
 
     #[test]

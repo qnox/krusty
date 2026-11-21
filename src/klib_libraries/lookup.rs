@@ -9,7 +9,6 @@ use super::classifier_records::{associated_callables, classifier_record};
 use super::declaration_signatures::{SignedFunction, SignedProperty};
 use super::external_identities::ExternalIdentities;
 use super::inventory::PackageInventory;
-use super::language_function_classifiers::function_classifier_record;
 use crate::libraries::{
     declared_function, declared_property, function_classifiers, CallablePlacement, Callables,
     ClassifierDeclaration, ExternalCallableKind, FnKind, FunctionInfo, FunctionSet,
@@ -73,7 +72,7 @@ pub(super) fn declared_symbols(
                 .map(std::sync::Arc::new)
                 .or_else(|| {
                     function_classifiers::classifier(alias.target)
-                        .map(|function| function_classifier_record(identities, function))
+                        .map(|function| language_function_record(identities, function))
                 });
             (
                 Some(alias.target),
@@ -91,7 +90,7 @@ pub(super) fn declared_symbols(
         (None, None) => match language_function_classifier(namespace, name) {
             Some(function) => (
                 Some(function.identity()),
-                Some(function_classifier_record(identities, function)),
+                Some(language_function_record(identities, function)),
                 Some(ClassifierDeclaration::Ordinary(function.identity())),
             ),
             None => (None, None, None),
@@ -139,6 +138,30 @@ pub(super) fn declared_symbols(
         ),
         importable_declaration: false,
     }
+}
+
+/// The synthetic classifier record is the language's declaration source for its member `invoke`.
+/// Publish the opaque callable identity on that same record so hierarchy lookup and override
+/// planning observe it as the classifier's instance member.
+fn language_function_record(
+    identities: &ExternalIdentities,
+    function: function_classifiers::FunctionClassifier,
+) -> std::sync::Arc<crate::libraries::LibraryType> {
+    let mut declaration = (*function_classifiers::synthetic(function)).clone();
+    if !function.is_reflective() {
+        if let Some(callables) = declaration.declared_callables.get_mut("invoke") {
+            let (mut functions, properties) = std::mem::take(callables).into_parts();
+            for invocation in &mut functions.overloads {
+                if invocation.callable.semantic_role
+                    == Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
+                {
+                    identities.assign_language_invoke(function.identity(), invocation);
+                }
+            }
+            *callables = crate::libraries::Callables::from_parts(functions, properties);
+        }
+    }
+    std::sync::Arc::new(declaration)
 }
 
 /// The shape a selected function or accessor at `placement` is realized as.
@@ -236,6 +259,11 @@ pub(super) fn published_property(
     }
     if let CallablePlacement::Member { owner, .. } = placement {
         builtin_realizations::realize_throwable_property(
+            owner,
+            signed.compiler_builtin_owner,
+            &mut property,
+        );
+        builtin_realizations::realize_result_failure_property(
             owner,
             signed.compiler_builtin_owner,
             &mut property,

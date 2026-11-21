@@ -114,6 +114,7 @@ fn official_serialized_closure_frames_keep_raw_and_prepared_ownership() {
         assert_frames(raw.ir(), capturer);
         if name == "inlineMake" {
             let mut prepared = IrFile::default();
+            let hierarchy = checked_template_facts(&libraries, &selected);
             lower_inline_template(
                 &mut prepared,
                 &selected,
@@ -122,6 +123,7 @@ fn official_serialized_closure_frames_keep_raw_and_prepared_ownership() {
                     declarations: libraries.declaration_bodies(),
                     references: libraries.reference_bindings(),
                     source: &libraries,
+                    dependency_facts: &hierarchy,
                 },
             )
             .unwrap()
@@ -130,8 +132,9 @@ fn official_serialized_closure_frames_keep_raw_and_prepared_ownership() {
             assert_frames(&prepared, capturer);
         }
     }
-    // This is valid producer IR with a nominal SAM result and Comparator.compare override.
-    // The first closure slice must decline it, not diagnose an internally inconsistent FunctionN.
+    // This is valid producer IR with a nominal SAM result and Comparator.compare override: a
+    // converted lambda. Without the checker's frozen SAM declaration it declines for want of
+    // that declaration, not as an internally inconsistent FunctionN.
     let selected = producer_function(&libraries, "unsupportedComparator");
     let callable = selected.klib_body_callable().unwrap();
     let callees = KlibCalleeFacts::new([callable]);
@@ -143,10 +146,12 @@ fn official_serialized_closure_frames_keep_raw_and_prepared_ownership() {
             &callees,
             libraries.intrinsic_facts(),
         )
-        .expect_err("SAM references remain a separate capability");
+        .expect_err("a converted lambda needs its checked SAM declaration");
     assert_eq!(
         decline.reason(),
-        &KlibBodyDeclineReason::UnsupportedOperation("a closure of a non-function type")
+        &KlibBodyDeclineReason::UnsupportedOperation(
+            "a SAM conversion without a checked declaration"
+        )
     );
     assert!(!decline.is_internal_inconsistency());
     super::demo_package::assert_unit_is_empty(&raw);

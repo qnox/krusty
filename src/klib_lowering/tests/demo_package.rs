@@ -85,6 +85,14 @@ pub(super) enum T {
     S,
     /// `Array<P>` of [`T::PBesideS`].
     ArrayPBesideS,
+    /// `() -> Int`, serialized as `kotlin.Function0<Int>`.
+    Function0Int,
+    /// `(CharSequence) -> Unit`, serialized as `kotlin.Function1<CharSequence, Unit>`.
+    Function1CharSequenceUnit,
+    /// `(Any) -> Unit`, serialized as `kotlin.Function1<Any, Unit>`.
+    Function1AnyUnit,
+    /// `CharSequence?`.
+    NullableCharSequence,
 }
 
 /// A generic `demo` function's type parameter: its spelling, metadata identity, serialized
@@ -124,7 +132,9 @@ impl T {
             | T::ArrayOutInt
             | T::ArrayPBoundingR
             | T::ArrayPBesideS => "Array",
-            T::CharSequence => "CharSequence",
+            T::CharSequence | T::NullableCharSequence => "CharSequence",
+            T::Function0Int => "Function0",
+            T::Function1CharSequenceUnit | T::Function1AnyUnit => "Function1",
             T::P | T::Q | T::PBoundingR | T::R | T::PBesideS | T::S => {
                 unreachable!("a type parameter is not a class")
             }
@@ -140,19 +150,22 @@ impl T {
         }
     }
 
-    /// The type argument of a generic class type.
-    fn argument(self) -> Option<T> {
+    /// The type arguments of a generic class type.
+    fn arguments(self) -> &'static [T] {
         match self {
-            T::ListString => Some(T::String),
-            T::ListNullableAny => Some(T::NullableAny),
-            T::ArrayP => Some(T::P),
-            T::ArrayOutString => Some(T::String),
-            T::ArrayOutNullableAny => Some(T::NullableAny),
-            T::ArrayQ => Some(T::Q),
-            T::ArrayOutInt => Some(T::Int),
-            T::ArrayPBoundingR => Some(T::PBoundingR),
-            T::ArrayPBesideS => Some(T::PBesideS),
-            _ => None,
+            T::ListString => &[T::String],
+            T::ListNullableAny => &[T::NullableAny],
+            T::ArrayP => &[T::P],
+            T::ArrayOutString => &[T::String],
+            T::ArrayOutNullableAny => &[T::NullableAny],
+            T::ArrayQ => &[T::Q],
+            T::ArrayOutInt => &[T::Int],
+            T::ArrayPBoundingR => &[T::PBoundingR],
+            T::ArrayPBesideS => &[T::PBesideS],
+            T::Function0Int => &[T::Int],
+            T::Function1CharSequenceUnit => &[T::CharSequence, T::Unit],
+            T::Function1AnyUnit => &[T::Any, T::Unit],
+            _ => &[],
         }
     }
 
@@ -215,8 +228,11 @@ impl T {
 
     /// The type parameter this type names, itself or as its type argument.
     fn mentioned_formal(self) -> Option<Formal> {
-        self.formal()
-            .or_else(|| self.argument().and_then(T::mentioned_formal))
+        self.formal().or_else(|| {
+            self.arguments()
+                .iter()
+                .find_map(|argument| argument.mentioned_formal())
+        })
     }
 
     pub(super) fn nullable(self) -> bool {
@@ -227,6 +243,7 @@ impl T {
                 | T::NullableInt
                 | T::NullableString
                 | T::NullableNothing
+                | T::NullableCharSequence
         )
     }
 
@@ -241,12 +258,12 @@ impl T {
         KotlinType::Class {
             internal: format!("{}/{}", self.package(), self.class()),
             args: self
-                .argument()
+                .arguments()
+                .iter()
                 .map(|argument| match self.variance() {
                     KlibIrVariance::Out => KotlinType::OutProjection(Box::new(argument.kotlin())),
                     _ => argument.kotlin(),
                 })
-                .into_iter()
                 .collect(),
             nullable: self.nullable(),
             shape: KotlinFunctionTypeShape::default(),
@@ -499,12 +516,12 @@ impl Body {
             return id;
         }
         let arguments = ty
-            .argument()
-            .map(|argument| KlibIrTypeArgument::Type {
+            .arguments()
+            .iter()
+            .map(|&argument| KlibIrTypeArgument::Type {
                 variance: ty.variance(),
                 ty: self.ty(argument),
             })
-            .into_iter()
             .collect();
         let id = self.arena.push_type(ty.klib_applied(arguments));
         self.types.push((ty, id));
@@ -899,6 +916,18 @@ pub(super) fn demo(
     demo_in_module("demo", shapes, build)
 }
 
+/// [`demo`], declaring the functions `inline` names `inline`.
+pub(super) fn demo_inlining(
+    shapes: &[Shape],
+    inline: &[&str],
+    build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
+) -> Demo {
+    let (facts, trees) = demo_module("demo", shapes, Vec::new(), |_| true, inline, build);
+    let bodies = KlibDeclarationBodies::from_libraries(vec![("demo".to_owned(), trees)])
+        .expect("one library");
+    Demo { facts, bodies }
+}
+
 /// [`demo`], with an exact provider/archive module identity chosen by the test.
 pub(super) fn demo_in_module(
     module: &str,
@@ -927,7 +956,7 @@ pub(super) fn module_trees(
     HashMap<&'static str, BackendCallableFact>,
     KlibIrModuleTrees,
 ) {
-    demo_module(module, shapes, extra, |_| true, build)
+    demo_module(module, shapes, extra, |_| true, &[], build)
 }
 
 fn demo_with_module(
@@ -936,7 +965,7 @@ fn demo_with_module(
     extra: Vec<KlibIrDeclarationTree>,
     build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
 ) -> Demo {
-    let (facts, trees) = demo_module(module, shapes, extra, |_| true, build);
+    let (facts, trees) = demo_module(module, shapes, extra, |_| true, &[], build);
     let bodies = KlibDeclarationBodies::from_libraries(vec![(module.to_owned(), trees)])
         .expect("one library");
     Demo { facts, bodies }
@@ -958,6 +987,7 @@ pub(super) fn selected_demo_module(
         shapes,
         Vec::new(),
         |name| declarations.contains(&name),
+        &[],
         build,
     )
 }
@@ -967,6 +997,7 @@ fn demo_module(
     shapes: &[Shape],
     extra: Vec<KlibIrDeclarationTree>,
     serialize: impl Fn(&str) -> bool,
+    inline: &[&str],
     build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
 ) -> (
     HashMap<&'static str, BackendCallableFact>,
@@ -977,7 +1008,13 @@ fn demo_module(
         vec![(
             vec!["demo".to_owned()],
             KotlinPackage {
-                functions: shapes.iter().copied().map(declaration).collect(),
+                functions: shapes
+                    .iter()
+                    .map(|&shape| KotlinFunction {
+                        is_inline: inline.contains(&shape.0),
+                        ..declaration(shape)
+                    })
+                    .collect(),
                 ..KotlinPackage::default()
             },
         )],
@@ -1065,8 +1102,16 @@ fn demo_module(
                 })
                 .collect();
             let mut arena = body.arena;
+            let flags = if inline.contains(&name) {
+                crate::metadata::function_flags::IS_INLINE
+            } else {
+                0
+            };
             let function = arena.push_function(KlibIrFunction {
-                base: base(function),
+                base: crate::metadata::klib_ir::tree::KlibIrDeclarationBase {
+                    flags,
+                    ..base(function)
+                },
                 name: name.to_owned(),
                 constructor: false,
                 type_parameters,

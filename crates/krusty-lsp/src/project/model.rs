@@ -90,7 +90,7 @@ impl ModuleOutput {
         }
     }
 
-    fn classpath_entry(&self) -> Option<&Path> {
+    pub(crate) fn classpath_entry(&self) -> Option<&Path> {
         match self {
             Self::Classes(path) => Some(path),
             Self::Location(_) => None,
@@ -111,6 +111,9 @@ pub struct Module {
     pub depends_on: Vec<ModuleId>,
     /// BSP `associates`: outputs whose `internal` declarations this module may see.
     pub friend_paths: Vec<PathBuf>,
+    /// Jar task archive IntelliJ substitutes for this module's class directories.
+    /// `build/libs` for a Gradle or Kotlin project; absent for every other provider.
+    pub archive: Option<PathBuf>,
     pub jvm_target: Option<String>,
     pub kotlinc_args: Vec<String>,
 }
@@ -519,18 +522,19 @@ impl ProjectModel {
             seen.insert(owned.clone());
             entries.push(owned);
         };
-        for entry in &module.classpath {
-            push(entry);
+        for entry in super::intellij_classpath::realize_direct(&module.classpath, &self.modules) {
+            push(&entry);
         }
         for entry in &module.friend_paths {
-            push(entry);
+            push(&super::intellij_classpath::realize_friend(
+                entry,
+                &self.modules,
+            ));
         }
         for dependency in &module.depends_on {
             if let Some(dependency) = self.module(dependency) {
-                for output in &dependency.outputs {
-                    if let Some(entry) = output.classpath_entry() {
-                        push(entry);
-                    }
+                for entry in super::intellij_classpath::dependency_classpath_entries(dependency) {
+                    push(&entry);
                 }
             }
         }

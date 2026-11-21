@@ -41,12 +41,58 @@ pub(super) struct ExternalIdentities {
     /// Parallel to `realizations`: the declaring KLIB is a friend of this compilation.
     internal_friends: RefCell<Vec<bool>>,
     by_signature: RefCell<HashMap<(Option<String>, KlibDeclarationSignature), ExternalCallableId>>,
+    /// Opaque identities for compiler-owned language declarations that have no serialized KLIB
+    /// declaration, keyed by the exact language classifier which owns them.
+    language_invokes: RefCell<HashMap<TypeName, ExternalCallableId>>,
     properties: RefCell<Vec<ExternalPropertyRealization>>,
     properties_by_signature:
         RefCell<HashMap<(Option<String>, KlibPublicIdSignature), ExternalPropertyId>>,
 }
 
 impl ExternalIdentities {
+    /// Publish the synthetic `invoke` declaration of an exact language-owned `FunctionN` or
+    /// `SuspendFunctionN` classifier. These declarations have an FIR identity for override edges,
+    /// but no KLIB signature or dependency body.
+    pub(super) fn assign_language_invoke(&self, owner: TypeName, function: &mut FunctionInfo) {
+        assert_eq!(function.callable.name, "invoke");
+        assert_eq!(
+            function.callable.semantic_role,
+            Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
+        );
+        function.callable.declaration_owner = Some(SemanticCallableOwner::Classifier(owner));
+        if let Some(identity) = self.language_invokes.borrow().get(&owner).copied() {
+            function.callable.external_identity = Some(identity);
+            return;
+        }
+
+        let mut realizations = self.realizations.borrow_mut();
+        let identity = ExternalCallableId::from_raw(
+            u32::try_from(realizations.len())
+                .expect("too many external callable declarations for packed FIR identity"),
+        );
+        function.callable.external_identity = Some(identity);
+        self.internal_friends.borrow_mut().push(false);
+        realizations.push(ExternalCallableRealization {
+            callable: function.callable.clone(),
+            kind: ExternalCallableKind::Member,
+            declaration_owner: Some(SemanticCallableOwner::Classifier(owner)),
+            parameter_identities: function.call_sig.parameter_identities.clone().into(),
+            declaration_signature: None,
+            dependency_callable: None,
+            direct_c_function: None,
+            klib_body_companion_receiver: None,
+            klib_body_type_parameters: Box::new([]),
+            klib_body_declaration_modifiers: None,
+            klib_body_class_contract: None,
+            klib_body_accessor: None,
+            klib_body_vararg_index: None,
+            klib_body_parameter_defaults: None,
+            declares_parameter_defaults: false,
+            composable_parameters: Default::default(),
+        });
+        self.language_invokes.borrow_mut().insert(owner, identity);
+    }
+
     /// Give a normalized function the identity of its declaration, publishing the declaration's
     /// realization, of shape `kind`, the first time its signature is seen.
     pub(super) fn assign_function(
@@ -87,30 +133,6 @@ impl ExternalIdentities {
                     ),
                 },
                 direct_c_function: signed.direct_c_function.clone(),
-            },
-            &mut function.callable,
-        );
-    }
-
-    /// Give a member of a classifier the language declares, which no KLIB serializes, the identity
-    /// of its public `signature`. It belongs to no module and has no serialized body.
-    pub(super) fn assign_language_member(
-        &self,
-        signature: KlibPublicIdSignature,
-        function: &mut FunctionInfo,
-    ) {
-        self.assign_callable(
-            PublishedDeclaration {
-                signature: KlibDeclarationSignature::Public(signature),
-                kind: ExternalCallableKind::Member,
-                parameters: &function.call_sig.parameter_identities,
-                internal_friend: false,
-                module: None,
-                body: BodyContract {
-                    parameter_defaults: Some(function.call_sig.param_defaults),
-                    ..Default::default()
-                },
-                direct_c_function: None,
             },
             &mut function.callable,
         );
@@ -374,6 +396,7 @@ impl ExternalIdentities {
             declares_parameter_defaults: body
                 .parameter_defaults
                 .is_some_and(|defaults| defaults.as_slice().contains(&true)),
+            composable_parameters: Default::default(),
         });
         self.by_signature.borrow_mut().insert(key, identity);
     }

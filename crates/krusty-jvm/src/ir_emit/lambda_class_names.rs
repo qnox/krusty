@@ -273,7 +273,8 @@ fn anonymous_peer(
     ir.specialized_anonymous_classes
         .values()
         .any(|specialization| {
-            inlined_method(&anonymous_view(specialization)) == callee
+            specialization.parent.is_none()
+                && inlined_method(&anonymous_view(specialization)) == callee
                 && specialization_location(ir, &anonymous_view(specialization), facade, modes)
                     .as_ref()
                     == Some(location)
@@ -315,7 +316,8 @@ fn expansion_ordinal(
         }
     }
     for specialization in ir.specialized_anonymous_classes.values() {
-        if inlined_method(&anonymous_view(specialization)) != callee
+        if specialization.parent.is_some()
+            || inlined_method(&anonymous_view(specialization)) != callee
             || specialization_location(ir, &anonymous_view(specialization), facade, modes).as_ref()
                 != Some(location)
         {
@@ -339,6 +341,24 @@ pub(crate) fn anonymous_class_name(
     modes: LambdaModes,
 ) -> Option<String> {
     let specialization = ir.specialized_anonymous_classes.get(&class)?;
+    // kotlinc regenerates an object nested in a regenerated object as a class of that copy:
+    // `{copy}$N`, numbered after the copy's continuations in construction order.
+    if let Some(parent) = specialization.parent {
+        let mut siblings = ir
+            .specialized_anonymous_classes
+            .iter()
+            .filter(|(_, sibling)| sibling.parent == Some(parent))
+            .map(|(&sibling, record)| (record.order, sibling))
+            .collect::<Vec<_>>();
+        siblings.sort_unstable();
+        let position = siblings.iter().position(|&(_, sibling)| sibling == class)?;
+        let continuations = crate::reified_anonymous::copy_continuations(ir, parent).len();
+        let ordinal = continuations + position + 1;
+        return Some(format!(
+            "{}${ordinal}",
+            anonymous_class_name(ir, parent, facade, modes)?
+        ));
+    }
     let view = anonymous_view(specialization);
     let (owner, caller) = specialization_location(ir, &view, facade, modes)?;
     let ordinal = expansion_ordinal(

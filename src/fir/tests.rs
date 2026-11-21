@@ -2324,7 +2324,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         spelling: &str,
         _origin: OriginId,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId> {
         self.operations
             .borrow_mut()
@@ -2345,7 +2345,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         _trailing_lambda: bool,
         qualified_namespace: bool,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId> {
         self.operations.borrow_mut().push(format!(
             "{}call:{spelling}",
@@ -2374,7 +2374,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         _qualified: bool,
         _refresh_typed_postponed: bool,
         _expected: Option<ResolvedTy>,
-        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        _demand: &mut SignatureDemand<'_>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId> {
         self.operations
             .borrow_mut()
@@ -2387,7 +2387,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         spelling: &str,
         _origin: OriginId,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId> {
         self.operations
             .borrow_mut()
@@ -2406,7 +2406,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         receiver: ResolvedTy,
         _unbound: bool,
         expected: Option<ResolvedTy>,
-        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        _demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId> {
         self.operations
             .borrow_mut()
@@ -2421,7 +2421,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         _origin: OriginId,
         _receiver: Option<ResolvedTy>,
         _unbound: bool,
-        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        _demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId> {
         self.operations
             .borrow_mut()
@@ -2473,7 +2473,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         _origin: OriginId,
         receiver: ResolvedTy,
         expected: Option<ResolvedTy>,
-        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        _demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId> {
         self.operations
             .borrow_mut()
@@ -2491,7 +2491,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         _type_arguments: &[ResolvedTy],
         _trailing_lambda: bool,
         result_constraint: Option<SignatureCallResultConstraint>,
-        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        _demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedMemberCall, DiagnosticId> {
         self.operations
             .borrow_mut()
@@ -2518,7 +2518,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         _trailing_lambda: bool,
         _refresh_typed_postponed: bool,
         _result_constraint: Option<SignatureCallResultConstraint>,
-        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        _demand: &mut SignatureDemand<'_>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId> {
         self.operations
             .borrow_mut()
@@ -2533,7 +2533,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         _origin: OriginId,
         lhs: ResolvedTy,
         rhs: ResolvedTy,
-        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        _demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId> {
         self.operations.borrow_mut().push("binary".into());
         assert_eq!(lhs, rhs);
@@ -2546,7 +2546,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         _origin: OriginId,
         callee: ResolvedTy,
         arguments: &[ResolvedSigCallArgument<'_>],
-        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        _demand: &mut SignatureDemand<'_>,
     ) -> Result<InvokeSelection, DiagnosticId> {
         self.operations.borrow_mut().push("invoke".into());
         let result = arguments.last().map(|argument| argument.ty);
@@ -2609,7 +2609,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         delegate: ResolvedTy,
         _expected: Option<ResolvedTy>,
         _site: ResolvedSignatureDelegateSite,
-        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        _demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId> {
         self.operations.borrow_mut().push("delegate".into());
         Ok(delegate)

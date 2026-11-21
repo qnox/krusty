@@ -32,7 +32,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
         declaration: DeclarationId,
         result: SigExprId,
         graph: &SignatureGraph,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedSignature, DiagnosticId> {
         /// Recover integer-constant provenance from nodes whose types have already been resolved.
         /// Binary folding is delegated to semantic policy after `select_binary` populated `memo`;
@@ -145,7 +145,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             semantics: &S,
             argument: &'a SigCallArgument,
             graph: &'a SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<SigCallArgumentProbe<'a>, DiagnosticId> {
@@ -235,7 +235,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             argument: &'a SigCallArgument,
             expectation: Option<ResolvedTy>,
             graph: &'a SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedSigCallArgument<'a>, DiagnosticId> {
@@ -271,6 +271,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             let Some(SigExpr::ContextualFunction {
                 parameters,
                 result,
+                labeled_receiver,
                 scope,
                 implicit_it,
                 suspend,
@@ -420,6 +421,9 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 .map(ResolvedTy::new)
                 .transpose()
                 .map_err(|_| semantics.missing_signature_diagnostic(contextual_declaration))?;
+            if let (Some(node), Some(receiver)) = (labeled_receiver, contextual_receiver) {
+                memo.insert(node, receiver);
+            }
             let scoped_inputs = expected
                 .params
                 .iter()
@@ -627,7 +631,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             expression: SigExprId,
             expected: Option<ResolvedTy>,
             graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedTy, DiagnosticId> {
@@ -941,7 +945,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             expression: SigExprId,
             expected: ResolvedTy,
             graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Option<Result<ResolvedTy, DiagnosticId>> {
@@ -961,7 +965,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             expression: SigExprId,
             result_constraint: SignatureCallResultConstraint,
             graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Option<Result<ResolvedTy, DiagnosticId>> {
@@ -1325,7 +1329,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             semantics: &S,
             expression: SigExprId,
             graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedTy, DiagnosticId> {
@@ -1672,8 +1676,25 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         origin,
                         later,
                     } => {
-                        let callee =
-                            evaluate_expression(semantics, callee, graph, demand, memo, computing)?;
+                        // A callee whose type is still being computed has no `invoke`: only a
+                        // selection that commits to it is a recursive problem, so the call moves
+                        // to the lower-priority alternative.
+                        let callee = match evaluate_expression(
+                            semantics, callee, graph, demand, memo, computing,
+                        ) {
+                            Ok(callee) => callee,
+                            Err(failure) if failure.in_progress_declaration().is_some() => {
+                                match later {
+                                    Some(later) => {
+                                        return evaluate_expression(
+                                            semantics, later, graph, demand, memo, computing,
+                                        );
+                                    }
+                                    None => return Err(failure),
+                                }
+                            }
+                            Err(failure) => return Err(failure),
+                        };
                         let probes = graph
                             .call_arguments(arguments)
                             .iter()
@@ -1749,7 +1770,8 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                             suspend,
                         )
                     }
-                    SigExpr::ContextualParameter(declaration) => {
+                    SigExpr::ContextualParameter(declaration)
+                    | SigExpr::ContextualReceiver(declaration) => {
                         Err(semantics.missing_signature_diagnostic(declaration))
                     }
                     SigExpr::ContextualFunction { parameters, .. } => {
@@ -1794,9 +1816,15 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         // reports `broken()` from the body check. A later expression that depends
                         // on a failed effect fails on its own read of it.
                         for effect in graph.operands(effects).iter().copied() {
-                            let _ = evaluate_expression(
+                            if let Err(failure) = evaluate_expression(
                                 semantics, effect, graph, demand, memo, computing,
-                            );
+                            ) {
+                                // A committed read of a declaration still being inferred is a
+                                // recursive-inference outcome, not an effect's own diagnostic.
+                                if failure.in_progress_declaration().is_some() {
+                                    return Err(failure);
+                                }
+                            }
                         }
                         evaluate_expression(semantics, result, graph, demand, memo, computing)
                     }
@@ -1887,6 +1915,11 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 semantics, operand, graph, demand, memo, computing,
                             ) {
                                 Ok(resolved) => resolved_operands.push(resolved),
+                                Err(diagnostic)
+                                    if diagnostic.in_progress_declaration().is_some() =>
+                                {
+                                    return Err(diagnostic);
+                                }
                                 Err(diagnostic) => {
                                     branch_failure.get_or_insert(diagnostic);
                                 }

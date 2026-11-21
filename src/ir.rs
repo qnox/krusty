@@ -17,6 +17,13 @@
 use crate::kt_string::KtString;
 use crate::types::{Ty, TypeName, TypeNameList};
 
+mod checked_klib_facts;
+mod checked_klib_sam;
+pub(crate) use checked_klib_facts::{CheckedKlibDependencyFacts, CheckedKlibTypeFacts};
+pub(crate) use checked_klib_sam::{CheckedKlibSamDeclaration, KlibSamKey};
+mod checked_member_call_edge;
+pub(crate) use checked_member_call_edge::CheckedMemberCallEdge;
+
 pub type ExprId = u32;
 pub type FunId = u32;
 pub type ClassId = u32;
@@ -57,9 +64,14 @@ mod endless_loops;
 mod enum_switch_whens;
 pub use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
+mod plugin_file_facts;
+pub use plugin_file_facts::PluginFileFacts;
 mod enums;
 mod expect_actualization;
 mod expression_copy;
+pub(crate) use expression_copy::{
+    rebind_declaration_argument_boundaries, truncate_expression_facts,
+};
 mod expression_provenance;
 pub use emitted_body_roots::{emitted_body_roots, emitted_declaration_roots, EmittedDeclaration};
 pub mod field_flags;
@@ -84,6 +96,7 @@ mod lifting_sequences;
 mod local_class_names;
 mod local_delegates;
 mod loop_exits;
+mod site_class_names;
 pub use local_delegates::IrLocalDelegateAccess;
 pub use local_delegates::{IrInlineDeclaration, IrLocalDelegateAccessorPlan, IrLocalDelegatePlan};
 mod declared_parameters;
@@ -109,9 +122,12 @@ pub mod referenced_classifiers;
 mod references;
 mod reified_markers;
 mod reified_templates;
+mod sam_function_value_adapter;
 mod sam_target;
 mod type_tests;
-pub(crate) use type_tests::{admits_null_at_runtime, settled_instance_answer};
+pub(crate) use type_tests::admits_null_at_runtime;
+#[cfg(test)]
+pub(crate) use type_tests::settled_instance_answer;
 mod source_debug;
 pub(crate) use source_debug::SourceDebug;
 mod static_properties;
@@ -171,7 +187,7 @@ pub use lambda_classes::{IrInvokeBridge, IrLambdaCapture, IrLambdaClass, IrSamWr
 pub(crate) use lifting_sequences::IrLiftingEntry;
 pub use lifting_sequences::{IrLiftingRoot, IrLiftingSequence};
 pub use local_class_names::{
-    IrClassDeclarationContext, IrLocalClassNameProvenance, IrLocalClassOwner,
+    IrClassDeclarationContext, IrLocalClassNameProvenance, IrLocalClassNameRoot, IrLocalClassOwner,
 };
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
@@ -193,11 +209,14 @@ pub use properties::{
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
-    FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable,
-    IrConstructorReferenceDeclaration, IrPropertyFunctionReference, IrReferencedProperty, PropRef,
-    ReflectedCallable,
+    BoundContextUnbox, FuncRef, IrCallableReference, IrCallableReferenceTarget,
+    IrClassifierCallable, IrConstructorReferenceDeclaration, IrPropertyFunctionReference,
+    IrReferencedProperty, PropRef, ReflectedCallable,
 };
-pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
+pub use sam_target::{
+    IrSamMethod, IrSamMethodFrame, IrSamPlacement, IrSamTarget, IrSamTypeParameter,
+};
+pub use site_class_names::{IrSiteClassContainer, IrSiteClassName};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
@@ -681,10 +700,13 @@ pub enum IrExpr {
     /// class's `$WhenMappings` table for `classifier` at `subject`'s runtime ordinal. Value type:
     /// `Int`. `registrations` are the table entries this subject `when` (and every subject `when`
     /// nested in it) claims, in kotlinc's visiting order; see [`EnumSwitchRegistration`].
+    /// `source_order` is the source `when`'s start offset ([`IrFile::start_offset`]), which
+    /// places these claims among the other claims of the class the backend emits it in.
     EnumSwitchOrdinal {
         classifier: TypeName,
         subject: ExprId,
         registrations: Box<[EnumSwitchRegistration]>,
+        source_order: Option<u32>,
     },
     /// The `$WhenMappings` key of one enum entry in the emitting class's table. Value type: `Int`.
     EnumSwitchKey {
@@ -957,6 +979,9 @@ pub struct IrClass {
     pub is_compiler_generated: bool,
     /// A source anonymous-object declaration.
     pub is_anonymous_object: bool,
+    /// The declaration site of a local classifier lowered from a serialized body, which has no
+    /// source naming provenance.
+    pub site_name: Option<IrSiteClassName>,
     /// The executable scope a local, anonymous or generated class is declared in, recorded as an
     /// exact identity so a backend realizes enclosure metadata without parsing generated names.
     pub enclosure: Option<IrEnclosure>,
@@ -1380,6 +1405,10 @@ pub struct IrSpecializedAnonymousClass {
     /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
     /// it, and so does an object nested in the copy that is specialized later.
     pub crossinline_operands: Vec<Option<u32>>,
+    /// The call-site copy whose body regenerated this copy, when the object is nested in another
+    /// regenerated anonymous object. A target names it under that copy rather than as another
+    /// expansion of the inline call.
+    pub parent: Option<ClassId>,
     /// Source function → the function on this copy. Accessor functions materialized after the
     /// copy are added here before bridges and metadata read the copy.
     pub method_clones: crate::fx_hash::HashMap<FunId, FunId>,
@@ -1395,6 +1424,11 @@ pub struct IrSpecializedAnonymousClass {
     /// the copy's methods. `field_count` still counts them on the declaration, so later fields
     /// appended to the declaration stay past that prefix.
     pub omitted_capture_fields: u32,
+    /// For each constructor parameter of the copy, the declaration's parameter it was copied from,
+    /// or `None` for a value the copy keeps in place of an inlined lambda. Constructor code the
+    /// copy takes from the declaration once lowering has realized it (the superclass constructor
+    /// call and the initializer) reads its parameters through this.
+    pub constructor_parameters: Vec<Option<u32>>,
     /// Property reads and writes in the inlined caller whose receiver is this copy's construction.
     /// Accessor functions are not available when the construction is retargeted, so the read is
     /// rebound once the copy's properties exist.
@@ -1499,6 +1533,11 @@ pub struct IrFile {
     pub classifier_hierarchies: crate::fx_hash::HashMap<TypeName, Vec<IrAppliedClassifier>>,
     /// The interface defaults each source classifier inherits without overriding, as override
     /// resolution selected them; a target backend realizes each record without selecting one.
+    /// The function names of each source classifier that keep more than one member slot, as
+    /// override resolution grouped them. A target whose realization can merge two slots checks
+    /// these records; it never compares the declarations again.
+    pub function_slot_families:
+        crate::fx_hash::HashMap<TypeName, Vec<crate::fir::ResolvedFunctionSlotFamily>>,
     pub inherited_defaults:
         crate::fx_hash::HashMap<TypeName, Vec<crate::fir::ResolvedInheritedDefault>>,
     /// The frontend-selected custom serializer construction of each source classifier whose
@@ -1733,9 +1772,10 @@ pub struct IrFile {
     /// What the Compose plugin recorded from this file's source at the handoff, for its body
     /// transform. `None` unless the plugin is active and the file declares a composable function.
     pub compose: Option<Box<crate::plugins::compose::ComposeFileFacts>>,
-    /// What the atomicfu plugin recorded from this file's source at the handoff, for its body
-    /// transform. `None` unless the plugin is active and the file declares an atomic it lowers.
-    pub atomicfu: Option<Box<crate::plugins::atomicfu::AtomicfuFileFacts>>,
+    /// What compiler plugins recorded from this file's source at the handoff, for their own later
+    /// phases. The atomicfu plugin records its facts here when the file declares an atomic it
+    /// lowers.
+    pub plugin_facts: PluginFileFacts,
     /// The Parcelize plugin's handoff facts; `None` unless the file declares a parcelized class.
     pub parcelize: Option<Box<crate::plugins::parcelize::ParcelizeFileFacts>>,
     /// Package functions a compiler plugin gave physical parameters their declaration does not
@@ -1915,6 +1955,11 @@ pub struct IrFile {
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub default_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each checked constructor another file may build through with arguments left out, by its
+    /// declaration: the constructor of its class that the shared default-argument lowering
+    /// realized as that constructor's entry. See [`crate::backend::construction_entries`].
+    pub constructor_default_entries:
+        crate::fx_hash::HashMap<crate::fir::DeclarationId, IrConstructorTarget>,
     /// Each entry another module constructs a class of this file, or reads its object, through,
     /// by the entry's `FunId`: the class it answers. See [`crate::backend::construction_entries`].
     pub(crate) construction_entries: crate::fx_hash::HashMap<FunId, ClassId>,
@@ -2269,6 +2314,11 @@ pub struct IrFile {
     /// return, before CPS erasure to `Object`), recorded from the checked FIR call target: the
     /// cross-unit complement of `suspend_funs`, for a callee in ANOTHER file or a dependency.
     pub suspend_calls: crate::fx_hash::HashMap<u32, Ty>,
+    /// A dependency suspend call after CPS rewriting → the exact checked source call application
+    /// before its physical continuation parameter and `Any?` result were added. The selected
+    /// declaration and substitutions remain available for provider authentication while targets
+    /// separately consume the transformed `Callee::External` as the physical call ABI.
+    pub suspend_call_declarations: crate::fx_hash::HashMap<ExprId, Callee>,
     /// Each suspend literal an emitted inline call binds to an inline parameter → where its body
     /// runs: in the caller's frame, in an object the callee constructs, or nowhere. Decided before
     /// coroutine lowering, from the callee's compiled body where the callee is spliced from one.
@@ -2868,7 +2918,7 @@ mod external_overrides;
 mod generated_members;
 pub use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
-pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
+pub use debug_locals::{IrCatchBinding, IrCatchName, IrLambdaForm, IrLambdaOrigin};
 pub use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
 pub use generated_members::{IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember};
 pub use generated_members::{
@@ -2876,21 +2926,22 @@ pub use generated_members::{
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
 };
 mod checked_operation;
-pub use checked_operation::IrCheckedOperation;
+pub use checked_operation::{IrCheckedOperation, IrModulePropertyReference};
+mod construction_entries;
 mod exported_entries;
 mod function_parameters;
 pub use function_parameters::*;
 mod traversal;
 pub use traversal::*;
 pub mod clone;
-pub use clone::clone_expression_dag;
 #[cfg(test)]
 pub(crate) use clone::make_expression_children_unique;
 pub use clone::make_expression_children_unique_tracked;
 pub(crate) use clone::{
     clone_class_method, clone_expression_with_own_lambdas, clone_function_implementation,
-    clone_with_operands,
+    clone_with_operands, relocate_with_operands,
 };
+pub use clone::{clone_expression_dag, clone_expression_dags};
 mod semantic_validation;
 pub use semantic_validation::{
     IncompleteIrFact, InvalidIrContract, NullableSamContractViolation, UndeterminedIrType,

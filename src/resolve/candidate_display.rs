@@ -67,6 +67,10 @@ impl Checker<'_> {
                 constructor(signature, &function.member_with_return(signature.ret))
             }
             Some(constructor) => Self::bound_inner_constructor_display(constructor, function),
+            None if function.constructor.is_some() => {
+                let signature = function.semantic_signature();
+                constructor(&signature, &function.member_with_return(signature.ret))
+            }
             None => Self::generic_callable_display(name, function),
         }
     }
@@ -331,14 +335,27 @@ pub(super) fn type_argument_count_wording(expected: usize) -> String {
 }
 
 /// kotlinc's declaration header of a typealias: `typealias Name<T> = Expansion<T>`.
-fn type_alias_display(alias: &crate::libraries::AliasExpansion) -> String {
-    let formals = if alias.formals.is_empty() {
+pub(super) fn type_alias_display(alias: &crate::libraries::AliasExpansion) -> String {
+    type_alias_header_display(
+        alias.identity.nested_segment_ref(),
+        &alias.formals,
+        alias.expansion,
+    )
+}
+
+/// kotlinc's declaration header of the typealias `declared` with `formals` expanding to
+/// `expansion`: `typealias Name<T> = Expansion<T>`.
+pub(super) fn type_alias_header_display(
+    declared: &str,
+    formals: &[String],
+    expansion: Ty,
+) -> String {
+    let formals = if formals.is_empty() {
         String::new()
     } else {
         format!(
             "<{}>",
-            alias
-                .formals
+            formals
                 .iter()
                 .map(|formal| crate::types::type_parameter_source_name(formal))
                 .collect::<Vec<_>>()
@@ -346,9 +363,8 @@ fn type_alias_display(alias: &crate::libraries::AliasExpansion) -> String {
         )
     };
     format!(
-        "typealias {}{formals} = {}",
-        alias.identity.nested_segment_ref(),
-        alias.expansion.source_name()
+        "typealias {declared}{formals} = {}",
+        expansion.source_name()
     )
 }
 

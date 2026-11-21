@@ -371,6 +371,44 @@ fn increment_blocks_keep_their_ordered_effects_and_selected_value() {
 }
 
 #[test]
+fn compound_assignment_blocks_keep_their_ordered_effects() {
+    // kotlinc wraps `a[i] += v` and other compound assignments that need temporaries in a Unit
+    // block of the operator's origin: the temporaries, then the store.
+    for origin in ["PLUSEQ", "MINUSEQ", "MULTEQ", "DIVEQ", "PERCEQ"] {
+        let demo = demo(&[("f", &[T::Int, T::Int], T::Int)], |_, body| {
+            let initial = body.param(0);
+            let (variable, x) = body.var(T::Int, initial);
+            let operand = body.param(1);
+            let (temporary, saved) =
+                body.variable_with(T::Int, Some(operand), 0, "IR_TEMPORARY_VARIABLE");
+            let stored = body.get(&saved, T::Int);
+            let store = body.set(&x, stored);
+            let block = body.expr(
+                T::Unit,
+                KlibIrExprKind::Block {
+                    statements: vec![temporary, store],
+                    origin: Some(origin.to_owned()),
+                },
+            );
+            let result = body.get(&x, T::Int);
+            Some(vec![
+                variable,
+                KlibIrStatement::Expression(block),
+                body.ret(result),
+            ])
+        });
+        // The block keeps its place between the declaration and the read; its single-use
+        // temporary folds into the store, as an increment's does.
+        assert_eq!(
+            lowered_f(&demo),
+            "scope {scope {val v2: Int = v0!: Int; {v2 = v1!: Int: Unit}: Unit; \
+             return@Some(0) v2~: Int: Nothing}: Nothing}",
+            "{origin}"
+        );
+    }
+}
+
+#[test]
 fn a_local_initializer_cannot_reuse_its_containing_declarations_slot() {
     let demo = demo(&[("f", &[T::Boolean, T::Int], T::Int)], |_, body| {
         let argument = body.param(1);
@@ -1051,21 +1089,26 @@ fn type_checks_and_casts_lower_as_the_source_operators_do() {
 }
 
 #[test]
-fn type_operators_checked_fir_expands_decline_by_name() {
-    let cases = [
-        (
+fn a_safe_cast_lowers_as_the_source_safe_cast_does() {
+    let source = "fun f(a: Any?): String? {\n return a as? String\n}\n";
+    assert_eq!(
+        lowered_f(&type_check(
             KlibIrTypeOperator::SafeCast,
-            T::NullableString,
-            T::NullableString,
-            "a safe cast",
-        ),
-        (
-            KlibIrTypeOperator::ImplicitNotNull,
             T::String,
-            T::String,
-            "an implicit non-null assertion",
-        ),
-    ];
+            T::NullableString
+        )),
+        source_body(source, "f", 1)
+    );
+}
+
+#[test]
+fn type_operators_checked_fir_expands_decline_by_name() {
+    let cases = [(
+        KlibIrTypeOperator::ImplicitNotNull,
+        T::String,
+        T::String,
+        "an implicit non-null assertion",
+    )];
     for (operator, target, result, reason) in cases {
         assert_eq!(
             type_check(operator, target, result).declined("f", &[]),
@@ -1151,6 +1194,40 @@ fn a_type_parameter_smart_cast_lowers_as_the_source_smart_cast_does() {
             "{source_type}"
         );
     }
+}
+
+/// `kotlin.coroutines.intrinsics.createCoroutineUnintercepted` narrows its `suspend () -> T`
+/// receiver by `this is BaseContinuationImpl`: a value of a function type narrows to any type it is
+/// checked against, since any class can implement a function type besides its own supertypes.
+#[test]
+fn a_function_value_smart_cast_lowers_as_the_source_smart_cast_does() {
+    let demo = demo(
+        &[("f", &[T::Function0Int], T::NullableCharSequence)],
+        |_, body| {
+            let a = body.param(0);
+            let operand = body.ty(T::CharSequence);
+            let checked = body.expr(
+                T::Boolean,
+                KlibIrExprKind::TypeOperator {
+                    operator: KlibIrTypeOperator::InstanceOf,
+                    operand,
+                    argument: a,
+                },
+            );
+            let a = body.param(0);
+            let narrowed = body.type_operator(KlibIrTypeOperator::ImplicitCast, a, T::CharSequence);
+            let returned = body.return_(narrowed);
+            let guard = body.branches("IF", vec![(checked, returned)], T::Unit);
+            let fallback = body.constant(T::NullableNothing, KlibIrConstant::Null);
+            Some(vec![KlibIrStatement::Expression(guard), body.ret(fallback)])
+        },
+    );
+    let source = "fun f(a: () -> Int): CharSequence? {\n if (a is CharSequence) return a\n \
+                  return null\n}\n";
+    assert_eq!(
+        lowered_f(&demo),
+        super::demo_package::source_body_with_stdlib(source, "f", 1)
+    );
 }
 
 /// `rendered` with each type parameter identity spelled `<P>`: a KLIB body names its function's
@@ -1309,11 +1386,11 @@ fn stdlib_star_projected_smart_cast_lowers_as_a_cast() {
         .unwrap_or_else(|decline| panic!("{decline}"));
     validated(unit.ir());
     assert_eq!(unit.ir().functions[function as usize].ret, Ty::Int);
-    // `size` is read at the receiver cast to `Collection<out Any?>`, the serialized `Collection<*>`.
+    // `size` is read at the receiver cast to the serialized `Collection<*>`.
     let ir = unit.ir();
     let collection = Ty::obj_args_name(
         crate::types::type_name("kotlin/collections/Collection"),
-        &[Ty::out_projection(Ty::nullable(Ty::obj_name(
+        &[Ty::star_projection(Ty::nullable(Ty::obj_name(
             crate::types::wk::any(),
         )))],
     );

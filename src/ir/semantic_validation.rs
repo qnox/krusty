@@ -76,7 +76,7 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         IrIntrinsic::TypeOf { ty } => reject("typeOf type argument", *ty),
         IrIntrinsic::GeneratedPropertyEquals { ty }
         | IrIntrinsic::GeneratedPropertyHash { ty }
-        | IrIntrinsic::DataClassArrayToString { ty } => reject("intrinsic property", *ty),
+        | IrIntrinsic::GeneratedPropertyArrayToString { ty } => reject("intrinsic property", *ty),
         IrIntrinsic::Assert { .. }
         | IrIntrinsic::ArrayGet
         | IrIntrinsic::ArraySet
@@ -110,12 +110,27 @@ fn validate_callee(callee: &Callee) -> Result<(), UndeterminedIrType> {
         }
         Callee::CrossFile { params, ret, .. }
         | Callee::Module { params, ret, .. }
-        | Callee::ModuleDefaultEntry { params, ret, .. }
         | Callee::Super { params, ret, .. } => {
             reject_all("callee parameter", params.iter().copied())?;
             reject("callee result", *ret)
         }
+        Callee::ModuleConstructorDefaultEntry {
+            outer, params, ret, ..
+        } => {
+            reject_all("callee parameter", params.iter().copied())?;
+            reject("callee result", *ret)?;
+            if let Some(outer) = outer {
+                reject("callee enclosing instance", *outer)?;
+            }
+            Ok(())
+        }
         Callee::ModuleWithDefaults {
+            params,
+            ret,
+            dispatch_receiver_ty,
+            ..
+        }
+        | Callee::ModuleDefaultEntry {
             params,
             ret,
             dispatch_receiver_ty,
@@ -203,12 +218,14 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
         IrCheckedOperation::ExternalPropertyRead {
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         }
         | IrCheckedOperation::ExternalPropertyWrite {
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         } => {
@@ -216,6 +233,9 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
             reject("external property result", *result)?;
             if let Some(receiver) = source_receiver {
                 reject("external property receiver", *receiver)?;
+            }
+            for substitution in substitutions {
+                validate_substitution(substitution)?;
             }
             Ok(())
         }
@@ -255,6 +275,8 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
         IrCheckedOperation::RangeContains { counter, .. }
         | IrCheckedOperation::RangeLoop { counter, .. } => reject("range counter", *counter),
         IrCheckedOperation::IllegalProgressionStep { .. }
+        | IrCheckedOperation::AtomicField { .. }
+        | IrCheckedOperation::AtomicArrayElement { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => Ok(()),
         IrCheckedOperation::PropertyReference { substitutions, .. } => {
             for substitution in substitutions {
@@ -275,7 +297,12 @@ fn validate_sam(sam: &IrSamTarget) -> Result<(), UndeterminedIrType> {
         "SAM declared parameter",
         sam.declared_parameters.iter().copied(),
     )?;
-    reject("SAM declared result", sam.declared_result)
+    reject("SAM declared result", sam.declared_result)?;
+    for frame in sam.dispatch_methods.iter().chain(&sam.default_methods) {
+        reject_all("SAM slot parameter", frame.parameters.iter().copied())?;
+        reject("SAM slot result", frame.result)?;
+    }
+    Ok(())
 }
 
 fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
@@ -903,13 +930,17 @@ mod tests {
             has_receiver: false,
             suspend: false,
             source_suspend: false,
+            requires_object_dispatch: false,
             overridden_results: Vec::new(),
+            dispatch_methods: Vec::new(),
+            default_methods: Vec::new(),
             function_adapter: false,
             wraps_function_value: true,
             nullable: true,
             kotlin_interface: false,
             parameter_identities: Vec::new(),
             type_parameters: Vec::new(),
+            placement: crate::ir::IrSamPlacement::ThisFile,
         }
     }
 

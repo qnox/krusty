@@ -843,7 +843,6 @@ mod tests {
             inline_origin: false,
             requires_reification: false,
             extension_receiver_label: None,
-            inline_default_owner: None,
             default_stub_owner: None,
             invoke: implementation,
             function_type: Ty::fun(Vec::new(), Ty::Unit),
@@ -859,6 +858,7 @@ mod tests {
             bridge: krusty::ir::IrInvokeBridge::logical(Vec::new(), Ty::Unit),
             lambda_origin: None,
             sam: None,
+            sam_reference: false,
         });
         ir.add_class(closure);
         implementation
@@ -1088,10 +1088,10 @@ mod tests {
         ir.local_class_name_provenance.insert(
             local_id,
             IrLocalClassNameProvenance {
-                source: IrModuleSource {
+                source: krusty::ir::IrLocalClassNameRoot::Source(IrModuleSource {
                     source: krusty::fir::SourceFileId::from_raw(0),
                     package: type_name("sample"),
-                },
+                }),
                 lexical_owner: Some(krusty::ir::IrLocalClassOwner::Class(owner_id)),
                 segments: vec!["make".to_string(), "Local".to_string()].into_boxed_slice(),
                 ordinal: None,

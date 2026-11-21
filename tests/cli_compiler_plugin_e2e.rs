@@ -429,21 +429,12 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
             String::new()
         )
     );
-    // Compose runs as a partial native pass, which a build is refused until it is complete.
+    // Compose runs as a partial native pass. A build still tries krusty, which rejects a construct
+    // the pass does not cover with its own exit status, so the support check does not refuse it.
     let compose = reference_plugin_jar("compose-compiler-plugin.jar");
     assert_eq!(
         check(&[format!("-Xplugin={}", compose.display())]),
-        (
-            Some(1),
-            format!(
-                "{}\n",
-                PluginDiagnostic::PartialSubstitution {
-                    plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string()
-                }
-                .message()
-            ),
-            String::new()
-        )
+        (Some(0), String::new(), String::new())
     );
     // So is a Kotlin release krusty does not support: kotlinc of that release compiles it.
     assert_eq!(
@@ -535,6 +526,64 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
     );
 }
 
+/// A build tells a plugin pass's refusal of valid source from a compile error by the exit status
+/// alone: 3 for a refusal (kotlinc compiles the module), 1 for an error. `verify-compile` records the
+/// refusal as unsupported and the error as a failure.
+#[test]
+fn a_plugin_refusal_has_its_own_exit_status_and_verify_records_it_as_unsupported() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let verify = |probe: &Probe| {
+        let record = probe.dir.join("record.json");
+        let reference = probe.dir.join("kotlinc");
+        std::fs::create_dir_all(&reference).expect("reference directory");
+        let output = Command::new(common::krusty_binary())
+            .args(["verify-compile", "--reference"])
+            .arg(&reference)
+            .arg("--record")
+            .arg(&record)
+            .args(["--compilation", ":compileKotlin", "--"])
+            .args(["-cp", &join_classpath(&classpath)])
+            .args(&switches)
+            .arg("-d")
+            .arg(probe.dir.join("verified"))
+            .arg(&probe.source)
+            .output()
+            .expect("run krusty verify-compile");
+        assert_eq!(output.status.code(), Some(0));
+        std::fs::read_to_string(record).expect("the record")
+    };
+    let status = |record: &str| {
+        record
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("\"status\":"))
+            .expect("the record's status")
+            .trim_end_matches(',')
+            .to_string()
+    };
+
+    let refused = Probe::new(
+        "refusal-status",
+        "package probe\nimport androidx.compose.runtime.Composable\nimport androidx.compose.runtime.ReusableContent\n@Composable fun Greeting() {\nReusableContent(1) { }\n}\n",
+    );
+    let compiled = refused.krusty(&classpath, &switches);
+    assert_eq!(compiled.code, Some(3), "{}", compiled.stderr);
+    assert_eq!(compiled.classes, Vec::<String>::new());
+    assert_eq!(status(&verify(&refused)), "\"status\": \"unsupported\"");
+
+    let invalid = Probe::new(
+        "error-status",
+        "package probe\nimport androidx.compose.runtime.Composable\n@Composable fun Greeting() {}\nval number: Int = \"text\"\n",
+    );
+    let compiled = invalid.krusty(&classpath, &switches);
+    assert_eq!(compiled.code, Some(1), "{}", compiled.stderr);
+    assert_eq!(status(&verify(&invalid)), "\"status\": \"failed\"");
+}
+
 /// Compiled directly, a Compose module compiles through krusty's partial pass, which rejects each
 /// composable construct it does not cover rather than emit it untransformed.
 #[test]
@@ -547,11 +596,32 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          with a default argument that is not a constant yet",
     );
     assert_compose_rejects(
-        "compose-inferred-stability",
-        "@Composable fun Greeting(names: List<String>) {}\n",
+        "compose-function-type-with-result",
+        "fun keep(content: @Composable () -> Int) {}\n",
         &[],
-        "3:13: error: krusty's Compose compiler plugin does not support a composable function \
-         parameter whose stability kotlinc infers yet",
+        "1:1: error: krusty's Compose compiler plugin does not support the composable function \
+         type in `keep` yet",
+    );
+    assert_compose_rejects(
+        "compose-ten-argument-function-type",
+        "fun keep(content: @Composable (Int, Int, Int, Int, Int, Int, Int, Int, Int, Int) -> Unit) {}\n",
+        &[],
+        "1:1: error: krusty's Compose compiler plugin does not support the composable function \
+         type in `keep` yet",
+    );
+    assert_compose_rejects(
+        "compose-ten-input-receiver-function-type",
+        "fun keep(content: @Composable Int.(Int, Int, Int, Int, Int, Int, Int, Int, Int) -> Unit) {}\n",
+        &[],
+        "1:1: error: krusty's Compose compiler plugin does not support the composable function \
+         type in `keep` yet",
+    );
+    assert_compose_rejects(
+        "compose-suspend-function-type",
+        "fun keep(content: @Composable suspend () -> Unit) {}\n",
+        &[],
+        "1:1: error: krusty's Compose compiler plugin does not support the composable function \
+         type in `keep` yet",
     );
     assert_compose_rejects(
         "compose-local-argument",
@@ -559,6 +629,13 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "6:1: error: krusty's Compose compiler plugin does not support a composable call argument \
          that is not a constant, a parameter, or computed from a parameter yet",
+    );
+    assert_compose_rejects(
+        "compose-computed-argument-of-runtime-stability",
+        "@Composable fun Show(items: List<Int>) {}\n@Composable fun Greeting(n: Int) {\nShow(listOf(n))\n}\n",
+        &[],
+        "5:1: error: krusty's Compose compiler plugin does not support a call argument whose type's \
+         stability is decided when it runs yet",
     );
     assert_compose_rejects(
         "compose-lambda-value",
@@ -576,13 +653,13 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
     );
     let frame = "@Composable fun Frame(content: @Composable () -> Unit) {\ncontent()\n}\n";
     assert_compose_rejects(
-        "compose-lambda-capturing-local",
+        "compose-lambda-passing-captured-local",
         &format!(
-            "{frame}@Composable fun Greeting(text: String) {{\nval shown = text\nFrame {{ println(shown) }}\n}}\n"
+            "{frame}@Composable fun Show(text: String) {{}}\n@Composable fun Greeting(text: String) {{\nval shown = text\nFrame {{ Show(shown) }}\n}}\n"
         ),
         &[],
-        "6:13: error: krusty's Compose compiler plugin does not support a composable lambda that \
-         captures a local value yet",
+        "9:9: error: krusty's Compose compiler plugin does not support a composable call argument \
+         that is not a constant, a parameter, or computed from a parameter yet",
     );
     assert_compose_rejects(
         "compose-lambda-capturing-lambda-parameter",
@@ -617,14 +694,14 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          `@NonSkippableComposable` function yet",
     );
     assert_compose_rejects(
-        "compose-cross-file",
+        "compose-cross-file-defaults",
         "@Composable fun Greeting() {\nOther()\n}\n",
         &[(
             "Other.kt",
-            "package probe\nimport androidx.compose.runtime.Composable\n@Composable fun Other() {}\n",
+            "package probe\nimport androidx.compose.runtime.Composable\n@Composable fun Other(size: Int = 1) {}\n",
         )],
         "4:1: error: krusty's Compose compiler plugin does not support a call to a composable \
-         function from another file yet",
+         function of another file with default arguments yet",
     );
     assert_compose_rejects(
         "compose-library-call-result",
@@ -638,14 +715,15 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "val action: () -> Unit = {}\n@Composable fun Greeting() {\nandroidx.compose.runtime.SideEffect(action)\n}\n",
         &[],
         "5:1: error: krusty's Compose compiler plugin does not support a call to a library \
-         composable function with a function-typed parameter yet",
+         composable function with a function-typed parameter that is not a composable function \
+         type yet",
     );
     assert_compose_library_call_rejects(
-        "compose-library-call-defaults",
-        "@Composable fun Sized(size: Int = 1) {}\n",
-        "@Composable fun Greeting() {\nlib.Sized(2)\n}\n",
-        "4:1: error: krusty's Compose compiler plugin does not support a call to a library \
-         composable function with default arguments yet",
+        "compose-library-call-forwarded-lambda",
+        "@Composable fun Frame(content: @Composable () -> Unit) { content() }\n",
+        "import lib.Frame\n@Composable fun Wrapper(content: @Composable () -> Unit) {\nFrame(content)\n}\n",
+        "5:1: error: krusty's Compose compiler plugin does not support a composable lambda \
+         parameter passed to a library composable yet",
     );
     assert_compose_rejects(
         "compose-generic-value-class-field",
@@ -671,6 +749,74 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
          depends on another file's class without `$stable` yet",
     );
+}
+
+/// A library composable's default argument is realized by its transformed entry, which only the
+/// Compose plugin's calls pass the mask to: a module compiled without the plugin that omits one
+/// gets the frontend's error for a default nothing can realize.
+#[test]
+fn a_library_composable_default_is_unavailable_without_the_compose_plugin() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let library = Probe::new(
+        "compose-default-without-plugin-lib",
+        "package lib\nimport androidx.compose.runtime.Composable\n\
+         @Composable fun Sized(size: Int = 1) {}\n",
+    );
+    let built = library.krusty(&classpath, &[format!("-Xplugin={}", compose.display())]);
+    assert_eq!(built.code, Some(0), "{}", built.stderr);
+    classpath.push(library.dir.join("krusty"));
+    let probe = Probe::new(
+        "compose-default-without-plugin",
+        "package probe\nimport lib.Sized\nfun plain() { Sized() }\n",
+    );
+    let compiled = probe.krusty(&classpath, &[]);
+    assert_eq!(
+        compiled.stderr,
+        format!(
+            "{}:3:15: error: default-argument realization is unavailable for 'Sized'.\n\
+             krusty: 1 error(s)\n",
+            probe.source.display()
+        )
+    );
+    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.classes, Vec::<String>::new());
+}
+
+/// A call to a composable function of another file compiles through krusty's partial pass: the
+/// class set is the one kotlinc emits for the same two files.
+#[test]
+fn the_compose_pass_compiles_a_call_to_a_composable_function_of_another_file() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let probe = Probe::new(
+        "compose-cross-file",
+        "package probe\nimport androidx.compose.runtime.Composable\n\
+         @Composable fun Greeting() {\nOther()\n}\n",
+    );
+    let other = probe.dir.join("Other.kt");
+    std::fs::write(
+        &other,
+        "package probe\nimport androidx.compose.runtime.Composable\n@Composable fun Other() {}\n",
+    )
+    .expect("write the other source");
+    let switches = vec![
+        format!("-Xplugin={}", compose.display()),
+        other.display().to_string(),
+    ];
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let compiled = probe.krusty(&classpath, &switches);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+    }
+    .message();
+    assert_eq!(compiled.stderr, format!("info: {partial}\n"));
+    assert_eq!(compiled.code, Some(0));
+    let reference = probe.kotlinc_classes(&classpath, &switches);
+    assert_eq!(compiled.classes, reference);
 }
 
 /// Compose's metrics and reports name files krusty does not write yet: a nonempty destination fails
@@ -787,7 +933,7 @@ fn assert_atomicfu_rejects(name: &str, declarations: &str, error: &str) {
             probe.source.display()
         )
     );
-    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.code, Some(3));
     assert_eq!(compiled.classes, Vec::<String>::new());
 }
 
@@ -824,8 +970,169 @@ fn assert_compose_library_call_rejects(name: &str, library: &str, declarations: 
             probe.source.display()
         )
     );
-    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.code, Some(3));
     assert_eq!(compiled.classes, Vec::<String>::new());
+}
+
+/// A library composable that takes a `@Composable () -> Unit` is compiled with the composer and
+/// `$changed` after a `Function2` value, so the declaration's source parameters still align with
+/// its method: the call resolves, and the pass alone declines the lambda it passes.
+#[test]
+fn a_library_composable_lambda_parameter_aligns_with_its_method() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let source = "package probe\nimport androidx.compose.runtime.Composable\n\
+                  import androidx.compose.runtime.ReusableContent\n\
+                  @Composable fun Greeting() {\nReusableContent(1) { }\n}\n";
+    let probe = Probe::new("compose-library-lambda-parameter", source);
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let compiled = probe.krusty(&classpath, &switches);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+    }
+    .message();
+    let file = probe.source.display();
+    assert_eq!(
+        compiled.stderr,
+        format!(
+            "info: {partial}\n\
+             {file}:4:13: error: krusty's Compose compiler plugin does not support a lambda in a \
+             composable function yet; compile this module with kotlinc\n\
+             {file}:5:1: error: krusty's Compose compiler plugin does not support a composable call \
+             outside the statements of a composable body yet; compile this module with kotlinc\n\
+             krusty: 2 error(s)\n"
+        )
+    );
+    assert_eq!(compiled.code, Some(3));
+}
+
+/// A composable lambda parameter passed on to a library composable needs the applier scheme of the
+/// library's parameter, which the pass does not infer: the call is declined, whole, against a library
+/// the reference compiler and its plugin compiled.
+#[test]
+fn forwarding_a_composable_lambda_parameter_to_a_producer_library_is_declined() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let producer = Probe::new(
+        "compose-forwarding-lib",
+        "package lib\nimport androidx.compose.runtime.Composable\n\
+         @Composable fun Frame(content: @Composable () -> Unit) { content() }\n",
+    );
+    producer.kotlinc_classes(&classpath, &switches);
+    classpath.push(producer.dir.join("kotlinc"));
+    let probe = Probe::new(
+        "compose-forwarding",
+        "package probe\nimport androidx.compose.runtime.Composable\nimport lib.Frame\n\
+         @Composable fun Wrapper(content: @Composable () -> Unit) {\nFrame(content)\n}\n",
+    );
+    let compiled = probe.krusty(&classpath, &switches);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+    }
+    .message();
+    assert_eq!(
+        compiled.stderr,
+        format!(
+            "info: {partial}\n{}:5:1: error: krusty's Compose compiler plugin does not support a \
+             composable lambda parameter passed to a library composable yet; compile this module \
+             with kotlinc\nkrusty: 1 error(s)\n",
+            probe.source.display()
+        )
+    );
+    assert_eq!(compiled.code, Some(3));
+}
+
+/// The widths around the Compose compiler's changed-word boundaries (nine and ten parameters, and
+/// the last width with a `Function` class of its own) of a `@Composable` function type, taken from
+/// a library the reference compiler and its plugin compiled.
+const COMPOSABLE_WIDTHS: [usize; 6] = [0, 9, 10, 11, 19, 20];
+
+fn composable_function_type(parameters: usize) -> String {
+    format!("({})", vec!["Int"; parameters].join(", "))
+}
+
+/// Every width aligns with the descriptor the producer emitted: metadata keeps the one source
+/// parameter, and no neighbouring width of the same declaration does.
+#[test]
+fn a_library_composable_function_parameter_aligns_at_every_changed_word_boundary() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let mut library = String::from("package lib\nimport androidx.compose.runtime.Composable\n");
+    for width in COMPOSABLE_WIDTHS {
+        let ty = composable_function_type(width);
+        library.push_str(&format!(
+            "@Composable fun Wide{width}(content: @Composable {ty} -> Unit) {{}}\n\
+             fun Plain{width}(content: {ty} -> Unit) {{}}\n"
+        ));
+    }
+    let producer = Probe::new("compose-widths-lib", &library);
+    producer.kotlinc_classes(&classpath, &switches);
+    classpath.push(producer.dir.join("kotlinc"));
+    let classpath = krusty::jvm::classpath::Classpath::new(classpath);
+    let facade = krusty::types::type_name("lib/ProbeKt");
+    let class = classpath
+        .find_name(facade)
+        .expect("the producer's facade class");
+    // The source parameters metadata keeps for `declaration` aligned with the descriptor the
+    // producer emitted for `method`.
+    let kept = |declaration: &str, method: &str| {
+        let method = class
+            .methods
+            .iter()
+            .find(|candidate| candidate.name == method)
+            .unwrap_or_else(|| panic!("the producer emits {method}"));
+        let (parameters, ret) =
+            krusty::jvm::jvm_libraries::parse_method_desc(&method.descriptor).expect("descriptor");
+        classpath
+            .metadata_call_facts_name(facade, declaration, &parameters, &ret, false, &|_| None)
+            .kept_params
+    };
+    for width in COMPOSABLE_WIDTHS {
+        let (composable, plain) = (format!("Wide{width}"), format!("Plain{width}"));
+        assert_eq!(kept(&composable, &composable), Some(1), "{composable}");
+        assert_eq!(kept(&plain, &plain), Some(1), "{plain}");
+        // Each declaration refuses the other's erasure: the composable one has the composer and
+        // changed words, the plain one has none.
+        assert_eq!(kept(&composable, &plain), None, "{composable} as {plain}");
+        assert_eq!(kept(&plain, &composable), None, "{plain} as {composable}");
+    }
+}
+
+/// A function type without the annotation keeps the source arity at the width where the
+/// composable erasure gains a second changed word, so its call resolves and compiles.
+#[test]
+fn a_function_parameter_aligns_by_the_erasure_its_producer_emitted() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let ty = composable_function_type(10);
+    let plain = Probe::new(
+        "compose-widths-plain-lib",
+        &format!("package lib\nfun Plain(content: {ty} -> Unit) {{}}\n"),
+    );
+    plain.kotlinc_classes(&classpath, &[]);
+    classpath.push(plain.dir.join("kotlinc"));
+    let probe = Probe::new(
+        "compose-widths-plain",
+        &format!("package probe\nfun use(content: {ty} -> Unit) {{\nlib.Plain(content)\n}}\n"),
+    );
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let compiled = probe.krusty(&classpath, &switches);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+    }
+    .message();
+    assert_eq!(compiled.stderr, format!("info: {partial}\n"));
+    assert_eq!(compiled.code, Some(0));
 }
 
 fn assert_compose_rejects(name: &str, declarations: &str, others: &[(&str, &str)], error: &str) {
@@ -854,7 +1161,7 @@ fn assert_compose_rejects(name: &str, declarations: &str, others: &[(&str, &str)
             probe.source.display()
         )
     );
-    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.code, Some(3));
     assert_eq!(compiled.classes, Vec::<String>::new());
 }
 

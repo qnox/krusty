@@ -27,13 +27,84 @@ fn template(
     libraries: &KlibLibraries,
     selected: &ExternalCallableRealization,
 ) -> Result<KlibInlineTemplate, crate::klib_lowering::KlibBodyDecline> {
+    let hierarchy = checked_template_facts(libraries, selected);
     let callees = TemplateCallees {
         declarations: libraries.declaration_bodies(),
         references: libraries.reference_bindings(),
         source: libraries,
+        dependency_facts: &hierarchy,
     };
     lower_inline_template(ir, selected, libraries.inline_declaration_bodies(), callees)
         .expect("a KLIB function")
+}
+
+#[test]
+fn iterable_star_template_preserves_the_serialized_readable_iterator_result() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/collections")),
+        "filterIsInstance",
+    );
+    let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let receiver = Ty::obj_args("kotlin/collections/Iterable", &[Ty::star_projection(any)]);
+    let matching = symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| function.semantic_receiver() == Some(receiver))
+        .collect::<Vec<_>>();
+    let [selected] = matching.as_slice() else {
+        panic!("one Iterable<*>.filterIsInstance declaration");
+    };
+    let selected = libraries
+        .external_callable(
+            selected
+                .callable
+                .external_identity
+                .expect("provider identity"),
+        )
+        .expect("selected realization");
+    assert!(selected.callable.inline.must_inline());
+    let mut ir = IrFile::default();
+    let lowered = template(&mut ir, &libraries, &selected)
+        .unwrap_or_else(|decline| panic!("Iterable<*>.filterIsInstance: {decline}"));
+    assert_eq!(
+        ir.functions[lowered.function as usize].params,
+        selected.callable.params
+    );
+    let iterable = libraries
+        .classifier(type_name("kotlin/collections/Iterable"))
+        .expect("Iterable declaration");
+    let [iterator] = iterable.declared_callables["iterator"].functions() else {
+        panic!("one authenticated Iterable.iterator declaration");
+    };
+    let iterator = iterator
+        .callable
+        .external_identity
+        .expect("iterator provider identity");
+    let readable_iterator = Ty::obj_args("kotlin/collections/Iterator", &[any]);
+    let iterator_results = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, expression)| {
+            let IrExpr::Call { callee, .. } = expression else {
+                return None;
+            };
+            let Callee::External { target, ret, .. } = callee.as_ref() else {
+                return None;
+            };
+            (*target == iterator).then_some((*ret, ir.checked_type(index as u32)))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        iterator_results,
+        [(readable_iterator, Some(readable_iterator))]
+    );
+    validated(&ir);
 }
 
 #[test]
@@ -70,6 +141,57 @@ fn default_null_checks_lower_branch_local_returns_in_prepared_inline_blocks() {
         );
         validated(&ir);
     }
+}
+
+#[test]
+fn selected_suspend_inline_template_keeps_its_unintercepted_suspension_block() {
+    // The Wasm stdlib's `suspendCoroutine` suspends through `suspendCoroutineUninterceptedOrReturn`.
+    let Some(stdlib) =
+        crate::toolchain::kotlin_stdlib_klib(crate::compilation_target::CompilationTarget::WasmJs)
+    else {
+        assert!(
+            std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
+            "the exact Wasm stdlib is required"
+        );
+        return;
+    };
+    let libraries =
+        KlibLibraries::open(&[crate::klib_libraries::KlibLibraryInput::platform_stdlib(
+            stdlib,
+            crate::klib_libraries::KlibStdlibSemantics::Wasm,
+        )])
+        .expect("open the Wasm stdlib");
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/coroutines")),
+        "suspendCoroutine",
+    );
+    let selected = symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| function.callable.suspend && function.callable.inline.must_inline())
+        .collect::<Vec<_>>();
+    let [selected] = selected.as_slice() else {
+        panic!("expected one selected suspend inline `suspendCoroutine`");
+    };
+    let target = selected
+        .callable
+        .external_identity
+        .expect("a KLIB suspend function carries its provider identity");
+    let selected = libraries
+        .external_callable(target)
+        .expect("the provider realizes the selected identity");
+    let mut ir = IrFile::default();
+
+    let template = template(&mut ir, &libraries, &selected)
+        .unwrap_or_else(|decline| panic!("suspendCoroutine: {decline}"));
+
+    assert!(ir.inline_only_fns.contains(&template.function));
+    assert!(!ir.intrinsic_suspension_points.is_empty());
+    assert!(ir.intrinsic_suspension_points.keys().all(
+        |expression| matches!(ir.expr(*expression), IrExpr::InvokeFunction { func, .. }
+            if matches!(ir.expr(*func), IrExpr::Lambda { inline_body: Some(_), .. }))
+    ));
 }
 
 #[test]
@@ -312,7 +434,7 @@ fn a_scope_function_body_is_a_generic_template_that_splices_its_lambda() {
             "takeIf",
             &["T"][..],
             "scope {scope {return@Some(0) when[invoke(v1!: (T) -> Boolean, v0!: T): Boolean -> \
-             ImplicitCoercion<T?>(v0!: T), else -> Null: Null]: T?: Nothing}: Nothing}",
+             ImplicitCoercion<T?>(v0!: T): T?, else -> Null: Null]: T?: Nothing}: Nothing}",
         ),
     ] {
         let selected = kotlin_function(&libraries, name);
@@ -345,21 +467,33 @@ fn a_scope_function_body_is_a_generic_template_that_splices_its_lambda() {
 }
 
 #[test]
-fn repeat_uses_the_canonical_declaration_of_its_inherited_iterator() {
+fn repeat_counts_its_range_loop_instead_of_iterating() {
     let Some(root) = distribution_root() else {
         return;
     };
     let libraries = stdlib(&root);
     let selected = kotlin_function(&libraries, "repeat");
     let mut ir = IrFile::default();
-    // The original `repeat` body now lowers: its exact `IntRange.iterator` reference is bound at
-    // provider publication to the real `IntProgression.iterator`, not a fabricated range member.
+    // `for (index in 0 until times)` in `repeat`'s body is a counted loop, as kotlinc's
+    // `ForLoopsLowering` makes it: no `IntRange` is built and no iterator is called.
     let template = template(&mut ir, &libraries, &selected).expect("the real repeat template");
     let function = &ir.functions[template.function as usize];
     assert_eq!(function.params, selected.callable.params);
     assert_eq!(function.ret, selected.callable.ret);
     assert!(ir.inline_only_fns.contains(&template.function));
-    assert!(ir.exprs.iter().any(|expression| {
+    let counters: Vec<Ty> = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Checked(operation) => match operation.as_ref() {
+                crate::ir::IrCheckedOperation::RangeLoop { counter, .. } => Some(*counter),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(counters, [Ty::Int]);
+    let iterates = ir.exprs.iter().any(|expression| {
         let IrExpr::Call { callee, .. } = expression else {
             return false;
         };
@@ -373,7 +507,8 @@ fn repeat_uses_the_canonical_declaration_of_its_inherited_iterator() {
             Some(KlibDeclarationSignature::Public(signature))
                 if signature.matches_exact(&["kotlin", "ranges"],
                     &["IntProgression", "iterator"], 8062689420742628886, 0))
-    }));
+    });
+    assert!(!iterates, "a counted loop calls no iterator");
     validated(&ir);
 }
 
@@ -589,6 +724,7 @@ fn a_dependency_property_read_reads_the_provider_property() {
                     arguments,
                     parameters,
                     result,
+                    substitutions: _,
                     source_receiver,
                 } => Some((
                     *target,

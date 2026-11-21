@@ -15,10 +15,11 @@ which is why `just fmt` and `just fmt-check` also pass `tests/*_e2e.rs` to rustf
 
 ## Compiler/plugin model reuse across worktrees
 
-`krusty-plugin-ir` records the workspace's existing `KRUSTY_BUILD_CHECKOUT` input in Rust dep-info.
-Its `shared_checkout` integration test builds two copies of the real model crate against one Cargo
-target, proves each consumer sees its own model API, and checks unchanged-checkout artifact reuse.
-The nested Cargo fixtures are dependency-free, offline and unoptimized; they do not inherit the
+`krusty-plugin-api` records the workspace's existing `KRUSTY_BUILD_CHECKOUT` input in Rust dep-info.
+Its `shared_checkout` integration test builds two copies of the real API crate (with the
+`krusty-names` crate it depends on) against one Cargo target, proves each consumer sees its own API,
+and checks unchanged-checkout artifact reuse. The nested Cargo fixtures build offline and
+unoptimized; they do not inherit the
 parent compiler's coverage flags or wrappers. Keep the shared target intact when reproducing this
 case: cleaning it hides the ownership defect.
 
@@ -60,7 +61,7 @@ when the test step fails. These are outputs of the original attempt, not diagnos
   recipe is a plain download, so do what it does:
 
   ```sh
-  ver=$(sed 's/#.*//' kotlin-versions | awk 'NF { print $1 }' | sort -V | tail -n 1)
+  ver=$(sed 's/#.*//' kotlin-versions | awk 'NF { print $1 }' | scripts/sort-kotlin-versions.sh | tail -n 1)
   dest="$PWD/target/cache/kotlinc/$ver"
   mkdir -p "$dest"
   curl -fsSL "https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-compiler-${ver}.zip" -o /tmp/kotlinc.zip
@@ -184,10 +185,12 @@ earlier run. The failure report reads the exact invocation's log, and the timing
 invocation separately because each is a separate process with its own wall time. The e2e log is the
 unfiltered binary name.
 
-CI builds the conformance test binary and CLI once. Every version in `kotlin-versions` expands into
-independent `jvm`, `native`, and `wasm` matrix rows from those artifacts. Those rows never wait for the
-ordinary compiler unit test binary: the `klib-implementation-coverage` job builds it and checks every release's exact Native and Wasm stdlib KLIB implementation coverage with
-it (`just klib-implementation-coverage`). One conformance matrix executes one step
+CI builds the conformance and e2e test binaries and the CLI once. Every version in `kotlin-versions`
+expands into independent `jvm`, `native`, and `wasm` matrix rows from those artifacts, and the `e2e`
+job runs the e2e binary. None of them waits for the ordinary compiler unit test binary: the `ci` job
+builds it with the other own test suites (`scripts/own-tests.sh`), runs it, and then checks every
+release's exact Native and Wasm stdlib KLIB implementation coverage with it
+(`just klib-implementation-coverage`). One conformance matrix executes one step
 inventory and the same backend-neutral case table. The JVM row runs its box corpus and JVM-owned
 regressions. The Native and Wasm rows run their own box corpora followed by
 their focused non-corpus regressions against the same exact target compiler and KLIB setup, so no
@@ -197,9 +200,9 @@ target test consumes JVM artifacts and no target waits for another target's corp
 code per Kotlin version or target. Toolchain and box/serialization corpora are isolated by version.
 JVM rows require pinned serialization-runtime provisioning, so missing prerequisites fail rather
 than turning those tests into passing skips. Compiler-dependent plugin and KSP integrations belong
-to the root e2e target. After coverage, CI reuses that exact coverage-profile executable for an explicit
-`plugin_host_compiler_e2e:: --include-ignored --test-threads=1` pass under the configurable e2e deadline.
-That pass runs after the coverage report; its counters do not change the measured workload.
+to the root e2e target. After the e2e suite, the `e2e` job runs the same executable again for an
+explicit `plugin_host_compiler_e2e:: --include-ignored --test-threads=1` pass under the configurable
+e2e deadline.
 Compiler-independent host tests run in their own `plugin-host` job through
 `cargo test --profile gate -p krusty-plugin-host -- --include-ignored`. Both use the host's pinned
 toolchain and JDK 17 in CI, not JVM matrix opt-in flags. Each row
@@ -288,7 +291,16 @@ inheritance. An owned source leaves a target only by naming its backends with `/
 as a fixture for a JVM-only compiler argument (`-Xuse-inline-scopes-numbers`) does. It is then
 outside that lane, not one of the lane's not-applicable entries: it leaves the lane's scanned
 and applicable counts, and the report line counts it as `outside-lane`. Harness errors, unavailable setup,
-compiler panics and every other target skip are fatal before any expectation write. The ordinary upstream
+compiler panics and every other target skip are fatal before any expectation write.
+
+A regression for a kotlinc bug fixed in a later release cannot use an earlier kotlinc as its
+oracle, because that compiler still miscompiles it. `// KOTLINC_VERSION:` bounds the reference
+releases such a case belongs to, in interval notation with either bound optional: `[2.5.0,)` (or
+just `2.5.0`) from 2.5.0, `[2.4.0,2.5.0)` before it. Bounds compare `major.minor.patch`, so a
+2.5.0 release candidate is inside `[2.5.0,)`. Under any other reference release, discovery leaves
+the case out of every lane's inventory; it is never a not-applicable entry. A malformed or repeated
+directive fails discovery. `// LANGUAGE_VERSION:` cannot do this: it selects a language level that
+an older kotlinc may still accept. The ordinary upstream
 per-case applicability policy is unchanged. Full sweeps require the provisioned upstream corpus;
 the separate vendored smoke test does not replace missing setup.
 
@@ -398,7 +410,7 @@ from its base commit's GHA cache (`box-reference-classes-<version>-…`), and ma
 its own commit, so a pull request pays kotlinc only for cases whose inputs it changed. The outer key
 names only the Kotlin version: a change to how references are planned, invoked, or laid out bumps
 `REF_CACHE_SALT` in `tests/box_reference_classes.rs`, which re-keys every entry, while any other
-harness edit keeps the cache. A read refreshes an entry's `OK`/`FAILED` marker time, and before
+harness edit keeps the cache. A read refreshes an entry's `OK`/`REJECTED` marker time, and before
 master saves, `scripts/prune-reference-cache.sh` drops entries unread for a week, so the cache
 tracks the current suite instead of growing with every input it ever compiled. The Native and Wasm
 rows keep their own copy (`box-reference-classes-<target>-<version>-…`) for the JVM oracles of their
@@ -429,12 +441,48 @@ class-dump: live kotlinc summary invocations=<n> tests=<n>
 class-dump: live kotlinc summary cache-miss test=<module>::<case> invocations=<n>
 ```
 
+## Plugin box corpora
+
+A compiler plugin keeps its own box corpus beside its code: `src/plugins/<name>/boxes/corpus.txt`
+describes what the plugin's cases need, and the shared harness (`krusty::conformance::plugin_corpus`)
+discovers it with no per-plugin branch. The descriptor names the case directive that enables the
+plugin (`// WITH_COMPOSE`), the reference compiler plugin jar and `-P` options, the runtime jars, the
+upstream `JetBrains/kotlin` `testData` directories, and the inclusive Kotlin release bracket the
+corpus covers; the module documentation lists the format. A case whose compiler is outside the
+bracket fails closed instead of compiling without the plugin.
+
+`just plugin-corpus <plugin> [version]` provisions the descriptor's `upstream` and `support` paths
+under `target/cache/plugin-corpus/<plugin>/<version>/` and prints that root. A new plugin registers
+by adding its descriptor to `DESCRIPTORS` in `src/conformance/plugin_corpus.rs`.
+
+A descriptor that names a `directive` and an `upstream` directory is run by
+`plugin_box_corpus::plugin_box_corpora_match_their_inventories` in the conformance binary, one path
+for every plugin: each upstream case compiles with the descriptor's directive and `support` sources
+against its runtime jars and Java `stubs`. The reference compiler runs the case first, and a case it
+cannot pass under that runtime is not applicable (`expected_not_applicable/jvm/<version>.txt`).
+A corpus starts clean: only the cases krusty passes are listed in `included/jvm/<version>.txt` and
+each must keep passing, while a case that does not pass yet is not included and joins the list in
+the change that makes it pass. A case that passes without being included fails the run, so the
+list only catches up. A descriptor with `check = classes` is for upstream cases that are code-generation dump tests with no
+`box()` (Compose's `testData/codegen`): the case passes when krusty emits exactly the classes the
+reference compiler and plugin emit, byte for byte, module by module. Both lists sit beside the descriptor (`src/plugins/<name>/boxes/`) and follow
+the same release-inheritance rule as the box inventories.
+Regenerate a plugin's lists with
+`KRUSTY_BLESS_BOX_EXPECTATIONS=1 ./run-tests.sh --test conformance plugin_box_corpora_match`.
+
+`scripts/provision-plugin-jars.sh [version]` fetches every Maven jar the descriptors name (the reference
+plugin jar and the runtime jars the distribution does not ship) into `KRUSTY_DEPS_CACHE` (`$HOME/.cache/krusty-deps` when unset, the
+same default the tests read; export one value for both), with
+retries, and fails when one cannot be fetched. A test process fetches a missing jar lazily under one
+shared download budget, so a slow transfer there starves every later case; the conformance rows run
+this script first, with a cache keyed by the descriptors.
+
 ## CLI Corpus Ratchet
 
 `kotlin_cli_jvm_conformance` (in the `conformance` binary) runs Kotlin's own command-line test
 corpus, `compiler/testData/cli/jvm` at the reference tag, through the krusty binary. `just box-corpus`
 provisions it in the same checkout as the box corpus. CI caches that checkout under a key versioned
-for every input it carries (`box-cli-and-generator-corpus-v3-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
+for every input it carries (`box-cli-diagnostics-and-generator-corpus-v4-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
 and `just box-corpus` then fails rather than fetch into an incomplete restored checkout, so adding a
 corpus input means bumping the salt. Each case is an `.args` file and the `.out`
 file kotlinc's `AbstractCliTest` compares against: the normalized stderr followed by the exit code's
@@ -474,6 +522,46 @@ being skipped, so the gate never tests fewer cases than it claims. JDKs are foun
 `JAVA_HOME_<release>_X64` variables `actions/setup-java` exports, and from
 `KRUSTY_JDK_<release>_HOME`, which overrides the rest.
 
+## Diagnostics False-Accept Ratchet
+
+`tests/kotlin_diagnostics_jvm_conformance.rs` runs Kotlin's diagnostics test data
+(`compiler/testData/diagnostics/tests` and `testsWithStdLib` of the provisioned checkout) through the
+box lane's compile path: krusty compiles each case in process with the same topologies (`// FILE:`
+with Java, `// MODULE:`), the same mock JDK unless `// FULL_JDK`, and the same kotlinc reference
+oracle and `target/cache/ref-classes` cache. Before either compiler sees a case, the lane strips its
+diagnostic markers and adds the helper files its directives select, as kotlinc's test runner does
+(`// CHECK_TYPE` adds `diagnostics/helpers/types/checkType.kt`, `// INFERENCE_HELPERS` adds
+`inference/inferenceUtils.kt`). It compares only whether each compiler rejects the case.
+
+A false accept, a case kotlinc rejects and krusty compiles without an error, is the divergence it
+ratchets in `tests/diagnostics_false_accepts/jvm/<version>.txt`. kotlinc rejects a case only by
+exiting with a compilation error (status 1) anchored at a Kotlin source position. A case kotlinc
+gives no verdict on (an internal error or crash status, an error with no source position, or javac
+refusing the case's Java) is excused only where `tests/diagnostics_not_scored/jvm/<version>.txt`
+lists it, and the run proves that list in both directions. A harness that cannot observe a case (a
+missing kotlinc or javac, the reference JDK configuration, a scratch or transport failure, a case it
+cannot prepare) fails the run whatever the lists say, and blessing then writes neither list. A
+listed false accept leaves the list only on a definite verdict from both compilers: an entry whose
+case lost kotlinc's or krusty's verdict fails the run, and blessing refuses while one does. Rewrite
+both lists with:
+
+```sh
+KRUSTY_BLESS_DIAGNOSTICS_EXPECTATIONS=1 just diagnostics-conformance "$(just conformance-bin)" <v>
+```
+
+krusty compiles the cases in a pool of long-lived worker processes, one per test thread, each this
+same test binary running the ignored `diagnostics_krusty_worker` test. A worker pays krusty's
+startup once; a case that crashes its worker (a stack overflow aborts the process) or runs past
+`KRUSTY_DIAGNOSTICS_CASE_TIMEOUT_SECONDS` (60 by default) is a krusty failure of that case, and a
+fresh worker takes the next one. `scripts/check-outcome-lists.sh` guards the false-accept lists like
+the box lists; the not-scored lists are proven by the reference run instead. False rejects and
+krusty failures are printed with the totals, not ratcheted. With kotlinc's references cached a run
+takes about a minute and a half on four cores; a cold reference cache adds about 1.5 hours of
+kotlinc compiles. Ordinary runs therefore ignore
+the test; `just diagnostics-conformance` first checks that the binary lists the test (an older
+binary would select none and pass), then runs it under `KRUSTY_DIAGNOSTICS_TIMEOUT_SECONDS`. CI runs
+it in the newest supported version's JVM conformance row after the box conformance run, and saves the
+references even when the run fails.
 ## Bytecode Text Ratchet
 
 `kotlin_bytecode_text_conformance` (in the `conformance` binary) compiles Kotlin's bytecode-text
@@ -552,11 +640,12 @@ Do not use `--release` for tests. The release build cycle takes longer than it s
 ## Required Check
 
 The `ci` workflow's `ci-and-conformance` job is the single check for master's ruleset to require.
-It needs the independent `lint` and coverage-owning `ci` jobs, the shared conformance matrix,
-`klib-implementation-coverage`, `build-gradle-plugin`, and the whole `gradle` compatibility matrix. Every
+It needs the independent `lint` job, the `ci` job that runs the own test suites and the KLIB
+implementation coverage, the `e2e` job, the shared conformance matrix, `build-gradle-plugin`, and
+the whole `gradle` compatibility matrix. Every
 supported Kotlin version has distinct JVM, Native and Wasm conformance
 rows. The KLIB decoder, value-class and kotlinc-native oracle tests are ordinary e2e and unit tests
-that the `ci` coverage gate runs against the maximum-version Native distribution, while
+that the `ci` and `e2e` jobs run against the maximum-version Native distribution, while
 `just klib-semantics` remains the focused local recipe. One backend-neutral box inventory includes upstream and owned
 portable regular/multimodule cases in every JVM, Native and Wasm row; directives may not silently
 skip owned cases. Genuinely platform-specific sources live in named target-owned tests with a
@@ -732,7 +821,8 @@ The e2e suite has its own built-in phase profiler: `KRUSTY_PROF=1` makes every h
 `PROF\t<phase>\t<ms>` lines (`krusty` in-process compile, `kotlinc` reference compile incl. queue
 wait, `box` JVM round-trip) to stderr — run the e2e binary with `--nocapture` and aggregate.
 
-`just coverage` prints a wall-clock line for every phase of that job, in whole seconds:
+`just coverage`, which the nightly `coverage` workflow runs, prints a wall-clock line for every
+phase, in whole seconds:
 `coverage: phase start <name>` when the phase begins and `coverage: phase <name> <seconds>s` when it
 finishes. The phases are toolchain provision, instrumentation, one compiler build
 (`build-compiler`) that emits the CLI, the language server, and their test binaries, each non-e2e
@@ -742,10 +832,11 @@ is compiled once and the cfg(test) harness overlaps the binaries. Nightly rustc 
 job per core (`-Z threads`). The run ends with `coverage: phases` repeating every
 finished phase and `coverage: phase total <seconds>s`, which is wall time from the first phase rather than
 the sum of the rows. The conformance box runner prints the same shape as
-`conformance-run: phase box-conformance <seconds>s`. The KLIB coverage job prints
-`klib-implementation-coverage: phase compiler-unit-tests`, and the tool producer, which builds the
-conformance binary, the CLI and the krusty-build tests over one krusty library, prints
-`tool-bins: phase conformance-and-cli` and `tool-bins: phase krusty-build-tests`. Conformance lanes
+`conformance-run: phase box-conformance <seconds>s`. `scripts/own-tests.sh` prints
+`own-tests: phase build` and one `own-tests: phase test-<binary>` per test binary, and the tool
+producer, which builds the conformance and e2e binaries, the CLI and the krusty-build tests over one
+krusty library, prints `tool-bins: phase conformance-e2e-and-cli` and
+`tool-bins: phase krusty-build-tests`. Conformance lanes
 and Gradle lanes run those binaries. A
 Gradle lane does not compile krusty.
 

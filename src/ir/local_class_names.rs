@@ -45,11 +45,48 @@ pub enum IrClassDeclarationContext {
     ClassInitializer { owner: TypeName },
 }
 
+/// What starts a local classifier's name when no classifier lexically owns it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrLocalClassNameRoot {
+    /// A source file of this module: its facade on a target with facade classes, its package on
+    /// one without. An inline payload classifier keeps its declaring source's root, not the file
+    /// that realizes the payload.
+    Source(super::IrModuleSource),
+    /// A dependency's file in `package`, whose body a dependency lowering realizes. It is no
+    /// source file of this module and has no facade here: the name starts in its package.
+    Dependency { package: TypeName },
+}
+
+impl IrLocalClassNameRoot {
+    /// The package the name is declared in.
+    pub fn package(&self) -> TypeName {
+        match self {
+            Self::Source(source) => source.package,
+            Self::Dependency { package } => *package,
+        }
+    }
+
+    fn package_mut(&mut self) -> &mut TypeName {
+        match self {
+            Self::Source(source) => &mut source.package,
+            Self::Dependency { package } => package,
+        }
+    }
+
+    /// The classifier the name starts in on a target with facade classes: `facade` of a source
+    /// file, and a dependency file's package, which has none.
+    pub fn facade(&self, facade: impl Fn(super::IrModuleSource) -> TypeName) -> TypeName {
+        match self {
+            Self::Source(source) => facade(*source),
+            Self::Dependency { package } => *package,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrLocalClassNameProvenance {
-    /// Source file whose facade roots the name when there is no lexical owner. An inline payload
-    /// classifier keeps its declaring source's facade, not the file that realizes the payload.
-    pub source: super::IrModuleSource,
+    /// What roots the name when there is no lexical owner.
+    pub source: IrLocalClassNameRoot,
     /// Exact source classifier that lexically owns this executable context, or the file facade.
     pub lexical_owner: Option<IrLocalClassOwner>,
     /// Source declaration identities below the owner (callable/property/local/class names).
@@ -366,6 +403,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             dispatch,
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         }
@@ -373,6 +411,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             dispatch,
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         } => {
@@ -383,6 +422,16 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             *result = ty(*result, names);
             if let Some(receiver) = source_receiver {
                 *receiver = ty(*receiver, names);
+            }
+            for substitution in substitutions {
+                substitution.value = ty(substitution.value, names);
+                substitution.reified_runtime = ty(substitution.reified_runtime, names);
+                substitution.additional_bounds = substitution
+                    .additional_bounds
+                    .iter()
+                    .copied()
+                    .map(|bound| ty(bound, names))
+                    .collect();
             }
             return;
         }
@@ -422,6 +471,8 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
             return;
         }
         IrCheckedOperation::IllegalProgressionStep { .. }
+        | IrCheckedOperation::AtomicField { .. }
+        | IrCheckedOperation::AtomicArrayElement { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => return,
         IrCheckedOperation::PropertyReference {
             target,
@@ -475,7 +526,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
                 }
                 | super::IrIntrinsic::GeneratedPropertyEquals { ty: classifier }
                 | super::IrIntrinsic::GeneratedPropertyHash { ty: classifier }
-                | super::IrIntrinsic::DataClassArrayToString { ty: classifier }
+                | super::IrIntrinsic::GeneratedPropertyArrayToString { ty: classifier }
                 | super::IrIntrinsic::TypeOf { ty: classifier }
                 | super::IrIntrinsic::Ieee754Equals {
                     operand: classifier,
@@ -501,7 +552,16 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             tys(params, names);
             *ret = ty(*ret, names);
         }
-        Callee::Module { params, ret, .. } | Callee::ModuleDefaultEntry { params, ret, .. } => {
+        Callee::Module { params, ret, .. } => {
+            tys(params, names);
+            *ret = ty(*ret, names);
+        }
+        Callee::ModuleConstructorDefaultEntry {
+            outer, params, ret, ..
+        } => {
+            if let Some(outer) = outer {
+                *outer = ty(*outer, names);
+            }
             tys(params, names);
             *ret = ty(*ret, names);
         }
@@ -520,6 +580,12 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             }
         }
         Callee::ModuleWithDefaults {
+            params,
+            ret,
+            dispatch_receiver_ty,
+            ..
+        }
+        | Callee::ModuleDefaultEntry {
             params,
             ret,
             dispatch_receiver_ty,
@@ -564,6 +630,14 @@ fn sam_target(sam: &mut crate::ir::IrSamTarget, names: &IdentityRemap<'_>) {
     tys(&mut sam.declared_parameters, names);
     sam.declared_result = ty(sam.declared_result, names);
     tys(&mut sam.overridden_results, names);
+    for frame in sam
+        .dispatch_methods
+        .iter_mut()
+        .chain(&mut sam.default_methods)
+    {
+        tys(&mut frame.parameters, names);
+        frame.result = ty(frame.result, names);
+    }
     for parameter in &mut sam.type_parameters {
         for (bound, _) in &mut parameter.bounds {
             *bound = ty(*bound, names);
@@ -949,7 +1023,7 @@ fn local_class_name_provenance(
     provenance: &mut IrLocalClassNameProvenance,
     names: &IdentityRemap<'_>,
 ) {
-    name(&mut provenance.source.package, names);
+    name(provenance.source.package_mut(), names);
     if let Some(IrLocalClassOwner::External(owner)) = &mut provenance.lexical_owner {
         name(owner, names);
     }
@@ -1093,6 +1167,11 @@ fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
             .staticbound_recv_unbox
             .iter_mut()
             .for_each(|value| name(value, names));
+        reference
+            .bound_context_unbox
+            .iter_mut()
+            .flatten()
+            .for_each(|value| name(&mut value.value_class, names));
     }
     for bridge in &mut class.bridges {
         bridge
@@ -1332,16 +1411,9 @@ impl super::IrFile {
             }
         }
         for overrides in self.property_overrides.values_mut() {
-            for edge in overrides {
-                name(&mut edge.implementation_owner, names);
-                name(&mut edge.overridden_owner, names);
-                edge.declared_type = ty(edge.declared_type, names);
-                edge.applied_type = ty(edge.applied_type, names);
-                edge.implementation_type = ty(edge.implementation_type, names);
-                edge.declared_receiver = edge.declared_receiver.map(|value| ty(value, names));
-                edge.implementation_receiver =
-                    edge.implementation_receiver.map(|value| ty(value, names));
-            }
+            overrides
+                .iter_mut()
+                .for_each(|edge| property_override(edge, names));
         }
         for defaults in self.inherited_defaults.values_mut() {
             for default in defaults {
@@ -1359,16 +1431,9 @@ impl super::IrFile {
             }
         }
         for overrides in self.function_overrides.values_mut() {
-            for edge in overrides {
-                name(&mut edge.implementation_owner, names);
-                name(&mut edge.overridden_owner, names);
-                tys(&mut edge.declared_parameters, names);
-                edge.declared_result = ty(edge.declared_result, names);
-                tys(&mut edge.applied_parameters, names);
-                edge.applied_result = ty(edge.applied_result, names);
-                tys(&mut edge.implementation_parameters, names);
-                edge.implementation_result = ty(edge.implementation_result, names);
-            }
+            overrides
+                .iter_mut()
+                .for_each(|edge| function_override(edge, names));
         }
         for constructor in self.checked_constructor_bodies.values_mut() {
             annotations(&mut constructor.annotations, names);
@@ -1632,6 +1697,7 @@ impl super::IrFile {
         remap_keyed(&mut self.property_overrides, names);
         remap_keyed(&mut self.function_overrides, names);
         remap_keyed(&mut self.inherited_defaults, names);
+        remap_keyed(&mut self.function_slot_families, names);
         remap_keyed(&mut self.generated_member_publications, names);
         remap_keyed(&mut self.class_type_aliases, names);
         remap_keyed(&mut self.jvm_value_class_secondary_ctors, names);
@@ -1706,6 +1772,9 @@ fn remap_expression_facts(ir: &mut super::IrFile, expression: ExprId, names: &Id
     }
     if let Some(parameters) = ir.physical_call_parameters.get_mut(&expression) {
         tys(parameters, names);
+    }
+    if let Some(source_callee) = ir.suspend_call_declarations.get_mut(&expression) {
+        callee(source_callee, names);
     }
     if let Some(access) = ir.module_member_accesses.get_mut(&expression) {
         module_member_access(access, names);
@@ -1803,7 +1872,7 @@ impl super::IrFile {
     /// (`box$Local`).
     pub(crate) fn realize_local_class_names(
         &mut self,
-        root: impl Fn(super::IrModuleSource, &str) -> TypeName,
+        root: impl Fn(IrLocalClassNameRoot, &str) -> TypeName,
     ) {
         let classes = self
             .local_class_name_provenance
@@ -1826,14 +1895,14 @@ impl super::IrFile {
     /// local to a top-level `box` is `box$Local` and its first anonymous object `box$1`.
     pub fn realize_local_class_names_in_packages(&mut self) {
         self.realize_local_class_names(|source, first| {
-            crate::types::type_name_child(source.package, first)
+            crate::types::type_name_child(source.package(), first)
         });
     }
 }
 
 fn physical_name(
     class: ClassId,
-    root: &impl Fn(super::IrModuleSource, &str) -> TypeName,
+    root: &impl Fn(IrLocalClassNameRoot, &str) -> TypeName,
     ir: &super::IrFile,
     cache: &mut HashMap<ClassId, TypeName>,
 ) -> TypeName {
@@ -1866,6 +1935,27 @@ fn physical_name(
     }
     cache.insert(class, name);
     name
+}
+
+fn property_override(edge: &mut super::IrPropertyOverride, names: &IdentityRemap<'_>) {
+    name(&mut edge.implementation_owner, names);
+    name(&mut edge.overridden_owner, names);
+    edge.declared_type = ty(edge.declared_type, names);
+    edge.applied_type = ty(edge.applied_type, names);
+    edge.implementation_type = ty(edge.implementation_type, names);
+    edge.declared_receiver = edge.declared_receiver.map(|value| ty(value, names));
+    edge.implementation_receiver = edge.implementation_receiver.map(|value| ty(value, names));
+}
+
+fn function_override(edge: &mut super::IrFunctionOverride, names: &IdentityRemap<'_>) {
+    name(&mut edge.implementation_owner, names);
+    name(&mut edge.overridden_owner, names);
+    tys(&mut edge.declared_parameters, names);
+    edge.declared_result = ty(edge.declared_result, names);
+    tys(&mut edge.applied_parameters, names);
+    edge.applied_result = ty(edge.applied_result, names);
+    tys(&mut edge.implementation_parameters, names);
+    edge.implementation_result = ty(edge.implementation_result, names);
 }
 
 #[cfg(test)]
@@ -1994,13 +2084,27 @@ mod tests {
                 has_receiver: false,
                 suspend: false,
                 source_suspend: false,
+                requires_object_dispatch: true,
                 overridden_results: vec![source_ty],
+                dispatch_methods: vec![crate::ir::IrSamMethodFrame {
+                    method: Some(IrSamMethod::External(
+                        crate::fir::ExternalCallableId::from_raw(71),
+                    )),
+                    parameters: vec![source_ty],
+                    result: source_ty,
+                }],
+                default_methods: vec![crate::ir::IrSamMethodFrame {
+                    method: None,
+                    parameters: vec![source_ty],
+                    result: source_ty,
+                }],
                 function_adapter: false,
                 wraps_function_value: false,
                 nullable: false,
                 kotlin_interface: true,
                 parameter_identities: Vec::new(),
                 type_parameters: Vec::new(),
+                placement: crate::ir::IrSamPlacement::ThisFile,
             })),
             inline_body: None,
         };
@@ -2009,7 +2113,18 @@ mod tests {
             unreachable!()
         };
         assert_eq!(sam.classifier, target);
+        assert!(sam.requires_object_dispatch);
         assert_eq!(sam.overridden_results, vec![target_ty]);
+        assert_eq!(
+            sam.dispatch_methods[0].method,
+            Some(IrSamMethod::External(
+                crate::fir::ExternalCallableId::from_raw(71)
+            ))
+        );
+        for frame in sam.dispatch_methods.iter().chain(&sam.default_methods) {
+            assert_eq!(frame.parameters, vec![target_ty]);
+            assert_eq!(frame.result, target_ty);
+        }
 
         let runtime = || IrRuntimeFunction {
             function: crate::fir::ExternalCallableId::from_raw(1),
@@ -2127,6 +2242,91 @@ mod tests {
         let target = crate::types::type_name("sample/Target");
         let names = HashMap::from_iter([(source, target)]);
         let mut ir = super::super::IrFile::default();
+        let returned = ir.add_expr(IrExpr::UnitInstance);
+        let implementation = ir.add_fun(IrFunction {
+            name: "invoke".to_string(),
+            params: vec![Ty::obj_name(source)],
+            ret: Ty::obj_name(source),
+            body: Some(returned),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let reachable_inline_body = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Local(implementation)),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let reachable = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: Some(reachable_inline_body),
+        });
+        let other_inline_body = ir.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::Local(implementation)),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let other = ir.add_expr(IrExpr::Lambda {
+            impl_fn: implementation,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: Some(other_inline_body),
+        });
+        ir.inline_only_fns.insert(implementation);
+        ir.must_inline_lambdas.insert(implementation);
+
+        let detached = ir.remap_reachable_classifier_identities(
+            &names,
+            [reachable],
+            &HashSet::from_iter([reachable, reachable_inline_body]),
+            &mut HashSet::default(),
+        );
+
+        assert_eq!(detached.len(), 1);
+        assert_eq!(detached[0].source, implementation);
+        assert_eq!(detached[0].parent, None);
+        assert_eq!(detached[0].order, reachable);
+        assert!(detached[0].class_site);
+        assert!(matches!(
+            ir.expr(reachable),
+            IrExpr::Lambda { impl_fn, .. } if *impl_fn == detached[0].target
+        ));
+        assert!(matches!(
+            ir.expr(other),
+            IrExpr::Lambda { impl_fn, .. } if *impl_fn == implementation
+        ));
+        assert!(matches!(
+            ir.expr(reachable_inline_body),
+            IrExpr::Call { callee: call_callee, .. }
+                if matches!(&**call_callee, Callee::Local(function) if *function == detached[0].target)));
+        assert!(matches!(
+            ir.expr(other_inline_body),
+            IrExpr::Call { callee: call_callee, .. }
+                if matches!(&**call_callee, Callee::Local(function) if *function == implementation)));
+        assert!(ir.inline_only_fns.contains(&implementation));
+        assert!(ir.must_inline_lambdas.contains(&implementation));
+        assert!(!ir.inline_only_fns.contains(&detached[0].target));
+        assert!(!ir.must_inline_lambdas.contains(&detached[0].target));
+        assert_eq!(
+            ir.functions[detached[0].target as usize].params,
+            vec![Ty::obj_name(target)]
+        );
+        assert_eq!(
+            ir.functions[detached[0].target as usize].ret,
+            Ty::obj_name(target)
+        );
+    }
+
+    #[test]
+    fn reachable_remap_keeps_a_consumed_lambda_implementation_consumed_on_its_copy() {
+        let source = crate::types::type_name("sample/Source");
+        let target = crate::types::type_name("sample/Target");
+        let names = HashMap::from_iter([(source, target)]);
+        let mut ir = super::super::IrFile::default();
         let implementation = ir.add_fun(IrFunction {
             name: "invoke".to_string(),
             params: vec![Ty::obj_name(source)],
@@ -2193,8 +2393,10 @@ mod tests {
                 if matches!(&**call_callee, Callee::Local(function) if *function == implementation)));
         assert!(ir.inline_only_fns.contains(&implementation));
         assert!(ir.must_inline_lambdas.contains(&implementation));
-        assert!(!ir.inline_only_fns.contains(&detached[0].target));
-        assert!(!ir.must_inline_lambdas.contains(&detached[0].target));
+        // A splice consumed the source's body, so the copy is that consumed implementation too.
+        assert!(ir.functions[detached[0].target as usize].body.is_none());
+        assert!(ir.inline_only_fns.contains(&detached[0].target));
+        assert!(ir.must_inline_lambdas.contains(&detached[0].target));
         assert_eq!(
             ir.functions[detached[0].target as usize].params,
             vec![Ty::obj_name(target)]

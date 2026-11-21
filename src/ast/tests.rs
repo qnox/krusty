@@ -4,6 +4,10 @@ fn span() -> Span {
     Span::new(0, 0)
 }
 
+fn one_name(name: &str) -> crate::fx_hash::HashSet<&str> {
+    std::iter::once(name).collect()
+}
+
 #[test]
 fn binary_operator_location_does_not_widen_the_expression_arena_entry() {
     assert!(
@@ -25,7 +29,7 @@ fn expr_uses_name_stops_at_nested_lambdas() {
         span(),
     );
 
-    assert!(!file.expr_uses_name(lambda, "outer"));
+    assert!(!file.expr_uses_any_name(lambda, &one_name("outer")));
     assert!(file.expr_uses_name_deep(lambda, "outer"));
 }
 
@@ -63,9 +67,33 @@ fn expr_uses_name_counts_assignment_targets_and_values() {
         span(),
     );
 
-    assert!(file.expr_uses_name(block, "target"));
-    assert!(file.expr_uses_name(block, "value"));
-    assert!(!file.expr_uses_name(block, "missing"));
+    assert!(file.expr_uses_any_name(block, &one_name("target")));
+    assert!(file.expr_uses_any_name(block, &one_name("value")));
+    assert!(!file.expr_uses_any_name(block, &one_name("missing")));
+}
+
+#[test]
+fn expr_uses_name_deep_counts_assignment_targets_and_values() {
+    let mut file = File::default();
+    let value = file.add_expr(Expr::Name("value".to_string()), span());
+    let assign = file.add_stmt(
+        Stmt::Assign {
+            name: "target".to_string(),
+            value,
+        },
+        span(),
+    );
+    let block = file.add_expr(
+        Expr::Block {
+            stmts: vec![assign],
+            trailing: None,
+        },
+        span(),
+    );
+
+    assert!(file.expr_uses_name_deep(block, "target"));
+    assert!(file.expr_uses_name_deep(block, "value"));
+    assert!(!file.expr_uses_name_deep(block, "missing"));
 }
 
 #[test]

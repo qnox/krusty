@@ -123,51 +123,16 @@ fn reference_site(expr: &IrExpr) -> Option<(&krusty::fir::PropertyId, Option<u32
 
 impl<'a> FileLowering<'a> {
     /// The Kotlin name of the declaration a callable-reference node names, which `KCallable.name`
-    /// answers.
-    ///
-    /// `None` when the expression is not such a node, or when the declaration's name cannot be
-    /// read — a reference that cannot say its own name gets no `name` member rather than a wrong
-    /// one.
+    /// answers (`krusty::backend::reference_names`); `None` when the expression is not such a node.
     pub(super) fn reference_declaration_name(&self, id: u32) -> Option<String> {
         let IrExpr::CallableReference(reference) = self.ir.expr(id) else {
             return None;
         };
-        match &reference.target {
-            krusty::ir::IrCallableReferenceTarget::Local { name, .. } => Some(name.to_string()),
-            // Kotlin calls a constructor reference `<init>`, which is the name it answers too.
-            krusty::ir::IrCallableReferenceTarget::Constructor { .. } => Some("<init>".to_string()),
-            // The declaration name is kept beside the call precisely so a reference's identity does
-            // not depend on whatever the emitted method ended up being called.
-            krusty::ir::IrCallableReferenceTarget::Module(id) => self
-                .ir
-                .referenced_module_callables
-                .get(id)
-                .map(|callable| callable.name.to_string()),
-            // A dependency declaration publishes its Kotlin name in the frozen selected-callable
-            // facts; the physical spelling is an emit handle and not what `name` answers.
-            krusty::ir::IrCallableReferenceTarget::External { declaration, .. } => {
-                let realization = self.callables.callable(*declaration)?;
-                Some(
-                    realization
-                        .reflection_name
-                        .clone()
-                        .unwrap_or_else(|| realization.name.clone()),
-                )
-            }
-            krusty::ir::IrCallableReferenceTarget::FunctionValueConversion { ordinal } => {
-                Some(format!("suspendConversion{ordinal}"))
-            }
-            krusty::ir::IrCallableReferenceTarget::FunctionInvoke => Some("invoke".to_string()),
-            // A function value has no `name`; only the property reference itself does.
-            krusty::ir::IrCallableReferenceTarget::Property(_) => None,
-            krusty::ir::IrCallableReferenceTarget::Classifier { operation, .. } => Some(
-                match operation {
-                    krusty::ir::IrClassifierCallable::EnumValueOf => "valueOf",
-                    krusty::ir::IrClassifierCallable::SamConstructor => "<init>",
-                }
-                .to_string(),
-            ),
-        }
+        krusty::backend::reference_names::callable_reference_name(
+            self.ir,
+            self.callables,
+            reference,
+        )
     }
 
     /// Why a property-reference site was not realized, named rather than numbered.
@@ -618,7 +583,11 @@ impl<'a> FileLowering<'a> {
                 instantiable: true,
                 superclass: any_type,
                 interfaces: &markers,
-                reference_target: Some((marker, receiver_offset.unwrap_or(0))),
+                reference_target: Some(super::objects::ReferenceTarget {
+                    marker,
+                    receiver_offset: receiver_offset.unwrap_or(0),
+                    context_offsets: Vec::new(),
+                }),
                 walk: super::objects::WalkMembers::default(),
                 qualified_name: None,
                 simple_name: None,

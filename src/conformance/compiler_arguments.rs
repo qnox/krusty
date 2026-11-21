@@ -6,7 +6,7 @@
 //! translation from directives: ordinary settings become kotlinc arguments, while historical
 //! language/API levels use the typed channel which Kotlin's own test runner uses.
 
-use super::{directive, UnitCodegenModes};
+use super::{case_directive_region, directive, UnitCodegenModes};
 use crate::features::LanguageVersionPolicy;
 use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
@@ -30,13 +30,13 @@ pub struct UnitCompilerConfiguration {
 
 /// The kotlinc arguments one compilation unit of a case compiles under: the case-wide arguments of
 /// [`case_kotlinc_arguments`], then the code-generation modes the unit's own Kotlin sources select
-/// ([`UnitCodegenModes::of_unit`]).
+/// ([`UnitCodegenModes::of_unit`]), or else the case selects for every module.
 pub fn unit_kotlinc_arguments<'a>(
     case: &str,
     unit: impl IntoIterator<Item = &'a str>,
 ) -> Result<Vec<String>, String> {
     let mut arguments = case_kotlinc_arguments(case)?;
-    arguments.extend(UnitCodegenModes::of_unit(unit).kotlinc_args());
+    arguments.extend(unit_codegen_modes(case, unit).kotlinc_args());
     Ok(arguments)
 }
 
@@ -49,8 +49,13 @@ pub fn unit_compiler_configuration<'a>(
     let mut configuration = case_compiler_configuration(case)?;
     configuration
         .arguments
-        .extend(UnitCodegenModes::of_unit(unit).kotlinc_args());
+        .extend(unit_codegen_modes(case, unit).kotlinc_args());
     Ok(configuration)
+}
+
+/// The modes one unit of `case` compiles under ([`UnitCodegenModes::of_unit_in_case`]).
+fn unit_codegen_modes<'a>(case: &str, unit: impl IntoIterator<Item = &'a str>) -> UnitCodegenModes {
+    UnitCodegenModes::of_unit_in_case(case_directive_region(case), unit)
 }
 
 fn case_compiler_configuration(src: &str) -> Result<UnitCompilerConfiguration, String> {
@@ -110,8 +115,7 @@ fn platform_compiler_configuration_for_release(
 /// | `// STRING_CONCAT: X` | `-Xstring-concat=X` |
 /// | `// ASSERTIONS_MODE: X` | `-Xassertions=X` |
 /// | `// WHEN_EXPRESSIONS: X` | `-Xwhen-expressions=x` |
-/// | `// WITH_COMPOSE` | `-Xplugin=<the distribution's Compose plugin>`, with source information |
-/// | `// WITH_ATOMICFU` | `-Xplugin=<the atomicfu plugin of the distribution's Kotlin version>` |
+/// | a plugin corpus's directive (`// WITH_COMPOSE`, `// WITH_ATOMICFU`, …) | `-Xplugin=<its plugin jar>` and its `-P` options, from its descriptor (see [`super::plugin_corpus`]) |
 ///
 /// The per-unit `// LAMBDAS:`, `// SAM_CONVERSIONS:` and `// JVM_DEFAULT_MODE:` directives belong
 /// to [`unit_kotlinc_arguments`]; a value of one that names no mode fails closed here, so no unit
@@ -202,30 +206,9 @@ fn case_cli_arguments(
             arguments.push(format!("-Xwhen-expressions={}", mode.to_ascii_lowercase()));
         }
     }
-    if directive(src, "WITH_COMPOSE") {
-        // The reference distribution's own plugin jar, with source information on so a case
-        // covers its encoding; every other option keeps the plugin's default.
-        let plugin =
-            crate::toolchain::dist_jar("compose-compiler-plugin.jar").ok_or_else(|| {
-                "box directive `// WITH_COMPOSE` needs the reference distribution's Compose plugin"
-                    .to_string()
-            })?;
-        arguments.push(format!("-Xplugin={}", plugin.display()));
-        arguments.extend([
-            "-P".to_string(),
-            format!(
-                "plugin:{}:sourceInformation=true",
-                crate::plugins::cli::COMPOSE_PLUGIN_ID
-            ),
-        ]);
-    }
-    if directive(src, "WITH_ATOMICFU") {
-        let plugin = crate::toolchain::atomicfu_compiler_plugin_jar().ok_or_else(|| {
-            "box directive `// WITH_ATOMICFU` needs the atomicfu compiler plugin of the reference \
-             Kotlin version"
-                .to_string()
-        })?;
-        arguments.push(format!("-Xplugin={}", plugin.display()));
+    // A plugin corpus's directive loads that plugin, with the options its descriptor names.
+    for corpus in super::plugin_corpus::enabled_by(src) {
+        arguments.extend(corpus.compiler_arguments(compiler)?);
     }
     Ok(arguments)
 }
@@ -588,6 +571,51 @@ mod tests {
         assert_eq!(
             unit_kotlinc_arguments(case, ["fun b() {}\n"]).unwrap(),
             ["-XXLanguage:+ContextParameters"]
+        );
+    }
+
+    /// A mode set before the first `// MODULE:` header is every module's, as in
+    /// `box/compileKotlinAgainstKotlin/jvm8/defaults/superCall.kt`; a module's own directive wins.
+    #[test]
+    fn a_mode_before_the_first_module_applies_to_every_unit() {
+        let case = "// JVM_DEFAULT_MODE: disable\n// MODULE: lib\n// FILE: lib.kt\n\
+                    // MODULE: main(lib)\n// FILE: main.kt\n";
+        assert_eq!(
+            unit_kotlinc_arguments(case, ["fun b() {}\n"]).unwrap(),
+            ["-jvm-default", "disable"]
+        );
+        assert_eq!(
+            unit_kotlinc_arguments(case, ["// JVM_DEFAULT_MODE: no-compatibility\n"]).unwrap(),
+            ["-jvm-default", "no-compatibility"]
+        );
+    }
+
+    /// A module directive that names kotlinc's own default still overrides the case-wide mode.
+    #[test]
+    fn a_modules_explicit_default_mode_overrides_the_case_mode() {
+        let case = "// LAMBDAS: CLASS\n// SAM_CONVERSIONS: CLASS\n// JVM_DEFAULT_MODE: disable\n\
+                    // MODULE: lib\n// FILE: Lib.kt\n\
+                    // MODULE: main(lib)\n// FILE: Main.kt\n";
+        assert_eq!(
+            unit_kotlinc_arguments(case, ["fun a() {}\n"]).unwrap(),
+            [
+                "-jvm-default",
+                "disable",
+                "-Xlambdas=class",
+                "-Xsam-conversions=class"
+            ]
+        );
+        assert_eq!(
+            unit_kotlinc_arguments(
+                case,
+                ["// LAMBDAS: INDY\n// SAM_CONVERSIONS: INDY\n// JVM_DEFAULT_MODE: enable\n"]
+            )
+            .unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            unit_kotlinc_arguments(case, ["// LAMBDAS: INDY\n"]).unwrap(),
+            ["-jvm-default", "disable", "-Xsam-conversions=class"]
         );
     }
 }

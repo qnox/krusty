@@ -113,6 +113,10 @@ impl InheritedFacts for LambdaExits {
         let Self { leaves } = self;
         leaves.inherit(source, target);
     }
+
+    fn truncate_from(&mut self, first: ExprId) {
+        self.leaves.truncate_from(first);
+    }
 }
 
 /// How `expression` leaves: by a `return`, or by a `break` or `continue` of no loop in `loops` or

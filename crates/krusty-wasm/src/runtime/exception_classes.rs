@@ -22,7 +22,7 @@ impl Runtime {
         let structure = self.exceptions.ensure_class(module, source, identity)?;
         for (class, structure) in self.exceptions.declared_classes() {
             let names = member_class_names(class);
-            let to_string = self.throwable_to_string(module, class, &names);
+            let to_string = self.throwable_to_string(module, &names);
             let mut init = Code::default();
             for function in [
                 self.objects.identity_equals,
@@ -43,5 +43,39 @@ impl Runtime {
             self.exceptions.publish_table(structure, table);
         }
         Ok(structure)
+    }
+
+    /// Make every interface stub throw the Kotlin `NullPointerException` on a `null` receiver,
+    /// declaring the function that throws it on first use. A program compiled with no library
+    /// that declares the exception has no such type to throw or catch, and its stubs keep
+    /// trapping.
+    pub(crate) fn null_receiver_throws(
+        &mut self,
+        module: &mut Module,
+        source: &dyn BackendClassifierSource,
+    ) -> Result<(), String> {
+        let identity = krusty::libraries::RuntimeExceptionKind::NullPointer.classifier();
+        if self.objects.interfaces.throws_on_null_receiver()
+            || source.classifier(identity).is_none()
+        {
+            return Ok(());
+        }
+        let structure = self.exception_class(module, source, identity)?;
+        let mut code = Code::default();
+        self.exceptions
+            .construct_class(&mut code, structure, None, self.string)?;
+        code.throw(self.exceptions.tag);
+        let ty = module.func_type(Vec::new(), Vec::new());
+        let function = module.declare();
+        module.define(
+            function,
+            Function {
+                ty,
+                locals: Vec::new(),
+                code,
+            },
+        );
+        self.objects.interfaces.throw_on_null_receiver(function);
+        Ok(())
     }
 }

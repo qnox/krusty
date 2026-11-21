@@ -17,6 +17,7 @@ use krusty::types::TypeName;
 
 #[cfg(test)]
 mod layout_tests;
+mod map_members;
 mod walking;
 pub(super) use walking::WalkMembers;
 
@@ -55,7 +56,13 @@ pub(super) mod ktype {
     /// The interface table; see the note on `KType`. Absent for a type implementing no interface
     /// of the program.
     pub const ITABLE: u32 = 160;
-    pub const SIZE: usize = 168;
+    /// The `Map` members of a class of the program implementing it; see the note on `KType`.
+    pub const MAP_MEMBERS: u32 = 168;
+    /// A callable reference's `uint32_t[]` of the byte offsets of its bound context values; see
+    /// the note on `KType`. Absent when it binds none.
+    pub const REFERENCE_CONTEXT_OFFSETS: u32 = 176;
+    pub const REFERENCE_CONTEXT_COUNT: u32 = 184;
+    pub const SIZE: usize = 192;
 }
 
 const CLASS_NAMES_MEMBER: u32 = 1;
@@ -70,10 +77,23 @@ const _: () = {
     assert!(ktype::ITABLE == super::super::super::interface_calls::ITABLE_OFFSET);
 };
 
+/// What equality of a callable reference reads: the identity of the declaration it names, then the
+/// values it binds, each as the byte offset of the field holding it.
+pub(super) struct ReferenceTarget {
+    pub(super) marker: DataId,
+    /// The bound receiver, or 0 when the reference binds none (no field sits at offset 0).
+    pub(super) receiver_offset: u32,
+    /// The values bound for the declaration's context parameters, in parameter order.
+    pub(super) context_offsets: Vec<u32>,
+}
+
 /// The emitted items of one class.
 pub(super) struct ClassItems {
     /// Its `KType`.
     pub(super) descriptor: DataId,
+    /// The classifier identity this descriptor was declared to publish, if its physical
+    /// declaration is linkable from another file.
+    pub(super) published_descriptor: Option<(krusty::backend::KlibClassIdentity, String)>,
     /// `kt_<class>__init(this, args…)`, absent for a class with no primary constructor: every
     /// `<init>` of one comes from its secondaries.
     pub(super) constructor: Option<FuncId>,
@@ -117,7 +137,9 @@ pub(super) fn constructor_parameters(ir: &IrFile, class: ClassId) -> Vec<Ty> {
         .ctor_args
         .iter()
         .enumerate()
-        .map(|(index, argument)| captures::prefix_physical_ty(ir, class, index, argument.ty))
+        .map(|(index, argument)| {
+            captures::constructor_argument_physical_ty(ir, class, index, argument.ty)
+        })
         .collect()
 }
 
@@ -161,9 +183,9 @@ pub(super) struct DescriptorShape<'s> {
     pub(super) superclass: DataId,
     /// Every interface the type implements, transitively.
     pub(super) interfaces: &'s [DataId],
-    /// A callable reference's declaration identity, and the byte offset of its bound receiver —
-    /// 0 when it binds none. The two travel together because only a reference has either.
-    pub(super) reference_target: Option<(DataId, u32)>,
+    /// A callable reference's declaration identity and the fields its equality reads. They travel
+    /// together because only a reference has any of them.
+    pub(super) reference_target: Option<ReferenceTarget>,
     /// How to reach this type's own `iterator`/`hasNext`/`next`, for a class of this file the
     /// runtime may be asked to walk. Empty for everything else, which is every type emitted here
     /// but a class.
@@ -211,6 +233,25 @@ impl<'a> FileLowering<'a> {
             .map_err(|error| declined!("declaring `{name}` ({error})"))
     }
 
+    /// A function standing in a table slot: linked under its owning exported class's name when a
+    /// later file's subclass inherits the slot, kept to this object otherwise.
+    fn declare_slot_function(
+        &mut self,
+        slot: &Slot,
+        owners: &HashMap<Slot, ClassId>,
+        name: &str,
+        params: &[Ty],
+        ret: Ty,
+    ) -> Result<FuncId, Unsupported> {
+        match owners.get(slot) {
+            Some(&owner) => {
+                let qualified = format!("kt_{}__{name}", self.class_base(owner));
+                self.declare_class_function(owner, &qualified, params, ret)
+            }
+            None => self.declare_local_function(name, params, ret),
+        }
+    }
+
     pub(super) fn declare_local_function(
         &mut self,
         name: &str,
@@ -228,7 +269,11 @@ impl<'a> FileLowering<'a> {
     pub(super) fn declare_classes(&mut self) -> Result<(), Unsupported> {
         for class in 0..self.ir.classes.len() as ClassId {
             let base = self.class_base(class).to_string();
-            let descriptor = self.declare_descriptor(class, &base)?;
+            let (descriptor, linkable_symbol) = self.declare_descriptor(class, &base)?;
+            let published_descriptor =
+                linkable_symbol.zip(self.dependency_signatures.classifier(class).cloned());
+            let published_descriptor =
+                published_descriptor.map(|(symbol, identity)| (identity, symbol));
             let params: Vec<Ty> = std::iter::once(any())
                 .chain(constructor_parameters(self.ir, class))
                 .collect();
@@ -268,6 +313,7 @@ impl<'a> FileLowering<'a> {
             };
             self.classes.push(ClassItems {
                 descriptor,
+                published_descriptor,
                 constructor,
                 singleton,
                 secondaries,
@@ -287,11 +333,24 @@ impl<'a> FileLowering<'a> {
                         | Slot::AnnotationMember { .. }
                         | Slot::ValueBridge { .. }
                         | Slot::Bridge { .. }
+                        | Slot::DeclaredBridge { .. }
                         | Slot::FunctionBridge { .. }
                         | Slot::AccessorBridge { .. }
                 )
             })
             .collect();
+        // A bridge a vtable of an exported class holds is inherited by a later file's subclass
+        // by symbol, so it is linked under a name its owner makes unique; any other stays local.
+        let mut owners: HashMap<Slot, ClassId> = HashMap::default();
+        for (class, layout) in self.model.layouts.iter().enumerate() {
+            let class = class as ClassId;
+            if !self.exported.contains(&class) {
+                continue;
+            }
+            for slot in layout.vtable.iter().chain(&layout.itable) {
+                owners.entry(slot.clone()).or_insert(class);
+            }
+        }
         for slot in synthesized {
             if self.accessors.contains_key(&slot) {
                 continue;
@@ -310,7 +369,9 @@ impl<'a> FileLowering<'a> {
                     self.ir, *declared,
                 ));
                 let ret = base.ret;
-                let id = self.declare_local_function(
+                let id = self.declare_slot_function(
+                    &slot,
+                    &owners,
                     &match target_slot {
                         Some(slot) => format!("kt_bridge_{declared}_{target}_{slot}"),
                         None => format!("kt_bridge_{declared}_{target}_direct"),
@@ -321,12 +382,34 @@ impl<'a> FileLowering<'a> {
                 self.accessors.insert(slot, id);
                 continue;
             }
+            if let Slot::DeclaredBridge {
+                parameters,
+                result,
+                target_slot,
+                target,
+            } = &slot
+            {
+                // The BASE's signature, as the plan recorded it for a base no file declares.
+                let mut params = vec![any()];
+                params.extend(parameters.iter().copied());
+                let id = self.declare_slot_function(
+                    &slot,
+                    &owners,
+                    &format!("kt_declared_bridge_{target}_{target_slot}"),
+                    &params,
+                    *result,
+                )?;
+                self.accessors.insert(slot, id);
+                continue;
+            }
             if let Slot::FunctionBridge { arity, .. } = &slot {
                 // `kotlin.Function{N}.invoke`'s own signature, which is what a caller reading the
                 // function slot passes and reads: the receiver and every operand a reference, and
                 // a reference back.
                 let params = vec![any(); arity + 1];
-                let id = self.declare_local_function(
+                let id = self.declare_slot_function(
+                    &slot,
+                    &owners,
                     &format!("kt_function_bridge_{}", self.accessors.len()),
                     &params,
                     any(),
@@ -351,7 +434,9 @@ impl<'a> FileLowering<'a> {
                 // Named by position rather than by what it bridges: neither end need be a source
                 // accessor, so there is no declaration id to name it after, and two classes may
                 // need one for the same slot number.
-                let id = self.declare_local_function(
+                let id = self.declare_slot_function(
+                    &slot,
+                    &owners,
                     &format!("kt_accessor_bridge_{}", self.accessors.len()),
                     &params,
                     ret,
@@ -368,7 +453,9 @@ impl<'a> FileLowering<'a> {
                     self.ir, *function,
                 ));
                 let ret = self.ir.functions[*function as usize].ret;
-                let id = self.declare_local_function(
+                let id = self.declare_slot_function(
+                    &slot,
+                    &owners,
                     &format!("kt_{base}__boxed_{function}"),
                     &params,
                     ret,
@@ -384,7 +471,9 @@ impl<'a> FileLowering<'a> {
                     AnyMember::HashCode => ("hash_code", vec![any()], Ty::Int),
                     AnyMember::ToString => ("to_string", vec![any()], any()),
                 };
-                let id = self.declare_local_function(
+                let id = self.declare_slot_function(
+                    &slot,
+                    &owners,
                     &format!("kt_{base}__{prefix}_{suffix}"),
                     &params,
                     ret,
@@ -558,8 +647,38 @@ impl<'a> FileLowering<'a> {
         write_u32(
             &mut bytes,
             ktype::REFERENCE_RECEIVER_OFFSET,
-            reference_target.map_or(0, |(_, receiver)| receiver),
+            reference_target
+                .as_ref()
+                .map_or(0, |target| target.receiver_offset),
         );
+        write_u32(
+            &mut bytes,
+            ktype::REFERENCE_CONTEXT_COUNT,
+            reference_target
+                .as_ref()
+                .map_or(0, |target| target.context_offsets.len() as u32),
+        );
+        let context_offsets = match reference_target
+            .as_ref()
+            .filter(|target| !target.context_offsets.is_empty())
+        {
+            Some(target) => {
+                let id = self.declare_local_data(&format!("kt_ctx_{base}"), false)?;
+                let mut description = DataDescription::new();
+                let bytes: Vec<u8> = target
+                    .context_offsets
+                    .iter()
+                    .flat_map(|offset| offset.to_le_bytes())
+                    .collect();
+                description.define(bytes.into_boxed_slice());
+                description.set_align(4);
+                self.module
+                    .define_data(id, &description)
+                    .map_err(|error| format!("defining `kt_ctx_{base}` ({error})"))?;
+                Some(id)
+            }
+            None => None,
+        };
         write_u32(
             &mut bytes,
             ktype::QUALIFIED_NAME_LENGTH,
@@ -604,10 +723,12 @@ impl<'a> FileLowering<'a> {
             (ktype::INTERFACES, implemented),
             (
                 ktype::REFERENCE_TARGET,
-                reference_target.map(|(marker, _)| marker),
+                reference_target.as_ref().map(|target| target.marker),
             ),
+            (ktype::REFERENCE_CONTEXT_OFFSETS, context_offsets),
             (ktype::QUALIFIED_NAME, qualified_name_data),
             (ktype::SIMPLE_NAME, simple_name_data),
+            (ktype::MAP_MEMBERS, walk.map_members),
         ] {
             let Some(data) = data else {
                 continue;
@@ -679,6 +800,7 @@ impl<'a> FileLowering<'a> {
                 | Slot::AnnotationMember { .. }
                 | Slot::ValueBridge { .. }
                 | Slot::Bridge { .. }
+                | Slot::DeclaredBridge { .. }
                 | Slot::FunctionBridge { .. }
                 | Slot::AccessorBridge { .. } => self.accessors[slot],
             });
@@ -785,6 +907,8 @@ impl<'a> FileLowering<'a> {
         let (qualified_name, simple_name, class_names) = self.reflection_names(class);
         if instantiable {
             self.record_dependency_implementations(descriptor, &base, class, (&vtable, &itable))?;
+        } else if self.exported.contains(&class) {
+            self.publish_dependency_bridges(class)?;
         }
         self.define_type_descriptor(
             descriptor,
@@ -804,7 +928,9 @@ impl<'a> FileLowering<'a> {
                 simple_name: simple_name.as_deref(),
                 class_names,
             },
-        )
+        )?;
+        let publication = self.classes[class as usize].published_descriptor.clone();
+        self.record_published_descriptor(class, descriptor, publication)
     }
 
     /// The names Kotlin reflection publishes for one declared classifier, from the declaration
@@ -1016,16 +1142,33 @@ impl<'a> FileLowering<'a> {
                     // A superclass an earlier file laid out, through the entry its file exports
                     // for the selected constructor.
                     None if self.model.layout(class).laid_out_superclass == Some(*owner) => {
-                        let (constructor, params) =
-                            self.laid_out_super_constructor(class, target.ordinal)?;
-                        if params.len() != target_params.len() {
-                            return Err(declined!(
-                                "a delegation to a superclass constructor with compiler-supplied \
-                                 parameters (`{}`)",
-                                owner.render()
-                            ));
-                        }
-                        (Some(constructor), target_params.clone())
+                        let source = self
+                            .classifiers
+                            .classifier(*owner)
+                            .is_some_and(|fact| fact.source);
+                        let (constructor, parameters) = if source {
+                            let (constructor, parameters) =
+                                self.laid_out_super_constructor(class, target.ordinal)?;
+                            if parameters.len() != target_params.len() {
+                                return Err(declined!(
+                                    "a same-module superclass constructor with a different selected frame (`{}`)",
+                                    owner.render()
+                                ));
+                            }
+                            (constructor, parameters)
+                        } else {
+                            let selected = self
+                                .ir
+                                .external_secondary_super_constructors
+                                .get(&(declaration.fq_name, ordinal as u32))
+                                .map(|target| target.declaration)
+                                .ok_or_else(|| declined!(
+                                    "a delegation to a dependency superclass without its exact selected constructor (`{}`)",
+                                    owner.render()
+                                ))?;
+                            self.dependency_super_constructor(class, selected, target_params)?
+                        };
+                        (Some(constructor), parameters)
                     }
                     None => {
                         return Err(declined!(
@@ -1225,6 +1368,23 @@ impl<'a> FileLowering<'a> {
         } = slot
         {
             return self.define_bridge(*declared, *target_slot, *target, id);
+        }
+        if let Slot::DeclaredBridge {
+            parameters,
+            result,
+            target_slot,
+            target,
+        } = slot
+        {
+            let forwarded = super::super::super::captures::carried_parameters(self.ir, *target);
+            let forwarded_ret = self.ir.functions[*target as usize].ret;
+            return self.define_converting_bridge(
+                (parameters, *result),
+                (&forwarded, forwarded_ret),
+                super::object_entries::BridgeTarget::Slot(*target_slot),
+                &format!("bridge to `{}`", self.ir.functions[*target as usize].name),
+                id,
+            );
         }
         if let Slot::FunctionBridge {
             arity,
@@ -1549,8 +1709,38 @@ impl<'a> FileLowering<'a> {
             // A superclass an earlier file laid out is constructed through the entry its file
             // exports for the constructor the checker selected.
             None if layout.laid_out_superclass.is_some() => {
-                let (constructor, params) =
-                    self.laid_out_super_constructor(class, declaration.super_ctor.ordinal)?;
+                let source = self
+                    .classifiers
+                    .classifier(declaration.superclass)
+                    .is_some_and(|fact| fact.source);
+                let (constructor, params) = if source {
+                    let (constructor, parameters) =
+                        self.laid_out_super_constructor(class, declaration.super_ctor.ordinal)?;
+                    if parameters.len() != declaration.super_ctor_params.len() {
+                        return Err(declined!(
+                            "a same-module superclass constructor with a different selected frame (`{}`)",
+                            declaration.fq_name()
+                        ));
+                    }
+                    (constructor, parameters)
+                } else {
+                    let selected = self
+                        .ir
+                        .external_super_constructors
+                        .get(&declaration.fq_name_id())
+                        .map(|target| target.declaration)
+                        .ok_or_else(|| {
+                            declined!(
+                                "a dependency superclass without its exact selected constructor (`{}`)",
+                                declaration.fq_name()
+                            )
+                        })?;
+                    self.dependency_super_constructor(
+                        class,
+                        selected,
+                        &declaration.super_ctor_params,
+                    )?
+                };
                 if declaration.super_args.len() != params.len()
                     || self
                         .ir
@@ -1702,8 +1892,12 @@ impl<'a> FileLowering<'a> {
                     next_field = field + 1;
                     let field_type =
                         model::field_storage_ty(body.file.values, body.file.ir, class, field)?;
-                    let argument_type =
-                        captures::prefix_physical_ty(body.file.ir, class, index, argument.ty);
+                    let argument_type = captures::constructor_argument_physical_ty(
+                        body.file.ir,
+                        class,
+                        index,
+                        argument.ty,
+                    );
                     let Some(value) =
                         body.convert(params[index + 1], Some(argument_type), field_type)?
                     else {
@@ -2282,7 +2476,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// A call of a method its class's table does not dispatch: a member of a dependency class
     /// that no subclass can override, such as its constructor initializer or a final member.
-    fn direct_method_call(
+    pub(super) fn direct_method_call(
         &mut self,
         fid: FunId,
         receiver: u32,
@@ -2354,6 +2548,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         target: &krusty::fir::PropertyId,
     ) -> Result<CheckedProperty, Unsupported> {
         self.checked_property_layout(self.file.ir.local_property_layouts.get(target))
+    }
+
+    /// Whether this file holds a layout for `target` at `operation`: the property of a class it
+    /// declares, or of a copy it realizes of another file's local class.
+    pub(super) fn has_property_layout_at(
+        &self,
+        operation: krusty::ir::ExprId,
+        target: &krusty::fir::PropertyId,
+    ) -> bool {
+        self.file
+            .ir
+            .property_layout_at(operation, *target)
+            .is_ok_and(|layout| layout.is_some())
     }
 
     pub(super) fn checked_property_at(
@@ -2473,6 +2680,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(self
             .convert(value, Some(stored), property.ty)?
             .map(|value| (value, property.ty)))
+    }
+
+    /// Write a property of a value class through its declared setter. The receiver is the carrier,
+    /// which that setter takes directly exactly as the getter does; a value class has no dispatch
+    /// slot or object header to write through.
+    pub(super) fn value_property_write_of(
+        &mut self,
+        class: ClassId,
+        index: usize,
+        carrier: Value,
+        value: Value,
+    ) -> Result<(), Unsupported> {
+        let property = self.file.ir.classes[class as usize].properties[index].clone();
+        let Some(setter) = property.setter else {
+            return Err(declined!(
+                "a value-class property written without a setter (`{}`)",
+                property.name
+            ));
+        };
+        let id = self.file.functions[setter as usize].expect("a setter has a body");
+        let func_ref = self.func_ref(id);
+        self.emit_call(func_ref, &[carrier, value])?;
+        Ok(())
     }
 
     /// [`Self::property_read`] with the receiver already evaluated — what a synthesized body has.
@@ -2629,9 +2859,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if classifier == krusty::types::wk::unit() {
             return self.runtime_call("kt_unit", &[], any(), &[]);
         }
-        // An object the runtime realizes entirely has no instance and needs none: every member of
-        // it is answered without reading the receiver. One provider materializes that receiver
-        // before the call reaches the table that says so, and this is what it materializes.
         // The companion object of a BUILT-IN type. Its members are constants the frontend folds,
         // so the object itself is only ever an identity — and that identity is asked about:
         // `o === Int.Companion` is a corpus case, and `Int` written as a value is the same object.
@@ -2642,10 +2869,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         {
             return self.runtime_call(symbol, &[], any(), &[]);
         }
-        if super::super::super::intrinsics::is_stateless_runtime_object(classifier) {
-            return Ok(Some(self.builder.ins().iconst(types::I64, 0)));
-        }
-        // Another file's object is read through the entry its file exports.
+        // Another module's object is read through the entry its module exports.
         if self.file.ir.class_id_by_name(classifier).is_none() {
             let instance = krusty::backend::instance_links::InstanceEntry::Object(classifier);
             if let Some(symbol) = self.file.dependency_instances.get(&instance) {

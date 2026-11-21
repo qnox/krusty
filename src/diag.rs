@@ -39,6 +39,10 @@ pub enum DiagnosticKind {
     /// frontend has reported, so these follow every frontend diagnostic in its ledger, in the order
     /// actualization produced them rather than in source order.
     Actualization,
+    /// A native compiler plugin's pass reports a construct it does not implement yet. The compile
+    /// fails, but the source is valid: kotlinc compiles it, so a build can hand the module to
+    /// kotlinc instead of failing. Never a kotlinc diagnostic.
+    PluginRefusal,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -54,6 +58,9 @@ pub enum DiagnosticIdentity {
     /// A type parameter whose upper bounds name one another. The source occurrence identifies the
     /// report however many times the declaration's bounds are resolved.
     CyclicUpperBound { reference: Span },
+    /// A classifier or typealias applied with the wrong number of type arguments. The source
+    /// occurrence identifies the report however many times its declaration's types are resolved.
+    TypeArgumentCount { reference: Span },
 }
 
 impl DiagnosticIdentity {
@@ -309,6 +316,36 @@ impl DiagSink {
             identity: None,
             file: self.current_file,
         });
+    }
+
+    /// Report what a frontend plugin checker found: a refusal when the plugin does not implement
+    /// the construct yet, an ordinary error when the source is invalid under the plugin's rules.
+    pub fn frontend_plugin_diagnostic(
+        &mut self,
+        diagnostic: crate::plugins::FrontendPluginDiagnostic,
+    ) {
+        let kind = if diagnostic.refusal {
+            DiagnosticKind::PluginRefusal
+        } else {
+            DiagnosticKind::Compiler
+        };
+        self.error_kind(diagnostic.span, kind, diagnostic.message);
+    }
+
+    /// Whether the compilation failed, and every error it reports is a plugin refusal: the source
+    /// is valid, and what failed is a native plugin pass that does not implement it yet.
+    pub fn failed_only_on_plugin_refusals(&self) -> bool {
+        self.module_errors.is_empty()
+            && !self
+                .module_diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error)
+            && self.diags.iter().any(|d| d.severity == Severity::Error)
+            && self
+                .diags
+                .iter()
+                .filter(|d| d.severity == Severity::Error)
+                .all(|d| d.kind == DiagnosticKind::PluginRefusal)
     }
 
     pub fn error_kind(&mut self, span: Span, kind: DiagnosticKind, msg: impl Into<String>) {

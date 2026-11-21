@@ -89,6 +89,8 @@ pub(super) struct FunctionSignature<'a> {
     pub(super) owner: DeclarationOwner,
     pub(super) name: &'a str,
     pub(super) receiver: Option<Ty>,
+    /// Context parameters that precede an extension receiver in the source call ABI.
+    pub(super) context_count: usize,
     pub(super) params: &'a [Ty],
     pub(super) ret: Ty,
     /// Exact declarations this one overrides, as the member hierarchy froze them.
@@ -101,6 +103,7 @@ impl<'a> FunctionSignature<'a> {
             owner,
             name,
             receiver: None,
+            context_count: 0,
             params,
             ret,
             overridden: &[],
@@ -109,6 +112,11 @@ impl<'a> FunctionSignature<'a> {
 
     pub(super) fn with_receiver(mut self, receiver: Option<Ty>) -> Self {
         self.receiver = receiver;
+        self
+    }
+
+    pub(super) fn with_context_count(mut self, context_count: usize) -> Self {
+        self.context_count = context_count;
         self
     }
 
@@ -252,39 +260,6 @@ pub(super) fn throwable_descriptor(owner: krusty::types::TypeName) -> Option<&'s
     .find_map(|(classifier, descriptor)| {
         classifier_matches(owner, classifier).then_some(descriptor)
     })
-}
-
-/// Whether Kotlin gives this member a SPECIAL BRIDGE, so that a call through the wide type does
-/// not always reach an override at all.
-///
-/// `Map<Any, Any>.get(key: Any)` is declared with a NON-NULL parameter, and a caller holding the
-/// same object as a `Map<Any?, Any?>` may pass `null`. Kotlin does not call the override there: it
-/// answers the member's default — `null` for `get` and `remove`, `false` for a `contains`, `-1` for
-/// an `indexOf` — because the argument cannot be what the declaration accepts. The corpus asks
-/// exactly that (`specialBuiltins/notEmptyMap.kt`, `bridges/special.kt`).
-///
-/// The receiver dispatch has no bridge to put in front of an implementor's arm, so it declines
-/// these rather than calling an override Kotlin would have skipped. Every one of them takes an
-/// ARGUMENT, which is why the nullary members are unaffected.
-pub(super) fn has_special_bridge(collection: krusty::types::MappedCollection, name: &str) -> bool {
-    let over_a_map = matches!(
-        collection.kind,
-        krusty::types::CollectionKind::Map | krusty::types::CollectionKind::MapEntry
-    );
-    let over_a_collection = matches!(
-        collection.kind,
-        krusty::types::CollectionKind::Iterable
-            | krusty::types::CollectionKind::Collection
-            | krusty::types::CollectionKind::List
-            | krusty::types::CollectionKind::Set
-    );
-    match name {
-        "get" | "containsKey" | "containsValue" | "getOrDefault" => over_a_map,
-        // `MutableCollection.remove(element)` is as special as `Map.remove(key)`.
-        "remove" => over_a_map || over_a_collection,
-        "contains" | "indexOf" | "lastIndexOf" => over_a_collection,
-        _ => false,
-    }
 }
 
 /// The one member of a functional interface the RUNTIME knows, or `None` for any other.
@@ -1301,6 +1276,7 @@ pub(super) fn iteration_runtime_member(
         owner: _,
         name,
         receiver: _,
+        context_count: _,
         params,
         ret,
         overridden: _,
@@ -1340,6 +1316,28 @@ pub(super) fn iteration_runtime_member(
     }
     if declaration_shape != Some(CollectionShape::Iterator) {
         return None;
+    }
+    // A `ListIterator`'s own members read the same runtime iterator from its cursor.
+    if signature
+        .owner
+        .classifier_matches("kotlin/collections/ListIterator")
+    {
+        let any = || vec![Ty::obj("kotlin/Any")];
+        match name {
+            "hasPrevious" if ret == Ty::Boolean => {
+                return Some(("kt_list_iterator_has_previous", any(), Ty::Boolean))
+            }
+            "nextIndex" if ret == Ty::Int => {
+                return Some(("kt_list_iterator_next_index", any(), Ty::Int))
+            }
+            "previousIndex" if ret == Ty::Int => {
+                return Some(("kt_list_iterator_previous_index", any(), Ty::Int))
+            }
+            "previous" if ret.is_ty_param() => {
+                return Some(("kt_list_iterator_previous", any(), Ty::obj("kotlin/Any")))
+            }
+            _ => {}
+        }
     }
     if name == "hasNext" && ret == Ty::Boolean {
         return Some((
@@ -1889,21 +1887,6 @@ pub(super) fn throwable_field(owner: krusty::types::TypeName, name: &str) -> Opt
     }
 }
 
-/// Whether this is an object the runtime realizes ENTIRELY, so it has no instance of its own.
-///
-/// `kotlin.properties.Delegates` is one: it holds no state, and every member of it is answered
-/// directly (see [`runtime_companion_member`]), so nothing ever reads the value a reference to it
-/// would carry. A provider that materializes the receiver before the call reaches that table needs
-/// something to materialize, and for such an object the honest answer is the null reference —
-/// there is no object, and nothing dereferences it.
-pub(super) fn is_stateless_runtime_object(classifier: krusty::types::TypeName) -> bool {
-    // The stdlib's standard delegates. `Delegates` declares no state and every member of it this
-    // runtime answers takes its arguments alone. `Result.Companion` is the receiver of the inline
-    // `success` and `failure` an expanded `runCatching` reaches, whose bodies never read it.
-    classifier.matches("kotlin/properties/Delegates")
-        || classifier.matches("kotlin/Result$Companion")
-}
-
 /// The runtime entry point answering the companion object of a BUILT-IN type, if this names one.
 ///
 /// Each is declared in no file krusty compiles and carries no state — every member of one is a
@@ -1911,22 +1894,72 @@ pub(super) fn is_stateless_runtime_object(classifier: krusty::types::TypeName) -
 /// runtime holds one static object per companion, with a descriptor of its own so that
 /// `Int.Companion === Long.Companion` is false.
 ///
-/// Apart from [`is_stateless_runtime_object`], which answers a NULL for an object nothing reads:
-/// that will not do here, because `o === Int.Companion` is exactly what the corpus asks.
 pub(super) fn builtin_companion(classifier: krusty::types::TypeName) -> Option<&'static str> {
+    builtin_companion_symbols(classifier).map(|(instance, _)| instance)
+}
+
+/// The runtime descriptor of the companion object [`builtin_companion`] answers, which an `is`
+/// check against the companion's type asks its instance about.
+pub(super) fn builtin_companion_descriptor(
+    classifier: krusty::types::TypeName,
+) -> Option<&'static str> {
+    builtin_companion_symbols(classifier).map(|(_, descriptor)| descriptor)
+}
+
+fn builtin_companion_symbols(
+    classifier: krusty::types::TypeName,
+) -> Option<(&'static str, &'static str)> {
     [
-        ("kotlin/Byte$Companion", "kt_byte_companion"),
-        ("kotlin/Short$Companion", "kt_short_companion"),
-        ("kotlin/Int$Companion", "kt_int_companion"),
-        ("kotlin/Long$Companion", "kt_long_companion"),
-        ("kotlin/Char$Companion", "kt_char_companion"),
-        ("kotlin/Boolean$Companion", "kt_boolean_companion"),
-        ("kotlin/Float$Companion", "kt_float_companion"),
-        ("kotlin/Double$Companion", "kt_double_companion"),
-        ("kotlin/String$Companion", "kt_string_companion"),
+        (
+            "kotlin/Byte$Companion",
+            "kt_byte_companion",
+            "kt_type_byte_companion",
+        ),
+        (
+            "kotlin/Short$Companion",
+            "kt_short_companion",
+            "kt_type_short_companion",
+        ),
+        (
+            "kotlin/Int$Companion",
+            "kt_int_companion",
+            "kt_type_int_companion",
+        ),
+        (
+            "kotlin/Long$Companion",
+            "kt_long_companion",
+            "kt_type_long_companion",
+        ),
+        (
+            "kotlin/Char$Companion",
+            "kt_char_companion",
+            "kt_type_char_companion",
+        ),
+        (
+            "kotlin/Boolean$Companion",
+            "kt_boolean_companion",
+            "kt_type_boolean_companion",
+        ),
+        (
+            "kotlin/Float$Companion",
+            "kt_float_companion",
+            "kt_type_float_companion",
+        ),
+        (
+            "kotlin/Double$Companion",
+            "kt_double_companion",
+            "kt_type_double_companion",
+        ),
+        (
+            "kotlin/String$Companion",
+            "kt_string_companion",
+            "kt_type_string_companion",
+        ),
     ]
     .into_iter()
-    .find_map(|(owner, symbol)| classifier.matches(owner).then_some(symbol))
+    .find_map(|(owner, instance, descriptor)| {
+        classifier.matches(owner).then_some((instance, descriptor))
+    })
 }
 
 /// The runtime entry point answering a stdlib object the runtime lays out itself, if this names one.
@@ -1937,32 +1970,6 @@ pub(super) fn runtime_object(classifier: krusty::types::TypeName) -> Option<&'st
     classifier
         .matches("kotlin/collections/EmptySet")
         .then_some("kt_set_empty")
-}
-
-/// A member of a COMPANION the runtime realizes, whose receiver carries nothing.
-///
-/// Such an object has no state and no instance in any file krusty compiles, so there is no
-/// receiver to pass and none to evaluate — the call is its arguments alone. That is why these are
-/// apart from [`runtime_member`], which leads every call with the receiver.
-pub(super) fn runtime_companion_member(
-    owner: DeclarationOwner,
-    name: &str,
-    params: &[Ty],
-) -> Option<&'static str> {
-    if !owner.classifier_matches("kotlin/properties/Delegates") {
-        return None;
-    }
-    match (name, params) {
-        // `Delegates.notNull()`. `Delegates` is an OBJECT of the stdlib, carrying nothing, and the
-        // delegate it answers with starts empty — so this is the same shape: no receiver to read
-        // and no operand to pass.
-        ("notNull", []) => Some("kt_not_null_var"),
-        // `observable(initial) { property, old, new -> … }`: the initial value and the callback,
-        // both references, and the `KProperty` it later hands that callback is the one the
-        // delegation passes to `setValue` — nothing here reads it.
-        ("observable", [_, _]) => Some("kt_observable"),
-        _ => None,
-    }
 }
 
 /// The runtime function realizing the interface member `signature` on an instance of `class`, a
@@ -2649,27 +2656,6 @@ mod tests {
             floor_mod(facade("kotlin/NumbersKt"), "mod", Ty::Int, &[Ty::Double]),
             None
         );
-    }
-
-    #[test]
-    fn collection_roles_keep_their_special_bridges() {
-        let collection = |kind, mutable| krusty::types::MappedCollection { kind, mutable };
-        assert!(has_special_bridge(
-            collection(krusty::types::CollectionKind::Collection, false),
-            "contains"
-        ));
-        assert!(has_special_bridge(
-            collection(krusty::types::CollectionKind::Collection, true),
-            "remove"
-        ));
-        assert!(has_special_bridge(
-            collection(krusty::types::CollectionKind::Map, false),
-            "remove"
-        ));
-        assert!(!has_special_bridge(
-            collection(krusty::types::CollectionKind::Collection, false),
-            "get"
-        ));
     }
 
     #[test]

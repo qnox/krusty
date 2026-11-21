@@ -5,6 +5,16 @@
 
 use super::*;
 
+/// One interface-member call: the receiver, the arguments, the answer the site asked for, and the
+/// member's realized parameter types. Those four travel together from the call site into the
+/// dispatch.
+pub(super) struct InterfaceMemberCall<'a> {
+    pub(super) receiver: u32,
+    pub(super) args: &'a [u32],
+    pub(super) ret: Ty,
+    pub(super) physical: &'a [Ty],
+}
+
 /// A class of this file that implements a dependency declaration, and the slot it does it in.
 pub(super) struct ImplementorArm {
     class: ClassId,
@@ -18,9 +28,9 @@ pub(super) struct ImplementorArm {
 /// `Comparable<II>.compareTo` takes a `T`, carried as a reference, where `II.compareTo` takes the
 /// `II` value. The operand crosses that declared boundary first and becomes the implementation's
 /// type from there, as it would through the bridge a virtual call reaches.
-struct ParameterBoundary {
-    declared: Ty,
-    implementation: Ty,
+pub(super) struct ParameterBoundary {
+    pub(super) declared: Ty,
+    pub(super) implementation: Ty,
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
@@ -37,14 +47,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         declared: &[Ty],
     ) -> Option<ImplementorArm> {
         let ir = self.file.ir;
-        let class_name = ir.classes[class as usize].fq_name;
-        let edge = ir
-            .function_overrides
-            .get(&class_name)?
-            .iter()
-            .find(|edge| {
-                edge.overridden == krusty::fir::ResolvedFunctionOverrideTarget::External(overridden)
-            })?;
+        // The class's own override, else the one it inherits from its nearest superclass in this
+        // file that has one, as a getter's is found.
+        let target = krusty::fir::ResolvedFunctionOverrideTarget::External(overridden);
+        let mut at = Some(class);
+        let edge = loop {
+            let id = at?;
+            if let Some(edge) = ir
+                .function_overrides
+                .get(&ir.classes[id as usize].fq_name)
+                .into_iter()
+                .flatten()
+                .find(|edge| edge.overridden == target)
+            {
+                break edge;
+            }
+            at = self.file.model.layout(id).superclass;
+        };
         let function = edge.implementation_function.or_else(|| {
             let krusty::fir::ResolvedFunctionOverrideTarget::Module(callable) = edge.implementation
             else {
@@ -124,15 +143,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// tested for first and handed to the runtime function realizing the member on it.
     pub(super) fn dependency_interface_stub(
         &mut self,
-        identity: &krusty::libraries::KlibDependencyCallable,
+        identity: Vec<u8>,
         signature: super::super::super::intrinsics::FunctionSignature<'_>,
         receiver: u32,
         args: &[u32],
         params: &[Ty],
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
+        let (number, declared_member_params) =
+            self.interface_stub_number(identity, &signature, params)?;
         let runtime = self.runtime_implementations(signature)?;
-        let number = self.file.dependency_interface_number(identity);
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
         };
@@ -146,14 +166,121 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .map(|(&value, &param)| (value, Some(param)))
             .collect();
         self.dispatch_runtime_implementations(&runtime, object, &operands, ret, |body| {
-            body.dispatch_through(
+            body.dispatch_through_stub(
                 object,
-                model::Dispatch::Interface(number),
-                params,
+                number,
+                &operands,
+                &declared_member_params,
+                signature.ret,
                 ret,
-                &arguments,
             )
         })
+    }
+
+    /// Call the link stub `number` with `operands`. The stub takes the declaration's own ABI,
+    /// whatever types the call applies: an applied primitive or value class crosses into the
+    /// declared (erased) parameter and the declared result back into the applied one, as through
+    /// a bridge.
+    fn dispatch_through_stub(
+        &mut self,
+        object: Value,
+        number: u32,
+        operands: &[(Value, Option<Ty>)],
+        declared_params: &[Ty],
+        declared_ret: Ty,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let mut declared_arguments = Vec::with_capacity(operands.len());
+        for (&(value, applied), &declared) in operands.iter().zip(declared_params) {
+            let Some(converted) = self.convert(value, applied, declared)? else {
+                return Ok(None);
+            };
+            declared_arguments.push(converted);
+        }
+        let produced = self.dispatch_through(
+            object,
+            model::Dispatch::Interface(number),
+            declared_params,
+            declared_ret,
+            &declared_arguments,
+        )?;
+        match produced {
+            Some(value) if !self.terminated => self.convert(value, Some(declared_ret), ret),
+            _ => Ok(None),
+        }
+    }
+
+    /// The number of the link stub for the dependency interface member `identity`, called with
+    /// `params`, and the parameters the member declares, which the stub takes.
+    fn interface_stub_number(
+        &mut self,
+        identity: Vec<u8>,
+        signature: &super::super::super::intrinsics::FunctionSignature<'_>,
+        params: &[Ty],
+    ) -> Result<(u32, Vec<Ty>), Unsupported> {
+        let mut declared_member_params = signature.params.to_vec();
+        if let Some(receiver) = signature.receiver {
+            if signature.context_count > declared_member_params.len() {
+                return Err(declined!(
+                    "the dependency interface member `{}` has malformed context parameters",
+                    signature.name
+                ));
+            }
+            declared_member_params.insert(signature.context_count, receiver);
+        }
+        if declared_member_params.len() != params.len() {
+            return Err(declined!(
+                "the dependency interface member `{}` is called with another arity than it declares",
+                signature.name
+            ));
+        }
+        Ok((
+            self.file.dependency_interface_number(identity),
+            declared_member_params,
+        ))
+    }
+
+    /// A read of a dependency interface's abstract property this file finds no other realization
+    /// for (`Continuation.context` of a continuation another file or module made): its getter's
+    /// stub, which the link joins to the getter each implementing class recorded under the
+    /// property's identity, as a function member's stub is joined.
+    pub(super) fn dependency_interface_getter(
+        &mut self,
+        operation: &IrCheckedOperation,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let access = self.file.callables.dependency_accessor(operation)?;
+        let realization = access.callable;
+        if access.writes()
+            || !access.dispatches()
+            || !access.substitutions().is_empty()
+            || !realization.owner_is_interface
+            || realization.kind != krusty::libraries::ExternalCallableKind::Member
+            || realization.member_realization != krusty::libraries::MemberRealization::Dispatch
+            || realization.compiler_operation().is_some()
+        {
+            return None;
+        }
+        let receiver = access.receiver?;
+        let accessor = realization.dependency_callable.as_ref()?;
+        let identity =
+            krusty::backend::interface_identity::property_member_identity(accessor, false)?;
+        let IrCheckedOperation::ExternalPropertyRead { result, .. } = operation else {
+            return None;
+        };
+        let owner = super::super::super::intrinsics::DeclarationOwner::callable(
+            realization.physical_owner,
+            realization.declaration_owner,
+        );
+        let name = access.property.name.to_string();
+        let declared_ret = realization.declared_ret.unwrap_or(realization.ret);
+        let signature = super::super::super::intrinsics::FunctionSignature::new(
+            owner,
+            &name,
+            &[],
+            declared_ret,
+        )
+        .with_overridden(&realization.overridden_declarations);
+        Some(self.dependency_interface_stub(identity, signature, receiver, &[], &[], *result))
     }
 
     /// Hand `object` to the runtime function of the first of `runtime`'s classes it is an instance
@@ -252,71 +379,140 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// Whether `internal`'s member stays with the runtime, rather than a direct implementor call.
     ///
-    /// A collection or a closed range is also worn by objects the runtime builds. No static type
-    /// tells one of those from a class of this file, which is why a member asked of such a type
-    /// declines once the handlers that can tell them apart have passed. A special bridge may skip
-    /// the override entirely when the argument cannot be what the declaration accepts, and this
-    /// dispatch has no bridge to put in front of an implementor's arm.
-    fn runtime_owns_member(&self, internal: krusty::types::TypeName, name: &str) -> bool {
+    /// A closed range is worn by objects the runtime builds, and nothing in this file is one of
+    /// them. A collection is worn by both, so its member is dispatched below: each class of this
+    /// file, then the runtime function that realizes the member on a runtime collection. A special
+    /// bridge whose answer is `Boolean` or `Int` (`contains`, `remove`, `indexOf`) is dispatched
+    /// the same way, and an argument that is not the override's element answers the bridge's
+    /// rejection instead of being cast. A bridge with any other answer, such as `Map.get`, stays
+    /// with the runtime.
+    fn runtime_owns_member(
+        &self,
+        internal: krusty::types::TypeName,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
+    ) -> bool {
         if super::classifier_shapes::is_closed_range(internal)
             || super::classifier_shapes::is_closed_floating_range(internal)
         {
             return true;
         }
         let ty = Ty::obj_name(internal);
-        self.file.implements_collection_of(ty)
-            || self.file.mapped_collection(ty).is_some_and(|collection| {
-                super::super::super::intrinsics::has_special_bridge(collection, name)
-            })
+        let bridge = self
+            .file
+            .mapped_collection(ty)
+            .is_some_and(|collection| collection.has_special_bridge(signature.name));
+        bridge && !matches!(signature.ret, Ty::Boolean | Ty::Int)
+    }
+
+    /// A dependency member called on a receiver whose static type is a class of this file that
+    /// overrides it, such as the forwarder a `by` delegation generates for an inherited
+    /// `Comparable.compareTo`. The class's slot holds the member for it and every subclass, so the
+    /// call dispatches there, as a call through the class's own declaration would.
+    pub(super) fn source_class_member(
+        &mut self,
+        target: krusty::fir::ExternalCallableId,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
+        call: InterfaceMemberCall<'_>,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let internal = self
+            .checked_type(call.receiver)?
+            .non_null()
+            .obj_internal()?;
+        let class = self
+            .file
+            .ir
+            .class_id_by_name(internal)
+            .filter(|&class| !self.file.ir.classes[class as usize].is_interface)?;
+        let arm = self.external_override_slot(class, target, signature.params)?;
+        Some(self.dependency_interface_dispatch(&[arm], &[], call, false, None, None))
     }
 
     /// Dispatch one dependency interface member by the exact override edge each implementor
-    /// published. An implementor without that edge leaves the call to the paths that already
-    /// know the member; this does not recover an implementation by its name. A member the runtime
-    /// also answers is left there too.
+    /// published. An implementor without that edge in this file is reached through the member's
+    /// link stub; with no stub, the call is left to the paths that already know the member. This
+    /// does not recover an implementation by its name. A member the runtime also answers is left
+    /// there too.
+    ///
+    /// `stub` is the member's KLIB identity and the parameters a call applies to it. An object
+    /// another file or module made, which none of these classes is, reaches the member through its
+    /// link stub, as a call this file does not implement does.
     pub(super) fn dependency_interface_member(
         &mut self,
         internal: krusty::types::TypeName,
         target: krusty::fir::ExternalCallableId,
         signature: super::super::super::intrinsics::FunctionSignature<'_>,
-        receiver: u32,
-        args: &[u32],
-        ret: Ty,
+        call: InterfaceMemberCall<'_>,
+        stub: Option<(Vec<u8>, &[Ty])>,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        if self.runtime_owns_member(internal, signature.name) {
+        if self.runtime_owns_member(internal, signature) {
             return None;
         }
         let declared = self.file.implementors_of(internal);
+        if declared.is_empty() {
+            return None;
+        }
         let implementors: Vec<ImplementorArm> = declared
             .iter()
             .filter_map(|&class| self.external_override_slot(class, target, signature.params))
             .collect();
-        if implementors.is_empty() || implementors.len() != declared.len() {
+        // A class whose implementation it inherits from a superclass another unit laid out has
+        // no arm of its own; the interface stub its table holds by the member's identity is the
+        // only path that reaches it.
+        if stub.is_none() && implementors.len() != declared.len() {
             return None;
         }
+        let stub = match stub
+            .map(|(identity, params)| self.interface_stub_number(identity, &signature, params))
+            .transpose()
+        {
+            Ok(stub) => stub,
+            Err(declined) => return Some(Err(declined)),
+        };
         let runtime = match self.runtime_implementations(signature) {
             Ok(runtime) => runtime,
             Err(declined) => return Some(Err(declined)),
         };
-        Some(self.dependency_interface_dispatch(&implementors, &runtime, receiver, args, ret))
+        let bridge = self
+            .file
+            .mapped_collection(Ty::obj_name(internal))
+            .is_some_and(|collection| collection.has_special_bridge(signature.name));
+        // A runtime collection is not one of the classes above. The member's own runtime function
+        // is the remaining arm; an abstract-method trap would be a call the program did make.
+        let collection = self.checked_type(call.receiver).and_then(|ty| {
+            super::lists::collection_runtime_member(self.file, ty, signature, call.physical)
+                .filter(|(_, carried, _)| carried.len() == call.args.len() + 1)
+        });
+        Some(self.dependency_interface_dispatch(
+            &implementors,
+            &runtime,
+            call,
+            bridge,
+            collection,
+            stub.map(|(number, params)| (number, params, signature.ret)),
+        ))
     }
 
     /// Dispatch among the classes of this file implementing a dependency interface member, then
     /// among the classes the runtime makes that implement it.
+    ///
+    /// `bridge` is a collection special bridge: an argument that is not an instance of the
+    /// override's element type answers the rejection (`false`, or `-1` for an index) instead of
+    /// being cast into that element type.
     fn dependency_interface_dispatch(
         &mut self,
         implementors: &[ImplementorArm],
         runtime: &[(&'static str, &'static str)],
-        receiver: u32,
-        args: &[u32],
-        ret: Ty,
+        call: InterfaceMemberCall<'_>,
+        bridge: bool,
+        collection: Option<(&'static str, Vec<Ty>, Ty)>,
+        stub: Option<(u32, Vec<Ty>, Ty)>,
     ) -> Result<Option<Value>, Unsupported> {
-        let object = self.reference(receiver)?;
+        let object = self.reference(call.receiver)?;
         if self.terminated {
             return Ok(None);
         }
-        let mut operands = Vec::with_capacity(args.len());
-        for argument in args {
+        let mut operands = Vec::with_capacity(call.args.len());
+        for argument in call.args {
             let Some(value) = self.expression(*argument)? else {
                 return Ok(None);
             };
@@ -326,13 +522,71 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             operands.push((value, self.physical_type(*argument)));
         }
         let runtime_operands = operands.clone();
-        self.dispatch_by_implementor_with(implementors, object, &operands, ret, |body, object| {
-            body.dispatch_runtime_implementations(runtime, object, &runtime_operands, ret, |body| {
-                // Unreachable when every implementor was tested. The merge fills the carrier.
-                body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
-                Ok(None)
-            })
-        })
+        self.dispatch_by_implementor_with(
+            implementors,
+            object,
+            &operands,
+            call.ret,
+            bridge,
+            |body, object| {
+                if let Some((symbol, carried, runtime_answer)) = collection {
+                    return body.collection_runtime_call(
+                        symbol,
+                        &carried,
+                        runtime_answer,
+                        object,
+                        &runtime_operands,
+                        call.ret,
+                    );
+                }
+                body.dispatch_runtime_implementations(
+                    runtime,
+                    object,
+                    &runtime_operands,
+                    call.ret,
+                    |body| {
+                        let Some((number, params, declared_ret)) = stub else {
+                            // No source class and no runtime function realizes this member.
+                            body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
+                            return Ok(None);
+                        };
+                        body.dispatch_through_stub(
+                            object,
+                            number,
+                            &runtime_operands,
+                            &params,
+                            declared_ret,
+                            call.ret,
+                        )
+                    },
+                )
+            },
+        )
+    }
+
+    /// Call the runtime function that realizes a collection member, converting each operand to the
+    /// carrier that function takes and the result to the type the call site asked for.
+    fn collection_runtime_call(
+        &mut self,
+        symbol: &'static str,
+        carried: &[Ty],
+        runtime_answer: Ty,
+        object: Value,
+        operands: &[(Value, Option<Ty>)],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let mut values = Vec::with_capacity(carried.len());
+        values.push(object);
+        for ((value, source), target) in operands.iter().zip(carried.iter().skip(1)) {
+            let Some(converted) = self.convert(*value, *source, *target)? else {
+                return Ok(None);
+            };
+            values.push(converted);
+        }
+        let Some(produced) = self.runtime_call(symbol, carried, runtime_answer, &values)? else {
+            return Ok(None);
+        };
+        self.convert(produced, Some(runtime_answer), ret)
     }
 
     pub(super) fn dispatch_by_implementor_with(
@@ -341,6 +595,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         object: Value,
         arguments: &[(Value, Option<Ty>)],
         answer: Ty,
+        bridge: bool,
         runtime: impl FnOnce(&mut Self, Value) -> Result<Option<Value>, Unsupported>,
     ) -> Result<Option<Value>, Unsupported> {
         let merge = self.builder.create_block();
@@ -365,6 +620,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
             self.continue_in(mine);
             self.builder.seal_block(mine);
+            if bridge
+                && self.bridge_argument_misses(arguments, &arm.params, answer, merge, carried)?
+            {
+                self.continue_in(rest);
+                self.builder.seal_block(rest);
+                continue;
+            }
             let mut operands = Vec::with_capacity(arguments.len());
             for (&(value, source), boundary) in arguments.iter().zip(&arm.params) {
                 let Some(crossing) = self.convert(value, source, boundary.declared)? else {
@@ -393,6 +655,87 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.builder.switch_to_block(merge);
         self.builder.seal_block(merge);
         Ok(carried.clif().map(|_| self.builder.block_params(merge)[0]))
+    }
+
+    /// An argument of a collection special bridge that is not an instance of the override's
+    /// element. The rejection is already on its way to `merge`; the caller continues with the
+    /// next implementor.
+    fn bridge_argument_misses(
+        &mut self,
+        arguments: &[(Value, Option<Ty>)],
+        params: &[ParameterBoundary],
+        answer: Ty,
+        merge: Block,
+        carried: Carrier,
+    ) -> Result<bool, Unsupported> {
+        let (Some((value, source)), Some(boundary)) = (arguments.first(), params.first()) else {
+            return Ok(false);
+        };
+        if boundary.implementation.non_null() == boundary.declared.non_null()
+            || !boundary.implementation.is_reference()
+        {
+            return Ok(false);
+        }
+        if source.is_none_or(|ty| self.carrier(ty) != Carrier::Ref) {
+            let rejected = self.bridge_rejection(answer);
+            self.jump_to_merge(merge, carried, rejected);
+            return Ok(true);
+        }
+        let Some((accepted, rejected)) = self.bridge_argument_guard(*value, boundary)? else {
+            return Ok(false);
+        };
+        self.continue_in(rejected);
+        self.builder.seal_block(rejected);
+        let rejected_value = self.bridge_rejection(answer);
+        self.jump_to_merge(merge, carried, rejected_value);
+        self.continue_in(accepted);
+        self.builder.seal_block(accepted);
+        Ok(false)
+    }
+
+    /// The branch of a collection special bridge on one erased reference argument: it goes to the
+    /// first block when the argument is an instance of the override's parameter type (a `null` the
+    /// type admits too), and to the second, which the caller fills with the bridge's rejection,
+    /// when it is not. A primitive parameter is asked through its box, so a `null` and a value of
+    /// another type are rejected rather than unboxed. `None` where the override's parameter is the
+    /// declared one, or has no type descriptor to test, so there is nothing to bridge.
+    pub(super) fn bridge_argument_guard(
+        &mut self,
+        value: Value,
+        boundary: &ParameterBoundary,
+    ) -> Result<Option<(Block, Block)>, Unsupported> {
+        if boundary.implementation.non_null() == boundary.declared.non_null() {
+            return Ok(None);
+        }
+        let Some(descriptor) = self.file.type_descriptor(boundary.implementation)? else {
+            return Ok(None);
+        };
+        let type_address = self.data_address(descriptor);
+        let mut matches = self
+            .runtime_call(
+                "kt_is_instance",
+                &[any(), any()],
+                Ty::Boolean,
+                &[value, type_address],
+            )?
+            .expect("`kt_is_instance` returns a Boolean");
+        if boundary.implementation.admits_null() {
+            let absent = self.builder.ins().icmp_imm_u(IntCC::Equal, value, 0);
+            matches = self.builder.ins().bor(matches, absent);
+        }
+        let accepted = self.builder.create_block();
+        let rejected = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(matches, accepted, &[], rejected, &[]);
+        Ok(Some((accepted, rejected)))
+    }
+
+    /// `contains`/`remove` answer `false` for a foreign argument; an index answers `-1`.
+    pub(super) fn bridge_rejection(&mut self, answer: Ty) -> Option<Value> {
+        let clif = self.carrier(answer).clif()?;
+        let bits = if answer == Ty::Int { -1 } else { 0 };
+        Some(self.builder.ins().iconst(clif, bits))
     }
 
     fn unit_where_wanted(&mut self, answer: Ty) -> Result<Option<Value>, Unsupported> {

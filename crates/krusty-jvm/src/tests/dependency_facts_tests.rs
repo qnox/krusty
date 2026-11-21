@@ -797,6 +797,7 @@ fn selected_singletons_are_frozen_per_call_edge_not_on_the_provider_base_record(
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
             declares_parameter_defaults: false,
+            composable_parameters: Default::default(),
         },
     };
 
@@ -978,6 +979,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
         klib_body_vararg_index: None,
         klib_body_parameter_defaults: None,
         declares_parameter_defaults: false,
+        composable_parameters: Default::default(),
     };
     let queries = std::cell::Cell::new(0);
     facts
@@ -1014,6 +1016,7 @@ fn a_property_its_provider_cannot_answer_is_an_internal_error() {
             arguments: Vec::new(),
             parameters: Vec::new(),
             result: krusty::types::Ty::Int,
+            substitutions: Vec::new(),
             source_receiver: None,
         },
     )));

@@ -56,6 +56,7 @@ impl Emitter<'_> {
             target,
             args,
             leading_non_argument_operands,
+            same_module,
             ..
         } = *call;
         let CalleeNodes {
@@ -91,7 +92,7 @@ impl Emitter<'_> {
             }
             lambda_arguments.push(argument);
         }
-        if let Some(shape) = inliner::unsupported_shape(&callee) {
+        if let Some(shape) = inliner::unsupported_shape(&callee, same_module) {
             return splice(SpliceReason::CalleeShape(shape));
         }
         let supplies = self

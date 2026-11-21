@@ -19,7 +19,6 @@ mod declaration_signatures;
 mod direct_c_calls;
 mod external_identities;
 mod inventory;
-mod language_function_classifiers;
 mod lookup;
 pub(crate) mod parameter_defaults;
 mod platform;
@@ -38,6 +37,7 @@ pub use archives::OpenedKlibLibraries;
 pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics};
 pub(crate) use declaration_bodies::{
     member_signature, KlibCalleeOrigin, KlibEnumEntryClass, LocatedClass, LocatedMember,
+    LocatedStaticField,
 };
 pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub use declaration_signatures::KlibLibraryError;
@@ -303,9 +303,20 @@ impl SymbolSource for KlibLibraries {
         &self,
         identity: &crate::libraries::KlibDependencyCallable,
     ) -> bool {
-        self.inventory
-            .dependency_function(identity)
-            .is_some_and(|(_, function)| function.compiler_builtin_owner)
+        match &identity.declaration {
+            crate::libraries::KlibDeclarationSignature::Accessor(_) => self
+                .inventory
+                .dependency_property(identity)
+                .is_some_and(|(_, property, _)| property.compiler_builtin_owner),
+            _ => match self.inventory.dependency_function(identity) {
+                Some((_, function)) => function.compiler_builtin_owner,
+                // A constructor belongs to the stdlib exactly when its declaring class does.
+                None => self
+                    .inventory
+                    .dependency_constructor(identity)
+                    .is_some_and(|(_, classifier, _)| classifier.compiler_builtin_owner),
+            },
+        }
     }
 
     fn external_property(

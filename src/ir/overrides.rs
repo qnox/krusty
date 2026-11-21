@@ -75,6 +75,26 @@ impl IrFile {
             .any(|edge| edge.implementation_function == Some(function))
     }
 
+    /// Whether `function`, a member of `owner`, overrides a function classifier's `invoke` by the
+    /// exact checked edge, whichever way the edge names its implementation.
+    pub fn overrides_function_invoke(&self, owner: TypeName, function: FunId) -> bool {
+        self.function_overrides
+            .get(&owner)
+            .into_iter()
+            .flatten()
+            .any(|edge| {
+                edge.overridden_semantic_role
+                    == Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
+                    && (edge.implementation_function == Some(function)
+                        || match &edge.implementation {
+                            crate::fir::ResolvedFunctionOverrideTarget::Module(callable) => {
+                                self.checked_callable_functions.get(callable) == Some(&function)
+                            }
+                            crate::fir::ResolvedFunctionOverrideTarget::External(_) => false,
+                        })
+            })
+    }
+
     /// The source member functions of `owner` that override one of `Any`'s
     /// `equals`/`hashCode`/`toString`, each with the `Any` member it overrides, by the frontend's
     /// override edges. The structural trio common lowering generates is not one of them: a value

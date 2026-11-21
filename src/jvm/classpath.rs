@@ -24,7 +24,7 @@ mod class_entry_bytes;
 mod class_locations;
 mod class_members;
 pub mod content_snapshot;
-mod ct_sym_index;
+pub(crate) mod ct_sym_index;
 mod declaration_annotations;
 mod entry_class_reads;
 mod external_identities;
@@ -350,6 +350,7 @@ macro_rules! cache_stat {
     }};
 }
 
+mod atomic_exchange;
 mod builtin_members;
 mod inline_plan_cache;
 mod versioned_records;
@@ -3808,8 +3809,11 @@ impl JarPackages {
     /// Record a class this entry declares, keeping [`Self::classes`] sorted and unique.
     fn add_class(&mut self, class: NameId) {
         match self.classes.last() {
-            Some(last) if last.0 >= class.0 => {
-                if let Err(at) = self.classes.binary_search_by_key(&class.0, |known| known.0) {
+            Some(last) if last.index() >= class.index() => {
+                if let Err(at) = self
+                    .classes
+                    .binary_search_by_key(&class.index(), |known| known.index())
+                {
                     self.classes.insert(at, class);
                 }
             }
@@ -3820,7 +3824,7 @@ impl JarPackages {
     /// Whether this entry declares the class `class` (an id in [`Self::names`]).
     fn declares_class(&self, class: NameId) -> bool {
         self.classes
-            .binary_search_by_key(&class.0, |known| known.0)
+            .binary_search_by_key(&class.index(), |known| known.index())
             .is_ok()
     }
 
@@ -4147,7 +4151,6 @@ fn read_one_type<'a>(s: &mut &'a str) -> &'a str {
 
 #[cfg(test)]
 mod fq_tests {
-    use super::metadata_alignment::function_parameter_erasure_matches;
     use super::test_support::{
         test_temp_dir, write_test_archive_entries, write_test_jar_with_entry,
     };
@@ -4180,30 +4183,6 @@ mod fq_tests {
                 .visibility,
             crate::types::Visibility::Protected
         );
-    }
-
-    #[test]
-    fn suspend_receiver_function_metadata_matches_its_function_interface_erasure() {
-        let TyKind::Fun(metadata) = Ty::fun_with_shape(
-            vec![Ty::obj("kotlin/sequences/SequenceScope")],
-            Ty::Unit,
-            0,
-            true,
-            true,
-        )
-        .kind() else {
-            unreachable!()
-        };
-        let erased = Ty::fun(
-            vec![Ty::obj("kotlin/Any"), Ty::obj("kotlin/Any")],
-            Ty::obj("kotlin/Any"),
-        );
-
-        assert!(function_parameter_erasure_matches(
-            metadata,
-            erased,
-            &|ty| ty.fun_arity().map(usize::from),
-        ));
     }
 
     #[test]

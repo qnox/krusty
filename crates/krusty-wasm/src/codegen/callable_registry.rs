@@ -14,8 +14,8 @@ use krusty::backend::{
     DependencyMemberReceiver, KlibDependencyCallable, SingletonExtensionUnreadReceiver,
     SingletonMemberReceiver,
 };
-use krusty::fir::{CallableId, ExternalCallableId};
-use krusty::ir::{Callee, ExprId, IrExpr, IrFile};
+use krusty::fir::{CallableId, ExternalCallableId, ResolvedFunctionOverrideTarget};
+use krusty::ir::{Callee, ExprId, IrExpr, IrFile, IrSuperCallKind};
 
 use super::super::encode::Module;
 use super::lower::Unsupported;
@@ -48,8 +48,8 @@ pub(super) struct CallableRegistry {
     singleton_member_receivers: HashMap<KlibDependencyCallable, SingletonMemberReceiver>,
     singleton_extension_unread_receivers:
         HashMap<KlibDependencyCallable, SingletonExtensionUnreadReceiver>,
-    /// The entry answering each object's instance and each enum constant, linked by the
-    /// instance (see `krusty::backend::instance_links`).
+    /// The entry answering each object's instance, each enum constant and each enum's `values()`
+    /// and `valueOf`, linked by the instance (see `krusty::backend::instance_links`).
     instances: ModuleLinks<InstanceEntry, u32>,
 }
 
@@ -104,6 +104,11 @@ impl CallableRegistry {
                 constant.classifier.render().replace('/', "."),
                 constant.name
             )),
+            Some(InstanceEntry::EnumMember { classifier, member }) => Err(format!(
+                "the {} of an enum (`{}`) without its declaring file's entry",
+                member.source_name(),
+                classifier.render().replace('/', ".")
+            )),
             Some(InstanceEntry::Object(classifier)) => Err(format!(
                 "an object (`{}`) without its declaring file's entry",
                 classifier.render().replace('/', ".")
@@ -111,6 +116,14 @@ impl CallableRegistry {
             Some(InstanceEntry::Constructor { .. }) => {
                 Err("a constructor without its declaring file's entry".to_owned())
             }
+            Some(InstanceEntry::ConstructorDefaults { .. }) => Err(
+                "a constructor's default-argument entry without its declaring file's entry"
+                    .to_owned(),
+            ),
+            Some(InstanceEntry::TypeTest(classifier)) => Err(format!(
+                "a type test against a class (`{}`) without its declaring file's entry",
+                classifier.render().replace('/', ".")
+            )),
             None => Ok(()),
         }
     }
@@ -127,22 +140,7 @@ impl CallableRegistry {
         linked: &[(krusty::ir::FunId, u32)],
     ) -> Result<Vec<Option<u32>>, Unsupported> {
         let mut identities = vec![Vec::new(); ir.functions.len()];
-        // A member of a local or anonymous class is reachable from no other file, and every file
-        // that expands an inline function declaring the class realizes the class again. Such a
-        // member is this file's own function and binds no module identity.
-        let local_members: HashSet<krusty::ir::FunId> = ir
-            .classes
-            .iter()
-            .enumerate()
-            .filter(|(id, _)| {
-                krusty::ir::ClassId::try_from(*id).is_ok_and(|id| ir.is_local_class(id))
-            })
-            .flat_map(|(_, class)| class.methods.iter().copied())
-            .collect();
         for (&callable, &function) in &ir.checked_callable_functions {
-            if local_members.contains(&function) {
-                continue;
-            }
             let Some(targets) = identities.get_mut(function as usize) else {
                 return Err("an invalid source callable identity".to_string());
             };
@@ -177,6 +175,25 @@ impl CallableRegistry {
                     }
                     return Ok(None);
                 }
+                // A member of a local or anonymous class is reachable from no other file, and an
+                // inline function that declares the class clones it into each file it is expanded
+                // into, where the clone realizes the template's callables again. Each file binds
+                // those identities to its own clone, never to an earlier file's.
+                let file_local = ir.functions[function]
+                    .dispatch_receiver
+                    .and_then(|owner| ir.class_id_by_name(owner))
+                    .is_some_and(|class| ir.local_class_name_provenance.contains_key(&class));
+                if file_local {
+                    for target in &targets {
+                        if self
+                            .module
+                            .get(target)
+                            .is_some_and(|&index| wasm.function_is_defined(index))
+                        {
+                            self.module.remove(target);
+                        }
+                    }
+                }
                 let mut reserved = targets
                     .iter()
                     .filter_map(|target| self.module.get(target).copied())
@@ -198,8 +215,6 @@ impl CallableRegistry {
                             .to_string(),
                     );
                 }
-                // A module identity names one function. A local class's members, which every
-                // file expanding its inline function realizes again, bind none (see above).
                 if wasm.function_is_defined(index) || !declared.insert(index) {
                     return Err("a callable realized by two functions".to_string());
                 }
@@ -222,6 +237,8 @@ impl CallableRegistry {
         ir: &IrFile,
         callables: &CheckedBackendCallables,
         module_facts: &krusty::backend::BackendModuleFacts,
+        classifiers: &dyn krusty::backend::BackendClassifierSource,
+        classes: &super::laid_out_classes::LaidOutClasses,
         wasm: &mut Module,
     ) -> Result<FileCallTargets, Unsupported> {
         let mut targets = FileCallTargets {
@@ -245,6 +262,12 @@ impl CallableRegistry {
                 reads.extend(krusty::backend::instance_links::link_constructor_reads(
                     ir,
                     self.source_module.as_deref().unwrap_or_default(),
+                    module_facts,
+                    &mut self.instances,
+                    || wasm.declare(),
+                ));
+                reads.extend(krusty::backend::instance_links::link_type_test_reads(
+                    ir,
                     module_facts,
                     &mut self.instances,
                     || wasm.declare(),
@@ -291,6 +314,33 @@ impl CallableRegistry {
                     let Some(access) = callables.dependency_accessor(operation) else {
                         continue;
                     };
+                    if access.receiver.is_some()
+                        && access.dispatches()
+                        && !access.callable.is_member_extension()
+                        && !super::lower::library_members::target_owns_call(
+                            ir,
+                            callables,
+                            expression,
+                            access.callable,
+                        )
+                    {
+                        let role = if access.writes() {
+                            super::lower::library_members::MemberRole::Setter
+                        } else {
+                            super::lower::library_members::MemberRole::Getter
+                        };
+                        if let Some(member) = super::lower::library_members::published_class::select(
+                            access.callable,
+                            role,
+                            || access.callee().map_err(str::to_owned),
+                            classifiers,
+                            classes,
+                            wasm,
+                        ) {
+                            member?;
+                            continue;
+                        }
+                    }
                     if !access
                         .callable
                         .dependency_callable
@@ -322,6 +372,28 @@ impl CallableRegistry {
                     targets
                         .module_defaults
                         .insert(*provider, self.module_default_index(*provider, wasm));
+                }
+                // `super.f()` of a dependency class's method runs that declaration's own body,
+                // through the entry its module exports under the selected identity.
+                Callee::Super {
+                    declaration: Some(ResolvedFunctionOverrideTarget::External(target)),
+                    kind: IrSuperCallKind::Function,
+                    ..
+                } => {
+                    let Some(identity) = callables
+                        .callable(*target)
+                        .and_then(|callable| callable.dependency_callable.as_ref())
+                    else {
+                        continue;
+                    };
+                    let Some(&index) = self.dependencies.get(identity) else {
+                        continue;
+                    };
+                    let signature = self.signatures.get(identity).ok_or_else(|| {
+                        "an emitted dependency member without its declared signature".to_owned()
+                    })?;
+                    targets.external.insert(*target, index);
+                    targets.signatures.insert(*target, signature.clone());
                 }
                 Callee::External {
                     target,
@@ -356,14 +428,33 @@ impl CallableRegistry {
                         // `typeOf` keeps its checked call, and emission makes the `KType` it names.
                         continue;
                     }
-                    if super::lower::declared_by_string_builder(callable) {
-                        // The runtime lays `StringBuilder` out and realizes its members.
+                    if super::lower::library_members::target_owns_call(
+                        ir, callables, expression, callable,
+                    ) {
+                        // The same positive runtime ownership check precedes class dispatch
+                        // during both dependency prewalking and body emission.
                         continue;
                     }
                     if super::lower::any_members::call_member(ir, callables, expression).is_some() {
                         // `kotlin.Any`'s members, and the declarations overriding them, are
                         // realized through the receiver's own representation.
                         continue;
+                    }
+                    if dispatch_receiver.is_some()
+                        && extension_receiver_parameter.is_none()
+                        && defaults.is_empty()
+                    {
+                        if let Some(member) = super::lower::library_members::published_class::select(
+                            callable,
+                            super::lower::library_members::MemberRole::Function,
+                            || Ok(callee.clone()),
+                            classifiers,
+                            classes,
+                            wasm,
+                        ) {
+                            member?;
+                            continue;
+                        }
                     }
                     // A published exact export owns even a specialized generic call. Its actual
                     // operand roles are authenticated from checked substitutions during emission,
@@ -618,7 +709,8 @@ impl FileCallTargets {
         self.module.get(&target).copied()
     }
 
-    /// The entry answering `instance`, an object or enum constant another file realizes.
+    /// The entry answering `instance`, an object, enum constant or enum member another file
+    /// realizes.
     pub(super) fn instance(&self, instance: &InstanceEntry) -> Option<u32> {
         self.instances.get(instance).copied()
     }
@@ -683,6 +775,16 @@ impl FileCallTargets {
 
 #[cfg(test)]
 mod tests {
+    struct NoClassifiers;
+    impl krusty::backend::BackendClassifierSource for NoClassifiers {
+        fn classifier(
+            &self,
+            _: krusty::types::TypeName,
+        ) -> Option<std::sync::Arc<krusty::backend::BackendClassifierFact>> {
+            None
+        }
+    }
+
     fn no_facts() -> krusty::backend::BackendModuleFacts {
         krusty::backend::BackendModuleFacts::from_classifiers([], [])
             .expect("an empty module has valid facts")
@@ -814,6 +916,7 @@ mod tests {
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
             declares_parameter_defaults: false,
+            composable_parameters: Default::default(),
             annotations: Box::new([]),
         }
     }
@@ -1000,6 +1103,8 @@ mod tests {
                 &ir,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("a dead inline template cannot affect emitted calls");
@@ -1037,6 +1142,8 @@ mod tests {
                 &ir,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("a supported constructor initializer has registered calls");
@@ -1087,6 +1194,71 @@ mod tests {
     }
 
     #[test]
+    fn a_defined_callable_is_rebound_only_by_a_local_class_clone() {
+        fn realizing_file(callable: CallableId, local_owner: bool) -> IrFile {
+            let mut ir = IrFile::default();
+            let owner = type_name("demo/make$1");
+            let class = ir.add_class(krusty::ir::IrClass::synthetic(owner));
+            if local_owner {
+                ir.local_class_name_provenance.insert(
+                    class,
+                    krusty::ir::IrLocalClassNameProvenance {
+                        source: krusty::ir::IrLocalClassNameRoot::Source(
+                            krusty::ir::IrModuleSource {
+                                source: krusty::fir::SourceFileId::from_raw(1),
+                                package: type_name("demo"),
+                            },
+                        ),
+                        lexical_owner: None,
+                        segments: Box::new([]),
+                        ordinal: Some(1),
+                        parents: Box::new([]),
+                    },
+                );
+            }
+            let mut run = function("run", None);
+            run.is_static = false;
+            run.dispatch_receiver = Some(owner);
+            let run = ir.add_fun(run);
+            ir.checked_callable_functions.insert(callable, run);
+            ir
+        }
+        fn defined_by_an_earlier_file(callable: CallableId) -> (CallableRegistry, Module, u32) {
+            let mut registry = CallableRegistry::default();
+            let mut wasm = Module::default();
+            registry.enter_source_module("app");
+            let earlier = registry.module_index(callable, &mut wasm);
+            let ty = wasm.func_type(Vec::new(), Vec::new());
+            wasm.define(
+                earlier,
+                Function {
+                    ty,
+                    locals: Vec::new(),
+                    code: Code::default(),
+                },
+            );
+            (registry, wasm, earlier)
+        }
+
+        let callable = CallableId::from_raw(0);
+        let (mut registry, mut wasm, _) = defined_by_an_earlier_file(callable);
+        assert_eq!(
+            registry.declare_file(&realizing_file(callable, false), &mut wasm, &[]),
+            Err("a callable realized by two functions".to_string())
+        );
+
+        let (mut registry, mut wasm, earlier) = defined_by_an_earlier_file(callable);
+        let realized = registry
+            .declare_file(&realizing_file(callable, true), &mut wasm, &[])
+            .expect("a file's clone of a local class realizes its own members");
+        let [Some(clone)] = realized[..] else {
+            panic!("the clone's member is realized once: {realized:?}");
+        };
+        assert_ne!(clone, earlier);
+        assert_eq!(registry.module_index(callable, &mut wasm), clone);
+    }
+
+    #[test]
     fn inherited_default_entry_is_keyed_by_provider_and_calls_the_actual_function() {
         let target = CallableId::from_raw(1);
         let provider = CallableId::from_raw(2);
@@ -1114,12 +1286,15 @@ mod tests {
             &mut caller,
             &mut krusty::backend::CheckedBackendCallables::default(),
             |_| false,
+            |_| false,
         );
         let calls = registry
             .file_calls(
                 &caller,
                 &CheckedBackendCallables::default(),
                 &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
                 &mut wasm,
             )
             .expect("the inherited provider reserves its exact entry");
@@ -1158,6 +1333,7 @@ mod tests {
             &mut declaration,
             &mut krusty::backend::CheckedBackendCallables::default(),
             |_| false,
+            |_| false,
         );
         let entry = declaration.default_entries[&function];
         let functions = registry
@@ -1182,5 +1358,146 @@ mod tests {
             IrExpr::Call { callee, dispatch_receiver: None, .. }
                 if **callee == Callee::Local(function)
         ));
+    }
+
+    #[test]
+    fn a_cross_file_member_default_entry_reuses_the_provider_index_with_receiver_prefix() {
+        let provider = CallableId::from_raw(20);
+        let target = CallableId::from_raw(21);
+        let owner = krusty::types::type_name("demo/Host");
+        let mut registry = CallableRegistry::default();
+        let mut wasm = Module::default();
+        registry.enter_source_module("app");
+
+        let mut caller = IrFile::default();
+        let receiver = caller.add_expr(IrExpr::GetValue(0));
+        caller.set_logical_type(receiver, Ty::obj_name(owner));
+        caller.referenced_module_callables.insert(
+            provider,
+            krusty::ir::IrModuleCallable {
+                source: krusty::ir::IrModuleSource {
+                    source: krusty::fir::SourceFileId::from_raw(0),
+                    package: krusty::types::type_name("demo"),
+                },
+                name: "answer".into(),
+                owner: Some(owner),
+                owner_kind: Some(krusty::ir::IrClassifierKind::Class),
+                visibility: krusty::types::Visibility::Public,
+                flags: Default::default(),
+                parameters: vec![Ty::String].into_boxed_slice(),
+                default_parameters: vec![0].into_boxed_slice(),
+                type_parameters: Box::default(),
+                owner_type_parameters: Box::default(),
+                parameter_identities: vec![krusty::ir::IrParameterIdentity::source(
+                    "value".to_owned(),
+                )]
+                .into_boxed_slice(),
+                result: Ty::String,
+                annotations: Box::default(),
+                placement: krusty::ir::IrStaticPlacement::Package,
+                overridden_results: Box::default(),
+                overridden_declarations: Box::default(),
+            },
+        );
+        let call = caller.add_expr(IrExpr::Call {
+            callee: Box::new(Callee::ModuleWithDefaults {
+                target,
+                default_provider: krusty::fir::ResolvedFunctionOverrideTarget::Module(provider),
+                name: "answer".to_string(),
+                params: vec![Ty::String],
+                ret: Ty::String,
+                defaults: vec![0].into_boxed_slice(),
+                dispatch_receiver_ty: Some(Ty::obj_name(owner)),
+                extension_receiver_parameter: None,
+            }),
+            dispatch_receiver: Some(receiver),
+            args: Vec::new(),
+        });
+        caller.add_fun(function("box", Some(call)));
+        krusty::backend::default_arguments::realize(
+            &mut caller,
+            &mut krusty::backend::CheckedBackendCallables::default(),
+            |_| false,
+            |_| false,
+        );
+        let calls = registry
+            .file_calls(
+                &caller,
+                &CheckedBackendCallables::default(),
+                &no_facts(),
+                &NoClassifiers,
+                &super::super::laid_out_classes::LaidOutClasses::default(),
+                &mut wasm,
+            )
+            .expect("the remote member-default provider reserves its exact entry");
+        let reserved = calls
+            .module_default(provider)
+            .expect("the entry is keyed by the declaration that owns the defaults");
+        assert_eq!(calls.module_default(target), None);
+        let IrExpr::Call {
+            callee,
+            dispatch_receiver: None,
+            args,
+        } = caller.expr(call)
+        else {
+            panic!("the checked receiver moves into the default entry frame");
+        };
+        assert!(matches!(
+            &**callee,
+            Callee::ModuleDefaultEntry {
+                provider: actual_provider,
+                dispatch_receiver_ty: Some(receiver_ty),
+                ..
+            } if *actual_provider == provider && *receiver_ty == Ty::obj_name(owner)
+        ));
+        assert_eq!(args.first(), Some(&receiver));
+        assert!(matches!(caller.expr(args[1]), IrExpr::AbsentArgument { ty } if *ty == Ty::String));
+        assert!(matches!(
+            caller.expr(args[2]),
+            IrExpr::Const(krusty::ir::IrConst::Int(1))
+        ));
+
+        let mut declaration = IrFile::default();
+        let default = declaration.add_expr(IrExpr::Const(krusty::ir::IrConst::String(
+            krusty::kt_string::KtString::from("OK"),
+        )));
+        let body = declaration.add_expr(IrExpr::GetValue(1));
+        let function = declaration.add_fun(IrFunction {
+            name: "answer".to_string(),
+            param_checks: Vec::new(),
+            params: vec![Ty::String],
+            ret: Ty::String,
+            body: Some(body),
+            is_static: false,
+            dispatch_receiver: Some(owner),
+        });
+        let mut class = krusty::ir::IrClass::synthetic(owner);
+        class.methods.push(function);
+        declaration.add_class(class);
+        declaration
+            .checked_callable_functions
+            .insert(provider, function);
+        let parameters =
+            krusty::ir::FnParamInfo::source_defaults(vec!["value".to_owned()], vec![Some(default)]);
+        declaration.fn_params.insert(function, parameters);
+
+        krusty::backend::default_arguments::realize(
+            &mut declaration,
+            &mut krusty::backend::CheckedBackendCallables::default(),
+            |_| false,
+            |_| false,
+        );
+        let entry = declaration.default_entries[&function];
+        let functions = registry
+            .declare_file(&declaration, &mut wasm, &[])
+            .expect("the member entry consumes the provider's reserved function index");
+        assert_eq!(functions[entry as usize], Some(reserved));
+        assert_ne!(functions[function as usize], Some(reserved));
+        assert_eq!(registry.module_defaults.get(&provider), Some(&reserved));
+        assert!(!registry.module_defaults.contains_key(&target));
+        assert_eq!(
+            declaration.functions[entry as usize].params,
+            [Ty::obj_name(owner), Ty::String, Ty::Int,]
+        );
     }
 }

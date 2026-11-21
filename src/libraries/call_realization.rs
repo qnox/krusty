@@ -116,6 +116,9 @@ pub struct KlibBodyCallable<'a> {
     generic_signature: Option<&'a super::GenericSig>,
     type_parameters: &'a [Ty],
     reified_type_parameter_ordinals: &'a [u32],
+    /// Each value parameter's `noinline`/`crossinline` modifier, context parameters included and
+    /// the extension receiver excluded, in declaration order.
+    inline_modifiers: &'a [crate::types::InlineParameterModifier],
     compiler_intrinsic: Option<CompilerIntrinsic>,
     /// The range operator an exact builtin `rangeTo`/`rangeUntil` member constructs.
     range_construction: Option<crate::fir::FirRangeOperation>,
@@ -151,6 +154,7 @@ pub(crate) struct KlibBodyCallableShape<'a> {
     pub(crate) generic_signature: Option<&'a super::GenericSig>,
     pub(crate) type_parameters: &'a [Ty],
     pub(crate) reified_type_parameter_ordinals: &'a [u32],
+    pub(crate) inline_modifiers: &'a [crate::types::InlineParameterModifier],
     pub(crate) compiler_intrinsic: Option<CompilerIntrinsic>,
     pub(crate) range_construction: Option<crate::fir::FirRangeOperation>,
     pub(crate) declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
@@ -180,6 +184,7 @@ impl<'a> KlibBodyCallable<'a> {
             generic_signature,
             type_parameters,
             reified_type_parameter_ordinals,
+            inline_modifiers,
             compiler_intrinsic,
             range_construction,
             declaration_modifiers,
@@ -200,6 +205,7 @@ impl<'a> KlibBodyCallable<'a> {
             generic_signature,
             type_parameters,
             reified_type_parameter_ordinals,
+            inline_modifiers,
             compiler_intrinsic,
             range_construction,
             declaration_modifiers,
@@ -260,6 +266,10 @@ impl<'a> KlibBodyCallable<'a> {
         self.reified_type_parameter_ordinals
     }
 
+    pub(crate) fn inline_modifiers(self) -> &'a [crate::types::InlineParameterModifier] {
+        self.inline_modifiers
+    }
+
     pub(crate) fn parameter_identities(self) -> &'a [crate::fir::ResolvedParameterIdentity] {
         self.parameter_identities
     }
@@ -304,13 +314,27 @@ impl<'a> KlibBodyCallable<'a> {
         self.singleton_classifier
     }
 
-    /// The class contract that belongs to the declaration, with a singleton edge's own class
-    /// removed. That class is the singleton the edge dispatches to, so two edges of one
-    /// declaration may name different singleton classes and still be the same declaration.
-    fn declaration_class_contract(self) -> Option<&'a super::KlibBodyClassContract> {
-        match (self.singleton_classifier, self.class_contract) {
-            (Some(singleton), Some(class)) if class.classifier == singleton => None,
-            _ => self.class_contract,
+    /// The contract of the class that declares the member, when this edge carries it. An edge
+    /// may instead carry the contract of the singleton it dispatches to, which is not the
+    /// declaration's own and says nothing about it.
+    fn declaring_class_contract(self) -> Option<&'a super::KlibBodyClassContract> {
+        let class = self.class_contract?;
+        (self.declaration_owner
+            == Some(crate::types::SemanticCallableOwner::Classifier(
+                class.classifier,
+            )))
+        .then_some(class)
+    }
+
+    /// Two edges of one declaration agree on its declaring class where both carry it; an edge
+    /// that names only its singleton's class is no evidence against the other's.
+    fn declaring_class_contracts_agree(self, other: Self) -> bool {
+        match (
+            self.declaring_class_contract(),
+            other.declaring_class_contract(),
+        ) {
+            (Some(left), Some(right)) => left == right,
+            _ => true,
         }
     }
 
@@ -335,7 +359,7 @@ impl<'a> KlibBodyCallable<'a> {
             && self.compiler_intrinsic == other.compiler_intrinsic
             && self.range_construction == other.range_construction
             && self.declaration_modifiers == other.declaration_modifiers
-            && self.declaration_class_contract() == other.declaration_class_contract()
+            && self.declaring_class_contracts_agree(other)
             && self.companion_receiver == other.companion_receiver
             && self.declaration_owner == other.declaration_owner
             && self.identity == other.identity
@@ -395,6 +419,8 @@ pub struct ExternalCallableRealization {
     pub klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
     /// Whether a source parameter declares a default value, as the provider's declaration says.
     pub declares_parameter_defaults: bool,
+    /// Per logical parameter, whether its declared type is a function type annotated `@Composable`.
+    pub composable_parameters: crate::libraries::ParamFlags,
 }
 
 impl ExternalCallableRealization {
@@ -418,6 +444,7 @@ impl ExternalCallableRealization {
                 generic_signature: self.callable.generic_sig.as_deref(),
                 type_parameters: &self.klib_body_type_parameters,
                 reified_type_parameter_ordinals: &self.callable.reified_type_parameter_ordinals,
+                inline_modifiers: &self.callable.inline_modifiers,
                 compiler_intrinsic: self
                     .callable
                     .compiler_intrinsic
@@ -523,6 +550,7 @@ impl LibraryCallable {
             reflection_name: None,
             compiler_intrinsic: None,
             semantic_role: None,
+            property_accessor_role: None,
             overridden_declarations: Box::new([]),
             collection_barrier: None,
             plugin_expression: None,
@@ -541,6 +569,7 @@ impl LibraryCallable {
             inline: InlineKind::None,
             default_call: false,
             defaults_from_declaration: false,
+            transformed_entry_tail: None,
             vararg_elem: None,
             vararg_index: None,
             signature: None,

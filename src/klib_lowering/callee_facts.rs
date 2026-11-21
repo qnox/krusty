@@ -7,10 +7,11 @@
 //! backend handoff froze them) must agree with the serialized header. A bare signature is never a
 //! key and an unrelated source selection is never an origin fallback.
 
+use std::rc::Rc;
+
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::libraries::{KlibBodyCallable, KlibDependencyCallable};
-use crate::symbol_source::SymbolSource;
 
 /// Frozen dependency declarations by their exact module-qualified KLIB identity.
 #[derive(Clone, Default)]
@@ -18,7 +19,7 @@ pub struct KlibCalleeFacts<'a> {
     callables: HashMap<&'a KlibDependencyCallable, IndexedKlibCallee<'a>>,
     /// Builtin dispatch facts derived for each exact member identity before common-IR lowering.
     builtin_implementation_facts:
-        HashMap<crate::fir::ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>>,
+        Rc<HashMap<crate::fir::ExternalCallableId, Box<[crate::fir::BuiltinImplementation]>>>,
     /// Header evidence is not a checked source call which requires an executable export.
     selected: HashSet<&'a KlibDependencyCallable>,
     /// Same-compilation declaration identities for reference equality. These do not grant an
@@ -28,8 +29,14 @@ pub struct KlibCalleeFacts<'a> {
     class_type_oracle: Option<&'a dyn crate::assignable::TypeOracle>,
     /// The classifiers whose representation the target owns, and so their singleton values too.
     target_classifiers: Option<&'a dyn Fn(crate::types::TypeName) -> bool>,
-    /// The call edge facts of members realized outside the unit, by declaration.
-    member_edges: HashMap<KlibDependencyCallable, CallEdge>,
+    /// The checked call edge facts of reachable dependency members, by declaration.
+    ///
+    /// This and the other frozen graph facts are filled once, before lowering derives per-body
+    /// copies of the table with extra declarations, so the copies share them.
+    member_edges: Rc<HashMap<KlibDependencyCallable, CallEdge>>,
+    sam_declarations: Rc<HashMap<crate::ir::KlibSamKey, crate::ir::CheckedKlibSamDeclaration>>,
+    /// The library objects whose values the closed bodies read, by classifier.
+    read_objects: Rc<HashMap<crate::types::TypeName, crate::libraries::KlibBodyClassContract>>,
 }
 
 #[derive(Clone)]
@@ -49,57 +56,58 @@ pub(super) enum KlibCalleeFact<'facts, 'callable> {
 }
 
 /// Shared name retained for the checked member-call edge consumed by KLIB body lowering.
-pub(crate) type CallEdge = crate::fir::CheckedMemberCallEdge;
+pub(crate) type CallEdge = crate::ir::CheckedMemberCallEdge;
 
 impl<'a> KlibCalleeFacts<'a> {
-    /// Derive builtin implementations for the selected KLIB member declarations while provider
-    /// identities and accessor-to-property names are still available to the body checker.
-    pub(crate) fn with_builtin_implementation_facts(
+    /// Copy checker-produced semantic facts for the selected KLIB dependency graph.
+    pub(crate) fn with_checked_dependency_facts(
         mut self,
-        source: &dyn SymbolSource,
-    ) -> Result<Self, KlibDependencyCallable> {
-        for fact in self.callables.values() {
-            let IndexedKlibCallee::Selected(callables) = fact else {
-                continue;
-            };
-            let callable = callables[0];
-            if !callable.is_member() {
-                continue;
-            }
-            let Some(crate::types::SemanticCallableOwner::Classifier(owner)) =
-                callable.declaration_owner()
-            else {
-                return Err(callable.identity().clone());
-            };
-            let Some((external, realization)) =
-                source.external_callable_by_dependency(callable.identity())
-            else {
-                return Err(callable.identity().clone());
-            };
-            if realization.dependency_callable.as_ref() != Some(callable.identity())
-                || realization.callable.external_identity != Some(external)
-                || realization.kind != crate::libraries::ExternalCallableKind::Member
-                || realization.declaration_owner
-                    != Some(crate::types::SemanticCallableOwner::Classifier(owner))
-            {
-                return Err(callable.identity().clone());
-            }
-            let name = callable
-                .accessor()
-                .map_or_else(|| callable.name(), |accessor| accessor.name.as_ref());
-            let implementations =
-                crate::symbol_resolver::builtin_implementation_facts(source, owner, name, external);
-            if self
-                .builtin_implementation_facts
-                .get(&external)
-                .is_some_and(|existing| existing != &implementations)
-            {
-                return Err(callable.identity().clone());
-            }
-            self.builtin_implementation_facts
-                .insert(external, implementations);
+        checked: &'a crate::ir::CheckedKlibDependencyFacts,
+    ) -> Self {
+        Rc::make_mut(&mut self.builtin_implementation_facts).extend(
+            checked
+                .builtin_implementations()
+                .iter()
+                .map(|(&id, facts)| (id, facts.clone())),
+        );
+        Rc::make_mut(&mut self.member_edges).extend(
+            checked
+                .member_edges()
+                .iter()
+                .map(|(id, edge)| (id.clone(), edge.clone())),
+        );
+        Rc::make_mut(&mut self.sam_declarations).extend(
+            checked
+                .sam_declarations()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        if let Some(hierarchy) = checked.type_hierarchy() {
+            self.class_type_oracle = Some(hierarchy);
         }
-        Ok(self)
+        self
+    }
+
+    /// Record edges the closure authorized for members the checker has no function edge for.
+    /// A checker edge is the hierarchy proof and is left as stored.
+    pub(crate) fn with_authorized_member_edges(
+        mut self,
+        edges: impl IntoIterator<Item = (KlibDependencyCallable, CallEdge)>,
+    ) -> Self {
+        let member_edges = Rc::make_mut(&mut self.member_edges);
+        for (identity, edge) in edges {
+            member_edges.entry(identity).or_insert(edge);
+        }
+        self
+    }
+
+    pub(super) fn sam_declaration(
+        &self,
+        module: &str,
+        signature: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> Option<&crate::ir::CheckedKlibSamDeclaration> {
+        self.sam_declarations
+            .get(&(module.to_owned(), signature.clone()))
     }
 
     pub(crate) fn builtin_implementation_facts(
@@ -108,13 +116,26 @@ impl<'a> KlibCalleeFacts<'a> {
         &self.builtin_implementation_facts
     }
 
-    /// The call edge facts of the members realized outside the unit, frozen with its closure.
-    pub(crate) fn with_member_edges(
+    /// Record the library objects whose values the closed bodies read.
+    pub(crate) fn with_read_objects(
         mut self,
-        edges: crate::fx_hash::HashMap<KlibDependencyCallable, CallEdge>,
+        objects: Vec<crate::libraries::KlibBodyClassContract>,
     ) -> Self {
-        self.member_edges = edges;
+        self.read_objects = Rc::new(
+            objects
+                .into_iter()
+                .map(|object| (object.classifier, object))
+                .collect(),
+        );
         self
+    }
+
+    /// The object `classifier`, when the closed bodies read its value.
+    pub(crate) fn read_object(
+        &self,
+        classifier: crate::types::TypeName,
+    ) -> Option<&crate::libraries::KlibBodyClassContract> {
+        self.read_objects.get(&classifier)
     }
 
     pub(crate) fn member_edge(&self, identity: &KlibDependencyCallable) -> Option<&CallEdge> {
@@ -174,6 +195,12 @@ impl<'a> KlibCalleeFacts<'a> {
         }
     }
 
+    /// The class hierarchy the checker froze for the selected bodies, when it froze one.
+    pub(super) fn class_type_oracle(&self) -> Option<&'a dyn crate::assignable::TypeOracle> {
+        self.class_type_oracle
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_type_oracle(
         mut self,
         oracle: &'a dyn crate::assignable::TypeOracle,
@@ -244,16 +271,25 @@ impl<'a> KlibCalleeFacts<'a> {
         Option<super::constructor_calls::ConstructorDeclaration>,
         super::decline::KlibBodyDeclineReason,
     > {
+        self.selected_constructor(identity)?
+            .map(|selected| super::constructor_calls::authenticate(selected, bodies))
+            .transpose()
+    }
+
+    fn selected_constructor(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<Option<KlibBodyCallable<'a>>, super::decline::KlibBodyDeclineReason> {
         match self.get(identity) {
             Some(KlibCalleeFact::Ambiguous) => {
                 Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
-                    "conflicting provider contracts for a constructor declaration".to_owned(),
+                    "conflicting provider contracts for a constructor declaration".into(),
                 ))
             }
             Some(KlibCalleeFact::Selected(callables))
                 if callables[0].kind() == crate::libraries::ExternalCallableKind::Constructor =>
             {
-                super::constructor_calls::authenticate(callables[0], bodies).map(Some)
+                Ok(Some(callables[0]))
             }
             _ => Ok(None),
         }
@@ -268,6 +304,19 @@ impl<'a> KlibCalleeFacts<'a> {
             .map(|constructor| constructor.is_some())
     }
 
+    /// An actual emitted initializer remains a declaration edge when its producer has no raw IR.
+    /// Ambiguous provider buckets and every known malformed serialized header still decline.
+    pub(crate) fn authenticates_retained_constructor(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<bool, super::decline::KlibBodyDeclineReason> {
+        self.selected_constructor(identity)?
+            .map(|selected| super::constructor_calls::authenticate_retained(selected, bodies))
+            .transpose()
+            .map(|constructor| constructor.is_some())
+    }
+
     /// The initializer graph of the same positive ordinary-class capability used by lowering.
     pub(crate) fn constructor_initialization_callees(
         &self,
@@ -275,6 +324,22 @@ impl<'a> KlibCalleeFacts<'a> {
         bodies: &crate::klib_libraries::KlibDeclarationBodies,
     ) -> Result<Option<Vec<KlibDependencyCallable>>, super::decline::KlibBodyDeclineReason> {
         super::class_initialization::constructor_initialization_callees(
+            self.initialized_class_member(identity)?,
+            bodies,
+            self,
+        )
+    }
+
+    /// The library objects the initialization of the class `identity` constructs reads as values.
+    pub(crate) fn constructor_initialization_objects(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Vec<crate::metadata::id_signature::KlibPublicIdSignature>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        super::class_initialization::constructor_initialization_objects(
             self.initialized_class_member(identity)?,
             bodies,
             self,
@@ -332,6 +397,45 @@ impl<'a> KlibCalleeFacts<'a> {
                 "an initializer has no unique selected constructor declaration".to_owned(),
             )),
         }
+    }
+
+    /// The initializer graph of the object `class`, when its initialization is admitted.
+    pub(crate) fn object_initialization_callees(
+        &self,
+        class: &crate::libraries::KlibBodyClassContract,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Option<Vec<KlibDependencyCallable>>, super::decline::KlibBodyDeclineReason> {
+        super::class_initialization::object_initialization_callees(class, bodies, self)
+    }
+
+    /// The library objects the initialization of the object `class` reads as values.
+    pub(crate) fn object_initialization_objects(
+        &self,
+        class: &crate::libraries::KlibBodyClassContract,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Vec<crate::metadata::id_signature::KlibPublicIdSignature>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        super::class_initialization::object_initialization_objects(class, bodies, self)
+    }
+
+    /// The members dispatch reaches of the object `class`.
+    pub(crate) fn object_dispatched_members(
+        &self,
+        class: &crate::libraries::KlibBodyClassContract,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Vec<KlibDependencyCallable>, super::decline::KlibBodyDeclineReason> {
+        super::class_initialization::object_dispatched_members(class, bodies, self)
+    }
+
+    /// The declarations the overrides of the object `class` override.
+    pub(crate) fn object_overridden_declarations(
+        &self,
+        class: &crate::libraries::KlibBodyClassContract,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<Vec<KlibDependencyCallable>, super::decline::KlibBodyDeclineReason> {
+        super::class_initialization::object_overridden_declarations(class, bodies, self)
     }
 
     /// Check graph-owned declarations even when the root operation emits no callee body/export.
@@ -429,8 +533,13 @@ impl<'a> KlibCalleeFacts<'a> {
 
     pub(crate) fn with_declaration(&self, declaration: KlibBodyCallable<'a>) -> Self {
         let mut facts = self.clone();
-        facts.record(declaration, false);
+        facts.add_declaration(declaration);
         facts
+    }
+
+    /// Record `declaration` in these facts, as [`Self::with_declaration`] does in a copy.
+    pub(crate) fn add_declaration(&mut self, declaration: KlibBodyCallable<'a>) {
+        self.record(declaration, false);
     }
 
     pub(crate) fn target_getter(
@@ -497,6 +606,24 @@ impl<'a> KlibCalleeFacts<'a> {
         }))
     }
 
+    /// The continuation intrinsic `identity` is, which body lowering realizes as the suspension
+    /// point it stands for: no declaration of it is emitted or called.
+    pub(crate) fn continuation_intrinsic(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<
+        Option<super::continuation_intrinsics::ContinuationIntrinsicCall>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        // Two selected declarations prove no intrinsic; the call's own linking reports them.
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => {
+                super::continuation_intrinsics::authenticate(callables[0])
+            }
+            Some(KlibCalleeFact::Ambiguous) | None => Ok(None),
+        }
+    }
+
     /// The range construction `identity` performs, whatever the target lays out. A membership in
     /// a range literal compares against its bounds, as kotlinc folds it, so it builds no range.
     pub(crate) fn range_literal_bounds(
@@ -534,6 +661,47 @@ impl<'a> KlibCalleeFacts<'a> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Authenticate the two target-owned builtin property reads whose serialized accessor is
+    /// deliberately left outside the dependency-body unit. This keeps an exact `Array.size` or
+    /// `String.length` target edge as its ordinary checked property read; other target intrinsics
+    /// remain external calls and are not folded into common IR.
+    pub(crate) fn target_property_read(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+        operation: crate::libraries::CompilerIntrinsic,
+    ) -> Result<
+        Option<super::primitive_calls::CommonPrimitiveCall>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        use crate::libraries::CompilerIntrinsic::{ArraySize, StringLength};
+        if !matches!(operation, ArraySize | StringLength) {
+            return Ok(None);
+        }
+        let selected = match self.get(identity) {
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a target property getter".to_owned(),
+                ));
+            }
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            None => return Ok(None),
+        };
+        if selected.compiler_intrinsic() != Some(operation) {
+            return Ok(None);
+        }
+        let Some(primitive) = super::primitive_calls::authenticate(selected, bodies)? else {
+            return Ok(None);
+        };
+        if !matches!(
+            primitive.operation,
+            super::primitive_calls::CommonPrimitive::PropertyRead(found) if found == operation
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(primitive))
     }
 
     /// Index the frozen views of a caller's selected dependency declarations.

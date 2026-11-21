@@ -51,12 +51,20 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 if [ "${android_variant:--}" != - ]; then
   export CORPUS_ANDROID_VARIANT=$android_variant
 fi
+# The target set and the toolchains, as in run.sh.
+targets=${CORPUS_TARGETS_DIR:-$here/gradle}/$name.targets
+if [ -f "$targets" ]; then
+  export CORPUS_TARGETS=$targets
+else
+  unset CORPUS_TARGETS
+fi
+. "$here/toolchains.sh"
 export KRUSTY_PLUGIN_REPOSITORY=$plugin_repository KRUSTY_PLUGIN_VERSION=$plugin_version
 
 # The init scripts read every project of the build, so the configuration cache and isolated
 # projects are off, as in run.sh.
 common=(-I "$here/corpus.init.gradle" --no-configure-on-demand --no-configuration-cache
-  -Dorg.gradle.isolated-projects=false)
+  -Dorg.gradle.isolated-projects=false "${toolchains[@]}")
 with_krusty=(-I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty")
 
 probe=$logs/$name.probe

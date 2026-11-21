@@ -126,14 +126,43 @@ typedef struct KType {
        implementing no interface of the program has none: nothing dispatches through it here.
        Appended, like the names above, so no existing initializer moves. */
     const kt_fn *itable;
+    /* On a class of the PROGRAM that implements `kotlin.collections.Map`: its members, through
+       typed virtual thunks, for the map entry points below to answer for an object they did not
+       make. NULL for every other type. */
+    const struct KMapMembers *map_members;
+    /* On a CALLABLE REFERENCE's descriptor: the byte offsets of the fields holding the values it
+       bound for the declaration's context parameters, `reference_context_count` of them, in
+       parameter order. Equality and `hashCode` read them as they read the bound receiver, so two
+       references to one declaration with different contexts are different. NULL, and a count of
+       0, for a reference binding none. */
+    const uint32_t *reference_context_offsets;
+    uint32_t reference_context_count;
 } KType;
+
+/* The read-only members of `Map` a program class answers, each a thunk with the fixed signature
+   written here that dispatches to the class's override virtually, so a subclass overriding one is
+   reached through the same thunk. A key or value crosses as a reference, as `Map` declares it. */
+typedef struct KMapMembers {
+    kt_int (*size)(struct KObject *self);
+    kt_boolean (*is_empty)(struct KObject *self);
+    kt_boolean (*contains_key)(struct KObject *self, struct KObject *key);
+    kt_boolean (*contains_value)(struct KObject *self, struct KObject *value);
+    struct KObject *(*get)(struct KObject *self, struct KObject *key);
+    struct KObject *(*keys)(struct KObject *self);
+    struct KObject *(*values)(struct KObject *self);
+    struct KObject *(*entries)(struct KObject *self);
+} KMapMembers;
 
 /* The compiler writes each descriptor field at a fixed offset (`ktype` in
    `codegen/lower/objects.rs`); these pin the C layout to the same numbers. */
 _Static_assert(offsetof(KType, class_names) == 148, "KType.class_names moved");
 _Static_assert(offsetof(KType, collection_size) == 152, "KType.collection_size moved");
 _Static_assert(offsetof(KType, itable) == 160, "KType.itable moved");
-_Static_assert(sizeof(KType) == 168, "KType changed size");
+_Static_assert(offsetof(KType, map_members) == 168, "KType.map_members moved");
+_Static_assert(offsetof(KType, reference_context_offsets) == 176, "KType.reference_context_offsets moved");
+_Static_assert(offsetof(KType, reference_context_count) == 184, "KType.reference_context_count moved");
+_Static_assert(sizeof(KType) == 192, "KType changed size");
+_Static_assert(offsetof(KMapMembers, entries) == 56, "KMapMembers.entries moved");
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.
 
@@ -287,6 +316,12 @@ KRef kt_unsigned_array_wrap(const KType *type, KRef storage);
    a spread needs: `f(a, *xs, b)` builds one array whose size only run time knows. */
 kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source);
 
+/* Kotlin/Native's `arrayCopy` of one specialized primitive array or `Array<Any?>`: `count` elements of `source`
+   from `from` into `destination` at `to`. A range outside either array raises its
+   `ArrayIndexOutOfBoundsException`, with no message, before anything is copied. The ranges may
+   overlap within one array. */
+void kt_array_copy_range(KRef source, kt_int from, KRef destination, kt_int to, kt_int count);
+
 /* An index outside `0 until size`: raises Kotlin's `IndexOutOfBoundsException`, with the JVM's
    wording, and returns; the caller returns too. */
 void kt_index_out_of_bounds(kt_int index, kt_int size);
@@ -351,6 +386,31 @@ extern const KType kt_type_function20;
 extern const KType kt_type_function21;
 extern const KType kt_type_function22;
 
+/* Semantic source-arity markers for Kotlin suspend function types. */
+extern const KType kt_type_suspend_function0;
+extern const KType kt_type_suspend_function1;
+extern const KType kt_type_suspend_function2;
+extern const KType kt_type_suspend_function3;
+extern const KType kt_type_suspend_function4;
+extern const KType kt_type_suspend_function5;
+extern const KType kt_type_suspend_function6;
+extern const KType kt_type_suspend_function7;
+extern const KType kt_type_suspend_function8;
+extern const KType kt_type_suspend_function9;
+extern const KType kt_type_suspend_function10;
+extern const KType kt_type_suspend_function11;
+extern const KType kt_type_suspend_function12;
+extern const KType kt_type_suspend_function13;
+extern const KType kt_type_suspend_function14;
+extern const KType kt_type_suspend_function15;
+extern const KType kt_type_suspend_function16;
+extern const KType kt_type_suspend_function17;
+extern const KType kt_type_suspend_function18;
+extern const KType kt_type_suspend_function19;
+extern const KType kt_type_suspend_function20;
+extern const KType kt_type_suspend_function21;
+extern const KType kt_type_suspend_function22;
+
 /* Kotlin's reflection hierarchy, as far as a PROPERTY REFERENCE wears it. Each reference object
    has a type of its own — one per property — so an `is` against `KProperty0` cannot ask about that
    type and asks about these instead. The whole chain is named on each descriptor, because
@@ -370,6 +430,7 @@ extern const KType kt_type_kmutable_property2;
    `KType.interfaces` requires) and a class of the program that implements one names it too. None
    has instances of its own; each lists its own bases. */
 extern const KType kt_type_iterator_interface;
+extern const KType kt_type_list_iterator_interface;
 extern const KType kt_type_iterable_interface;
 extern const KType kt_type_mutable_iterable_interface;
 extern const KType kt_type_collection_interface;
@@ -389,6 +450,11 @@ extern const KType kt_type_mutable_map_interface;
    `listOf(vararg)` answers an anonymous read-only `AbstractList`, which this class stands for. */
 extern const KType kt_type_list;
 extern const KType kt_type_list_iterator;
+/* The view `List.subList` answers: the range of a list, reading the list as it is. A `List`, not a
+   `MutableList`; its size is fixed, and a growable parent that changes shape after it was made
+   makes each read raise `ConcurrentModificationException`. */
+extern const KType kt_type_sub_list;
+extern const KType kt_type_mutable_sub_list;
 
 KRef kt_list_of(KRef elements);
 KRef kt_list_empty(void);
@@ -428,6 +494,7 @@ kt_boolean kt_mutable_collection_remove(KRef self, KRef value);
 void kt_mutable_collection_clear(KRef self);
 kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements);
 KRef kt_list_get(KRef list, kt_int index);
+KRef kt_list_sub_list(KRef list, kt_int from, kt_int to);
 /* `first()` / `last()`; both raise `NoSuchElementException` on an empty list, as Kotlin does. */
 KRef kt_list_first(KRef list);
 KRef kt_list_last(KRef list);
@@ -435,6 +502,8 @@ kt_int kt_list_index_of(KRef list, KRef value);
 kt_int kt_list_last_index_of(KRef list, KRef value);
 kt_boolean kt_list_contains(KRef list, KRef value);
 KRef kt_list_iterator(KRef list);
+KRef kt_list_list_iterator(KRef list, kt_int index);
+KRef kt_list_list_iterator_from_start(KRef list);
 
 /* ---- a growable list -------------------------------------------------------------------------
 
@@ -447,12 +516,17 @@ KRef kt_mutable_list_new(void);
 KRef kt_mutable_list_with_capacity(kt_int capacity);
 /* A growable list holding a COPY of an array's elements. */
 KRef kt_mutable_list_of(KRef elements);
+/* `ArrayList(elements)`: a growable list holding a copy of any collection's elements. */
+KRef kt_mutable_list_copy_of(KRef elements);
 kt_boolean kt_mutable_list_add(KRef self, KRef value);
 void kt_mutable_list_add_at(KRef self, kt_int index, KRef value);
 /* Answers the element that was there, as Kotlin's `set` does. */
 KRef kt_mutable_list_set(KRef self, kt_int index, KRef value);
 KRef kt_mutable_list_remove_at(KRef self, kt_int index);
 kt_boolean kt_mutable_list_remove(KRef self, KRef value);
+/* `removeAll` / `retainAll`: whether the list changed. See the definitions. */
+kt_boolean kt_mutable_list_remove_all(KRef self, KRef elements);
+kt_boolean kt_mutable_list_retain_all(KRef self, KRef elements);
 void kt_mutable_list_clear(KRef self);
 /* `list += element` and `list += elements`: Kotlin's `plusAssign`, which is `add`/`addAll` and
    answers `Unit`. */
@@ -460,6 +534,12 @@ void kt_mutable_list_plus_assign(KRef self, KRef value);
 void kt_mutable_list_add_all(KRef self, KRef elements);
 kt_boolean kt_list_iterator_has_next(KRef iterator);
 KRef kt_list_iterator_next(KRef iterator);
+/* `ListIterator`'s members over a list's iterator. `kt_list_iterator_at` is `listIterator(index)`. */
+KRef kt_list_iterator_at(KRef list, kt_int index);
+kt_boolean kt_list_iterator_has_previous(KRef iterator);
+KRef kt_list_iterator_previous(KRef iterator);
+kt_int kt_list_iterator_next_index(KRef iterator);
+kt_int kt_list_iterator_previous_index(KRef iterator);
 
 /* Iteration through a receiver the generator could only type by the INTERFACE, where either of the
    two iterable things this runtime has may turn up. The descriptor decides which, and `next`
@@ -623,6 +703,15 @@ KRef kt_int_range(kt_int first, kt_int last);
 KRef kt_long_range(kt_long first, kt_long last);
 KRef kt_char_range(kt_char first, kt_char last);
 
+/* `IntProgression(first, last, step)` and its kin, with Kotlin's constructor checks: a zero step,
+   or the step type's minimum, is its `IllegalArgumentException`. `last` is normalized to the last
+   element on the step, as `IntProgression.last` is. */
+KRef kt_int_progression(kt_int first, kt_int last, kt_int step);
+KRef kt_long_progression(kt_long first, kt_long last, kt_long step);
+KRef kt_char_progression(kt_char first, kt_char last, kt_int step);
+KRef kt_uint_progression(kt_int first, kt_int last, kt_int step);
+KRef kt_ulong_progression(kt_long first, kt_long last, kt_long step);
+
 /* `first..<last` / `first until last`. Kotlin answers the EMPTY range rather than wrapping when
    `last` is the element type's minimum, so the half-open form is a function and not `last - 1`. */
 KRef kt_int_range_until(kt_int first, kt_int last);
@@ -665,27 +754,6 @@ kt_boolean kt_floating_range_contains(KRef range, kt_double value);
 kt_boolean kt_floating_range_is_empty(KRef range);
 kt_double kt_floating_range_start(KRef range);
 kt_double kt_floating_range_end(KRef range);
-
-/* ---- Delegates.notNull -------------------------------------------------------------------------
-
-   `var x: T by Delegates.notNull()`: one reference, and reading it before it is written is an
-   error. The NAME the error reports is handed over by the caller, read from the `KProperty`
-   operand the delegate convention passes. */
-extern const KType kt_type_not_null_var;
-
-KRef kt_not_null_var(void);
-/* `Delegates.observable(initial) { property, old, new -> … }`: the value and a callback run after
-   each write. The `KProperty` is passed along, never read, which is what lets this carry it without
-   any reflection. */
-extern const KType kt_type_observable;
-KRef kt_observable(KRef initial, KRef on_change);
-/* The two entry points a `ReadWriteProperty` receiver reaches; the DESCRIPTOR says which delegate
-   it is, no static type separating them. `get` takes the property's NAME, the only thing it can
-   need (the text of a `notNull` read-before-write error); `set` takes the PROPERTY, which an
-   observable passes to its callback. Any object other than those two delegates ends the program
-   with a message naming its descriptor. */
-KRef kt_rw_property_get(KRef self, KRef name);
-void kt_rw_property_set(KRef self, KRef property, KRef value);
 
 /* ---- comparable ranges ------------------------------------------------------------------------
 
@@ -838,6 +906,17 @@ KRef kt_string_substring_from(KRef self, kt_int start);
 /* `a.compareTo(b)`, by UTF-16 code unit and with Java's magnitude: the difference of the first
    units that differ, or of the lengths when one string is a prefix of the other. */
 kt_int kt_string_compare_to(KRef a, KRef b);
+
+/* Whether `length` UTF-16 units of `self` from `self_offset` equal `other`'s from `other_offset`;
+   both ranges are already within their strings (Kotlin/Native's `unsafeRangeEquals`). */
+kt_boolean kt_string_range_equals(KRef self, kt_int self_offset, KRef other, kt_int other_offset,
+                                  kt_int length);
+
+/* Kotlin/Native's `indexOfString` and `indexOfChar`: the first UTF-16 unit offset at or after
+   `from` (a negative start counts from zero) where `other` or `ch` occurs, or -1. */
+kt_int kt_string_index_of_string(KRef self, KRef other, kt_int from);
+kt_int kt_string_index_of_char(KRef self, kt_char ch, kt_int from);
+kt_int kt_string_last_index_of_char(KRef self, kt_char ch, kt_int from);
 
 /* `s.removeSuffix(suffix)`: the receiver without it, cut by UTF-16 unit as `endsWith` and
    `substring` are; either may be a `StringBuilder`. A string that does not end there comes back
@@ -1049,6 +1128,7 @@ KRef kt_throwable_new_defaulted(const KType *type);
 /* `kotlin.Result`'s failed state, and kotlin-test's `checkResultIsFailure` over one. */
 extern const KType kt_type_result_failure;
 KRef kt_result_failure_new(KRef exception);
+KRef kt_result_failure_exception(KRef failure);
 KRef kt_check_result_is_failure(KRef expected, KRef message, KRef result);
 /* A `Result` held where its class is not known statically, and the value back out of one. */
 extern const KType kt_type_result;
@@ -1335,6 +1415,23 @@ KRef kt_read_line_or_throw(void);
 
 typedef struct KThread KThread;
 
+/* Explicit embedding lifetime. A foreign host calls begin once at OS-thread routine entry, and
+   end with its returned token after the routine's final callback, immediately before thread exit.
+   Both run outside Kotlin, without holding the mutator lock. Begin is not nestable and rejects
+   an existing registration; the token is valid only until its one matching end on the same thread.
+   They do not detect OS exit and must not bracket individual callbacks. Main and kt_thread_start
+   threads are already managed and must not be registered or ended by the host.
+   Unregistered hosts retain the existing temporary callback behavior, without persistent slots. */
+KThread *kt_thread_lifetime_begin(void);
+void kt_thread_lifetime_end(KThread *thread);
+
+/* A declaration's reference slot in the current managed/registered OS-thread lifetime. The caller
+   holds the mutator lock. The nonnull token must identify the same exact declaration in every
+   module; the runtime never interprets it. The stable zero-initialized slot is a GC root until
+   the declared thread end, including gaps between callbacks. Allocation/initialization of its
+   value belongs to the caller. An unregistered temporary callback cannot use this operation. */
+KRef *kt_thread_object_slot(const void *canonical_declaration_token);
+
 /* Release the lock for a call into foreign code, recording the caller's callee-saved registers and
    stack pointer so its frames stay roots while it is away. Pass the answer to `kt_native_leave`
    when the foreign call returns. */
@@ -1346,6 +1443,8 @@ typedef struct KThreadEntry {
     KThread *thread;
     /* Whether this entry attached the thread, and so detaches it on the way out. */
     bool attached;
+    /* An explicitly registered thread was outside every callback, with no Kotlin stack. */
+    bool outer_dormant;
     /* A thread that was already attached, in a `kt_native_enter`: its released state, put back on
        the way out. */
     uintptr_t outer_registers[KT_SAVED_REGISTERS];
@@ -1355,7 +1454,8 @@ typedef struct KThreadEntry {
 
 /* Enter Kotlin from foreign code, taking the lock. `stack_bottom` is the address of a local in the
    caller's frame, above every Kotlin frame the callback will run; it matters only for a thread the
-   runtime has not seen, which is attached for the callback's duration. */
+   runtime has not seen, which is attached for the callback's duration, or a registered
+   thread reentering after its previous callback returned. */
 void kt_callback_enter(KThreadEntry *entry, void *stack_bottom);
 
 /* Leave Kotlin for the foreign code that called in, releasing the lock. An exception the callback

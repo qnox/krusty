@@ -120,6 +120,26 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
                 .and_then(|t| t.non_null().obj_internal())
                 .filter(|fq| callable_under.contains_key(fq));
         }
+        // A value bound for a leading context parameter is stored boxed in `boundContextArguments`;
+        // a value-class context the mangled target takes as its underlying is unboxed at `invoke`.
+        fr.bound_context_unbox = erase_src
+            .iter()
+            .take(fr.bound_contexts as usize)
+            .map(|parameter| {
+                // The declared parameter's own physical form decides: a nullable value class over a
+                // scalar stays boxed, exactly as the mangled target's parameter does.
+                let value_class = parameter
+                    .non_null()
+                    .obj_internal()
+                    .filter(|fq| callable_under.contains_key(fq))?;
+                (erase(parameter, callable_under) != *parameter).then_some(
+                    krusty::ir::BoundContextUnbox {
+                        value_class,
+                        nullable: parameter.is_nullable(),
+                    },
+                )
+            })
+            .collect();
         if let Some((_, parameters, result)) = local_target {
             fr.target_param_tys = parameters;
             fr.target_ret_ty = result;
@@ -147,6 +167,10 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
             .enumerate()
             .map(|(i, logical)| {
                 let target = fr.target_param_tys.get(i + target_offset)?;
+                // A primitive-array value class keeps its semantic name through erasure
+                // (`UIntArray`), yet the selected callable takes its carrier (`int[]`).
+                let target = &super::representation::carrier_slot(*target, callable_under)
+                    .unwrap_or(*target);
                 let fq = logical.non_null().obj_internal()?;
                 // `FunctionN.invoke` always receives the logical value as an Object. Adapt it to
                 // the selected callable's *physical* parameter, not merely to a type with different
@@ -168,10 +192,14 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
             // branch for a primitive target slot and produces an impossible stack-map join.
             .map(|parameter| parameter.is_nullable())
             .collect();
+        // The same physical slot decides the result: a `UIntArray` result leaves the target as
+        // its `int[]` carrier and is boxed for `FunctionN.invoke`'s `Object`.
+        let target_ret = super::representation::carrier_slot(fr.target_ret_ty, callable_under)
+            .unwrap_or(fr.target_ret_ty);
         fr.box_ret = fr.ret_ty.non_null().obj_internal().and_then(|fq| {
             (callable_under.contains_key(&fq)
                 && target_decl_ret.non_null().obj_internal() == Some(fq)
-                && fr.ret_ty != fr.target_ret_ty)
+                && fr.ret_ty != target_ret)
                 .then_some(fq)
         });
         fr.invoke_renamed = fr

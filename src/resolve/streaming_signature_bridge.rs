@@ -140,8 +140,6 @@ struct ExplicitContextCall {
     argument_types: Vec<Ty>,
 }
 
-const RECURSIVE_INFERENCE_MESSAGE: &str = "type checking has run into a recursive problem. Easiest workaround: specify the types of your declarations explicitly.";
-
 impl ProductionSignatureSemantics<'_> {
     fn failure() -> crate::fir::DiagnosticId {
         crate::fir::DiagnosticId::from_raw(0)
@@ -184,10 +182,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         spelling: &str,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<Ty>, crate::fir::DiagnosticId> {
         let declaration = match self.headers.declarations.anchor(scope.owner) {
             Some(declaration) if declaration.kind == crate::fir::DeclarationKind::Property => {
@@ -500,37 +495,16 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         declaration: crate::fir::DeclarationId,
     ) -> crate::fir::DiagnosticId {
-        let mut diagnostics = self.diagnostics.borrow_mut();
-        if let Some(index) = diagnostics
-            .iter()
-            .position(|diagnostic| diagnostic.declaration == declaration)
-        {
-            return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
+        let message = super::RECURSIVE_INFERENCE_MESSAGE.to_string();
+        match self.signature_origins.get(&declaration) {
+            Some(origin) => self.record_source_diagnostic(declaration, *origin, message),
+            None => self
+                .headers
+                .stub(declaration)
+                .map_or_else(Self::failure, |stub| {
+                    self.record_source_diagnostic_at(declaration, stub.source, stub.range, message)
+                }),
         }
-        let Some(stub) = self.headers.stub(declaration) else {
-            return Self::failure();
-        };
-        let span = self
-            .signature_origins
-            .get(&declaration)
-            .and_then(|origin| match self.headers.signature_origins.get(*origin) {
-                Some(crate::fir::Origin::Source { span, .. }) => Some(span),
-                Some(crate::fir::Origin::Synthetic { cause, .. }) => {
-                    match self.headers.signature_origins.get(cause) {
-                        Some(crate::fir::Origin::Source { span, .. }) => Some(span),
-                        Some(crate::fir::Origin::Synthetic { .. }) | None => None,
-                    }
-                }
-                None => None,
-            })
-            .unwrap_or(stub.range);
-        diagnostics.push(ProductionSignatureDiagnostic::conditional(
-            declaration,
-            stub.source.raw(),
-            span,
-            RECURSIVE_INFERENCE_MESSAGE.to_string(),
-        ));
-        crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
     fn record_missing_signature(
@@ -860,21 +834,8 @@ impl ProductionSignatureSemantics<'_> {
         source: crate::fir::SourceFileId,
         reference: &TypeRef,
     ) -> Option<crate::fir::DiagnosticId> {
-        fn extent(reference: &TypeRef, lo: &mut u32, hi: &mut u32) {
-            *lo = (*lo).min(reference.span.lo);
-            *hi = (*hi).max(reference.span.hi);
-            for component in reference
-                .fun_params
-                .iter()
-                .chain(reference.arg.iter().map(|argument| &**argument))
-                .chain(reference.targs.iter())
-            {
-                extent(component, lo, hi);
-            }
-        }
-        let mut lo = reference.span.lo;
-        let mut hi = reference.span.hi;
-        extent(reference, &mut lo, &mut hi);
+        let (lo, hi) =
+            super::type_argument_arity::written_extent(&self.headers.syntax, source, reference);
         self.diagnostics
             .borrow()
             .iter()
@@ -1646,10 +1607,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         from: Option<crate::fir::SignatureScope>,
         declaration: Option<crate::fir::DeclarationId>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedSignature>, crate::fir::DiagnosticId> {
         self.demanded_source_signature_at(from, declaration, None, demand)
     }
@@ -1659,10 +1617,7 @@ impl ProductionSignatureSemantics<'_> {
         from: Option<crate::fir::SignatureScope>,
         declaration: Option<crate::fir::DeclarationId>,
         origin: Option<crate::fir::OriginId>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedSignature>, crate::fir::DiagnosticId> {
         let Some(declaration) = declaration else {
             return Ok(None);
@@ -1716,10 +1671,7 @@ impl ProductionSignatureSemantics<'_> {
     fn demanded_member_signature(
         &self,
         declaration: Option<crate::fir::DeclarationId>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedSignature>, crate::fir::DiagnosticId> {
         declaration.map_or(Ok(None), |declaration| demand(declaration).map(Some))
     }
@@ -2021,10 +1973,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         super_spelling: &str,
         member_spelling: &str,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let (class_super, interface_supers) = self.direct_super_receivers(scope, super_spelling)?;
         if let Some(receiver) = class_super {
@@ -2057,10 +2006,7 @@ impl ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         type_arguments: &[Ty],
         trailing_lambda: bool,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let (class_super, interface_supers) = self.direct_super_receivers(scope, super_spelling)?;
         // `super.Inner(args)` is a constructor call on an inner classifier inherited through the
@@ -2317,24 +2263,11 @@ impl ProductionSignatureSemantics<'_> {
                                 .map(SignatureImplicitReceiver::context_parameter),
                         );
                     }
-                    let arguments = signature
-                        .type_params
-                        .iter()
-                        .enumerate()
-                        .map(|(index, name)| {
-                            let bound = signature
-                                .type_param_bounds
-                                .get(index)
-                                .copied()
-                                .filter(|bound| *bound != Ty::Error)
-                                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                            Ty::ty_param(name, bound)
-                        })
-                        .collect::<Vec<_>>();
-                    receivers.push(SignatureImplicitReceiver::ordinary(Ty::obj_args_name(
-                        signature.internal,
-                        &arguments,
-                    )));
+                    // An inner classifier's receiver carries the outer formals it captures, the
+                    // same self type its members are declared against.
+                    receivers.push(SignatureImplicitReceiver::ordinary(
+                        semantic_classifier_self(signature),
+                    ));
                     if direct_classifier {
                         receivers.extend(
                             self.classifier_context_receivers(owner, scope.source)
@@ -2467,6 +2400,7 @@ fn semantic_classifier_self(signature: &ClassSig) -> Ty {
                     .type_param_bounds
                     .get(ordinal)
                     .copied()
+                    .filter(|bound| *bound != Ty::Error)
                     .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
             )
         });
@@ -2652,9 +2586,7 @@ pub(crate) fn install_streamed_anonymous_capture_declarations(
                 // physical field later; it must never replace the source-visible signature.
                 continue;
             }
-            let sibling = u32::MAX
-                .checked_sub(u32::try_from(ordinal).expect("too many anonymous-object captures"))
-                .expect("too many anonymous-object captures");
+            let sibling = DeclarationAnchor::capture_storage_sibling(ordinal);
             let declaration = headers.declarations.intern(DeclarationAnchor {
                 source: crate::fir::SourceFileId::from_raw(source),
                 range: class.span,
@@ -3137,9 +3069,9 @@ pub(crate) fn finalized_streamed_signature_index(
         false
     }
 
-    /// `equals`/`hashCode`/`toString` stubs are recorded for every final `value` keyword. A boxed
-    /// or an unboxed value class generates them; a `value class` rejected (for example because
-    /// `FullValueClasses` is off) is an ordinary class and keeps `Any`'s members.
+    /// `equals`/`hashCode`/`toString` stubs are recorded for every final `value`/`inline` class. A
+    /// boxed or an unboxed value class generates them; a rejected one (`FullValueClasses` off, a
+    /// bad constructor shape) is an ordinary class and keeps `Any`'s members.
     fn generated_value_keyword_method_is_suppressed(
         headers: &crate::fir::StreamedHeaderModule,
         table: &SymbolTable,
@@ -3163,10 +3095,10 @@ pub(crate) fn finalized_streamed_signature_index(
         let Some(owner_stub) = headers.stubs.iter().find(|candidate| candidate.id == owner) else {
             return false;
         };
-        if !owner_stub
-            .flags
-            .has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
-            || owner_stub.flags.has(crate::fir::DeclarationFlags::DATA)
+        let owner_flags = owner_stub.flags;
+        if !(owner_flags.has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
+            || owner_flags.has(crate::fir::DeclarationFlags::VALUE))
+            || owner_flags.has(crate::fir::DeclarationFlags::DATA)
         {
             return false;
         }
@@ -3637,7 +3569,7 @@ pub(crate) fn finalized_streamed_signature_index(
                         result = super::semantic_value_parameter_ty(
                             resolved,
                             constructor_property_vararg,
-                        )
+                        );
                     }
                     Err(_) => header_resolution_failed = true,
                 }
@@ -3879,11 +3811,10 @@ pub(crate) fn finalized_streamed_signature_index(
             deferred_local_headers.insert(stub.id);
             continue;
         }
-        // An ordinary local inferred result is not a module signature root. It is published in
-        // Pass 2 while its real lexical context is active; semantic override plans for its local
-        // classifier are completed immediately after that publication.
+        // Enum-entry methods are published in Pass 1; other local results wait for Pass 2.
         let deferred_local_signature = stub.signature_inference.is_some()
-            && stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS);
+            && stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
+            && !super::enum_entry_method_owner::is_entry_method(headers, stub.id);
         if !deferred_local_signature {
             required.push(stub.id);
         }
@@ -4203,25 +4134,25 @@ pub(crate) fn finalized_streamed_signature_index(
             .anchor(stub.id)
             .expect("a compact stub must retain its stable anchor");
         let mut flags = open_by_default.status(headers, stub.id, stub.kind, stub.flags);
+        use crate::fir::DeclarationFlags as F;
         if stub.kind == DeclarationKind::Classifier
-            && flags.has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
+            && (flags.has(F::VALUE_KEYWORD) || flags.has(F::VALUE))
         {
             let class = table
                 .classes
                 .values()
                 .find(|class| class.stable_declaration == Some(stub.id));
             // Signature collection decided the representation for the compilation target; an
-            // inline value class is the one it gave an underlying field.
-            if class.is_some_and(|class| class.value_field.is_some()) {
-                flags = flags.with(crate::fir::DeclarationFlags::VALUE, true);
-            } else if class.is_some_and(|class| class.full_value) {
-                flags = flags.with(crate::fir::DeclarationFlags::FULL_VALUE, true);
-            }
+            // inline value class is the one it gave an underlying field, and a rejected one is
+            // neither inline nor full.
+            let inline = class.is_some_and(|class| class.value_field.is_some());
+            let full = !inline && class.is_some_and(|class| class.full_value);
+            flags = flags.with(F::VALUE, inline).with(F::FULL_VALUE, full);
         }
         let Some(visibility) = generated_member_header::visibility(&semantics, stub) else {
             stop_with_failure!(stub.id);
         };
-        index.publish_declaration_header(
+        index.publish_compact_declaration(
             stub.id,
             crate::fir::ResolvedDeclarationHeader {
                 kind: stub.kind,
@@ -4233,10 +4164,9 @@ pub(crate) fn finalized_streamed_signature_index(
             },
             stub.lookup_name
                 .and_then(|name| headers.lookup_names.get(name)),
+            headers.classifier_source_spelling(stub.id),
+            (stub.kind == DeclarationKind::Classifier).then(|| classifier_types[&stub.id]),
         );
-        if stub.kind == DeclarationKind::Classifier {
-            index.publish_classifier_identity(stub.id, classifier_types[&stub.id]);
-        }
         if let Some(&ordinal) = headers.continuation_ordinals.get(&stub.id) {
             index.publish_continuation_ordinal(stub.id, ordinal);
         }

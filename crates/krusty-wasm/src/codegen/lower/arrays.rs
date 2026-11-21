@@ -348,7 +348,7 @@ impl Body<'_> {
     }
 
     /// Read the backing array of the checked Kotlin array value on the stack.
-    fn array_storage(&mut self, form: ArrayForm) {
+    pub(super) fn array_storage(&mut self, form: ArrayForm) {
         self.code
             .ref_cast(false, HeapType::Concrete(form.object))
             .struct_get(form.object, STORAGE_FIELD);
@@ -449,19 +449,24 @@ impl Body<'_> {
         if !self.array_range_checks {
             return Ok(());
         }
+        self.code
+            .local_get(offset)
+            .local_get(storage)
+            .ref_as_non_null()
+            .array_len();
+        self.throw_unless_index_below()
+    }
+
+    /// Consume an index and a length from the stack, throwing `IndexOutOfBoundsException` unless
+    /// the index is in `0 until length`.
+    pub(super) fn throw_unless_index_below(&mut self) -> Result<(), Unsupported> {
         let exception = self.runtime.exception_class(
             self.module,
             self.classifiers,
             RuntimeExceptionKind::IndexOutOfBounds.classifier(),
         )?;
-        // Unsigned comparison includes every negative index as well as size and larger.
-        self.code
-            .local_get(offset)
-            .local_get(storage)
-            .ref_as_non_null()
-            .array_len()
-            .op(I32_GE_U)
-            .if_(BlockType::Empty);
+        // Unsigned comparison includes every negative index as well as length and larger.
+        self.code.op(I32_GE_U).if_(BlockType::Empty);
         self.runtime.exceptions.construct_class(
             &mut self.code,
             exception,

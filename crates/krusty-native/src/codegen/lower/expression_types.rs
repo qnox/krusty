@@ -113,6 +113,7 @@ impl BodyLowering<'_, '_, '_> {
             // A declaration's result, at the type the declaration gives it.
             IrExpr::Call { callee, .. } => match &**callee {
                 Callee::Local(function)
+                | Callee::ClassStatic { function, .. }
                 | Callee::LocalWithDefaults { function, .. }
                 | Callee::ClassStaticWithDefaults { function, .. } => {
                     ir.functions[*function as usize].ret
@@ -122,6 +123,7 @@ impl BodyLowering<'_, '_, '_> {
                 | Callee::Module { ret, .. }
                 | Callee::ModuleWithDefaults { ret, .. }
                 | Callee::ModuleDefaultEntry { ret, .. }
+                | Callee::ModuleConstructorDefaultEntry { ret, .. }
                 | Callee::Super { ret, .. }
                 // Another file's function returns what its declaration fixes; both files carry
                 // that type by the same projection, a value class as its value.

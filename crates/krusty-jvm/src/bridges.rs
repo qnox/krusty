@@ -23,12 +23,11 @@ use krusty::types::Ty;
 /// Every bridge family this class needs, appended to `IrClass::bridges`.
 pub(super) fn derive_bridges(
     ir: &mut IrFile,
-    classpath: &krusty::jvm::classpath::Classpath,
     callables: &krusty::backend::CheckedBackendCallables,
     override_results: &crate::override_results::OverrideResults,
     argument_arrays: &mut crate::function_argument_arrays::FunctionArgumentArrays,
     jvm_default: crate::ir_emit::JvmDefaultMode,
-    abstract_overrides: &crate::abstract_builtin_overrides::AbstractBuiltinOverrides,
+    superclasses: &SuperclassSources<'_>,
 ) -> Result<(), SkipReason> {
     for cid in 0..ir.classes.len() {
         // Source-declared classes, declaration-owned enum-entry subclasses, and anonymous classes
@@ -45,15 +44,22 @@ pub(super) fn derive_bridges(
             ir,
             cid,
             &OverrideBridgeFacts {
-                classpath,
                 callables,
                 override_results,
                 jvm_default,
             },
+            superclasses,
             argument_arrays,
             &mut order,
         )?;
-        property_bridges(ir, cid, classpath, callables, override_results, &mut order)?;
+        property_bridges(
+            ir,
+            cid,
+            superclasses,
+            callables,
+            override_results,
+            &mut order,
+        )?;
         // A forwarder a specializing supertype types is not a declaration: its erased bridge
         // follows the class's own members' bridges.
         let inherited = crate::inherited_default_realization::inherited_default_bridges(
@@ -66,18 +72,23 @@ pub(super) fn derive_bridges(
         ir.classes[cid].bridges.extend(inherited);
         declaration_order(&mut ir.classes[cid].bridges[first..], order);
     }
-    finalize_special_collection_bridges(ir, classpath, abstract_overrides);
+    finalize_special_collection_bridges(ir, superclasses);
     Ok(())
+}
+
+/// What a class inherits from its superclasses, by the source that declares each: the active
+/// file's IR, the module's declaration records for a named source class another file declares,
+/// and the classpath for a dependency.
+pub(super) struct SuperclassSources<'a> {
+    pub(super) classpath: &'a krusty::jvm::classpath::Classpath,
+    pub(super) module: &'a krusty::backend::BackendModuleFacts,
+    pub(super) abstract_overrides: &'a crate::abstract_builtin_overrides::AbstractBuiltinOverrides,
 }
 
 /// A type-safe collection bridge is kotlinc's `BRIDGE_SPECIAL`: the erased root signature is
 /// final, so a subclass inherits it rather than publishing the same JVM method again. Bridge
 /// identity here is the JVM's `(name, descriptor)`, not the semantic `Ty` values that produced it.
-fn finalize_special_collection_bridges(
-    ir: &mut IrFile,
-    classpath: &krusty::jvm::classpath::Classpath,
-    abstract_overrides: &crate::abstract_builtin_overrides::AbstractBuiltinOverrides,
-) {
+fn finalize_special_collection_bridges(ir: &mut IrFile, superclasses: &SuperclassSources<'_>) {
     for class in &mut ir.classes {
         for bridge in &mut class.bridges {
             // A source interface's type-safe bridge stays abstract/overridable. The JVM forbids
@@ -105,7 +116,11 @@ fn finalize_special_collection_bridges(
                         method_descriptor(&bridge.erased_params, bridge.erased_ret),
                     )
                 })
-                .chain(abstract_overrides.final_bridges(class.fq_name_id()))
+                .chain(
+                    superclasses
+                        .abstract_overrides
+                        .final_bridges(class.fq_name_id()),
+                )
                 .collect::<Vec<_>>();
             (class.fq_name, methods)
         })
@@ -113,12 +128,19 @@ fn finalize_special_collection_bridges(
 
     for cid in 0..ir.classes.len() {
         let mut inherited = krusty::fx_hash::HashSet::default();
-        let mut next = ir.classes[cid].superclass;
-        while let Some(superclass) = ir.classes.iter().find(|class| class.fq_name == next) {
-            if let Some(methods) = module_specials.get(&superclass.fq_name) {
+        // A class of the active file can sit above a named source class another file declares.
+        let mut next = Some(ir.classes[cid].superclass);
+        while let Some(superclass) = next {
+            if let Some(methods) = module_specials.get(&superclass) {
                 inherited.extend(methods.iter().cloned());
             }
-            next = superclass.superclass;
+            next = match ir.classes.iter().find(|class| class.fq_name == superclass) {
+                Some(class) => Some(class.superclass),
+                None => superclasses
+                    .module
+                    .source_class_members(superclass)
+                    .and_then(|members| members.superclass),
+            };
         }
         let keep = ir.classes[cid]
             .bridges
@@ -126,7 +148,13 @@ fn finalize_special_collection_bridges(
             .map(|bridge| {
                 let descriptor = method_descriptor(&bridge.erased_params, bridge.erased_ret);
                 !inherited.contains(&(bridge.name.clone(), descriptor.clone()))
-                    && !inherits_final_special_bridge(ir, cid, classpath, &bridge.name, &descriptor)
+                    && !inherits_final_special_bridge(
+                        ir,
+                        cid,
+                        superclasses,
+                        &bridge.name,
+                        &descriptor,
+                    )
             })
             .collect::<Vec<_>>();
         let mut keep = keep.into_iter();
@@ -161,11 +189,13 @@ fn declaration_order(bridges: &mut [Bridge], order: Vec<u32>) {
 /// final `size()` bridge to its `getSize()`, including through an inherited fake override, so a
 /// subclass must not declare it again (`IncompatibleClassChangeError: overrides final method`). The
 /// override edges name only the declarations that spell the member, so walk the superclass chain
-/// for a Kotlin class whose classfile already has that final bridge.
+/// for a Kotlin class that already has that final bridge: a named source class another file
+/// declares by the materializations its declaration record selects, a dependency by its classfile.
+/// The active file's own classes are the caller's to compare, from their derived bridges.
 fn inherits_final_special_bridge(
     ir: &IrFile,
     cid: usize,
-    classpath: &krusty::jvm::classpath::Classpath,
+    superclasses: &SuperclassSources<'_>,
     name: &str,
     descriptor: &str,
 ) -> bool {
@@ -175,7 +205,24 @@ fn inherits_final_special_bridge(
             next = module_class.superclass;
             continue;
         }
-        let Some(info) = classpath.find_name(next) else {
+        if let Some(members) = superclasses.module.source_class_members(next) {
+            if superclasses
+                .abstract_overrides
+                .final_bridges(next)
+                .iter()
+                .any(|(bridge, bridge_descriptor)| {
+                    bridge == name && bridge_descriptor == descriptor
+                })
+            {
+                return true;
+            }
+            match members.superclass {
+                Some(superclass) => next = superclass,
+                None => return false,
+            }
+            continue;
+        }
+        let Some(info) = superclasses.classpath.find_name(next) else {
             return false;
         };
         if info.meta.class_kind.is_some()
@@ -371,7 +418,6 @@ pub(super) fn implementation_function(
 /// concrete override — without it a call through a base reference resolves to a method that is not there.
 /// What bridge derivation reads of the module beyond the class being derived.
 struct OverrideBridgeFacts<'a> {
-    classpath: &'a krusty::jvm::classpath::Classpath,
     callables: &'a krusty::backend::CheckedBackendCallables,
     override_results: &'a crate::override_results::OverrideResults,
     jvm_default: crate::ir_emit::JvmDefaultMode,
@@ -381,11 +427,11 @@ fn superclass_method_bridges(
     ir: &mut IrFile,
     cid: usize,
     facts: &OverrideBridgeFacts<'_>,
+    superclasses: &SuperclassSources<'_>,
     argument_arrays: &mut crate::function_argument_arrays::FunctionArgumentArrays,
     order: &mut Vec<u32>,
 ) -> Result<(), SkipReason> {
     let OverrideBridgeFacts {
-        classpath,
         callables,
         override_results,
         jvm_default,
@@ -527,7 +573,7 @@ fn superclass_method_bridges(
         // internal member does not publish its slot, even when `override` is required by another
         // visible declaration of the same Kotlin name. A public JVM name is never that slot.
         let sees_internal = sees_internal_member(
-            classpath,
+            superclasses.classpath,
             edge.overridden_owner,
             matches!(
                 edge.overridden,
@@ -553,7 +599,7 @@ fn superclass_method_bridges(
             && inherits_final_special_bridge(
                 ir,
                 cid,
-                classpath,
+                superclasses,
                 &bridge_name,
                 &method_descriptor(&base_params, base_ret),
             )
@@ -601,32 +647,35 @@ fn superclass_method_bridges(
                 continue;
             }
         }
+        if parameter_identities.len() != concrete_params.len()
+            || declared_parameters.len() != concrete_params.len()
+        {
+            return Err(SkipReason::Bridges);
+        }
+        let parameters: Vec<BridgeParameter> = parameter_identities
+            .into_iter()
+            .zip(declared_parameters)
+            .map(|(identity, semantic)| BridgeParameter { identity, semantic })
+            .collect();
         if let Some(existing) = ir.classes[cid].bridges.iter_mut().find(|bridge| {
             bridge.name == bridge_name
                 && bridge.erased_params == base_params
                 && bridge.erased_ret == base_ret
         }) {
             // Several resolved override edges erase to one physical bridge. The nearest
-            // declaration (`AbstractCollection.contains`) need not be the collection member that
-            // carries the type-safe role; a farther edge (`Collection.contains`) does. The role
-            // is already on that edge, so the bridge keeps it.
-            if existing.collection_barrier.is_none() {
+            // declaration (`AbstractCollection.contains`, a Java `HashSet.remove`) need not be the
+            // collection member that carries the type-safe role; a farther edge
+            // (`Collection.contains`) does. kotlinc's special bridge is that declaration's, so
+            // the bridge takes its role and its parameters from that edge.
+            if existing.collection_barrier.is_none() && edge.collection_barrier.is_some() {
                 existing.collection_barrier = edge.collection_barrier;
+                existing.overridden_owner = Some(edge.overridden_owner);
+                existing.parameters = parameters;
             }
             continue;
         }
         let target_name =
             (internal_name_bridge || bridge_name != target_name).then_some(target_name);
-        if parameter_identities.len() != concrete_params.len()
-            || declared_parameters.len() != concrete_params.len()
-        {
-            return Err(SkipReason::Bridges);
-        }
-        let parameters = parameter_identities
-            .into_iter()
-            .zip(declared_parameters)
-            .map(|(identity, semantic)| BridgeParameter { identity, semantic })
-            .collect();
         order.push(
             own_fid
                 .and_then(|function| ir.fn_source_order.get(&function).copied())
@@ -667,7 +716,7 @@ fn superclass_method_bridges(
 fn property_bridges(
     ir: &mut IrFile,
     cid: usize,
-    classpath: &krusty::jvm::classpath::Classpath,
+    superclasses: &SuperclassSources<'_>,
     callables: &krusty::backend::CheckedBackendCallables,
     override_results: &crate::override_results::OverrideResults,
     order: &mut Vec<u32>,
@@ -687,9 +736,11 @@ fn property_bridges(
         };
         let declared_here = match edge.implementation_getter {
             Some(getter) => ir.classes[cid].methods.contains(&getter),
-            None => {
-                implementation_property.is_some_and(|property| property.class == Some(cid as u32))
-            }
+            None => implementation_property
+                .and_then(|property| property.class)
+                .is_some_and(|declaration| {
+                    crate::override_results::realizes_members_of(ir, cid, declaration)
+                }),
         };
         if edge.implementation_owner == internal_name && !declared_here {
             continue;
@@ -720,7 +771,7 @@ fn property_bridges(
             }
         };
         let sees_internal = sees_internal_member(
-            classpath,
+            superclasses.classpath,
             edge.overridden_owner,
             matches!(
                 edge.overridden,
@@ -791,7 +842,13 @@ fn property_bridges(
             bridge_erasure(getter_results.declared),
         );
         if bridge_getter != target_getter
-            && inherits_final_special_bridge(ir, cid, classpath, &bridge_getter, &bridge_descriptor)
+            && inherits_final_special_bridge(
+                ir,
+                cid,
+                superclasses,
+                &bridge_getter,
+                &bridge_descriptor,
+            )
         {
             continue;
         }

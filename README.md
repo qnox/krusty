@@ -4,10 +4,10 @@
 
 <p align="center">
   <a href="https://github.com/qnox/krusty/actions/workflows/ci.yml"><img src="https://github.com/qnox/krusty/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-kotlin.json" alt="Latest supported Kotlin version">
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-conformance.json" alt="Kotlin conformance: share of applicable codegen/box cases whose box() returns OK">
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-jvm-byte-equality.json" alt="JVM byte equality: matching leading .class bytes against kotlinc across the same codegen/box cases">
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2Fkrusty-native-conformance.json" alt="Native conformance: share of applicable Native codegen/box cases whose box() returns OK">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fkrustythecompiler.dev%2Fbadges%2Fkrusty-kotlin.json" alt="Latest supported Kotlin version">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fkrustythecompiler.dev%2Fbadges%2Fkrusty-conformance.json" alt="Kotlin conformance: share of applicable codegen/box cases whose box() returns OK">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fkrustythecompiler.dev%2Fbadges%2Fkrusty-jvm-byte-equality.json" alt="JVM byte equality: matching leading .class bytes against kotlinc across the same codegen/box cases">
+  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fkrustythecompiler.dev%2Fbadges%2Fkrusty-native-conformance.json" alt="Native conformance: share of applicable Native codegen/box cases whose box() returns OK">
 </p>
 
 <!-- The JVM badges come from one run of the applicable Kotlin `codegen/box` cases per version.
@@ -28,9 +28,9 @@
      `wasm-js-klib`, and `wasm-wasi-klib` fail/not-applicable inventories are committed under
      tests/box_expected_*/<platform>/<version>.txt.
      See docs/TEST_HARNESS.md "Current Conformance".
-     The master build recomputes all three and writes the badge JSON to a Gist
-     (no repo commit) — see the `release` job in .github/workflows/ci.yml. The gist id is wired via
-     the CONFORMANCE_GIST_ID repo variable; updates need the GIST_TOKEN secret (PAT, `gist` scope). -->
+     The site deploy (.github/workflows/pages.yml) packages the badge JSON from the latest successful
+     master CI run's reports with scripts/package-release-badges.sh and serves it at
+     https://krustythecompiler.dev/badges/; the landing page shows the same reports. -->
 
 krusty is built to be a drop-in replacement for `kotlinc` on the JVM. For the Kotlin subset it
 supports, it accepts `kotlinc`'s command-line flags and aims to emit `.class` files byte-for-byte
@@ -185,7 +185,7 @@ changing its plugin configuration.
 | all-open (`plugin.allopen`, `plugin.spring`, `plugin.jpa`) | Supported, with the `spring` and `jpa` presets. |
 | no-arg (`plugin.noarg`, `plugin.jpa`) | Supported, with the `jpa` preset; `invokeInitializers=true` is not implemented. |
 | sam-with-receiver | Supported. |
-| KSP (KSP2) | Supported through a build system: under Gradle, KSP's own `kspKotlin` task runs the processors and krusty compiles what they generate (KSP's Gradle plugin needs Gradle 8 or newer); under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles, but only their generated classes and resources are picked up; a processor that generates Kotlin or Java sources fails the module for now. The plain command line has no codegen host and rejects the KSP plugin. |
+| KSP (KSP2) | Supported through a build system: under Gradle, KSP's own `kspKotlin` task runs the processors and krusty compiles what they generate (KSP's Gradle plugin needs Gradle 8 or newer); under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles, and krusty compiles the Kotlin sources they generate with the module's own and picks up their generated classes and resources; a processor that generates Java sources fails the module for now. The plain command line has no codegen host and rejects the KSP plugin. |
 | kapt | Supported under Gradle: kapt's own tasks generate stubs and run the annotation processors with kotlinc, and krusty compiles the module after them. kapt's jar alone, which the Kotlin Gradle plugin passes to every compile of a kapt project, changes nothing; kapt options on the command line fail with an error. |
 | Compose, Parcelize, assignment and every other FIR/IR plugin | Not supported. The command line fails with an error. The Gradle plugin reports the unsupported plugin and leaves that compile task to kotlinc, so the build still succeeds. |
 | Kotlin scripts (`.kts`) | Not supported. |

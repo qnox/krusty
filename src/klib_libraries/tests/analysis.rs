@@ -160,3 +160,76 @@ fun box(): String {
 "#;
     assert_eq!(diagnostics(&libraries, source), Vec::<String>::new());
 }
+
+/// The object literal `Delegates.observable` expands to extends `ObservableProperty`, a class no
+/// named class of the module extends. Pass 1 freezes its dispatch shape from the inline templates
+/// the stdlib serializes, before any body says which of them the module expands.
+#[test]
+fn inline_template_superclasses_are_frozen_in_pass_one() {
+    use crate::libraries::SemanticPlatform;
+    use crate::symbol_source::SymbolSource;
+    let Some(libraries) = native_stdlib() else {
+        return;
+    };
+    let observable = crate::types::type_name("kotlin/properties/ObservableProperty");
+    let templates = libraries
+        .for_compilation()
+        .klib_dependency_body_facts()
+        .expect("a KLIB platform serializes its inline templates")
+        .inline_bodies()
+        .local_class_supertypes();
+    assert!(templates.contains(&observable), "{templates:?}");
+    let mut diags = DiagSink::new();
+    let platform = crate::frontend::PlatformProvider::new(
+        crate::compilation_target::CompilationTarget::Native,
+        Box::new(libraries.for_compilation()),
+    );
+    let analysis =
+        crate::frontend::analyze_source_set(&["fun box() = \"OK\"\n"], platform, &mut diags);
+    assert!(diags.diags.is_empty(), "{:?}", diags.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    let superclasses = index
+        .dependency_superclasses()
+        .iter()
+        .map(|superclass| {
+            (
+                superclass.classifier,
+                superclass.extended_by_inline_template,
+            )
+        })
+        .collect::<Vec<_>>();
+    // Every class a template's local class names as its superclass, and only those, are marked;
+    // an interface or object it implements has no table here.
+    let marked = superclasses
+        .iter()
+        .filter(|(_, marked)| *marked)
+        .map(|(classifier, _)| classifier.render())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        marked,
+        [
+            "kotlin/coroutines/native/internal/ContinuationImpl",
+            "kotlin/properties/ObservableProperty",
+        ],
+        "{superclasses:?}"
+    );
+    for (classifier, _) in &superclasses {
+        let declaration = libraries
+            .for_compilation()
+            .classifier(*classifier)
+            .expect("a published dependency superclass has a declaration");
+        assert!(!declaration.is_interface() && !declaration.is_object());
+    }
+    // The backends read the fact from the frozen module classes: the class has its dependency
+    // shape, and the support unit materializing it lays it out for a subclass in another file.
+    let classes =
+        crate::backend::class_tables::module_classes::ModuleClasses::from_resolved_index(index);
+    assert!(classes.is_dependency_class(observable));
+    assert!(classes.is_inline_template_superclass(observable));
+    assert_eq!(classes.subclasses_of(observable).count(), 0);
+}

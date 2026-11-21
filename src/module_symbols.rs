@@ -443,6 +443,7 @@ impl<'a> ModuleSymbols<'a> {
         .into_iter()
         .collect();
         let mut shape = LibraryType {
+            klib_identity: None,
             runtime_exception: None,
             declaration_name: c.declaration_name.clone(),
             // A current-module classifier is by definition a Kotlin declaration.
@@ -1033,6 +1034,7 @@ fn fn_info(
         reflection_name: Some(name.to_string()),
         compiler_intrinsic: None,
         semantic_role: None,
+        property_accessor_role: None,
         overridden_declarations: Box::new([]),
         collection_barrier: None,
         inline_body_plan: None,
@@ -1057,6 +1059,7 @@ fn fn_info(
         inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
         default_call: false,
         defaults_from_declaration: false,
+        transformed_entry_tail: None,
         vararg_elem: None,
         vararg_index: None,
         signature: None,
@@ -1167,6 +1170,7 @@ fn source_callable(
         physical_name: None,
         compiler_intrinsic: None,
         semantic_role: None,
+        property_accessor_role: None,
         overridden_declarations: Box::new([]),
         collection_barrier: None,
         inline_body_plan: None,
@@ -1187,6 +1191,7 @@ fn source_callable(
         inline: InlineKind::None,
         default_call: false,
         defaults_from_declaration: false,
+        transformed_entry_tail: None,
         vararg_elem: None,
         vararg_index: None,
         signature: None,

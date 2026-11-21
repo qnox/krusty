@@ -296,6 +296,131 @@ fn kotlin_codegen_box_native_conformance() {
     box_lane::run(&NativeLane { target: host() });
 }
 
+#[test]
+fn native_dependency_interface_aliases_join_by_identity() {
+    let source = include_str!("box_regressions/multimodule/nativeInterfaceAliasJoin.kt");
+    super::box_reference_classes::checked_box(source, "nativeInterfaceAliasJoin")
+        .expect("pinned kotlinc must run the exact KLIB module graph");
+    assert_eq!(
+        run_native_abi_case(source, "nativeInterfaceAliasJoin"),
+        Outcome::Pass,
+        "consumer files must share interface import numbers and join their aliases"
+    );
+}
+
+#[test]
+fn native_library_object_values_preserve_identity() {
+    let source = include_str!("box_regressions/libraryObjectValues.kt");
+    expect_native_klib_box(source, "nativeLibraryObjectValues");
+}
+
+#[test]
+fn native_library_generic_any_override_uses_the_canonical_vtable_slot() {
+    let source = include_str!("box_regressions/multimodule/libraryGenericAnyOverride.kt");
+    super::box_reference_classes::checked_box(source, "libraryGenericAnyOverride")
+        .expect("pinned kotlinc must run the exact KLIB module graph");
+    assert_eq!(
+        run_native_abi_case(source, "libraryGenericAnyOverride"),
+        Outcome::Pass,
+        "generic KLIB implementation must dispatch its Any.toString override"
+    );
+}
+
+#[test]
+fn native_a_not_null_member_delegate_holds_what_was_written_to_it() {
+    let source = include_str!("box_regressions/notNullDelegateMember.kt");
+    expect_native_klib_box(source, "nativeNotNullDelegateMember");
+}
+
+#[test]
+fn native_a_local_not_null_delegate_is_read_through_a_capture() {
+    let source = include_str!("box_regressions/notNullDelegateLocalCapture.kt");
+    expect_native_klib_box(source, "nativeNotNullDelegateLocalCapture");
+}
+
+#[test]
+fn native_a_not_null_delegate_is_rewritten() {
+    let source = include_str!("box_regressions/notNullDelegateRewritten.kt");
+    expect_native_klib_box(source, "nativeNotNullDelegateRewritten");
+}
+
+#[test]
+fn native_an_observable_member_delegate_notifies_its_instance() {
+    let source = include_str!("box_regressions/observableDelegateMember.kt");
+    expect_native_klib_box(source, "nativeObservableDelegateMember");
+}
+
+#[test]
+fn an_explicit_delegate_write_evaluates_this_ref() {
+    let source = "import kotlin.properties.Delegates\n\
+         var referenced = 0\n\
+         var effects = \"\"\n\
+         fun mark(): Any? { effects += \"R\"; return null }\n\
+         fun next(): Int { effects += \"V\"; return 7 }\n\
+         fun box(): String {\n\
+         \x20   val delegate = Delegates.notNull<Int>()\n\
+         \x20   delegate.setValue(mark(), ::referenced, next())\n\
+         \x20   if (effects != \"RV\") return \"fail effects \" + effects\n\
+         \x20   return if (delegate.getValue(null, ::referenced) == 7) \"OK\" else \"fail value\"\n\
+         }\n";
+    expect_native_klib_box(source, "ExplicitDelegateWriteEffects");
+}
+
+#[test]
+fn a_not_null_delegate_read_before_it_was_written_raises() {
+    let source = "import kotlin.properties.Delegates\n\
+         var value: String by Delegates.notNull()\n\
+         fun box(): String {\n\
+         \x20   try {\n\
+         \x20       return \"fail \" + value\n\
+         \x20   } catch (e: IllegalStateException) {\n\
+         \x20       return if (e.message == \"Property value should be initialized before get.\")\n\
+         \x20           \"OK\"\n\
+         \x20       else\n\
+         \x20           \"fail message \" + e.message\n\
+         \x20   }\n\
+         }\n";
+    expect_native_klib_box(source, "NotNullUnset");
+}
+
+#[test]
+fn an_observable_delegate_reports_each_write_after_it_happened() {
+    let source = "import kotlin.properties.Delegates\n\
+         var log = \"\"\n\
+         var seen = \"\"\n\
+         var watched: String by Delegates.observable(\"start\") { property, old, new ->\n\
+         \x20   log += property.name + \":\" + old + \"->\" + new + \";\"\n\
+         \x20   seen += watched\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   if (watched != \"start\") return \"fail initial \" + watched\n\
+         \x20   if (log != \"\") return \"fail early \" + log\n\
+         \x20   watched = \"middle\"\n\
+         \x20   watched = \"end\"\n\
+         \x20   if (watched != \"end\") return \"fail final \" + watched\n\
+         \x20   if (log != \"watched:start->middle;watched:middle->end;\") return \"fail log \" + log\n\
+         \x20   // The callback runs after the write, so it reads the value that was just stored.\n\
+         \x20   if (seen != \"middleend\") return \"fail order \" + seen\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_native_klib_box(source, "ObservableDelegate");
+}
+
+fn expect_native_klib_box(source: &str, stem: &str) {
+    super::common::expect_box_ok_with_stdlib(source, &format!("{stem}Oracle"));
+    let target = host().expect("Native KLIB/runtime is required for this test");
+    let lane = NativeLane {
+        target: Some(target),
+    };
+    let outcome = lane.compile_and_run(
+        &std::env::temp_dir(),
+        stem,
+        &[(format!("{stem}.kt"), source.to_string())],
+        source,
+    );
+    assert_eq!(outcome, Outcome::Pass, "{stem}");
+}
+
 fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
     if let Some(reason) = not_applicable(source) {
         return Outcome::NotApplicable(reason);
@@ -487,6 +612,45 @@ fn native_generic_class_members_instantiate_their_declared_dependency_exports() 
 }
 
 #[test]
+fn native_cross_module_superclasses_keep_selected_constructor_and_generic_method_frames() {
+    let source = include_str!("box_regressions/multimodule/sourceLibraryGenericClassDispatch.kt");
+    let stem = "sourceLibraryGenericClassDispatch";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete source superclass module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "Native must preserve selected superclass ABI across module boundaries"
+    );
+}
+
+#[test]
+fn native_cross_module_superclass_publishes_the_bridges_its_function_supertype_needs() {
+    let source = include_str!("box_regressions/multimodule/sourceLibraryUnboxedFunctionBridge.kt");
+    let stem = "sourceLibraryUnboxedFunctionBridge";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete source superclass module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "a library class's vtable bridges must be linkable by a subclass in another module"
+    );
+}
+
+/// One module of two files: the superclass's secondary constructor is reached from the other file.
+#[test]
+fn native_cross_file_superclasses_keep_selected_secondary_constructor() {
+    assert_eq!(
+        run_native_portable_box(
+            include_str!("box_regressions/crossFileSuperclassSecondary.kt"),
+            "crossFileSuperclassSecondary",
+        ),
+        Outcome::Pass,
+        "Native must preserve the selected superclass constructor across file boundaries"
+    );
+}
+
+#[test]
 fn native_data_class_signed_array_members_are_lowered_from_the_library_klib() {
     let source = include_str!("box_regressions/multimodule/dataClassSignedArrayMembers.kt");
     let stem = "dataClassSignedArrayMembers";
@@ -510,12 +674,11 @@ fn run_native_portable_box(source: &str, stem: &str) -> Outcome {
     let lane = NativeLane {
         target: Some(target),
     };
-    lane.compile_and_run(
-        &std::env::temp_dir(),
-        stem,
-        &[(format!("{stem}.kt"), source.to_string())],
-        source,
-    )
+    let sources = match box_lane::prepare_sources(source, stem, TestTarget::Native) {
+        Ok(sources) => sources,
+        Err(outcome) => return outcome,
+    };
+    lane.compile_and_run(&std::env::temp_dir(), stem, &sources, source)
 }
 
 /// A `StringBuilder` appended to through `Appendable` from a file declaring no `Appendable` of

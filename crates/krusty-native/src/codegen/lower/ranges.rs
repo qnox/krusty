@@ -57,6 +57,15 @@ fn range_type(ty: Ty) -> Option<(&'static str, Ty)> {
     Some((kind, integral_range_element_ty(element)))
 }
 
+/// The declared type of a progression constructor's `step`: `Long` for the 64-bit progressions,
+/// `Int` for the rest (including `CharProgression` and `UIntProgression`).
+fn progression_step_type(element: Ty) -> Ty {
+    match element {
+        Ty::Long | Ty::ULong => Ty::Long,
+        _ => Ty::Int,
+    }
+}
+
 fn range_to_owner(owner: super::super::super::intrinsics::DeclarationOwner) -> bool {
     super::super::super::intrinsics::is_ranges_facade(owner)
         || owner.semantic_classifier().is_some_and(|owner| {
@@ -350,8 +359,10 @@ impl BodyLowering<'_, '_, '_> {
     }
 
     /// `IntRange(start, endInclusive)` and its siblings constructed directly, as an expanded
-    /// `rangeTo` body does: the runtime's closed range over the two bounds. `None` for any class
-    /// that is not one of the runtime's integral ranges.
+    /// `rangeTo` body does: the runtime's closed range over the two bounds. The progression
+    /// classes' `(start, endInclusive, step)` constructor, which `fromClosedRange` bodies call, is
+    /// the runtime's checked progression. `None` for any class that is not one of the runtime's
+    /// integral ranges or progressions.
     pub(super) fn range_class_construction(
         &mut self,
         internal: TypeName,
@@ -359,29 +370,40 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let result = Ty::obj_name(internal);
         let (kind, element) = range_type(result)?;
-        let &[start, end] = args else {
-            return Some(Err(declined!(
-                "construction of `{}` from {} arguments",
-                internal.render(),
-                args.len()
-            )));
+        let (function, step) = match args {
+            [_, _] => (format!("kt_{kind}_range"), None),
+            [_, _, step] => (
+                format!("kt_{kind}_progression"),
+                Some((*step, progression_step_type(element))),
+            ),
+            _ => {
+                return Some(Err(declined!(
+                    "construction of `{}` from {} arguments",
+                    internal.render(),
+                    args.len()
+                )));
+            }
         };
         Some((|| {
-            let Some(first) = self.coerce(start, element)? else {
+            let Some(first) = self.coerce(args[0], element)? else {
                 return Ok(None);
             };
-            let Some(last) = self.coerce(end, element)? else {
+            let Some(last) = self.coerce(args[1], element)? else {
                 return Ok(None);
             };
+            let mut params = vec![element, element];
+            let mut values = vec![first, last];
+            if let Some((step, step_type)) = step {
+                let Some(step) = self.coerce(step, step_type)? else {
+                    return Ok(None);
+                };
+                params.push(step_type);
+                values.push(step);
+            }
             if self.terminated {
                 return Ok(None);
             }
-            self.runtime_call(
-                &format!("kt_{kind}_range"),
-                &[element, element],
-                result,
-                &[first, last],
-            )
+            self.runtime_call(&function, &params, result, &values)
         })())
     }
 
@@ -918,6 +940,17 @@ impl BodyLowering<'_, '_, '_> {
             Ty::obj("kotlin/ranges/IntRange"),
             &[first, last],
         )
+    }
+
+    /// Whether the interface `receiver` is typed by is one a class of this file implements.
+    ///
+    /// The runtime answers a range's members from the objects it builds, and no static type tells
+    /// those from an instance of that class, so a read of such a member declines, as a call of
+    /// one does.
+    pub(super) fn range_has_source_implementor(&self, receiver: u32) -> bool {
+        self.checked_type(receiver)
+            .and_then(|ty| ty.non_null().obj_internal())
+            .is_some_and(|internal| self.file.implements_dependency(internal))
     }
 
     /// The owner, name and result of a dependency getter naming a member of a range type.

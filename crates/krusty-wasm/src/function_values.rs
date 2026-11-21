@@ -2,8 +2,8 @@
 //!
 //! A function value is an object. Common lowering has already moved its body into a function of
 //! the file whose LEADING parameters are the captured values and whose trailing ones are the
-//! lambda's own, so the object only holds the captures. Its dispatch table extends `$AnyTable` with
-//! one more field, the function a call enters.
+//! lambda's own, so the object only holds the captures. Its dispatch table extends
+//! `$FunctionTable` with one typed function-reference field, the entry a call enters.
 //!
 //! **That function takes and returns references**, as `FunctionN.invoke` does on the JVM: a call
 //! site knows the value's arity and its Kotlin type, not which lambda it holds, so every function
@@ -13,18 +13,16 @@
 use krusty::fx_hash::HashMap;
 
 use super::encode::{CompositeType, Module, SubType, ValType};
-use super::objects::{immutable, ObjectRoot, REFERENCE, TYPE_INFO_FIELD};
+use super::interface_dispatch::MemberRef;
+use super::objects::{immutable, REFERENCE};
 use super::runtime::Runtime;
-
-/// The dispatch table field holding a function value's entry: after the interface table and the
-/// type information, which a function value has none of.
-pub(super) const INVOKE_FIELD: u32 = TYPE_INFO_FIELD + 1;
 
 /// The table type of every function value of one arity, and the type of its entry.
 #[derive(Clone, Copy)]
 pub(super) struct FunctionShape {
     pub(super) table: u32,
     pub(super) invoke: u32,
+    pub(super) protocol: MemberRef,
 }
 
 /// The function shapes this module has declared, by arity.
@@ -36,21 +34,11 @@ pub(super) struct FunctionShapes {
 impl Runtime {
     /// The shape of a function value taking `arity` arguments, declared on first use.
     pub(super) fn function_shape(&mut self, module: &mut Module, arity: usize) -> FunctionShape {
-        self.functions.shape(module, &self.objects, arity)
-    }
-}
-
-impl FunctionShapes {
-    /// The shape of a function value taking `arity` arguments, declared on first use.
-    pub(super) fn shape(
-        &mut self,
-        module: &mut Module,
-        objects: &ObjectRoot,
-        arity: usize,
-    ) -> FunctionShape {
-        if let Some(shape) = self.by_arity.get(&arity) {
+        if let Some(shape) = self.functions.by_arity.get(&arity) {
             return *shape;
         }
+        let protocol = self.objects.interfaces.function_invoke(module, arity);
+        let objects = &self.objects;
         // The receiver, which is the function value itself, then the arguments.
         let invoke = module.func_type(vec![REFERENCE; arity + 1], vec![REFERENCE]);
         let fields = objects
@@ -63,14 +51,17 @@ impl FunctionShapes {
                 immutable(ValType::reference(invoke)),
             ])
             .collect();
-        // Open: the table of a class implementing a function type of this arity extends it.
         let table = module.subtype(SubType {
             composite: CompositeType::Struct(fields),
-            supertype: Some(objects.any_table),
-            open: true,
+            supertype: Some(objects.function_table),
+            open: false,
         });
-        let shape = FunctionShape { table, invoke };
-        self.by_arity.insert(arity, shape);
+        let shape = FunctionShape {
+            table,
+            invoke,
+            protocol,
+        };
+        self.functions.by_arity.insert(arity, shape);
         shape
     }
 }

@@ -77,25 +77,42 @@ impl<'a> FileLowering<'a> {
         &mut self,
         class: ClassId,
         base: &str,
-    ) -> Result<DataId, Unsupported> {
+    ) -> Result<(DataId, Option<String>), Unsupported> {
         // A support unit names the descriptors of the dependency classes a source file extends,
-        // which that file's descriptors point at as their superclass's. A source file names a
-        // class other files can name; a local class, including an inline expansion's specialized
-        // anonymous copy, is this object's own.
+        // which that file's descriptors point at as their superclass's, and of the objects whose
+        // single instance it hands to other files, which may ask that instance its class. A source
+        // file names a class other files can name; a local class, including an inline expansion's
+        // specialized anonymous copy, is this object's own.
         let named = match self.unit_kind {
             krusty::backend::CheckedIrUnitKind::Source => !self.ir.is_local_class(class),
-            krusty::backend::CheckedIrUnitKind::DependencySupport => self.exported.contains(&class),
+            krusty::backend::CheckedIrUnitKind::DependencySupport => {
+                self.exported.contains(&class) || self.exports_singleton(class)
+            }
         };
         if !named {
-            return self.declare_local_data(&format!("kt_type_{base}"), false);
+            let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
+            return Ok((descriptor, None));
         }
         let symbol = super::super::super::symbols::module_descriptor_symbol(
             self.module_name,
             self.ir.classes[class as usize].fq_name_id(),
         );
-        self.module
+        let descriptor = self
+            .module
             .declare_data(&symbol, Linkage::Hidden, false, false)
-            .map_err(|error| declined!("declaring `{symbol}` ({error})"))
+            .map_err(|error| declined!("declaring `{symbol}` ({error})"))?;
+        Ok((descriptor, Some(symbol)))
+    }
+
+    /// Whether this unit exports the entry answering `class`'s single instance.
+    fn exports_singleton(&self, class: ClassId) -> bool {
+        let object = krusty::backend::instance_links::InstanceEntry::Object(
+            self.ir.classes[class as usize].fq_name_id(),
+        );
+        self.dependency_signatures
+            .instance_entries()
+            .iter()
+            .any(|(instance, _)| *instance == object)
     }
 
     /// The runtime descriptor for a represented type: a class of this file or of another file of
@@ -120,6 +137,23 @@ impl<'a> FileLowering<'a> {
                     super::super::super::symbols::module_descriptor_symbol(self.module_name, name);
                 return self.import_data(&symbol).map(Some);
             }
+        }
+        if let Some(identity) = target
+            .obj_internal()
+            .and_then(|name| self.classifiers.classifier(name))
+            .and_then(|fact| fact.klib_identity.clone())
+        {
+            if let Some(symbol) = self.laid_out.published_descriptor(&identity)? {
+                let symbol = symbol.to_owned();
+                return self.import_data(&symbol).map(Some);
+            }
+        }
+        // The companion object of a built-in type is the runtime's, with a descriptor of its own.
+        if let Some(symbol) = target
+            .obj_internal()
+            .and_then(super::super::super::intrinsics::builtin_companion_descriptor)
+        {
+            return self.import_data(symbol).map(Some);
         }
         let symbol = match target {
             Ty::String => "kt_type_string",
@@ -375,6 +409,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
     }
 
+    /// A safe cast uses the same semantic function membership as `is`. A non-safe `as` remains a
+    /// physical cast, which is why it continues through `checked_cast_target` below.
+    fn safe_cast_target(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
+        let role_ty = match ty.non_null().kind() {
+            TyKind::TyParam(_, bound) => bound,
+            _ => ty,
+        };
+        match self.file.ir.type_check_role(role_ty.non_null()) {
+            Some(TypeCheckRole::FunctionOfArity(_))
+            | Some(TypeCheckRole::SuspendFunctionOfArity(_)) => self.instance_check_descriptor(ty),
+            _ => self.checked_cast_target(ty),
+        }
+    }
+
     /// The `is` checks Kotlin settles by the type alone — `Nothing`, which has no instances, and
     /// `Any`, which every non-`null` value is one of — and `None` when the question really is
     /// about the object.
@@ -617,7 +665,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.checked_object(checked, type_operand)
             }
             IrTypeOp::SafeCast => {
-                let Some(descriptor) = self.checked_cast_target(type_operand)? else {
+                let Some(descriptor) = self.safe_cast_target(type_operand)? else {
                     return Err(declined!("an `as?` to `{}`", type_name_of(type_operand)));
                 };
                 let Some(object) = self.receiver(arg)? else {
@@ -815,9 +863,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         // `ArrayList()`, the runtime's growable list. Declared in no file either, like `Any` and
         // the throwables above, so the runtime allocates it rather than the generator laying one
-        // out. The capacity overload is a HINT with nothing observable depending on it; a copy
-        // constructor takes a collection and declines, because sharing that collection's storage
-        // would let a write through the new list reach it.
+        // out. The capacity overload is a HINT with nothing observable depending on it. The copy
+        // constructor takes any collection and walks it into storage of the new list's own, so a
+        // later write to either list is not seen by the other.
         if self.file.standard_collection_implementation(internal)
             == Some(super::classifier_shapes::StandardCollectionImplementation::List)
         {
@@ -836,6 +884,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         any(),
                         &[capacity],
                     )
+                }
+                ([argument], Some([only])) if only.is_reference() => {
+                    let elements = self.reference(*argument)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call("kt_mutable_list_copy_of", &[any()], any(), &[elements])
                 }
                 _ => Err(declined!("this constructor of `{name}`")),
             };

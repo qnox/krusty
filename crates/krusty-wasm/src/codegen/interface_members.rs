@@ -9,9 +9,13 @@
 //! beside its number, which is what a dependent module's classes name their implementations by.
 //!
 //! An implementation carrying a reference more narrowly than its member does stands behind a thunk
-//! with the member's signature that casts the operand and calls it; one whose member carries a
-//! value the implementation does not (a primitive behind a type parameter) declines, since that
-//! thunk does not box or unbox yet (see `super::super::boxes`).
+//! with the member's signature. A collection bridge (`contains`/`remove` answering `Boolean`,
+//! `indexOf`/`lastIndexOf` answering `Int`, `Map.get`/`remove` answering a nullable reference),
+//! recognized by the overridden declaration's collection role, tests that narrower reference and
+//! answers the rejection (`false`, `-1` or `null`) when the argument is some other type, as the
+//! erased interface method does; any other narrower reference is cast. A member that carries a value the
+//! implementation does not (a primitive behind a type parameter) is unboxed or boxed
+//! (see `super::super::boxes`).
 
 use krusty::fx_hash::HashMap;
 
@@ -20,26 +24,29 @@ use krusty::backend::class_tables::module_slots::PlanKey;
 use krusty::backend::class_tables::planned_itable::InterfaceEntry;
 use krusty::backend::class_tables::{function_key, Slot, SlotKey};
 use krusty::backend::interface_identity::{member_identity, property_member_identity};
-use krusty::backend::{CheckedBackendCallables, DependencyExportSignatures};
+use krusty::backend::{BackendCallableFact, CheckedBackendCallables, DependencyExportSignatures};
 use krusty::fir::{
     InheritedDefaultBody, InheritedMemberName, ResolvedFunctionOverrideTarget,
     ResolvedPropertyOverrideTarget,
 };
 use krusty::ir::{ClassId, IrFile, IrLocalPropertyLayout};
-use krusty::types::Ty;
+use krusty::types::{SemanticCallRole, Ty};
 
 use super::super::boxes::BoxForm;
-use super::super::encode::{Code, Function, Module, ValType};
-use super::super::interface_dispatch::{ClassRef, MemberRef};
+use super::super::encode::{BlockType, Code, Function, Module, ValType};
+use super::super::interface_dispatch::{ClassRef, InterfaceDispatch, MemberRef};
 use super::super::objects::REFERENCE;
 use super::super::runtime::Runtime;
 use super::callable_registry::CallableRegistry;
 use super::classes::{accessor_function, field_carrier, Accessor, FileClasses};
-use super::laid_out_classes::DependencyImplementation;
-use super::lower::library_members::{
-    library_member_identity, library_member_owner, library_member_signature, MemberRole,
+use super::laid_out_classes::{
+    BridgeRejection, DependencyImplementation, ResultAdapter, SignatureAdapters,
 };
-use super::lower::{carrier, Unsupported};
+use super::lower::library_members::{
+    is_abstract_class_member, library_member_identity, library_member_owner,
+    library_member_signature, MemberRole,
+};
+use super::lower::{carrier, parameter_carrier_of, Unsupported};
 
 /// A function's wasm parameters (the receiver first) and results.
 pub(super) type Signature = (Vec<ValType>, Vec<ValType>);
@@ -48,7 +55,8 @@ pub(super) type Signature = (Vec<ValType>, Vec<ValType>);
 pub(super) fn member_signature(params: &[Ty], result: Ty) -> Result<Signature, Unsupported> {
     let mut carriers = vec![REFERENCE];
     for param in params {
-        carriers.push(carrier(*param)?.ok_or_else(|| "a `Unit` parameter".to_string())?);
+        carriers
+            .push(parameter_carrier_of(*param)?.ok_or_else(|| "a `Unit` parameter".to_string())?);
     }
     Ok((carriers, carrier(result)?.into_iter().collect()))
 }
@@ -62,6 +70,13 @@ pub(super) fn accessor_types(ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
     }
 }
 
+/// The parameters and result of a property accessor of a value of type `ty` on a member extension
+/// whose receiver is `receiver`: the receiver comes first, then (for a setter) the value.
+fn extension_accessor_types(receiver: Option<Ty>, ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
+    let (value, result) = accessor_types(ty, setter);
+    (receiver.into_iter().chain(value).collect(), result)
+}
+
 /// What every recording of one file reads.
 pub(super) struct Recording<'a> {
     pub(super) ir: &'a IrFile,
@@ -71,6 +86,9 @@ pub(super) struct Recording<'a> {
     pub(super) functions: &'a [Option<u32>],
     pub(super) callables: &'a CheckedBackendCallables,
     pub(super) exports: &'a DependencyExportSignatures,
+    /// The frozen classifier facts, whose published supertypes name the interfaces a class
+    /// inherits through a library superclass.
+    pub(super) classifiers: &'a dyn krusty::backend::BackendClassifierSource,
 }
 
 /// Where a recording writes: the module, the runtime and the callables of the program.
@@ -88,17 +106,42 @@ struct Carried {
     /// The class slot `placed` was read from, which a subclass reads its own implementation from.
     slot: Option<u32>,
     /// The member's parameters and result.
-    declared: (Vec<Ty>, Ty),
+    declared: Signature,
     /// The implementation's parameters and result.
-    implemented: (Vec<Ty>, Ty),
+    implemented: Signature,
+    /// Exact box operations selected while the implementation's logical types were live.
+    adapters: SignatureAdapters,
 }
 
 /// A member of a dependency's interface a class implements.
 #[derive(Clone, Copy)]
-struct DependencyMember {
-    member: MemberRef,
+pub(super) struct DependencyMember {
+    pub(super) member: MemberRef,
     /// Whether it is a library classifier's member rather than a source module's.
-    library: bool,
+    pub(super) library: bool,
+}
+
+/// The member the dependency declaration `fact` is in `role`: a member of a source module's
+/// interface, by the identity its module published, or else a library classifier's member,
+/// which a call through it may name too. `None` for a declaration no member stands for.
+pub(super) fn dependency_member(
+    interfaces: &mut InterfaceDispatch,
+    module: &mut Module,
+    fact: &BackendCallableFact,
+    role: MemberRole,
+) -> Result<Option<DependencyMember>, Unsupported> {
+    let Some(identity) = library_member_identity(fact, role) else {
+        return Ok(None);
+    };
+    let published = interfaces.identified(&identity).is_some();
+    let signature = library_member_signature(fact, role)?;
+    let owner = library_member_owner(fact)
+        .ok_or("an interface member without its checked declaring classifier")?;
+    let member = interfaces.library(module, owner, &identity, signature)?;
+    Ok(Some(DependencyMember {
+        member,
+        library: !published,
+    }))
 }
 
 /// Publish the identities of the file's interface members and record what its classes implement.
@@ -117,6 +160,50 @@ pub(super) fn record(
             continue;
         }
         let record = classes.forms[id as usize].record;
+        let mut arities = classes
+            .laid_out_superclass(id)
+            .map(|parent| parent.function_arities.clone())
+            .unwrap_or_default();
+        let mut suspend_arities = classes
+            .laid_out_superclass(id)
+            .map(|parent| parent.suspend_function_arities.clone())
+            .unwrap_or_default();
+        let mut current = Some(id);
+        while let Some(owner) = current {
+            let name = recording.ir.classes[owner as usize].fq_name_id();
+            for edge in recording
+                .ir
+                .function_overrides
+                .get(&name)
+                .into_iter()
+                .flatten()
+            {
+                if edge.overridden_is_interface
+                    && edge.overridden_semantic_role == Some(SemanticCallRole::KotlinFunctionInvoke)
+                    && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
+                {
+                    let arity = edge.declared_parameters.len() + usize::from(edge.suspend);
+                    if !arities.contains(&arity) {
+                        arities.push(arity);
+                    }
+                    if edge.suspend && !suspend_arities.contains(&arity) {
+                        suspend_arities.push(arity);
+                    }
+                }
+            }
+            current = classes.tables.table(owner).superclass;
+        }
+        if let Some(record) = record {
+            for &arity in &arities {
+                program.runtime.objects.interfaces.function_instance_of(
+                    record,
+                    arity,
+                    suspend_arities.contains(&arity),
+                );
+            }
+        }
+        classes.function_arities[id as usize] = arities;
+        classes.suspend_function_arities[id as usize] = suspend_arities;
         if record.is_none() && classes.refusals[id as usize].is_some() {
             continue;
         }
@@ -170,11 +257,13 @@ fn publish_identities(
         let declaration = &ir.functions[*function as usize];
         let signature = member_signature(&declaration.params, declaration.ret)?;
         let member = numbered(recording, program, number, signature)?;
-        program
-            .runtime
-            .objects
-            .interfaces
-            .publish(member_identity(identity), member)?;
+        program.runtime.objects.interfaces.publish(
+            member_identity(identity),
+            declaration
+                .dispatch_receiver
+                .ok_or("an interface publication without its checked declaring owner")?,
+            member,
+        )?;
     }
     let mut properties = ir.local_property_layouts.iter().collect::<Vec<_>>();
     properties.sort_unstable_by_key(|(property, _)| **property);
@@ -219,11 +308,19 @@ fn publish_identities(
                 _ => continue,
             };
             let member = numbered(recording, program, number, signature)?;
-            program
-                .runtime
-                .objects
-                .interfaces
-                .publish(identity, member)?;
+            program.runtime.objects.interfaces.publish(
+                identity,
+                match layout {
+                    IrLocalPropertyLayout::Member { owner, .. }
+                    | IrLocalPropertyLayout::MemberExtension { owner, .. } => *owner,
+                    _ => {
+                        return Err(
+                            "an interface property publication without its declaring owner".into(),
+                        )
+                    }
+                },
+                member,
+            )?;
         }
     }
     Ok(())
@@ -278,6 +375,22 @@ impl FileRecorder<'_, '_, '_> {
                     .objects
                     .interfaces
                     .implement(record, member, function)?;
+            }
+            if !self.implemented.iter().any(|(known, _)| *known == member) {
+                let how = match self.classes.tables.interface_tables.members[self.id as usize]
+                    .get(&(number as u32))
+                    .copied()
+                    .flatten()
+                {
+                    Some(slot) => DependencyImplementation::Slot {
+                        slot,
+                        declared: signature.clone(),
+                        implemented: signature.clone(),
+                        adapters: SignatureAdapters::none(signature.0.len()),
+                    },
+                    None => DependencyImplementation::Function(function),
+                };
+                self.implemented.push((member, how));
             }
             placed.insert(number as u32, (function, signature));
         }
@@ -358,6 +471,14 @@ impl FileRecorder<'_, '_, '_> {
         }
     }
 
+    /// Whether class slot `slot` of this class is abstract: no body stands there.
+    fn slot_is_abstract(&self, slot: u32) -> bool {
+        matches!(
+            self.classes.tables.table(self.id).vtable[slot as usize],
+            Slot::Abstract
+        )
+    }
+
     /// The function class slot `slot` of this class holds.
     fn slot_function(&mut self, slot: u32) -> Result<Placed, Unsupported> {
         let entry = self.classes.tables.table(self.id).vtable[slot as usize].clone();
@@ -434,24 +555,140 @@ impl FileRecorder<'_, '_, '_> {
 
     /// `implementation`, which takes `implemented`, as a function taking `declared`: itself when
     /// both are carried alike, else a thunk adapting each operand the member carries as a
-    /// reference: a narrower reference is cast, and a scalar the implementation carries itself
-    /// (`next(): Int` implementing `Iterator<T>.next(): T`) is read out of its box, or boxed as the
-    /// result.
+    /// reference. A collection bridge answers `false` or `-1` when its narrower reference
+    /// argument is a different type; any other narrower reference is cast. A scalar the
+    /// implementation carries itself (`next(): Int` implementing `Iterator<T>.next(): T`) is
+    /// read out of its box, or boxed as the result.
     fn thunk(
         &mut self,
         declared: (&[Ty], Ty),
         implemented: (&[Ty], Ty),
         (function, carried): Placed,
     ) -> Result<Placed, Unsupported> {
+        // A member this file declares is never a collection's special bridge.
         let signature = member_signature(declared.0, declared.1)?;
-        if signature == carried {
+        let implementation_signature = member_signature(implemented.0, implemented.1)?;
+        let placed = (function, carried);
+        let adapters = self.adapters_for_placed(
+            declared,
+            implemented,
+            &signature,
+            &implementation_signature,
+            &placed,
+            false,
+        )?;
+        self.emit_thunk(signature, implementation_signature, adapters, placed)
+    }
+
+    /// Select exact boxes while the selected implementation's logical types are available.
+    /// Only their program-owned module identities are retained for later physical emission.
+    fn thunk_adapters(
+        &mut self,
+        declared: (&[Ty], Ty),
+        implemented: (&[Ty], Ty),
+        signature: &Signature,
+        implemented_signature: &Signature,
+        special_bridge: bool,
+    ) -> Result<SignatureAdapters, Unsupported> {
+        if declared.0.len() != implemented.0.len()
+            || signature.0.len() != implemented_signature.0.len()
+        {
+            return Err(self.declined("an interface member with incompatible adaptation arity"));
+        }
+        let mut adapters = SignatureAdapters::none(signature.0.len());
+        adapters.rejection = special_bridge
+            .then(|| collection_bridge_rejection(declared, signature))
+            .flatten();
+        if adapters.rejection.is_some() {
+            for (local, ty) in implemented.0.iter().enumerate() {
+                adapters.rejects_null[local + 1] = !ty.upper_bound_admits_null();
+            }
+        }
+        let class = self.recording.ir.classes[self.id as usize].fq_name();
+        let unadapted =
+            || format!("an interface member implemented with a value it cannot adapt (`{class}`)");
+        for local in 1..signature.0.len() {
+            let (wide, narrow) = (&signature.0[local], &implemented_signature.0[local]);
+            match (wide, narrow) {
+                (ValType::Ref { .. }, scalar) if !matches!(scalar, ValType::Ref { .. }) => {
+                    let ty = *implemented.0.get(local - 1).ok_or_else(unadapted)?;
+                    adapters.parameters[local] =
+                        Some(self.box_of(ty, *scalar)?.ok_or_else(unadapted)?.adapter());
+                }
+                (ValType::Ref { .. }, ValType::Ref { .. }) => {}
+                (left, right) if left == right => {}
+                _ => return Err(unadapted()),
+            }
+        }
+        match (&signature.1[..], &implemented_signature.1[..]) {
+            ([ValType::Ref { .. }], [ValType::Ref { .. }]) => {}
+            ([wide @ ValType::Ref { .. }], [scalar]) if *wide == REFERENCE => {
+                adapters.result = Some(ResultAdapter::Box(
+                    self.box_of(implemented.1, *scalar)?
+                        .ok_or_else(unadapted)?
+                        .adapter(),
+                ));
+            }
+            ([wide], []) if *wide == REFERENCE && implemented.1 == Ty::Unit => {
+                adapters.result = Some(ResultAdapter::Unit(
+                    self.program.runtime.unit_object(self.program.module),
+                ));
+            }
+            ([ValType::Ref { .. }], []) if implemented.1 == Ty::Nothing => adapters.diverges = true,
+            (declared, implementation) if declared == implementation => {}
+            _ => return Err(unadapted()),
+        }
+        Ok(adapters)
+    }
+
+    /// Preserve the direct-slot path; otherwise authenticate the physical function before
+    /// selecting boxes from the current logical signature.
+    fn adapters_for_placed(
+        &mut self,
+        declared: (&[Ty], Ty),
+        implemented: (&[Ty], Ty),
+        signature: &Signature,
+        implemented_signature: &Signature,
+        placed: &Placed,
+        special_bridge: bool,
+    ) -> Result<SignatureAdapters, Unsupported> {
+        // A bridge whose override excludes `null` stands behind a thunk even where both carry the
+        // same references: the thunk is what rejects the `null`.
+        let guards_null = special_bridge
+            && collection_bridge_rejection(declared, signature).is_some()
+            && implemented.0.iter().any(|ty| !ty.upper_bound_admits_null());
+        if signature == &placed.1 && !guards_null {
+            return Ok(SignatureAdapters::none(signature.0.len()));
+        }
+        if implemented_signature != &placed.1 {
+            return Err(self.declined("an interface member implemented with other carriers"));
+        }
+        self.thunk_adapters(
+            declared,
+            implemented,
+            signature,
+            implemented_signature,
+            special_bridge,
+        )
+    }
+
+    /// Emit one bridge from frozen physical signatures and exact program-owned box operations.
+    fn emit_thunk(
+        &mut self,
+        signature: Signature,
+        implemented: Signature,
+        adapters: SignatureAdapters,
+        (function, carried): Placed,
+    ) -> Result<Placed, Unsupported> {
+        if signature == carried && !adapters.guards_null() {
             return Ok((function, carried));
         }
         let class = self.recording.ir.classes[self.id as usize].fq_name();
         let unadapted =
             || format!("an interface member implemented with a value it cannot adapt (`{class}`)");
         if signature.0.len() != carried.0.len()
-            || member_signature(implemented.0, implemented.1)? != carried
+            || implemented != carried
+            || adapters.parameters.len() != signature.0.len()
         {
             return Err(unadapted());
         }
@@ -459,22 +696,45 @@ impl FileRecorder<'_, '_, '_> {
         let mut locals = Vec::new();
         for (local, (wide, narrow)) in signature.0.iter().zip(&carried.0).enumerate() {
             code.local_get(local as u32);
+            // A bridge answers its rejection for a `null` where the override's type excludes it,
+            // whether or not the two carriers differ.
+            let excludes_null = adapters.rejects_null.get(local).copied().unwrap_or(false);
+            if let (Some(rejected), true) = (adapters.rejection, excludes_null) {
+                code.ref_is_null().if_(BlockType::Empty);
+                emit_rejection(&mut code, rejected, &signature.1).ok_or_else(unadapted)?;
+                code.end();
+                code.local_get(local as u32);
+            }
             if wide == narrow {
                 continue;
             }
             match (wide, narrow) {
                 (ValType::Ref { .. }, ValType::Ref { nullable, heap }) => {
+                    if let Some(rejected) = adapters.rejection {
+                        // The erased interface method accepts any reference. An argument of
+                        // another type is not an element, so the bridge answers its rejection
+                        // instead of trapping on the cast.
+                        code.ref_test(*nullable, *heap)
+                            .if_(BlockType::Empty)
+                            .else_();
+                        emit_rejection(&mut code, rejected, &signature.1).ok_or_else(unadapted)?;
+                        code.end();
+                        code.local_get(local as u32);
+                    }
                     code.ref_cast(*nullable, *heap);
                 }
-                (ValType::Ref { .. }, scalar) => {
-                    // The receiver is a reference on both sides, so a scalar is a parameter.
-                    let parameter = local
-                        .checked_sub(1)
-                        .and_then(|index| implemented.0.get(index))
-                        .copied()
-                        .ok_or_else(unadapted)?;
-                    let form = self.box_of(parameter, *scalar)?.ok_or_else(unadapted)?;
-                    form.emit_unbox(&mut code);
+                (ValType::Ref { .. }, _) => {
+                    let unbox = adapters.parameters[local].ok_or_else(unadapted)?;
+                    if let Some(rejected) = adapters.rejection {
+                        // A box of another type is not an element either: the bridge answers
+                        // its rejection instead of trapping on the cast to this box.
+                        unbox.emit_is_box(&mut code);
+                        code.if_(BlockType::Empty).else_();
+                        emit_rejection(&mut code, rejected, &signature.1).ok_or_else(unadapted)?;
+                        code.end();
+                        code.local_get(local as u32);
+                    }
+                    unbox.emit_unbox(&mut code);
                 }
                 _ => return Err(unadapted()),
             }
@@ -486,12 +746,23 @@ impl FileRecorder<'_, '_, '_> {
             ([wide], [narrow]) if wide == narrow => {}
             ([wide], [ValType::Ref { .. }]) if *wide == REFERENCE => {}
             ([wide], [scalar]) if *wide == REFERENCE => {
-                let form = self.box_of(implemented.1, *scalar)?.ok_or_else(unadapted)?;
+                let Some(ResultAdapter::Box(form)) = adapters.result else {
+                    return Err(unadapted());
+                };
                 let scratch = form.needs_scratch().then(|| {
                     locals.push(*scalar);
                     signature.0.len() as u32
                 });
                 form.emit_box(&mut code, scratch);
+            }
+            ([ValType::Ref { .. }], []) if adapters.diverges => {
+                code.unreachable();
+            }
+            ([wide], []) if *wide == REFERENCE => {
+                let Some(ResultAdapter::Unit(unit)) = adapters.result else {
+                    return Err(unadapted());
+                };
+                code.global_get(unit);
             }
             ([], []) => {}
             _ => return Err(unadapted()),
@@ -526,15 +797,88 @@ impl FileRecorder<'_, '_, '_> {
                 let ResolvedFunctionOverrideTarget::External(target) = edge.overridden else {
                     continue;
                 };
-                if !edge.overridden_is_interface {
+                // A call of a library class's abstract member reaches the overrides as one of a
+                // library interface's does.
+                if !edge.overridden_is_interface
+                    && !self
+                        .recording
+                        .callables
+                        .callable(target)
+                        .is_some_and(is_abstract_class_member)
+                {
                     continue;
                 }
-                let Some(member) = self.dependency_member(target, MemberRole::Function) else {
+                if edge.overridden_semantic_role == Some(SemanticCallRole::KotlinFunctionInvoke) {
+                    let arity = edge.declared_parameters.len() + usize::from(edge.suspend);
+                    let protocol = self
+                        .program
+                        .runtime
+                        .objects
+                        .interfaces
+                        .function_invoke(self.program.module, arity);
+                    if !self.implements(protocol) {
+                        let any = Ty::nullable(Ty::obj_name(krusty::types::wk::any()));
+                        let parameters = vec![any; arity];
+                        let implemented = match self.function_edge_implementation(
+                            owner,
+                            edge,
+                            numbered,
+                            (&parameters, any),
+                        ) {
+                            Ok(Some(carried)) => Some(self.implement_carried(protocol, carried)),
+                            // An abstract class's abstract override implements nothing; each
+                            // concrete subclass's table holds the body.
+                            Ok(None) => None,
+                            Err(reason) => Some(Err(reason)),
+                        };
+                        // An abstract/non-instantiated producer still publishes callable
+                        // membership. A later concrete class must supply its invocation; a
+                        // missing body here must not poison every call of this arity.
+                        let recorded = self.record.is_some();
+                        if let Some(implemented) =
+                            implemented.filter(|implemented| recorded || implemented.is_ok())
+                        {
+                            self.settle(
+                                DependencyMember {
+                                    member: protocol,
+                                    library: true,
+                                },
+                                implemented,
+                            )?;
+                        }
+                    }
+                }
+                let Some(member) = self.dependency_member(target, MemberRole::Function)? else {
                     continue;
                 };
-                let implemented = match self.function_edge_implementation(owner, edge, numbered) {
-                    Ok(carried) => self.implement_carried(member.member, carried),
-                    Err(reason) => Err(reason),
+                if self.implements(member.member) {
+                    continue;
+                }
+                // A default the interface publishes, which the class does not override, is its own
+                // implementation: the exported body, not a slot of the class.
+                let implemented = if edge.implementation == edge.overridden
+                    && edge.implementation_function.is_some_and(|function| {
+                        ir.functions[function as usize].dispatch_receiver
+                            != Some(ir.classes[owner as usize].fq_name_id())
+                    }) {
+                    self.dependency_default_implementation(
+                        member,
+                        target,
+                        edge.implementation_function,
+                    )
+                } else {
+                    match self.function_edge_implementation(
+                        owner,
+                        edge,
+                        numbered,
+                        (&edge.declared_parameters, edge.declared_result),
+                    ) {
+                        Ok(Some(carried)) => self.implement_carried(member.member, carried),
+                        // An abstract class's abstract override implements nothing; each concrete
+                        // subclass's table holds the body.
+                        Ok(None) => continue,
+                        Err(reason) => Err(reason),
+                    }
                 };
                 self.settle(member, implemented)?;
             }
@@ -549,29 +893,13 @@ impl FileRecorder<'_, '_, '_> {
                     InheritedMemberName::PropertyGetter(_) => MemberRole::Getter,
                     InheritedMemberName::PropertySetter(_) => MemberRole::Setter,
                 };
-                let Some(member) = self.dependency_member(declaration, role) else {
+                let Some(member) = self.dependency_member(declaration, role)? else {
                     continue;
                 };
                 if self.implements(member.member) {
                     continue;
                 }
-                let function = self
-                    .recording
-                    .callables
-                    .callable(declaration)
-                    .and_then(|fact| fact.dependency_callable.as_ref())
-                    .and_then(|identity| self.program.callables.dependency(identity))
-                    .ok_or_else(|| {
-                        self.declined("a default a dependency's interface declares with no body")
-                    });
-                let implemented = match function {
-                    Ok(function) => self.record_implementation(
-                        member.member,
-                        function,
-                        DependencyImplementation::Function(function),
-                    ),
-                    Err(reason) => Err(reason),
-                };
+                let implemented = self.dependency_default_implementation(member, declaration, None);
                 self.settle(member, implemented)?;
             }
             current = self.classes.tables.table(owner).superclass;
@@ -592,6 +920,7 @@ impl FileRecorder<'_, '_, '_> {
                     slot,
                     declared,
                     implemented,
+                    adapters,
                 } => {
                     let placed = self.slot_function(slot)?;
                     self.implement_carried(
@@ -601,6 +930,7 @@ impl FileRecorder<'_, '_, '_> {
                             slot: Some(slot),
                             declared,
                             implemented,
+                            adapters,
                         },
                     )?;
                 }
@@ -612,6 +942,35 @@ impl FileRecorder<'_, '_, '_> {
         Ok(())
     }
 
+    /// Record the body of the default `declaration` as what the class implements `member` with:
+    /// the function this file declares for it (`declared`), or else the one an earlier module
+    /// exported.
+    fn dependency_default_implementation(
+        &mut self,
+        member: DependencyMember,
+        declaration: krusty::fir::ExternalCallableId,
+        declared: Option<krusty::ir::FunId>,
+    ) -> Result<(), Unsupported> {
+        let function = declared
+            .and_then(|function| self.recording.functions.get(function as usize).copied())
+            .flatten()
+            .or_else(|| {
+                self.recording
+                    .callables
+                    .callable(declaration)
+                    .and_then(|fact| fact.dependency_callable.as_ref())
+                    .and_then(|identity| self.program.callables.dependency(identity))
+            })
+            .ok_or_else(|| {
+                self.declined("a default a dependency's interface declares with no body")
+            })?;
+        self.record_implementation(
+            member.member,
+            function,
+            DependencyImplementation::Function(function),
+        )
+    }
+
     /// The function `owner` implements the dependency member `edge` overrides with: its own or
     /// inherited override, read off its own table so the most derived one stands, or a default of
     /// this module's interface, at that interface member's number (`numbered`).
@@ -620,7 +979,8 @@ impl FileRecorder<'_, '_, '_> {
         owner: ClassId,
         edge: &krusty::ir::IrFunctionOverride,
         numbered: &HashMap<u32, Placed>,
-    ) -> Result<Carried, Unsupported> {
+        declaration: (&[Ty], Ty),
+    ) -> Result<Option<Carried>, Unsupported> {
         let ir = self.recording.ir;
         let implementation = match edge.implementation {
             ResolvedFunctionOverrideTarget::Module(callable) => Some(callable),
@@ -652,18 +1012,42 @@ impl FileRecorder<'_, '_, '_> {
                     self.classes.tables.slot(owner, &key).ok_or_else(|| {
                         self.declined("a dependency's interface member with no slot")
                     })?;
+                if self.slot_is_abstract(slot) {
+                    return Ok(None);
+                }
                 (self.slot_function(slot)?, Some(slot))
             }
         };
-        Ok(Carried {
+        let declared = member_signature(declaration.0, declaration.1)?;
+        let implemented =
+            member_signature(&edge.implementation_parameters, edge.implementation_result)?;
+        let special_bridge = self
+            .recording
+            .classifiers
+            .classifier(edge.overridden_owner)
+            .and_then(|fact| fact.role)
+            .is_some_and(|role| {
+                matches!(
+                    role,
+                    krusty::types::ClassifierRole::MappedCollection(collection)
+                        if collection.has_special_bridge(&edge.name)
+                )
+            });
+        let adapters = self.adapters_for_placed(
+            declaration,
+            (&edge.implementation_parameters, edge.implementation_result),
+            &declared,
+            &implemented,
+            &placed,
+            special_bridge,
+        )?;
+        Ok(Some(Carried {
             placed,
             slot,
-            declared: (edge.declared_parameters.clone(), edge.declared_result),
-            implemented: (
-                edge.implementation_parameters.clone(),
-                edge.implementation_result,
-            ),
-        })
+            declared,
+            implemented,
+            adapters,
+        }))
     }
 
     /// The getter and setter `owner` implements each property of a dependency's interface with.
@@ -678,7 +1062,7 @@ impl FileRecorder<'_, '_, '_> {
             let ResolvedPropertyOverrideTarget::External(target) = edge.overridden else {
                 continue;
             };
-            if !edge.overridden_is_interface || edge.declared_receiver.is_some() {
+            if !edge.overridden_is_interface {
                 continue;
             }
             let roles = [false, true]
@@ -690,9 +1074,12 @@ impl FileRecorder<'_, '_, '_> {
                 } else {
                     MemberRole::Getter
                 };
-                let Some(member) = self.dependency_member(target, role) else {
+                let Some(member) = self.dependency_member(target, role)? else {
                     continue;
                 };
+                if self.implements(member.member) {
+                    continue;
+                }
                 let implemented =
                     match self.property_edge_implementation(owner, edge, setter, numbered) {
                         Ok(carried) => self.implement_carried(member.member, carried),
@@ -737,41 +1124,49 @@ impl FileRecorder<'_, '_, '_> {
                 }
             }
         };
+        let declared_types =
+            extension_accessor_types(edge.declared_receiver, edge.declared_type, setter);
+        let implemented_types = extension_accessor_types(
+            edge.implementation_receiver,
+            edge.implementation_type,
+            setter,
+        );
+        let declared = member_signature(&declared_types.0, declared_types.1)?;
+        let implemented = member_signature(&implemented_types.0, implemented_types.1)?;
+        let placed = placed
+            .ok_or_else(|| self.declined("a dependency's interface property with no slot"))?;
+        let adapters = self.adapters_for_placed(
+            (&declared_types.0, declared_types.1),
+            (&implemented_types.0, implemented_types.1),
+            &declared,
+            &implemented,
+            &placed,
+            false,
+        )?;
         Ok(Carried {
-            placed: placed
-                .ok_or_else(|| self.declined("a dependency's interface property with no slot"))?,
+            placed,
             slot,
-            declared: accessor_types(edge.declared_type, setter),
-            implemented: accessor_types(edge.implementation_type, setter),
+            declared,
+            implemented,
+            adapters,
         })
     }
 
-    /// The member the dependency declaration `target` is in `role`: a member of a source module's
-    /// interface, by the identity its module published, or else a library classifier's member,
-    /// which a call through it may name too. `None` for a declaration no member stands for.
+    /// The member the dependency declaration `target` is in `role` (`dependency_member`).
     fn dependency_member(
         &mut self,
         target: krusty::fir::ExternalCallableId,
         role: MemberRole,
-    ) -> Option<DependencyMember> {
-        let fact = self.recording.callables.callable(target)?;
-        let identity = library_member_identity(fact, role)?;
-        let interfaces = &mut self.program.runtime.objects.interfaces;
-        if let Some(member) = interfaces.identified(&identity) {
-            return Some(DependencyMember {
-                member,
-                library: false,
-            });
-        }
-        let signature = library_member_signature(fact, role).ok()?;
-        let owner = library_member_owner(fact)?;
-        let member = interfaces
-            .library(self.program.module, owner, &identity, signature)
-            .ok()?;
-        Some(DependencyMember {
-            member,
-            library: true,
-        })
+    ) -> Result<Option<DependencyMember>, Unsupported> {
+        let Some(fact) = self.recording.callables.callable(target) else {
+            return Ok(None);
+        };
+        dependency_member(
+            &mut self.program.runtime.objects.interfaces,
+            self.program.module,
+            fact,
+            role,
+        )
     }
 
     /// Settle the outcome of recording what the class implements `member` with. A library
@@ -818,14 +1213,16 @@ impl FileRecorder<'_, '_, '_> {
             slot,
             declared,
             implemented,
+            adapters,
         }: Carried,
     ) -> Result<(), Unsupported> {
         if self.implements(member) {
             return Ok(());
         }
-        let (function, signature) = self.thunk(
-            (&declared.0, declared.1),
-            (&implemented.0, implemented.1),
+        let (function, signature) = self.emit_thunk(
+            declared.clone(),
+            implemented.clone(),
+            adapters.clone(),
             placed,
         )?;
         let ty = self
@@ -842,6 +1239,7 @@ impl FileRecorder<'_, '_, '_> {
                 slot,
                 declared,
                 implemented,
+                adapters,
             },
             None => DependencyImplementation::Function(function),
         };
@@ -886,7 +1284,19 @@ impl FileRecorder<'_, '_, '_> {
             .into_iter()
             .flatten()
             .map(|applied| applied.classifier);
-        for interface in module.chain(hierarchy).chain(class.interfaces.iter()) {
+        // A class below a library class is also an instance of every interface that class
+        // implements, which neither the module numbering nor the class's own list repeats.
+        let classifiers = self.recording.classifiers;
+        let inherited = [class.fq_name_id(), class.superclass]
+            .into_iter()
+            .chain(class.interfaces.iter())
+            .flat_map(|supertype| classifiers.inherited_interfaces(supertype))
+            .collect::<Vec<_>>();
+        for interface in module
+            .chain(hierarchy)
+            .chain(class.interfaces.iter())
+            .chain(inherited)
+        {
             self.program
                 .runtime
                 .objects
@@ -900,5 +1310,41 @@ impl FileRecorder<'_, '_, '_> {
             "{construct} (`{}`)",
             self.recording.ir.classes[self.id as usize].fq_name()
         )
+    }
+}
+
+/// Leave the thunk with the bridge's rejection as its answer.
+fn emit_rejection(code: &mut Code, rejected: BridgeRejection, result: &[ValType]) -> Option<()> {
+    match (rejected, result) {
+        (BridgeRejection::Value(value), _) => {
+            code.i32_const(value);
+        }
+        (BridgeRejection::Null, [ValType::Ref { heap, .. }]) => {
+            code.ref_null(*heap);
+        }
+        (BridgeRejection::Null, _) => return None,
+    }
+    code.return_();
+    Some(())
+}
+
+/// What a collection special bridge answers when its argument is not the override's element.
+///
+/// `contains` and `remove` answer `false`. `indexOf` and `lastIndexOf` answer `-1`. A member of
+/// one argument that answers a nullable reference (`Map.get`, `Map.remove`) answers `null`. Any
+/// other result keeps the cast: a mismatch there is a use the frontend said was the narrower type.
+fn collection_bridge_rejection(
+    declared: (&[Ty], Ty),
+    signature: &Signature,
+) -> Option<BridgeRejection> {
+    match declared.1 {
+        Ty::Boolean => Some(BridgeRejection::Value(0)),
+        Ty::Int => Some(BridgeRejection::Value(-1)),
+        _ if declared.0.len() == 1
+            && matches!(&signature.1[..], [ValType::Ref { nullable: true, .. }]) =>
+        {
+            Some(BridgeRejection::Null)
+        }
+        _ => None,
     }
 }

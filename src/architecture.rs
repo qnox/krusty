@@ -507,8 +507,10 @@ mod tests {
 
         let checker = source_path("src/compiler/builtin_implementations.rs");
         let text = fs::read_to_string(&checker).expect("read checked builtin fact finalizer");
-        assert!(text.contains("for_checked_external_members"));
-        assert!(text.contains("external_member_identities"));
+        assert!(!text.contains("symbol_source"));
+        assert!(!text.contains("for_checked_external_members"));
+        assert!(!text.contains("external_callable("));
+        assert!(text.contains("record_checked_builtin_implementations"));
     }
 
     #[test]
@@ -517,20 +519,57 @@ mod tests {
         let text = fs::read_to_string(&path).expect("read KLIB body handoff");
         assert!(text.contains("record_checked"));
         assert!(!text.contains("record_dependency_support"));
+        assert!(text.contains("checked_dependency_facts"));
+        for forbidden in [
+            "with_builtin_implementation_facts(platform)",
+            "symbol_resolver::",
+            "klib_dependency_member_call_edge(",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "KLIB body emission must consume facts stored before backend entry: {forbidden}"
+            );
+        }
+
+        let handoff = source_path("src/compiler/backend_handoff.rs");
+        let text = fs::read_to_string(&handoff).expect("read checked backend handoff");
+        let checked_facts = text
+            .find("record_checked_klib_dependency_facts(")
+            .expect("freeze KLIB body checker facts before backend emission");
+        let backend_facts = text
+            .find("super::builtin_implementations::record_checked")
+            .expect("finish checked callable facts at the handoff");
+        assert!(
+            checked_facts < backend_facts,
+            "KLIB body facts must be stored before checked callable completeness is enforced"
+        );
 
         let roots = source_path("src/compiler/dependency_body_emission/emitted_roots.rs");
         let text = fs::read_to_string(&roots).expect("read KLIB emitted roots");
-        assert!(text.contains("klib_dependency_member_call_edge"));
         for forbidden in [
             "SymbolResolver",
             "symbol_resolver::",
             "member_declarations_in_hierarchy(",
+            "klib_dependency_member_call_edge(",
         ] {
             assert!(
                 !text.contains(forbidden),
-                "KLIB body planning must consume checked member edge facts: {forbidden}"
+                "KLIB body planning must consume facts stored at checker handoff: {forbidden}"
             );
         }
+
+        let checked = source_path("src/backend/dependency_facts.rs");
+        let text = fs::read_to_string(&checked).expect("read checked KLIB dependency facts");
+        assert!(text.contains("klib_type_hierarchy"));
+        assert!(text.contains("crate::ir::CheckedKlibDependencyFacts"));
+        assert!(!text.contains("crate::fir::CheckedKlibDependencyFacts"));
+        let lowerer = source_path("src/klib_lowering/callee_facts.rs");
+        let text = fs::read_to_string(&lowerer).expect("read checked KLIB lowerer facts");
+        assert!(text.contains("crate::ir::CheckedKlibDependencyFacts"));
+        assert!(!text.contains("crate::fir::CheckedKlibDependencyFacts"));
+        let checker = source_path("src/resolve/dependency_body_call_edges.rs");
+        let text = fs::read_to_string(&checker).expect("read KLIB body hierarchy checker");
+        assert!(text.contains("klib_type_facts::freeze"));
     }
 
     #[test]
@@ -831,6 +870,16 @@ mod tests {
                 let mut budget = provider.to_vec();
                 budget.push("symbol_resolver");
                 assert_allowed_crate_modules_in_file(&path, &budget);
+            } else if path
+                == source_path("src/klib_libraries/declaration_bodies/inheritance/most_specific.rs")
+            {
+                // The most specific of several inherited abstract declarations is the one whose
+                // result is a subtype of every other's: the provider normalizes the serialized
+                // headers and compares them by the one shared subtyping relation instead of a
+                // subtype algebra of its own.
+                let mut budget = provider.to_vec();
+                budget.push("assignable");
+                assert_allowed_crate_modules_in_file(&path, &budget);
             } else if path == source_path("src/klib_libraries/shared_trees.rs") {
                 // Decoded archive trees stay resident in the count-bounded cache the JVM classpath
                 // also uses for its per-entry facts. `lru` is a leaf container, not a layer.
@@ -848,25 +897,28 @@ mod tests {
         // Dependency bodies lower into common IR that Native and Wasm consume alike. The tests
         // beside the lowering may also reach the frontend to lower equivalent source.
         // A template body links its callees through the calling compilation's normalized
-        // provider (`symbol_source`) and decides the subtyping the body leaves implicit over the
-        // common class hierarchy (`assignable`, read through `symbol_resolver`'s provider
-        // oracle). All three are target-neutral semantic contracts, never a backend's.
+        // provider (`symbol_source`) and consumes the class hierarchy facts frozen by resolution.
         let allowed = [
             "assignable",
             "fir",
+            // A call of an inline function is expanded by the IR splice checked lowering shares.
+            "inline_expansion",
             "ir",
             "klib_libraries",
             "libraries",
             "metadata",
-            "symbol_resolver",
             "symbol_source",
             "types",
         ];
-        assert_allowed_crate_modules("src/klib_lowering.rs", &allowed);
+        let mut test_allowed = allowed.to_vec();
+        test_allowed.push("symbol_resolver");
+        assert_allowed_crate_modules("src/klib_lowering.rs", &test_allowed);
         for path in rust_files_under("src/klib_lowering") {
             let test_module = path.file_name() == Some(std::ffi::OsStr::new("tests.rs"))
                 || path.starts_with(source_path("src/klib_lowering/tests"));
-            if !test_module {
+            if test_module {
+                assert_allowed_crate_modules_in_file(&path, &test_allowed);
+            } else {
                 assert_allowed_crate_modules_in_file(&path, &allowed);
             }
         }
@@ -1034,6 +1086,9 @@ mod tests {
                 &path,
                 &[
                     "fir",
+                    // The IR-only expansion of an inline body at a use, which dependency-body
+                    // lowering shares; it reads and writes common IR only.
+                    "inline_expansion",
                     "ir",
                     "kt_string",
                     // Which enclosing callable is a lambda, so a nested one takes that lambda's
@@ -1198,8 +1253,8 @@ mod tests {
     }
 
     #[test]
-    fn the_hosted_plugin_ir_reads_only_checked_fir_and_its_declarations() {
-        // It encodes Pass 2's checked bodies for kotlinc plugins in the plugin host: checked FIR,
+    fn the_plugin_ir_reads_only_checked_fir_and_its_declarations() {
+        // It encodes Pass 2's checked bodies for IR plugins through the plugin API: checked FIR,
         // the declarations' syntax and resolved index, and the platform's description of a
         // dependency. It never resolves, lowers or reaches a backend.
         let allowed = [
@@ -1211,8 +1266,8 @@ mod tests {
             "libraries",
             "types",
         ];
-        assert_allowed_crate_modules("src/hosted_plugin_ir.rs", &allowed);
-        assert_allowed_crate_modules_in_tree("src/hosted_plugin_ir", &allowed);
+        assert_allowed_crate_modules("src/plugin_ir.rs", &allowed);
+        assert_allowed_crate_modules_in_tree("src/plugin_ir", &allowed);
     }
 
     #[test]
@@ -1293,7 +1348,7 @@ mod tests {
                 "features",
                 "frontend",
                 // Compiler plugins consume this public projection of the module's checked FIR.
-                "hosted_plugin_ir",
+                "plugin_ir",
                 "ir",
                 "js",
                 "jvm",

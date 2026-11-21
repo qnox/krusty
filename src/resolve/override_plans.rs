@@ -8,6 +8,7 @@ use crate::fx_hash::{HashMap, HashSet};
 
 mod inherited_defaults;
 mod inherited_status;
+mod member_slots;
 mod published_recheck;
 
 pub(super) use published_recheck::published_function_override_matches;
@@ -48,6 +49,12 @@ where
 {
     let nearest = candidates.iter().map(&rank_of).min()?;
     candidates.retain(|candidate| rank_of(candidate) == nearest);
+    if candidates
+        .iter()
+        .any(|candidate| target_of(candidate).is_none())
+    {
+        return None;
+    }
     let mut seen = HashSet::default();
     candidates.retain(|candidate| target_of(candidate).is_some_and(|target| seen.insert(target)));
     if candidates.len() != 1 {
@@ -126,16 +133,29 @@ fn target(
     index: &ResolvedModuleIndex,
     property: &PropertyInfo,
 ) -> Option<ResolvedPropertyOverrideTarget> {
-    property
-        .stable_declaration
-        .and_then(|declaration| index.property_for_declaration(declaration))
-        .map(ResolvedPropertyOverrideTarget::Module)
-        .or_else(|| {
-            property
-                .getter
+    property_accessor_target(index, property, false)
+}
+
+pub(super) fn property_accessor_target(
+    index: &ResolvedModuleIndex,
+    property: &PropertyInfo,
+    setter: bool,
+) -> Option<ResolvedPropertyOverrideTarget> {
+    match property.stable_declaration {
+        Some(declaration) => index
+            .property_for_declaration(declaration)
+            .map(ResolvedPropertyOverrideTarget::Module),
+        None => {
+            let accessor = if setter {
+                property.setter.as_deref()?
+            } else {
+                &property.getter
+            };
+            accessor
                 .external_identity
                 .map(ResolvedPropertyOverrideTarget::External)
-        })
+        }
+    }
 }
 
 /// The unsubstituted declared shape of the exact declaration a property selects: the signature a
@@ -188,16 +208,15 @@ pub(super) fn function_target(
     index: &ResolvedModuleIndex,
     function: &FunctionInfo,
 ) -> Option<ResolvedFunctionOverrideTarget> {
-    function
-        .stable_declaration
-        .and_then(|declaration| index.callable_for_declaration(declaration))
-        .map(|callable| ResolvedFunctionOverrideTarget::Module(callable.id))
-        .or_else(|| {
-            function
-                .callable
-                .external_identity
-                .map(ResolvedFunctionOverrideTarget::External)
-        })
+    match function.stable_declaration {
+        Some(declaration) => index
+            .callable_for_declaration(declaration)
+            .map(|callable| ResolvedFunctionOverrideTarget::Module(callable.id)),
+        None => function
+            .callable
+            .external_identity
+            .map(ResolvedFunctionOverrideTarget::External),
+    }
 }
 
 fn function_default_provider(
@@ -371,9 +390,16 @@ pub(super) fn dependency_declaration_signature(
     source: &dyn SymbolSource,
     identity: crate::fir::ExternalCallableId,
 ) -> (Box<[Ty]>, Ty) {
-    let realization = source
-        .external_callable(identity)
-        .expect("the provider that assigned a dependency identity answers for it");
+    realized_dependency_declaration_signature(source, identity)
+        .expect("the provider that assigned a dependency identity answers for it")
+}
+
+/// [`dependency_declaration_signature`], or `None` when the provider cannot realize `identity`.
+fn realized_dependency_declaration_signature(
+    source: &dyn SymbolSource,
+    identity: crate::fir::ExternalCallableId,
+) -> Option<(Box<[Ty]>, Ty)> {
+    let realization = source.external_callable(identity)?;
     let callable = &realization.callable;
     let parameters = callable
         .declared_params
@@ -392,7 +418,7 @@ pub(super) fn dependency_declaration_signature(
         .declared_ret
         .or_else(|| callable.generic_sig.as_ref().map(|signature| signature.ret))
         .unwrap_or(callable.ret);
-    (parameters, result)
+    Some((parameters, result))
 }
 
 /// The overridden declaration's own parameters and result, before any substitution. A backend
@@ -402,22 +428,33 @@ fn overridden_declaration_signature(
     declared: &FunctionInfo,
     overridden: ResolvedFunctionOverrideTarget,
 ) -> (Box<[ResolvedTy]>, ResolvedTy) {
+    realized_overridden_declaration_signature(source, declared, overridden)
+        .expect("the provider that assigned a dependency identity answers for it")
+}
+
+/// [`overridden_declaration_signature`], or `None` for a dependency declaration its provider
+/// cannot realize.
+fn realized_overridden_declaration_signature(
+    source: &dyn SymbolSource,
+    declared: &FunctionInfo,
+    overridden: ResolvedFunctionOverrideTarget,
+) -> Option<(Box<[ResolvedTy]>, ResolvedTy)> {
     let (parameters, result) = match overridden {
         ResolvedFunctionOverrideTarget::Module(_) => (
             declaration_parameters_with_receiver(declared).into_boxed_slice(),
             declared.ret.apply(declared.callable.ret),
         ),
         ResolvedFunctionOverrideTarget::External(identity) => {
-            dependency_declaration_signature(source, identity)
+            realized_dependency_declaration_signature(source, identity)?
         }
     };
-    (
+    Some((
         resolved_types(
             parameters.iter().copied(),
             "overridden function declaration parameters",
         ),
         resolved_ty(result, "overridden function result"),
-    )
+    ))
 }
 
 fn applied_parameters_with_receiver(function: &crate::libraries::FunctionInfo) -> Vec<Ty> {
@@ -1096,6 +1133,58 @@ struct OverridingFunction {
 }
 
 impl OverridingFunction {
+    /// Its inputs without the extension receiver, which override matching compares on its own.
+    fn inputs(&self) -> Vec<Ty> {
+        let mut inputs = self.parameters.to_vec();
+        if self.receiver.is_some() {
+            assert!(
+                self.context_count < inputs.len(),
+                "an extension override must retain its declared receiver parameter"
+            );
+            inputs.remove(self.context_count);
+        }
+        inputs
+    }
+
+    /// Whether this declaration's inputs (`inputs`, from [`Self::inputs`]) override `applied`'s.
+    fn overrides_inputs_of(
+        &self,
+        source: &dyn SymbolSource,
+        inputs: &[Ty],
+        applied: &FunctionInfo,
+    ) -> bool {
+        let applied_inputs = applied.semantic_params();
+        let applied_formals = applied
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.formals.as_slice())
+            .unwrap_or_default();
+        let applied_bounds = applied
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.formal_bounds.as_slice())
+            .unwrap_or_default();
+        let applied_shape = crate::symbol_resolver::OverrideInputShape {
+            params: &applied_inputs,
+            receiver: applied
+                .semantic_receiver()
+                .filter(|_| applied.is_extension()),
+            formals: applied_formals,
+            formal_bounds: applied_bounds,
+            context_count: applied.context_count,
+            suspend: applied.flags.suspend,
+        };
+        let own_shape = crate::symbol_resolver::OverrideInputShape {
+            params: inputs,
+            receiver: self.receiver,
+            formals: &self.formals,
+            formal_bounds: &self.formal_bounds,
+            context_count: self.context_count,
+            suspend: self.suspend,
+        };
+        crate::symbol_resolver::override_input_shapes_match(source, applied_shape, own_shape)
+    }
+
     fn of(
         index: &ResolvedModuleIndex,
         declaration: crate::fir::DeclarationId,
@@ -1140,14 +1229,7 @@ fn append_function_override_edges(
 ) {
     let mut seen = HashSet::default();
     let first = overrides.len();
-    let mut implementation_inputs = implementation.parameters.to_vec();
-    if implementation.receiver.is_some() {
-        assert!(
-            implementation.context_count < implementation_inputs.len(),
-            "an extension override must retain its declared receiver parameter"
-        );
-        implementation_inputs.remove(implementation.context_count);
-    }
+    let implementation_inputs = implementation.inputs();
     for supertype in hierarchy.iter().filter(|entry| entry.depth != 0) {
         let overridden_is_interface = source
             .classifier(supertype.classifier)
@@ -1164,48 +1246,24 @@ fn append_function_override_edges(
                 continue;
             };
             let applied_parameters = applied_parameters_with_receiver(&applied);
-            let applied_inputs = applied.semantic_params();
             let applied_formals = applied
                 .generic_sig
                 .as_ref()
                 .map(|signature| signature.formals.as_slice())
                 .unwrap_or_default();
-            let applied_bounds = applied
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.formal_bounds.as_slice())
-                .unwrap_or_default();
-            if !crate::symbol_resolver::override_input_shapes_match(
-                source,
-                crate::symbol_resolver::OverrideInputShape {
-                    params: &applied_inputs,
-                    receiver: applied
-                        .semantic_receiver()
-                        .filter(|_| applied.is_extension()),
-                    formals: applied_formals,
-                    formal_bounds: applied_bounds,
-                    context_count: applied.context_count,
-                    suspend: applied.flags.suspend,
-                },
-                crate::symbol_resolver::OverrideInputShape {
-                    params: &implementation_inputs,
-                    receiver: implementation.receiver,
-                    formals: &implementation.formals,
-                    formal_bounds: &implementation.formal_bounds,
-                    context_count: implementation.context_count,
-                    suspend: implementation.suspend,
-                },
-            ) || !crate::symbol_resolver::resolution_subtype(
-                source,
-                crate::types::ty_canonicalize_params(
-                    implementation.result,
-                    &implementation.formals,
-                ),
-                crate::types::ty_canonicalize_params(
-                    applied.ret.apply(applied.callable.ret).canonical_semantic(),
-                    applied_formals,
-                ),
-            ) || !seen.insert(overridden)
+            if !implementation.overrides_inputs_of(source, &implementation_inputs, &applied)
+                || !crate::symbol_resolver::resolution_subtype(
+                    source,
+                    crate::types::ty_canonicalize_params(
+                        implementation.result,
+                        &implementation.formals,
+                    ),
+                    crate::types::ty_canonicalize_params(
+                        applied.ret.apply(applied.callable.ret).canonical_semantic(),
+                        applied_formals,
+                    ),
+                )
+                || !seen.insert(overridden)
             {
                 continue;
             }
@@ -1303,42 +1361,60 @@ fn with_function_supertypes(
     extended
 }
 
+/// The classifier's function override edges, and the function names that keep more than one
+/// member slot (see [`member_slots`]).
 fn function_override_plans(
     index: &ResolvedModuleIndex,
     source: &dyn SymbolSource,
     class: &super::ClassSig,
     hierarchy: &[crate::fir::ResolvedAppliedClassifier],
-) -> Vec<ResolvedFunctionOverride> {
+) -> (
+    Vec<ResolvedFunctionOverride>,
+    Vec<crate::fir::ResolvedFunctionSlotFamily>,
+) {
     let mut overrides = Vec::new();
-    let mut append_implementation = |name: &str, implementation: &super::Signature| {
-        if !implementation.is_override() {
+    let mut declared = Vec::<(String, Vec<OverridingFunction>)>::new();
+    let mut append_declaration = |name: &str, signature: &super::Signature| {
+        let Some(declaration) = signature.stable_declaration else {
+            return;
+        };
+        if index
+            .declaration_header(declaration)
+            .is_some_and(|header| header.visibility == Visibility::Private)
+        {
             return;
         }
-        let Some(declaration) = implementation.stable_declaration else {
+        let Some(callable) = index.callable_for_declaration(declaration) else {
             return;
         };
-        let Some(implementation_callable) = index.callable_for_declaration(declaration) else {
+        let Some(resolved_signature) = index.signature(declaration) else {
             return;
         };
-        let Some(implementation_signature) = index.signature(declaration) else {
-            return;
-        };
-        let implementation = OverridingFunction::of(
+        let function = OverridingFunction::of(
             index,
             declaration,
-            &implementation_callable,
-            implementation_signature,
-            implementation.is_suspend(),
+            &callable,
+            resolved_signature,
+            signature.is_suspend(),
         );
-        append_function_override_edges(
-            index,
-            source,
-            class.internal_name(),
-            name,
-            &implementation,
-            hierarchy,
-            &mut overrides,
-        );
+        if signature.is_override() {
+            append_function_override_edges(
+                index,
+                source,
+                class.internal_name(),
+                name,
+                &function,
+                hierarchy,
+                &mut overrides,
+            );
+        }
+        match declared
+            .iter_mut()
+            .find(|(declared_name, _)| declared_name == name)
+        {
+            Some((_, functions)) => functions.push(function),
+            None => declared.push((name.to_owned(), vec![function])),
+        }
     };
     // Declaration order, not map order: the plans become bridge methods, and their order is
     // part of the emitted class.
@@ -1347,10 +1423,10 @@ fn function_override_plans(
         class.methods.keys().chain(class.member_ext_funs.keys()),
     ) {
         for implementation in class.methods.get(name).into_iter().flatten() {
-            append_implementation(name, implementation);
+            append_declaration(name, implementation);
         }
         for implementation in class.member_ext_funs.get(name).into_iter().flatten() {
-            append_implementation(name, implementation.signature());
+            append_declaration(name, implementation.signature());
         }
     }
     publish_inherited_interface_function_plans(
@@ -1361,7 +1437,26 @@ fn function_override_plans(
         &mut overrides,
     );
     overrides.sort_by_key(|edge| edge.depth);
-    overrides
+    let declared = declared
+        .iter()
+        .map(|(name, functions)| {
+            (
+                name.clone(),
+                functions
+                    .iter()
+                    .map(|implementation| member_slots::DeclaredFunction { implementation })
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let families = member_slots::function_slot_families(
+        index,
+        source,
+        class.internal_name(),
+        &declared,
+        hierarchy,
+    );
+    (overrides, families)
 }
 
 /// Enum-entry bodies are anonymous subclasses semantically owned by the entry declaration rather
@@ -1951,6 +2046,7 @@ fn publish_inherited_function_defaults(
 }
 
 pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mut SymbolTable) {
+    let mut slot_families = Vec::new();
     let (plans, preorders, inherited_defaults, dependency_superclasses) = {
         let module = ModuleSymbols::new(table);
         let source =
@@ -1979,10 +2075,13 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mu
                         &source,
                         index.classifier_hierarchy(classifier).unwrap_or_default(),
                     );
+                    let (functions, families) =
+                        function_override_plans(index, &source, class, &hierarchy);
+                    slot_families.push((classifier, families));
                     (
                         classifier,
                         property_override_plans(index, &source, class, &hierarchy),
-                        function_override_plans(index, &source, class, &hierarchy),
+                        functions,
                     )
                 })
                 .chain(enum_entry_override_plans(index, &source))
@@ -2005,10 +2104,16 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mu
             .map(|(classifier, _, _)| *classifier)
             .filter(|classifier| index.classifier_header(*classifier).is_some())
             .collect::<Vec<_>>();
+        let template_superclasses = table
+            .libraries
+            .klib_dependency_body_facts()
+            .map(|bodies| bodies.inline_bodies().local_class_supertypes())
+            .unwrap_or_default();
         let dependency_superclasses = dependency_superclasses::dependency_superclasses(
             index,
             &source,
             &module_classes,
+            &template_superclasses,
             |name| table.class_by_type_name(name).is_some(),
         );
         (
@@ -2027,10 +2132,64 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mu
     for (classifier, defaults) in inherited_defaults {
         index.publish_inherited_defaults(classifier, defaults);
     }
+    for (classifier, families) in slot_families {
+        index.publish_function_slot_families(classifier, families);
+    }
     let inherited = publish_inherited_statuses(index, &plans);
     publish_inherited_visibilities_to_symbols(table, &inherited);
     for (classifier, properties, functions) in plans {
         index.publish_property_overrides(classifier, properties);
         index.publish_function_overrides(classifier, functions);
+    }
+}
+
+#[cfg(test)]
+mod selection_identity_tests {
+    use super::{function_target, nearest_unique_by};
+
+    fn selected(candidates: &[(u32, Option<u32>)]) -> Option<(u32, Option<u32>)> {
+        nearest_unique_by(
+            candidates.to_vec(),
+            |candidate| candidate.0,
+            |candidate| candidate.1,
+        )
+    }
+
+    #[test]
+    fn an_unregistered_source_declaration_is_not_reinterpreted_as_external() {
+        let index = crate::fir::ResolvedModuleIndex::default();
+        let mut callable = crate::libraries::LibraryCallable::library(
+            crate::types::type_name("sample/Parent"),
+            "value",
+            vec![],
+            crate::types::Ty::String,
+            crate::types::Ty::String,
+            "()Ljava/lang/String;",
+        );
+        let external = crate::fir::ExternalCallableId::from_raw(7);
+        callable.external_identity = Some(external);
+        let mut function = crate::libraries::FunctionInfo::plain(
+            crate::libraries::FnKind::Member,
+            Some(crate::types::Ty::obj("sample/Parent")),
+            callable,
+        );
+        assert_eq!(
+            function_target(&index, &function),
+            Some(crate::fir::ResolvedFunctionOverrideTarget::External(
+                external
+            ))
+        );
+        function.stable_declaration = Some(crate::fir::DeclarationId::from_raw(99));
+        assert_eq!(function_target(&index, &function), None);
+    }
+
+    #[test]
+    fn nearest_selection_requires_every_nearest_identity() {
+        assert_eq!(selected(&[(0, Some(1)), (0, None)]), None);
+        assert_eq!(selected(&[(0, None), (0, Some(1))]), None);
+        assert_eq!(selected(&[(0, Some(1)), (0, Some(2))]), None);
+        assert_eq!(selected(&[(0, Some(1)), (0, Some(1))]), Some((0, Some(1))));
+        assert_eq!(selected(&[(0, Some(1)), (1, None)]), Some((0, Some(1))));
+        assert_eq!(selected(&[]), None);
     }
 }

@@ -18,10 +18,12 @@ mod body_unit;
 mod callable_references;
 mod callee_facts;
 mod class_headers;
+mod class_hierarchies;
 mod class_initialization;
 mod class_storage;
 mod closure_forms;
 mod constructor_calls;
+mod continuation_intrinsics;
 mod decline;
 mod enum_classes;
 mod for_loops;
@@ -34,6 +36,7 @@ mod lowering_checkpoint;
 mod primitive_calls;
 mod range_membership;
 mod same_library_class;
+mod site_containers;
 #[cfg(test)]
 mod tests;
 mod type_evidence;
@@ -45,8 +48,17 @@ pub(crate) use body_unit::{
 };
 pub(crate) use callee_facts::CallEdge;
 pub use callee_facts::KlibCalleeFacts;
-pub(crate) use class_initialization::delegated_superclass_constructor;
+pub(crate) use class_initialization::{
+    delegated_superclass_constructor, initializing_constructors, value_class_overrides,
+};
 pub(crate) use closure_forms::emitted_closure_function;
+
+/// The classifier a serialized object symbol names, when its signature names a class.
+pub(crate) fn object_classifier(
+    signature: &crate::metadata::id_signature::KlibPublicIdSignature,
+) -> Option<crate::types::TypeName> {
+    klib_types::classifier_name(signature).ok()
+}
 
 /// The serialized forms common body lowering realizes without the declaration edges they name.
 pub(crate) const EMITTED_CALL_FORMS: crate::metadata::klib_ir::tree::EmittedCallForms =
@@ -55,6 +67,7 @@ pub(crate) const EMITTED_CALL_FORMS: crate::metadata::klib_ir::tree::EmittedCall
         folded_call: range_membership::folds_range_literal_membership,
         folded_calls: for_loops::folded_loop_calls,
         implied_callee: array_content_members::implied_callee,
+        converted_closure: closure_forms::converted_closure,
     };
 pub use decline::{KlibBodyDecline, KlibBodyDeclineReason};
 pub use inline_templates::{lower_inline_template, KlibInlineTemplate, TemplateCallees};

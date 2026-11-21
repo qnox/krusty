@@ -105,6 +105,22 @@ pub(super) fn facade_source_ordered_members(
     members
 }
 
+/// Interface methods use the same property unit as classes: getter, setter, then the exact
+/// property annotation carrier. Implicit field accessors are not interface method declarations.
+pub(super) fn interface_functions(ir: &IrFile, class: &IrClass) -> Vec<u32> {
+    source_ordered_members(ir, class, None)
+        .into_iter()
+        .flat_map(|member| match member {
+            SourceOrderedMember::Property(property) => {
+                property.getter.into_iter().chain(property.setter).collect()
+            }
+            SourceOrderedMember::Function(function) => vec![function],
+            _ => Vec::new(),
+        })
+        .filter(|function| class.methods.contains(function))
+        .collect()
+}
+
 pub(super) enum SourceOrderedMember<'a> {
     Property(&'a IrProperty),
     /// The compiler-default public accessor of a `companion { … }` block property stored in one
@@ -357,15 +373,19 @@ fn plugin_and_structural_member_keys(
 ) -> std::collections::HashMap<u32, (u32, u8)> {
     use krusty::ir::IrDataClassMemberRole;
     let owner = class.fq_name_id();
-    let structural: Vec<(u32, u32)> = [
-        IrDataClassMemberRole::ToString,
-        IrDataClassMemberRole::HashCode,
-        IrDataClassMemberRole::Equals,
-    ]
-    .into_iter()
-    .filter_map(|role| ir.data_class_member(owner, role))
-    .filter_map(|function| Some((function, *ir.fn_source_order.get(&function)?)))
-    .collect();
+    // kotlinc declares a plugin's member before every member a data class generates (`componentN`,
+    // `copy`, `toString`, `hashCode`, `equals`), so it precedes the first of them.
+    let structural: Vec<(u32, u32)> = [IrDataClassMemberRole::Copy]
+        .into_iter()
+        .chain((0..class.ctor_param_count).map(IrDataClassMemberRole::Component))
+        .chain([
+            IrDataClassMemberRole::ToString,
+            IrDataClassMemberRole::HashCode,
+            IrDataClassMemberRole::Equals,
+        ])
+        .filter_map(|role| ir.data_class_member(owner, role))
+        .filter_map(|function| Some((function, *ir.fn_source_order.get(&function)?)))
+        .collect();
     let Some(first) = structural.iter().map(|&(_, order)| order).min() else {
         return std::collections::HashMap::new();
     };

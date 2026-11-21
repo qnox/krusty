@@ -11,6 +11,7 @@ mod dependency_inline_templates;
 mod diagnostic_recovery;
 mod emission_session;
 mod local_visibility;
+mod lowering_failure;
 mod metadata_handoff;
 #[cfg(test)]
 mod streaming_tests;
@@ -211,6 +212,7 @@ fn emit_analyzed_into<B: Backend>(
         return;
     }
     let (mut index, mut inline_bodies, mut default_arguments, mut source_map) = module.into_parts();
+    let dispatched_classes = backend.dispatched_dependency_classes();
     let backend_module_facts = match crate::backend::BackendModuleFacts::from_resolved_index(&index)
     {
         Ok(facts) if backend.numbers_slots() => facts.with_classes(&index),
@@ -297,12 +299,13 @@ fn emit_analyzed_into<B: Backend>(
             }
         }
         if let Err(error) = sink.accept_inline_bodies(&index, &inline_bodies) {
-            report_fir_lowering_failure(diags, "cannot consume inline FIR", &error, |target| {
-                crate::frontend::selected_external_call_diagnostic(
-                    symbols.shared_semantic_platform().as_ref(),
-                    target,
-                )
-            });
+            diags.error(
+                Span::new(0, 0),
+                format!(
+                    "internal error: cannot consume inline FIR: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
+            );
             default_arguments.take_for_source(&index, source_id);
             continue;
         }
@@ -315,7 +318,10 @@ fn emit_analyzed_into<B: Backend>(
             crate::trace_compiler!("fir", "default FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: default FIR lowering failed: {error:?}"),
+                format!(
+                    "internal error: default FIR lowering failed: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             continue;
         }
@@ -416,7 +422,8 @@ fn emit_analyzed_into<B: Backend>(
             diags.error(
                 Span::new(0, 0),
                 format!(
-                    "internal error: cannot consume completed body-local inline FIR: {error:?}"
+                    "internal error: cannot consume completed body-local inline FIR: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
                 ),
             );
             source_failed = true;
@@ -431,7 +438,10 @@ fn emit_analyzed_into<B: Backend>(
             crate::trace_compiler!("fir", "default FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: default FIR lowering failed: {error:?}"),
+                format!(
+                    "internal error: default FIR lowering failed: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             source_failed = true;
         }
@@ -451,13 +461,17 @@ fn emit_analyzed_into<B: Backend>(
             crate::trace_compiler!("fir", "FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: FIR lowering failed: {error:?}"),
+                format!(
+                    "internal error: FIR lowering failed: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             continue;
         }
         if diags.has_errors() {
             continue;
         }
+        let common_ir_preparation = backend.common_ir_preparation();
         let Some(mut file) = backend_handoff::checked_ir_file(
             CompletedSourceIr {
                 local_storage_owners: capture_storage::source_owners(&ir, &index, source_id),
@@ -471,7 +485,10 @@ fn emit_analyzed_into<B: Backend>(
                 text: source.text(),
                 stems,
                 origins: source_map.origins(),
-                common_ir_coroutines: backend.lowers_coroutines_on_common_ir(),
+                common_ir_coroutines: common_ir_preparation.is_some(),
+                dispatched_classes: &dispatched_classes,
+                appends_char_sequences_by_index: backend.appends_char_sequences_by_index(),
+                collections_through_interfaces: backend.reads_collections_through_interfaces(),
             },
             diags,
         ) else {
@@ -480,6 +497,18 @@ fn emit_analyzed_into<B: Backend>(
         before_target(&mut file, diags);
         if diags.has_errors() {
             continue;
+        }
+        if let Some(preparation) = common_ir_preparation {
+            if let Err(error) = backend_handoff::prepare_common_ir(
+                &mut file,
+                symbols.semantic_platform(),
+                preparation,
+                symbols.coroutine_runtime(),
+                &dispatched_classes,
+            ) {
+                backend.report_common_ir_preparation_error(&error, diags);
+                continue;
+            }
         }
         // A target emitting library bodies builds a range class it does not lay out through the
         // library's own declaration, which support emission below then selects.
@@ -514,8 +543,26 @@ fn emit_analyzed_into<B: Backend>(
         if diags.has_errors() {
             continue;
         }
-        backend
-            .lower_ir_file(file, state, diags)
+        let initializer_requests = if backend.emits_dependency_support() {
+            match crate::backend::initializer_declarations(&file) {
+                Ok(requests) => requests,
+                Err(reason) => {
+                    diags.error(Span::new(0, 0), format!("internal error: {reason}"));
+                    continue;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let outputs = backend.lower_ir_file(file, state, diags);
+        if !diags.has_errors() {
+            for declaration in &initializer_requests {
+                if backend.emitted_constructor_initializer(state, declaration) {
+                    dependency_support.record_initializer(declaration);
+                }
+            }
+        }
+        outputs
             .into_iter()
             .for_each(|artifact| artifacts(ArtifactOrigin::Source(raw_source), artifact));
     }
@@ -869,7 +916,7 @@ fn check_body_group(
             current = owner;
         }
     }
-    let info = crate::resolve::check_selected_declarations_in_pass_two(
+    let mut info = crate::resolve::check_selected_declarations_in_pass_two(
         crate::resolve::SourceFileUnit {
             file: active_file,
             file_index: raw_source as u32,
@@ -908,6 +955,22 @@ fn check_body_group(
             Span::new(0, 0),
             format!(
                 "internal error: checked local signatures were not publishable: {declarations:?}"
+            ),
+        );
+        return None;
+    }
+    // The body-local override plans published above can name external declarations no checked
+    // selection reached; freeze their builtin implementation facts with the unit's own.
+    if let Err(identity) = crate::resolve::record_override_edges(
+        &mut info.builtin_implementations,
+        index,
+        symbols.semantic_platform(),
+        raw_source as u32,
+    ) {
+        diags.error(
+            Span::new(0, 0),
+            format!(
+                "internal error: selected external member has incomplete builtin implementation facts: {identity:?}"
             ),
         );
         return None;
@@ -1071,16 +1134,12 @@ fn consume_body_group(
                     body: &body,
                 });
                 if let Err(error) = sink.accept_streamed_body(index, inline_bodies, owner, body) {
-                    report_fir_lowering_failure(
-                        diags,
-                        "checked FIR lowering failed",
-                        &error,
-                        |target| {
-                            crate::frontend::selected_external_call_diagnostic(
-                                symbols.shared_semantic_platform().as_ref(),
-                                target,
-                            )
-                        },
+                    diags.error(
+                        Span::new(0, 0),
+                        format!(
+                            "internal error: checked FIR lowering failed: {}",
+                            lowering_failure::describe(&error, symbols.semantic_platform())
+                        ),
                     );
                     return false;
                 }
@@ -1470,27 +1529,6 @@ pub fn check_frontend_only(
     }
     assert!(default_arguments.is_empty());
     census
-}
-
-/// Preserve the lowering failure and ask the frontend to describe its exact selected dependency.
-/// The callback owns declaration presentation; the driver retains the existing error protocol.
-fn report_fir_lowering_failure(
-    diags: &mut DiagSink,
-    context: &str,
-    error: &crate::fir_lower::FirFileLoweringFailure,
-    render_selected: impl FnOnce(crate::fir::ExternalCallableId) -> Option<String>,
-) {
-    let mut message = format!("internal error: {context}: {error:?}");
-    let selected = match error {
-        crate::fir_lower::FirFileLoweringFailure::Body(
-            crate::fir_lower::FirLoweringFailure::UnsupportedExternalCall(target),
-        ) => render_selected(*target),
-        _ => None,
-    };
-    if let Some(selected) = selected {
-        message = format!("{message}; {selected}");
-    }
-    diags.error(Span::new(0, 0), message);
 }
 
 #[cfg(test)]

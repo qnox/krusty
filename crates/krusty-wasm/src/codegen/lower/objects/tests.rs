@@ -99,7 +99,6 @@ fn reified_template_file(copy: bool) -> IrFile {
                     krusty::fir::CallableId::from_raw(0),
                 ),
                 inline_callee_source_name: "checks".to_owned(),
-                inline_callee_default_entry: false,
                 parent: None,
                 consumed_inline_capture: false,
             },

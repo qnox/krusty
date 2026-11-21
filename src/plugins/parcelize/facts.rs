@@ -75,6 +75,7 @@ pub(super) fn record(
         Err(missing) => {
             let class = &ir.classes[classes[0].class as usize];
             rejections.push(PluginRejection {
+                refusal: true,
                 span: rejection(source, class, "").span,
                 message: format!("krusty's Parcelize compiler plugin cannot run: {missing}"),
             });
@@ -234,6 +235,7 @@ fn rejection(
 ) -> PluginRejection {
     let start = crate::plugins::line_start(source.text, class.decl_line);
     PluginRejection {
+        refusal: true,
         span: crate::diag::Span::new(start, start),
         message: format!(
             "krusty's Parcelize compiler plugin does not support {what} yet; compile this module \
