@@ -538,7 +538,7 @@ impl GradleProvider {
         let version = gradle_wrapper_release(&self.root);
         let user = self.probe_gradle_user_home();
         let mut enabled = None;
-        // Gradle 8.5 introduced the unsafe name. A wrapper we cannot read keeps that name, which
+        // Gradle 7.1 introduced the unsafe name. A wrapper we cannot read keeps that name, which
         // is the property the existing probes set.
         if version.is_none_or(|release| release >= GRADLE_UNSAFE_ISOLATED_PROJECTS) {
             record_isolated_projects(
@@ -637,8 +637,10 @@ fn init_script_path(root: &Path) -> PathBuf {
     ))
 }
 
-/// First release that reads `org.gradle.unsafe.isolated-projects`.
-const GRADLE_UNSAFE_ISOLATED_PROJECTS: GradleRelease = GradleRelease::new(8, 5, 0);
+/// First release that reads `org.gradle.unsafe.isolated-projects`: Gradle 7.1 registers it as
+/// `StartParameterBuildOptions.IsolatedProjectsOption` and refuses it beside an explicitly
+/// disabled configuration cache; 7.0 has neither.
+const GRADLE_UNSAFE_ISOLATED_PROJECTS: GradleRelease = GradleRelease::new(7, 1, 0);
 /// First release that reads `org.gradle.isolated-projects`.
 const GRADLE_CANONICAL_ISOLATED_PROJECTS: GradleRelease = GradleRelease::new(9, 7, 0);
 
@@ -1315,6 +1317,32 @@ mod tests {
             "Gradle 8.14 still honors the unsafe name: {:?}",
             action.arguments
         );
+    }
+
+    #[test]
+    fn the_unsafe_isolated_projects_name_follows_the_gradle_version() {
+        for (version, honored) in [("8.4", true), ("7.1", true), ("7.0.2", false)] {
+            let tree = TempTree::new("gradle-isolated-unsafe-version");
+            tree.write("settings.gradle.kts", "");
+            write_wrapper(&tree, version);
+            tree.write(
+                "gradle.properties",
+                "org.gradle.unsafe.isolated-projects=true\n",
+            );
+            let (_, action) = probe_action(
+                &GradleProvider::new(tree.root()),
+                FakeRunner::stdout(&recorded_output()),
+            );
+            assert_eq!(
+                action
+                    .arguments
+                    .iter()
+                    .any(|argument| argument == "--no-configuration-cache"),
+                !honored,
+                "Gradle {version}: {:?}",
+                action.arguments
+            );
+        }
     }
 
     #[test]
