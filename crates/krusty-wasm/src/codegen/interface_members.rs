@@ -956,21 +956,36 @@ impl FileRecorder<'_, '_, '_> {
                 None,
             ),
             None => {
-                let function = edge
-                    .implementation_function
-                    .or_else(|| {
-                        implementation.and_then(|callable| {
-                            ir.checked_callable_functions.get(&callable).copied()
-                        })
-                    })
-                    .ok_or_else(|| {
-                        self.declined("a dependency's interface member with no body here")
-                    })?;
-                let key = function_key(ir, owner, function);
-                let slot =
-                    self.classes.tables.slot(owner, &key).ok_or_else(|| {
-                        self.declined("a dependency's interface member with no slot")
-                    })?;
+                let function = edge.implementation_function.or_else(|| {
+                    implementation
+                        .and_then(|callable| ir.checked_callable_functions.get(&callable).copied())
+                });
+                let slot = match function {
+                    Some(function) => {
+                        let key = function_key(ir, owner, function);
+                        self.classes.tables.slot(owner, &key)
+                    }
+                    // A member the class inherits from a superclass an earlier file laid out:
+                    // the slot that file's table holds it at, by the member's provider identity.
+                    None => self
+                        .classes
+                        .laid_out_superclass(self.id)
+                        .and_then(|superclass| {
+                            superclass
+                                .table
+                                .members
+                                .get(&match edge.implementation {
+                                    ResolvedFunctionOverrideTarget::Module(callable) => {
+                                        PlanKey::Callable(callable)
+                                    }
+                                    ResolvedFunctionOverrideTarget::External(target) => {
+                                        PlanKey::DependencyCallable(target)
+                                    }
+                                })
+                                .copied()
+                        }),
+                }
+                .ok_or_else(|| self.declined("a dependency's interface member with no slot"))?;
                 if self.slot_is_abstract(slot) {
                     return Ok(None);
                 }
