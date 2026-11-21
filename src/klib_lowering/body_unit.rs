@@ -1607,12 +1607,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
-        let record = self.sources.declarations.classifier(name);
-        record.map(|record| record.is_interface()).ok_or_else(|| {
-            KlibBodyDeclineReason::SignatureMismatch(format!(
-                "an object literal's supertype {name:?} is not a selected classifier"
-            ))
-        })
+        inline_functions::is_interface(self, name)
     }
 
     fn link_accessor(
