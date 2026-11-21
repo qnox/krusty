@@ -33,7 +33,6 @@ arrays/forInReversed/reversedOriginalUpdatedInLoopBody.kt
 arrays/forInReversed/reversedReversedOriginalUpdatedInLoopBody.kt
 arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
 arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
-arrays/indices.kt
 arrays/multiArrayConstructors.kt
 arrays/primitiveArrays.kt
 associatedObjects/associatedObjectNested.kt
@@ -213,7 +212,6 @@ companionBlocksAndExtensions/lateinit.kt
 compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
-compileKotlinAgainstKotlin/genericSetter.kt
 compileKotlinAgainstKotlin/inlineClasses/funInterface.kt
 compileKotlinAgainstKotlin/inlineClasses/suspendFunWithDefaultMangling.kt
 compileKotlinAgainstKotlin/interfaceDelegationAndBridgesProcessing.kt
@@ -1178,7 +1176,6 @@ ir/enumClass3.kt
 ir/fileClassInitializers.kt
 ir/serializationRegressions/anonFakeOverride.kt
 ir/serializationRegressions/innerClassInEnumEntryClass.kt
-ir/serializationRegressions/useImportedMember.kt
 ir/serializationRegressions/varAsFunctionCall.kt
 jdk/iteratingOverHashMap.kt
 jdk/noStringToCharArray.kt
@@ -1341,7 +1338,6 @@ ranges/contains/evaluationOrderForRangeLiteral.kt
 ranges/contains/evaluationOrderForRangeLiteralReversed.kt
 ranges/contains/evaluationOrderForUntil.kt
 ranges/contains/evaluationOrderForUntilReversed.kt
-ranges/contains/generated/arrayIndices.kt
 ranges/contains/generated/charDownTo.kt
 ranges/contains/generated/doubleRangeTo.kt
 ranges/contains/generated/floatRangeTo.kt
