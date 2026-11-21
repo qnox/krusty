@@ -210,6 +210,24 @@ pub(super) fn transform(ir: &mut IrFile) {
     for function in &facts.functions {
         add_composer_parameters(ir, function);
     }
+    for taker in &facts.lambda_takers {
+        // An extension receiver precedes the declared parameters in the physical ones.
+        let receiver = usize::from(ir.extension_receiver_fns.contains(&taker.function));
+        let declaration = &mut ir.functions[taker.function as usize];
+        for &(index, _) in &taker.parameters {
+            if let TyKind::Fun(signature) = declaration.params[index + receiver].kind() {
+                declaration.params[index + receiver] =
+                    runtime::composable_function(&signature.params);
+            }
+        }
+        ir.plugin_extended_signatures.insert(taker.function);
+        if let Some(scheme) = &taker.inferred_target {
+            ir.function_annotations
+                .entry(taker.function)
+                .or_default()
+                .push_metadata_visible(runtime::composable_inferred_target(scheme));
+        }
+    }
     // A lambda's calls are given their composer before its callers read it from the singletons
     // or remember it.
     for lambda in &facts.lambdas {
