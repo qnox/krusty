@@ -167,6 +167,16 @@ fn wasm_official_dependency_subclasses_implement_interfaces_with_inherited_bodie
     );
 }
 
+/// A public constructor that delegates to a library-private primary constructor lowers from the
+/// official producer's bodies, though no provider publishes the private constructor to source.
+#[test]
+fn wasm_official_dependency_public_constructors_delegate_to_a_private_primary() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyPrivatePrimaryConstructor.kt"),
+        "DependencyPrivatePrimaryConstructor",
+    );
+}
+
 /// Run the shared two-module program through the product producer, then compile its consumer
 /// against the library the exact official Wasm compiler produces and run it, on every target.
 fn run_against_official_producer(source: &str, name: &str) {
