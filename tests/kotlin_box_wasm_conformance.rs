@@ -1779,6 +1779,19 @@ fn wasm_data_class_unit_property_uses_units_fixed_hash() {
     );
 }
 
+// PLATFORM-SPECIFIC: the Wasm runtime lays out its own `ArrayList` iterator as a struct that no
+// declared class stands for, so its interface membership is recorded by the backend. Native
+// lowers the stdlib's `ArrayList` instead and does not yet lower `listIterator`; that gap is
+// reported, not excused, and the shared `arrayListIteratorInterfaces.kt` covers `iterator()` on
+// every lane.
+#[test]
+fn wasm_runtime_list_iterator_is_a_list_iterator() {
+    expect_wasm_box(
+        include_str!("wasm_regressions/arrayListListIteratorInterfaces.kt"),
+        "wasmArrayListListIteratorInterfaces",
+    );
+}
+
 #[path = "wasm_unsigned_decimal.rs"]
 mod unsigned_decimal;
 

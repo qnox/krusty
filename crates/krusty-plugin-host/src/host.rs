@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use krusty_plugin_ir::{CallableIdentity, ModuleIr};
+use krusty_plugin_api::ir::{CallableIdentity, ModuleIr};
 
 use crate::adapter;
 use crate::environment::Environment;
