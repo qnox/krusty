@@ -305,6 +305,8 @@ classes/kt508.kt
 classes/nestedInitBlocksWithLambda.kt
 classes/overloadUnaryOperator.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
+closures/capturedVarsOptimization/kt44347.kt
+closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
 closures/closuresAsSingleton.kt
 closures/kt11634_4.kt
@@ -396,6 +398,8 @@ coroutines/asyncIteratorNullMerge_1_3.kt
 coroutines/asyncIteratorToList_1_3.kt
 coroutines/asyncIterator_1_3.kt
 coroutines/await.kt
+coroutines/beginWithException.kt
+coroutines/beginWithExceptionNoHandleException.kt
 coroutines/bridges/interfaceGenericDefault.kt
 coroutines/bridges/interfaceSpecialization.kt
 coroutines/bridges/lambdaWithLongReceiver.kt
@@ -406,6 +410,7 @@ coroutines/builderInferenceAndGenericArrayAcessCall.kt
 coroutines/captureInfixFun.kt
 coroutines/captureMutableLocalVariableInsideCoroutineBlock.kt
 coroutines/captureUnaryOperator.kt
+coroutines/capturedVarInSuspendLambda.kt
 coroutines/castWithSuspend.kt
 coroutines/catchWithInlineInsideSuspend.kt
 coroutines/coercionToUnit.kt
@@ -457,6 +462,7 @@ coroutines/coroutineContext1.kt
 coroutines/coroutineContext2.kt
 coroutines/coroutineContextInInlinedLambda.kt
 coroutines/correctOrder1.kt
+coroutines/createCoroutineSafe.kt
 coroutines/crossInlineWithCapturedOuterReceiver.kt
 coroutines/defaultParameterLambdaInSuspend.kt
 coroutines/defaultParametersInSuspend.kt
@@ -547,6 +553,7 @@ coroutines/inlineClasses/direct/covariantOverrideSuspendFunWithNullableInlineCla
 coroutines/inlineClasses/direct/covariantOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/direct/covariantOverrideSuspendFun_Int.kt
 coroutines/inlineClasses/direct/createMangling.kt
+coroutines/inlineClasses/direct/createOverride.kt
 coroutines/inlineClasses/direct/defaultStub.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun_Any.kt
@@ -597,6 +604,7 @@ coroutines/inlineClasses/resume/covariantOverrideSuspendFunWithNullableInlineCla
 coroutines/inlineClasses/resume/covariantOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/resume/covariantOverrideSuspendFun_Int.kt
 coroutines/inlineClasses/resume/createMangling.kt
+coroutines/inlineClasses/resume/createOverride.kt
 coroutines/inlineClasses/resume/defaultStub.kt
 coroutines/inlineClasses/resume/genericOverrideSuspendFun.kt
 coroutines/inlineClasses/resume/genericOverrideSuspendFun_Any.kt
@@ -642,6 +650,7 @@ coroutines/inlineClasses/resumeWithException/covariantOverrideSuspendFunWithNull
 coroutines/inlineClasses/resumeWithException/covariantOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/resumeWithException/covariantOverrideSuspendFun_Int.kt
 coroutines/inlineClasses/resumeWithException/createMangling.kt
+coroutines/inlineClasses/resumeWithException/createOverride.kt
 coroutines/inlineClasses/resumeWithException/genericOverrideSuspendFun.kt
 coroutines/inlineClasses/resumeWithException/genericOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/resumeWithException/genericOverrideSuspendFun_Any_NullableInlineClassUpperBound.kt
@@ -664,9 +673,16 @@ coroutines/inlineSuspendTypealias.kt
 coroutines/inlinedTryCatchFinally.kt
 coroutines/innerSuspensionCalls.kt
 coroutines/instanceOfContinuation.kt
+coroutines/intLikeVarSpilling/complicatedMerge.kt
+coroutines/intLikeVarSpilling/i2bResult.kt
 coroutines/intLikeVarSpilling/listThrowablePairInOneSlot.kt
+coroutines/intLikeVarSpilling/loadFromBooleanArray.kt
+coroutines/intLikeVarSpilling/loadFromByteArray.kt
 coroutines/intLikeVarSpilling/noVariableInTable.kt
+coroutines/intLikeVarSpilling/sameIconst1ManyVars.kt
 coroutines/intLikeVarSpilling/unusedCatchVar.kt
+coroutines/intLikeVarSpilling/usedInMethodCall.kt
+coroutines/intLikeVarSpilling/usedInVarStore.kt
 coroutines/intrinsicSemantics/coroutineContext.kt
 coroutines/intrinsicSemantics/coroutineContextReceiver.kt
 coroutines/intrinsicSemantics/coroutineContextReceiverNotIntrinsic.kt
@@ -678,7 +694,9 @@ coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturnInterception.kt
 coroutines/intrinsicSemantics/suspendCoroutineUninterceptedOrReturn.kt
 coroutines/iterateOverArray.kt
 coroutines/kt12958.kt
+coroutines/kt15016.kt
 coroutines/kt15017.kt
+coroutines/kt15930.kt
 coroutines/kt21080.kt
 coroutines/kt21605.kt
 coroutines/kt24135.kt
@@ -698,6 +716,9 @@ coroutines/kt49168.kt
 coroutines/kt49317.kt
 coroutines/kt51530.kt
 coroutines/kt51718.kt
+coroutines/kt52311_nullOnLeft.kt
+coroutines/kt52311_nullOnRight.kt
+coroutines/kt52561.kt
 coroutines/kt55494.kt
 coroutines/kt56407.kt
 coroutines/kt82803.kt
@@ -722,6 +743,7 @@ coroutines/localFunctions/named/stateMachine.kt
 coroutines/localFunctions/named/withArguments.kt
 coroutines/longRangeInSuspendCall.kt
 coroutines/longRangeInSuspendFun.kt
+coroutines/mergeNullAndString.kt
 coroutines/multiModule/inheritFromAnotherModule.kt
 coroutines/multiModule/inlineCrossModule.kt
 coroutines/multiModule/inlineFunctionWithOptionalParam.kt
@@ -752,6 +774,7 @@ coroutines/simple2.kt
 coroutines/simpleException.kt
 coroutines/simpleSuspendCallableReference.kt
 coroutines/simpleWithDefaultValue.kt
+coroutines/simpleWithHandleResult.kt
 coroutines/stackUnwinding/exception.kt
 coroutines/stackUnwinding/inlineSuspendFunction.kt
 coroutines/stackUnwinding/rethrowInFinally.kt
@@ -765,6 +788,7 @@ coroutines/suspendConversion.kt
 coroutines/suspendConversion/intersectionTypeToSubtypeConversion.kt
 coroutines/suspendConversion/onArgument.kt
 coroutines/suspendConversion/onInlineArgument.kt
+coroutines/suspendConversion/onNullableArgument.kt
 coroutines/suspendConversion/subtypeOfFunctionalTypeToSuspendConversion.kt
 coroutines/suspendConversion/suspendConversionBetweenFunInterfaces.kt
 coroutines/suspendCoroutineFromStateMachine.kt
@@ -777,7 +801,9 @@ coroutines/suspendFunImportedFromObject.kt
 coroutines/suspendFunctionAsCoroutine/handleException.kt
 coroutines/suspendFunctionAsCoroutine/ifExpressionInsideCoroutine_1_3.kt
 coroutines/suspendFunctionAsCoroutine/inline.kt
+coroutines/suspendFunctionAsCoroutine/inlineTwoReceivers.kt
 coroutines/suspendFunctionAsCoroutine/member.kt
+coroutines/suspendFunctionAsCoroutine/noinlineTwoReceivers.kt
 coroutines/suspendFunctionAsCoroutine/operators.kt
 coroutines/suspendFunctionAsCoroutine/privateFunctions.kt
 coroutines/suspendFunctionAsCoroutine/privateInFile.kt
@@ -825,11 +851,14 @@ coroutines/unitTypeReturn/coroutineNonLocalReturn.kt
 coroutines/unitTypeReturn/coroutineReturn.kt
 coroutines/unitTypeReturn/interfaceDelegation.kt
 coroutines/unitTypeReturn/suspendNonLocalReturn.kt
+coroutines/unitTypeReturn/suspendReturn.kt
 coroutines/unitTypeReturn/unitSafeCall.kt
 coroutines/unsafeTransform.kt
 coroutines/varCaptuedInCoroutineIntrinsic.kt
 coroutines/varSpilling/fakeInlinerVariables.kt
+coroutines/varSpilling/kt19475.kt
 coroutines/varSpilling/kt38925.kt
+coroutines/varSpilling/kt64139.kt
 coroutines/varSpilling/kt75926.kt
 coroutines/varSpilling/kt79276.kt
 coroutines/varSpilling/nullSpilling.kt
