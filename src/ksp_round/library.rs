@@ -2,7 +2,7 @@
 //! by name when a processor first reaches one, from the declaration header krusty's library
 //! provider reads, and the name kotlinc's class map gives one across the JVM boundary.
 
-use krusty_plugin_ir::{
+use krusty_plugin_api::ksp::{
     KspClass, KspClassKind, KspClasspath, KspLibraryClass, KspModifier, KspNameMapping, KspOrigin,
     KspType, KspTypeDeclaration,
 };
