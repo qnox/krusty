@@ -405,7 +405,7 @@ identity krusty names a dependency's declaration by when it hands the host IR th
 
 ### The module's IR
 
-`Host::generate` hands the session the module's own declarations as a `ModuleIr` (from `crates/krusty-plugin-ir`, plain data with no dependencies, so the compiler can build it without depending on the host): each source file
+`Host::generate` hands the session the module's own declarations as a `ModuleIr` (`krusty_plugin_api::ir`, plain data in the plugin API, so the compiler builds it without depending on the host): each source file
 with its path, package and text, and its functions in kotlinc's IR shape, every element with the
 UTF-16 offsets kotlinc gives the same source. The host builds them as fir2ir builds a module's
 sources (every declaration first, so a body can call any function of the module, then every body),
@@ -430,7 +430,7 @@ value arguments. A test compiles the same source with kotlinc and an IR plugin t
 with its offsets, then builds krusty's IR for it in the host under the same plugin, and requires the
 two dumps to be identical.
 
-krusty builds that `ModuleIr` from checked FIR: `hosted_plugin_ir::plugin_module_ir` analyzes the
+krusty builds that `ModuleIr` from checked FIR: `plugin_ir::plugin_module_ir` analyzes the
 module and runs Pass 2 with a `CheckedBodyObserver` that sees each checked body before common
 lowering consumes it. Declarations come from the parser's unit and the resolved index, statements
 and expressions from checked FIR, offsets from source spans converted to UTF-16. kotlinc's own

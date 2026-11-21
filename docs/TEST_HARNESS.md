@@ -15,10 +15,11 @@ which is why `just fmt` and `just fmt-check` also pass `tests/*_e2e.rs` to rustf
 
 ## Compiler/plugin model reuse across worktrees
 
-`krusty-plugin-ir` records the workspace's existing `KRUSTY_BUILD_CHECKOUT` input in Rust dep-info.
-Its `shared_checkout` integration test builds two copies of the real model crate against one Cargo
-target, proves each consumer sees its own model API, and checks unchanged-checkout artifact reuse.
-The nested Cargo fixtures are dependency-free, offline and unoptimized; they do not inherit the
+`krusty-plugin-api` records the workspace's existing `KRUSTY_BUILD_CHECKOUT` input in Rust dep-info.
+Its `shared_checkout` integration test builds two copies of the real API crate (with the
+`krusty-names` crate it depends on) against one Cargo target, proves each consumer sees its own API,
+and checks unchanged-checkout artifact reuse. The nested Cargo fixtures build offline and
+unoptimized; they do not inherit the
 parent compiler's coverage flags or wrappers. Keep the shared target intact when reproducing this
 case: cleaning it hides the ownership defect.
 
@@ -60,7 +61,7 @@ when the test step fails. These are outputs of the original attempt, not diagnos
   recipe is a plain download, so do what it does:
 
   ```sh
-  ver=$(sed 's/#.*//' kotlin-versions | awk 'NF { print $1 }' | sort -V | tail -n 1)
+  ver=$(sed 's/#.*//' kotlin-versions | awk 'NF { print $1 }' | scripts/sort-kotlin-versions.sh | tail -n 1)
   dest="$PWD/target/cache/kotlinc/$ver"
   mkdir -p "$dest"
   curl -fsSL "https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-compiler-${ver}.zip" -o /tmp/kotlinc.zip
@@ -439,6 +440,33 @@ compiled live and how many invocations it made:
 class-dump: live kotlinc summary invocations=<n> tests=<n>
 class-dump: live kotlinc summary cache-miss test=<module>::<case> invocations=<n>
 ```
+
+## Plugin box corpora
+
+A compiler plugin keeps its own box corpus beside its code: `src/plugins/<name>/boxes/corpus.txt`
+describes what the plugin's cases need, and the shared harness (`krusty::conformance::plugin_corpus`)
+discovers it with no per-plugin branch. The descriptor names the case directive that enables the
+plugin (`// WITH_COMPOSE`), the reference compiler plugin jar and `-P` options, the runtime jars, the
+upstream `JetBrains/kotlin` `testData` directories, and the inclusive Kotlin release bracket the
+corpus covers; the module documentation lists the format. A case whose compiler is outside the
+bracket fails closed instead of compiling without the plugin.
+
+`just plugin-corpus <plugin> [version]` provisions the descriptor's `upstream` and `support` paths
+under `target/cache/plugin-corpus/<plugin>/<version>/` and prints that root. A new plugin registers
+by adding its descriptor to `DESCRIPTORS` in `src/conformance/plugin_corpus.rs`.
+
+A descriptor that names a `directive` and an `upstream` directory is run by
+`plugin_box_corpus::plugin_box_corpora_match_their_inventories` in the conformance binary, one path
+for every plugin: each upstream case compiles with the descriptor's directive and `support` sources
+against its runtime jars and Java `stubs`. The reference compiler runs the case first, and a case it
+cannot pass under that runtime is not applicable (`expected_not_applicable/jvm/<version>.txt`).
+A corpus starts clean: only the cases krusty passes are listed in `included/jvm/<version>.txt` and
+each must keep passing, while a case that does not pass yet is not included and joins the list in
+the change that makes it pass. A case that passes without being included fails the run, so the
+list only catches up. Both lists sit beside the descriptor (`src/plugins/<name>/boxes/`) and follow
+the same release-inheritance rule as the box inventories.
+Regenerate a plugin's lists with
+`KRUSTY_BLESS_BOX_EXPECTATIONS=1 ./run-tests.sh --test conformance plugin_box_corpora_match`.
 
 ## CLI Corpus Ratchet
 

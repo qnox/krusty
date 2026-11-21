@@ -48,6 +48,16 @@ pub fn checked_box(src: &str, stem: &str) -> Result<ReferenceClasses, String> {
 /// Establish the JVM result of source already prepared by the JVM corpus runner. Preparation
 /// cannot run twice: directives such as CHECK_TYPE_WITH_EXACT inject support declarations.
 pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, String> {
+    checked_prepared_box_with(src, stem, &[])
+}
+
+/// [`checked_prepared_box`] with `extra` classpath entries (a plugin corpus's runtime stubs) after
+/// the ones the case's directives select.
+pub fn checked_prepared_box_with(
+    src: &str,
+    stem: &str,
+    extra: &[PathBuf],
+) -> Result<ReferenceClasses, String> {
     if !krusty::conformance::backend_targeted(src, &["JVM", "JVM_IR"])
         || krusty::conformance::backend_muted(src, &["JVM", "JVM_IR"])
     {
@@ -57,7 +67,8 @@ pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, S
         return Err("owned box fixture requires the configured reference Kotlin compiler".into());
     }
     let jdk = producing_jdk_modules()?;
-    let classpath = common::classpath_jars_for(src);
+    let mut classpath = common::classpath_jars_for(src);
+    classpath.extend_from_slice(extra);
     let reference = reference_compile(
         src,
         stem,
