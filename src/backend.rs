@@ -245,7 +245,7 @@ pub trait Backend {
     /// `toString` rendering (Kotlin/Wasm JS's ranged append). The handoff then freezes those
     /// `CharSequence` members for the target to call
     /// ([`CheckedBackendCallables::char_sequence_protocol`]).
-    fn reads_appended_char_sequences(&self) -> bool {
+    fn appends_char_sequences_by_index(&self) -> bool {
         false
     }
 

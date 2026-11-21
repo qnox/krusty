@@ -5,10 +5,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use krusty_plugin_host::{
-    provision, CallableIdentity, CallableKind, ClassName, Classifier, Curl, Environment, Host,
-    HostError, HostRuntime, Pins, Request, SessionRequest, TypeArgument, TypeIdentity,
+use krusty_plugin_api::ir::{
+    CallableIdentity, CallableKind, ClassName, Classifier, TypeArgument, TypeIdentity,
     TypeParameterOwner,
+};
+use krusty_plugin_host::{
+    provision, Curl, Environment, Host, HostError, HostRuntime, Pins, Request, SessionRequest,
 };
 
 mod support;

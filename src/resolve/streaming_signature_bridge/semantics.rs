@@ -58,10 +58,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         qualifier: &str,
         origin: crate::fir::OriginId,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
         let mut segments = qualifier.split('.');
         let Some(root) = segments.next() else {
@@ -635,10 +632,7 @@ impl ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
         let resolved_type_arguments = type_arguments
             .iter()
@@ -1014,10 +1008,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         spelling: &str,
         origin: crate::fir::OriginId,
         expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         self.select_value_candidate(scope, spelling, origin, expected, demand)
             .map(|selected| selected.result)
@@ -1034,10 +1025,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         trailing_lambda: bool,
         qualified_namespace: bool,
         expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         crate::trace_compiler!(
             "signature",
@@ -1518,7 +1506,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // functions at this same receiver rung. The property declaration and the `invoke`
             // convention are both selected by the shared resolver; SigExpr only composes them.
             if let Some(callee) =
-                self.selected_member_property_type(scope, receiver, spelling, None, demand)?
+                self.invoke_callee_property_type(scope, receiver, spelling, demand)?
             {
                 if let Ok(result) = self.invoke_result(scope, origin, callee, arguments, demand) {
                     return Ok(result);
@@ -2051,10 +2039,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         qualified: bool,
         refresh_typed_postponed: bool,
         expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
         let resolved_type_arguments = type_arguments
             .iter()
@@ -2413,10 +2398,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         spelling: &str,
         origin: crate::fir::OriginId,
         expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         // Receiver-less `::x` binds at the first applicable implicit receiver rung, or names an
         // associated declaration of an open static scope.
@@ -2658,10 +2640,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         receiver: crate::fir::ResolvedTy,
         unbound: bool,
         expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         // `Outer::Nested` and `Outer::Inner` select a nested classifier's constructor through the
         // same semantic nested-classifier lookup as ordinary resolution. An unbound inner
@@ -3167,10 +3146,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         _origin: crate::fir::OriginId,
         receiver: Option<crate::fir::ResolvedTy>,
         _unbound: bool,
-        _demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        _demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let is_lateinit = |declaration: Option<crate::fir::DeclarationId>| {
             declaration.is_some_and(|declaration| {
@@ -3456,10 +3432,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
         receiver: crate::fir::ResolvedTy,
         _expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         self.forget_selected_result_publication(origin);
         crate::trace_compiler!(
@@ -3645,10 +3618,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
         signature_result_constraint: Option<crate::fir::SignatureCallResultConstraint>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
         crate::trace_compiler!("signature", "select_member_call spelling={spelling}");
         self.forget_selected_result_publication(origin);
@@ -3872,13 +3842,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 // A member PROPERTY whose value is callable participates in call syntax after
                 // ordinary member functions, exactly as at a top-level callee: `outer.Inner().fn()`
                 // reads the property `fn` and applies the `invoke` convention to its value.
-                if let Some(callee) = self.selected_member_property_type(
-                    scope,
-                    receiver.get(),
-                    spelling,
-                    None,
-                    demand,
-                )? {
+                if let Some(callee) =
+                    self.invoke_callee_property_type(scope, receiver.get(), spelling, demand)?
+                {
                     if let Ok(result) = self.invoke_result(scope, origin, callee, arguments, demand)
                     {
                         return Ok(crate::fir::ResolvedMemberCall {
@@ -4058,10 +4024,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         trailing_lambda: bool,
         refresh_typed_postponed: bool,
         signature_result_constraint: Option<crate::fir::SignatureCallResultConstraint>,
-        _demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        _demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
         if spelling == "invoke" && type_arguments.is_empty() {
             if let Ok(expectations) = self.invoke_argument_expectations_for_refresh(
@@ -4129,10 +4092,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         receiver: crate::fir::ResolvedTy,
         argument: crate::fir::ResolvedTy,
         local_operator: Option<crate::fir::ResolvedTy>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> bool {
         super::operator_conventions::selects_in_place_assignment(
             self,
@@ -4153,10 +4113,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
         lhs: crate::fir::ResolvedTy,
         rhs: crate::fir::ResolvedTy,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         super::operator_conventions::select_binary(self, scope, operator, origin, lhs, rhs, demand)
     }
@@ -4167,10 +4124,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
         callee: crate::fir::ResolvedTy,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::InvokeSelection, crate::fir::DiagnosticId> {
         self.select_value_invoke(scope, origin, callee, arguments, demand)
     }
@@ -4255,10 +4209,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         delegate: crate::fir::ResolvedTy,
         expected: Option<crate::fir::ResolvedTy>,
         site: crate::fir::ResolvedSignatureDelegateSite,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         self.select_delegate_signature(scope, delegate, expected, site, demand)
     }

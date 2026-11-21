@@ -5,7 +5,7 @@ use crate::compiler::{CheckedBodyObserver, ObservedBody, ObservedModule};
 use crate::diag::Span;
 use crate::fir::{DeclarationId, DeclarationKind, SourceFileId};
 use crate::fx_hash::HashMap;
-use krusty_plugin_ir::{FileIr, FunctionIr, ModuleIr};
+use krusty_plugin_api::ir::{FileIr, FunctionIr, ModuleIr};
 
 use super::call_spans::CallSpans;
 use super::function::encode_function;

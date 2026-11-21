@@ -15,10 +15,7 @@ impl ProductionSignatureSemantics<'_> {
         delegate: crate::fir::ResolvedTy,
         expected: Option<crate::fir::ResolvedTy>,
         site: crate::fir::ResolvedSignatureDelegateSite,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let (provide_ref, this_ref) = self.delegate_first_arguments(&site);
         // The classifier is resolved through the same source that answers applicability, so this
@@ -346,10 +343,7 @@ impl ProductionSignatureSemantics<'_> {
         delegate: Ty,
         name: &str,
         this_ref: Ty,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> crate::fir::DiagnosticId {
         let (source, by_span) = self.delegate_by_location(&site);
         assert_eq!(
@@ -398,10 +392,7 @@ impl ProductionSignatureSemantics<'_> {
         name: &str,
         this_ref: Ty,
         candidates: &[crate::libraries::FunctionInfo],
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> crate::fir::DiagnosticId {
         let (source, by_span) = self.delegate_by_location(&site);
         assert_eq!(
@@ -441,10 +432,7 @@ impl ProductionSignatureSemantics<'_> {
         name: &str,
         this_ref: Ty,
         candidates: &[super::super::MemberExtensionFunctionCandidate],
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> crate::fir::DiagnosticId {
         let (source, by_span) = self.delegate_by_location(&site);
         assert_eq!(
@@ -507,10 +495,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         families: &crate::resolve::delegated_properties::DelegateConventionFamilies,
         name: &str,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<
         Vec<crate::resolve::delegated_properties::DelegateConventionDiagnosticCandidate>,
         crate::fir::DiagnosticId,
@@ -576,10 +561,7 @@ impl ProductionSignatureSemantics<'_> {
     fn determined_candidate_result(
         &self,
         candidate: &crate::libraries::FunctionInfo,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Ty, crate::fir::DiagnosticId> {
         let recorded = candidate.callable.ret;
         if !recorded.mentions_pending() {

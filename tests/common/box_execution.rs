@@ -45,6 +45,11 @@ pub fn run_box(
     for j in cp_jars {
         if j.is_dir() {
             request_classes.extend(dir_classes(j)?.iter().cloned());
+        } else if krusty::toolchain::is_plugin_runtime_jar(j) {
+            // A plugin runtime links against the corpus's per-request stubs; on the system
+            // classpath it would pin one request's stub classes through a loader constraint and
+            // fail every later request's call with a LinkageError.
+            request_classes.extend(jar_classes(j)?.iter().cloned());
         } else {
             cp.push(':');
             cp.push_str(&j.to_string_lossy());
@@ -189,4 +194,34 @@ fn setup_runner(java_home: &str) -> Option<PathBuf> {
             }
         })
         .clone()
+}
+
+/// The classes of a jar: internal name and bytes.
+type JarClasses = Arc<Vec<(String, Vec<u8>)>>;
+
+/// The classes of `jar`, read once per process.
+fn jar_classes(jar: &Path) -> Option<JarClasses> {
+    type Memo = Mutex<std::collections::HashMap<PathBuf, JarClasses>>;
+    static MEMO: OnceLock<Memo> = OnceLock::new();
+    let memo = MEMO.get_or_init(Default::default);
+    if let Some(hit) = memo.lock().unwrap_or_else(|e| e.into_inner()).get(jar) {
+        return Some(hit.clone());
+    }
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(jar).ok()?).ok()?;
+    let mut classes = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).ok()?;
+        let entry_name = entry.name().ok()?.into_owned();
+        let Some(name) = entry_name.strip_suffix(".class").map(str::to_owned) else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).ok()?;
+        classes.push((name, bytes));
+    }
+    let classes = Arc::new(classes);
+    memo.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(jar.to_path_buf(), classes.clone());
+    Some(classes)
 }
