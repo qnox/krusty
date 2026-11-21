@@ -1347,6 +1347,16 @@ impl Body<'_> {
         self.classifiers.is_subclassifier(array_list, interface)
     }
 
+    /// Whether the runtime's list iterator, whose class the program does not declare, is below the
+    /// library interface `interface`: it is a `MutableListIterator`, as `ArrayList`'s own is.
+    fn runtime_array_list_iterator_is_below(&self, interface: TypeName) -> bool {
+        let Some(iterator) = Ty::obj("kotlin/collections/MutableListIterator").obj_internal()
+        else {
+            return false;
+        };
+        self.classifiers.is_subclassifier(iterator, interface)
+    }
+
     /// Replace the reference on the stack with whether it is an instance of the library interface
     /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
     /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
@@ -1361,6 +1371,7 @@ impl Body<'_> {
                 .classifiers
                 .is_subclassifier(krusty::types::wk::string_builder(), interface),
             array_list: self.runtime_array_list_is_below(interface),
+            array_list_iterator: self.runtime_array_list_iterator_is_below(interface),
         };
         self.runtime
             .builtin_instances(interface, subtypes, laid_out);
