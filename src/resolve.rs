@@ -286,6 +286,7 @@ mod enhanced_values;
 use declaration_publication::inferred_declaration_ty;
 mod overload_diagnostics;
 mod override_plans;
+mod override_results;
 mod parameter_defaults;
 use parameter_defaults::ParameterDefaultFlow;
 mod platform_value_narrowing;
@@ -41624,6 +41625,7 @@ impl<'a> Checker<'a> {
                 &mut props,
             );
             let methods: Vec<&FunDecl> = cl.methods.iter().collect();
+            let mut deferred_results = override_results::DeferredOverrideResults::default();
             self.check_conflicting_member_overloads(d, current_owner, &methods);
             if let Some(internal) = current_owner {
                 // An `override` member must match one complete invariant input signature in the
@@ -41668,23 +41670,19 @@ impl<'a> Checker<'a> {
                         // same body owns that binding and this diagnostic.
                         local_method_dependencies::OverrideImplementation::Unbound => continue,
                     };
-                    let operator_equals_override = self.recognize_any_equals_override(
-                        m,
-                        implementation_declaration,
-                        implementation.as_ref(),
-                    );
+                    let operator_equals_override =
+                        self.recognize_any_equals_override(m, implementation_declaration);
+                    let candidates = self.override_candidates(&direct_supertypes, &m.name);
+                    if let Some(implementation) = implementation.as_ref() {
+                        let result = override_results::OverrideResult {
+                            method: method_index,
+                            class: (d, internal),
+                            identity: (source_member, implementation_declaration),
+                        };
+                        let checked = (implementation, candidates.clone());
+                        self.check_override_results(cl, result, checked, &mut deferred_results);
+                    }
                     let source = self.fed_source();
-                    let candidates = direct_supertypes
-                        .iter()
-                        .flat_map(|supertype| {
-                            crate::symbol_resolver::member_declarations_in_hierarchy(
-                                &source, *supertype, &m.name,
-                            )
-                            .into_parts()
-                            .0
-                            .overloads
-                        })
-                        .collect::<Vec<_>>();
                     let mut overrides_super =
                         implementation.as_ref().is_some_and(|implementation| {
                             candidates.iter().any(|candidate| {
@@ -41937,6 +41935,7 @@ impl<'a> Checker<'a> {
                 }
                 method_check_index += 1;
             }
+            self.check_deferred_override_results(cl, deferred_results);
             if body_local_class {
                 self.check_class_abstract_members(d, cl, current_owner);
             }

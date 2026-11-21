@@ -2263,24 +2263,11 @@ impl ProductionSignatureSemantics<'_> {
                                 .map(SignatureImplicitReceiver::context_parameter),
                         );
                     }
-                    let arguments = signature
-                        .type_params
-                        .iter()
-                        .enumerate()
-                        .map(|(index, name)| {
-                            let bound = signature
-                                .type_param_bounds
-                                .get(index)
-                                .copied()
-                                .filter(|bound| *bound != Ty::Error)
-                                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                            Ty::ty_param(name, bound)
-                        })
-                        .collect::<Vec<_>>();
-                    receivers.push(SignatureImplicitReceiver::ordinary(Ty::obj_args_name(
-                        signature.internal,
-                        &arguments,
-                    )));
+                    // An inner classifier's receiver carries the outer formals it captures, the
+                    // same self type its members are declared against.
+                    receivers.push(SignatureImplicitReceiver::ordinary(
+                        semantic_classifier_self(signature),
+                    ));
                     if direct_classifier {
                         receivers.extend(
                             self.classifier_context_receivers(owner, scope.source)
@@ -2413,6 +2400,7 @@ fn semantic_classifier_self(signature: &ClassSig) -> Ty {
                     .type_param_bounds
                     .get(ordinal)
                     .copied()
+                    .filter(|bound| *bound != Ty::Error)
                     .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
             )
         });
