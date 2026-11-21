@@ -10,9 +10,24 @@ impl Parser<'_> {
     /// Parse `(a: A, vararg b: B, noinline c: () -> Unit = …)`, positioned on the `(`.
     pub(super) fn parse_param_list(&mut self) -> Vec<Param> {
         let mut params = Vec::new();
-        self.expect(TokenKind::LParen, "'('");
+        let open = self.tok().span;
+        if !self.expect(TokenKind::LParen, "'('") {
+            // `fun` with no parameter list still owes a `)`, reported on the token that is there.
+            self.expect(TokenKind::RParen, "')'");
+            return params;
+        }
         self.skip_semicolons();
+        let mut closed_by_enclosing = false;
+        let mut expecting_parameter = true;
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+            // `}` belongs to the enclosing class. Parsing it as a parameter cascades
+            // "expected parameter name / ':' / type / ')'" at the brace. kotlinc reports one
+            // syntax error at the unclosed `(`.
+            if self.at(TokenKind::RBrace) {
+                closed_by_enclosing = true;
+                break;
+            }
+            expecting_parameter = false;
             let prefix_start = self.i;
             let mut pmods = Vec::new();
             let mut pannos = Vec::new();
@@ -84,8 +99,23 @@ impl Parser<'_> {
                 break;
             }
             self.skip_semicolons();
+            expecting_parameter = true;
         }
-        self.expect(TokenKind::RParen, "')'");
+        if closed_by_enclosing {
+            self.diags
+                .error(Span::new(open.hi, open.hi), "syntax error: Expecting ')'.");
+        } else if expecting_parameter && self.at(TokenKind::Eof) {
+            // The list ended while a parameter was still required. kotlinc reports these three
+            // syntax errors at the EOF token, not a parameter-name / ':' / type cascade.
+            let at = self.tok().span;
+            self.diags
+                .error(at, "syntax error: Parameter name expected.");
+            self.diags
+                .error(at, "syntax error: Expecting comma or ')'.");
+            self.diags.error(at, "syntax error: Expecting ')'.");
+        } else {
+            self.expect(TokenKind::RParen, "')'");
+        }
         params
     }
 

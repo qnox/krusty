@@ -14,7 +14,7 @@ use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::ksp_round::KspLibraries;
 use krusty::source::SourceInput;
-use krusty_plugin_ir::{
+use krusty_plugin_api::ksp::{
     KspAnnotation, KspClassKind, KspClasspath, KspLibraryClass, KspModifier, KspNameMapping,
     KspOrigin, KspType, KspTypeArgument, KspTypeDeclaration, KspValue, KspVariance,
 };

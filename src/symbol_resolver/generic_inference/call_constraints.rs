@@ -1008,7 +1008,34 @@ fn collect_call_inference_constraints(
         ),
         TyKind::StarProjection(_) => {}
         TyKind::Fun(function) => {
-            let TyKind::Fun(actual) = actual.non_null().kind() else {
+            // A nominal callable (`KFunction1<K, String>`, a class implementing `(A) -> R`) reaches
+            // a function-typed formal through the callable supertype view of the formal's own
+            // shape, as extension-receiver applicability reads it. A class that implements several
+            // function supertypes contributes only the view with the formal's arity and
+            // suspension; views of another shape say nothing about this formal.
+            let actual = match actual.non_null().kind() {
+                TyKind::Fun(_) => actual.non_null(),
+                _ => {
+                    let mut views = crate::symbol_resolver::classifier_callable_signatures(
+                        source,
+                        actual.non_null(),
+                    )
+                    .into_iter()
+                    .filter(|view| {
+                        matches!(
+                            view.kind(),
+                            TyKind::Fun(view)
+                                if view.params.len() == function.params.len()
+                                    && view.suspend == function.suspend
+                        )
+                    });
+                    match (views.next(), views.next()) {
+                        (Some(view), None) => view,
+                        _ => return,
+                    }
+                }
+            };
+            let TyKind::Fun(actual) = actual.kind() else {
                 return;
             };
             for (&parameter, &actual) in function.params.iter().zip(&actual.params) {

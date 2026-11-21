@@ -327,7 +327,7 @@ impl ExtensionReferenceRules for super::Checker<'_> {
     }
 
     fn binds_reference_contexts(&self) -> bool {
-        self.file.callable_references_to_contextual
+        self.file.language.callable_references_to_contextual
     }
 
     fn type_variable_inputs(&self) -> TypeVariableInputs {
