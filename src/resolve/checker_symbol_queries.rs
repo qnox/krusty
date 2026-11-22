@@ -21,6 +21,15 @@ impl Checker<'_> {
         .with_member_access(self)
     }
 
+    /// The resolver that answers whether a classifier reference is invisible. A classifier
+    /// reference is exempted by `INVISIBLE_REFERENCE` alone; `INVISIBLE_MEMBER` exempts members.
+    pub(super) fn classifier_reference_resolver(
+        &self,
+    ) -> crate::symbol_resolver::SymbolResolver<'_> {
+        self.resolver()
+            .with_visibility_suppression(self.suppresses_diagnostic("INVISIBLE_REFERENCE"))
+    }
+
     pub(super) fn resolver_in_scope<'s>(
         &'s self,
         scope: &'s [TypeName],

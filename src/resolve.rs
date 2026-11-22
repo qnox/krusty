@@ -56224,7 +56224,7 @@ impl<'a> Checker<'a> {
         let InheritedNestedClassifier::Found(internal) = self.select_classifier(scope, name) else {
             return None;
         };
-        self.resolver()
+        self.classifier_reference_resolver()
             .inaccessible_classifier_access(internal)
             .map(|access| (internal, access))
     }
@@ -56237,7 +56237,10 @@ impl<'a> Checker<'a> {
         if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
             return false;
         }
-        let Some(access) = self.resolver().inaccessible_classifier_access(internal) else {
+        let Some(access) = self
+            .classifier_reference_resolver()
+            .inaccessible_classifier_access(internal)
+        else {
             return false;
         };
         crate::trace_compiler!(
@@ -56328,7 +56331,9 @@ impl<'a> Checker<'a> {
         classifier: TypeName,
         selected: &SelectedCallable,
     ) {
-        if self.resolver().inaccessible_classifier_access(classifier)
+        if self
+            .classifier_reference_resolver()
+            .inaccessible_classifier_access(classifier)
             == Some(crate::libraries::ClassifierAccess::PackagePrivate)
         {
             let display = self
