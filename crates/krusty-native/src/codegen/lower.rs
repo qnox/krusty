@@ -237,6 +237,9 @@ pub struct FileInput<'a> {
     pub dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
     /// Stable dependency-member numbers shared by every file in the source module.
     pub dependency_interface_numbers: &'a mut HashMap<Vec<u8>, u32>,
+    /// Dependency interface members a library default implements without a lowered body, with
+    /// the reason; shared by the whole emission session.
+    pub unimplementable_interface_members: &'a mut HashMap<Vec<u8>, String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -278,6 +281,7 @@ pub fn lower_file(
         dependency_symbols,
         dependency_instances,
         dependency_interface_numbers,
+        unimplementable_interface_members,
         value_classes,
         slot_plan,
         module_facts,
@@ -389,6 +393,7 @@ pub fn lower_file(
         dependency_symbols,
         dependency_interface_calls: Vec::new(),
         dependency_interface_numbers,
+        unimplementable_interface_members,
         dependency_instances,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
@@ -668,6 +673,8 @@ struct FileLowering<'a> {
     /// this file's emitted identity records; the shared map prevents a second file from reusing
     /// one stub number for another dependency member.
     dependency_interface_numbers: &'a mut krusty::fx_hash::HashMap<Vec<u8>, u32>,
+    /// See [`FileInput::unimplementable_interface_members`].
+    unimplementable_interface_members: &'a mut krusty::fx_hash::HashMap<Vec<u8>, String>,
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
@@ -695,16 +702,10 @@ impl<'a> FileLowering<'a> {
         if let Some(owner) = function.dispatch_receiver {
             // A value class's member takes the VALUE as `this`; its box reaches it through a
             // bridge. Every other member takes the object, as a reference.
-            params.push(match self.value_receiver(owner) {
-                Some(value) => value,
-                None if self.ir.class_id_by_name(owner).is_some() => any(),
-                None => {
-                    return Err(declined!(
-                        "a method of `{}`, which is not declared in this file",
-                        owner.render()
-                    ))
-                }
-            });
+            // An owner this file does not declare is a library classifier whose members the
+            // dependency unit lowers as functions of the instance (an interface's default body),
+            // so its receiver is the instance reference too.
+            params.push(self.value_receiver(owner).unwrap_or_else(any));
         }
         params.extend(super::super::captures::carried_parameters(self.ir, id));
         self.signature_of(&params, function.ret)
@@ -2841,6 +2842,7 @@ fn callee_kind(callee: &Callee) -> &'static str {
         Callee::Static { .. } => "static",
         Callee::Virtual { .. } => "virtual",
         Callee::Super { .. } => "super",
+        Callee::ValueClassAdapter { .. } => "value-class adapter",
         Callee::Special { .. } => "special",
     }
 }

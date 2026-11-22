@@ -193,3 +193,19 @@ fn a_star_projected_receiver_binds_an_indexed_extension_result() {
     };
     assert_eq!(boxed, "OK");
 }
+
+#[test]
+fn indexed_store_value_takes_type_arguments_from_the_selected_set() {
+    common::expect_box_same_as_kotlinc(
+        include_str!("box_regressions/indexedStoreExpectedTypeArguments.kt"),
+        "IndexedStoreExpectedTypeArguments",
+    );
+}
+
+#[test]
+fn indexed_store_into_linked_hash_map_takes_type_arguments_from_the_selected_set() {
+    common::expect_box_same_as_kotlinc(
+        include_str!("box_regressions/indexedStoreLinkedHashMap.kt"),
+        "IndexedStoreLinkedHashMap",
+    );
+}

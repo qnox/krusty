@@ -11,6 +11,10 @@
 //! interface this library's producer graph serializes. Any other hierarchy is refused before the
 //! class is admitted.
 //!
+//! A non-public interface is installed the same way without a constructor: it declares abstract
+//! members only, so no class of this unit implements it unless a later preparation admits one. A
+//! type test or a member call of it needs the installed interface to name.
+//!
 //! A class private to its enclosing class is linked the same way. Its signatures are public, but
 //! no provider publishes it and no other library names it.
 
@@ -54,20 +58,26 @@ pub(super) struct LocalConstructor {
     pub(super) object: bool,
 }
 
-/// One file-local class materialized in the unit that lowers its library's bodies.
-pub(super) struct MaterializedLocalClass {
-    pub(super) class: ClassId,
-    pub(super) classifier: TypeName,
+/// The constructor that builds a materialized class, which an interface does not have.
+pub(super) struct LocalConstruction {
     pub(super) constructor: KlibIrSignature,
     pub(super) declaration: ConstructorDeclaration,
     pub(super) access: IrConstructorAccess,
+    /// Whether [`MaterializedLocalClass::class`] is an object.
+    pub(super) object: bool,
+}
+
+/// One file-local class or interface materialized in the unit that lowers its library's bodies.
+pub(super) struct MaterializedLocalClass {
+    pub(super) class: ClassId,
+    pub(super) classifier: TypeName,
+    /// `None` for an interface.
+    pub(super) construction: Option<LocalConstruction>,
     pub(super) formals: Vec<Ty>,
     /// The supertypes written on [`Self::class`]. Subtyping reads this same list.
     pub(super) supertypes: Vec<Ty>,
     pub(super) self_type: Ty,
     pub(super) class_type_parameters: Vec<String>,
-    /// Whether [`Self::class`] is an object.
-    pub(super) object: bool,
 }
 
 /// A field the class initializer and its members store through, in declaration order.
@@ -136,6 +146,8 @@ pub(super) struct PreparedMember<'a> {
     pub(super) visibility: Visibility,
     /// Whether the function is its property's setter.
     pub(super) setter: bool,
+    /// The function's own type parameters and their declared bounds, which a call binds.
+    pub(super) formals: Vec<(crate::types::TyParamName, Vec<Ty>)>,
 }
 
 /// An overridden member, joined by its checked dependency identity.
@@ -416,6 +428,9 @@ pub(super) struct PreparedLocalClass<'a> {
     /// The same-library superclass the constructor delegates to; `Any` otherwise.
     pub(super) superclass: Option<LocalSuperclass<'a>>,
     pub(super) open: bool,
+    /// How Kotlin names a top-level class private to its file: in its file's package, by its
+    /// declared name. Any other file-local class has no name of its own here.
+    pub(super) naming: Option<crate::ir::IrLocalClassNameProvenance>,
     /// Whether the class is an object, whose one instance its singleton value reads.
     pub(super) object: bool,
 }
@@ -488,9 +503,9 @@ pub(super) fn classifier(
         return Err(unsupported("a non-public value class"));
     }
     match class_kind(class.base.flags) {
-        TypeKind::Class | TypeKind::Object => Ok(Some(name)),
+        TypeKind::Class | TypeKind::Object | TypeKind::Interface => Ok(Some(name)),
         _ => Err(unsupported(
-            "a non-public classifier other than a class or an object",
+            "a non-public classifier other than a class, an object or an interface",
         )),
     }
 }
@@ -606,7 +621,7 @@ fn applied_local_supertype(
 /// The call shape of a member already declared for `class`.
 pub(super) fn linked_member(
     class: &MaterializedLocalClass,
-    function: crate::ir::FunId,
+    (function, formals): (crate::ir::FunId, &[(crate::types::TyParamName, Vec<Ty>)]),
     ir: &crate::ir::IrFile,
     defaults: Vec<bool>,
 ) -> super::body_lowering::LinkedCallee {
@@ -618,8 +633,8 @@ pub(super) fn linked_member(
         ret: declared.ret,
         context_count: 0,
         singleton_dispatch: None,
-        type_parameters: Vec::new(),
-        type_parameter_bounds: Some(Vec::new()),
+        type_parameters: formals.iter().map(|(name, _)| *name).collect(),
+        type_parameter_bounds: Some(formals.iter().map(|(_, bounds)| bounds.clone()).collect()),
         class_type_parameters: class.class_type_parameters.clone(),
         parameter_defaults: defaults,
         edge: super::CallEdge::default(),
@@ -660,13 +675,16 @@ pub(super) fn link<'bodies>(
         signature: class_signature,
     };
     if let Some(known) = cache.get(&key) {
-        if known.constructor != *signature {
+        let Some(construction) = &known.construction else {
+            return Err(mismatch("a constructor names an interface"));
+        };
+        if construction.constructor != *signature {
             return Err(unsupported("a non-public class with another constructor"));
         }
         return Ok(LocalLink::Ready(LocalConstructor {
-            declaration: known.declaration.clone(),
-            access: known.access,
-            object: known.object,
+            declaration: construction.declaration.clone(),
+            access: construction.access,
+            object: construction.object,
         }));
     }
     let Some((class_arena, class)) = source
@@ -689,6 +707,203 @@ pub(super) fn link<'bodies>(
     Ok(LocalLink::Prepared(Box::new(prepare(
         source, signature, arena, class, function, key,
     )?)))
+}
+
+/// An interface ready to install, or one already installed for this library.
+pub(super) enum InterfaceLink<'a> {
+    Ready,
+    Prepared(Box<PreparedLocalInterface<'a>>),
+}
+
+/// A file-local interface: its supertypes, its formals and its abstract members, declared
+/// before any body that names it is lowered.
+pub(super) struct PreparedLocalInterface<'a> {
+    pub(super) key: LocalIdentity,
+    pub(super) classifier: TypeName,
+    pub(super) self_type: Ty,
+    pub(super) supertypes: Vec<Ty>,
+    pub(super) interfaces: Vec<TypeName>,
+    pub(super) formals: Vec<Ty>,
+    pub(super) class_type_parameters: Vec<String>,
+    /// The declared bounds of each interface type parameter, in its order.
+    pub(super) class_type_parameter_bounds: Vec<Vec<Ty>>,
+    pub(super) members: Vec<PreparedMember<'a>>,
+}
+
+/// The file-local interface `signature` of the body module. One already installed for this
+/// library answers immediately; a new one is prepared and left for the linker to install.
+pub(super) fn link_interface<'bodies>(
+    source: LocalClassSource<'bodies, '_>,
+    signature: &KlibIrSignature,
+    cache: &HashMap<LocalIdentity, MaterializedLocalClass>,
+) -> Result<InterfaceLink<'bodies>, KlibBodyDeclineReason> {
+    let key = LocalIdentity {
+        module: source.module.to_owned(),
+        signature: signature.clone(),
+    };
+    if cache
+        .get(&key)
+        .is_some_and(|known| known.construction.is_none())
+    {
+        return Ok(InterfaceLink::Ready);
+    }
+    let Some((arena, class)) = source.bodies.module_local_class(source.module, signature) else {
+        return Err(non_public_type());
+    };
+    if class_kind(class.base.flags) != TypeKind::Interface {
+        return Err(mismatch("an interface is named by a class declaration"));
+    }
+    Ok(InterfaceLink::Prepared(Box::new(prepare_interface(
+        source, arena, class, key,
+    )?)))
+}
+
+fn prepare_interface<'a>(
+    source: LocalClassSource<'a, '_>,
+    arena: &'a KlibIrArena,
+    class: &'a KlibIrClass,
+    key: LocalIdentity,
+) -> Result<PreparedLocalInterface<'a>, KlibBodyDeclineReason> {
+    let resolve = |signature: &KlibIrSignature| classifier(source.bodies, source.module, signature);
+    let classifier_name = resolve(&class.base.symbol.signature)?.ok_or_else(non_public_type)?;
+    if !class.sealed_subclasses.is_empty() {
+        return Err(unsupported("a non-public sealed interface"));
+    }
+    let ClassFormals {
+        types,
+        formals,
+        variances: _,
+        bounds,
+        // An interface is never inner, so no outer instance's type parameters are its own.
+    } = class_formals(arena, class, None, &resolve)?;
+    let AuthenticatedSupertypes {
+        supertypes,
+        interfaces,
+        superclass,
+        library_superclass,
+    } = authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
+    // Only an interface can be a supertype of an interface: a superclass of either kind is a
+    // declaration this installation did not authenticate.
+    if superclass.is_some() || library_superclass.is_some() {
+        return Err(mismatch("an interface lists a superclass"));
+    }
+    let self_type = Ty::obj_args_name(classifier_name, &formals);
+    let Some(receiver) = &class.this_receiver else {
+        return Err(mismatch("an interface has no instance receiver"));
+    };
+    if semantic_type_in(arena, &types, receiver.ty, &resolve)? != self_type {
+        return Err(mismatch(
+            "an interface instance receiver has another declared type",
+        ));
+    }
+    let scope = MemberScope {
+        types: &types,
+        resolve: &resolve,
+        self_type,
+        bodies: source.bodies,
+        declarations: source.declarations,
+        classes: source.classes,
+        module: source.module,
+        interfaces: &interfaces,
+        library_superclass: None,
+    };
+    let members = abstract_members(arena, class, &scope)?;
+    let class_type_parameters = formals
+        .iter()
+        .map(|formal| match formal.kind() {
+            TyKind::TyParam(identity, _) => Ok(identity.as_str().to_owned()),
+            _ => Err(mismatch(
+                "a non-public interface type parameter has no symbol",
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PreparedLocalInterface {
+        key,
+        classifier: classifier_name,
+        self_type,
+        supertypes,
+        interfaces: interfaces.iter().map(|interface| interface.name).collect(),
+        formals,
+        class_type_parameters,
+        class_type_parameter_bounds: bounds,
+        members,
+    })
+}
+
+/// The abstract members of an interface, in declaration order. A member with a body, a stored
+/// property and an initializer are refused: this installs no implementation.
+fn abstract_members<'a>(
+    arena: &'a KlibIrArena,
+    class: &'a KlibIrClass,
+    scope: &MemberScope<'_>,
+) -> Result<Vec<PreparedMember<'a>>, KlibBodyDeclineReason> {
+    let mut members = Vec::new();
+    for declaration in &class.members {
+        if member_field(declaration).is_some() {
+            return Err(unsupported("a stored property of a non-public interface"));
+        }
+        match declaration {
+            KlibIrMember::Function(id) => {
+                let function = arena.function(*id);
+                if function.constructor {
+                    return Err(mismatch("an interface declares a constructor"));
+                }
+                members.push(prepare_abstract_member(arena, function, scope, false)?);
+            }
+            KlibIrMember::Property(property) => {
+                if let Some(id) = property.getter {
+                    members.push(prepare_abstract_member(
+                        arena,
+                        arena.function(id),
+                        scope,
+                        false,
+                    )?);
+                }
+                if let Some(id) = property.setter {
+                    members.push(prepare_abstract_member(
+                        arena,
+                        arena.function(id),
+                        scope,
+                        true,
+                    )?);
+                }
+            }
+            KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {
+                return Err(unsupported("an initializer of a non-public interface"))
+            }
+            // A nested class is its own declaration, prepared when a body names it.
+            KlibIrMember::Class(_) => {}
+            KlibIrMember::EnumEntry(_) => return Err(unsupported("a non-public enum")),
+            KlibIrMember::TypeAlias(_) => {
+                return Err(unsupported("a type alias of a non-public interface"))
+            }
+        }
+    }
+    Ok(members)
+}
+
+fn prepare_abstract_member<'a>(
+    arena: &'a KlibIrArena,
+    function: &'a KlibIrFunction,
+    scope: &MemberScope<'_>,
+    setter: bool,
+) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
+    if function.body.is_some() {
+        return Err(unsupported(
+            "a member of a non-public interface with a body",
+        ));
+    }
+    let header = local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?;
+    Ok(PreparedMember {
+        signature: function.base.symbol.signature.clone(),
+        symbol: &function.base.symbol,
+        statements: &[],
+        formals: header.own_formals(function),
+        header,
+        overrides: member_overrides(function, scope)?,
+        visibility: declaration_visibility(function.base.flags),
+        setter,
+    })
 }
 
 fn constructor_class(
@@ -799,6 +1014,7 @@ fn prepare_class<'a>(
         class_name,
         outer,
     } = declaration;
+    let naming = file_private_naming(source.bodies, &key);
     if declaration_modality(class.base.flags).is_abstract() {
         return Err(unsupported("a non-public abstract class"));
     }
@@ -985,10 +1201,7 @@ fn prepare_class<'a>(
                 declaration
             }
         },
-        access: match declaration_visibility(function.base.flags) {
-            Visibility::Private => IrConstructorAccess::Private,
-            _ => IrConstructorAccess::Unrestricted,
-        },
+        access: constructor_access(function),
         formals,
         class_type_parameters,
         class_type_parameter_bounds,
@@ -1003,7 +1216,27 @@ fn prepare_class<'a>(
         outer: outer_instance,
         superclass,
         open: declaration_modality(class.base.flags) != KotlinModality::Final,
+        naming,
         object,
+    })
+}
+
+/// The naming provenance of the class `key` names when it is a top-level class private to its
+/// file: rooted in that file's package, with no lexical owner and no ordinal.
+fn file_private_naming(
+    bodies: &KlibDeclarationBodies,
+    key: &LocalIdentity,
+) -> Option<crate::ir::IrLocalClassNameProvenance> {
+    let (package, class) = bodies.module_file_private_class(&key.module, &key.signature)?;
+    let package = package.iter().fold(TypeName::ROOT, |parent, segment| {
+        crate::types::type_name_child(parent, segment)
+    });
+    Some(crate::ir::IrLocalClassNameProvenance {
+        source: crate::ir::IrLocalClassNameRoot::Dependency { package },
+        lexical_owner: None,
+        segments: Box::new([class.name.clone()]),
+        ordinal: None,
+        parents: Box::new([]),
     })
 }
 
@@ -1293,11 +1526,13 @@ fn prepare_member<'a>(
         }
         None => return Err(unsupported("a member of a non-public class without a body")),
     };
+    let header = local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?;
     Ok(PreparedMember {
         signature: function.base.symbol.signature.clone(),
         symbol: &function.base.symbol,
         statements,
-        header: local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?,
+        formals: header.own_formals(function),
+        header,
         overrides: member_overrides(function, scope)?,
         visibility: declaration_visibility(function.base.flags),
         setter,
@@ -1429,13 +1664,11 @@ fn member_overrides(
             }
             Err(reason) => return Err(mismatch(reason)),
         }
-        if !declared.type_parameters.is_empty() || declared.constructor {
-            return Err(unsupported(
-                "an override of a generic or constructor declaration",
-            ));
+        if declared.constructor {
+            return Err(unsupported("an override of a constructor declaration"));
         }
         let mut formals = Vec::new();
-        let declared_types = bind_interface_parameters(owner, |parameter| {
+        let mut declared_types = bind_interface_parameters(owner, |parameter| {
             let formal = Ty::ty_param(
                 crate::types::metadata_type_parameter(&parameter.name),
                 Ty::nullable(Ty::obj("kotlin/Any")),
@@ -1443,6 +1676,19 @@ fn member_overrides(
             formals.push(formal);
             Ok(formal)
         })?;
+        // The overridden declaration's own type parameters stay formals of its signature; only
+        // its class's are applied.
+        for parameter in &declared.type_parameters {
+            let formal = Ty::ty_param(
+                crate::types::metadata_type_parameter(&parameter.name),
+                Ty::nullable(Ty::obj("kotlin/Any")),
+            );
+            if !declared_types.bind(&parameter.base.symbol, formal) {
+                return Err(mismatch(
+                    "an overridden declaration repeats a type parameter",
+                ));
+            }
+        }
         let declared_signature =
             interface_signature(owner_arena, declared, &declared_types, scope.resolve)?;
         if declared_signature.parameters.len() != function.regular_parameters.len() {
@@ -1715,6 +1961,14 @@ fn non_public_type() -> KlibBodyDeclineReason {
     KlibBodyDeclineReason::UnsupportedType("a type of a non-public class")
 }
 
+/// Who may call the serialized constructor `function`.
+pub(super) fn constructor_access(function: &KlibIrFunction) -> IrConstructorAccess {
+    match declaration_visibility(function.base.flags) {
+        Visibility::Private => IrConstructorAccess::Private,
+        _ => IrConstructorAccess::Unrestricted,
+    }
+}
+
 /// The construction target recorded for a same-library primary constructor.
 pub(super) fn construction_target(access: IrConstructorAccess) -> IrConstructorTarget {
     IrConstructorTarget { ordinal: 0, access }
@@ -1725,8 +1979,10 @@ pub(super) fn construction_target(access: IrConstructorAccess) -> IrConstructorT
 pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
     let mut class = IrClass::synthetic(prepared.classifier);
     // A class private to its enclosing class is a member classifier its public signature names,
-    // as its source declares it; a file-local one has no name of its own here.
-    class.is_source_declared = matches!(prepared.key.signature, KlibIrSignature::Public(_));
+    // as its source declares it, and a top-level class private to its file is named by its
+    // provenance; any other file-local one has no name of its own here.
+    class.is_source_declared =
+        matches!(prepared.key.signature, KlibIrSignature::Public(_)) || prepared.naming.is_some();
     class.supertypes = prepared.supertypes.clone();
     for interface in &prepared.interfaces {
         class.interfaces.push_name(*interface);
@@ -1753,5 +2009,28 @@ pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
         class.pre_super_param_fields.push((0, outer.field));
     }
     class.is_object = prepared.object;
+    class
+}
+
+/// The interface shape a prepared file-local interface installs. Its members are declared by the
+/// linker; none has a body.
+pub(super) fn installed_interface(prepared: &PreparedLocalInterface<'_>) -> IrClass {
+    let mut class = IrClass::synthetic(prepared.classifier);
+    class.is_interface = true;
+    class.has_primary_ctor = false;
+    class.supertypes = prepared.supertypes.clone();
+    for interface in &prepared.interfaces {
+        class.interfaces.push_name(*interface);
+    }
+    for (identity, bounds) in prepared
+        .class_type_parameters
+        .iter()
+        .zip(&prepared.class_type_parameter_bounds)
+    {
+        class.type_params.push(identity.clone());
+        class
+            .type_param_bounds
+            .extend(bounds.iter().map(|bound| (identity.clone(), *bound)));
+    }
     class
 }

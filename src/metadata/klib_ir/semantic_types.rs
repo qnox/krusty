@@ -61,6 +61,11 @@ impl KlibTypeParameters {
             .is_none()
     }
 
+    /// The semantic type parameter the serialized `symbol` is bound to.
+    pub(crate) fn bound(&self, symbol: &KlibIrSymbol) -> Option<Ty> {
+        self.bindings.get(symbol).copied()
+    }
+
     pub(crate) fn declared_bounds(&self, name: &str) -> Option<&[Ty]> {
         self.bounds.get(name).map(Vec::as_slice)
     }
@@ -191,12 +196,8 @@ pub(crate) fn semantic_type_in<E: From<KlibTypeError>>(
         // A class type the serializer marks definitely non-null is its ordinary non-null type; on
         // a type parameter whose bound admits null the mark is the intersection `T & Any`. A
         // parameter bounded by a non-null type is already non-null, and `T & Any` is `T` itself.
-        KlibIrNullability::DefinitelyNotNull
-            if semantic.is_ty_param() && semantic.upper_bound_admits_null() =>
-        {
-            Ty::from(TyKind::DefinitelyNotNull(semantic))
-        }
-        KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull => semantic,
+        KlibIrNullability::DefinitelyNotNull => semantic.marked_definitely_not_null(),
+        KlibIrNullability::NotSpecified => semantic,
     })
 }
 

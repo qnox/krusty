@@ -507,6 +507,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
         | Callee::ClassStaticWithDefaults { owner, .. }
         | Callee::ClassStaticDefault { owner, .. }
         | Callee::Static { owner, .. }
+        | Callee::ValueClassAdapter { owner, .. }
         | Callee::Special { owner, .. } => name(owner, names),
         Callee::Intrinsic { operation, ret } => {
             *ret = ty(*ret, names);
@@ -1167,6 +1168,11 @@ fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
             .staticbound_recv_unbox
             .iter_mut()
             .for_each(|value| name(value, names));
+        reference
+            .bound_context_unbox
+            .iter_mut()
+            .flatten()
+            .for_each(|value| name(&mut value.value_class, names));
     }
     for bridge in &mut class.bridges {
         bridge

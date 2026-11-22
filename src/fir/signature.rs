@@ -17,6 +17,7 @@ use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
 mod arena_ranges;
 mod call_arguments;
 mod call_result_constraints;
+mod cycle_decision;
 mod declaration_type_sites;
 mod expressions;
 mod local_type_aliases;
@@ -541,6 +542,10 @@ pub trait ExplicitHeaderSemantics {
     ) -> Result<(), DiagnosticId>;
 }
 
+/// Demand for a declaration's signature while an expression that needs it is evaluated.
+pub type SignatureDemand<'demand> =
+    dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId> + 'demand;
+
 /// Semantic adapter for signature-constraint evaluation.
 ///
 /// The implementation belongs beside the normal resolver/checker and must route calls, members,
@@ -553,7 +558,7 @@ pub trait SignatureConstraintEvaluator {
         declaration: DeclarationId,
         result: SigExprId,
         graph: &SignatureGraph,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedSignature, DiagnosticId>;
 
     /// Create the declaration-local diagnostic emitted for an unanchored inference cycle.
@@ -663,7 +668,7 @@ pub trait SignatureSemantics:
         spelling: &str,
         origin: OriginId,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     /// A call argument's materialized type with the formals its own inputs left unfixed named as
@@ -692,7 +697,7 @@ pub trait SignatureSemantics:
         // Final selection must not retry that root as a value.
         qualified_namespace: bool,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     fn call_argument_expectations(
@@ -710,7 +715,7 @@ pub trait SignatureSemantics:
         // Keep all-typed contextual shaping alive for an active sibling-refinement fixed point.
         refresh_typed_postponed: bool,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId>;
 
     fn select_callable_reference(
@@ -719,7 +724,7 @@ pub trait SignatureSemantics:
         spelling: &str,
         origin: OriginId,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     fn select_bound_callable_reference(
@@ -730,7 +735,7 @@ pub trait SignatureSemantics:
         receiver: ResolvedTy,
         unbound: bool,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     /// Select the declaration behind the compiler-defined `::property.isInitialized` operation.
@@ -745,7 +750,7 @@ pub trait SignatureSemantics:
         origin: OriginId,
         receiver: Option<ResolvedTy>,
         unbound: bool,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     /// Decide whether a syntactically qualified class-literal receiver starts with a value at the
@@ -801,7 +806,7 @@ pub trait SignatureSemantics:
         origin: OriginId,
         receiver: ResolvedTy,
         expected: Option<ResolvedTy>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     fn select_member_call(
@@ -814,7 +819,7 @@ pub trait SignatureSemantics:
         type_arguments: &[ResolvedTy],
         trailing_lambda: bool,
         result_constraint: Option<SignatureCallResultConstraint>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedMemberCall, DiagnosticId>;
     fn member_call_argument_expectations(
         &self,
@@ -827,7 +832,7 @@ pub trait SignatureSemantics:
         trailing_lambda: bool,
         refresh_typed_postponed: bool,
         result_constraint: Option<SignatureCallResultConstraint>,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<Box<[Option<ResolvedTy>]>, DiagnosticId>;
 
     fn select_binary(
@@ -837,7 +842,7 @@ pub trait SignatureSemantics:
         origin: OriginId,
         lhs: ResolvedTy,
         rhs: ResolvedTy,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     /// Select the `opAssign` convention for a simple-name augmented assignment without emitting a
@@ -851,7 +856,7 @@ pub trait SignatureSemantics:
         _receiver: ResolvedTy,
         _argument: ResolvedTy,
         _local_operator: Option<ResolvedTy>,
-        _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        _demand: &mut SignatureDemand<'_>,
     ) -> bool {
         false
     }
@@ -891,7 +896,7 @@ pub trait SignatureSemantics:
         origin: OriginId,
         callee: ResolvedTy,
         arguments: &[ResolvedSigCallArgument<'_>],
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<InvokeSelection, DiagnosticId>;
 
     fn invoke_argument_expectations(
@@ -946,7 +951,7 @@ pub trait SignatureSemantics:
         delegate: ResolvedTy,
         expected: Option<ResolvedTy>,
         site: ResolvedSignatureDelegateSite,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     fn least_upper_bound(
@@ -1308,28 +1313,10 @@ fn resolve_signature(
     match states.get(&declaration) {
         Some(SignatureState::Resolved(signature)) => return Ok(signature.clone()),
         Some(SignatureState::Failed(diagnostic)) => return Err(*diagnostic),
-        Some(SignatureState::Computing) => {
-            crate::trace_compiler!(
-                "fir",
-                "signature cycle: re-entered {declaration:?} with stack {computing:?}",
-            );
-            let cycle_start = computing
-                .iter()
-                .position(|candidate| *candidate == declaration)
-                .unwrap_or(computing.len());
-            let cycle = computing[cycle_start..].to_vec();
-            let mut requested = None;
-            for member in cycle {
-                let diagnostic = evaluator.recursive_inference_diagnostic(member);
-                if member == declaration {
-                    requested = Some(diagnostic);
-                }
-                states.insert(member, SignatureState::Failed(diagnostic));
-            }
-            let diagnostic =
-                requested.unwrap_or_else(|| evaluator.recursive_inference_diagnostic(declaration));
-            return Err(diagnostic);
-        }
+        // Re-entry is not a decision: a declaration still being computed has no known type. A
+        // caller that merely probes it may move on; one that commits to it decides the cycle in
+        // `decide_cycle` below.
+        Some(SignatureState::Computing) => return Err(DiagnosticId::in_progress(declaration)),
         Some(SignatureState::Uncomputed) | None => {}
     }
 
@@ -1347,10 +1334,16 @@ fn resolve_signature(
     let evaluated = evaluator.evaluate(declaration, constraint.result, graph, &mut |dependency| {
         resolve_signature(graph, states, computing, dependency, evaluator)
     });
+    let evaluated = evaluated.map_err(|failure| match failure.in_progress_declaration() {
+        Some(target) => {
+            cycle_decision::decide_cycle(states, computing, declaration, target, evaluator)
+        }
+        None => failure,
+    });
     let popped = computing.pop();
     debug_assert_eq!(popped, Some(declaration));
 
-    // Re-entry may already have marked this declaration as a cycle member. Never overwrite that
+    // A committed re-entry already marked this declaration as a cycle member. Never overwrite that
     // diagnostic with a value computed on top of the recursive failure.
     if let Some(SignatureState::Failed(diagnostic)) = states.get(&declaration) {
         return Err(*diagnostic);
@@ -1763,9 +1756,13 @@ impl ResolvedModuleIndex {
         declaration: DeclarationId,
         contract: crate::contracts::ResolvedContract,
     ) {
+        // A failed explicit result publishes no semantic signature. Its diagnostic callable is
+        // still the contract's owner, so the contract is not dropped and the result is not
+        // replaced with a type the source never declared.
         assert!(
-            self.signatures.contains_key(&declaration),
-            "a contract requires a published callable signature"
+            self.signatures.contains_key(&declaration)
+                || self.callable_by_declaration.contains_key(&declaration),
+            "a contract requires a published callable"
         );
         assert!(
             self.contracts.insert(declaration, contract).is_none(),

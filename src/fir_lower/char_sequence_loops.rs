@@ -37,6 +37,7 @@ impl BodyLowering<'_> {
             &[IrCheckedArgument::Expression {
                 parameter: 0,
                 value: index_read,
+                context: Default::default(),
             }],
             &[],
         )?;

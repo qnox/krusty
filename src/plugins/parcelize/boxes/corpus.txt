@@ -1,0 +1,10 @@
+# The Parcelize compiler plugin's box corpus descriptor. See src/conformance/plugin_corpus.rs for the
+# format. The cases run against the android.os stubs in `runtime/`, whose Parcel really stores
+# values, and the plugin's own runtime annotations.
+plugin = parcelize
+directive = WITH_PARCELIZE
+plugin-jar = dist:parcelize-compiler.jar
+runtime = dist:parcelize-runtime.jar
+upstream = plugins/parcelize/parcelize-compiler/testData/box
+support = plugins/parcelize/parcelize-compiler/testData/boxLib.kt
+stubs = runtime

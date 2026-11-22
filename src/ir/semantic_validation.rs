@@ -157,6 +157,7 @@ fn validate_callee(callee: &Callee) -> Result<(), UndeterminedIrType> {
         | Callee::ClassStaticDefault { .. }
         | Callee::LocalDefault(_)
         | Callee::Static { .. }
+        | Callee::ValueClassAdapter { .. }
         | Callee::Special { .. } => Ok(()),
     }
 }

@@ -5,22 +5,14 @@
 # native-klib run. The lists only shrink.
 annotations/annotations0.kt
 annotations/instances/AnnotationInstantiationWithArray.kt
-annotations/instances/annotationAnyDispatch.kt
 annotations/instances/annotationFromStdlib.kt
-annotations/instances/annotationInlineMultiModule.kt
 annotations/instances/annotationInstances.kt
 annotations/instances/annotationInstancesEmptyDefault.kt
 annotations/instances/annotationInstancesEmptyDefaultLowered.kt
-annotations/instances/annotationToString.kt
-annotations/instances/annotationToStringDefaultsAndEmptyArrays.kt
 annotations/instances/annotationWithTypeParameters.kt
-annotations/instances/enumAndKClass.kt
 annotations/instances/inInlineFunction.kt
-annotations/instances/instanceEquality.kt
 annotations/instances/multifileEqHc.kt
 annotations/instances/multimoduleTypeParams.kt
-annotations/instances/nested.kt
-annotations/instances/typeAliasesAndGenericsInterop.kt
 arithmetic/basic_charConversions.kt
 arithmetic/basic_charCornerCases.kt
 arithmetic/basic_compareIntToFloat.kt
@@ -41,7 +33,6 @@ arrays/forInReversed/reversedReversedOriginalUpdatedInLoopBody.kt
 arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
 arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
 arrays/indices.kt
-arrays/kt42932.kt
 arrays/multiArrayConstructors.kt
 arrays/primitiveArrays.kt
 associatedObjects/associatedObjectNested.kt
@@ -70,7 +61,6 @@ basics/unchecked_cast7.kt
 basics/unchecked_cast8.kt
 basics/unchecked_cast9.kt
 basics/unit4.kt
-bce/bceCases.kt
 bce/customGetter.kt
 bce/delegatedProperty.kt
 bce/differentArrays.kt
@@ -106,7 +96,6 @@ boxingOptimization/casts.kt
 boxingOptimization/checkcastAndInstanceOf2.kt
 boxingOptimization/fold.kt
 boxingOptimization/foldRange.kt
-boxingOptimization/kt19767_2.kt
 boxingOptimization/kt5844.kt
 boxingOptimization/kt6842.kt
 boxingOptimization/maxMinByOrNull.kt
@@ -119,7 +108,6 @@ boxingOptimization/simpleUninitializedMerge.kt
 boxingOptimization/unsafeRemoving.kt
 boxingOptimization/unsignedArrayForEach.kt
 boxingOptimization/variables.kt
-bridges/complexTraitImpl.kt
 bridges/delegationComplexWithList.kt
 bridges/internalMethodFakeOverrideInFriendModule.kt
 bridges/internalMethodOverrideInFriendModule.kt
@@ -127,9 +115,7 @@ bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 bridges/internalMethodOverridePublishedApi.kt
 bridges/multipleModules1.kt
-bridges/noBridgeOnMutableCollectionInheritance.kt
 bridges/special.kt
-bridges/strListContains.kt
 bridges/test10.kt
 bridges/test11.kt
 bridges/test12.kt
@@ -212,7 +198,6 @@ classLiteral/bound/primitives.kt
 classes/kt1538.kt
 classes/kt2566_2.kt
 classes/kt3001.kt
-classes/overloadUnaryOperator.kt
 classes/typedDelegation.kt
 closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
@@ -297,7 +282,6 @@ controlStructures/breakContinueInExpressions/inlinedBreakContinue/lambdaPassedTo
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/loopWithinInlineFunction.kt
 controlStructures/breakContinueInExpressions/kt17384.kt
 controlStructures/factorialTest.kt
-controlStructures/forInArrayWithIndex/forInArrayOfObjectArrayWithIndex.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexContinuesAsUnmodified.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNotDestructured.kt
@@ -336,8 +320,6 @@ coroutines/bridges/interfaceGenericDefault.kt
 coroutines/bridges/interfaceSpecialization.kt
 coroutines/bridges/lambdaWithLongReceiver.kt
 coroutines/bridges/lambdaWithMultipleParameters.kt
-coroutines/bridges/mapSuspendAbstractClear.kt
-coroutines/bridges/mapSuspendClear.kt
 coroutines/captureInfixFun.kt
 coroutines/captureMutableLocalVariableInsideCoroutineBlock.kt
 coroutines/captureUnaryOperator.kt
@@ -889,12 +871,8 @@ fir/sourceBinarySource.kt
 fp/atan2ZeroGuadrantsDouble.kt
 fp/powDouble.kt
 fp/powFloat.kt
-fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
-fullValueClasses/kt70461.kt
-fullValueClasses/lateinit.kt
 fullValueClasses/nonFinal.kt
-fullValueClasses/vararg.kt
 funInterface/basicFunInterfaceConversionClash.kt
 funInterface/funInterfaceWithSuspendMethod.kt
 funInterface/implIsNotFunction.kt
@@ -1071,7 +1049,6 @@ inline/propertyAccessorInline.kt
 inline/redundantCoercionsCleaner.kt
 inline/redundantCoercionsCleanerKT48876.kt
 inline/redundantCoercionsCleanerKT49356.kt
-inline/requireNotNull.kt
 inline/rootConstructor.kt
 inline/safeCall.kt
 inline/sharedVar.kt
@@ -1119,7 +1096,6 @@ inlineClasses/functionNameMangling/reflectionForFunctionWithMangledName.kt
 inlineClasses/functionNameMangling/reflectionForFunctionWithMangledNameGeneric.kt
 inlineClasses/functionNameMangling/reflectionForPropertyOfInlineClassType.kt
 inlineClasses/functionNameMangling/reflectionForPropertyOfInlineClassTypeGeneric.kt
-inlineClasses/genericVararg2ndConstructor.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClass.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClassGeneric.kt
 inlineClasses/inlineClassCollection/inlineListOfInlineClass.kt
@@ -1144,7 +1120,6 @@ inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTyp
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypesGeneric.kt
 inlineClasses/kt27113.kt
 inlineClasses/kt32793.kt
-inlineClasses/kt70461.kt
 inlineClasses/privateConstructorFunInterfaceMultiModule.kt
 inlineClasses/privateConstructorFunInterfaceMultiModuleGeneric.kt
 inlineClasses/removeInInlineCollectionOfInlineClassAsInt.kt
@@ -1317,7 +1292,6 @@ multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
-multiplatform/k2/hmpp/genericTypealiasSameNameTwoLibs.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
 multiplatform/k2/hmpp/inheritanceFromExpected3-3.kt
@@ -1328,7 +1302,6 @@ multiplatform/k2/hmpp/mutlipleExpectsForOneActual.kt
 multiplatform/k2/hmpp/overloadAlias3-3.kt
 multiplatform/k2/hmpp/propertyAlias3-3.kt
 multiplatform/k2/hmpp/propertyAliasTwoLibs.kt
-multiplatform/k2/hmpp/typealiasNameClash.kt
 multiplatform/k2/internalOverride2.kt
 multiplatform/k2/kt66970.kt
 nameBasedDestructuring/fullFormExtraPropType.kt
@@ -1369,7 +1342,6 @@ properties/accessorForProtectedPropertyWithPrivateSetter.kt
 properties/accessorForProtectedPropertyWithPrivateSetterInObjectLiteral.kt
 properties/accessorForProtectedPropertyWithPrivateSetterViaSuper.kt
 properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
-properties/backingField/backingFieldWithSmartTypeParameters.kt
 properties/complexPropertyInitializer.kt
 properties/eagerInitializationGlobal1.kt
 properties/eagerInitializationGlobal2.kt
@@ -1408,7 +1380,6 @@ ranges/contains/generated/uintDownTo.kt
 ranges/contains/generated/uintUntil.kt
 ranges/contains/generated/ulongDownTo.kt
 ranges/contains/generated/ulongUntil.kt
-ranges/contains/inCharSequence.kt
 ranges/contains/inComparableRange.kt
 ranges/contains/inCustomObjectRange.kt
 ranges/contains/inDoubleRangeLiteralVsComparableRangeLiteral.kt
@@ -2039,7 +2010,6 @@ reflection/types/typeArguments.kt
 reflection/types/useSiteVariance.kt
 regressions/directInvokeNameBasedDestructuring.kt
 regressions/floatingRangeContainsMixedWidths.kt
-regressions/kt15196.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
 regressions/kt2246.kt
@@ -2094,7 +2064,6 @@ serialization/serializedCharConstant.kt
 serialization/serializedDefaultArgs.kt
 serialization/serializedEnumOrdinal.kt
 serialization/serializedVararg.kt
-smartCasts/negativesmartCastAugmentedAssignment.kt
 smartCasts/smartcastFromGenericToString.kt
 specialBuiltins/bridgeNotEmptyMap.kt
 specialBuiltins/bridges.kt
@@ -2102,7 +2071,6 @@ specialBuiltins/emptyList.kt
 specialBuiltins/emptyMap.kt
 specialBuiltins/emptyStringMap.kt
 specialBuiltins/enumAsOrdinaled.kt
-specialBuiltins/maps.kt
 specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
 specialBuiltins/throwableComplex.kt
@@ -2123,7 +2091,6 @@ strings/constInStringTemplate.kt
 strings/kt2592.kt
 strings/kt3571.kt
 strings/nestedConcat.kt
-strings/stringPlusOnlyWorksOnString.kt
 strings/surrogatePair.kt
 strings/trimOptimization.kt
 super/innerClassLabeledSuperProperty2.kt
@@ -2181,15 +2148,12 @@ typeErasure/twoFunWithReifiedTypeParametersInlineFunWithTwoTypeParameters.kt
 typeErasure/twoFunWithTypeParametersInlineFunWithReifiedTypeParameters.kt
 typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParameters.kt
 typealias/abbreviationWithCapturedType.kt
-typealias/typeAliasAsBareType.kt
 unsignedTypes/forInUnsignedRangeWithCoercion.kt
 unsignedTypes/inUnsignedDownTo.kt
 unsignedTypes/kt47716.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
-vararg/kt37715.kt
 vararg/spreadCopiesArray.kt
 vararg/useSuspendFunResultAsVararg.kt
-vararg/varargInTailrec.kt
 volatile/atomicArrayIntrinsics.kt
 volatile/intrinsicWithInlineFunction.kt
 volatile/intrinsics.kt
@@ -2212,7 +2176,6 @@ when/stringOptimization/expression.kt
 when/stringOptimization/nullability.kt
 when/stringOptimization/sameHashCode.kt
 when/stringOptimization/statement.kt
-when/stringOptimization/temporaryVarInWhenByStringIsDisposedProperly.kt
 when/whenSubjectVariable/whenByEnum.kt
 when/whenSubjectVariable/whenByNullableEnum.kt
 when/whenSubjectVariable/whenByString.kt

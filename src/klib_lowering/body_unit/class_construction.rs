@@ -20,7 +20,7 @@ impl<'u, 's> Linker<'u, 's> {
             self.sources.callees,
         )?
         else {
-            return self.materialize_primary_delegation(ir, identity, selected);
+            return self.materialize_own_delegation(ir, identity, selected);
         };
         self.materialize_plan(ir, identity, plan)
     }
@@ -261,18 +261,19 @@ impl<'u, 's> Linker<'u, 's> {
         Ok(())
     }
 
-    /// A secondary constructor delegating to its class's primary constructor: the primary
-    /// constructor materializes the class, and the class gains a secondary constructor that
-    /// delegates to it with the delegation's arguments, then runs a private function holding the
-    /// secondary constructor's own statements. A class whose primary initialization is not
-    /// admitted keeps its target boundary.
-    fn materialize_primary_delegation(
+    /// A secondary constructor delegating to another constructor of its class: the delegation's
+    /// target, materialized first, reaches the primary constructor that materializes the class,
+    /// and the class gains a secondary constructor that delegates to the target with the
+    /// delegation's arguments, then runs a private function holding the secondary constructor's
+    /// own statements. A class whose primary initialization is not admitted keeps its target
+    /// boundary.
+    fn materialize_own_delegation(
         &mut self,
         ir: &mut IrFile,
         identity: &KlibDependencyCallable,
         selected: KlibBodyCallable<'s>,
     ) -> Result<(), KlibBodyDeclineReason> {
-        let Some(delegation) = super::super::class_initialization::primary_delegation(
+        let Some(delegation) = super::super::class_initialization::own_delegation(
             selected,
             self.sources.bodies,
             self.sources.callees,
@@ -280,10 +281,10 @@ impl<'u, 's> Linker<'u, 's> {
         else {
             return Ok(());
         };
-        self.materialize_class(ir, &delegation.primary, delegation.primary_selected)?;
-        let class = *self.classes.get(&delegation.primary).ok_or_else(|| {
+        self.materialize_class(ir, &delegation.target, delegation.target_selected)?;
+        let class = *self.classes.get(&delegation.target).ok_or_else(|| {
             KlibBodyDeclineReason::SignatureMismatch(
-                "an admitted primary constructor materialized no class".to_owned(),
+                "an admitted delegation target materialized no class".to_owned(),
             )
         })?;
         let fields = delegation
@@ -335,14 +336,31 @@ impl<'u, 's> Linker<'u, 's> {
             args,
         });
         ir.set_logical_type(run, Ty::Unit);
-        let delegate = crate::ir::CtorDelegateTarget::This {
-            target_params: ir.classes[class as usize]
-                .ctor_args
-                .iter()
-                .map(|parameter| parameter.ty)
-                .collect(),
-            target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
-            default_masks: Vec::new(),
+        // The target is the primary constructor, or the materialized secondary one at its place.
+        let delegate = match self
+            .constructors
+            .get(&delegation.target)
+            .and_then(|constructor| constructor.secondary)
+        {
+            Some(secondary) => crate::ir::CtorDelegateTarget::This {
+                target_params: ir.classes[class as usize].secondary_ctors[secondary]
+                    .params
+                    .clone(),
+                target: crate::ir::IrConstructorTarget {
+                    ordinal: u32::try_from(secondary + 1).expect("a constructor ordinal fits u32"),
+                    access: crate::ir::IrConstructorAccess::Unrestricted,
+                },
+                default_masks: Vec::new(),
+            },
+            None => crate::ir::CtorDelegateTarget::This {
+                target_params: ir.classes[class as usize]
+                    .ctor_args
+                    .iter()
+                    .map(|parameter| parameter.ty)
+                    .collect(),
+                target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                default_masks: Vec::new(),
+            },
         };
         let secondaries = &mut ir.classes[class as usize].secondary_ctors;
         secondaries.push(materialized_secondary(
@@ -369,7 +387,7 @@ impl<'u, 's> Linker<'u, 's> {
             function,
             initialization: Some((
                 class,
-                super::PendingInitialization::PrimaryDelegation {
+                super::PendingInitialization::OwnDelegation {
                     secondary,
                     arguments: delegation.arguments,
                 },
@@ -786,71 +804,132 @@ impl<'u, 's> Linker<'u, 's> {
             .inherited_implementations(module, arena, declaration)
             .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
         for (body, implemented) in &inherited {
-            let Some(&method) = self.functions.get(body) else {
-                continue;
-            };
-            let Some(implementation) = self.sources.callees.reference_target(body) else {
-                continue;
-            };
-            let name = ir.functions[method as usize].name.clone();
-            for declared in implemented {
-                let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(declared)
-                else {
-                    continue;
-                };
-                let overridden_declaration = callables[0];
-                if !overridden_declaration
-                    .class_contract()
-                    .is_some_and(|class| class.kind == crate::libraries::TypeKind::Interface)
-                {
-                    continue;
+            // The inherited body belongs to a superclass this unit materialized; its member may
+            // not be declared yet when no body calls it (`Itr.remove` under `KeysItr`).
+            let from_class = matches!(
+                self.sources.bodies.member_owner(body),
+                crate::klib_libraries::LocatedMember::One { class, .. }
+                    if crate::metadata::semantic::class_kind(class.base.flags)
+                        == crate::libraries::TypeKind::Class
+            );
+            if from_class && self.declared_member(body).is_none() {
+                if let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) {
+                    let selected = callables[0];
+                    let (arena, function) =
+                        self.sources.bodies.function(body).ok_or_else(|| {
+                            KlibBodyDeclineReason::SignatureMismatch(
+                                "an inherited body has no serialized declaration".to_owned(),
+                            )
+                        })?;
+                    self.declare(ir, body, Some(selected), arena, function)?;
                 }
-                let Some(crate::types::SemanticCallableOwner::Classifier(interface)) =
-                    overridden_declaration.declaration_owner()
-                else {
-                    continue;
-                };
-                let Some(target) = self.sources.callees.reference_target(declared) else {
-                    continue;
-                };
-                let overridden = crate::fir::ResolvedFunctionOverrideTarget::External(target);
-                let records = ir.function_overrides.entry(owner).or_default();
-                if records.iter().any(|edge| edge.overridden == overridden) {
-                    continue;
-                }
-                let (params, result) = (
-                    ir.functions[method as usize].params.clone(),
-                    ir.functions[method as usize].ret,
-                );
-                records.push(crate::ir::IrFunctionOverride {
-                    implementation: crate::fir::ResolvedFunctionOverrideTarget::External(
-                        implementation,
-                    ),
-                    implementation_function: Some(method),
-                    implementation_owner: owner,
-                    overridden,
-                    overridden_owner: interface,
-                    overridden_semantic_role: overridden_declaration.semantic_role(),
-                    collection_barrier: None,
-                    overridden_is_interface: true,
-                    name: name.clone(),
-                    declared_parameters: overridden_declaration.params().to_vec(),
-                    declared_result: overridden_declaration.ret(),
-                    applied_parameters: overridden_declaration.params().to_vec(),
-                    applied_result: overridden_declaration.ret(),
-                    implementation_parameters: params,
-                    implementation_parameter_identities: Vec::new(),
-                    overridden_parameter_identities: overridden_declaration
-                        .parameter_identities()
-                        .to_vec(),
-                    implementation_result: result,
-                    suspend: false,
-                    has_kotlin_superclass_override: false,
-                    depth: 0,
-                });
             }
+            self.record_inherited_implementation(ir, owner, body, implemented);
         }
         Ok(())
+    }
+
+    /// The method this unit declared for the member `body`: a member of a class it materialized,
+    /// or of a same-library class it installed.
+    fn declared_member(&self, body: &KlibDependencyCallable) -> Option<FunId> {
+        if let Some(&function) = self.functions.get(body) {
+            return Some(function);
+        }
+        let signature = match &body.declaration {
+            KlibDeclarationSignature::Public(signature) => {
+                KlibIrSignature::Public(signature.clone())
+            }
+            KlibDeclarationSignature::Accessor(signature) => {
+                KlibIrSignature::Accessor(signature.clone())
+            }
+            _ => return None,
+        };
+        self.local_functions
+            .get(&super::super::same_library_class::LocalIdentity {
+                module: body.module.clone(),
+                signature,
+            })
+            .map(|local| local.function)
+    }
+
+    /// Record that `owner` implements each interface declaration of `implemented` with the
+    /// inherited member `body`, unless an edge already names that declaration. A body this unit
+    /// did not declare, or a declaration outside the program's closure, records nothing.
+    pub(super) fn record_inherited_implementation(
+        &self,
+        ir: &mut IrFile,
+        owner: crate::types::TypeName,
+        body: &KlibDependencyCallable,
+        implemented: &[KlibDependencyCallable],
+    ) {
+        let Some(method) = self.declared_member(body) else {
+            return;
+        };
+        let name = ir.functions[method as usize].name.clone();
+        for declared in implemented {
+            let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(declared)
+            else {
+                continue;
+            };
+            let overridden_declaration = callables[0];
+            if !overridden_declaration
+                .class_contract()
+                .is_some_and(|class| class.kind == crate::libraries::TypeKind::Interface)
+            {
+                continue;
+            }
+            let Some(crate::types::SemanticCallableOwner::Classifier(interface)) =
+                overridden_declaration.declaration_owner()
+            else {
+                continue;
+            };
+            let Some(target) = self.sources.callees.reference_target(declared) else {
+                continue;
+            };
+            // A member of a class private to its library has no provider handle of its own; the
+            // edge then names the interface declaration it implements, as an installed class's
+            // own override does.
+            let implementation = self
+                .sources
+                .callees
+                .reference_target(body)
+                .unwrap_or(target);
+            let overridden = crate::fir::ResolvedFunctionOverrideTarget::External(target);
+            let records = ir.function_overrides.entry(owner).or_default();
+            if records.iter().any(|edge| edge.overridden == overridden) {
+                continue;
+            }
+            let (params, result) = (
+                ir.functions[method as usize].params.clone(),
+                ir.functions[method as usize].ret,
+            );
+            records.push(crate::ir::IrFunctionOverride {
+                implementation: crate::fir::ResolvedFunctionOverrideTarget::External(
+                    implementation,
+                ),
+                implementation_function: Some(method),
+                implementation_owner: owner,
+                overridden,
+                overridden_owner: interface,
+                overridden_semantic_role: overridden_declaration.semantic_role(),
+                collection_barrier: None,
+                overridden_is_interface: true,
+                name: name.clone(),
+                declared_parameters: overridden_declaration.params().to_vec(),
+                declared_result: overridden_declaration.ret(),
+                applied_parameters: overridden_declaration.params().to_vec(),
+                applied_result: overridden_declaration.ret(),
+                implementation_parameters: params,
+                implementation_parameter_identities: Vec::new(),
+                overridden_parameter_identities: overridden_declaration
+                    .parameter_identities()
+                    .to_vec(),
+                implementation_result: result,
+                suspend: false,
+                has_kotlin_superclass_override: false,
+                depth: 0,
+            });
+        }
     }
 
     /// Declare `function`, a member dispatch on an instance of the materialized class `member`

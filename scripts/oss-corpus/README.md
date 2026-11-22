@@ -65,7 +65,12 @@ also split by kind), then stops the leftover daemons so the next build starts an
 tasks: kotlinc's Kotlin task, and krusty's replacement, support check and Kotlin task. The two
 measured builds are comparable: an unmeasured warm-up build first downloads everything the build
 needs (dependencies, plugins, toolchains) and its outputs are dropped, then both measured builds run
-with `--offline` from the same caches.
+with `--offline` from the same caches. A warm-up that fails to download something is not retried (a repository extends a block for every
+request made during it); it stops the run with a pointer to its log.
+
+A project's job fails when the reference kotlinc build or the krusty build fails, after the
+comparison has recorded how far each got, so the project still appears in the report; the `summary`
+job runs either way.
 
 The krusty build is also sampled: `perf` records every process at 99 Hz while it runs (the corpus
 binary keeps frame pointers), `hotspots.py` folds the krusty processes' call stacks, and
@@ -81,7 +86,11 @@ nothing is reported as unverified, not left out), the projects' tests that pass 
 what both builds cost, krusty's hotspots, and the Gradle and compiler plugins the corpus uses.
 Each `corpus-<project>` workflow artifact holds that project's comparison and logs. The `summary`
 artifact holds `summary.md` and `summary.json` for the results produced by this run; the job summary
-displays the same Markdown report.
+displays the same Markdown report. No table cell is empty: a project whose job left no comparison has no
+row and is listed under "Not measured" with why (the first failed build, Gradle's cause line, and the HTTP
+status of a failed download, read from the logs its job uploaded), a test run that cannot be compared is
+listed under its table, and totals are sentences below the tables. The run itself fails while any project
+is not measured, after the summary is published.
 
 To work on one failure, `repro.sh <project> <compile task path>` (for example
 `repro.sh ktor :ktor-io:compileKotlinJvm`) checks the project out the way the nightly does and
