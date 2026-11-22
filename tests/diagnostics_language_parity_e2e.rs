@@ -307,3 +307,130 @@ fn a_script_return_is_prohibited_in_its_result_position_like_kotlinc() {
         &[],
     );
 }
+
+/// Only a contextual one-parameter function type introduces a lambda's implicit `it`. Without one
+/// (an `Any` expectation, a `() -> R` parameter, a conditional branch, or no expectation at all) a
+/// lambda that omits its parameter list declares no parameter and `it` is unresolved. A lexical
+/// `it` is still captured, and a contextual one-parameter function type still binds it.
+#[test]
+fn implicit_it_needs_a_one_parameter_function_type_like_kotlinc() {
+    let source = "fun take(f: () -> Unit) {}\n\
+                  fun anyExpected() { val f: Any = { it } }\n\
+                  fun noParameters() { take { it } }\n\
+                  fun branch() { val g = if (true) { { it } } else null }\n\
+                  fun bare() { val f = { it.toString() } }\n\
+                  fun captured(it: Int) = { it + 1 }\n\
+                  fun contextual() = listOf(1).map { { it } }";
+    let stdlib = common::stdlib_jar();
+    let result =
+        common::compiler_diagnostics(&[("ImplicitIt.kt", source)], std::slice::from_ref(&stdlib));
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    assert_eq!(krusty_errors, errors(&result.reference_stderr));
+    assert_eq!(
+        krusty_errors
+            .iter()
+            .map(|error| (error.line, error.column, error.message.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (2, 36, "unresolved reference 'it'."),
+            (3, 29, "unresolved reference 'it'."),
+            (4, 38, "unresolved reference 'it'."),
+            (5, 24, "unresolved reference 'it'."),
+        ]
+    );
+}
+
+/// A lambda that omits its parameter list fits both `() -> Unit` and `(Int) -> Unit`, whether or
+/// not its body spells `it`, so the call is ambiguous. A written parameter list, even an empty
+/// `{ -> }`, fixes the arity and selects one overload.
+#[test]
+fn lambda_arity_comes_from_its_written_parameter_list_like_kotlinc() {
+    let source = "fun f(g: () -> Unit) = 0\n\
+                  fun f(g: (Int) -> Unit) = 1\n\
+                  fun spelled() = f { it }\n\
+                  fun empty() = f { }\n\
+                  fun arrow(): Int = f { -> }\n\
+                  fun named(): Int = f { x -> }";
+    let sources = [("LambdaArity.kt", source)];
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(&sources, std::slice::from_ref(&stdlib));
+    assert_eq!(
+        result.reference_code, 1,
+        "kotlinc: {}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        result.krusty_code, 1,
+        "krusty: {}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    let expected = common::reference_error_blocks(&sources, &[]);
+    assert_eq!(
+        common::krusty_error_blocks_with_args(&sources, &[]),
+        expected
+    );
+    assert_eq!(
+        expected,
+        [
+            "LambdaArity.kt:3:17: overload resolution ambiguity between candidates:",
+            "| fun f(g: () -> Unit): Int",
+            "| fun f(g: (Int) -> Unit): Int",
+            "LambdaArity.kt:3:21: unresolved reference 'it'.",
+            "LambdaArity.kt:4:15: overload resolution ambiguity between candidates:",
+            "| fun f(g: () -> Unit): Int",
+            "| fun f(g: (Int) -> Unit): Int",
+        ]
+    );
+}
+
+/// Every contextual one-parameter function type still binds `it`.
+#[test]
+fn implicit_it_with_a_one_parameter_function_type_runs_like_kotlinc() {
+    let source = include_str!("box_regressions/implicitItContext.kt");
+    assert_eq!(common::kotlinc_box_result(source), "OK");
+    common::expect_box_ok_with_stdlib(source, "ImplicitItContext");
+}
+
+/// A lambda whose selected parameter is a bare type parameter is analysed standalone, and its
+/// natural function type infers that parameter, as kotlinc does.
+#[test]
+fn a_lambda_for_a_bare_type_parameter_infers_it_like_kotlinc() {
+    let source = include_str!("box_regressions/lambdaToBareTypeParameter.kt");
+    assert_eq!(common::kotlinc_box_result(source), "OK");
+    common::expect_box_ok_with_stdlib(source, "LambdaToBareTypeParameter");
+}
+
+/// A SAM conversion takes the method's parameters as a function type takes its own, so a lambda's
+/// written parameter type must be a supertype of each. A star-projected SAM method takes the
+/// projection's upper bound (`Any!`, `Any?`), unlike a star-projected `Function1`, whose
+/// parameter is `Nothing` and so takes `{ i: Int -> i }`.
+#[test]
+fn a_sam_lambda_with_written_parameter_types_fits_the_method_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "SamLambdaParameters.kt",
+            "fun interface F<R, P> { fun execute(p: P): R }\n\
+             fun bar1(x: java.util.function.Function<*, *>) {}\n\
+             fun bar2(x: Function1<*, *>) {}\n\
+             fun bar3(x: F<*, *>) {}\n\
+             fun bar4(x: java.util.function.Function<Any?, Any?>) {}\n\
+             fun bar5(x: F<Any?, Int>) {}\n\
+             fun test() {\n\
+             \x20   bar1 { i: Int -> i }\n\
+             \x20   bar2 { i: Int -> i }\n\
+             \x20   bar3 { i: Int -> i }\n\
+             \x20   bar4 { i: Int -> i }\n\
+             \x20   bar5 { i: Int -> i }\n\
+             \x20   bar5 { i: Number -> i }\n\
+             \x20   bar5 { i -> i }\n\
+             }\n",
+        )],
+        &[],
+    );
+}

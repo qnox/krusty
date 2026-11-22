@@ -1082,6 +1082,70 @@ fn a_private_class_and_its_private_members_are_not_published() {
 }
 
 #[test]
+fn a_private_constructor_is_found_only_by_its_exact_identity() {
+    let mut open = in_memory_class(1);
+    open.constructors[0].visibility = Visibility::Private;
+    open.constructors.push(KotlinConstructor {
+        is_primary: false,
+        params: Vec::new(),
+        param_names: Vec::new(),
+        param_defaults: Vec::new(),
+        vararg: None,
+        visibility: Visibility::Public,
+    });
+    let inventory = inventory::PackageInventory::from_package_inputs(vec![(
+        segments(&["p"]),
+        package_with_classes(vec![("p/Open", open)]),
+        false,
+        false,
+        Some("lib".to_string()),
+    )])
+    .expect("a class with a private constructor is signable");
+    let signed = inventory
+        .classifier(type_name("p/Open"))
+        .expect("Open is published");
+    let [public] = signed.constructors.as_slice() else {
+        panic!("only the public constructor is published");
+    };
+    let [private] = signed.private_constructors.as_slice() else {
+        panic!("the private constructor is retained for exact joins");
+    };
+    assert_eq!(
+        signed.primary_constructor.as_ref(),
+        Some(&private.signature),
+        "the primary constructor is the private one"
+    );
+    let signatures = [
+        (private.signature.clone(), "private"),
+        (public.signature.clone(), "public"),
+    ];
+    let libraries = KlibLibraries::over(std::rc::Rc::new(inventory));
+    let published = libraries
+        .classifier(type_name("p/Open"))
+        .expect("Open is published");
+    assert_eq!(
+        published.constructors.len(),
+        1,
+        "source resolution sees only the public constructor"
+    );
+    let platform = &libraries as &dyn crate::libraries::SemanticPlatform;
+    for (signature, kind) in signatures {
+        let identity = crate::libraries::KlibDependencyCallable {
+            module: "lib".to_owned(),
+            declaration: crate::libraries::KlibDeclarationSignature::Public(signature),
+        };
+        let (_, realization) = platform
+            .external_callable_by_dependency(&identity)
+            .unwrap_or_else(|| panic!("the {kind} constructor joins by its exact identity"));
+        assert_eq!(realization.dependency_callable.as_ref(), Some(&identity));
+        assert_eq!(
+            realization.kind,
+            crate::libraries::ExternalCallableKind::Constructor
+        );
+    }
+}
+
+#[test]
 fn an_unsignable_member_rejects_the_library_set() {
     let mut malformed = in_memory_class(1);
     malformed.functions[0].context_count = 2;

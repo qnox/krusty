@@ -1,7 +1,7 @@
 //! The declarations KSP lists for a classifier, and the functions, properties and constructors
 //! among them, in KSP's order.
 
-use krusty_plugin_ir::{
+use krusty_plugin_api::ksp::{
     KspClass, KspClassKind, KspDeclaration, KspDeclarationOrigin, KspFunction, KspFunctionKind,
     KspModifier, KspOverridee, KspParameter, KspProperty, KspType, KspTypeArgument,
     KspTypeParameter, KspTypeSlot,
@@ -1025,7 +1025,7 @@ impl Source<'_> {
             .flatten()
             .map(|parameter| {
                 KspTypeArgument::Invariant(KspType {
-                    declaration: krusty_plugin_ir::KspTypeDeclaration::TypeParameter {
+                    declaration: krusty_plugin_api::ksp::KspTypeDeclaration::TypeParameter {
                         id: parameter.id,
                         owner: header.qualified_name.to_string(),
                         name: parameter.name.clone(),
@@ -1314,7 +1314,7 @@ fn constructor(
     header: &ClassHeader<'_>,
     kind: KspFunctionKind,
     line: Option<u32>,
-    annotations: Vec<krusty_plugin_ir::KspAnnotation>,
+    annotations: Vec<krusty_plugin_api::ksp::KspAnnotation>,
     modifiers: Option<Vec<KspModifier>>,
     parameters: Vec<KspParameter>,
 ) -> KspFunction {

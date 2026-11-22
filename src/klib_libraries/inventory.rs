@@ -519,8 +519,7 @@ impl PackageInventory {
         }
         for classifier in self.classifiers.values() {
             let constructors = classifier
-                .constructors
-                .iter()
+                .declared_constructors()
                 .filter(|constructor| constructor.declaration.param_defaults.contains(&true))
                 .map(|constructor| &constructor.signature);
             let members = classifier
@@ -568,7 +567,11 @@ impl PackageInventory {
             .flatten()
             .for_each(|extension| attach(&mut extension.signed));
         for classifier in self.classifiers.values_mut() {
-            for constructor in &mut classifier.constructors {
+            for constructor in classifier
+                .constructors
+                .iter_mut()
+                .chain(&mut classifier.private_constructors)
+            {
                 let signature = KlibIrSignature::Public(constructor.signature.clone());
                 constructor.defaults = defaults.of(classifier.module.as_deref(), &signature);
             }
@@ -722,7 +725,11 @@ impl PackageInventory {
             .dependency_identities()
             .constructor(&identity.module, signature)?;
         let signed = &self.classifiers[&classifier];
-        Some((classifier, signed, &signed.constructors[position]))
+        Some((
+            classifier,
+            signed,
+            signed.declared_constructors().nth(position)?,
+        ))
     }
 
     /// The property whose getter or setter is serialized under exactly `identity`, at its

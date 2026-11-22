@@ -2589,17 +2589,7 @@ fn lower_type_operation(operation: FirTypeOperation, target: crate::types::Ty) -
     match operation {
         FirTypeOperation::Is(_) => IrTypeOp::InstanceOf,
         FirTypeOperation::NotIs(_) => IrTypeOp::NotInstanceOf,
-        // A cast to a type parameter follows the parameter's upper-bound nullability. Kotlin's
-        // implicit bound is `Any?`, so `value as E` in an unconstrained generic function must let
-        // `null` reach an instantiation such as `E = String?`; only `<E : Any>`/`E & Any` requires
-        // the runtime null check. The checked target already carries that distinction.
-        FirTypeOperation::Cast
-            if target.is_nullable()
-                || (target.is_ty_param() && target.upper_bound_admits_null()) =>
-        {
-            IrTypeOp::Cast
-        }
-        FirTypeOperation::Cast => IrTypeOp::CastNonNull,
+        FirTypeOperation::Cast => IrTypeOp::cast_to(target),
         FirTypeOperation::SafeCast => {
             unreachable!("safe casts expand to checked control flow before common IR")
         }

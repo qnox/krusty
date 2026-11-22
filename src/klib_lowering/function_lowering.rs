@@ -182,6 +182,11 @@ impl FunctionHeader {
         crate::types::ty_subst(ty, &self.erasures)
     }
 
+    /// Whether the body returns the erasure of a declared result that names a type parameter.
+    pub(super) fn erases_result(&self) -> bool {
+        self.erased_result.is_some_and(|erased| erased != self.ret)
+    }
+
     /// The type the body's own returns carry.
     pub(super) fn body_result(&self) -> Ty {
         self.erased_result.unwrap_or(self.ret)

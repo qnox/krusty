@@ -73,7 +73,8 @@ mod top_level_selection;
 use argument_compatibility::arg_fits;
 use argument_compatibility::{arg_fits_platform, arg_fits_source, untyped_lambda_pertinent};
 pub(crate) use argument_compatibility::{
-    function_input_types, resolution_subtype, sam_arg_matches, sam_return_matches,
+    function_input_types, resolution_subtype, sam_arg_matches, sam_parameters_admit,
+    sam_return_matches,
 };
 pub(crate) use call_argument::{
     expected_result_keeps_call_evidence, CallArgKind, ProvisionalResult,
@@ -100,12 +101,12 @@ pub use lambda_call_shape::LambdaCallShape;
 pub(crate) use member_hierarchy::{
     apply_inner_alias_outer_in_source, apply_inner_classifier_outer_in_source,
     bound_inner_classifier_in_source, bound_inner_constructor_candidates,
-    declared_member_callables, declared_member_declarations, function_declaration_identity,
-    function_input_shapes_match, function_override_input_slots_match, function_result_refines,
-    imported_object_member_symbols, inherited_nested_classifier_name,
-    inherits_nested_classifiers_through, lexical_enclosing_classifier_names,
-    member_declarations_in_hierarchy, member_is_inheritable, members_in_hierarchy,
-    nested_classifier_supertypes, normalize_inherited_member_functions,
+    checked_function_result_refines, declared_member_callables, declared_member_declarations,
+    function_declaration_identity, function_input_shapes_match,
+    function_override_input_slots_match, function_result_refines, imported_object_member_symbols,
+    inherited_nested_classifier_name, inherits_nested_classifiers_through,
+    lexical_enclosing_classifier_names, member_declarations_in_hierarchy, member_is_inheritable,
+    members_in_hierarchy, nested_classifier_supertypes, normalize_inherited_member_functions,
     override_input_shapes_match, override_parameter_types_match, property_declaration_identity,
     specialize_member_function, supertype_preorder, BoundInnerConstructorContext,
     InheritedNestedClassifier, InnerAliasOuterApplication, OverrideInputShape,

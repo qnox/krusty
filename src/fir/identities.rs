@@ -36,6 +36,35 @@ u32_id!(DeferredValueSelectionId);
 u32_id!(QualifiedCallCoordinateId);
 u32_id!(TypeParameterId);
 u32_id!(DiagnosticId);
+
+impl DiagnosticId {
+    const IN_PROGRESS_TAG: u32 = 1 << 31;
+
+    /// The outcome of demanding a declaration whose signature is still being computed. It is not a
+    /// recorded diagnostic and marks nothing as failed: the declaration has no known type yet, which
+    /// is a recursive problem only if a selection commits to it (see
+    /// [`SignatureSolver`](super::signature::SignatureSolver)). Recorded diagnostics never carry the tag.
+    pub fn in_progress(declaration: DeclarationId) -> Self {
+        debug_assert!(declaration.raw() < Self::IN_PROGRESS_TAG);
+        Self(Self::IN_PROGRESS_TAG | declaration.raw())
+    }
+
+    /// A probe's result with the in-progress outcome read as "no candidate": a declaration still
+    /// being computed has no type to offer, so a probe that needs the type only to decide
+    /// applicability moves on to the next candidate.
+    pub fn probe<T>(result: Result<Option<T>, Self>) -> Result<Option<T>, Self> {
+        match result {
+            Err(failure) if failure.in_progress_declaration().is_some() => Ok(None),
+            result => result,
+        }
+    }
+
+    /// The declaration whose signature was in progress, or `None` for a recorded diagnostic.
+    pub fn in_progress_declaration(self) -> Option<DeclarationId> {
+        (self.0 & Self::IN_PROGRESS_TAG != 0)
+            .then(|| DeclarationId::from_raw(self.0 & !Self::IN_PROGRESS_TAG))
+    }
+}
 u32_id!(LookupNameId);
 u32_id!(HeaderTypeId);
 u32_id!(HeaderClassifierTypeId);

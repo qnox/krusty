@@ -293,11 +293,21 @@ pub(super) fn declarations(
                     .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?;
                 read_values(platform, bodies, &facts, &objects, &mut state)?;
             }
-            state.dispatched.extend(
-                facts
-                    .constructor_dispatched_members(&identity, bodies)
-                    .map_err(|reason| format!("an invalid class member: {reason:?}"))?,
+            let dispatched = facts
+                .constructor_dispatched_members(&identity, bodies)
+                .map_err(|reason| format!("an invalid class member: {reason:?}"))?;
+            // Each is emitted with the class: a member the class inherits implements interface
+            // declarations only dispatch reaches, and no body calls it.
+            let member_class = selected
+                .class_contract()
+                .filter(|class| class.emits_members())
+                .cloned();
+            state.pending.extend(
+                dispatched
+                    .iter()
+                    .map(|member| (member.clone(), member_class.clone())),
             );
+            state.dispatched.extend(dispatched);
             // The declarations the class's initialization names without emitting them.
             for declaration in facts
                 .constructor_declaration_evidence(&identity, bodies)
