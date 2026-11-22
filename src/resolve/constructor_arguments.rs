@@ -133,6 +133,9 @@ impl Checker<'_> {
         if self.report_self_delegation_cycle(class, secondary, span, label, arguments) {
             return;
         }
+        if self.report_inapplicable_this_delegations(class, secondary, span, label, arguments) {
+            return;
+        }
         if self.report_missing_delegation_arguments(
             class, secondary, span, label, arguments, candidates,
         ) {
@@ -360,6 +363,191 @@ impl Checker<'_> {
         self.diags
             .error(span, "there's a cycle in the delegation calls chain.");
         true
+    }
+
+    /// Every `this(...)` constructor, including the one delegating, rejects the arguments for a
+    /// missing parameter. kotlinc lists them together. One constructor keeps the single-candidate
+    /// wording, and a named or extra argument keeps its own diagnostic.
+    fn report_inapplicable_this_delegations(
+        &mut self,
+        class: DeclId,
+        secondary: usize,
+        span: Span,
+        label: &str,
+        arguments: &CtorDelegationCall,
+    ) -> bool {
+        if label != "this" {
+            return false;
+        }
+        let Decl::Class(classifier) = self.file.decl(class) else {
+            return false;
+        };
+        let mut rejected = Vec::new();
+        for (signature, parameters) in Self::this_delegation_shapes(classifier) {
+            let names = arguments
+                .names
+                .iter()
+                .any(Option::is_some)
+                .then_some(arguments.names.as_slice());
+            let Err(failure) = map_param_list_args(
+                &arguments.args,
+                names,
+                &parameters,
+                arguments.trailing_lambda,
+            ) else {
+                return false;
+            };
+            let missing = failure
+                .errors
+                .iter()
+                .filter_map(|error| match error {
+                    CallArgMappingError::MissingRequired { name } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if missing.len() != failure.errors.len() || missing.is_empty() {
+                return false;
+            }
+            rejected.push((signature, missing));
+        }
+        if rejected.len() < 2 {
+            return false;
+        }
+        let mut message = String::from("none of the following candidates is applicable:");
+        for (signature, missing) in rejected {
+            message.push_str(&format!("\n\n{signature}:"));
+            for name in missing {
+                message.push_str(&format!("\n  No value passed for parameter '{name}'."));
+            }
+        }
+        let span = self
+            .delegation_keyword_span(class, secondary)
+            .unwrap_or(span);
+        self.diags.error(span, message);
+        true
+    }
+
+    fn this_delegation_shapes(
+        classifier: &ClassDecl,
+    ) -> Vec<(String, crate::libraries::ParamList)> {
+        let mut shapes = Vec::new();
+        if classifier.primary_ctor_annotations.is_some() {
+            let context = classifier.context_params.len();
+            shapes.push(Self::delegation_shape(
+                &classifier.name,
+                classifier
+                    .context_params
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .chain(
+                        classifier
+                            .props
+                            .iter()
+                            .map(|parameter| parameter.name.clone()),
+                    ),
+                classifier
+                    .context_params
+                    .iter()
+                    .map(|parameter| parameter.ty.clone())
+                    .chain(
+                        classifier
+                            .props
+                            .iter()
+                            .map(|parameter| parameter.ty.clone()),
+                    ),
+                std::iter::repeat_n(false, context).chain(
+                    classifier
+                        .props
+                        .iter()
+                        .map(|parameter| parameter.default.is_some()),
+                ),
+                classifier
+                    .props
+                    .iter()
+                    .position(|parameter| parameter.is_vararg)
+                    .map(|ordinal| ordinal + context),
+            ));
+        }
+        for constructor in &classifier.secondary_ctors {
+            let context = classifier.context_params.len();
+            shapes.push(Self::delegation_shape(
+                &classifier.name,
+                classifier
+                    .context_params
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .chain(
+                        constructor
+                            .params
+                            .iter()
+                            .map(|parameter| parameter.name.clone()),
+                    ),
+                classifier
+                    .context_params
+                    .iter()
+                    .map(|parameter| parameter.ty.clone())
+                    .chain(
+                        constructor
+                            .params
+                            .iter()
+                            .map(|parameter| parameter.ty.clone()),
+                    ),
+                std::iter::repeat_n(false, context).chain(
+                    constructor
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.default.is_some()),
+                ),
+                constructor
+                    .params
+                    .iter()
+                    .position(|parameter| parameter.is_vararg)
+                    .map(|ordinal| ordinal + context),
+            ));
+        }
+        shapes
+    }
+
+    fn delegation_shape(
+        owner: &str,
+        names: impl Iterator<Item = String>,
+        types: impl Iterator<Item = TypeRef>,
+        defaults: impl Iterator<Item = bool>,
+        vararg: Option<usize>,
+    ) -> (String, crate::libraries::ParamList) {
+        let names = names.collect::<Vec<_>>();
+        let types = types.collect::<Vec<_>>();
+        let defaults = defaults.collect::<Vec<_>>();
+        let parts = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let vararg_prefix = if vararg == Some(index) { "vararg " } else { "" };
+                let default = if defaults.get(index).copied().unwrap_or(false) {
+                    " = ..."
+                } else {
+                    ""
+                };
+                let rendered = types.get(index).map_or_else(String::new, |ty| {
+                    super::delegated_properties::diagnostic_type_syntax(ty, |name| {
+                        Some(name.replace('/', "."))
+                    })
+                });
+                format!("{vararg_prefix}{name}: {rendered}{default}")
+            })
+            .collect::<Vec<_>>();
+        (
+            format!("constructor({}): {owner}", parts.join(", ")),
+            crate::libraries::ParamList {
+                visibility: Visibility::Public,
+                names,
+                defaults: defaults.as_slice().into(),
+                types: Vec::new(),
+                recv_fun: crate::libraries::ParamFlags::new(),
+                vararg,
+                annotation: None,
+            },
+        )
     }
 
     fn current_constructor_accepts_delegation(
