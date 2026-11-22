@@ -127,6 +127,9 @@ impl Checker<'_> {
         {
             return;
         }
+        if self.report_self_delegation_type_mismatches(class, secondary, label, arguments) {
+            return;
+        }
         if self.report_self_delegation_cycle(class, secondary, span, label, arguments) {
             return;
         }
@@ -284,6 +287,59 @@ impl Checker<'_> {
         Some(format!("constructor({}): {owner}", parts.join(", ")))
     }
 
+    /// Arguments that map onto the delegating constructor but do not fit its parameters. The
+    /// constructor is not a selectable candidate, so the ordinary single-candidate path never sees
+    /// them. An unresolved argument is not a type mismatch.
+    fn report_self_delegation_type_mismatches(
+        &mut self,
+        class: DeclId,
+        secondary: usize,
+        label: &str,
+        arguments: &CtorDelegationCall,
+    ) -> bool {
+        let Some(mismatches) =
+            self.self_delegation_type_mismatches(class, secondary, label, arguments)
+        else {
+            return false;
+        };
+        if mismatches.is_empty() {
+            return false;
+        }
+        for (expected, actual, argument) in mismatches {
+            self.report_assignability_error(expected, actual, self.span(argument), "argument");
+        }
+        true
+    }
+
+    fn self_delegation_type_mismatches(
+        &self,
+        class: DeclId,
+        secondary: usize,
+        label: &str,
+        arguments: &CtorDelegationCall,
+    ) -> Option<Vec<(Ty, Ty, ExprId)>> {
+        let (slots, types) = self.mapped_self_delegation(class, secondary, label, arguments)?;
+        let mut mismatches = Vec::new();
+        for (index, slot) in slots.iter().enumerate() {
+            let Some(argument) = slot else {
+                continue;
+            };
+            let (expected, actual) = (
+                types.get(index).copied()?,
+                self.expr_types.get(argument.0 as usize).copied()?,
+            );
+            if actual == Ty::Error
+                || expected == Ty::Error
+                || self.receiver_is_assignable(actual, expected)
+                || expected.accepts_numeric(actual)
+            {
+                continue;
+            }
+            mismatches.push((expected, actual, *argument));
+        }
+        Some(mismatches)
+    }
+
     /// The delegating constructor is the only `this(...)` target that accepts these arguments.
     /// kotlinc reports that at the keyword; a constructor that does not accept them is a different
     /// argument error.
@@ -313,27 +369,8 @@ impl Checker<'_> {
         label: &str,
         arguments: &CtorDelegationCall,
     ) -> bool {
-        if label != "this" {
-            return false;
-        }
-        let Some(parameters) = self.delegation_argument_parameters(class, secondary, label, &[])
+        let Some((slots, types)) = self.mapped_self_delegation(class, secondary, label, arguments)
         else {
-            return false;
-        };
-        let names = arguments
-            .names
-            .iter()
-            .any(Option::is_some)
-            .then_some(arguments.names.as_slice());
-        let Ok(slots) = map_param_list_args(
-            &arguments.args,
-            names,
-            &parameters,
-            arguments.trailing_lambda,
-        ) else {
-            return false;
-        };
-        let Some(types) = self.secondary_parameter_types(class, secondary) else {
             return false;
         };
         slots.iter().enumerate().all(|(index, slot)| {
@@ -351,6 +388,33 @@ impl Checker<'_> {
                 || self.receiver_is_assignable(actual, expected)
                 || expected.accepts_numeric(actual)
         })
+    }
+
+    fn mapped_self_delegation(
+        &self,
+        class: DeclId,
+        secondary: usize,
+        label: &str,
+        arguments: &CtorDelegationCall,
+    ) -> Option<(Vec<Option<ExprId>>, Vec<Ty>)> {
+        if label != "this" {
+            return None;
+        }
+        let parameters = self.delegation_argument_parameters(class, secondary, label, &[])?;
+        let names = arguments
+            .names
+            .iter()
+            .any(Option::is_some)
+            .then_some(arguments.names.as_slice());
+        let slots = map_param_list_args(
+            &arguments.args,
+            names,
+            &parameters,
+            arguments.trailing_lambda,
+        )
+        .ok()?;
+        let types = self.secondary_parameter_types(class, secondary)?;
+        Some((slots, types))
     }
 
     fn secondary_parameter_types(&self, class: DeclId, secondary: usize) -> Option<Vec<Ty>> {
