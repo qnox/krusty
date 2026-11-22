@@ -233,15 +233,6 @@ impl<'a> KlibCalleeFacts<'a> {
         super::type_evidence::satisfies(self.class_type_oracle, parameters, argument, bound)
     }
 
-    pub(super) fn is_subtype(
-        &self,
-        parameters: &super::klib_types::KlibTypeParameters,
-        sub: crate::types::Ty,
-        sup: crate::types::Ty,
-    ) -> bool {
-        super::type_evidence::ordinary_subtype(self.class_type_oracle, parameters, sub, sup)
-    }
-
     pub(super) fn classifier_parameter_bounds(
         &self,
         owner: crate::types::TypeName,
@@ -627,6 +618,24 @@ impl<'a> KlibCalleeFacts<'a> {
         match self.get(identity) {
             Some(KlibCalleeFact::Selected(callables)) => {
                 super::continuation_intrinsics::authenticate(callables[0])
+            }
+            Some(KlibCalleeFact::Ambiguous) | None => Ok(None),
+        }
+    }
+
+    /// The continuation interception `identity` is, which body lowering expands to the coroutine
+    /// class's own interception: no declaration of it is emitted or called.
+    pub(crate) fn intercepted_continuation(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<
+        Option<super::intercepted_continuation::InterceptedContinuationCall>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        // Two selected declarations prove no intrinsic; the call's own linking reports them.
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => {
+                super::intercepted_continuation::authenticate(callables[0])
             }
             Some(KlibCalleeFact::Ambiguous) | None => Ok(None),
         }

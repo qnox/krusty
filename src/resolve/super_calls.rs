@@ -201,6 +201,7 @@ impl Checker<'_> {
             class_receiver: true,
             current,
             receiver_depth,
+            dsl_shadowed: false,
         }))
     }
 

@@ -691,7 +691,7 @@ impl<'a> FileLowering<'a> {
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
         for param in params {
-            match self.carrier(*param).abi_param() {
+            match self.carrier(parameter_slot(*param)).abi_param() {
                 Some(abi) => signature.params.push(abi),
                 None => return Err("a `Unit` parameter".into()),
             }
@@ -1032,8 +1032,7 @@ impl<'a> FileLowering<'a> {
                 lowering.scope = krusty::ir::IrEnclosure::Function(index as krusty::ir::FunId);
                 lowering.record_semantic_slots(&semantic_slots);
                 for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
-                    let variable = lowering.declare_value(slot as u32, *ty)?;
-                    lowering.builder.def_var(variable, *value);
+                    lowering.bind_parameter(slot as u32, *value, *ty)?;
                 }
                 lowering.frame_objects = lowering.frame_constructions(body);
                 lowering.statement(body)
@@ -1173,6 +1172,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 "common-IR value slot {slot} has two semantic declaration types"
             );
         }
+    }
+
+    /// Bind an entry parameter to its slot. A `Unit` parameter arrives as the `Unit` instance;
+    /// reading it answers `Unit` exactly as a `Unit`-typed local does, so nothing is stored.
+    pub(super) fn bind_parameter(
+        &mut self,
+        slot: u32,
+        value: Value,
+        ty: Ty,
+    ) -> Result<(), Unsupported> {
+        if ty == Ty::Unit {
+            self.unit_values.insert(slot);
+            return Ok(());
+        }
+        let variable = self.declare_value(slot, ty)?;
+        self.builder.def_var(variable, value);
+        Ok(())
     }
 
     fn declare_value(&mut self, slot: u32, ty: Ty) -> Result<Variable, Unsupported> {
@@ -2232,13 +2248,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let (owner, name) = self
                     .range_getter(*target, *receiver)
                     .expect("checked by the guard");
-                if self.range_has_source_implementor(*receiver) {
-                    return Err(declined!(
-                        "the member `{name}` of a range type this file implements itself"
-                    ));
-                }
-                self.range_property_member(owner, &name, *receiver, *result)
-                    .expect("a range member, by the guard")
+                self.range_property_through_implementors(*target, owner, &name, *receiver, *result)
             }
             IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::ExternalPropertyRead {
@@ -2818,7 +2828,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let mut values = Vec::with_capacity(args.len());
         for (index, argument) in args.iter().enumerate() {
             let value = match parameters.get(index) {
-                Some(ty) => self.coerce(*argument, *ty)?,
+                Some(ty) => self.coerce(*argument, parameter_slot(*ty))?,
                 None => self.expression(*argument)?,
             };
             if self.terminated {
@@ -2836,6 +2846,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 /// `Any?`: the type every runtime reference parameter is declared as.
 fn any() -> Ty {
     Ty::nullable(Ty::obj("kotlin/Any"))
+}
+
+/// The type a parameter declared `ty` is passed as. A `Unit` parameter is passed the `Unit`
+/// instance in a reference slot, as kotlinc passes it: the argument is evaluated, and the callee
+/// receives the singleton.
+fn parameter_slot(ty: Ty) -> Ty {
+    if ty == Ty::Unit {
+        any()
+    } else {
+        ty
+    }
 }
 
 fn callee_kind(callee: &Callee) -> &'static str {

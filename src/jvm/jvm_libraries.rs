@@ -833,10 +833,10 @@ impl JvmLibraries {
                 continue;
             };
             let getter_inline = property_getter_inline(property.getter_inline, getter_public);
-            let Some((getter_params, getter_ret)) = parse_method_desc(&getter_sig.desc) else {
+            let Some((mut getter_params, getter_ret)) = parse_method_desc(&getter_sig.desc) else {
                 continue;
             };
-            if getter_params.len() != 1 {
+            if !parameter_plans::declared_prefix(&mut getter_params, 1) {
                 continue; // exactly the extension receiver
             }
             let property_gsig = property.generic_sig.clone();
@@ -2731,7 +2731,7 @@ impl JvmLibraries {
                     // frontend continues to see only the two semantic receiver roles.
                     let value_dispatch = metadata::class_inline(&ci).is_some();
                     let extension_index = context_count + usize::from(value_dispatch);
-                    if getter_params.len() != extension_index + 1 {
+                    if !parameter_plans::declared_prefix(&mut getter_params, extension_index + 1) {
                         continue;
                     }
                     let Some(physical_receiver) = getter_params.get(extension_index).copied()
@@ -2883,7 +2883,7 @@ impl JvmLibraries {
                 // NOT the value class's own sole property: that one IS the carrier (`Result.value`),
                 // reached as the underlying value itself rather than through a computed `-impl`
                 // accessor, and rerouting it breaks the box/unbox boundary.
-                let carrier_receiver = getter_params.len() == context_count + 1
+                let carrier_receiver = getter_params.len() > context_count
                     && metadata::class_inline(&ci).is_some_and(|inline| {
                         context_count != 0
                             || inline.property_name.as_deref() != Some(mp.name.as_str())
@@ -2891,7 +2891,7 @@ impl JvmLibraries {
                 if carrier_receiver {
                     getter_params.remove(0);
                 }
-                if getter_params.len() != context_count {
+                if !parameter_plans::declared_prefix(&mut getter_params, context_count) {
                     continue;
                 }
                 let semantic_context = property_signature
