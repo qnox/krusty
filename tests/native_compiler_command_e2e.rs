@@ -403,3 +403,120 @@ fn a_source_error_is_reported_and_no_program_is_written() {
     assert!(!scratch.join("broken.kexe").exists());
     std::fs::remove_dir_all(&scratch).expect("remove the compiler command's directory");
 }
+
+const COMMON: &str = "\
+expect fun platformName(): String
+
+expect class Counter() {
+    fun next(): Int
+}
+
+fun greeting(): String = \"hello \" + platformName()
+";
+
+const NATIVE: &str = "\
+actual fun platformName(): String = \"native\"
+
+actual class Counter actual constructor() {
+    private var count = 0
+    actual fun next(): Int = ++count
+}
+
+fun box(): String {
+    val counter = Counter()
+    counter.next()
+    return if (greeting() == \"hello native\" && counter.next() == 2) \"OK\" else \"fail\"
+}
+
+fun main() {
+    val result = box()
+    if (result != \"OK\") throw IllegalStateException(result)
+}
+";
+
+/// A multiplatform source set as a build tool passes it: the common fragment's `expect`
+/// declarations are actualized by the platform fragment that refines it.
+#[test]
+fn a_multiplatform_source_set_compiles_its_fragments_into_one_program() {
+    if !native_compiler_available() {
+        return;
+    }
+    common::expect_box_ok_with_stdlib(
+        &format!(
+            "// LANGUAGE: +MultiPlatformProjects\n// MODULE: common\n// FILE: common.kt\n{COMMON}\
+             // MODULE: main()()(common)\n// FILE: native.kt\n{NATIVE}"
+        ),
+        "compilerCommandFragments",
+    );
+
+    let scratch = common::scratch_dir().expect("allocate the compiler command's directory");
+    let common_source = scratch.join("common.kt");
+    let native_source = scratch.join("native.kt");
+    std::fs::write(&common_source, COMMON).expect("write common.kt");
+    std::fs::write(&native_source, NATIVE).expect("write native.kt");
+
+    let compiled = Command::new(common::krusty_binary())
+        .args([
+            "kotlinc-native",
+            "-Xmulti-platform",
+            "-Xexpect-actual-classes",
+            "-Xfragments=common,native",
+            "-Xfragment-refines=native:common",
+        ])
+        .arg(format!(
+            "-Xfragment-sources=common:{}",
+            common_source.display()
+        ))
+        .arg(format!(
+            "-Xfragment-sources=native:{}",
+            native_source.display()
+        ))
+        .arg("-o")
+        .arg(scratch.join("app"))
+        .arg(&common_source)
+        .arg(&native_source)
+        .output()
+        .expect("run krusty kotlinc-native");
+    assert_eq!(
+        completed(compiled),
+        (Some(0), String::new(), String::new()),
+        "the program compiles and links silently"
+    );
+    let run = common::run_freshly_written(&mut Command::new(scratch.join("app.kexe")))
+        .expect("run the Native program");
+    assert_eq!(completed(run), (Some(0), String::new(), String::new()));
+    std::fs::remove_dir_all(&scratch).expect("remove the compiler command's directory");
+}
+
+/// Without `-Xmulti-platform` the same sources are an ordinary module, so kotlinc's refusal of
+/// `expect` and `actual` outside a multiplatform project stands.
+#[test]
+fn expect_and_actual_outside_a_multiplatform_project_are_reported() {
+    if !native_compiler_available() {
+        return;
+    }
+    let scratch = common::scratch_dir().expect("allocate the compiler command's directory");
+    let source = scratch.join("plain.kt");
+    std::fs::write(&source, "expect fun f(): Int\n\nfun main() {}\n").expect("write plain.kt");
+    let compiled = Command::new(common::krusty_binary())
+        .args(["kotlinc-native", "-o"])
+        .arg(scratch.join("plain"))
+        .arg(&source)
+        .output()
+        .expect("run krusty kotlinc-native");
+    assert_eq!(
+        completed(compiled),
+        (
+            Some(1),
+            String::new(),
+            format!(
+                "{}:1:1: error: 'expect' and 'actual' declarations can be used only in \
+                 multiplatform projects. Learn more about Kotlin Multiplatform: \
+                 https://kotl.in/multiplatform-setup\n",
+                source.display()
+            )
+        )
+    );
+    assert!(!scratch.join("plain.kexe").exists());
+    std::fs::remove_dir_all(&scratch).expect("remove the compiler command's directory");
+}
