@@ -123,6 +123,8 @@ impl Checker<'_> {
             self.selected_value_smartcasts.insert(read, narrowed);
             receiver.ty = narrowed;
         }
+        // `this@label` names its receiver explicitly, so `@DslMarker` scope control never applies.
+        receiver.dsl_shadowed = false;
         self.mark_implicit_receiver_selection(read, receiver);
         narrowed
     }

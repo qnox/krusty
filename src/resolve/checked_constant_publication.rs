@@ -166,6 +166,9 @@ fn fold_member_constant(
     let file = files.get(file_index as usize)?;
     let mut diagnostics = DiagSink::new();
     let mut checker = make_checker(file, file_index, Some(files), table, &mut diagnostics);
+    // The initializer is lexically inside its singleton: a private sibling const, or a private
+    // declaration of an enclosing classifier, is accessible there exactly as in the body check.
+    checker.lexical_class_context.push(owner);
     let root = CheckerScope::root();
     // The initializer is checked as a member of its singleton, so an unqualified sibling const is
     // a read of that object and a top-level const remains visible on the file scope above it.

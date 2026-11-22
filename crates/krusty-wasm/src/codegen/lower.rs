@@ -163,10 +163,9 @@ pub(super) fn lower_file(
         classes: laid_out_classes,
         tables: module_tables,
     } = state;
+    // A classifier-owned static (an object or companion `const val`) is the same storage as a
+    // top-level one: a global initialized with the file, which its qualified reads address.
     for property in &ir.statics {
-        if property.owner.is_some() {
-            return Err("a static property of a class".to_string());
-        }
         if property.is_lateinit {
             return Err("a `lateinit` top-level property".to_string());
         }

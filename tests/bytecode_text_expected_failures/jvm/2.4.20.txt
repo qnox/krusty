@@ -65,7 +65,6 @@ ieee754/smartCastsForFloat.kt
 inaccessibleTypeInArray.kt
 inline/noFakeVariableForInlineOnlyFun.kt
 inline/reifiedSafeAsWithMutable.kt
-inline/specialEnumFunction.kt
 inline/syntheticPropertyReference.kt
 inlineClasses/boxUnboxInlineClassFromMethodReturnType.kt
 inlineClasses/boxUnboxOnInlinedParameters.kt

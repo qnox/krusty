@@ -493,6 +493,7 @@ kt_boolean kt_mutable_collection_add(KRef self, KRef value);
 kt_boolean kt_mutable_collection_remove(KRef self, KRef value);
 void kt_mutable_collection_clear(KRef self);
 kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements);
+kt_boolean kt_mutable_collection_add_all_reading_first(KRef self, KRef elements);
 KRef kt_list_get(KRef list, kt_int index);
 KRef kt_list_sub_list(KRef list, kt_int from, kt_int to);
 /* `first()` / `last()`; both raise `NoSuchElementException` on an empty list, as Kotlin does. */
@@ -532,6 +533,7 @@ void kt_mutable_list_clear(KRef self);
    answers `Unit`. */
 void kt_mutable_list_plus_assign(KRef self, KRef value);
 void kt_mutable_list_add_all(KRef self, KRef elements);
+void kt_mutable_list_add_all_reading_first(KRef self, KRef elements);
 kt_boolean kt_list_iterator_has_next(KRef iterator);
 KRef kt_list_iterator_next(KRef iterator);
 /* `ListIterator`'s members over a list's iterator. `kt_list_iterator_at` is `listIterator(index)`. */

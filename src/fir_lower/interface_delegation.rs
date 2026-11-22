@@ -516,6 +516,7 @@ fn materialize_delegation(
                             source_order: u32::MAX,
                             receiver,
                             ty,
+                            context_params,
                             is_var: setter.is_some(),
                             is_abstract: false,
                             modifiers: DELEGATION_PROPERTY_MODIFIERS,
