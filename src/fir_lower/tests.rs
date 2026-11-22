@@ -558,7 +558,8 @@ fn checked_call_keeps_stable_target_and_final_argument_mapping() {
         [
             IrCheckedArgument::Expression {
                 parameter: 0,
-                value: 0
+                value: 0,
+                ..
             },
             IrCheckedArgument::Default { parameter: 1 },
             IrCheckedArgument::Vararg {
@@ -2689,7 +2690,7 @@ fn constructor_delegation_remains_distinct_from_object_construction() {
             target: crate::ir::IrCheckedConstructorTarget::Module(target),
             arguments,
             ..
-        } if *target == constructor && matches!(arguments.as_slice(), [IrCheckedArgument::Expression { parameter: 0, value: 0 }]))));
+        } if *target == constructor && matches!(arguments.as_slice(), [IrCheckedArgument::Expression { parameter: 0, value: 0, .. }]))));
 }
 
 #[test]

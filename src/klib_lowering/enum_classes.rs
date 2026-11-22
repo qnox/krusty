@@ -68,6 +68,34 @@ pub(super) fn authenticate_entry(
     Ok((class, name))
 }
 
+/// One of the two operations an enum class declares on itself: `values()` and `valueOf(name)`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EnumStaticMember {
+    Values,
+    ValueOf,
+}
+
+/// The enum class whose compiler-generated `values()` or `valueOf` is exactly `identity`, and which
+/// of the two it is. `None` for any other callable.
+pub(super) fn authenticate_static_member(
+    bodies: &KlibDeclarationBodies,
+    identity: &KlibDependencyCallable,
+) -> Result<Option<(EnumClass, EnumStaticMember)>, KlibBodyDeclineReason> {
+    let Some((declared, body)) = bodies.enum_static_member(identity) else {
+        return Ok(None);
+    };
+    let member = match body {
+        KlibIrSyntheticBody::EnumValues => EnumStaticMember::Values,
+        KlibIrSyntheticBody::EnumValueOf => EnumStaticMember::ValueOf,
+        KlibIrSyntheticBody::EnumEntries => {
+            return Err(mismatch(
+                "an enum's `entries` getter is called as a function",
+            ))
+        }
+    };
+    Ok(Some((authenticate(bodies, &declared)?, member)))
+}
+
 fn authenticate(
     bodies: &KlibDeclarationBodies,
     declared: &KlibEnumEntryClass<'_>,
@@ -121,7 +149,7 @@ fn authenticate(
                 if function.constructor {
                     constructors.push(function);
                 } else if !matches!(
-                    (function.name.as_str(), special_member_body(function)),
+                    (function.name.as_str(), function.enum_special_member()),
                     ("values", Some(KlibIrSyntheticBody::EnumValues))
                         | ("valueOf", Some(KlibIrSyntheticBody::EnumValueOf))
                 ) {
@@ -134,7 +162,7 @@ fn authenticate(
                     || property.setter.is_some()
                     || property.name != "entries"
                     || !getter.is_some_and(|getter| {
-                        special_member_body(getter) == Some(KlibIrSyntheticBody::EnumEntries)
+                        getter.enum_special_member() == Some(KlibIrSyntheticBody::EnumEntries)
                     })
                 {
                     return Err(unsupported("an enum class with member properties"));
@@ -193,18 +221,6 @@ fn authenticate(
         supertype,
         entries: names,
     })
-}
-
-/// The synthetic body of a compiler-generated enum member, which the common realization provides.
-fn special_member_body(function: &KlibIrFunction) -> Option<KlibIrSyntheticBody> {
-    match &function.body {
-        Some(KlibIrBody::Synthetic(body))
-            if function.base.origin == "ENUM_CLASS_SPECIAL_MEMBER" =>
-        {
-            Some(*body)
-        }
-        _ => None,
-    }
 }
 
 /// The constructor only delegates to `kotlin.Enum`'s and then runs the instance initializer, so
