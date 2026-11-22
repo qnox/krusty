@@ -139,7 +139,7 @@ use overload_selection::{
     SelectionMode,
 };
 use property_candidates::{
-    generic_property_more_specific, source_property_visible, specialize_property,
+    retain_most_specific_properties, source_property_visible, specialize_property,
 };
 pub(crate) use receiver_mro::{function_shape_matches, ReceiverMro};
 pub(crate) use resolved_symbol::ErrorReceiverSelection;
@@ -1338,36 +1338,7 @@ impl<'a> SymbolResolver<'a> {
             return Ok(None);
         };
         candidates.retain(|(rank, _)| *rank == nearest);
-        if candidates.len() > 1 {
-            let dominated = (0..candidates.len())
-                .filter(|&candidate| {
-                    (0..candidates.len()).any(|other| {
-                        candidate != other
-                            && generic_property_more_specific(
-                                &self.src,
-                                &candidates[other].1,
-                                &candidates[candidate].1,
-                            )
-                    })
-                })
-                .collect::<crate::fx_hash::HashSet<_>>();
-            candidates = candidates
-                .into_iter()
-                .enumerate()
-                .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
-                .collect();
-        }
-        // The receiver is the property's only specificity position. A tie then goes to a
-        // non-generic declaration over a generic one, as for every other callable family:
-        // `PipelineContext<*, PipelineCall>.call` beats `<C> PipelineContext<*, C>.call`.
-        retain_most_specific_declarations(&self.src, None, &mut candidates, |(_, property)| {
-            (
-                property.receiver,
-                &[][..],
-                !property.formals.is_empty(),
-                None,
-            )
-        });
+        retain_most_specific_properties(&self.src, &mut candidates);
         match candidates.as_mut_slice() {
             [(_, property)] => Ok(Some(specialize_property(
                 &self.src,

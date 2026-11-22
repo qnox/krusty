@@ -11,6 +11,8 @@ interface PipelineCall : ApplicationCall
 
 open class Pipeline<TSubject : Any, TContext : Any>(val context: TContext, var subject: TSubject)
 
+class Selected(override val application: String) : PipelineCall
+
 // FILE: genericAccess.kt
 val <C : ApplicationCall> Pipeline<*, C>.call: C
     get() = context
@@ -23,7 +25,7 @@ var <S : Any> Pipeline<S, *>.current: S
 
 // FILE: concreteAccess.kt
 inline val Pipeline<*, PipelineCall>.call: PipelineCall
-    get() = context
+    get() = Selected("concrete:" + context.application)
 
 var Pipeline<String, *>.current: String
     get() = "concrete:" + subject
@@ -57,13 +59,15 @@ fun <T> withPipeline(
 
 fun box(): String {
     val pipeline = Pipeline<String, PipelineCall>(Call("app"), "s")
-    if (pipeline.call.application != "app") return "fail explicit: ${pipeline.call.application}"
-    if (pipeline.application != "app") return "fail implicit: ${pipeline.application}"
-    if (pipeline.libraryApplication != "app") return "fail library: ${pipeline.libraryApplication}"
-    if (pipeline.viaThis() != "appconcrete") return "fail this: ${pipeline.viaThis()}"
+    val explicit = pipeline.call.application
+    if (explicit != "concrete:app") return "fail explicit: $explicit"
+    if (pipeline.application != "concrete:app") return "fail implicit: ${pipeline.application}"
+    val library = pipeline.libraryApplication
+    if (library != "concrete:app") return "fail library: $library"
+    if (pipeline.viaThis() != "concrete:appconcrete") return "fail this: ${pipeline.viaThis()}"
     if (pipeline.local != "concrete") return "fail local: ${pipeline.local}"
     val viaLambda = withPipeline(pipeline) { call.application + local + current }
-    if (viaLambda != "appconcreteconcrete:s") return "fail lambda: $viaLambda"
+    if (viaLambda != "concrete:appconcreteconcrete:s") return "fail lambda: $viaLambda"
     pipeline.current = "w"
     if (pipeline.subject != "concrete:w") return "fail write: ${pipeline.subject}"
     return "OK"
