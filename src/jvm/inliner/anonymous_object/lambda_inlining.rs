@@ -17,7 +17,7 @@ use crate::jvm::source_map::SourceMap;
 
 use super::super::class_roles::RegeneratedClass;
 use super::super::lambda_expansion::{self, Lambda, SourceLines};
-use super::super::{functional_arguments, object_regeneration, preparation, try_blocks};
+use super::super::{functional_arguments, object_regeneration, preparation, returns, try_blocks};
 use super::super::{Binding, ClassRoles, InlineError, Parameter, Parameters};
 use super::{CopiedLines, NestedObjects, RegenerationError};
 
@@ -66,6 +66,7 @@ pub(super) fn inline_into(
     try_blocks::move_try_starts_to_their_first_instruction(&mut node).map_err(inlining)?;
     let mut node = super::super::preprocess_node_before_inline(node).map_err(inlining)?;
     preparation::remove_fake_variable_initializations(&mut node);
+    returns::normalize_local_returns(&mut node).map_err(inlining)?;
     let classes = WithOwnCopy {
         classes: objects.regeneration.classes,
         copy: owner,

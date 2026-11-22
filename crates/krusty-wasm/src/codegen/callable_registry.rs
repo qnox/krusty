@@ -61,6 +61,9 @@ pub(super) struct FileCallTargets {
     /// The ABI of each default entry, which is its provider declaration's own.
     external_default_signatures: HashMap<ExternalCallableId, DependencyFunctionSignature>,
     external_dispatches: HashMap<ExternalCallableId, u32>,
+    /// The published body of each dependency interface member an ordinary call dispatches
+    /// through: the implementation of every class that does not override it.
+    interface_defaults: HashMap<ExternalCallableId, u32>,
     signatures: HashMap<ExternalCallableId, DependencyFunctionSignature>,
     member_receivers: HashMap<ExternalCallableId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
@@ -248,6 +251,7 @@ impl CallableRegistry {
             external_defaults: HashMap::default(),
             external_default_signatures: HashMap::default(),
             external_dispatches: HashMap::default(),
+            interface_defaults: HashMap::default(),
             signatures: HashMap::default(),
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
@@ -470,7 +474,17 @@ impl CallableRegistry {
                             ir, callables, expression, callable, published,
                         )
                     {
-                        // The member's implementations are reached through its library member.
+                        // The member's implementations are reached through its library member;
+                        // an interface's published body implements it for the classes that do
+                        // not override it.
+                        if let Some(index) = callable
+                            .dependency_callable
+                            .as_ref()
+                            .filter(|_| published && callable.owner_is_interface)
+                            .and_then(|identity| self.dependencies.get(identity))
+                        {
+                            targets.interface_defaults.insert(*target, *index);
+                        }
                         continue;
                     }
                     if callable
@@ -521,6 +535,21 @@ impl CallableRegistry {
                     {
                         continue;
                     }
+                    let dispatch_entry = self.dependency_dispatches.get(identity).copied();
+                    if dispatch_receiver.is_some()
+                        && extension_receiver_parameter.is_some()
+                        && dispatch_entry.is_none()
+                        && super::lower::library_members::is_dispatched_interface_member(callable)
+                    {
+                        // The selected body is the default of a member extension the receiver's
+                        // class may override, and its module exports no entry dispatching on the
+                        // receiver: a direct call to it, emitted or not, would bypass an override.
+                        return Err(Unsupported::from(format!(
+                            "a call through the dependency interface member extension `{}` \
+                             without an entry dispatching on its receiver",
+                            callable.name
+                        )));
+                    }
                     let index = self.dependencies.get(identity).copied().ok_or_else(|| {
                         krusty::trace_compiler!(
                             "lower",
@@ -564,7 +593,7 @@ impl CallableRegistry {
                             .external_default_signatures
                             .insert(*target, signature.clone());
                     }
-                    if let Some(&entry) = self.dependency_dispatches.get(identity) {
+                    if let Some(entry) = dispatch_entry {
                         targets.external_dispatches.insert(*target, entry);
                     }
                     targets.signatures.insert(
@@ -736,6 +765,12 @@ impl FileCallTargets {
     /// which dispatches on its receiver.
     pub(super) fn external_dispatch(&self, target: ExternalCallableId) -> Option<u32> {
         self.external_dispatches.get(&target).copied()
+    }
+
+    /// The published body of the dependency interface member `target`, which implements it for
+    /// every class that does not override it.
+    pub(super) fn interface_default(&self, target: ExternalCallableId) -> Option<u32> {
+        self.interface_defaults.get(&target).copied()
     }
 
     pub(super) fn signature(

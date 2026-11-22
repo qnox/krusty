@@ -97,14 +97,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// The slot of `class`'s getter overriding the dependency property whose getter is
-    /// `overridden`, answering `declared`: the class registers the overridden declaration's
-    /// identity at the slot of its own accessor. `None` where the override's representation is not the declaration's, which a
-    /// direct dispatch could not reconcile.
+    /// `overridden`: the class registers the overridden declaration's identity at the slot of its
+    /// own accessor, which answers the override's own type; the call site converts it to the one
+    /// the declaration states.
     pub(super) fn external_property_getter_slot(
         &self,
         class: ClassId,
         overridden: krusty::fir::ExternalCallableId,
-        declared: Ty,
     ) -> Option<ImplementorArm> {
         let target = krusty::fir::ResolvedPropertyOverrideTarget::External(overridden);
         let ir = self.file.ir;
@@ -122,9 +121,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
             at = self.file.model.layout(id).superclass;
         };
-        if self.carrier(implementation) != self.carrier(declared) {
-            return None;
-        }
         let slot = self
             .file
             .model
@@ -233,6 +229,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 "the dependency interface member `{}` is called with another arity than it declares",
                 signature.name
             ));
+        }
+        if let Some(reason) = self.file.unimplementable_interface_members.get(&identity) {
+            return Err(declined!("{reason}"));
         }
         Ok((
             self.file.dependency_interface_number(identity),
@@ -448,7 +447,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return None;
         }
         let declared = self.file.implementors_of(internal);
-        if declared.is_empty() {
+        // With no class of its own behind the type (a dependency body realized apart from the
+        // classes that inherit it), the interface stub still reaches every implementation record.
+        if declared.is_empty() && stub.is_none() {
             return None;
         }
         let implementors: Vec<ImplementorArm> = declared

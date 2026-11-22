@@ -66,6 +66,7 @@ private val reservedArguments: Map<String, String> = mapOf(
     "-kotlin-home" to "the plugin-owned dependency policy",
     // krusty's own argument, not in kotlinc's table.
     "-Xkotlin-reference-version" to "the Kotlin Gradle plugin version",
+    FIX_KOTLINC_DEFECTS_ARGUMENT to "the $FIX_KOTLINC_DEFECTS_PROPERTY Gradle property",
     "-Xplugin" to "compiler plugin configuration",
     "-Xcompiler-plugin" to "compiler plugin configuration",
 )
