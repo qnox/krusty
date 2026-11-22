@@ -2,11 +2,13 @@
 """The projects' own tests run on kotlinc's and on krusty's classes: `compare.py` compares only the
 tests that passed on kotlinc's classes, separates the test tasks that run classes krusty built only,
 `run.sh` moves each test build's JUnit reports out of the checkout, and `summarize.py` reports it."""
+import http.server
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -206,6 +208,37 @@ class RunScript(unittest.TestCase):
                 os.environ['HOME'] = home
         self.assertEqual([line.split(' seconds')[0] for line in self.status], ['p warmup exit 1'])
         self.assertIn('p: the warm-up could not download what the build needs; see p.warmup.log', self.stderr)
+
+    def test_a_failed_warm_up_records_the_status_of_the_repositories_it_names(self):
+        class Dead(http.server.BaseHTTPRequestHandler):
+            def do_HEAD(self):
+                self.send_response(503)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(('127.0.0.1', 0), Dead)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        url = f'http://127.0.0.1:{server.server_port}/dead/'
+        gradlew = ('#!/bin/sh\n'
+                   f"echo \"Plugin [id: 'x'] was not found: could not resolve plugin artifact 'x:x:1'\"\n"
+                   f'echo "    maven({url})"\n'
+                   'exit 1\n')
+        try:
+            with tempfile.TemporaryDirectory() as work:
+                os.environ['CORPUS_PROBE_URLS'] = ''
+                try:
+                    self.run_corpus(work, gradlew, expected_exit=1, compared=False)
+                finally:
+                    del os.environ['CORPUS_PROBE_URLS']
+                with open(f'{work}/corpus/logs/p.warmup.http.tsv') as f:
+                    recorded = f.read().splitlines()
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(recorded, [f'503 {url}'])
+        self.assertEqual(self.stderr.count(f'503 {url}'), 1)
 
     def test_each_test_build_reports_on_its_own_classes(self):
         with tempfile.TemporaryDirectory() as work:

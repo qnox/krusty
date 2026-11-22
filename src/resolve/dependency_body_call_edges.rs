@@ -43,7 +43,7 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         if !visited.insert(identity.clone()) {
             continue;
         }
-        let emitted = bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+        let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
         classifier_roots.extend(bodies.type_classifiers_in_body(&identity));
         classifier_roots.extend(emitted.hierarchy_roots);
         for (signature, name) in emitted.sam_classifiers {
