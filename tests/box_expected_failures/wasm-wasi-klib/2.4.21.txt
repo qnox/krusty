@@ -1060,7 +1060,6 @@ inlineClass/customEquals.kt
 inlineClass/defaultEquals.kt
 inlineClass/nestedInlineClasses.kt
 inlineClass/secondaryConstructorWithGenerics.kt
-inlineClasses/UIntArraySortExample.kt
 inlineClasses/UIntArraySortExampleGeneric.kt
 inlineClasses/anonymousObjectAsDefaultParamFull.kt
 inlineClasses/anySuperCall.kt
