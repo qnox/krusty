@@ -361,9 +361,6 @@ fn bind_inherited_dependency_members(
     bindings: &mut crate::fir::ActualizationTypeBindings,
 ) {
     let expected_names = expected_member_names(headers);
-    if expected_names.is_empty() {
-        return;
-    }
     for stub in headers
         .stubs
         .iter()
@@ -390,8 +387,12 @@ fn bind_inherited_dependency_members(
         let members = expected_names
             .iter()
             .flat_map(|name| inherited_members(platform, receiver, name))
+            .chain(dependency_constructors(platform, target))
             .collect();
         bindings.bind_inherited_dependency_members(stub.id, members);
+    }
+    if expected_names.is_empty() {
+        return;
     }
     for stub in headers
         .stubs
@@ -424,6 +425,39 @@ fn bind_inherited_dependency_members(
             .collect();
         bindings.bind_inherited_dependency_members(stub.id, members);
     }
+}
+
+/// The constructors an `actual typealias` to a dependency class makes available: they are the
+/// target's own, not inherited, and an `expect` constructor is implemented by the one that agrees
+/// on its value parameters. A constructor with a type parameter, a receiver-like context or a
+/// `vararg` cannot be stated by the record and is left out, with its evidence intact.
+fn dependency_constructors(
+    platform: &dyn SemanticPlatform,
+    target: TypeName,
+) -> Vec<crate::fir::InheritedDependencyMember> {
+    let Some(class) = crate::symbol_source::SymbolSource::classifier(platform, target) else {
+        return Vec::new();
+    };
+    class
+        .constructors
+        .iter()
+        .filter(|constructor| {
+            crate::symbol_resolver::member_is_inheritable(constructor.visibility)
+                && constructor.context_count == 0
+                && !constructor.call_sig.vararg
+                && constructor
+                    .generic_sig
+                    .as_ref()
+                    .is_none_or(|signature| signature.formals.is_empty())
+        })
+        .map(|constructor| crate::fir::InheritedDependencyMember {
+            kind: crate::fir::DeclarationKind::Constructor,
+            name: String::new(),
+            parameters: constructor.params.clone().into_boxed_slice(),
+            result: crate::types::Ty::Unit,
+            mutable: false,
+        })
+        .collect()
 }
 
 fn has_type_arguments(

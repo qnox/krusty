@@ -53,7 +53,9 @@ fn implements(
     name: &str,
     member: &InheritedDependencyMember,
 ) -> bool {
-    if member.kind != expect.kind || member.name != name || carries_unprojected_modifier(expect) {
+    // A constructor is named by its class, not by a member name the record keeps.
+    let named_alike = expect.kind == DeclarationKind::Constructor || member.name == name;
+    if member.kind != expect.kind || !named_alike || carries_unprojected_modifier(expect) {
         return false;
     }
     match headers
@@ -94,6 +96,27 @@ fn implements(
                     // An inferred result states no type to compare.
                     HeaderResultType::Inferred => false,
                 }
+        }
+        Some(HeaderDeclarationKind::Constructor {
+            context_parameters,
+            parameters,
+        }) => {
+            let parameters = headers.syntax.parameters(parameters);
+            headers.syntax.parameters(context_parameters).is_empty()
+                && parameters.len() == member.parameters.len()
+                && parameters
+                    .iter()
+                    .zip(&member.parameters)
+                    .all(|(parameter, inherited)| {
+                        !parameter.flags.is_vararg()
+                            && type_matches(
+                                headers,
+                                bindings,
+                                expect.source,
+                                parameter.ty,
+                                *inherited,
+                            )
+                    })
         }
         Some(HeaderDeclarationKind::Property {
             receiver: None,
