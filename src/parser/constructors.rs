@@ -26,11 +26,13 @@ impl Parser<'_> {
         let signature_end = self.t[self.i.saturating_sub(1)].span.hi;
         let mut delegation = CtorDelegation::None;
         let mut delegation_offset = 0;
+        let mut delegation_keyword = Span::new(0, 0);
         if self.eat(TokenKind::Colon) {
             self.skip_semicolons();
             let target = if self.at(TokenKind::Ident) {
                 let target = self.text().to_string();
-                delegation_offset = self.tok().span.lo;
+                delegation_keyword = self.tok().span;
+                delegation_offset = delegation_keyword.lo;
                 self.bump();
                 target
             } else {
@@ -77,6 +79,7 @@ impl Parser<'_> {
             // other declaration's; the delegation carries its OFFSET until then.
             decl_line: 0,
             delegation_line: delegation_offset,
+            delegation_keyword,
             decl_end_line: 0,
             visibility: visibility_of(modifiers),
         }

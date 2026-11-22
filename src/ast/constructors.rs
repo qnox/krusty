@@ -35,6 +35,9 @@ pub struct SecondaryCtor {
     /// parser stores that token's OFFSET and the post-pass rewrites it to its line, the way
     /// `ClassDecl::primary_ctor_lines` are rewritten; 0 = no written delegation.
     pub delegation_line: u32,
+    /// The written `this` or `super` keyword. Empty when the constructor delegates implicitly.
+    /// Delegation diagnostics point here; the line above is only the debug-info anchor.
+    pub delegation_keyword: Span,
     /// 1-based source line this constructor's declaration ENDS on — its delegation's closing `)`
     /// or its block's `}`. Filled by the same post-pass.
     pub decl_end_line: u32,

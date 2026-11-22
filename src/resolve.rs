@@ -37711,10 +37711,12 @@ impl<'a> Checker<'a> {
             });
         }
         for (index, constructor) in class.secondary_ctors.iter().enumerate() {
-            if index == secondary {
+            let params = &secondary_params[index];
+            // An unpublished parameter type is still a `this(...)` candidate, including on the
+            // constructor that writes the delegation. kotlinc lists that constructor.
+            if index == secondary && !params.iter().copied().any(Ty::mentions_error) {
                 continue;
             }
-            let params = &secondary_params[index];
             let secondary_context_count = class
                 .context_params
                 .len()
@@ -38007,6 +38009,7 @@ impl<'a> Checker<'a> {
                 .filter_map(|(candidate, keep)| keep.then_some(candidate))
                 .collect();
         }
+        source_constructors::equate_unresolved_constructor_scores(&mut scored);
         let Some(best) = scored.iter().map(|candidate| candidate.1).max() else {
             let mismatch = (candidates.len() == 1)
                 .then(|| {
@@ -38263,12 +38266,7 @@ impl<'a> Checker<'a> {
                 return;
             }
             SourceConstructorSelection::Ambiguous => {
-                self.diags.error(
-                    span,
-                    format!(
-                        "overload resolution ambiguity for {label}(...) constructor delegation"
-                    ),
-                );
+                self.report_ambiguous_constructor_delegation(scope, class, span, &candidates);
                 return;
             }
         };
@@ -42411,29 +42409,10 @@ impl<'a> Checker<'a> {
                                     }
                                     None => return None,
                                 };
-                                let secondary = cl
-                                    .secondary_ctors
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(ordinal, _)| {
-                                        let sibling = u32::try_from(ordinal + 1)
-                                            .expect("too many secondary constructors");
-                                        index
-                                            .owned_declaration(
-                                                owner,
-                                                crate::fir::DeclarationKind::Constructor,
-                                                sibling,
-                                            )
-                                            .and_then(|declaration| index.signature(declaration))
-                                            .map(|signature| {
-                                                signature
-                                                    .parameters
-                                                    .iter()
-                                                    .map(|parameter| parameter.get())
-                                                    .collect::<Vec<_>>()
-                                            })
-                                    })
-                                    .collect::<Option<Vec<_>>>()?;
+                                let secondary =
+                                    source_constructors::published_secondary_parameter_shapes(
+                                        index, owner, cl,
+                                    )?;
                                 Some((primary, source_primary, secondary))
                             },
                         )
@@ -42751,7 +42730,11 @@ impl<'a> Checker<'a> {
                             CtorDelegationSite {
                                 class: d,
                                 secondary: sc_index,
-                                span: sc.span,
+                                span: if sc.delegation_keyword.lo == 0 {
+                                    sc.span
+                                } else {
+                                    sc.delegation_keyword
+                                },
                                 label: "this",
                             },
                             delegation,

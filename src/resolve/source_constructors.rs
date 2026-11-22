@@ -28,6 +28,66 @@ pub(super) fn unpublished_constructor_shapes(
     )
 }
 
+/// An unresolved parameter is applicable beside a concrete one, and kotlinc does not let the
+/// concrete exact-match score discard it. Lift those candidates to the best score so specificity
+/// can still tie them.
+pub(super) fn equate_unresolved_constructor_scores(
+    scored: &mut [(
+        bool,
+        (usize, std::cmp::Reverse<usize>, bool),
+        usize,
+        ResolvedCtorDelegation,
+    )],
+) {
+    let Some(best) = scored.iter().map(|candidate| candidate.1 .0).max() else {
+        return;
+    };
+    for candidate in scored {
+        if candidate
+            .3
+            .argument_types
+            .iter()
+            .copied()
+            .any(Ty::mentions_error)
+        {
+            candidate.1 .0 = best;
+        }
+    }
+}
+
+/// Parameter types of every secondary constructor. A declaration whose signature was not
+/// published — an unpublishable parameter type leaves none — keeps an error type in each source
+/// slot, so the class still has constructor shapes and `this(...)` can name that constructor.
+pub(super) fn published_secondary_parameter_shapes(
+    index: &crate::fir::ResolvedModuleIndex,
+    owner: crate::fir::DeclarationId,
+    class: &ClassDecl,
+) -> Option<Vec<Vec<Ty>>> {
+    class
+        .secondary_ctors
+        .iter()
+        .enumerate()
+        .map(|(ordinal, constructor)| {
+            let sibling = u32::try_from(ordinal + 1).expect("too many secondary constructors");
+            let declaration = index.owned_declaration(
+                owner,
+                crate::fir::DeclarationKind::Constructor,
+                sibling,
+            )?;
+            Some(match index.signature(declaration) {
+                Some(signature) => signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect(),
+                None => {
+                    vec![Ty::Error; class.context_params.len() + constructor.params.len()]
+                }
+            })
+        })
+        .collect()
+}
+
 impl Checker<'_> {
     /// Normalize constructor headers already checked on an active body-local classifier's lexical
     /// rung into the ordinary constructor-candidate surface. No lookup or inference happens here:
@@ -926,5 +986,127 @@ impl Checker<'_> {
             });
         }
         candidates
+    }
+
+    /// kotlinc's constructor-overload ambiguity, at the delegation keyword. An unpublished
+    /// parameter keeps the written type's unresolved spelling instead of `<error>`.
+    pub(super) fn report_ambiguous_constructor_delegation(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        class_id: DeclId,
+        span: Span,
+        candidates: &[CtorDelegationCandidate],
+    ) {
+        let lines = self.constructor_delegation_lines(scope, class_id, candidates);
+        let mut message = "overload resolution ambiguity between candidates:".to_string();
+        for line in lines {
+            message.push('\n');
+            message.push_str(&line);
+        }
+        self.diags.error(span, message);
+    }
+
+    fn constructor_delegation_lines(
+        &self,
+        scope: &CheckerScope<'_>,
+        class_id: DeclId,
+        candidates: &[CtorDelegationCandidate],
+    ) -> Vec<String> {
+        let rendered = self.constructor_delegation_parameters(class_id, candidates);
+        rendered
+            .iter()
+            .map(|(result, parameters)| {
+                let parameters = parameters
+                    .iter()
+                    .map(|(name, ty, written)| {
+                        let rendered = if ty.mentions_error() {
+                            written.as_ref().map_or_else(
+                                || ty.source_name(),
+                                |written| self.unresolved_type_display(scope, written),
+                            )
+                        } else {
+                            ty.source_name()
+                        };
+                        format!("{name}: {rendered}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("constructor({parameters}): {result}")
+            })
+            .collect()
+    }
+
+    fn constructor_delegation_parameters(
+        &self,
+        class_id: DeclId,
+        candidates: &[CtorDelegationCandidate],
+    ) -> Vec<(String, Vec<(String, Ty, Option<crate::ast::TypeRef>)>)> {
+        let Decl::Class(class) = self.file.decl(class_id) else {
+            return Vec::new();
+        };
+        candidates
+            .iter()
+            .map(|candidate| {
+                let result = match &candidate.target {
+                    ResolvedCtorDelegationTarget::Super { owner, .. } => {
+                        owner.segment_ref().replace('$', ".")
+                    }
+                    ResolvedCtorDelegationTarget::ThisPrimary { .. }
+                    | ResolvedCtorDelegationTarget::ThisSecondary { .. } => class.name.clone(),
+                };
+                let context = candidate.context_count;
+                let semantic = candidate.target.params();
+                let semantic = &semantic[context.min(semantic.len())..];
+                let names = &candidate.param_names[context.min(candidate.param_names.len())..];
+                let written = match &candidate.target {
+                    ResolvedCtorDelegationTarget::ThisPrimary { .. } => class
+                        .props
+                        .iter()
+                        .map(|parameter| parameter.ty.clone())
+                        .collect::<Vec<_>>(),
+                    ResolvedCtorDelegationTarget::ThisSecondary { index, .. } => class
+                        .secondary_ctors
+                        .get(*index)
+                        .map(|constructor| {
+                            constructor
+                                .params
+                                .iter()
+                                .map(|parameter| parameter.ty.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    ResolvedCtorDelegationTarget::Super { .. } => Vec::new(),
+                };
+                let parameters = semantic
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(index, ty)| {
+                        let name = names
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| format!("p{index}"));
+                        (name, ty, written.get(index).cloned())
+                    })
+                    .collect();
+                (result, parameters)
+            })
+            .collect()
+    }
+
+    fn unresolved_type_display(
+        &self,
+        scope: &CheckerScope<'_>,
+        written: &crate::ast::TypeRef,
+    ) -> String {
+        super::delegated_properties::diagnostic_type_syntax(written, |name| {
+            let (selection, _, alias, _) = self.select_classifier_binding(scope, name);
+            super::delegated_properties::delegate_classifier_display(
+                name,
+                scope.tparam_contains(name),
+                selection.found(),
+                alias.is_some() || scope.type_alias(name).is_some(),
+            )
+        })
     }
 }
