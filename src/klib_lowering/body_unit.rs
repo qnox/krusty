@@ -41,6 +41,7 @@ pub(crate) use class_construction::superclass_constructor_ordinal;
 mod constructor_linking;
 mod enum_materialization;
 mod fake_overrides;
+pub(crate) use fake_overrides::emitted_body;
 #[cfg(test)]
 mod initializer_capability_tests;
 mod inline_functions;
@@ -1105,6 +1106,22 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.primitive_at(signature, true, |facts, identity, bodies| {
             facts.common_primitive(identity, bodies)
         })
+    }
+
+    fn intercepted_continuation(
+        &self,
+        signature: &KlibDeclarationSignature,
+    ) -> Result<
+        Option<super::intercepted_continuation::InterceptedContinuationExpansion>,
+        KlibBodyDeclineReason,
+    > {
+        let bodies = self.sources.bodies;
+        match bodies.linked_origin(&self.active_module, signature) {
+            KlibCalleeOrigin::Exact(identity) => {
+                super::intercepted_continuation::expansion(self.sources.callees, bodies, &identity)
+            }
+            KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => Ok(None),
+        }
     }
 
     fn continuation_intrinsic(
