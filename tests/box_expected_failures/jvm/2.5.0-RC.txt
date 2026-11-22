@@ -25,5 +25,4 @@ contextParameters/callableReferences/contextual/shapes.kt
 contextParameters/callableReferences/contextual/simple.kt
 contextParameters/callableReferences/contextual/valueClassContextArg.kt
 contextParameters/contextualCallableReferenceReturnType.kt
-inference/selfBoundedVariableFromFunctionTypeBeforeElvisThrow.kt
 suspendConversion/suspendConversionNullableNpe2.kt

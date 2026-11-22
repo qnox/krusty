@@ -233,13 +233,12 @@ impl<'a> KlibCalleeFacts<'a> {
         super::type_evidence::satisfies(self.class_type_oracle, parameters, argument, bound)
     }
 
-    pub(super) fn is_subtype(
+    pub(super) fn classifier_parameter_bounds(
         &self,
-        parameters: &super::klib_types::KlibTypeParameters,
-        sub: crate::types::Ty,
-        sup: crate::types::Ty,
-    ) -> bool {
-        super::type_evidence::ordinary_subtype(self.class_type_oracle, parameters, sub, sup)
+        owner: crate::types::TypeName,
+        index: usize,
+    ) -> Vec<crate::types::Ty> {
+        super::type_evidence::classifier_parameter_bounds(self.class_type_oracle, owner, index)
     }
 
     pub(super) fn same_type(&self, left: crate::types::Ty, right: crate::types::Ty) -> bool {

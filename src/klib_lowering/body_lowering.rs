@@ -392,6 +392,17 @@ pub(super) trait CallLinker {
         unsupported("an enum entry")
     }
 
+    /// The dependency enum class whose compiler-generated `values()` or `valueOf` the public
+    /// declaration `callee` is, with which of the two. `None` for any other callee, which links
+    /// as an ordinary call; a linker that materializes no enum class knows none.
+    fn enum_static_member(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<Option<(TypeName, super::enum_classes::EnumStaticMember)>> {
+        Ok(None)
+    }
+
     /// `sub` as the class `owner` it is a subtype of, with the type arguments its hierarchy applies
     /// to `owner`.
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty>;
@@ -403,6 +414,11 @@ pub(super) trait CallLinker {
     /// Whether `left` and `right` are one type in the calling compilation's class model, apart
     /// from projections that restate their parameter's declaration-site variance.
     fn same_type(&self, left: Ty, right: Ty) -> bool;
+
+    /// The declared upper bounds of the classifier `owner`'s type parameter at `index` in the
+    /// calling compilation's class model: what a star or `out` projection of that slot captures
+    /// besides its own read type.
+    fn classifier_parameter_bounds(&self, owner: TypeName, index: usize) -> Vec<Ty>;
 
     /// Constructor generic bounds consume explicit hierarchy/full-formal evidence without
     /// changing the independent operand-coercion capability.
