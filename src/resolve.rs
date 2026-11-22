@@ -315,6 +315,7 @@ use receiver_flow::ReceiverNarrowing;
 mod receiver_function_values;
 use receiver_function_values::ImplicitReceiverFunctionInvoke;
 pub use receiver_function_values::ReceiverFunctionPropertyCallee;
+mod dsl_markers;
 mod package_qualifier_forms;
 mod package_qualifier_type_arguments;
 mod receiver_tower;
@@ -11284,6 +11285,7 @@ impl<'a> Checker<'a> {
                         class_receiver: false,
                         current: false,
                         receiver_depth: 0,
+                        dsl_shadowed: false,
                     },
                     declared_name,
                     singleton,
@@ -29855,6 +29857,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         postponed_diagnostics: PostponedDiagnostics::default(),
         eager_eliminated_members: HashMap::default(),
         implicit_receiver_selections: HashMap::default(),
+        dsl_scope_violations: HashSet::default(),
         implicit_receiver_identities: HashMap::default(),
         constructor_receiver_frames: Vec::new(),
         read_flow_roots: HashMap::default(),
@@ -31856,6 +31859,9 @@ pub(crate) struct ImplicitReceiver {
     class_receiver: bool,
     current: bool,
     receiver_depth: usize,
+    /// A nearer receiver in the tower shares a `@DslMarker` with this one, so binding it
+    /// implicitly is a DSL scope violation.
+    dsl_shadowed: bool,
 }
 
 /// Stable identity for a semantic receiver supplied by the checker's `this`-label stack rather
@@ -32407,6 +32413,8 @@ struct Checker<'a> {
     /// state, so this decision must cross the frontend/backend boundary rather than being guessed from
     /// JVM slot names.
     implicit_receiver_selections: HashMap<ExprId, ImplicitReceiverSelection>,
+    /// Expressions already rejected for binding a `@DslMarker`-shadowed implicit receiver.
+    dsl_scope_violations: HashSet<ExprId>,
     /// Receiver-tower coordinate of each implicit receiver selected above; checker-only, it keys
     /// the smart-cast paths of member reads through that receiver.
     implicit_receiver_identities: HashMap<ExprId, (usize, usize)>,
@@ -35486,6 +35494,7 @@ impl<'a> Checker<'a> {
                 receiver_depth,
             },
         );
+        self.record_dsl_scope_use(expression, receiver);
         self.mark_extension_receiver_used(expression, receiver);
     }
 
@@ -35544,26 +35553,6 @@ impl<'a> Checker<'a> {
 
     fn implicit_receiver_identity_use_count(&self, identity: (usize, usize)) -> usize {
         self.implicit_receiver_identity_uses.count(identity)
-    }
-
-    fn mark_context_extension_receiver_used(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        sources: &[ResolvedContextArgument],
-    ) {
-        for source in sources {
-            let ResolvedContextArgument::ImplicitReceiver(selected) = source else {
-                continue;
-            };
-            if let Some(receiver) = self
-                .implicit_receivers(scope)
-                .into_iter()
-                .find(|receiver| receiver.ty == selected.ty && receiver.current == selected.current)
-            {
-                self.mark_extension_receiver_used(call, receiver);
-            }
-        }
     }
 
     /// Specialize a selected generic property from its implicit context arguments. Context values
@@ -38250,6 +38239,7 @@ impl<'a> Checker<'a> {
             class_receiver: false,
             current: false,
             receiver_depth: 0,
+            dsl_shadowed: false,
         };
         let ty = self.read_implicit_receiver_name(scope, expression, name, receiver)?;
         self.mark_implicit_receiver_selection(expression, receiver);
@@ -47676,6 +47666,7 @@ impl<'a> Checker<'a> {
                                 class_receiver: self.this_labels[idx].2,
                                 current: idx == top,
                                 receiver_depth: label_depth,
+                                dsl_shadowed: false,
                             },
                         };
                         let ty = self
