@@ -42437,10 +42437,14 @@ impl<'a> Checker<'a> {
                 self.with_this_unavailable(|c| match &sc.delegation {
                     CtorDelegation::This(delegation) => {
                         for &argument in &delegation.args {
-                            // A delegation lambda is contextual: leave its initial `Error`
-                            // placeholder until the shared constructor selector maps it to a
-                            // parameter slot, just like a primary class-header base argument.
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
+                            // A delegation lambda or callable reference is contextual: leave its
+                            // initial `Error` placeholder until the shared constructor selector
+                            // maps it to a parameter slot, just like a primary class-header base
+                            // argument.
+                            if !matches!(
+                                c.file.expr(argument),
+                                Expr::Lambda { .. } | Expr::CallableRef { .. }
+                            ) {
                                 c.expr(delegation_scope, argument);
                             }
                         }
@@ -42482,7 +42486,10 @@ impl<'a> Checker<'a> {
                     }
                     CtorDelegation::Super(delegation) => {
                         for &argument in &delegation.args {
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
+                            if !matches!(
+                                c.file.expr(argument),
+                                Expr::Lambda { .. } | Expr::CallableRef { .. }
+                            ) {
                                 c.expr(delegation_scope, argument);
                             }
                         }
