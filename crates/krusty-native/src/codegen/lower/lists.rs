@@ -803,7 +803,14 @@ impl BodyLowering<'_, '_, '_> {
         // REPRESENTATION rather than about walking. A file that also puts a class of its own
         // behind the receiver's type dispatches that class first; this direct call is only for a
         // receiver no class of the file can be. See [`FileLowering::implements_collection_of`].
-        if self.file.implements_collection_of(ty) {
+        // The shape is as coarse as `Iterable`, so a class implementing only `Collection` marks
+        // `List` too; only a class that can stand behind this very type is one to dispatch to.
+        if self.file.implements_collection_of(ty)
+            && ty
+                .non_null()
+                .obj_internal()
+                .is_none_or(|internal| !self.file.implementors_of(internal).is_empty())
+        {
             return None;
         }
         let (symbol, carried, answer) =
