@@ -9,7 +9,6 @@ annotations/instances/annotationFromStdlib.kt
 annotations/instances/annotationInstances.kt
 annotations/instances/annotationInstancesEmptyDefault.kt
 annotations/instances/annotationInstancesEmptyDefaultLowered.kt
-annotations/instances/annotationToString.kt
 annotations/instances/annotationWithTypeParameters.kt
 annotations/instances/inInlineFunction.kt
 annotations/instances/multifileEqHc.kt
@@ -61,7 +60,6 @@ basics/unchecked_cast6x.kt
 basics/unchecked_cast7.kt
 basics/unchecked_cast8.kt
 basics/unchecked_cast9.kt
-bce/bceCases.kt
 bce/customGetter.kt
 bce/delegatedProperty.kt
 bce/differentArrays.kt

@@ -143,12 +143,23 @@ struct LibraryMember {
     name: String,
     /// Whether the member is `KCallable.name`, which every callable-reference object answers.
     reference_name: bool,
+    /// The published body an interface declares for the member: the implementation of every
+    /// class that does not override it.
+    interface_default: Option<u32>,
 }
 
 /// Whether `property` is `KCallable.name`, which every callable-reference object implements
 /// (`crate::callable_references`).
 fn is_reference_name(property: &BackendPropertyFact) -> bool {
     &*property.name == "name" && property.owner.matches("kotlin/reflect/KCallable")
+}
+
+/// Whether `fact` is a member of a library interface that dispatches on its receiver, which a
+/// class implementing the interface may override.
+pub(in crate::codegen) fn is_dispatched_interface_member(fact: &BackendCallableFact) -> bool {
+    fact.owner_is_interface
+        && fact.kind == ExternalCallableKind::Member
+        && fact.member_realization == MemberRealization::Dispatch
 }
 
 /// Whether `fact` is an abstract member of a library class: no body of its own runs, only the
@@ -313,6 +324,7 @@ impl Body<'_> {
                 role,
                 name,
                 reference_name: property.is_some_and(is_reference_name),
+                interface_default: self.calls.interface_default(target),
             },
             receiver,
             args,
@@ -375,6 +387,7 @@ impl Body<'_> {
             role,
             name,
             reference_name,
+            interface_default,
         } = member;
         let params = fact.declared_params.as_deref().unwrap_or(&fact.params);
         let result = fact.declared_ret.unwrap_or(fact.ret);
@@ -389,6 +402,12 @@ impl Body<'_> {
             self.record_char_sequence_reads(false)?;
         }
         let member = self.library_member_of(&fact, identity, role, &name)?;
+        if let Some(function) = interface_default {
+            self.runtime
+                .objects
+                .interfaces
+                .interface_default(member, function)?;
+        }
         if reference_name {
             self.runtime.reference_name_member(self.module, member)?;
         }
@@ -443,9 +462,12 @@ impl Body<'_> {
             self.module,
             self.classifiers,
             member,
-            name,
+            crate::builtin_members::LibraryMemberDeclaration {
+                name,
+                params: fact.declared_params.as_deref().unwrap_or(&fact.params),
+                implementations: &fact.builtin_implementations,
+            },
             &signature,
-            &fact.builtin_implementations,
         )?;
         if let Some(step) = super::array_lists::iterator_step(fact) {
             use super::array_lists::IteratorStep;

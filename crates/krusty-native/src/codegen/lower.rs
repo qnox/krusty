@@ -237,6 +237,9 @@ pub struct FileInput<'a> {
     pub dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
     /// Stable dependency-member numbers shared by every file in the source module.
     pub dependency_interface_numbers: &'a mut HashMap<Vec<u8>, u32>,
+    /// Dependency interface members a library default implements without a lowered body, with
+    /// the reason; shared by the whole emission session.
+    pub unimplementable_interface_members: &'a mut HashMap<Vec<u8>, String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -278,6 +281,7 @@ pub fn lower_file(
         dependency_symbols,
         dependency_instances,
         dependency_interface_numbers,
+        unimplementable_interface_members,
         value_classes,
         slot_plan,
         module_facts,
@@ -389,6 +393,7 @@ pub fn lower_file(
         dependency_symbols,
         dependency_interface_calls: Vec::new(),
         dependency_interface_numbers,
+        unimplementable_interface_members,
         dependency_instances,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
@@ -668,6 +673,8 @@ struct FileLowering<'a> {
     /// this file's emitted identity records; the shared map prevents a second file from reusing
     /// one stub number for another dependency member.
     dependency_interface_numbers: &'a mut krusty::fx_hash::HashMap<Vec<u8>, u32>,
+    /// See [`FileInput::unimplementable_interface_members`].
+    unimplementable_interface_members: &'a mut krusty::fx_hash::HashMap<Vec<u8>, String>,
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
@@ -2868,6 +2875,7 @@ fn callee_kind(callee: &Callee) -> &'static str {
         Callee::Static { .. } => "static",
         Callee::Virtual { .. } => "virtual",
         Callee::Super { .. } => "super",
+        Callee::ValueClassAdapter { .. } => "value-class adapter",
         Callee::Special { .. } => "special",
     }
 }
