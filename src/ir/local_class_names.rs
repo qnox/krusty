@@ -1495,6 +1495,9 @@ impl super::IrFile {
             for property in properties {
                 property.receiver = ty(property.receiver, names);
                 property.ty = ty(property.ty, names);
+                for (_, _, parameter) in &mut property.context_params {
+                    *parameter = ty(*parameter, names);
+                }
                 type_parameters(&mut property.type_params, names);
             }
         }

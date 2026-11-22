@@ -475,6 +475,10 @@ fn validate_prop_ref(reference: &PropRef) -> Result<(), UndeterminedIrType> {
 fn validate_member_extension(property: &MemberExtProp) -> Result<(), UndeterminedIrType> {
     reject("member-extension receiver", property.receiver)?;
     reject("member-extension property", property.ty)?;
+    reject_all(
+        "member-extension context parameter",
+        property.context_params.iter().map(|(_, _, ty)| *ty),
+    )?;
     for parameter in &property.type_params {
         validate_type_parameter(parameter)?;
     }
