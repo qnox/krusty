@@ -7,7 +7,7 @@
 //! does not describe, one of a classifier with type parameters, and one sharing its name with
 //! another member of its classifier leave the answer undescribed.
 
-use krusty_plugin_ir::{
+use krusty_plugin_api::ksp::{
     KspDeclaration, KspDeclarationOrigin, KspFile, KspFunctionKind, KspMember, KspModifier,
     KspOverridee,
 };
