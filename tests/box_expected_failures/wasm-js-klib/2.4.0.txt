@@ -2202,7 +2202,6 @@ size/add.kt
 size/helloWorld.kt
 size/helloWorldPromise.kt
 size/objectsOptimization.kt
-smartCasts/smartcastFromGenericToString.kt
 specialBuiltins/bridges.kt
 specialBuiltins/emptyList.kt
 specialBuiltins/enumAsOrdinaled.kt
