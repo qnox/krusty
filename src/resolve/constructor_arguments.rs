@@ -189,9 +189,13 @@ impl Checker<'_> {
             .iter()
             .all(|error| matches!(error, CallArgMappingError::TooManyArguments { .. }))
         {
-            return self.report_excess_delegation_arguments(
+            let reported_types = self.report_fitted_delegation_type_mismatches(
+                class, secondary, label, arguments, candidates, &failure,
+            );
+            let reported_excess = self.report_excess_delegation_arguments(
                 class, secondary, arguments, candidates, &failure,
             );
+            return reported_types || reported_excess;
         }
         false
     }
@@ -222,6 +226,94 @@ impl Checker<'_> {
             reported = true;
         }
         reported
+    }
+
+    /// Arguments that fit the parameter list can still have the wrong type when later arguments
+    /// are extra. The arity failure used to hide that mismatch.
+    fn report_fitted_delegation_type_mismatches(
+        &mut self,
+        class: DeclId,
+        secondary: usize,
+        label: &str,
+        arguments: &CtorDelegationCall,
+        candidates: &[CtorDelegationCandidate],
+        failure: &CallArgMappingFailure,
+    ) -> bool {
+        let Some(parameters) =
+            self.delegation_argument_parameters(class, secondary, label, candidates)
+        else {
+            return false;
+        };
+        let Some(types) = self.delegation_parameter_types(class, secondary, label, candidates)
+        else {
+            return false;
+        };
+        let excess = failure
+            .errors
+            .iter()
+            .filter_map(|error| match error {
+                CallArgMappingError::TooManyArguments { argument, .. } => Some(*argument),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut kept_args = Vec::new();
+        let mut kept_names = Vec::new();
+        for (index, &argument) in arguments.args.iter().enumerate() {
+            if excess.contains(&index) {
+                continue;
+            }
+            kept_args.push(argument);
+            kept_names.push(arguments.names.get(index).cloned().flatten());
+        }
+        let last = arguments.args.len().saturating_sub(1);
+        let names = kept_names
+            .iter()
+            .any(Option::is_some)
+            .then_some(kept_names.as_slice());
+        let Ok(slots) = map_param_list_args(
+            &kept_args,
+            names,
+            &parameters,
+            arguments.trailing_lambda && !excess.contains(&last),
+        ) else {
+            return false;
+        };
+        let mut reported = false;
+        for (index, slot) in slots.iter().enumerate() {
+            let Some(argument) = slot else {
+                continue;
+            };
+            let (Some(expected), Some(actual)) = (
+                types.get(index).copied(),
+                self.expr_types.get(argument.0 as usize).copied(),
+            ) else {
+                continue;
+            };
+            if actual == Ty::Error
+                || expected == Ty::Error
+                || self.receiver_is_assignable(actual, expected)
+                || expected.accepts_numeric(actual)
+            {
+                continue;
+            }
+            self.report_assignability_error(expected, actual, self.span(*argument), "argument");
+            reported = true;
+        }
+        reported
+    }
+
+    fn delegation_parameter_types(
+        &self,
+        class: DeclId,
+        secondary: usize,
+        label: &str,
+        candidates: &[CtorDelegationCandidate],
+    ) -> Option<Vec<Ty>> {
+        match candidates {
+            [candidate] => Some(candidate.target.params().to_vec()),
+            [] if label == "this" => self.secondary_parameter_types(class, secondary),
+            _ => None,
+        }
     }
 
     fn delegation_arity_signature(
