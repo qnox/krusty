@@ -682,6 +682,19 @@ impl Ty {
             .is_some_and(|n| same(n, wk::any()) || same(n, wk::java_object()))
     }
 
+    /// Whether this is Kotlin's top type itself, `Any`/`Any?` or a physical JVM `Object` spelling.
+    /// Unlike [`Self::is_erased_top`], a type parameter whose bound is `Any?` is not the top type:
+    /// it erases to `Object`, but only values of that parameter are its subtypes.
+    pub fn is_semantic_top(self) -> bool {
+        match self.kind() {
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => inner.is_semantic_top(),
+            TyKind::Obj(n, _) => same(n, wk::any()) || same(n, wk::java_object()),
+            _ => false,
+        }
+    }
+
     /// The canonical **extension-receiver key**: the `Ty` two receivers must share for an extension
     /// declared on one to resolve on the other. A Kotlin-level erasure that reproduces the equivalence
     /// the old JVM descriptor key gave for *reference* receivers, without referencing the backend — it

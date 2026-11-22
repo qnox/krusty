@@ -1569,5 +1569,8 @@ pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate
                 element: element.get(),
             }
         }
+        crate::fir::FirIntrinsic::EnumValues { classifier } => crate::ir::IrIntrinsic::EnumValues {
+            classifier: classifier.get(),
+        },
     }
 }
