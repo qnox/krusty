@@ -1804,10 +1804,10 @@ actual typealias FromKotlin = KotlinTarget
 #[test]
 fn an_actual_typealias_whose_target_implements_every_member_is_silent() {
     let common_source = "\
-expect class FromJava {
+expect class FromJava() {
     fun present(): Int
 }
-expect class FromKotlin {
+expect class FromKotlin() {
     fun present(): Int
 }
 ";
