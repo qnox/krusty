@@ -16,7 +16,7 @@ use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction, KlibIrMember,
-    KlibIrStatement, KlibIrType,
+    KlibIrStatement, KlibIrSyntheticBody, KlibIrType,
 };
 use crate::metadata::klib_ir::{
     KlibIrModuleTrees, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind,
@@ -595,6 +595,33 @@ impl KlibDeclarationBodies {
         Some((trees, arena, function))
     }
 
+    /// The enum class whose compiler-generated `values()` or `valueOf` is exactly `identity`, with
+    /// which of the two it is. The backend implements both, as it does for a source enum, so a call
+    /// of either is the common enum operation and links no body of its own.
+    pub(crate) fn enum_static_member(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<(KlibEnumEntryClass<'_>, KlibIrSyntheticBody)> {
+        let (_, function) = self.function(identity)?;
+        let member = function.enum_special_member().filter(|member| {
+            matches!(
+                member,
+                KlibIrSyntheticBody::EnumValues | KlibIrSyntheticBody::EnumValueOf
+            )
+        })?;
+        let (module, _) = self.modules.get_key_value(&identity.module)?;
+        let (arena, class) =
+            self.module_class_declaring(module, &ir_signature(&identity.declaration))?;
+        Some((
+            KlibEnumEntryClass {
+                module: module.as_str(),
+                arena,
+                class,
+            },
+            member,
+        ))
+    }
+
     /// The file-local class `module` itself serializes under `signature`.
     ///
     /// A file-local identity is meaningful only in the library that wrote it. Producer
@@ -624,6 +651,43 @@ impl KlibDeclarationBodies {
     pub(crate) fn module_file_package(&self, module: &str, file: u32) -> Option<&[String]> {
         let library = *self.modules.get(module)?;
         self.libraries[library].file_package(file)
+    }
+
+    /// The class `module` itself serializes under `signature`, whichever kind of signature names
+    /// it. `None` unless exactly one class has it.
+    pub(crate) fn module_declared_class<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a KlibIrArena, &'a KlibIrClass)> {
+        let library = *self.modules.get(module)?;
+        let mut found = None;
+        for class in self.libraries[library].classes_with_signature(signature) {
+            if found.replace(class).is_some() {
+                return None;
+            }
+        }
+        found.or_else(|| self.libraries[library].local_class(signature))
+    }
+
+    /// What the serialized file-local `signature` of `module` records beside its table slot.
+    pub(crate) fn module_file_local_origin(
+        &self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<&crate::metadata::klib_ir::KlibFileLocalOrigin> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].file_local_origin(signature)
+    }
+
+    /// The public function `module` itself serializes under `signature`.
+    pub(crate) fn module_public_function<'a>(
+        &'a self,
+        module: &str,
+        signature: &KlibIrSignature,
+    ) -> Option<(&'a KlibIrArena, &'a KlibIrFunction)> {
+        let library = *self.modules.get(module)?;
+        self.libraries[library].function(signature)
     }
 
     /// The file-local function `module` itself serializes under `signature`.

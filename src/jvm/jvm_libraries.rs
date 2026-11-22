@@ -97,7 +97,9 @@ use crate::types::{
     TypeName, TypeNameList,
 };
 
-use java_operator_convention::java_method_has_operator_convention;
+use java_operator_convention::{
+    java_method_has_operator_convention, publish_classfile_member_shape, ClassfileMemberShape,
+};
 
 /// The JVM platform's contribution to Kotlin's default imports. The language-level `kotlin.*` set is
 /// composed with this list in the import-level builder and in the seed filter, so neither list is duplicated.
@@ -870,7 +872,15 @@ impl JvmLibraries {
                 let setter_inline = property_accessor_inline(setter_public);
                 let (params, ret) = parse_method_desc(&setter_sig.desc)?;
                 (params.len() == 2 && ret == Ty::Unit).then(|| {
-                    accessor(
+                    let receiver = property_gsig
+                        .as_ref()
+                        .and_then(|gsig| gsig.receiver)
+                        .unwrap_or_else(|| {
+                            property
+                                .receiver_class
+                                .map_or(getter_params[0], Ty::obj_name)
+                        });
+                    let mut setter = accessor(
                         crate::names::property_setter_name(&property.name),
                         &setter_sig.name,
                         &setter_sig.desc,
@@ -878,7 +888,9 @@ impl JvmLibraries {
                         Ty::Unit,
                         ret,
                         setter_inline,
-                    )
+                    );
+                    setter.declared_params = Some(Box::new([receiver, property_ty]));
+                    setter
                 })
             });
             props.push(PropertyInfo {
@@ -1659,22 +1671,15 @@ impl JvmLibraries {
                     member.set_ret_nullable(true);
                 }
                 if declaration.is_none() && constructor_declaration.is_none() {
-                    member.call_sig = {
-                        let vararg_index = m
-                            .is_vararg()
-                            .then_some(value_arity)
-                            .and_then(|arity| arity.checked_sub(1));
-                        CallSig::metadata_member(value_arity, Vec::new(), Vec::new(), vararg_index)
-                    };
-                    // Java has no `operator` modifier. Kotlin therefore recognizes a Java method
-                    // as an operator declaration from the language-defined name/arity convention.
-                    // Normalize that capability here; the resolver can then require the same
-                    // semantic flag for Kotlin metadata, Java classfiles, and Java source stubs.
-                    if uses_java_type_semantics
-                        && java_method_has_operator_convention(&member.name, member.params.len())
-                    {
-                        member.set_is_operator(true);
-                    }
+                    publish_classfile_member_shape(
+                        &mut member,
+                        ClassfileMemberShape {
+                            value_arity,
+                            vararg: m.is_vararg(),
+                            java_semantics: uses_java_type_semantics,
+                            java_declaration: !has_kotlin_metadata && m.name != "<init>",
+                        },
+                    );
                 }
                 if let Some(java_nullable) = platform_nullable_params {
                     member.call_sig.platform_nullable_params = java_nullable.into();
@@ -2758,6 +2763,7 @@ impl JvmLibraries {
                         .copied()
                         .chain(std::iter::once(receiver))
                         .collect();
+                    getter.declared_params = Some(getter.params.clone().into_boxed_slice());
                     getter.source_receiver = Some(receiver);
                     getter.context_count = context_count;
                     getter.generic_sig = property_signature.cloned().map(Box::new);
@@ -2807,6 +2813,7 @@ impl JvmLibraries {
                             .copied()
                             .chain([receiver, ty])
                             .collect();
+                        callable.declared_params = Some(callable.params.clone().into_boxed_slice());
                         callable.source_receiver = Some(receiver);
                         callable.context_count = context_count;
                         callable.owner_is_interface = ci.is_interface();
@@ -2903,6 +2910,7 @@ impl JvmLibraries {
                 getter.physical_name =
                     (getter_physical_name != getter_source_name).then_some(getter_physical_name);
                 getter.params = semantic_context.clone();
+                getter.declared_params = Some(getter.params.clone().into_boxed_slice());
                 // The property declaration's generic signature owns classifier parameters too
                 // (`Base<T>.value: T?`). `specialize_property` reads that relation from the getter,
                 // just as it does for member-extension properties; omitting it here turned an
@@ -2967,6 +2975,7 @@ impl JvmLibraries {
                         .copied()
                         .chain(std::iter::once(ty))
                         .collect();
+                    setter.declared_params = Some(setter.params.clone().into_boxed_slice());
                     setter.context_count = context_count;
                     setter.owner_is_interface = ci.is_interface();
                     setter.is_abstract = mp.is_abstract;
@@ -3115,6 +3124,7 @@ impl JvmLibraries {
                     );
                     setter.physical_name = setter_physical_name;
                     setter.params = vec![field_ty];
+                    setter.declared_params = Some(setter.params.clone().into_boxed_slice());
                     setter.external_identity = Some(self.cp.intern_external_callable(
                         &setter,
                         super::classpath::ExternalCallableKind::InstanceFieldWrite,
@@ -4139,7 +4149,7 @@ impl JvmLibraries {
         };
         let until = match elem {
             Ty::Double | Ty::Float => None,
-            Ty::UInt => Some(LibraryCallable::library(
+            Ty::UInt => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/URangesKt"),
                 "until-J1ME1BU",
                 vec![elem, elem],
@@ -4147,7 +4157,7 @@ impl JvmLibraries {
                 Ty::obj(internal),
                 format!("({prim}{prim})L{internal};"),
             )),
-            Ty::ULong => Some(LibraryCallable::library(
+            Ty::ULong => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/URangesKt"),
                 "until-eb3DHEI",
                 vec![elem, elem],
@@ -4155,7 +4165,7 @@ impl JvmLibraries {
                 Ty::obj(internal),
                 format!("({prim}{prim})L{internal};"),
             )),
-            _ if trailing_nulls == 0 => Some(LibraryCallable::library(
+            _ if trailing_nulls == 0 => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/RangesKt"),
                 "until",
                 vec![elem, elem],
@@ -4170,7 +4180,7 @@ impl JvmLibraries {
                 let iface = "kotlin/ranges/ClosedFloatingPointRange";
                 (
                     Ty::obj(iface),
-                    Some(LibraryCallable::library(
+                    Some(LibraryCallable::declared(
                         type_name("kotlin/ranges/RangesKt"),
                         "rangeTo",
                         vec![elem, elem],

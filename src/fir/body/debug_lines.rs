@@ -17,6 +17,10 @@ fn expression_lines(file: &crate::ast::File, span: Span) -> Option<FirExpression
             crate::ast::Expr::Member { name, .. } => Some(file.member_name_span(*callee, name).lo),
             _ => None,
         },
+        crate::ast::Expr::SafeCall { name, .. } => Some(
+            file.member_name_span(crate::ast::ExprId(raw as u32), name)
+                .lo,
+        ),
         _ => None,
     };
     Some(FirExpressionDebugLines {

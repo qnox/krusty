@@ -1392,6 +1392,11 @@ fn an_array_list_of_negative_capacity_raises() {
 }
 
 #[test]
+fn a_read_only_lists_list_iterator_steps_both_ways_and_checks_its_index() {
+    run_driver_against_kotlin("list_list_iterator");
+}
+
+#[test]
 fn walking_a_string_is_linear_and_yields_its_utf16_units() {
     run_driver("string_iterator_linear");
 }
