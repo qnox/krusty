@@ -26,7 +26,7 @@ impl ProductionSignatureSemantics<'_> {
             callee.get().non_null(),
         );
         if let Some(TyKind::Fun(signature)) = callable.map(|ty| ty.kind()) {
-            let Some((implicit_prefix, accepts_explicit_shape)) =
+            let Some(implicit_prefix) =
                 crate::resolve::lexical_value_invoke::signature_function_value_invoke_shape(
                     self.table,
                     scope.source.raw(),
@@ -41,7 +41,6 @@ impl ProductionSignatureSemantics<'_> {
                 scope,
                 signature,
                 implicit_prefix,
-                accepts_explicit_shape,
                 arguments,
             );
             return Self::selected_invoke(signature.ret);

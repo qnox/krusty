@@ -44949,25 +44949,6 @@ impl<'a> Checker<'a> {
         self.expect_assignable(expected, actual, span, "argument");
     }
 
-    /// Whether `actual` certainly cannot be a value of the type parameter `expected` that an
-    /// enclosing declaration fixes at `scope`. Only values of that very parameter (or of one bounded
-    /// by it) are; its erased `Any?` bound is not a top type. A selected callee's still-open formal,
-    /// on either side, is an inference variable instead and is left to the constraint system.
-    fn lexical_type_parameter_rejects(
-        &self,
-        scope: &CheckerScope<'_>,
-        expected: Ty,
-        actual: Ty,
-    ) -> bool {
-        expected.non_null().is_ty_param()
-            && Self::type_is_lexically_fixed(scope, expected)
-            && actual != Ty::Error
-            && !actual.mentions_pending()
-            && !self.postponed_call_mentions(actual)
-            && Self::type_is_lexically_fixed(scope, actual)
-            && !self.receiver_is_assignable(actual, expected)
-    }
-
     fn expect_source_constructor_args(
         &mut self,
         scope: &CheckerScope<'_>,

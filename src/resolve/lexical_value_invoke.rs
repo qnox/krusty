@@ -82,38 +82,48 @@ pub(in crate::resolve) fn function_value_parameter_rejects(
         )
 }
 
-/// The invocation form implicit-signature evaluation selects for a function value: the number of
-/// leading context and receiver parameters a scope supplies, and whether the arguments take every
-/// parameter instead. `None` when no form admits the arguments, by count, by a named or spread
-/// argument, or by a typed argument [`function_value_parameter_rejects`]. Literal, lambda and
-/// provisional call arguments are typed by the selected parameter, so they decide nothing here.
+/// The leading parameters a scope supplies when a function value is invoked with `arguments`
+/// explicit arguments, or `None` when no invocation form takes that many. A function type has
+/// neither defaults nor varargs, so kotlinc admits three forms: every parameter explicit, the
+/// context arguments from scope, and both the context arguments and the extension receiver from
+/// scope. The body checker and implicit-signature evaluation share this one rule.
+pub(in crate::resolve) fn function_value_implicit_prefix(
+    signature: &crate::types::FnSig,
+    arguments: usize,
+) -> Option<usize> {
+    let contexts = signature.context_count.min(signature.params.len());
+    let receiver = usize::from(signature.has_receiver && contexts < signature.params.len());
+    [0, contexts, contexts + receiver]
+        .into_iter()
+        .find(|&prefix| signature.params.len() - prefix == arguments)
+}
+
+/// The number of leading parameters a scope supplies in the invocation form implicit-signature
+/// evaluation selects for a function value ([`function_value_implicit_prefix`]). `None` when no
+/// form admits the arguments, by count, by a named or spread argument, or by a typed argument
+/// [`function_value_parameter_rejects`]. Literal, lambda and provisional call arguments are typed
+/// by the selected parameter, so they decide nothing here.
 pub(in crate::resolve) fn signature_function_value_invoke_shape(
     table: &SymbolTable,
     source_file: u32,
     open: &[crate::types::TyParamName],
     signature: &crate::types::FnSig,
     arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-) -> Option<(usize, bool)> {
-    let implicit_prefix = signature
-        .context_count
-        .saturating_add(usize::from(signature.has_receiver))
-        .min(signature.params.len());
-    let explicit = signature.params.len() == arguments.len();
-    if (!explicit && signature.params.len() - implicit_prefix != arguments.len())
-        || arguments
-            .iter()
-            .any(|argument| argument.name.is_some() || argument.spread)
+) -> Option<usize> {
+    let implicit_prefix = function_value_implicit_prefix(signature, arguments.len())?;
+    if arguments
+        .iter()
+        .any(|argument| argument.name.is_some() || argument.spread)
     {
         return None;
     }
-    let parameters = &signature.params[if explicit { 0 } else { implicit_prefix }..];
     let module = crate::module_symbols::ModuleSymbols::for_file(table, source_file);
     let source = crate::symbol_source::CompositeSource::new(vec![
         &module as &dyn crate::symbol_source::SymbolSource,
         &*table.libraries as &dyn crate::symbol_source::SymbolSource,
     ]);
     let oracle = crate::symbol_resolver::SourceOracle(&source);
-    let rejected = parameters
+    let rejected = signature.params[implicit_prefix..]
         .iter()
         .zip(arguments)
         .any(|(&parameter, argument)| {
@@ -123,7 +133,7 @@ pub(in crate::resolve) fn signature_function_value_invoke_shape(
                 && !argument.wrapped_contextual_call
                 && function_value_parameter_rejects(&oracle, open, argument.ty.get(), parameter)
         });
-    (!rejected).then_some((implicit_prefix, explicit))
+    (!rejected).then_some(implicit_prefix)
 }
 
 impl Checker<'_> {
@@ -170,17 +180,8 @@ impl Checker<'_> {
         let TyKind::Fun(signature) = self.declared_function_semantic_type(value_ty).kind() else {
             return false;
         };
-        // A function type has neither defaults nor varargs: the explicit form takes every
-        // parameter, a context argument may come from scope, and an extension receiver may be an
-        // implicit one. An argument count none of those forms admits cannot be taken.
-        let context_count = signature.context_count.min(signature.params.len());
-        let implicit_context_arity = signature.params.len() - context_count;
-        let admitted_arities = [
-            signature.params.len(),
-            implicit_context_arity,
-            implicit_context_arity.saturating_sub(usize::from(signature.has_receiver)),
-        ];
-        if !admitted_arities.contains(&args.len()) {
+        // An argument count no invocation form admits cannot be taken.
+        if function_value_implicit_prefix(signature, args.len()).is_none() {
             return true;
         }
         if signature.params.len() != args.len()
@@ -198,14 +199,17 @@ impl Checker<'_> {
         // checked in, and records flow facts. The probe checks them in a scope of its own and
         // leaves the call's flow as it found it.
         // Its diagnostics are dropped too: an argument that cannot be checked against the value's
-        // parameter (`value.let { other(it) }` whose lambda result is not that parameter) makes
-        // the value inapplicable, and the selected level checks the argument again.
+        // parameter without an error (`value.let { other(it) }` whose lambda result is not that
+        // parameter) makes the value inapplicable, and the selected level checks the argument
+        // again. A warning is not a failure: kotlinc still calls the value.
         let entry_flow = scope.flow_snapshot();
         let diagnostics = self.diags.diags.len();
         let probe_scope = scope.parameter_child();
         let arg_tys = self.invoke_operator_arg_tys(&probe_scope, call, value_ty, args);
         scope.restore_flow(&entry_flow);
-        let argument_failed = self.diags.diags.len() > diagnostics;
+        let argument_failed = self.diags.diags[diagnostics..]
+            .iter()
+            .any(|diagnostic| diagnostic.severity == crate::diag::Severity::Error);
         self.diags.diags.truncate(diagnostics);
         if argument_failed {
             return true;

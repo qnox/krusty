@@ -1755,7 +1755,9 @@ impl SignatureConstraintExtractor {
                         let explicit =
                             self.call_arguments(file, expression, args, scope, origin)?;
                         // A function value that cannot take the arguments leaves the call to the
-                        // member or extension the call would otherwise select.
+                        // member or extension the call would otherwise select. Both read the
+                        // written receiver once.
+                        let mut written_receiver = None;
                         let later = if let Some(path) =
                             qualified_calls::callable_path(self, file, *callee)
                         {
@@ -1806,6 +1808,7 @@ impl SignatureConstraintExtractor {
                             })
                         } else {
                             let receiver = self.expression(file, *receiver, scope, origin)?;
+                            written_receiver = Some(receiver);
                             let arguments = explicit;
                             let type_arguments =
                                 self.call_type_arguments(file, expression, scope, origin);
@@ -1832,7 +1835,10 @@ impl SignatureConstraintExtractor {
                                 file.expr_span(*receiver)
                                     .expect("a signature receiver must retain its source span"),
                             );
-                            let receiver = self.expression(file, *receiver, scope, origin)?;
+                            let receiver = match written_receiver {
+                                Some(receiver) => receiver,
+                                None => self.expression(file, *receiver, scope, origin)?,
+                            };
                             let mut arguments =
                                 Vec::with_capacity(self.graph.call_arguments(explicit).len() + 1);
                             arguments.push(SigCallArgument {
