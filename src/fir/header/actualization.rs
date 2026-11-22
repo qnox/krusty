@@ -178,6 +178,24 @@ fn actual_member_owners(
         }
         ordinary
     };
+    // An `actual typealias` has no members of its own: its member scope is its target's. A target
+    // declared in this module contributes its headers; a dependency or Java target has none, so
+    // the resolver publishes its selected members under the alias itself.
+    if let Some(HeaderDeclarationKind::TypeAlias { target, .. }) =
+        headers.syntax.declaration(actual).map(|value| value.kind)
+    {
+        let source = headers
+            .declarations
+            .anchor(actual)
+            .map(|anchor| anchor.source);
+        return match source
+            .and_then(|source| bindings.type_classifier(source, target))
+            .and_then(implementation_classifier)
+        {
+            Some(class) => actual_member_owners(headers, bindings, class),
+            None => vec![actual],
+        };
+    }
     let mut owners = vec![actual];
     let mut next = 0;
     while next < owners.len() {
