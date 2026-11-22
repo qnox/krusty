@@ -794,6 +794,7 @@ mod tests {
             ir,
             &ValueClassInventory::default(),
             &ModuleSlotPlan::empty(),
+            &mut Default::default(),
             &LaidOutClasses::default(),
         )
     }
@@ -1225,6 +1226,7 @@ mod tests {
             &ir,
             &ValueClassInventory::default(),
             &ModuleSlotPlan::empty(),
+            &mut Default::default(),
             &LaidOutClasses::default(),
         )
         .expect("layout");
