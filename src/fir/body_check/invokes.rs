@@ -45,30 +45,21 @@ impl BodyFirChecker<'_> {
         if !function_value {
             return Ok(None);
         }
-        let parameters = selected.member.params.as_slice();
-        if parameters.len() != arguments.len() {
-            return Err(self.failure(
-                self.file.expr_span(expression),
-                BodyCheckFailureKind::UnsupportedCallShape,
-            ));
-        }
-        let span = self
-            .file
-            .expr_span(expression)
-            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
-        let parameter_types = parameters
-            .iter()
-            .map(|parameter| self.resolved_type(span, *parameter))
-            .collect::<Result<Vec<_>, _>>()?;
+        // The member's parameters are every slot of the function type, context parameters
+        // included, all passed as source arguments; the shared publication splits them.
         let callee = self.convert_fir_value(receiver.value, callee_ty, receiver.conversion);
-        Ok(Some(FirExprKind::FunctionInvoke {
+        self.invoke_on_value(
+            expression,
             callee,
-            context_arguments: Box::new([]),
-            arguments: self.call_arguments(expression, arguments, parameters)?,
-            parameter_types: parameter_types.into_boxed_slice(),
-            result: self.resolved_type(span, selected.ret)?,
-            suspend: selected.suspend,
-        }))
+            arguments,
+            &selected.member.params,
+            InvokeKind::Function {
+                context_params: Vec::new(),
+                ret: selected.ret,
+                suspend: selected.suspend,
+            },
+        )
+        .map(Some)
     }
 
     pub(super) fn extension_function_binding(

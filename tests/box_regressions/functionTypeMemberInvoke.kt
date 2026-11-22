@@ -1,4 +1,7 @@
 // WITH_STDLIB
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.EmptyCoroutineContext
+import kotlin.coroutines.startCoroutine
 
 // A function type's members are its function classifier's: a bare `invoke(...)` with a
 // function-typed implicit receiver calls `FunctionN.invoke`, through a typealias too.
@@ -9,6 +12,14 @@ fun ElementFilter.matches(value: String): Boolean = invoke(listOf(value)).isNotE
 fun ((Int) -> Int).twice(value: Int): Int = invoke(invoke(value))
 
 fun (Int.(Int) -> Int).applyTo(value: Int): Int = invoke(value, 2)
+
+suspend fun (suspend (Int) -> Int).callSuspend(value: Int): Int = invoke(value)
+
+fun runSuspend(block: suspend () -> Int): Int {
+    var result = 0
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })
+    return result
+}
 
 fun suspendShape(block: suspend () -> Int): Int = with(block) { if (hashCode() == hashCode()) 1 else 0 }
 
@@ -39,6 +50,8 @@ fun box(): String {
     val scale: Int.(Int) -> Int = { factor -> this * factor }
     if (scale.applyTo(21) != 42) return "fail: extension function receiver"
     if (suspendShape { 1 } != 1) return "fail: suspend function receiver"
+    val inc: suspend (Int) -> Int = { it + 1 }
+    if (runSuspend { inc.callSuspend(41) } != 42) return "fail: suspend invoke"
     if (callThrough { it * 3 } != 30) return "fail: with receiver"
     val double: (Int) -> Int = { it * 2 }
     val once = CallOnce(-1, double)
