@@ -63,6 +63,7 @@ versioning-tests:
     bash scripts/test-install-maven.sh
     bash scripts/test-fetch-conformance-deps.sh
     bash scripts/test-check-intellij-patch.sh
+    bash scripts/test-provision-jdks.sh
 
 # The CI runner profile's machine and contention report, against stand-in /proc and /sys trees.
 runner-profile-tests:

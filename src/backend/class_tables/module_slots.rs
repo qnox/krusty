@@ -700,7 +700,7 @@ impl PlannedTable {
 
 /// What a slot holding a function of `parameters` answering `result` is typed by: a `suspend`
 /// one in the form every target that lowers coroutines on common IR gives it.
-fn carried(parameters: &[Ty], result: Ty, suspend: bool) -> (Box<[Ty]>, Ty) {
+pub(super) fn carried(parameters: &[Ty], result: Ty, suspend: bool) -> (Box<[Ty]>, Ty) {
     if suspend {
         let (continuation, completed) = crate::types::continuation_passing(result);
         (
