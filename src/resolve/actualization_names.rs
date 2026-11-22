@@ -367,6 +367,35 @@ fn bind_inherited_dependency_members(
     for stub in headers
         .stubs
         .iter()
+        .filter(|stub| stub.kind == crate::fir::DeclarationKind::TypeAlias)
+    {
+        // An `actual typealias` answers for its target's member scope. A target in this module
+        // has headers the matcher reads directly; a dependency or Java target has none, so its
+        // selected members are published under the alias.
+        let Some(crate::fir::HeaderDeclarationKind::TypeAlias { target, .. }) =
+            headers.syntax.declaration(stub.id).map(|value| value.kind)
+        else {
+            continue;
+        };
+        if has_type_arguments(headers, target) {
+            continue;
+        }
+        let Some(target) = bindings
+            .bound_type(stub.source, target)
+            .filter(|target| !declarations.contains(target))
+        else {
+            continue;
+        };
+        let receiver = crate::types::Ty::obj_name(target);
+        let members = expected_names
+            .iter()
+            .flat_map(|name| inherited_members(platform, receiver, name))
+            .collect();
+        bindings.bind_inherited_dependency_members(stub.id, members);
+    }
+    for stub in headers
+        .stubs
+        .iter()
         .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
     {
         let Some(crate::fir::HeaderDeclarationKind::Classifier {

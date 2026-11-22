@@ -411,15 +411,19 @@ pub(super) fn report_unactualized_members(
             continue;
         };
         diags.set_file(actual.file);
-        let Target::Classifier { name, shape, .. } = &actual.target else {
-            // Only a classifier owns members, and only a classifier is recorded as owing any.
-            continue;
-        };
-        let subject = match declarations.get(owed.classifier) {
-            Some(Resolved::Classifier(signature)) => {
-                render_classifier_subject(signature, name, shape)
+        let subject = match &actual.target {
+            Target::Classifier { name, shape, .. } => match declarations.get(owed.classifier) {
+                Some(Resolved::Classifier(signature)) => {
+                    render_classifier_subject(signature, name, shape)
+                }
+                _ => Err("has no resolved classifier signature"),
+            },
+            // An `actual typealias` owes the members of the class it names.
+            Target::TypeAlias { name, .. } => {
+                render_type_alias_subject(&declarations, owed.classifier, name)
             }
-            _ => Err("has no resolved classifier signature"),
+            // Only a classifier or an alias owns members, and only those are recorded as owing any.
+            Target::Function { .. } | Target::Property { .. } => continue,
         };
         // The reference compiler lists what the classifier owes under the line that names it,
         // each member as the common source declared it.
@@ -974,12 +978,12 @@ fn render_classifier_subject(
     ))
 }
 
-fn render_type_alias(
+/// An alias's type parameters and the type it expands to, as the reference compiler renders them:
+/// `<T> = Box<T>` for `actual typealias Foo<T> = Box<T>`.
+fn alias_head_and_target(
     declarations: &ResolvedDeclarations<'_>,
     stable: crate::fir::DeclarationId,
-    name: &str,
-    declared: Visibility,
-) -> Result<String, &'static str> {
+) -> Result<(String, String), &'static str> {
     let template = declarations
         .alias_expansion(stable)
         .ok_or("has no resolved expansion")?;
@@ -993,9 +997,30 @@ fn render_type_alias(
     } else {
         format!("<{}>", formals.join(", "))
     };
+    Ok((formals, target.source_name()))
+}
+
+fn render_type_alias(
+    declarations: &ResolvedDeclarations<'_>,
+    stable: crate::fir::DeclarationId,
+    name: &str,
+    declared: Visibility,
+) -> Result<String, &'static str> {
+    let (formals, target) = alias_head_and_target(declarations, stable)?;
     Ok(format!(
-        "{} final actual typealias {name}{formals} = {}",
-        visibility(declared),
-        target.source_name()
+        "{} final actual typealias {name}{formals} = {target}",
+        visibility(declared)
     ))
+}
+
+/// The alias as the subject of a members report, which names no visibility or modality: the
+/// reference compiler renders `'actual typealias Foo = Box'` there, as it does `'actual class
+/// Foo : Any'` for a class.
+fn render_type_alias_subject(
+    declarations: &ResolvedDeclarations<'_>,
+    stable: crate::fir::DeclarationId,
+    name: &str,
+) -> Result<String, &'static str> {
+    let (formals, target) = alias_head_and_target(declarations, stable)?;
+    Ok(format!("actual typealias {name}{formals} = {target}"))
 }

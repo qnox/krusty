@@ -1757,3 +1757,79 @@ fn a_complete_nested_header_path_outranks_the_imported_type() {
     );
     assert_eq!(krusty, reference, "file, line, column, and message agree");
 }
+
+/// An `expect class` actualized by a `typealias` owes its members to the alias's TARGET, whichever
+/// side of the module boundary that class is on: a Java class, or a class in the same module.
+/// The reference compiler names the alias once and lists what the target does not implement.
+#[test]
+fn an_actual_typealias_owes_the_members_its_target_class_lacks() {
+    let common_source = "\
+expect class FromJava {
+    fun present(): Int
+    fun missing(): Int
+}
+expect class FromKotlin {
+    fun present(): Int
+    fun missing(): Int
+}
+";
+    let java = "\
+public class JavaTarget {
+    public int present() {
+        return 1;
+    }
+}
+";
+    let platform = "\
+class KotlinTarget {
+    fun present(): Int = 1
+}
+actual typealias FromJava = JavaTarget
+actual typealias FromKotlin = KotlinTarget
+";
+    let (reference, krusty) = both_split(
+        "alias_owes_members",
+        &[("Common.kt", common_source)],
+        &[("JavaTarget.java", java), ("Platform.kt", platform)],
+    );
+    assert_eq!(
+        reference.len(),
+        2,
+        "the reference compiler names each alias once: {reference:#?}"
+    );
+    assert_eq!(krusty, reference);
+}
+
+/// An alias whose target implements every `expect` member is silent, for either kind of target.
+#[test]
+fn an_actual_typealias_whose_target_implements_every_member_is_silent() {
+    let common_source = "\
+expect class FromJava {
+    fun present(): Int
+}
+expect class FromKotlin {
+    fun present(): Int
+}
+";
+    let java = "\
+public class JavaTarget {
+    public int present() {
+        return 1;
+    }
+}
+";
+    let platform = "\
+class KotlinTarget {
+    fun present(): Int = 1
+}
+actual typealias FromJava = JavaTarget
+actual typealias FromKotlin = KotlinTarget
+";
+    let (reference, krusty) = both_split(
+        "alias_implements_members",
+        &[("Common.kt", common_source)],
+        &[("JavaTarget.java", java), ("Platform.kt", platform)],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
