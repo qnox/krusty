@@ -119,6 +119,12 @@ impl KlibIrClassIndex {
         self.by_enum_entry.get(signature).map_or(&[], Vec::as_slice)
     }
 
+    pub(super) fn at_path(&self, class: &KlibPublicIdSignature) -> &[ClassAt] {
+        self.by_owner_path
+            .get(&class.declaration_path())
+            .map_or(&[], Vec::as_slice)
+    }
+
     pub(super) fn owning_member(&self, member: &KlibPublicIdSignature) -> &[ClassAt] {
         member
             .owner_path()
@@ -386,5 +392,21 @@ mod tests {
             index.owning_member(&member(&["Color", "RED", "Inner"], "g")),
             []
         );
+    }
+
+    #[test]
+    fn a_class_path_names_the_classes_outside_every_enum_entry() {
+        let (tree, _, _) = tree();
+        let index = KlibIrClassIndex::of(std::slice::from_ref(&tree));
+        for path in [&["Color"][..], &["Color", "Nested"]] {
+            assert_eq!(
+                index.at_path(&class_path(path)),
+                [at(class_id(&tree, class_path(path)))],
+                "{path:?}"
+            );
+        }
+        assert_eq!(index.at_path(&class_path(&["Color", "RED"])), []);
+        assert_eq!(index.at_path(&class_path(&["Color", "RED", "Inner"])), []);
+        assert_eq!(index.at_path(&class_path(&["Color", "Missing"])), []);
     }
 }
