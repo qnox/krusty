@@ -206,6 +206,16 @@ fn wasm_official_dependency_subclasses_inherit_members_realized_by_an_earlier_so
     );
 }
 
+/// A library body reads an abstract accessor of a class an earlier source realized: the read
+/// dispatches through that class's frozen declaration rather than declaring the accessor again.
+#[test]
+fn wasm_official_dependency_reads_abstract_accessors_of_a_class_an_earlier_source_realized() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyCrossUnitAbstractAccessor.kt"),
+        "DependencyCrossUnitAbstractAccessor",
+    );
+}
+
 /// A subclass implements a library interface member with the body it inherits from its
 /// superclass, which does not declare the interface and which no body calls.
 #[test]
