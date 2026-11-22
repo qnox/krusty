@@ -57,7 +57,9 @@ impl FileLowering<'_> {
             for (index, &want) in forwarded.iter().enumerate() {
                 // From the REFERENCE the caller passed: a function type's operands are boxed, and
                 // this is the same unboxing the uniform lambda entry point makes.
-                let Some(value) = body.convert(values[index + 1], Some(any()), want)? else {
+                let Some(value) =
+                    body.convert(values[index + 1], Some(any()), parameter_slot(want))?
+                else {
                     return Err("a `Unit` operand crossing the function slot".into());
                 };
                 arguments.push(value);
@@ -135,7 +137,8 @@ impl FileLowering<'_> {
         self.emit_function(id, signature, result, name, &mut |body, values| {
             let mut arguments = Vec::with_capacity(forwarded.len());
             for (index, &want) in forwarded.iter().enumerate() {
-                let have = carried.get(index).copied();
+                let have = carried.get(index).copied().map(parameter_slot);
+                let want = parameter_slot(want);
                 let Some(value) = body.convert(values[index + 1], have, want)? else {
                     return Err("a `Unit` operand crossing a bridge".into());
                 };
