@@ -16,7 +16,7 @@ use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction, KlibIrMember,
-    KlibIrStatement, KlibIrType,
+    KlibIrStatement, KlibIrSyntheticBody, KlibIrType,
 };
 use crate::metadata::klib_ir::{
     KlibIrModuleTrees, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind,
@@ -593,6 +593,33 @@ impl KlibDeclarationBodies {
             .get(&(identity.module.clone(), signature.clone()))?];
         let (arena, function) = trees.function(&signature)?;
         Some((trees, arena, function))
+    }
+
+    /// The enum class whose compiler-generated `values()` or `valueOf` is exactly `identity`, with
+    /// which of the two it is. The backend implements both, as it does for a source enum, so a call
+    /// of either is the common enum operation and links no body of its own.
+    pub(crate) fn enum_static_member(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Option<(KlibEnumEntryClass<'_>, KlibIrSyntheticBody)> {
+        let (_, function) = self.function(identity)?;
+        let member = function.enum_special_member().filter(|member| {
+            matches!(
+                member,
+                KlibIrSyntheticBody::EnumValues | KlibIrSyntheticBody::EnumValueOf
+            )
+        })?;
+        let (module, _) = self.modules.get_key_value(&identity.module)?;
+        let (arena, class) =
+            self.module_class_declaring(module, &ir_signature(&identity.declaration))?;
+        Some((
+            KlibEnumEntryClass {
+                module: module.as_str(),
+                arena,
+                class,
+            },
+            member,
+        ))
     }
 
     /// The file-local class `module` itself serializes under `signature`.

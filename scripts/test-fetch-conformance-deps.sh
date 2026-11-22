@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Offline test of scripts/fetch-conformance-deps.sh: a stub `curl` stands in for Maven Central.
 set -euo pipefail
-export FETCH_RETRY_WAIT=0
 root="$(cd "$(dirname "$0")/.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -77,5 +76,7 @@ if FAIL_URL_PART=atomicfu-wasm-js SCRIPT_ROOT="$work" KRUSTY_DEPS_CACHE="$deps" 
 fi
 grep -q "atomicfu-wasm-js/$runtime/atomicfu-wasm-js-$runtime.klib" "$work/err"
 grep -q 'error: 404' "$work/err"
+# One attempt: the refused URL was requested exactly once.
+[ "$(grep -c 'atomicfu-wasm-js-' "$STUB_LOG")" -eq 1 ]
 ! ls "$deps" | grep -q 'part'
 echo "fetch-conformance-deps: ok"

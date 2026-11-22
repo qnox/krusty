@@ -161,15 +161,11 @@ impl Checker<'_> {
         &mut self,
         function: &FunDecl,
         declaration: Option<crate::fir::DeclarationId>,
-        implementation: Option<&crate::libraries::FunctionInfo>,
     ) -> bool {
         let Some(selected) =
             declaration.and_then(|declaration| self.selected_any_equals_override(declaration))
         else {
             return false;
-        };
-        let Some(implementation) = implementation else {
-            return true;
         };
         let target = format!(
             "fun equals(other: Any?): {}",
@@ -193,35 +189,6 @@ impl Checker<'_> {
                     "{implementation_kind} function '{}' cannot override {target_kind} function \
                      '{target}' defined in '{owner}'.",
                     function.name
-                ),
-            );
-            return true;
-        }
-        let actual = implementation
-            .ret
-            .apply(implementation.callable.ret)
-            .canonical_semantic();
-        let implementation = if actual == Ty::Error {
-            None
-        } else {
-            let source = self.fed_source();
-            (!crate::symbol_resolver::resolution_subtype(
-                &source,
-                actual,
-                selected.overridden_result.get(),
-            ))
-            .then(|| declaration_rendering::declared_function(&source, implementation))
-        };
-        if let Some(implementation) = implementation {
-            self.diags.error(
-                function
-                    .ret
-                    .as_ref()
-                    .map_or(function.name_span, |result| result.span),
-                format!(
-                    "return type of '{}' is not a subtype of the return type of the overridden \
-                     member '{target}' defined in '{owner}'.",
-                    implementation
                 ),
             );
         }

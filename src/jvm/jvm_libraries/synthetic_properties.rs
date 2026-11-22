@@ -65,6 +65,52 @@ fn get_prefixed_property_name(method: &str) -> Option<String> {
     ))
 }
 
+/// The property accessor the Java instance method `method` with `parameters` value parameters is
+/// named as: `getA()` is the getter of `a` (its setter would be `setA`), and `setOpen(v)` the
+/// setter of `open` (getter `getOpen`) or of `isOpen` (getter `isOpen`).
+pub(super) fn java_accessor_role(
+    method: &str,
+    parameters: usize,
+) -> Option<crate::libraries::PropertyAccessorRole> {
+    use crate::libraries::PropertyAccessorCandidate;
+    let (candidates, setter) = match parameters {
+        0 => (
+            accessor_property_name(method)
+                .map(|property| PropertyAccessorCandidate {
+                    property,
+                    counterparts: Box::new([setter_name_for_getter(method)]),
+                })
+                .into_iter()
+                .collect::<Vec<_>>(),
+            false,
+        ),
+        1 => {
+            let stem = method.strip_prefix("set")?;
+            let getter = format!("get{stem}");
+            let is_getter = format!("is{stem}");
+            let mut candidates = Vec::new();
+            if let Some(property) = accessor_property_name(&getter) {
+                candidates.push(PropertyAccessorCandidate {
+                    property,
+                    counterparts: Box::new([getter]),
+                });
+            }
+            if accessor_property_name(&is_getter).as_deref() == Some(is_getter.as_str()) {
+                candidates.push(PropertyAccessorCandidate {
+                    property: is_getter.clone(),
+                    counterparts: Box::new([is_getter]),
+                });
+            }
+            (candidates, true)
+        }
+        _ => return None,
+    };
+    (!candidates.is_empty()).then(|| crate::libraries::PropertyAccessorRole {
+        candidates: candidates.into_boxed_slice(),
+        setter,
+    })
+}
+
 /// The setter paired with the getter `getter`: `set` plus the getter's spelling without its
 /// accessor prefix. `isOpen` pairs with `setOpen`, `getIsOpen` with `setIsOpen`, and `getURLPath`
 /// with `setURLPath`.

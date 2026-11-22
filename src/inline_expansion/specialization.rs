@@ -415,6 +415,7 @@ fn specialize_callee(
         | Callee::LocalDefault(_)
         | Callee::Static { .. }
         | Callee::Virtual { params: None, .. }
+        | Callee::ValueClassAdapter { .. }
         | Callee::Special { .. } => {}
     }
 }
