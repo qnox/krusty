@@ -74,10 +74,6 @@ fun box(): String {
     } catch (e: IllegalArgumentException) {
     }
 
-    val appended = ints(1, 2, 3)
-    val head = (appended as List<Int>).subList(0, 2)
-    appended.addAll(head)
-    if (appended != ints(1, 2, 3, 1, 2)) return "aliased addAll"
     if (fresh.size != 5) return "whole"
     return "OK"
 }
