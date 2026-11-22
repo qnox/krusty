@@ -616,7 +616,7 @@ fn dependency_deprecated_use(
 }
 
 /// The selected declaration of a call, when this compilation declares it.
-fn call_declaration(call: &ResolvedCall) -> Option<crate::fir::DeclarationId> {
+pub(super) fn call_declaration(call: &ResolvedCall) -> Option<crate::fir::DeclarationId> {
     match call {
         ResolvedCall::Member(selected) => selected.member.stable_declaration,
         ResolvedCall::Companion(member) => member.stable_declaration,
