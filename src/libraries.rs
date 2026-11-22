@@ -67,7 +67,9 @@ pub use call_realization::{
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub use class_identity::KlibClassIdentity;
-pub(crate) use classifier_application::{classifier_bindings, classifier_type_parameter_bounds};
+pub(crate) use classifier_application::{
+    application_arguments_with_star_bounds, classifier_bindings, classifier_type_parameter_bounds,
+};
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
     ConstructorCallConstraints,

@@ -779,6 +779,11 @@ fn compose_restartable_functions_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_hidden_class_annotation_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("hiddenClassAnnotation");
+}
+
+#[test]
 fn compose_tracked_parameters_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("trackedParameters");
 }
@@ -936,6 +941,11 @@ fn compose_captured_lambdas_in_plain_functions_are_byte_identical_to_kotlinc() {
 #[test]
 fn compose_layout_calls_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("layoutCalls");
+}
+
+#[test]
+fn compose_call_initializers_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("callInitializers");
 }
 
 #[test]

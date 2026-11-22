@@ -16,7 +16,7 @@
 //! template leaves the file as it was.
 
 use super::body_lowering::{
-    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor, LinkedAccessorTarget,
+    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessorCall,
     LinkedCallableReference, LinkedCallee, LinkedConstructor, LoweredFunction,
 };
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -90,6 +90,10 @@ impl TemplateCallees<'_> {
 
     fn same_type(&self, left: Ty, right: Ty) -> bool {
         super::type_evidence::same_type(Some(self.hierarchy()), left, right)
+    }
+
+    fn classifier_parameter_bounds(&self, owner: crate::types::TypeName, index: usize) -> Vec<Ty> {
+        super::type_evidence::classifier_parameter_bounds(Some(self.hierarchy()), owner, index)
     }
 
     fn constructor_bound(
@@ -649,6 +653,10 @@ impl CallLinker for TemplateCalls<'_> {
         self.callees.same_type(left, right)
     }
 
+    fn classifier_parameter_bounds(&self, owner: crate::types::TypeName, index: usize) -> Vec<Ty> {
+        self.callees.classifier_parameter_bounds(owner, index)
+    }
+
     fn link_constructor(
         &mut self,
         _ir: &mut IrFile,
@@ -793,7 +801,7 @@ impl CallLinker for TemplateCalls<'_> {
         &mut self,
         _: &mut IrFile,
         callee: &KlibAccessorIdSignature,
-    ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
+    ) -> Result<LinkedAccessorCall, KlibBodyDeclineReason> {
         let signature = KlibDeclarationSignature::Accessor(callee.clone());
         let identity = self.origin(&signature, callee.property())?;
         let declined = |reason| {
@@ -849,9 +857,8 @@ impl CallLinker for TemplateCalls<'_> {
                     "an inline-template property accessor without an exact selected contract",
                 ))
             })?;
-        linked.target = LinkedAccessorTarget::External(property);
         linked.callable = Some(target);
-        Ok(linked)
+        Ok(LinkedAccessorCall::Property(linked))
     }
 
     fn requires_declaration(
