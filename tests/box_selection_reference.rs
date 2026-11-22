@@ -183,8 +183,11 @@ fn decode_hex(value: &str) -> String {
 fn oracle_source(root: &Path, target: &str, generator: &str) -> String {
     let original = read(root, generator);
     let main = main_function(&original);
-    let classes = type_arguments(main, "testClass")
-        .union(&type_arguments(main, "provider"))
+    let classes = ["testClass", "provider", "annotation"]
+        .into_iter()
+        .flat_map(|call| type_arguments(main, call))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .map(|name| format!("class {name}"))
         .collect::<Vec<_>>()
         .join("\n");

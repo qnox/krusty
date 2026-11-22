@@ -756,6 +756,7 @@ mod tests {
                         class_receiver,
                         current: receiver_depth == 0,
                         receiver_depth,
+                        dsl_shadowed: false,
                     }
                 },
             )

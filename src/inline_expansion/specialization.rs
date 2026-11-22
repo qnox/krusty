@@ -331,6 +331,9 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::EnumValueOf {
             classifier: operand,
         }
+        | IrIntrinsic::EnumValues {
+            classifier: operand,
+        }
         | IrIntrinsic::EnumEntries {
             classifier: operand,
         }
