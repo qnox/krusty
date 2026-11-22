@@ -17,16 +17,37 @@ pub(in crate::resolve) struct GeneratedSourceClassifier {
     pub(in crate::resolve) identity: TypeName,
 }
 
-/// The header facts of a source class that a plugin decides from, and the nested classifiers the
-/// plugins generated from them.
-#[derive(Default)]
+/// The header of a source class that the plugins decide from, bound once, and the nested
+/// classifiers they generated from it. Every plugin hook of the class reads this one header.
 pub(in crate::resolve) struct ClassifierPluginFacts {
+    classifier: TypeName,
+    companion: Option<TypeName>,
+    kind: crate::libraries::TypeKind,
+    is_sealed: bool,
+    is_abstract: bool,
+    /// The class's annotations, bound through the file's classifier names before any type is
+    /// resolved, the way kotlinc binds the annotations a plugin's predicates read.
+    annotations: Vec<TypeName>,
     /// A class-valued annotation argument, resolved next to the annotation's own name and through
     /// the same classifier rules. Another file of this module reads it from the stable index; it
     /// never sees this declaration's syntax, so recovering the identity from a spelling later is
     /// not available to it.
     pub(in crate::resolve) annotation_class_arguments: Vec<(u32, TypeName)>,
     pub(in crate::resolve) generated: Vec<crate::types::GeneratedClassifierFact>,
+}
+
+impl ClassifierPluginFacts {
+    pub(in crate::resolve) fn header(&self) -> crate::plugins::FrontendClassifierHeader<'_> {
+        crate::plugins::FrontendClassifierHeader {
+            classifier: self.classifier,
+            companion: self.companion,
+            kind: self.kind,
+            is_sealed: self.is_sealed,
+            is_abstract: self.is_abstract,
+            annotations: &self.annotations,
+            annotation_class_arguments: &self.annotation_class_arguments,
+        }
+    }
 }
 
 /// The plugins' generated nested classifiers of every source class, decided once from the class's
@@ -39,7 +60,8 @@ pub(in crate::resolve) struct GeneratedClassifiers {
 }
 
 impl GeneratedClassifiers {
-    /// The plugin facts of class declaration `declaration` of source `source`.
+    /// The plugin facts of class declaration `declaration` of source `source`. Signature
+    /// collection visits exactly the classes the universe build did.
     pub(in crate::resolve) fn take(
         &mut self,
         source: usize,
@@ -47,7 +69,7 @@ impl GeneratedClassifiers {
     ) -> ClassifierPluginFacts {
         self.by_declaration
             .remove(&(source, declaration))
-            .unwrap_or_default()
+            .expect("the universe build records the plugin facts of every collected class")
     }
 }
 
@@ -156,35 +178,36 @@ pub(in crate::resolve) fn plugin_generated_classifiers(
                     Some((ordinal, names.classifier_binding(&path).ok()?))
                 })
                 .collect::<Vec<_>>();
-            let mut facts_out = Vec::new();
-            plugins.publish_frontend_generated_classifiers(
-                &crate::plugins::FrontendClassifierHeader {
-                    classifier,
-                    companion,
-                    kind: frontend_class_kind(flags, is_enum),
-                    is_sealed: flags.has(ClassFlags::SEALED),
-                    is_abstract: flags.has(ClassFlags::ABSTRACT),
-                    annotations: &annotations,
-                    annotation_class_arguments: &annotation_class_arguments,
-                },
-                &mut facts_out,
-            );
+            let mut facts = ClassifierPluginFacts {
+                classifier,
+                companion,
+                kind: frontend_class_kind(flags, is_enum),
+                is_sealed: flags.has(ClassFlags::SEALED),
+                is_abstract: flags.has(ClassFlags::ABSTRACT),
+                annotations,
+                annotation_class_arguments,
+                generated: Vec::new(),
+            };
+            let mut generated_here = Vec::new();
+            plugins.publish_frontend_generated_classifiers(&facts.header(), &mut generated_here);
+            facts.generated = generated_here;
             if reachable {
-                generated.reachable.extend(facts_out.iter().map(|fact| {
-                    GeneratedSourceClassifier {
-                        source_name: format!("{}.{}", class.name, fact.source_name),
-                        simple_name: fact.source_name.to_string(),
-                        identity: fact.classifier,
-                    }
-                }));
+                generated
+                    .reachable
+                    .extend(
+                        facts
+                            .generated
+                            .iter()
+                            .map(|fact| GeneratedSourceClassifier {
+                                source_name: format!("{}.{}", class.name, fact.source_name),
+                                simple_name: fact.source_name.to_string(),
+                                identity: fact.classifier,
+                            }),
+                    );
             }
-            generated.by_declaration.insert(
-                (source, declaration),
-                ClassifierPluginFacts {
-                    annotation_class_arguments,
-                    generated: facts_out,
-                },
-            );
+            generated
+                .by_declaration
+                .insert((source, declaration), facts);
         }
     }
     generated

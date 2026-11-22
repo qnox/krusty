@@ -2984,10 +2984,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .iter()
                         .filter_map(|annotation| table.resolved_annotation(i as u32, annotation))
                         .collect();
-                    let ClassifierPluginFacts {
-                        annotation_class_arguments: resolved_annotation_class_arguments,
-                        generated: generated_nested_classifiers,
-                    } = generated_classifiers.take(i, d);
+                    let plugin_facts = generated_classifiers.take(i, d);
                     let semantic_tparam_names = classifier_header
                         .type_parameters
                         .iter()
@@ -3028,15 +3025,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .cloned()
                         .collect::<Vec<_>>();
                     let frontend_plugin_context = crate::plugins::FrontendClassContext {
-                        header: crate::plugins::FrontendClassifierHeader {
-                            classifier: internal,
-                            companion: direct_companion,
-                            kind: frontend_class_kind(classifier_flags, classifier_is_enum),
-                            is_sealed: classifier_flags.has(ClassFlags::SEALED),
-                            is_abstract: classifier_flags.has(ClassFlags::ABSTRACT),
-                            annotations: &resolved_annotations,
-                            annotation_class_arguments: &resolved_annotation_class_arguments,
-                        },
+                        header: plugin_facts.header(),
                         type_parameters: &class_type_parameters,
                         declared_functions: &frontend_declared_functions(&methods),
                     };
@@ -3407,8 +3396,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             visibility: classifier_visibility,
                             annotations: resolved_annotations,
                             applied_annotations: Vec::new(),
-                            annotation_class_arguments: resolved_annotation_class_arguments,
-                            generated_nested_classifiers,
+                            annotation_class_arguments: plugin_facts.annotation_class_arguments,
+                            generated_nested_classifiers: plugin_facts.generated,
                             props,
                             declared_props,
                             contextual_props,
