@@ -406,6 +406,12 @@ fn an_observable_delegate_reports_each_write_after_it_happened() {
     expect_native_klib_box(source, "ObservableDelegate");
 }
 
+#[test]
+fn native_library_suspend_coroutine_runs() {
+    let source = include_str!("box_regressions/librarySuspendCoroutine.kt");
+    expect_native_klib_box(source, "nativeLibrarySuspendCoroutine");
+}
+
 fn expect_native_klib_box(source: &str, stem: &str) {
     super::common::expect_box_ok_with_stdlib(source, &format!("{stem}Oracle"));
     let target = host().expect("Native KLIB/runtime is required for this test");
@@ -419,6 +425,13 @@ fn expect_native_klib_box(source: &str, stem: &str) {
         source,
     );
     assert_eq!(outcome, Outcome::Pass, "{stem}");
+}
+
+/// The receiver-reuse program starts its suspend lambda through the stdlib KLIB's `startCoroutine`.
+#[test]
+fn native_apply_receiver_single_store_runs() {
+    let source = include_str!("box_regressions/applyReceiverSingleStore.kt");
+    expect_native_klib_box(source, "nativeApplyReceiverSingleStore");
 }
 
 fn run_native_abi_case(source: &str, stem: &str) -> Outcome {

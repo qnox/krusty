@@ -541,9 +541,7 @@ pub(super) fn mapped_collection_descriptor(collection: MappedCollection) -> Opti
         CollectionKind::Map => Some("kt_type_map_interface"),
         CollectionKind::MapEntry if collection.mutable => Some("kt_type_mutable_map_entry"),
         CollectionKind::MapEntry => Some("kt_type_map_entry"),
-        // The runtime has no distinct ListIterator interface marker. Its provider-published
-        // Iterator supertype is visited separately and supplies the marker this target has.
-        CollectionKind::ListIterator => None,
+        CollectionKind::ListIterator => Some("kt_type_list_iterator_interface"),
     }
 }
 
@@ -551,8 +549,9 @@ pub(super) fn mapped_collection_descriptor(collection: MappedCollection) -> Opti
 /// the marker an `is` check tests stands for another interface too.
 pub(super) fn exact_collection_descriptor(collection: MappedCollection) -> Option<&'static str> {
     match collection.kind {
-        // `kt_type_iterator_interface` is what `MutableIterator` is tested by as well.
-        CollectionKind::Iterator if collection.mutable => None,
+        // `kt_type_iterator_interface` and `kt_type_list_iterator_interface` are what
+        // `MutableIterator` and `MutableListIterator` are tested by as well.
+        CollectionKind::Iterator | CollectionKind::ListIterator if collection.mutable => None,
         _ => mapped_collection_descriptor(collection),
     }
 }
@@ -671,6 +670,28 @@ impl<'a> FileLowering<'a> {
                     && self.class_stands_behind(class, internal)
             })
             .collect()
+    }
+
+    /// How many concrete classes of this file the instance tests of `arms` answer for: each arm and
+    /// every concrete class below it, since an instance test of a class also matches its
+    /// subclasses.
+    pub(super) fn classes_answered_by(&self, arms: &[ClassId]) -> usize {
+        let answered_by_arm = |mut class: ClassId| loop {
+            if arms.contains(&class) {
+                return true;
+            }
+            let superclass = self.ir.classes[class as usize].superclass;
+            match self.ir.class_id_by_name(superclass) {
+                Some(next) if next != class => class = next,
+                _ => return false,
+            }
+        };
+        (0..self.ir.classes.len() as ClassId)
+            .filter(|&id| {
+                let class = &self.ir.classes[id as usize];
+                !class.is_interface && !class.is_abstract && answered_by_arm(id)
+            })
+            .count()
     }
 
     /// Whether a concrete class of this file can be an instance of `internal`.

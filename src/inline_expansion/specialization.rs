@@ -248,6 +248,13 @@ fn specialize_recorded_facts(
     {
         specialize_tys(parameters, bindings);
     }
+    // A call the copied body makes binds the callee's own type parameters to types written in terms
+    // of this splice's formals; the callee's formal keys stay, the bound types are specialized.
+    if let Some(arguments) = ir.inline_call_type_arguments.get_mut(&expression) {
+        for (_, ty) in arguments {
+            specialize_ty(ty, bindings);
+        }
+    }
     if let Some(substitutions) = ir.reified_call_subst.get_mut(&expression) {
         for (_, ty) in substitutions {
             specialize_ty(ty, runtime);
@@ -322,6 +329,9 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::UnsignedToString { source: operand }
         | IrIntrinsic::PrimitiveArrayNew { element: operand }
         | IrIntrinsic::EnumValueOf {
+            classifier: operand,
+        }
+        | IrIntrinsic::EnumValues {
             classifier: operand,
         }
         | IrIntrinsic::EnumEntries {
@@ -408,6 +418,7 @@ fn specialize_callee(
         | Callee::LocalDefault(_)
         | Callee::Static { .. }
         | Callee::Virtual { params: None, .. }
+        | Callee::ValueClassAdapter { .. }
         | Callee::Special { .. } => {}
     }
 }
