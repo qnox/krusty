@@ -22,3 +22,10 @@ pub struct KlibBodyAccessor {
     pub(crate) role: KlibAccessorRole,
     pub(crate) name: Box<str>,
 }
+
+impl KlibBodyAccessor {
+    /// Whether the accessor is its property's setter rather than its getter.
+    pub fn is_setter(&self) -> bool {
+        self.role == KlibAccessorRole::Setter
+    }
+}

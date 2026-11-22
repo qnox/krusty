@@ -1341,30 +1341,28 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.install_local_object(ir, signature)
     }
 
+    fn is_local_interface(&self, signature: &KlibIrSignature) -> bool {
+        self.names_local_interface(signature)
+    }
+
+    fn link_local_interface(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        self.install_local_interface(ir, signature)
+    }
+
     fn link_local_constructor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibIrSignature,
     ) -> Result<super::same_library_class::LocalConstructor, KlibBodyDeclineReason> {
-        let module = self.active_module.clone();
-        let bodies = self.sources.bodies;
-        let callees = self.sources.callees;
-        match super::same_library_class::link(
-            super::same_library_class::LocalClassSource {
-                bodies,
-                declarations: self.sources.declarations,
-                classes: callees.class_type_oracle(),
-                module: &module,
-                validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
-            },
-            callee,
-            self.local_classes,
-        )? {
-            super::same_library_class::LocalLink::Ready(constructor) => Ok(constructor),
-            super::same_library_class::LocalLink::Prepared(prepared) => {
-                self.install_local_class(ir, prepared)
-            }
-        }
+        self.link_constructor_of_local_class(ir, callee)
+    }
+
+    fn inherited_getter(&self, callee: &KlibIrSignature) -> fake_overrides::Inherited {
+        fake_overrides::inherited_getter(self, callee)
     }
 
     fn inherited_getter(&self, callee: &KlibIrSignature) -> fake_overrides::Inherited {
@@ -1427,6 +1425,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
 
     fn same_type(&self, left: Ty, right: Ty) -> bool {
         self.sources.callees.same_type(left, right)
+    }
+
+    fn classifier_parameter_bounds(&self, owner: TypeName, index: usize) -> Vec<Ty> {
+        self.sources
+            .callees
+            .classifier_parameter_bounds(owner, index)
     }
 
     fn link_constructor(

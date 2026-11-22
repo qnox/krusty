@@ -684,42 +684,59 @@ pub fn klib_libraries_for(
 ) -> Result<Vec<PathBuf>, String> {
     let mut libraries = Vec::new();
     if crate::conformance::plugin_corpus::named("atomicfu").enabled_by(src) {
-        match atomicfu_klib(target) {
-            Some(library) => libraries.push(library),
-            None if matches!(
-                target,
-                crate::compilation_target::CompilationTarget::Jvm
-                    | crate::compilation_target::CompilationTarget::Js
-            ) => {}
-            None => {
-                return Err(format!(
-                    "box directive `// WITH_ATOMICFU` needs the atomicfu runtime KLIB for {target:?}"
-                ));
-            }
+        if let Some(library) =
+            atomicfu_klib(target).map_err(|reason| atomicfu_klib_unavailable(target, &reason))?
+        {
+            libraries.push(library);
         }
     }
     Ok(libraries)
 }
 
-/// The atomicfu runtime KLIB for `target`, pinned to the version of the atomicfu corpus's runtime.
+/// Why a `// WITH_ATOMICFU` case has no atomicfu runtime KLIB: the target and the reason the
+/// download or lookup gave, so a refused answer from Maven Central is named in the failure.
+fn atomicfu_klib_unavailable(
+    target: crate::compilation_target::CompilationTarget,
+    reason: &str,
+) -> String {
+    format!(
+        "box directive `// WITH_ATOMICFU` needs the atomicfu runtime KLIB for {target:?}: {reason}"
+    )
+}
+
+/// The atomicfu runtime KLIB for `target`, pinned to the version of the atomicfu corpus's runtime; `Ok(None)` for
+/// the targets without a KLIB form (the JVM lane uses [`atomicfu_runtime_jar`] and the compiler
+/// plugin instead). An `Err` says why the KLIB is unavailable: the URL and the status or deadline
+/// that stopped the download.
 ///
-/// Native and Wasm `// WITH_ATOMICFU` cases resolve `kotlinx.atomicfu` against this library. The
-/// JVM lane uses [`atomicfu_runtime_jar`] and the compiler plugin instead. Maven drops the
-/// underscores of a Kotlin/Native target name, so `linux_x64` is `atomicfu-linuxx64`.
-pub fn atomicfu_klib(target: crate::compilation_target::CompilationTarget) -> Option<PathBuf> {
+/// Native and Wasm `// WITH_ATOMICFU` cases resolve `kotlinx.atomicfu` against this library. Maven
+/// drops the underscores of a Kotlin/Native target name, so `linux_x64` is `atomicfu-linuxx64`.
+pub fn atomicfu_klib(
+    target: crate::compilation_target::CompilationTarget,
+) -> Result<Option<PathBuf>, String> {
     use crate::compilation_target::CompilationTarget;
     let artifact = match target {
         CompilationTarget::Native => {
-            let konan = crate::native_target::NativeTarget::host()?.konan_name()?;
+            let konan = crate::native_target::NativeTarget::host()
+                .and_then(|host| host.konan_name())
+                .ok_or_else(|| "this host has no Kotlin/Native target".to_string())?;
             format!("atomicfu-{}", konan.replace('_', ""))
         }
         CompilationTarget::WasmJs => "atomicfu-wasm-js".to_string(),
         CompilationTarget::WasmWasi => "atomicfu-wasm-wasi".to_string(),
-        CompilationTarget::Jvm | CompilationTarget::Js => return None,
+        CompilationTarget::Jvm | CompilationTarget::Js => return Ok(None),
     };
-    let version =
-        crate::conformance::plugin_corpus::named("atomicfu").runtime_version("atomicfu-jvm")?;
-    ensure_maven_artifact("org.jetbrains.kotlinx", &artifact, version, "klib")
+    let version = crate::conformance::plugin_corpus::named("atomicfu")
+        .runtime_version("atomicfu-jvm")
+        .ok_or_else(|| "the atomicfu corpus names no `atomicfu-jvm` runtime version".to_string())?;
+    fetch_repository_artifact(
+        MAVEN_CENTRAL,
+        "org.jetbrains.kotlinx",
+        &artifact,
+        version,
+        "klib",
+    )
+    .map(Some)
 }
 
 /// Locate the coroutines runtime jar used by classpath suspend tests.
@@ -1013,5 +1030,23 @@ mod tests {
         );
 
         std::fs::remove_dir_all(directory).expect("remove isolated Maven cache");
+    }
+
+    #[test]
+    fn a_missing_atomicfu_klib_names_the_target_and_the_download_failure() {
+        assert_eq!(
+            atomicfu_klib_unavailable(
+                crate::compilation_target::CompilationTarget::Native,
+                "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/atomicfu-linuxx64/0.32.1/atomicfu-linuxx64-0.32.1.klib was not downloaded after 5 attempt(s): curl: (22) The requested URL returned error: 429",
+            ),
+            "box directive `// WITH_ATOMICFU` needs the atomicfu runtime KLIB for Native: https://repo1.maven.org/maven2/org/jetbrains/kotlinx/atomicfu-linuxx64/0.32.1/atomicfu-linuxx64-0.32.1.klib was not downloaded after 5 attempt(s): curl: (22) The requested URL returned error: 429"
+        );
+    }
+
+    #[test]
+    fn jvm_and_js_have_no_atomicfu_klib_to_fetch() {
+        use crate::compilation_target::CompilationTarget;
+        assert_eq!(atomicfu_klib(CompilationTarget::Jvm), Ok(None));
+        assert_eq!(atomicfu_klib(CompilationTarget::Js), Ok(None));
     }
 }
