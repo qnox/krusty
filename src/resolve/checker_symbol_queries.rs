@@ -17,6 +17,7 @@ impl Checker<'_> {
             self.access_context_class_names(),
         )
         .with_eager_lambda_results(self.file.eager_lambda_analysis)
+        .with_visibility_suppression(self.visibility_access_suppressed())
         .with_member_access(self)
     }
 
