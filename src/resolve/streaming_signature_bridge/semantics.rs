@@ -2053,10 +2053,22 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         // A nested generic call is typed provisionally before its selected outer parameter is
         // known. This includes an unqualified outer call whose argument wraps the nested call
         // (`consume(value?.choose { ... })`), as well as qualified and receiver call shapes.
+        // A bare call that names no top-level callable can name a member of an implicit receiver,
+        // which shapes a nested generic call argument as a qualified call does.
+        let direct_calls = qualified
+            || self
+                .with_resolver(scope, |resolver| {
+                    Some(
+                        resolver
+                            .accessible_top_level_candidates(spelling)
+                            .is_empty(),
+                    )
+                })
+                .unwrap_or(false);
         if !super::postponed_calls::call_expectation_lookup_required(
             arguments,
             refresh_typed_postponed,
-            qualified,
+            direct_calls,
         ) {
             return Ok(vec![None; arguments.len()].into_boxed_slice());
         }
@@ -2367,7 +2379,18 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             return Ok(expectations);
                         }
                     }
-                    return Err(Self::failure());
+                    // Only nested generic calls were left to shape: none was, and each keeps its
+                    // typed form for final selection, as before this lookup.
+                    let nested_calls_only = !refresh_typed_postponed
+                        && arguments.iter().all(|argument| {
+                            matches!(argument, crate::fir::SigCallArgumentProbe::Typed(typed)
+                                if !typed.wrapped_contextual_call)
+                        });
+                    return if nested_calls_only {
+                        Ok(vec![None; arguments.len()].into_boxed_slice())
+                    } else {
+                        Err(Self::failure())
+                    };
                 }
             }
         };

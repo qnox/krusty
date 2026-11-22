@@ -1445,12 +1445,22 @@ impl ProductionSignatureSemantics<'_> {
             if let Some((parameters, slots)) =
                 self.receiver_member_level_expectations(receiver, call)?
             {
-                return Ok(Self::postponed_expectations(
+                let mut expectations = Self::postponed_expectations(
                     arguments,
                     &slots,
                     &parameters,
                     refresh_typed_postponed,
-                ));
+                );
+                // A nested generic call is shaped only by a parameter that is already concrete; one
+                // that still mentions the callee's formals is left to final selection.
+                for (expectation, argument) in expectations.iter_mut().zip(arguments) {
+                    if matches!(argument, crate::fir::SigCallArgumentProbe::Typed(_))
+                        && expectation.is_some_and(|ty| ty.get().mentions_ty_param())
+                    {
+                        *expectation = None;
+                    }
+                }
+                return Ok(expectations);
             }
             // At each receiver rung, callable-valued properties follow ordinary functions before
             // the tower advances outward. Reuse the property selector and invoke expectation
