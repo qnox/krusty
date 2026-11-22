@@ -9,6 +9,19 @@ pub(super) fn is_exact_argument_rank(expected: Ty, actual: Ty) -> bool {
     expected == actual && !matches!(expected.kind(), TyKind::TyParam(..) | TyKind::Var(..))
 }
 
+/// The call-site signature's parameters, before inference binds its variables, in the order of
+/// the scored shape.
+fn shaped_declared_parameters(
+    signature: &crate::libraries::GenericSig,
+    shape: &ContextualCallShape,
+) -> Vec<Ty> {
+    shape
+        .parameter_indices
+        .iter()
+        .map(|&index| signature.params.get(index).copied().unwrap_or(Ty::Error))
+        .collect()
+}
+
 impl Checker<'_> {
     /// Select one declaration from a provider's raw callable family. Receiver/name lookup has already
     /// produced the family; applicability, generic binding, and contextual argument shape are shared.
@@ -1013,6 +1026,7 @@ impl Checker<'_> {
                     argument_names,
                 )?
             };
+            let declared_params = shaped_declared_parameters(&signature, &shape);
             let Some(mut score) = call_applicability::score_with_declaration(
                 self,
                 scope,
@@ -1030,6 +1044,10 @@ impl Checker<'_> {
                         bindings: &specialized_bindings,
                         parameter_indices: &shape.parameter_indices,
                     }
+                }),
+                Some(call_applicability::DeclaredParameters {
+                    params: &declared_params,
+                    formals: &signature.formals,
                 }),
             ) else {
                 crate::trace_compiler!(
@@ -1107,6 +1125,7 @@ impl Checker<'_> {
                         argument_names,
                     )?
                 };
+                let declared_params = shaped_declared_parameters(&signature, &shape);
                 let Some(specialized_score) = call_applicability::score_with_declaration(
                     self,
                     scope,
@@ -1124,6 +1143,10 @@ impl Checker<'_> {
                             bindings: &specialized_bindings,
                             parameter_indices: &shape.parameter_indices,
                         }
+                    }),
+                    Some(call_applicability::DeclaredParameters {
+                        params: &declared_params,
+                        formals: &signature.formals,
                     }),
                 ) else {
                     continue;
