@@ -1402,10 +1402,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
         sup: Ty,
     ) -> bool {
         let callees = self.sources.callees;
-        super::same_library_class::is_subtype(self.local_classes, sub, sup, &|sub, sup| {
-            callees.is_subtype(parameters, sub, sup)
-                || super::callable_references::function_supertype(sub, sup)
-        })
+        let model = super::same_library_class::MaterializedClassModel {
+            classes: self.local_classes,
+            public: callees.class_type_oracle(),
+        };
+        model.is_subtype(parameters, sub, sup)
+            || super::callable_references::function_supertype(sub, sup)
     }
 
     fn link_reference(
