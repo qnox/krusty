@@ -236,8 +236,7 @@ use lexical_value_invoke::{DeferredInvokePeers, DeferredLexicalInvoke, LexicalIn
 mod lambda_call_shapes;
 mod property_read_selection;
 use lambda_call_shapes::{
-    projected_function_shape, ExplicitTypeArgumentBounds, ExplicitTypeArgumentProbe,
-    UntypedLambdaCall,
+    ExplicitTypeArgumentBounds, ExplicitTypeArgumentProbe, UntypedLambdaCall,
 };
 use lexical_policies::LexicalPolicy;
 use library_constructor_failure::LibraryConstructorFailure;
@@ -18212,12 +18211,7 @@ impl<'a> Checker<'a> {
                     };
                     let receiver = implicit_receiver.ty;
                     let mut receiver_extension = None;
-                    if receiver == Ty::String
-                        || matches!(
-                            receiver.kind(),
-                            TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Var(..)
-                        )
-                    {
+                    if implicit_rungs::receiver_has_member_scope(receiver) {
                         match self.record_member_call_with_slots(
                             scope,
                             call,
@@ -46199,27 +46193,6 @@ impl<'a> Checker<'a> {
             .zip(params)
             .map(|(&a, param)| self.expr_result(scope, a, Some(param), true))
             .collect()
-    }
-
-    /// Project an explicitly declared Kotlin function classifier (`FunctionN<P..., R>`) onto the
-    /// exact callable shape published by its semantic provider. Callable objects remain nominal:
-    /// only classifiers whose declaration says they represent a function type are normalized.
-    fn declared_function_semantic_type(&self, ty: Ty) -> Ty {
-        let Some(internal) = ty.non_null().kotlin_class_internal() else {
-            return ty;
-        };
-        let source = self.fed_source();
-        if !source
-            .classifier(internal)
-            .is_some_and(|classifier| classifier.represents_function_type())
-        {
-            return ty;
-        }
-        self.stable_classifier_callable_signatures(ty)
-            .into_iter()
-            .next()
-            .map(|function| ty.rewrap_nullability(projected_function_shape(function)))
-            .unwrap_or(ty)
     }
 
     /// Exact function signature of a value expression. Callable references retain this separately
