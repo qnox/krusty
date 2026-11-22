@@ -195,6 +195,17 @@ fn wasm_official_dependency_inherited_members_implement_indirect_interfaces() {
     );
 }
 
+/// A later checked source realizes a subclass of a library class an earlier one already realized
+/// and exported: the subclass inherits the superclass's members from the earlier realization, as
+/// its own interface implementations, instead of realizing the superclass again.
+#[test]
+fn wasm_official_dependency_subclasses_inherit_members_realized_by_an_earlier_source() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyCrossUnitInheritedMembers.kt"),
+        "DependencyCrossUnitInheritedMembers",
+    );
+}
+
 /// A subclass implements a library interface member with the body it inherits from its
 /// superclass, which does not declare the interface and which no body calls.
 #[test]
