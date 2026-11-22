@@ -33,5 +33,9 @@ impl Checker<'_> {
         subject == condition
             || Ty::promote(subject, condition).is_some()
             || self.when_objs_comparable(subject, condition)
+            // A value of a non-class type (`Unit`) meets a supertype subject (`Any?`) through
+            // ordinary subtyping, in either direction.
+            || self.receiver_is_assignable(condition, subject)
+            || self.receiver_is_assignable(subject, condition)
     }
 }
