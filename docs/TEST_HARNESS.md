@@ -632,7 +632,10 @@ seconds, including each shard of the scored byte-equality run, and can be adjust
 `KRUSTY_CONFORMANCE_TIMEOUT_SECONDS`. The product e2e suite is one process and defaults to 1800
 seconds (`KRUSTY_E2E_TIMEOUT_SECONDS`). Native's corpus pass defaults to 600 seconds
 (`KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS`), and each focused Native or Wasm target pass defaults
-to 600 seconds (`KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS`).
+to 600 seconds (`KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS`). The focused Wasm tests are
+independent programs, so that pass runs them on up to four test threads of its one process (the
+runner's core count when it has fewer); `KRUSTY_TARGET_CONFORMANCE_THREADS` overrides the count for
+either target, and the focused Native pass defaults to one.
 
 Do not use `--release` for tests. The release build cycle takes longer than it saves at runtime, and
 `run-tests.sh --release` is rejected intentionally.

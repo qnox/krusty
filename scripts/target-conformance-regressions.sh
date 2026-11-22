@@ -22,6 +22,7 @@ case "$target" in
     : "${KRUSTY_KOTLIN_NATIVE:?native target regressions require KRUSTY_KOTLIN_NATIVE}"
     export KRUSTY_REQUIRE_NATIVE_CONFORMANCE=1
     filter=kotlin_box_native_conformance::
+    threads="${KRUSTY_TARGET_CONFORMANCE_THREADS:-1}"
     skips=(--skip kotlin_box_native_conformance::kotlin_codegen_box_native_conformance)
     ;;
   wasm)
@@ -31,6 +32,11 @@ case "$target" in
     export KRUSTY_REQUIRE_WASM_JS_CONFORMANCE=1
     export KRUSTY_REQUIRE_WASM_WASI_CONFORMANCE=1
     filter=kotlin_box_wasm_conformance::
+    # The focused Wasm tests are independent programs, each compiled and run in its own process, so
+    # they share the runner's cores instead of queueing behind one another: serially the suite
+    # outgrew its deadline on a four-core runner.
+    cores="$(nproc 2>/dev/null || echo 1)"
+    threads="${KRUSTY_TARGET_CONFORMANCE_THREADS:-$(( cores < 4 ? cores : 4 ))}"
     skips=(
       --skip kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance
       --skip kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance
@@ -46,7 +52,7 @@ export KRUSTY_LANGUAGE_VERSION="$v"
 export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}"
 set +e
 run_with_deadline "$KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS" \
-  "$bin" "$filter" "${skips[@]}" --test-threads 1
+  "$bin" "$filter" "${skips[@]}" --test-threads "$threads"
 focused_status=$?
 set -e
 if [ "$focused_status" -eq 124 ]; then
