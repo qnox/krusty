@@ -29,6 +29,9 @@ use super::{box_reference_classes, common};
 
 const INCLUDED: &str = "included";
 const NOT_APPLICABLE: &str = "expected_not_applicable";
+/// The included cases whose classes are not byte-identical to the reference compiler's. Only a
+/// `check = box` corpus has one: a `check = classes` case passes by being byte-identical.
+const BYTE_NON_IDENTICAL: &str = "byte_non_identical";
 const LANE: &str = "jvm";
 
 fn corpus_root(corpus: &PluginCorpus, version: &str) -> PathBuf {
@@ -121,7 +124,11 @@ struct Case {
     stem: String,
 }
 
-fn run_case(case: &Case, check: CaseCheck, stubs: &[PathBuf]) -> Result<Outcome, String> {
+/// What running one case showed: its outcome and, for a pass, whether its classes are
+/// byte-identical to the reference compiler's.
+type CaseResult = Result<(Outcome, bool), String>;
+
+fn run_case(case: &Case, check: CaseCheck, stubs: &[PathBuf]) -> CaseResult {
     let prepared = krusty::conformance::prepare_test_source(
         &case.source,
         krusty::conformance::TestTarget::Jvm,
@@ -133,10 +140,12 @@ fn run_case(case: &Case, check: CaseCheck, stubs: &[PathBuf]) -> Result<Outcome,
 }
 
 /// The case compiles with krusty and returns `"OK"` from `box()`.
-fn run_box_case(case: &Case, prepared: &str, stubs: &[PathBuf]) -> Result<Outcome, String> {
-    if box_reference_classes::checked_prepared_box_with(prepared, &case.stem, stubs).is_err() {
-        return Ok(Outcome::NotApplicable);
-    }
+fn run_box_case(case: &Case, prepared: &str, stubs: &[PathBuf]) -> CaseResult {
+    let Ok(reference) =
+        box_reference_classes::checked_prepared_box_with(prepared, &case.stem, stubs)
+    else {
+        return Ok((Outcome::NotApplicable, true));
+    };
     let mut classpath = common::classpath_jars_for(prepared);
     classpath.extend_from_slice(stubs);
     let jdk = common::jdk_modules();
@@ -154,22 +163,27 @@ fn run_box_case(case: &Case, prepared: &str, stubs: &[PathBuf]) -> Result<Outcom
         return Err("no box() in the final module".to_string());
     };
     match common::run_box(&compiled.flat, &box_class, &classpath).as_deref() {
-        Some("OK") => Ok(Outcome::Pass),
+        Some("OK") => {
+            let identical =
+                krusty_classes_matching_reference(prepared, &case.stem, &classpath, &reference)
+                    .is_ok();
+            Ok((Outcome::Pass, identical))
+        }
         other => Err(format!("box() returned {other:?}")),
     }
 }
 
 /// The case compiles to exactly the classes the reference compiler emits. A case the reference
 /// itself rejects is not applicable.
-fn run_classes_case(case: &Case, prepared: &str, stubs: &[PathBuf]) -> Result<Outcome, String> {
+fn run_classes_case(case: &Case, prepared: &str, stubs: &[PathBuf]) -> CaseResult {
     let Ok(reference) = box_reference_classes::reference_classes_with(prepared, &case.stem, stubs)
     else {
-        return Ok(Outcome::NotApplicable);
+        return Ok((Outcome::NotApplicable, true));
     };
     let mut classpath = common::classpath_jars_for(prepared);
     classpath.extend_from_slice(stubs);
     krusty_classes_matching_reference(prepared, &case.stem, &classpath, &reference)
-        .map(|_| Outcome::Pass)
+        .map(|_| (Outcome::Pass, true))
 }
 
 fn render(
@@ -257,7 +271,7 @@ fn run_corpus(corpus: &PluginCorpus) {
         root.display()
     );
     let stubs = compile_stubs(corpus);
-    let results: Vec<(String, Result<Outcome, String>)> = cases
+    let results: Vec<(String, CaseResult)> = cases
         .par_iter()
         .map(|case| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -282,7 +296,9 @@ fn run_corpus(corpus: &PluginCorpus) {
         .map(|(key, result)| {
             (
                 key.clone(),
-                result.as_ref().copied().unwrap_or(Outcome::Fail),
+                result
+                    .as_ref()
+                    .map_or(Outcome::Fail, |(outcome, _)| *outcome),
             )
         })
         .collect();
@@ -298,6 +314,11 @@ fn run_corpus(corpus: &PluginCorpus) {
     let passing: BTreeSet<String> = outcomes
         .iter()
         .filter(|(_, outcome)| **outcome == Outcome::Pass)
+        .map(|(key, _)| key.clone())
+        .collect();
+    let non_identical: BTreeSet<String> = results
+        .iter()
+        .filter(|(_, result)| matches!(result, Ok((Outcome::Pass, false))))
         .map(|(key, _)| key.clone())
         .collect();
     let not_applicable: BTreeSet<String> = outcomes
@@ -332,10 +353,18 @@ fn run_corpus(corpus: &PluginCorpus) {
             "{} corpus: included cases no longer pass, so blessing is refused: {regressed:?}",
             corpus.plugin
         );
-        for (name, paths, what) in [
+        let mut inventories = vec![
             (INCLUDED, &passing, "pass and are part of the corpus"),
             (NOT_APPLICABLE, &not_applicable, "be not-applicable"),
-        ] {
+        ];
+        if corpus.check == CaseCheck::Box {
+            inventories.push((
+                BYTE_NON_IDENTICAL,
+                &non_identical,
+                "pass with classes that are not byte-identical to the reference compiler's",
+            ));
+        }
+        for (name, paths, what) in inventories {
             box_ratchet::record_in(
                 &dir,
                 name,
@@ -372,6 +401,22 @@ fn run_corpus(corpus: &PluginCorpus) {
         true,
     );
     let mut problems = Vec::new();
+    if corpus.check == CaseCheck::Box {
+        let expected = box_ratchet::load_path(
+            &box_ratchet::read_path_in(&root, BYTE_NON_IDENTICAL, LANE, version),
+            true,
+        );
+        for key in non_identical.difference(&expected) {
+            problems.push(format!(
+                "{key}: passes with classes that differ from the reference compiler's, and is not in {BYTE_NON_IDENTICAL}"
+            ));
+        }
+        for key in expected.difference(&non_identical) {
+            problems.push(format!(
+                "{key}: listed in {BYTE_NON_IDENTICAL} but byte-identical or not passing; remove it"
+            ));
+        }
+    }
     for key in &included {
         match outcomes.get(key) {
             Some(Outcome::Pass) => {}
@@ -399,7 +444,7 @@ fn run_corpus(corpus: &PluginCorpus) {
     }
     assert!(
         problems.is_empty(),
-        "{} corpus disagrees with its inventories under {}/{{{INCLUDED},{NOT_APPLICABLE}}}:\n{}",
+        "{} corpus disagrees with its inventories under {}/{{{INCLUDED},{NOT_APPLICABLE},{BYTE_NON_IDENTICAL}}}:\n{}",
         corpus.plugin,
         corpus.dir,
         problems.join("\n")

@@ -5,6 +5,7 @@ tools/krusty-bazel/intellij/*.patch whitespace=-blank-at-eol,-blank-at-eof
 tests/box_byte_non_identical/** merge=sorted-set
 tests/box_expected_failures/** merge=sorted-set
 tests/box_expected_not_applicable/** merge=sorted-set
+src/plugins/*/boxes/byte_non_identical/** merge=sorted-set
 src/plugins/*/boxes/included/** merge=sorted-set
 src/plugins/*/boxes/expected_not_applicable/** merge=sorted-set
 tests/bytecode_listing_expected_failures/** merge=sorted-set

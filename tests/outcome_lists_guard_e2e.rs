@@ -881,3 +881,60 @@ fn a_growing_plugin_not_applicable_inventory_still_fails() {
         )
     );
 }
+
+const PLUGIN_BYTE_NON_IDENTICAL: &str =
+    "src/plugins/demo/boxes/byte_non_identical/jvm/2.4.20.txt";
+
+const BYTE_ROWS_ONLY_SHRINK: &str =
+    "outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n";
+
+#[test]
+fn a_byte_identity_row_for_an_already_included_plugin_case_fails() {
+    let repo = Repo::new("plugin-byte-row-added");
+    repo.write(INCLUDED, "a/one.kt\nb/two.kt\n");
+    repo.write(PLUGIN_BYTE_NON_IDENTICAL, "a/one.kt\n");
+    let base = repo.commit();
+    repo.write(PLUGIN_BYTE_NON_IDENTICAL, "a/one.kt\nb/two.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        format!(
+            "outcome-lists: {PLUGIN_BYTE_NON_IDENTICAL} gains 1 entry:\n    b/two.kt\n{BYTE_ROWS_ONLY_SHRINK}"
+        )
+    );
+}
+
+#[test]
+fn a_byte_identity_row_arrives_with_the_plugin_case_it_describes() {
+    let repo = Repo::new("plugin-byte-row-with-case");
+    repo.write(INCLUDED, "a/one.kt\n");
+    repo.write(PLUGIN_BYTE_NON_IDENTICAL, "a/one.kt\n");
+    let base = repo.commit();
+    repo.write(INCLUDED, "a/one.kt\nb/two.kt\n");
+    repo.write(PLUGIN_BYTE_NON_IDENTICAL, "a/one.kt\nb/two.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stderr, b"");
+}
+
+#[test]
+fn removing_a_plugin_byte_identity_row_passes() {
+    let repo = Repo::new("plugin-byte-row-removed");
+    repo.write(INCLUDED, "a/one.kt\nb/two.kt\n");
+    repo.write(PLUGIN_BYTE_NON_IDENTICAL, "a/one.kt\nb/two.kt\n");
+    let base = repo.commit();
+    repo.write(PLUGIN_BYTE_NON_IDENTICAL, "a/one.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stderr, b"");
+}
