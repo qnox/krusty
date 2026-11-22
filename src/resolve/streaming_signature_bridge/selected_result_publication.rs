@@ -126,10 +126,7 @@ impl ProductionSignatureSemantics<'_> {
         source_declaration: Option<crate::fir::DeclarationId>,
         argument_types: Vec<Ty>,
         publication: CompactSelectedResultPublication,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
         if let Some(member) = member.as_ref() {
             if let Some(signature) =

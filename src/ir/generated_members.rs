@@ -119,36 +119,45 @@ pub struct IrGeneratedMemberPublication {
     pub functions: Vec<IrGeneratedFunctionPublication>,
 }
 
-/// A compiler-generated function's semantic role within its owner. The producer records this
-/// exact edge when it declares the function; a later phase completing the function finds it here,
-/// never by its name, arity or synthetic flag.
+/// Where a compiler plugin's generated member sits among its owner's members. The plugin that
+/// declares the member states this; the backend orders members by it without knowing the plugin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum IrGeneratedFunctionRole {
-    SerializationDescriptor,
-    SerializationSerialize,
-    SerializationDeserialize,
-    SerializationChildSerializers,
-    SerializationTypeParameterSerializers,
-    /// kotlinx.serialization's `write$Self` on a serialized class.
-    SerializationWriteSelf,
-    /// A generic `$serializer`'s private `getTypeSerial<k>()` for type parameter `k`.
-    SerializationTypeSerializerGetter(u32),
+pub enum IrMemberPlacement {
+    /// Ordered with the owner's other members.
+    Declared,
+    /// After the owner's declared members and constructors, where kotlinc's IR plugin appends it.
+    AfterConstructors,
+    /// After the owner's structural members and its `interface by` delegation members.
+    AfterDelegatedMembers,
 }
 
-/// A compiler-generated classifier's semantic role within its source owner.
+/// A compiler-generated function's semantic role within its owner. The plugin that declares the
+/// function names itself and numbers its own roles; the IR assigns no meaning to the number. The
+/// producer records this exact edge when it declares the function; a later phase completing the
+/// function finds it here, never by its name, arity or synthetic flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum IrGeneratedClassRole {
-    /// kotlinx.serialization's nested `$serializer` classifier.
-    SerializationSerializer,
+pub struct IrGeneratedFunctionRole {
+    pub plugin: &'static str,
+    pub role: u32,
+    pub placement: IrMemberPlacement,
+}
+
+/// A compiler-generated classifier's semantic role within its source owner, named and numbered by
+/// the plugin that generates it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct IrGeneratedClassRole {
+    pub plugin: &'static str,
+    pub role: u32,
 }
 
 impl IrFile {
     pub(crate) fn record_generated_class(
         &mut self,
         owner: TypeName,
-        role: IrGeneratedClassRole,
+        role: impl Into<IrGeneratedClassRole>,
         class: super::ClassId,
     ) {
+        let role = role.into();
         assert!(
             self.generated_classes
                 .insert((owner, role), class)
@@ -160,17 +169,19 @@ impl IrFile {
     pub(crate) fn generated_class(
         &self,
         owner: TypeName,
-        role: IrGeneratedClassRole,
+        role: impl Into<IrGeneratedClassRole>,
     ) -> Option<super::ClassId> {
+        let role = role.into();
         self.generated_classes.get(&(owner, role)).copied()
     }
 
     pub fn record_generated_function(
         &mut self,
         owner: TypeName,
-        role: IrGeneratedFunctionRole,
+        role: impl Into<IrGeneratedFunctionRole>,
         function: FunId,
     ) {
+        let role = role.into();
         assert!(
             self.generated_functions
                 .insert((owner, role), function)
@@ -182,32 +193,35 @@ impl IrFile {
     pub(crate) fn generated_function(
         &self,
         owner: TypeName,
-        role: IrGeneratedFunctionRole,
+        role: impl Into<IrGeneratedFunctionRole>,
     ) -> Option<FunId> {
+        let role = role.into();
         self.generated_functions.get(&(owner, role)).copied()
     }
 
-    /// Whether `function` is a member kotlinc's IR plugin adds to `owner` after its declared
-    /// members and constructors.
+    /// Whether `function` is a member a compiler plugin placed after `owner`'s declared members
+    /// and constructors.
     pub fn follows_declared_constructors(&self, owner: TypeName, function: FunId) -> bool {
+        self.has_generated_placement(owner, function, IrMemberPlacement::AfterConstructors)
+    }
+
+    /// Whether `function` is a member a compiler plugin placed after `owner`'s structural members
+    /// and its `interface by` delegation members.
+    pub fn follows_delegated_members(&self, owner: TypeName, function: FunId) -> bool {
+        self.has_generated_placement(owner, function, IrMemberPlacement::AfterDelegatedMembers)
+    }
+
+    fn has_generated_placement(
+        &self,
+        owner: TypeName,
+        function: FunId,
+        placement: IrMemberPlacement,
+    ) -> bool {
         self.generated_functions
             .iter()
             .any(|(&(member_owner, role), &member)| {
-                member_owner == owner
-                    && member == function
-                    && matches!(
-                        role,
-                        IrGeneratedFunctionRole::SerializationTypeSerializerGetter(_)
-                    )
+                member_owner == owner && member == function && role.placement == placement
             })
-    }
-
-    /// Whether `function` is a member kotlinc's IR plugin adds to `owner` once the frontend has
-    /// declared the class, its structural members and its `interface by` delegation members (a
-    /// serializable class's `write$Self`).
-    pub fn follows_delegated_members(&self, owner: TypeName, function: FunId) -> bool {
-        self.generated_function(owner, IrGeneratedFunctionRole::SerializationWriteSelf)
-            == Some(function)
     }
 
     pub(crate) fn publish_generated_members(

@@ -925,10 +925,10 @@ fn wasm_a_declined_required_inline_body_rejects_the_caller() {
         }
         let outcome =
             lane.compile_modules_and_run(&std::env::temp_dir(), &stem, &units, case.source);
-        assert!(
-            matches!(&outcome, Outcome::Frontend(message)
-                if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
-            "{stem}: {outcome:?}"
+        super::dependency_template_rejections::assert_required_inline_rejection(
+            &stem,
+            &outcome,
+            &super::dependency_template_rejections::declined_count_of(),
         );
     }
 }
@@ -951,10 +951,10 @@ fn wasm_a_declined_required_stdlib_template_rejects_the_caller() {
             &[(format!("{stem}.kt"), src.to_string())],
             src,
         );
-        assert!(
-            matches!(&outcome, Outcome::Frontend(message)
-                if super::dependency_template_rejections::required_inline_rejection(message).is_some()),
-            "{stem}: {outcome:?}"
+        super::dependency_template_rejections::assert_required_inline_rejection(
+            &stem,
+            &outcome,
+            &super::dependency_template_rejections::declined_compare_by("kotlin"),
         );
     }
 }
@@ -967,6 +967,14 @@ fn unsigned_factory_references_compile_with_the_whole_content_to_string_branch()
     const SOURCE: &str = include_str!("box_regressions/unsignedArrayFactoryReferences.kt");
     expect_reference_box(SOURCE, "unsignedArrayFactoryReferences");
     expect_wasm_box(SOURCE, "unsignedArrayFactoryReferences");
+}
+
+#[test]
+fn wasm_library_suspend_coroutine_runs() {
+    expect_wasm_box(
+        include_str!("box_regressions/librarySuspendCoroutine.kt"),
+        "wasmLibrarySuspendCoroutine",
+    );
 }
 
 /// Run `src` directly against both Wasm targets' KLIBs and runtimes; every target must answer `OK`.
@@ -1366,6 +1374,14 @@ fn wasm_suspend_function_values_are_function_values() {
     let src = "fun take(f: suspend () -> Int): Int = 1\nfun box(): String = if (take { 2 } == 1) \"OK\" else \"fail\"";
     expect_reference_box(src, "suspendFunctionValue");
     expect_wasm_box(src, "suspendFunctionValue");
+}
+
+/// The shared receiver-reuse program, including its non-suspending suspend lambda.
+#[test]
+fn wasm_apply_receiver_single_store_runs() {
+    let src = include_str!("box_regressions/applyReceiverSingleStore.kt");
+    expect_reference_box(src, "applyReceiverSingleStore");
+    expect_wasm_box(src, "applyReceiverSingleStore");
 }
 
 // A lambda or callable reference converted to a `fun interface` becomes an object of that
@@ -1776,6 +1792,19 @@ fn wasm_data_class_unit_property_uses_units_fixed_hash() {
     expect_wasm_box(
         include_str!("box_regressions/knownPrimaryConstructorRoles.kt"),
         "wasmKnownPrimaryConstructorRoles",
+    );
+}
+
+// PLATFORM-SPECIFIC: the Wasm runtime lays out its own `ArrayList` iterator as a struct that no
+// declared class stands for, so its interface membership is recorded by the backend. Native
+// lowers the stdlib's `ArrayList` instead and does not yet lower `listIterator`; that gap is
+// reported, not excused, and the shared `arrayListIteratorInterfaces.kt` covers `iterator()` on
+// every lane.
+#[test]
+fn wasm_runtime_list_iterator_is_a_list_iterator() {
+    expect_wasm_box(
+        include_str!("wasm_regressions/arrayListListIteratorInterfaces.kt"),
+        "wasmArrayListListIteratorInterfaces",
     );
 }
 

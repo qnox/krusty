@@ -37,7 +37,7 @@ impl CallLinker for NoCalls {
         &mut self,
         _: &mut IrFile,
         _: &KlibAccessorIdSignature,
-    ) -> Lowered<LinkedAccessor> {
+    ) -> Lowered<LinkedAccessorCall> {
         panic!("no accessor")
     }
     fn singleton(&mut self, _: &mut IrFile, _: TypeName) -> Lowered<()> {
@@ -51,6 +51,9 @@ impl CallLinker for NoCalls {
     }
     fn same_type(&self, left: Ty, right: Ty) -> bool {
         left == right
+    }
+    fn classifier_parameter_bounds(&self, _: TypeName, _: usize) -> Vec<Ty> {
+        Vec::new()
     }
     fn constructor_bound(&self, _: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool {
         argument == bound

@@ -168,22 +168,30 @@ release() {
 # The warm-up build downloads everything the build needs (dependencies, Gradle and compiler plugins,
 # toolchains) and is not compared; its cost goes unrecorded and its outputs are dropped. The two
 # measured builds then run offline, so neither pays for the network and both start from the same
-# caches. A warm-up that could not download something (a repository or the plugin portal out for a
-# moment) is retried twice, after a pause: the offline builds cannot fetch it later. Any other
-# warm-up failure is the build's own, which the reference build then reports. A download that still
-# fails stops the run, which would otherwise measure a build that cannot start.
+# caches. A warm-up that could not download something (a repository or the plugin portal refused
+# it) stops the run: the offline builds cannot fetch it later, and a retry would only extend a block
+# the repository placed on this host. Any other warm-up failure is the build's own, which the
+# reference build then reports. Gradle reports a refused download as "not found" whichever
+# repository refused it, so before stopping, the repositories are probed and their HTTP status is
+# recorded in <name>.warmup.http.tsv and on stderr: a dead host (000, 5xx) and a throttled one (429)
+# then read differently from a missing artifact.
 unreachable='Could not (resolve|GET|HEAD)|could not resolve plugin artifact|Connection reset|timed out|Name or service not known|No such host'
-for attempt in 1 2 3; do
-  build warmup
-  if [ "$status" -eq 0 ] || ! grep -qE "$unreachable" "$logs/$name.warmup.log"; then
-    break
-  fi
-  if [ "$attempt" -eq 3 ]; then
-    echo "$name: the warm-up could not download what the build needs; see $name.warmup.log" >&2
-    exit 1
-  fi
-  sleep $((attempt * ${CORPUS_RETRY_PAUSE:-60}))
-done
+# Prints "<status> <url>" for each repository the warm-up log names, and for the default
+# ones (CORPUS_PROBE_URLS overrides those, for hosts a test must not reach).
+probe_repositories() {
+  local url code
+  local defaults=${CORPUS_PROBE_URLS-https://repo.maven.apache.org/maven2/ https://maven.google.com/ https://plugins.gradle.org/m2/}
+  for url in $(grep -oE 'maven\(https?://[^)]+\)' "$logs/$name.warmup.log" | sed -E 's/^maven\(|\)$//g' | sort -u) $defaults; do
+    code=$(curl -s -o /dev/null -I -w '%{http_code}' --max-time 20 "$url") || true
+    echo "$code $url" | tee -a "$logs/$name.warmup.http.tsv" >&2
+  done
+}
+build warmup
+if [ "$status" -ne 0 ] && grep -qE "$unreachable" "$logs/$name.warmup.log"; then
+  probe_repositories
+  echo "$name: the warm-up could not download what the build needs; see $name.warmup.log" >&2
+  exit 1
+fi
 snapshot warmup
 rm -rf "$work/out/$name/warmup" "$logs/$name.warmup.metrics.json" "$logs/$name.warmup.tasks.tsv"
 CORPUS_PLUGIN_SURVEY=$logs/$name.plugins.tsv build kotlinc
@@ -209,6 +217,7 @@ if [ -n "${CORPUS_PERF:-}" ]; then
 fi
 KRUSTY_PLUGIN_REPOSITORY=$plugin_repository KRUSTY_PLUGIN_VERSION=$plugin_version \
   build krusty -I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty"
+krusty_build=$status
 if [ -n "${CORPUS_PERF:-}" ]; then
   kill -INT "$perf_pid"
   wait "$perf_pid" || true
@@ -245,5 +254,11 @@ python3 "$here/compare.py" "$work" "$name" "$reference" "$kotlinc_tests" "$krust
 # meant to build with kotlinc, and a project that does not measures only what its build reached.
 if [ "$reference" -ne 0 ]; then
   echo "$name: the reference kotlinc build failed (exit $reference); see $name.kotlinc.log" >&2
+  exit 1
+fi
+# A project krusty cannot build is as much a failure as one kotlinc cannot: its job is red, and the
+# comparison above has already recorded what krusty reached, so the report still carries it.
+if [ "$krusty_build" -ne 0 ]; then
+  echo "$name: the krusty build failed (exit $krusty_build); see $name.krusty.log" >&2
   exit 1
 fi

@@ -948,6 +948,12 @@ pub trait CheckedSourceFacts {
         &self,
         property: crate::ir::ExternalPropertyId,
     ) -> Option<DependencyDeclaration<'_>>;
+    /// The getter of the dependency property a read selected by `property`, the declaration a
+    /// read calls and whose annotations say what role it has.
+    fn dependency_property_getter(
+        &self,
+        property: crate::ir::ExternalPropertyId,
+    ) -> Option<crate::ir::ExternalCallableId>;
     /// The declaration shape of the dependency function a call selected by `callable`.
     fn dependency_shape(
         &self,

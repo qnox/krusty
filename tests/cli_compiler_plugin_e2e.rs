@@ -596,6 +596,34 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          with a default argument that is not a constant yet",
     );
     assert_compose_rejects(
+        "compose-function-type-with-result",
+        "fun keep(content: @Composable () -> Int) {}\n",
+        &[],
+        "1:1: error: krusty's Compose compiler plugin does not support the composable function \
+         type in `keep` yet",
+    );
+    assert_compose_rejects(
+        "compose-ten-argument-function-type",
+        "fun keep(content: @Composable (Int, Int, Int, Int, Int, Int, Int, Int, Int, Int) -> Unit) {}\n",
+        &[],
+        "1:1: error: krusty's Compose compiler plugin does not support the composable function \
+         type in `keep` yet",
+    );
+    assert_compose_rejects(
+        "compose-ten-input-receiver-function-type",
+        "fun keep(content: @Composable Int.(Int, Int, Int, Int, Int, Int, Int, Int, Int) -> Unit) {}\n",
+        &[],
+        "1:1: error: krusty's Compose compiler plugin does not support the composable function \
+         type in `keep` yet",
+    );
+    assert_compose_rejects(
+        "compose-suspend-function-type",
+        "fun keep(content: @Composable suspend () -> Unit) {}\n",
+        &[],
+        "1:1: error: krusty's Compose compiler plugin does not support the composable function \
+         type in `keep` yet",
+    );
+    assert_compose_rejects(
         "compose-local-argument",
         "@Composable fun Show(text: String) {}\n@Composable fun Greeting() {\nval text = \"a\"\nShow(text)\n}\n",
         &[],
@@ -687,7 +715,8 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "val action: () -> Unit = {}\n@Composable fun Greeting() {\nandroidx.compose.runtime.SideEffect(action)\n}\n",
         &[],
         "5:1: error: krusty's Compose compiler plugin does not support a call to a library \
-         composable function with a function-typed parameter other than `@Composable () -> Unit` yet",
+         composable function with a function-typed parameter that is not a composable function \
+         type yet",
     );
     assert_compose_library_call_rejects(
         "compose-library-call-forwarded-lambda",
@@ -719,6 +748,39 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         )],
         "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
          depends on another file's class without `$stable` yet",
+    );
+}
+
+/// A compiled composable getter takes the composer and `$changed` after the property's own
+/// parameters, as a composable function does. The property still resolves as its declaration
+/// states it, whether a class member, a top-level property or an extension, and the pass hands a
+/// module that reads one to kotlinc, since it does not pass a getter those parameters yet.
+#[test]
+fn a_read_of_a_composable_property_resolves_and_the_compose_pass_refuses_it() {
+    assert_compose_rejects(
+        "compose-member-property-read",
+        "val LocalName = androidx.compose.runtime.compositionLocalOf { \"a\" }\n\
+         @Composable fun Greeting(): String = LocalName.current\n",
+        &[],
+        "4:38: error: krusty's Compose compiler plugin does not support a read of a composable \
+         property yet",
+    );
+    assert_compose_rejects(
+        "compose-top-level-property-read",
+        "import androidx.compose.runtime.currentCompositeKeyHash\n\
+         @Composable fun Key(): Int = currentCompositeKeyHash\n",
+        &[],
+        "4:30: error: krusty's Compose compiler plugin does not support a read of a composable \
+         property yet",
+    );
+    assert_compose_rejects(
+        "compose-extension-property-read",
+        "import androidx.compose.foundation.layout.WindowInsets\n\
+         import androidx.compose.foundation.layout.safeDrawing\n\
+         @Composable fun Insets(): WindowInsets = WindowInsets.safeDrawing\n",
+        &[],
+        "5:42: error: krusty's Compose compiler plugin does not support a read of a composable \
+         property yet",
     );
 }
 

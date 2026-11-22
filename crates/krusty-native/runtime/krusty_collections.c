@@ -36,6 +36,7 @@ static const uint32_t kt_list_offsets[] = {offsetof(KList, elements)};
                               .vtable_length = 3};
 
 static const KType *const kt_iterable_bases[] = {&kt_type_iterable_interface};
+static const KType *const kt_iterator_bases[] = {&kt_type_iterator_interface};
 static const KType *const kt_mutable_iterable_bases[] = {&kt_type_iterable_interface};
 static const KType *const kt_collection_bases[] = {&kt_type_iterable_interface};
 static const KType *const kt_mutable_collection_bases[] = {
@@ -48,6 +49,7 @@ static const KType *const kt_mutable_list_bases[] = {
     &kt_type_mutable_iterable_interface, &kt_type_iterable_interface};
 
 KT_ROOT_INTERFACE(kt_type_iterator_interface, "Iterator")
+KT_INTERFACE(kt_type_list_iterator_interface, "ListIterator", kt_iterator_bases)
 KT_ROOT_INTERFACE(kt_type_iterable_interface, "Iterable")
 KT_INTERFACE(kt_type_mutable_iterable_interface, "MutableIterable", kt_mutable_iterable_bases)
 KT_INTERFACE(kt_type_collection_interface, "Collection", kt_collection_bases)
@@ -71,6 +73,8 @@ static const KType *const kt_mutable_list_interfaces[] = {
     &kt_type_mutable_iterable_interface, &kt_type_iterable_interface,
     &kt_type_random_access_interface};
 static const KType *const kt_iterator_interfaces[] = {&kt_type_iterator_interface};
+static const KType *const kt_list_iterator_interfaces[] = {&kt_type_list_iterator_interface,
+                                                           &kt_type_iterator_interface};
 
 static kt_boolean kt_list_equals(KRef self, KRef other);
 static kt_int kt_list_hash_code(KRef self);
@@ -289,22 +293,29 @@ static const uint32_t kt_list_iterator_offsets[] = {offsetof(KListIterator, list
 /* An iterator answers `kotlin.Any`'s three members by identity, as Kotlin's own iterators do. Its
    class is Kotlin/Native's: a read-only list's is the anonymous iterator `Array.asList` answers
    (`listOf(a, b)` is `a, b` as a list), a growable one's `ArrayList`'s nested `Itr`. */
-#define KT_LIST_ITERATOR_TYPE                                                                      \
+#define KT_LIST_ITERATOR_TYPE(bases)                                                               \
     .instance_size = sizeof(KListIterator), .reference_count = 1,                                  \
     .reference_offsets = kt_list_iterator_offsets, .super = &kt_type_any, .vtable = kt_any_vtable, \
-    .vtable_length = 3, .interfaces = kt_iterator_interfaces,                                      \
-    .interface_count = sizeof(kt_iterator_interfaces) / sizeof(KType *)
+    .vtable_length = 3, .interfaces = bases, .interface_count = sizeof(bases) / sizeof(KType *)
 const KType kt_type_list_iterator = {KT_ANONYMOUS("kotlin.collections.Iterator"),
-                                     KT_LIST_ITERATOR_TYPE};
-static const KType kt_type_array_list_iterator = {KT_NAMED("kotlin.collections.ArrayList.", "Itr"),
-                                                  KT_LIST_ITERATOR_TYPE};
+                                     KT_LIST_ITERATOR_TYPE(kt_iterator_interfaces)};
+/* `ArrayList.iterator()` and `listIterator()` answer the same `Itr`, which is a `ListIterator`. */
+static const KType kt_type_array_list_iterator = {
+    KT_NAMED("kotlin.collections.ArrayList.", "Itr"),
+    KT_LIST_ITERATOR_TYPE(kt_list_iterator_interfaces)};
+/* The `listIterator()` of a read-only list, which is a `ListIterator` and not a mutable one. */
+static const KType kt_type_read_only_list_iterator = {
+    KT_ANONYMOUS("kotlin.collections.ListIterator"),
+    KT_LIST_ITERATOR_TYPE(kt_list_iterator_interfaces)};
 /* `EnumEntriesList` is an `AbstractList`, and its iterator is that class's own. */
 static const KType kt_type_abstract_list_iterator = {
-    KT_NAMED("kotlin.collections.AbstractList.", "IteratorImpl"), KT_LIST_ITERATOR_TYPE};
+    KT_NAMED("kotlin.collections.AbstractList.", "IteratorImpl"),
+    KT_LIST_ITERATOR_TYPE(kt_iterator_interfaces)};
 
 static kt_boolean kt_is_list_iterator(KRef value) {
     return value != NULL && (value->header.type == &kt_type_list_iterator ||
                              value->header.type == &kt_type_array_list_iterator ||
+                             value->header.type == &kt_type_read_only_list_iterator ||
                              value->header.type == &kt_type_abstract_list_iterator);
 }
 
@@ -687,24 +698,44 @@ kt_boolean kt_mutable_list_add(KRef self, KRef value) {
    result the caller has to remember to drop. */
 void kt_mutable_list_plus_assign(KRef self, KRef value) { kt_mutable_list_add(self, value); }
 
-/* `list += elements`, where the right-hand side is something to walk. Kotlin has one `plusAssign`
-   per shape of that — an `Iterable`, an `Array`, a `Sequence` — and each appends every element in
-   order, which is the one walk this runtime already knows how to do.
+/* `list += elements` and `addAll(elements)`, where the right-hand side is something to walk. Kotlin
+   has one `plusAssign` per shape of that — an `Iterable`, an `Array`, a `Sequence` — and each
+   appends every element in order.
 
-   A LIST argument is copied by index up to the size it had when the call began, because that is
-   what Kotlin's `addAll` of a collection does: it takes the argument's elements out first. That is
-   what makes `xs.addAll(xs)` double the list, where walking `xs` with an iterator while appending
-   to it would see its own list modified at the second step. */
-void kt_mutable_list_add_all(KRef self, KRef elements) {
+   A LIST argument is read up to the size it had when the call began. When it is read is the
+   difference between kotlinc-native and the JVM. Kotlin/Native's `ArrayList.addAll` makes room for
+   the new elements first, then walks the argument: a range of this very list is then invalidated
+   before it is read, so the call raises `ConcurrentModificationException` and leaves the list grown
+   by that many nulls (`Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument`). The JVM's takes
+   `c.toArray()` first, so the same call appends the range; `read_first` asks for that, under
+   `-Xfix-kotlinc-defects`. Either way `xs.addAll(xs)` doubles the list: its walk starts after the
+   room is made, and reads only the elements that were there. */
+static void kt_list_append_all(KRef self, KRef elements, kt_boolean read_first) {
     if (elements != NULL
         && (kt_is_runtime_list(elements))) {
         kt_int count = kt_list_size(elements);
         if (kt_raised()) {
             return;
         }
-        /* Taken out BEFORE anything is appended, as `ArrayList.addAll` takes `c.toArray()`: the
-           argument may be a range of this very list, which an append would invalidate while it is
-           still being read. The array is a root across the allocations the appends make. */
+        if (!read_first && !kt_is_sub_list(self)) {
+            KMutableList *list = (KMutableList *)self;
+            kt_int at = list->size;
+            for (kt_int added = 0; added < count; added++) {
+                kt_mutable_list_reserve(self);
+                kt_elements_of(list->elements)[list->size++] = NULL;
+            }
+            list->modifications++;
+            KRef iterator = kt_iterable_iterator(elements);
+            for (kt_int read = 0; read < count; read++) {
+                KRef element = kt_iterator_next(iterator);
+                if (kt_raised()) {
+                    return;
+                }
+                kt_elements_of(list->elements)[at + read] = element;
+            }
+            return;
+        }
+        /* The array is a root across the allocations the appends make. */
         KRef snapshot = kt_array_new(&kt_type_array, count);
         for (kt_int at = 0; at < count; at++) {
             KRef element = kt_list_get(elements, at);
@@ -731,11 +762,20 @@ void kt_mutable_list_add_all(KRef self, KRef elements) {
     }
 }
 
+void kt_mutable_list_add_all(KRef self, KRef elements) {
+    kt_list_append_all(self, elements, false);
+}
+
+void kt_mutable_list_add_all_reading_first(KRef self, KRef elements) {
+    kt_list_append_all(self, elements, true);
+}
+
 /* `ArrayList(elements)`: a new list holding the elements of any collection, in its iteration order,
    read once now. The list owns its own storage, so a later write to either is not seen by the
    other. */
 KRef kt_mutable_list_copy_of(KRef elements) {
     KRef list = kt_mutable_list_new();
+    /* A new list is no range's parent, so either reading gives the same list. */
     kt_mutable_list_add_all(list, elements);
     return kt_raised() ? NULL : list;
 }
@@ -915,14 +955,14 @@ void kt_mutable_collection_clear(KRef self) {
 }
 
 /* `addAll`: whether the receiver changed. A list appends every element (Kotlin's answer is that the
-   argument was not empty), by `kt_mutable_list_add_all`'s snapshot; a set adds each it lacks. */
-kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements) {
+   argument was not empty), read as `kt_list_append_all` says; a set adds each it lacks. */
+static kt_boolean kt_collection_add_all(KRef self, KRef elements, kt_boolean read_first) {
     if (kt_read_only_list(self)) {
         return false;
     }
     if (kt_is_writable_list(self)) {
         kt_int before = kt_list_size(self);
-        kt_mutable_list_add_all(self, elements);
+        kt_list_append_all(self, elements, read_first);
         return !kt_raised() && kt_list_size(self) != before;
     }
     kt_boolean changed = false;
@@ -940,6 +980,14 @@ kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements) {
     return changed;
 }
 
+kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements) {
+    return kt_collection_add_all(self, elements, false);
+}
+
+kt_boolean kt_mutable_collection_add_all_reading_first(KRef self, KRef elements) {
+    return kt_collection_add_all(self, elements, true);
+}
+
 KRef kt_list_iterator(KRef list) {
     const KType *type = &kt_type_list_iterator;
     if (kt_is_mutable_list(list)) {
@@ -952,6 +1000,32 @@ KRef kt_list_iterator(KRef list) {
     iterator->at = 0;
     iterator->modifications = kt_list_version(list);
     return (KRef)iterator;
+}
+
+/* `listIterator(index)`: the iterator of `kt_list_iterator`, whose next element is the one at
+   `index`. An index outside `0..size` raises, as Kotlin/Native's `ArrayList.listIterator` does. */
+KRef kt_list_list_iterator(KRef list, kt_int index) {
+    kt_int size = kt_list_size(list);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    if (index < 0 || index > size) {
+        kt_index_out_of_bounds(index, size);
+        return NULL;
+    }
+    KRef iterator = kt_list_iterator(list);
+    /* A read-only list's and an enum's entries' iterators implement `Iterator` alone; this one
+       is a `ListIterator` too. The growable list's already is. */
+    if (iterator->header.type == &kt_type_list_iterator ||
+        iterator->header.type == &kt_type_abstract_list_iterator) {
+        iterator->header.type = &kt_type_read_only_list_iterator;
+    }
+    ((KListIterator *)iterator)->at = index;
+    return iterator;
+}
+
+KRef kt_list_list_iterator_from_start(KRef list) {
+    return kt_list_list_iterator(list, 0);
 }
 
 /* `cursor < size`, as Kotlin/Native's `ArrayList` iterator answers it (`Itr.hasNext` in the

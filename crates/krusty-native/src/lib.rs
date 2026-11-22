@@ -37,7 +37,9 @@ mod symbols;
 #[cfg(feature = "test-support")]
 pub use codegen::DriverEntry;
 pub use codegen::{CraneliftBackend, Entry, BOX_RESULT_FRAME};
-pub use compiler_tool::{compile_native, NativeCompileError, NativeCompileOptions, NativeCompiled};
+pub use compiler_tool::{
+    compile_native, NativeCompileError, NativeCompileOptions, NativeCompiled, NativeSource,
+};
 pub use interop_libraries::{NativeKlibInputs, NativeKlibInputsOpenError};
 pub use linker::{
     can_link, link_program, link_program_with_libraries, runtime_symbols, Export, ExportKind,

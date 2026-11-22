@@ -21,6 +21,28 @@ impl Checker<'_> {
         }
     }
 
+    /// Account for the implicit receivers a call's context arguments were filled from.
+    pub(super) fn mark_context_extension_receiver_used(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        sources: &[ResolvedContextArgument],
+    ) {
+        for source in sources {
+            let ResolvedContextArgument::ImplicitReceiver(selected) = source else {
+                continue;
+            };
+            let receivers = self.implicit_receivers(scope);
+            self.record_dsl_context_scope_use(call, &receivers, selected);
+            if let Some(receiver) = receivers
+                .into_iter()
+                .find(|receiver| receiver.ty == selected.ty && receiver.current == selected.current)
+            {
+                self.mark_extension_receiver_used(call, receiver);
+            }
+        }
+    }
+
     pub(super) fn mark_extension_receiver_stmt_used(
         &mut self,
         statement: StmtId,

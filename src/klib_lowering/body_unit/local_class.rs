@@ -204,7 +204,6 @@ impl<'s> Linker<'_, 's> {
                 LocalFunction {
                     function,
                     class: prepared.key.clone(),
-                    setter: member.setter,
                     formals: member.formals.clone(),
                 },
             );
@@ -237,6 +236,16 @@ impl<'s> Linker<'_, 's> {
                 self.sources.declarations,
             )?;
         }
+        // A member the class inherits from a superclass this unit installed or materialized
+        // implements the interface declarations the class reaches only through its supertypes.
+        let inherited = self
+            .sources
+            .bodies
+            .inherited_implementations_of(&prepared.key.module, &prepared.key.signature)
+            .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
+        for (body, implemented) in &inherited {
+            self.record_inherited_implementation(ir, prepared.classifier, body, None, implemented);
+        }
         let constructor = super::super::same_library_class::LocalConstructor {
             declaration: prepared.declaration.clone(),
             access: prepared.access,
@@ -247,17 +256,138 @@ impl<'s> Linker<'_, 's> {
             super::super::same_library_class::MaterializedLocalClass {
                 class: class_id,
                 classifier: prepared.classifier,
-                constructor: constructor_signature,
-                declaration: prepared.declaration,
-                access: prepared.access,
+                construction: Some(super::super::same_library_class::LocalConstruction {
+                    constructor: constructor_signature,
+                    declaration: prepared.declaration,
+                    access: prepared.access,
+                    object: prepared.object,
+                }),
                 formals: prepared.formals,
                 supertypes: prepared.supertypes,
                 self_type: prepared.self_type,
                 class_type_parameters: prepared.class_type_parameters,
-                object: prepared.object,
             },
         );
         Ok(constructor)
+    }
+
+    /// The constructor a file-local construction invokes: one of a class already installed for
+    /// this library, or the constructor of a class prepared and installed now.
+    pub(super) fn link_constructor_of_local_class(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibIrSignature,
+    ) -> Result<super::super::same_library_class::LocalConstructor, KlibBodyDeclineReason> {
+        let module = self.active_module.clone();
+        let bodies = self.sources.bodies;
+        let callees = self.sources.callees;
+        match super::super::same_library_class::link(
+            super::super::same_library_class::LocalClassSource {
+                bodies,
+                declarations: self.sources.declarations,
+                classes: callees.class_type_oracle(),
+                module: &module,
+                validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
+            },
+            callee,
+            self.local_classes,
+        )? {
+            super::super::same_library_class::LocalLink::Ready(constructor) => Ok(constructor),
+            super::super::same_library_class::LocalLink::Prepared(prepared) => {
+                self.install_local_class(ir, prepared)
+            }
+        }
+    }
+
+    /// Whether `signature` names a non-public interface of this library.
+    pub(super) fn names_local_interface(&self, signature: &KlibIrSignature) -> bool {
+        self.sources
+            .bodies
+            .module_local_class(&self.active_module, signature)
+            .is_some_and(|(_, class)| {
+                crate::metadata::semantic::class_kind(class.base.flags)
+                    == crate::libraries::TypeKind::Interface
+            })
+    }
+
+    /// Install the non-public interface `signature` of this library in the unit, with its abstract
+    /// members declared, so a type test or a member call of it has a class to name.
+    pub(super) fn install_local_interface(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        let module = self.active_module.clone();
+        let bodies = self.sources.bodies;
+        let callees = self.sources.callees;
+        match super::super::same_library_class::link_interface(
+            super::super::same_library_class::LocalClassSource {
+                bodies,
+                declarations: self.sources.declarations,
+                classes: callees.class_type_oracle(),
+                module: &module,
+                validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
+            },
+            signature,
+            self.local_classes,
+        )? {
+            super::super::same_library_class::InterfaceLink::Ready => Ok(()),
+            super::super::same_library_class::InterfaceLink::Prepared(prepared) => {
+                self.install_interface(ir, prepared)
+            }
+        }
+    }
+
+    fn install_interface(
+        &mut self,
+        ir: &mut IrFile,
+        prepared: Box<super::super::same_library_class::PreparedLocalInterface<'s>>,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        if ir.class_id_by_name(prepared.classifier).is_some() {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "different dependency identities claim the same materialized classifier".to_owned(),
+            ));
+        }
+        let class = super::super::same_library_class::installed_interface(&prepared);
+        let class_id = ir.add_class(class);
+        ir.record_declared_class_self_type(prepared.classifier, prepared.self_type);
+        for member in prepared.members {
+            let function = declare_function(ir, &member.header);
+            ir.classes[class_id as usize].methods.push(function);
+            ir.note_class_method(class_id, function);
+            self.local_functions.insert(
+                super::super::same_library_class::LocalIdentity {
+                    module: prepared.key.module.clone(),
+                    signature: member.signature.clone(),
+                },
+                LocalFunction {
+                    function,
+                    class: prepared.key.clone(),
+                    formals: member.formals.clone(),
+                },
+            );
+            publish_overrides(
+                ir,
+                prepared.classifier,
+                function,
+                &member.overrides,
+                self.sources.externals,
+                self.sources.declarations,
+            )?;
+        }
+        self.local_classes.insert(
+            prepared.key,
+            super::super::same_library_class::MaterializedLocalClass {
+                class: class_id,
+                classifier: prepared.classifier,
+                construction: None,
+                formals: prepared.formals,
+                supertypes: prepared.supertypes,
+                self_type: prepared.self_type,
+                class_type_parameters: prepared.class_type_parameters,
+            },
+        );
+        Ok(())
     }
 
     pub(super) fn link_local_member(
@@ -300,6 +430,12 @@ impl<'s> Linker<'_, 's> {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "a member is not in its class".to_owned(),
             ));
+        }
+        if crate::metadata::semantic::class_kind(class.base.flags)
+            == crate::libraries::TypeKind::Interface
+        {
+            self.install_local_interface(ir, &class.base.symbol.signature)?;
+            return self.linked_local_member(ir, &key);
         }
         let constructor = class_constructor(class_arena, class)?;
         self.link_local_constructor(ir, &constructor)?;
@@ -523,24 +659,76 @@ fn class_constructor(
     ))
 }
 
-impl Linker<'_, '_> {
+impl<'s> Linker<'_, 's> {
+    /// Whether an earlier unit of the program materialized the class of the member `candidate`:
+    /// it published the initialization of each of the class's constructors.
+    pub(super) fn class_realized_earlier(&self, candidate: KlibBodyCallable<'s>) -> bool {
+        let Some(constructors) = candidate.class_contract().and_then(|class| {
+            super::super::class_initialization::initializing_constructors(
+                class,
+                self.sources.bodies,
+            )
+        }) else {
+            return false;
+        };
+        !constructors.is_empty()
+            && constructors.iter().all(|identity| {
+                self.sources
+                    .externals
+                    .get(identity)
+                    .is_some_and(|external| {
+                        matches!(
+                            external.realization,
+                            DependencyExternalRealization::AllocatingConstructor
+                                | DependencyExternalRealization::ConstructorInitializer
+                        )
+                    })
+            })
+    }
+
+    /// Whether `declaration` is a member with a dispatch receiver of a non-public class of the
+    /// same library, which no provider records. An earlier unit installed the class with all its
+    /// members and published each under its identity, so a call of one retains the dispatch
+    /// operand of its serialized declaration, as a call of any member emitted as part of its
+    /// class does.
+    pub(super) fn is_published_member(
+        &self,
+        identity: &KlibDependencyCallable,
+        arena: &KlibIrArena,
+        declaration: &KlibIrFunction,
+        unselected: bool,
+    ) -> bool {
+        let KlibDeclarationSignature::Public(signature) = &identity.declaration else {
+            return false;
+        };
+        unselected
+            && declaration.dispatch_receiver.is_some()
+            && self
+                .sources
+                .bodies
+                .module_class_declaring(
+                    &identity.module,
+                    &crate::metadata::klib_ir::KlibIrSignature::Public(signature.clone()),
+                )
+                .is_some_and(|(class_arena, class)| {
+                    std::ptr::eq(arena, class_arena)
+                        && crate::metadata::semantic::declaration_visibility(class.base.flags)
+                            != crate::types::Visibility::Public
+                })
+    }
+
     /// The member `identity` of a public class this unit installed, which every call in the
     /// unit reaches directly: the class is final, so no override can replace it.
     pub(super) fn installed_member(
         &self,
         ir: &IrFile,
         identity: &KlibDependencyCallable,
-    ) -> Result<Option<(LinkedCallee, bool)>, KlibBodyDeclineReason> {
+    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
         let key = installed_identity(identity);
-        let Some(setter) = self
-            .local_functions
-            .get(&key)
-            .map(|function| function.setter)
-        else {
+        if !self.local_functions.contains_key(&key) {
             return Ok(None);
-        };
-        self.linked_installed_member(ir, &key)
-            .map(|linked| Some((linked, setter)))
+        }
+        self.linked_installed_member(ir, &key).map(Some)
     }
 }
 

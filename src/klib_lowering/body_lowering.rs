@@ -161,6 +161,16 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The continuation interception this linker's selected declaration of `callee` is:
+    /// Kotlin/Wasm's `interceptedIntrinsic`, which a body expands to its coroutine class's own
+    /// interception.
+    fn intercepted_continuation(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<super::intercepted_continuation::InterceptedContinuationExpansion>> {
+        Ok(None)
+    }
+
     /// The continuation intrinsic this linker's selected declaration of `callee` is: Native's
     /// `getContinuation`/`returnIfSuspended`, which a body realizes as its suspension point.
     fn continuation_intrinsic(
@@ -311,6 +321,21 @@ pub(super) trait CallLinker {
         unsupported("a file-private object value")
     }
 
+    /// Whether `signature` names a non-public interface of the library of the body being lowered.
+    fn is_local_interface(&self, _signature: &crate::metadata::klib_ir::KlibIrSignature) -> bool {
+        false
+    }
+
+    /// The non-public interface a type test or a cast of this library's body names, installed in
+    /// the unit with its abstract members. Template linkers keep the refusal.
+    fn link_local_interface(
+        &mut self,
+        _ir: &mut IrFile,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<()> {
+        unsupported("a type of a file-private interface")
+    }
+
     /// The constructor a file-local construction invokes. Template linkers keep the refusal.
     fn link_local_constructor(
         &mut self,
@@ -322,6 +347,15 @@ pub(super) trait CallLinker {
 
     /// The function a file-local call invokes: a top-level function private to the lowered
     /// body's file, or a member of a file-local class. Template linkers keep the refusal.
+    /// The getter of an inherited property that a call of the fake override `callee` of a local
+    /// class stands for. `None` when `callee` is no such fake override.
+    fn inherited_getter(
+        &self,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<Option<crate::metadata::klib_ir::KlibIrSignature>> {
+        Ok(None)
+    }
+
     fn link_local_function(
         &mut self,
         _ir: &mut IrFile,
@@ -330,12 +364,13 @@ pub(super) trait CallLinker {
         unsupported("a call of a file-private declaration")
     }
 
-    /// The dependency property a call of its accessor `callee` reads or writes.
+    /// What a call of the property accessor `callee` reaches: the dependency property it reads or
+    /// writes, or the accessor function the unit emits.
     fn link_accessor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibAccessorIdSignature,
-    ) -> Lowered<LinkedAccessor>;
+    ) -> Lowered<LinkedAccessorCall>;
 
     /// The static storage of the top-level property whose backing field is `field`, which a body
     /// of that property's own library reads or writes. `None` leaves the access to the body's
@@ -368,6 +403,17 @@ pub(super) trait CallLinker {
         unsupported("an enum entry")
     }
 
+    /// The dependency enum class whose compiler-generated `values()` or `valueOf` the public
+    /// declaration `callee` is, with which of the two. `None` for any other callee, which links
+    /// as an ordinary call; a linker that materializes no enum class knows none.
+    fn enum_static_member(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<Option<(TypeName, super::enum_classes::EnumStaticMember)>> {
+        Ok(None)
+    }
+
     /// `sub` as the class `owner` it is a subtype of, with the type arguments its hierarchy applies
     /// to `owner`.
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty>;
@@ -379,6 +425,11 @@ pub(super) trait CallLinker {
     /// Whether `left` and `right` are one type in the calling compilation's class model, apart
     /// from projections that restate their parameter's declaration-site variance.
     fn same_type(&self, left: Ty, right: Ty) -> bool;
+
+    /// The declared upper bounds of the classifier `owner`'s type parameter at `index` in the
+    /// calling compilation's class model: what a star or `out` projection of that slot captures
+    /// besides its own read type.
+    fn classifier_parameter_bounds(&self, owner: TypeName, index: usize) -> Vec<Ty>;
 
     /// Constructor generic bounds consume explicit hierarchy/full-formal evidence without
     /// changing the independent operand-coercion capability.
@@ -438,7 +489,7 @@ pub(super) struct LinkedConstructor {
 /// and the accessor's dispatch receiver, parameters (context parameters, extension receiver, and a
 /// setter's value) and result.
 pub(super) struct LinkedAccessor {
-    pub(super) target: LinkedAccessorTarget,
+    pub(super) property: crate::fir::ExternalPropertyId,
     pub(super) write: bool,
     pub(super) receiver: Option<Ty>,
     pub(super) params: Vec<Ty>,
@@ -493,13 +544,12 @@ pub(super) struct StaticField {
 }
 
 /// What an accessor call reaches.
-#[derive(Clone, Copy)]
-pub(super) enum LinkedAccessorTarget {
+pub(super) enum LinkedAccessorCall {
     /// The provider's property, read or written through its accessor.
-    External(crate::fir::ExternalPropertyId),
-    /// The getter this unit emits, for a member of a value class: a member function of its
-    /// class, called on the receiver in place of the property read.
-    Local(FunId),
+    Property(LinkedAccessor),
+    /// The accessor function this unit emits, called as any function of the unit is: a member of
+    /// a class the unit materializes, or a top-level accessor, generic ones among them.
+    Function(LinkedCallee),
 }
 
 /// The function a body is lowered into: its serialized symbol, the only target its `return`s may
@@ -1333,7 +1383,15 @@ impl<'a> BodyLowering<'a> {
             return Err(KlibBodyDeclineReason::ForeignReturnTarget);
         }
         let expected = self.member_result.unwrap_or(self.header.body_result());
-        let mut value = self.operand(value, expected)?;
+        let mut value = if !member && self.header.erases_result() {
+            // An erased body leaves the smart cast of its result to a type parameter out with the
+            // parameter (`checkNotNull` returns its `value: T?` as `T` after its `null` test), and
+            // Kotlin's inliner casts the inlined result to the call's result type implicitly.
+            let lowered = self.expression(value)?;
+            self.implicit_cast_of(lowered, expected, expected)?
+        } else {
+            self.operand(value, expected)?
+        };
         if !member && self.header.body_result() != self.header.result() {
             value = self.declared_value(value, self.header.result());
         }

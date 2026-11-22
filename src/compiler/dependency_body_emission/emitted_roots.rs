@@ -153,6 +153,12 @@ pub(super) fn declarations(
         if !visited.insert(identity.clone()) {
             continue;
         }
+        // `values()` and `valueOf` of a library enum are the common enum operation, which the
+        // backend realizes for the enum's class as for a source enum; no body or provider links
+        // them. Lowering the call makes the same decision.
+        if bodies.enum_static_member(&identity).is_some() {
+            continue;
+        }
         // A private member of a materialized class has no provider declaration; the member calling it
         // authenticates its class, and it is emitted as that member is.
         if let Some(class) = member_class.filter(|class| {
@@ -162,7 +168,7 @@ pub(super) fn declarations(
                 && !externals.contains_key(&identity)
                 && crate::klib_lowering::is_private_class_member(bodies, &identity, class)
         }) {
-            let emitted = bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+            let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
             state.pending.extend(
                 emitted
                     .callables
@@ -183,7 +189,7 @@ pub(super) fn declarations(
         // it is emitted with that body. One an earlier unit already emitted is that unit's export
         // instead, an exact external edge which keeps its declaration authentication below.
         if bodies.is_library_private(&identity) && !externals.contains_key(&identity) {
-            let emitted = bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+            let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
             state
                 .pending
                 .extend(emitted.callables.into_iter().map(|callee| (callee, None)));
@@ -220,8 +226,7 @@ pub(super) fn declarations(
             match platform.external_callable_by_dependency(&identity) {
                 Some(declaration) => declaration,
                 None if raw_header_capability && known_target.is_none() => {
-                    let emitted =
-                        bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+                    let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
                     state
                         .pending
                         .extend(emitted.callables.into_iter().map(|callee| (callee, None)));
@@ -251,6 +256,16 @@ pub(super) fn declarations(
             capabilities.callees.with_declaration(selected),
             &superclasses,
         );
+        // A continuation interception expands to its coroutine class's own interception, which
+        // the expansion calls in its stead: the closure reaches that member, never the
+        // intrinsic's excluded body. The intrinsic's declaration is what selects the expansion.
+        if let Some(member) = crate::klib_lowering::expansion_member(selected, bodies)
+            .map_err(|reason| format!("an invalid continuation interception: {reason:?}"))?
+        {
+            state.pending.push_back((member, None));
+            state.declarations.push((declaration_target, realization));
+            continue;
+        }
         let retained = externals
             .get(&identity)
             .and_then(|external| external.constructor_initializer_target());
@@ -293,11 +308,21 @@ pub(super) fn declarations(
                     .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?;
                 read_values(platform, bodies, &facts, &objects, &mut state)?;
             }
-            state.dispatched.extend(
-                facts
-                    .constructor_dispatched_members(&identity, bodies)
-                    .map_err(|reason| format!("an invalid class member: {reason:?}"))?,
+            let dispatched = facts
+                .constructor_dispatched_members(&identity, bodies)
+                .map_err(|reason| format!("an invalid class member: {reason:?}"))?;
+            // Each is emitted with the class: a member the class inherits implements interface
+            // declarations only dispatch reaches, and no body calls it.
+            let member_class = selected
+                .class_contract()
+                .filter(|class| class.emits_members())
+                .cloned();
+            state.pending.extend(
+                dispatched
+                    .iter()
+                    .map(|member| (member.clone(), member_class.clone())),
             );
+            state.dispatched.extend(dispatched);
             // The declarations the class's initialization names without emitting them.
             for declaration in facts
                 .constructor_declaration_evidence(&identity, bodies)
@@ -416,7 +441,7 @@ pub(super) fn declarations(
             if let Some(class) = member_object(platform, &identity) {
                 walk_object(platform, bodies, &facts, class, &mut state)?;
             }
-            let emitted = bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+            let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
             read_values(platform, bodies, &facts, &emitted.objects, &mut state)?;
             let member_class = selected
                 .class_contract()
