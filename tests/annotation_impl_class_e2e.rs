@@ -934,3 +934,18 @@ fn annotation_implementation_with_value_class_members_has_kotlincs_method_table(
 fn annotation_implementation_with_value_class_members_runs_like_kotlin() {
     common::expect_box_same_as_kotlinc(VALUE_CLASS_MEMBERS, "ValueClassMembers");
 }
+
+#[test]
+fn unsigned_byte_literal_constructor_argument_is_not_narrowed() {
+    let source = "class C(val u: UInt, val b: UByte, val n: Int)\nfun make() = C(1u, 2u, 3)\nfun box(): String = if (make().n == 3) \"OK\" else \"no\"\n";
+    let classes = common::classes_against_kotlinc_module(&[("Probe.kt", source)]);
+    let differences = classes
+        .reference
+        .iter()
+        .filter_map(|(name, reference)| {
+            let ours = &classes.krusty[name];
+            (reference != ours).then(|| common::exact_class_difference(name, reference, ours))
+        })
+        .collect::<Vec<_>>();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}

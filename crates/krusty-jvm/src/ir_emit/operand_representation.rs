@@ -584,7 +584,11 @@ impl Emitter<'_> {
                 semantic_scalar_adapter(semantic, physical),
             );
         } else if source_jvm.is_jvm_scalar() && physical.is_jvm_scalar() {
-            emit_num_conv(source_jvm, physical, code);
+            // An unsigned value already carries its exact bit pattern (a `UByte` literal is the
+            // `int` constant 0..=255); kotlinc stores it without narrowing.
+            if !semantic.non_null().is_unsigned() {
+                emit_num_conv(source_jvm, physical, code);
+            }
         } else if source_jvm.is_reference() && physical.is_reference() {
             self.coerce_declared_reference(source_jvm, destination_semantic, physical, code);
         }
