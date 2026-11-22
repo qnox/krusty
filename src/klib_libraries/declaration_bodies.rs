@@ -16,7 +16,7 @@ use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction, KlibIrMember,
-    KlibIrStatement, KlibIrSyntheticBody, KlibIrType,
+    KlibIrStatement, KlibIrSyntheticBody, KlibIrType, KlibIrTypeParameter,
 };
 use crate::metadata::klib_ir::{
     KlibIrModuleTrees, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind,
@@ -783,7 +783,9 @@ impl KlibDeclarationBodies {
                         matches!(tree.arena.expr(initializer).kind, KlibIrExprKind::Const(_))
                     })
                 }
-                KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_) => false,
+                KlibIrSignature::Public(_)
+                | KlibIrSignature::Accessor(_)
+                | KlibIrSignature::TypeParameter { .. } => false,
             }
         })
     }
@@ -925,6 +927,32 @@ impl KlibDeclarationBodies {
             Some(class) => LocatedClass::One(class),
             None => LocatedClass::Missing,
         }
+    }
+
+    /// The type parameter `index` of the public class `owner` serialized by `module` or a library
+    /// its manifest depends on, with the arena that owns its bounds. `None` unless exactly one
+    /// class has the signature and declares that many type parameters.
+    pub(crate) fn public_class_type_parameter<'a>(
+        &'a self,
+        module: &str,
+        owner: &KlibPublicIdSignature,
+        index: u32,
+    ) -> Option<(&'a KlibIrArena, &'a KlibIrTypeParameter)> {
+        let wanted = KlibIrSignature::Public(owner.clone());
+        let mut found = None;
+        for module in self.body_provider_modules(module) {
+            let Some(&library) = self.modules.get(&module) else {
+                continue;
+            };
+            for (arena, class) in self.libraries[library].classes_with_signature(&wanted) {
+                if found.replace((arena, class)).is_some() {
+                    return None;
+                }
+            }
+        }
+        let (arena, class) = found?;
+        let parameter = class.type_parameters.get(usize::try_from(index).ok()?)?;
+        Some((arena, parameter))
     }
 
     /// The constructors the public class `signature` serialized by `module` or a library its
@@ -1596,6 +1624,7 @@ fn declaration_signature(signature: &KlibIrSignature) -> Option<KlibDeclarationS
         &KlibIrSignature::FileLocal { file, slot } => {
             Some(KlibDeclarationSignature::FileLocal { file, slot })
         }
+        KlibIrSignature::TypeParameter { .. } => None,
     }
 }
 
