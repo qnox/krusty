@@ -1084,11 +1084,20 @@ fn property_override_plans(
     let names = class
         .declared_props
         .keys()
+        .chain(class.contextual_props.keys())
         .chain(class.member_ext_props.keys());
     for name in declaration_ordered(class, names) {
         let members = class
             .declared_props
             .get(name)
+            .map(|property| property.stable_declaration);
+        // A context-parameter property is overloadable by its context shape: every declaration
+        // under the name is an implementation candidate.
+        let contextual = class
+            .contextual_props
+            .get(name)
+            .into_iter()
+            .flatten()
             .map(|property| property.stable_declaration);
         let member_extensions = class
             .member_ext_props
@@ -1096,7 +1105,12 @@ fn property_override_plans(
             .into_iter()
             .flatten()
             .map(|property| property.stable_declaration);
-        for declaration in members.into_iter().chain(member_extensions).flatten() {
+        for declaration in members
+            .into_iter()
+            .chain(contextual)
+            .chain(member_extensions)
+            .flatten()
+        {
             let Some(implementation) =
                 overriding_property(index, class.internal_name(), name, declaration)
             else {
