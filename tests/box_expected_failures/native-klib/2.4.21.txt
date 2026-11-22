@@ -239,7 +239,6 @@ contextParameters/explicitPassing.kt
 contextParameters/inlineAnonymousParameter.kt
 contextParameters/kt51863.kt
 contextParameters/kt65953.kt
-contextParameters/suspendContextParemetersWithExtension.kt
 contracts/contractForCast.kt
 contracts/isNullString.kt
 contracts/kt39374.kt
