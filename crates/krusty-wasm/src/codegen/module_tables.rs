@@ -100,9 +100,9 @@ impl ModuleTables {
         if let Some(known) = self.dependencies.get(&class) {
             if known.slot_types != slot_types {
                 return Err(format!(
-                    "a dependency class whose table two modules lay out differently (`{}`) {:?} vs {:?}",
+                    "a dependency class whose table two modules lay out differently (`{}`)",
                     // Boundary conversion for a diagnostic.
-                    class.render().replace('/', "."), known.slot_types, slot_types
+                    class.render().replace('/', ".")
                 ));
             }
             return Ok(known.table_type);

@@ -631,19 +631,14 @@ fn publish_inherited_interface_function_plans(
                                 .is_some_and(|target| target != overridden)
                     })
                     .filter(|candidate| {
-                        let parameters = applied_parameters_with_receiver(candidate);
-                        parameters.len() == applied_parameters.len()
-                            && parameters.iter().zip(applied_parameters.iter()).all(
-                                |(&implementation, &base)| equivalent(source, implementation, base),
-                            )
-                            && crate::symbol_resolver::resolution_subtype(
-                                source,
-                                candidate
-                                    .ret
-                                    .apply(candidate.callable.ret)
-                                    .canonical_semantic(),
-                                applied_result,
-                            )
+                        // One override slot with a refining result, by the shared rules: a
+                        // generic member such as `CoroutineContext.Element.fold` overrides
+                        // `CoroutineContext.fold` under its own type parameters.
+                        crate::symbol_resolver::function_override_input_slots_match(
+                            source, &applied, candidate,
+                        ) && crate::symbol_resolver::function_result_refines(
+                            source, candidate, &applied,
+                        )
                     })
                     .cloned()
                     .collect::<Vec<_>>();

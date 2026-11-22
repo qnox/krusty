@@ -52,6 +52,9 @@ impl CallLinker for NoCalls {
     fn same_type(&self, left: Ty, right: Ty) -> bool {
         left == right
     }
+    fn classifier_parameter_bounds(&self, _: TypeName, _: usize) -> Vec<Ty> {
+        Vec::new()
+    }
     fn constructor_bound(&self, _: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool {
         argument == bound
     }

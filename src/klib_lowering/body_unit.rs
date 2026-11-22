@@ -1424,6 +1424,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.sources.callees.same_type(left, right)
     }
 
+    fn classifier_parameter_bounds(&self, owner: TypeName, index: usize) -> Vec<Ty> {
+        self.sources
+            .callees
+            .classifier_parameter_bounds(owner, index)
+    }
+
     fn link_constructor(
         &mut self,
         ir: &mut IrFile,
@@ -1576,7 +1582,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
-        inline_functions::is_interface(self, name)
+        let record = self.sources.declarations.classifier(name);
+        record.map(|record| record.is_interface()).ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(format!(
+                "an object literal's supertype {name:?} is not a selected classifier"
+            ))
+        })
     }
 
     fn link_accessor(
