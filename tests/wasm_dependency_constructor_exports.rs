@@ -195,6 +195,27 @@ fn wasm_official_dependency_inherited_members_implement_indirect_interfaces() {
     );
 }
 
+/// A later checked source realizes a subclass of a library class an earlier one already realized
+/// and exported: the subclass inherits the superclass's members from the earlier realization, as
+/// its own interface implementations, instead of realizing the superclass again.
+#[test]
+fn wasm_official_dependency_subclasses_inherit_members_realized_by_an_earlier_source() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyCrossUnitInheritedMembers.kt"),
+        "DependencyCrossUnitInheritedMembers",
+    );
+}
+
+/// A library body reads an abstract accessor of a class an earlier source realized: the read
+/// dispatches through that class's frozen declaration rather than declaring the accessor again.
+#[test]
+fn wasm_official_dependency_reads_abstract_accessors_of_a_class_an_earlier_source_realized() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyCrossUnitAbstractAccessor.kt"),
+        "DependencyCrossUnitAbstractAccessor",
+    );
+}
+
 /// A subclass implements a library interface member with the body it inherits from its
 /// superclass, which does not declare the interface and which no body calls.
 #[test]
