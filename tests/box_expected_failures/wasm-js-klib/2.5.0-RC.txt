@@ -1758,7 +1758,6 @@ ranges/literal/inexactSteppedRange.kt
 ranges/literal/inexactToMaxValue.kt
 ranges/literal/maxValueMinusTwoToMaxValue.kt
 ranges/literal/maxValueToMaxValue.kt
-ranges/literal/maxValueToMinValue.kt
 ranges/literal/oneElementDownTo.kt
 ranges/literal/oneElementRange.kt
 ranges/literal/openRange.kt
