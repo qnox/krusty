@@ -374,6 +374,10 @@ pub enum FirCallTarget {
         /// are parallel to the call's parameters for a source declaration, whose `descriptor` the
         /// target derives from them; a provider-described declaration keeps its own ABI shape.
         parameters: Box<[ResolvedTy]>,
+        /// The selected declaration's own semantic parameters, before the call site's
+        /// substitution, parallel to the call's arguments: the representation each argument is
+        /// passed in. Unset when the provider declares none.
+        declared_parameters: Option<Box<[ResolvedTy]>>,
         result: ResolvedTy,
         /// The selected owner is an interface, so the call reaches a default method.
         interface: bool,
