@@ -97,7 +97,9 @@ use crate::types::{
     TypeName, TypeNameList,
 };
 
-use java_operator_convention::java_method_has_operator_convention;
+use java_operator_convention::{
+    java_method_has_operator_convention, publish_classfile_member_shape, ClassfileMemberShape,
+};
 
 /// The JVM platform's contribution to Kotlin's default imports. The language-level `kotlin.*` set is
 /// composed with this list in the import-level builder and in the seed filter, so neither list is duplicated.
@@ -1669,22 +1671,15 @@ impl JvmLibraries {
                     member.set_ret_nullable(true);
                 }
                 if declaration.is_none() && constructor_declaration.is_none() {
-                    member.call_sig = {
-                        let vararg_index = m
-                            .is_vararg()
-                            .then_some(value_arity)
-                            .and_then(|arity| arity.checked_sub(1));
-                        CallSig::metadata_member(value_arity, Vec::new(), Vec::new(), vararg_index)
-                    };
-                    // Java has no `operator` modifier. Kotlin therefore recognizes a Java method
-                    // as an operator declaration from the language-defined name/arity convention.
-                    // Normalize that capability here; the resolver can then require the same
-                    // semantic flag for Kotlin metadata, Java classfiles, and Java source stubs.
-                    if uses_java_type_semantics
-                        && java_method_has_operator_convention(&member.name, member.params.len())
-                    {
-                        member.set_is_operator(true);
-                    }
+                    publish_classfile_member_shape(
+                        &mut member,
+                        ClassfileMemberShape {
+                            value_arity,
+                            vararg: m.is_vararg(),
+                            java_semantics: uses_java_type_semantics,
+                            java_declaration: !has_kotlin_metadata && m.name != "<init>",
+                        },
+                    );
                 }
                 if let Some(java_nullable) = platform_nullable_params {
                     member.call_sig.platform_nullable_params = java_nullable.into();
@@ -4154,7 +4149,7 @@ impl JvmLibraries {
         };
         let until = match elem {
             Ty::Double | Ty::Float => None,
-            Ty::UInt => Some(LibraryCallable::library(
+            Ty::UInt => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/URangesKt"),
                 "until-J1ME1BU",
                 vec![elem, elem],
@@ -4162,7 +4157,7 @@ impl JvmLibraries {
                 Ty::obj(internal),
                 format!("({prim}{prim})L{internal};"),
             )),
-            Ty::ULong => Some(LibraryCallable::library(
+            Ty::ULong => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/URangesKt"),
                 "until-eb3DHEI",
                 vec![elem, elem],
@@ -4170,7 +4165,7 @@ impl JvmLibraries {
                 Ty::obj(internal),
                 format!("({prim}{prim})L{internal};"),
             )),
-            _ if trailing_nulls == 0 => Some(LibraryCallable::library(
+            _ if trailing_nulls == 0 => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/RangesKt"),
                 "until",
                 vec![elem, elem],
@@ -4185,7 +4180,7 @@ impl JvmLibraries {
                 let iface = "kotlin/ranges/ClosedFloatingPointRange";
                 (
                     Ty::obj(iface),
-                    Some(LibraryCallable::library(
+                    Some(LibraryCallable::declared(
                         type_name("kotlin/ranges/RangesKt"),
                         "rangeTo",
                         vec![elem, elem],

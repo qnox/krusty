@@ -93,6 +93,7 @@ impl BodyLowering<'_> {
                 .map(|parameter| crate::ir::IrCheckedArgument::Expression {
                     parameter: parameter as u32,
                     value: self.ir.add_expr(IrExpr::GetValue(parameter as u32)),
+                    context: Default::default(),
                 })
                 .collect::<Vec<_>>();
             let construction = self.constructor_reference_call(
@@ -173,6 +174,7 @@ impl BodyLowering<'_> {
                             crate::ir::IrCheckedArgument::Expression {
                                 parameter,
                                 value: self.ir.add_expr(IrExpr::GetValue(own_start + *source)),
+                                context: Default::default(),
                             }
                         }
                         FirAdaptedReferenceArgument::Context => return Err(failed()),
@@ -219,6 +221,7 @@ impl BodyLowering<'_> {
                             + u32::try_from(parameter + identity_source_start)
                                 .expect("too many constructor-reference parameters"),
                     )),
+                    context: Default::default(),
                 })
                 .collect()
         };

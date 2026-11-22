@@ -153,6 +153,12 @@ pub(super) fn declarations(
         if !visited.insert(identity.clone()) {
             continue;
         }
+        // `values()` and `valueOf` of a library enum are the common enum operation, which the
+        // backend realizes for the enum's class as for a source enum; no body or provider links
+        // them. Lowering the call makes the same decision.
+        if bodies.enum_static_member(&identity).is_some() {
+            continue;
+        }
         // A private member of a materialized class has no provider declaration; the member calling it
         // authenticates its class, and it is emitted as that member is.
         if let Some(class) = member_class.filter(|class| {

@@ -1276,6 +1276,8 @@ impl Parser<'_> {
             }
             TokenKind::Ident => {
                 let mut n = self.text().to_string();
+                let reserved_underscores =
+                    !n.is_empty() && n.bytes().all(|byte| byte == b'_') && !self.escaped_ident();
                 self.bump();
                 // A TYPED super (`super<Base>.foo()`): the `<Base>` type qualifier selects WHICH
                 // supertype's method to dispatch to. Encode it on the name (`super<Base>`) so the
@@ -1302,7 +1304,11 @@ impl Parser<'_> {
                     self.bump(); // label
                     return self.file.add_expr(Expr::Name(format!("{n}@{label}")), span);
                 }
-                self.file.add_expr(Expr::Name(n), span)
+                let name = self.file.add_expr(Expr::Name(n), span);
+                if reserved_underscores {
+                    self.file.unescaped_underscore_names.insert(name.0);
+                }
+                name
             }
             TokenKind::LParen => {
                 self.bump();

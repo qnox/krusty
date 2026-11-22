@@ -137,6 +137,7 @@ impl BodyLowering<'_> {
                             IrCheckedArgument::Expression {
                                 parameter,
                                 value: self.ir.add_expr(IrExpr::GetValue(own_start + *source)),
+                                context: Default::default(),
                             }
                         }
                         FirAdaptedReferenceArgument::Context => {
@@ -189,6 +190,7 @@ impl BodyLowering<'_> {
                 .map(|(parameter, source)| IrCheckedArgument::Expression {
                     parameter: parameter as u32,
                     value: self.ir.add_expr(IrExpr::GetValue(own_start + source)),
+                    context: Default::default(),
                 })
                 .collect()
         };
