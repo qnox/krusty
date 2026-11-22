@@ -62,14 +62,14 @@ pub(super) fn box_vc_tail(
                     .map(|u| !is_ref(&erase(u, under)))
                     .unwrap_or(false);
                 if !prim_only || prim {
-                    box_wrap(ir, id, x, under);
+                    box_wrap(ir, id, x);
                 }
             }
         }
     }
 }
 
-/// The value class an expr produces UNBOXED (a `constructor-impl`/`unbox-impl` result, or a local call
+/// The value class an expr produces UNBOXED (a `constructor-impl` result, or a local call
 /// whose return type is a non-null value class), if any.
 fn unboxed_vc_class(
     exprs: &[IrExpr],
@@ -83,7 +83,7 @@ fn unboxed_vc_class(
             callee: call_callee,
             ..
         } if let Callee::Static { owner, name, .. } = &**call_callee
-            && (name == "constructor-impl" || name == "unbox-impl") =>
+            && name == "constructor-impl" =>
         {
             value_class_name(*owner, under)
         }

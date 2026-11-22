@@ -2848,6 +2848,7 @@ fn callee_kind(callee: &Callee) -> &'static str {
         Callee::Static { .. } => "static",
         Callee::Virtual { .. } => "virtual",
         Callee::Super { .. } => "super",
+        Callee::ValueClassAdapter { .. } => "value-class adapter",
         Callee::Special { .. } => "special",
     }
 }
