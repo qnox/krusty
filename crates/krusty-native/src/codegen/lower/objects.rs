@@ -1258,8 +1258,7 @@ impl<'a> FileLowering<'a> {
             };
             body.record_semantic_slots(&semantic_slots);
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
-                let variable = body.declare_value(slot as u32, *ty)?;
-                body.builder.def_var(variable, *value);
+                body.bind_parameter(slot as u32, *value, *ty)?;
             }
             let this = params[0];
             if let Some(getter) = companion {
@@ -1789,8 +1788,7 @@ impl<'a> FileLowering<'a> {
             body.scope = krusty::ir::IrEnclosure::Constructor { class, ordinal: 0 };
             body.record_semantic_slots(&semantic_slots);
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
-                let variable = body.declare_value(slot as u32, *ty)?;
-                body.builder.def_var(variable, *value);
+                body.bind_parameter(slot as u32, *value, *ty)?;
             }
             let this = params[0];
             if let Some(getter) = companion {
