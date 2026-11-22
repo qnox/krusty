@@ -42,7 +42,7 @@ gradle=("$project/gradlew" --no-daemon -p "$project"
 # needs a dependency the cache lacks fails by name instead of fetching from Maven Central.
 [ -z "${KRUSTY_GRADLE_OFFLINE:-}" ] || gradle+=(--offline)
 
-"${gradle[@]}" clean test jar
+"${gradle[@]}" clean test kotlinGradlePluginTest jar
 first=$(mktemp)
 trap 'rm -f "$first"' EXIT
 cp "$built" "$first"

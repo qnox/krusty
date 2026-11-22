@@ -539,6 +539,16 @@ impl Ty {
         }
     }
 
+    /// The type a value must have to be written through a use-site projection: a contravariant
+    /// projection admits its bound, while a covariant or star projection admits only `Nothing`.
+    pub fn projection_write_ty(self) -> Ty {
+        match self.kind() {
+            TyKind::InProjection(inner) => inner,
+            TyKind::OutProjection(_) | TyKind::StarProjection(_) => Ty::Nothing,
+            _ => self,
+        }
+    }
+
     /// Whether this type is nullable (`T?`).
     pub fn is_nullable(self) -> bool {
         matches!(self.kind(), TyKind::Nullable(_))
@@ -608,6 +618,16 @@ impl Ty {
                 self.with_symbol_bound(self.ty_param_bound().unwrap().definitely_non_null())
             }
             _ => self.non_null_keeping_mutability(),
+        }
+    }
+
+    /// The intersection `T & Any` of a type parameter whose bound admits null, as a KLIB
+    /// serializes a definitely-non-null type. Any other type is already as non-null as it can be.
+    pub fn marked_definitely_not_null(self) -> Ty {
+        if self.is_ty_param() && self.upper_bound_admits_null() {
+            Ty::from(TyKind::DefinitelyNotNull(self))
+        } else {
+            self
         }
     }
 

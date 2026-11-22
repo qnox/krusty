@@ -28,6 +28,8 @@ pub(super) struct BuiltinInstances {
 pub(super) struct RuntimeLayouts {
     pub(super) string_builder: bool,
     pub(super) array_list: bool,
+    /// The runtime's iterator over a list, which `iterator()` and `listIterator()` answer.
+    pub(super) array_list_iterator: bool,
 }
 
 impl Runtime {
@@ -64,6 +66,11 @@ impl Runtime {
             self.objects
                 .interfaces
                 .representation_instance_of(self.array_lists.list, interface);
+        }
+        if laid_out.array_list_iterator {
+            self.objects
+                .interfaces
+                .representation_instance_of(self.array_lists.iterator, interface);
         }
         for form in self.box_forms() {
             if subtypes.contains(&form.boxed) {

@@ -215,7 +215,7 @@ impl FileLowering<'_> {
         matches!(
             self.classifiers.classifier(owner).and_then(|fact| fact.role),
             Some(ClassifierRole::MappedCollection(collection))
-                if crate::intrinsics::has_special_bridge(collection, name)
+                if collection.has_special_bridge(name)
         )
     }
 

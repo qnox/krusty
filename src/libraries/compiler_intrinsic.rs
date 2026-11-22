@@ -257,6 +257,13 @@ pub enum CompilerIntrinsic {
     /// Native's runtime comparison of two `String` ranges' UTF-16 units, whose bounds the stdlib
     /// already checked (`kotlin.text.unsafeRangeEquals`, a private `@GCUnsafeCall` external).
     StringRangeEquals,
+    /// Native's runtime search of a `String` for a `String` or a `Char` from a start index
+    /// (`kotlin.text.nativeIndexOf` and `nativeLastIndexOf`, `@GCUnsafeCall` externals), forward
+    /// or, for `last`, backward. The sought value is the second operand, of type `sought`.
+    StringIndexOf {
+        sought: crate::types::Ty,
+        last: bool,
+    },
     /// Native's runtime copy of `count` elements of one array into another of its kind, a
     /// specialized primitive array or `Array<Any?>` (`kotlin.collections.arrayCopy`, a
     /// `@GCUnsafeCall` external without a body). It checks both ranges itself and copies as if
