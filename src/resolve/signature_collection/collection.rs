@@ -38,6 +38,27 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
     target: crate::compilation_target::CompilationTarget,
 ) -> SymbolTable {
     let stubs_by_source = compact_headers.map(stub_positions_by_source);
+    let universe = source_type_universe(files, &*libraries, diags, compact_headers, &[]);
+    let generated_classifiers = plugin_generated_classifiers(
+        files,
+        compact_headers,
+        compact_local_contexts,
+        &universe,
+        frontend_plugins,
+    );
+    // The first build already reported its declaration conflicts; the generated classifiers add
+    // none, so the second build's diagnostics repeat them.
+    let universe = if universe_misses_generated_classifier(&universe, &generated_classifiers) {
+        source_type_universe(
+            files,
+            &*libraries,
+            &mut DiagSink::new(),
+            compact_headers,
+            &generated_classifiers,
+        )
+    } else {
+        universe
+    };
     let SourceTypeUniverse {
         file_type_aliases,
         source_packages,
@@ -47,7 +68,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         file_class_names,
         user_defined,
         user_base_classes,
-    } = source_type_universe(files, &*libraries, diags, compact_headers);
+    } = universe;
     let DeclaredClassifierInventory {
         legacy_anonymous_lexical_scopes,
         legacy_local_class_tparams,
@@ -3032,14 +3053,16 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .cloned()
                         .collect::<Vec<_>>();
                     let frontend_plugin_context = crate::plugins::FrontendClassContext {
-                        classifier: internal,
-                        companion: direct_companion,
-                        kind: frontend_class_kind(classifier_flags, classifier_is_enum),
-                        is_sealed: classifier_flags.has(ClassFlags::SEALED),
-                        is_abstract: classifier_flags.has(ClassFlags::ABSTRACT),
+                        header: crate::plugins::FrontendClassifierHeader {
+                            classifier: internal,
+                            companion: direct_companion,
+                            kind: frontend_class_kind(classifier_flags, classifier_is_enum),
+                            is_sealed: classifier_flags.has(ClassFlags::SEALED),
+                            is_abstract: classifier_flags.has(ClassFlags::ABSTRACT),
+                            annotations: &resolved_annotations,
+                            annotation_class_arguments: &resolved_annotation_class_arguments,
+                        },
                         type_parameters: &class_type_parameters,
-                        annotations: &resolved_annotations,
-                        annotation_class_arguments: &resolved_annotation_class_arguments,
                         declared_functions: &frontend_declared_functions(&methods),
                     };
                     let mut contributed_members = Vec::new();
@@ -3049,7 +3072,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     );
                     let mut generated_nested_classifiers = Vec::new();
                     frontend_plugins.publish_frontend_generated_classifiers(
-                        &frontend_plugin_context,
+                        &frontend_plugin_context.header,
                         &mut generated_nested_classifiers,
                     );
                     let mut contributed_companion_methods = MethodMap::default();
