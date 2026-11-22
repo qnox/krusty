@@ -45,7 +45,7 @@ impl Checker<'_> {
         if full {
             return;
         }
-        let equals_and_hash_code_reserved = !self.file.custom_equals_in_value_classes;
+        let equals_and_hash_code_reserved = !self.file.language.custom_equals_in_value_classes;
         for function in &cl.methods {
             if function.is_abstract() {
                 continue;
