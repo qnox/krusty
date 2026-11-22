@@ -515,9 +515,9 @@ impl Checker<'_> {
         }
     }
 
-    /// Every `this(...)` constructor, including the one delegating, rejects the arguments for a
-    /// missing parameter. kotlinc lists them together. One constructor keeps the single-candidate
-    /// wording, and a named or extra argument keeps its own diagnostic.
+    /// Every `this(...)` constructor, including the one delegating, rejects the arguments. kotlinc
+    /// lists each missing parameter and each name none of them declares. One constructor keeps the
+    /// single-candidate wording, and an extra argument keeps its own diagnostic.
     fn report_inapplicable_this_delegations(
         &mut self,
         class: DeclId,
@@ -547,27 +547,37 @@ impl Checker<'_> {
             ) else {
                 return false;
             };
-            let missing = failure
-                .errors
-                .iter()
-                .filter_map(|error| match error {
-                    CallArgMappingError::MissingRequired { name } => Some(name.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if missing.len() != failure.errors.len() || missing.is_empty() {
+            let mut reasons = Vec::new();
+            for error in &failure.errors {
+                match error {
+                    CallArgMappingError::MissingRequired { name } => {
+                        reasons.push(format!("No value passed for parameter '{name}'."));
+                    }
+                    CallArgMappingError::NoParameterNamed { name, .. } => {
+                        reasons.push(format!("No parameter with name '{name}' found."));
+                    }
+                    _ => return false,
+                }
+            }
+            for name in Self::omitted_required_names(arguments, &parameters) {
+                let reason = format!("No value passed for parameter '{name}'.");
+                if !reasons.iter().any(|existing| existing == &reason) {
+                    reasons.push(reason);
+                }
+            }
+            if reasons.is_empty() {
                 return false;
             }
-            rejected.push((signature, missing));
+            rejected.push((signature, reasons));
         }
         if rejected.len() < 2 {
             return false;
         }
         let mut message = String::from("none of the following candidates is applicable:");
-        for (signature, missing) in rejected {
+        for (signature, reasons) in rejected {
             message.push_str(&format!("\n\n{signature}:"));
-            for name in missing {
-                message.push_str(&format!("\n  No value passed for parameter '{name}'."));
+            for reason in reasons {
+                message.push_str(&format!("\n  {reason}"));
             }
         }
         let span = self
@@ -575,6 +585,50 @@ impl Checker<'_> {
             .unwrap_or(span);
         self.diags.error(span, message);
         true
+    }
+
+    /// Required parameters no argument named or filled. The shared mapper reports these only when
+    /// the call has no other mapping error, while a delegation candidate lists them beside an
+    /// unknown name.
+    fn omitted_required_names(
+        arguments: &CtorDelegationCall,
+        parameters: &crate::libraries::ParamList,
+    ) -> Vec<String> {
+        let mut filled = vec![false; parameters.names.len()];
+        let mut positional = 0usize;
+        for index in 0..arguments.args.len() {
+            if let Some(name) = arguments.names.get(index).and_then(Option::as_ref) {
+                if let Some(parameter) = parameters
+                    .names
+                    .iter()
+                    .position(|parameter| parameter == name)
+                {
+                    filled[parameter] = true;
+                }
+                continue;
+            }
+            if parameters.vararg == Some(positional) {
+                filled[positional] = true;
+                continue;
+            }
+            if positional < parameters.names.len() {
+                filled[positional] = true;
+                positional += 1;
+            }
+        }
+        parameters
+            .names
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| {
+                let has_default = parameters.defaults.get(index).copied().unwrap_or(false);
+                if filled[index] || has_default || parameters.vararg == Some(index) {
+                    None
+                } else {
+                    Some(name.clone())
+                }
+            })
+            .collect()
     }
 
     fn this_delegation_shapes(
