@@ -287,6 +287,24 @@ impl FileLowering<'_> {
         Ok(id)
     }
 
+    /// Whether the class named `class` inherits the dependency interface default `declaration`
+    /// without overriding it.
+    fn inherits_default(
+        &self,
+        class: krusty::types::TypeName,
+        declaration: krusty::fir::ExternalCallableId,
+    ) -> bool {
+        self.ir
+            .inherited_defaults
+            .get(&class)
+            .into_iter()
+            .flatten()
+            .any(|default| {
+                default.body
+                    == krusty::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration)
+            })
+    }
+
     /// How an instance of `class` implements each member of another source module's interface,
     /// by the member's KLIB identity, most derived first: by the function at a slot of its vtable
     /// (an override takes a slot of its own, so the most derived implementation is read there),
@@ -383,6 +401,14 @@ impl FileLowering<'_> {
                     {
                         continue;
                     }
+                    // A dependency interface's default the class inherits: the defaults below
+                    // implement it.
+                    ResolvedFunctionOverrideTarget::External(implementation)
+                        if edge.implementation_function.is_none()
+                            && self.inherits_default(name, implementation) =>
+                    {
+                        continue;
+                    }
                     ResolvedFunctionOverrideTarget::External(_) => None,
                 };
                 // An interface of this module implementing the member stands at its own number
@@ -475,13 +501,19 @@ impl FileLowering<'_> {
                 if implemented.iter().any(|(known, _)| *known == identity) {
                     continue;
                 }
-                let export = self.dependency_symbols.get(member).ok_or_else(|| {
-                    declined!(
-                        "a default a dependency's interface declares without a body to call \
-                         (`{}`)",
-                        self.kotlin_name(owner)
-                    )
-                })?;
+                let Some(export) = self.dependency_symbols.get(member) else {
+                    // A library default whose body lowering does not model is not support: a
+                    // call through the member declines instead of reaching nothing.
+                    self.unimplementable_interface_members.insert(
+                        identity,
+                        format!(
+                            "a default a dependency's interface declares without a body to call \
+                             (`{}`)",
+                            self.kotlin_name(owner)
+                        ),
+                    );
+                    continue;
+                };
                 let (symbol, parameters, result) = (
                     export.symbol.clone(),
                     export.signature.parameters().to_vec(),

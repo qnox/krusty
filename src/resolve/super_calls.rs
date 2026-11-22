@@ -20,6 +20,10 @@ pub struct ResolvedSuperCall {
     /// the substituted one, names the method: `super.foo(r)` through `B : A<String>` calls
     /// `A.foo(T)`.
     pub physical_params: Vec<Ty>,
+    /// The selected declaration's semantic parameters, unsubstituted, as its provider declares
+    /// them: they tell a generic `T` parameter from a value-class one where both erase alike. A
+    /// provider that publishes none leaves this unset.
+    pub declared_params: Option<Box<[Ty]>>,
     pub ret: Ty,
     pub physical_ret: Ty,
     /// Empty for a source signature whose descriptor is derived from the semantic parameter types.
@@ -91,6 +95,7 @@ impl ResolvedSuperCall {
             params: member.params,
             vararg_index,
             physical_params: member.physical_params,
+            declared_params: member.declared_params,
             ret: member.ret,
             physical_ret: member.physical_ret,
             descriptor: member.descriptor,
@@ -135,6 +140,7 @@ impl ResolvedSuperCall {
             params: callable.params,
             vararg_index: None,
             physical_params: callable.physical_params,
+            declared_params: callable.declared_params,
             ret: callable.ret,
             physical_ret: callable.physical_ret,
             descriptor: callable.descriptor,
@@ -195,6 +201,7 @@ impl Checker<'_> {
             class_receiver: true,
             current,
             receiver_depth,
+            dsl_shadowed: false,
         }))
     }
 

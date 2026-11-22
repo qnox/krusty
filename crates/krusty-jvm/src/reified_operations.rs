@@ -562,6 +562,7 @@ fn expression_reified_parameters(
             operation:
                 krusty::ir::IrIntrinsic::TypeOf { ty: classifier }
                 | krusty::ir::IrIntrinsic::EnumValueOf { classifier }
+                | krusty::ir::IrIntrinsic::EnumValues { classifier }
                 | krusty::ir::IrIntrinsic::EnumEntries { classifier },
             ..
         } = &**call_callee =>

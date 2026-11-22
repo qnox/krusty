@@ -874,6 +874,21 @@ pub struct KlibIrFunction {
     pub body: Option<KlibIrBody>,
 }
 
+impl KlibIrFunction {
+    /// The synthetic body of an enum's compiler-generated member (`values`, `valueOf` or the
+    /// `entries` getter): the producer's own record that the backend provides the implementation.
+    pub fn enum_special_member(&self) -> Option<KlibIrSyntheticBody> {
+        match &self.body {
+            Some(KlibIrBody::Synthetic(body))
+                if self.base.origin == "ENUM_CLASS_SPECIAL_MEMBER" =>
+            {
+                Some(*body)
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrVariable {
     pub base: KlibIrDeclarationBase,

@@ -1977,7 +1977,12 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 sibling.get(),
                                 joined.get(),
                             );
+                                // A `Nothing` sibling (`?: throw`, a `return` arm) is only the
+                                // trivial lower constraint of the join's variable. As an
+                                // expectation it would instead cap the branch's own variables at
+                                // `Nothing` and override what its inputs proved.
                                 if current == sibling
+                                    || sibling.get() == Ty::Nothing
                                     || (!current.get().mentions_ty_param() && joined != current)
                                 {
                                     continue;
