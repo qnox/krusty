@@ -1,7 +1,9 @@
 //! The class static plan over common IR built by hand.
 
 use super::{ClassActivationStep, ClassStaticPlan, UnorderedClassStatic};
-use crate::ir::{ClassId, IrAccessorLines, IrConst, IrExpr, IrFile, IrStatic, IrStaticAccessors};
+use crate::ir::{
+    ClassId, IrAccessorLines, IrConst, IrExpr, IrFile, IrFunction, IrStatic, IrStaticAccessors,
+};
 use crate::types::{type_name, Ty, Visibility};
 
 fn class(ir: &mut IrFile, name: &str) -> ClassId {
@@ -78,13 +80,12 @@ fn a_class_runs_its_own_statics_in_declaration_order_at_each_activation_point() 
 
 #[test]
 fn a_class_with_other_initialization_parts_declines_an_owned_static() {
-    for shape in ["object", "value", "companion", "enum"] {
+    for shape in ["object", "value", "enum"] {
         let mut ir = IrFile::default();
         let mut declaration = crate::ir::test_support::blank_class("p/Owner");
         match shape {
             "object" => declaration.is_object = true,
             "value" => declaration.is_value = true,
-            "companion" => declaration.companion_class = Some(type_name("p/Owner$Companion")),
             _ => declaration.superclass = crate::types::wk::kotlin_enum(),
         }
         ir.add_class(declaration);
@@ -148,4 +149,89 @@ fn an_interface_runs_its_own_statics_when_its_storage_or_block_functions_are_use
             "{companion}"
         );
     }
+}
+
+#[test]
+fn a_class_with_a_companion_object_runs_its_statics_before_the_companion() {
+    let mut ir = IrFile::default();
+    let mut declaration = crate::ir::test_support::blank_class("p/Owner");
+    declaration.companion_class = Some(type_name("p/Owner$Companion"));
+    let owner = ir.add_class(declaration);
+    let owned = static_of(&mut ir, "owned", Some("p/Owner"), Some(1));
+
+    let plan = ClassStaticPlan::new(&ir).expect("a companion object follows the class's statics");
+
+    assert_eq!(plan.access_activation(owned), Some(owner));
+    assert_eq!(
+        plan.activation_steps(owner).collect::<Vec<_>>(),
+        vec![
+            ClassActivationStep::OwnStatics(owner),
+            ClassActivationStep::Companion(owner),
+        ]
+    );
+}
+
+/// An interface of this file, with a non-abstract member when `default_member` holds.
+fn interface(ir: &mut IrFile, name: &str, extends: &[&str], default_member: bool) -> ClassId {
+    let mut declaration = crate::ir::test_support::blank_class(name);
+    declaration.is_interface = true;
+    for parent in extends {
+        declaration.interfaces.push(parent);
+    }
+    let body = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+    let method = ir.add_fun(IrFunction {
+        name: "member".to_owned(),
+        params: Vec::new(),
+        ret: Ty::Int,
+        body: default_member.then_some(body),
+        is_static: false,
+        dispatch_receiver: Some(type_name(name)),
+        param_checks: Vec::new(),
+    });
+    declaration.methods.push(method);
+    ir.add_class(declaration)
+}
+
+#[test]
+fn a_class_initializes_its_superinterfaces_with_statics_and_default_members_first() {
+    let mut ir = IrFile::default();
+    let root = interface(&mut ir, "p/Root", &[], true);
+    let first = interface(&mut ir, "p/First", &["p/Root"], true);
+    let abstract_only = interface(&mut ir, "p/AbstractOnly", &[], false);
+    let without_statics = interface(&mut ir, "p/WithoutStatics", &[], true);
+    let second = interface(&mut ir, "p/Second", &["p/Root"], true);
+    let mut declaration = crate::ir::test_support::blank_class("p/Impl");
+    for name in ["p/First", "p/AbstractOnly", "p/WithoutStatics", "p/Second"] {
+        declaration.interfaces.push(name);
+    }
+    let implementation = ir.add_class(declaration);
+    for owner in ["p/Root", "p/First", "p/AbstractOnly", "p/Second", "p/Impl"] {
+        static_of(&mut ir, "value", Some(owner), Some(1));
+    }
+
+    let plan = ClassStaticPlan::new(&ir).expect("interfaces order their statics");
+
+    assert!(!plan.has_statics(without_statics));
+    assert!(plan.has_statics(abstract_only));
+    assert_eq!(
+        plan.activation_steps(implementation).collect::<Vec<_>>(),
+        vec![
+            ClassActivationStep::OwnStatics(root),
+            ClassActivationStep::Companion(root),
+            ClassActivationStep::OwnStatics(first),
+            ClassActivationStep::Companion(first),
+            ClassActivationStep::OwnStatics(second),
+            ClassActivationStep::Companion(second),
+            ClassActivationStep::OwnStatics(implementation),
+            ClassActivationStep::Companion(implementation),
+        ]
+    );
+    assert_eq!(
+        plan.activation_steps(first).collect::<Vec<_>>(),
+        vec![
+            ClassActivationStep::OwnStatics(first),
+            ClassActivationStep::Companion(first),
+        ],
+        "an interface does not initialize its superinterfaces"
+    );
 }
