@@ -9,10 +9,16 @@
 //!
 //! The defect mode is process-wide, so krusty compiles each program in a CLI process of its own.
 //! kotlinc-native answers from its recording when its distribution is not provisioned, and a Native
-//! check runs where the host links Native programs, as every Native test does.
+//! check runs where the host links Native programs, as every Native test does. A Kotlin/Wasm
+//! program runs under the exact kotlinc-wasm and Node.js.
+//!
+//! GAP: krusty's Wasm runtime lays out its own `ArrayList`, which reads `addAll`'s argument before it
+//! grows, so krusty's Wasm programs are not checked here yet. They will be once the target stdlib's
+//! `ArrayList` body replaces that runtime list (#3836).
 
 use std::path::Path;
 
+use krusty::compilation_target::CompilationTarget;
 use krusty::kotlin_version::{Quirk, Quirks};
 
 use super::common;
@@ -31,12 +37,14 @@ enum Outcome {
 enum Platform {
     Jvm,
     Native,
+    WasmJs,
+    WasmWasi,
 }
 
 /// A program that a defect makes kotlinc compile wrongly.
 struct Defect {
-    /// The platform whose kotlinc has the defect.
-    platform: Platform,
+    /// The platforms whose kotlinc has the defect.
+    platforms: &'static [Platform],
     /// Platforms whose own kotlinc and library already give the fixed outcome.
     fixed_on: &'static [Platform],
     /// One `Main.kt`, its `// LANGUAGE:` directives included.
@@ -103,28 +111,28 @@ const LIST_ADD_ALL_OF_ITS_RANGE: &str = "fun box(): String {\n\
 fn defect(quirk: Quirk) -> Option<Defect> {
     match quirk {
         Quirk::UnitConversionRejectsNonUnitResult => Some(Defect {
-            platform: Platform::Jvm,
+            platforms: &[Platform::Jvm],
             fixed_on: &[],
             source: UNIT_CONVERSION,
             with_defect: Outcome::Rejected,
             fixed: Outcome::Answer("OK".to_string()),
         }),
         Quirk::VarargReferenceTakesTypeVariableInputAsElement => Some(Defect {
-            platform: Platform::Jvm,
+            platforms: &[Platform::Jvm],
             fixed_on: &[],
             source: VARARG_REFERENCE,
             with_defect: Outcome::Answer("1".to_string()),
             fixed: Outcome::Answer("2".to_string()),
         }),
         Quirk::ContextArgumentEvaluatedBeforeExtensionReceiver => Some(Defect {
-            platform: Platform::Jvm,
+            platforms: &[Platform::Jvm],
             fixed_on: &[],
             source: CONTEXT_ARGUMENT_ORDER,
             with_defect: Outcome::Answer("crv".to_string()),
             fixed: Outcome::Answer("rcv".to_string()),
         }),
         Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument => Some(Defect {
-            platform: Platform::Native,
+            platforms: &[Platform::Native, Platform::WasmJs, Platform::WasmWasi],
             fixed_on: &[Platform::Jvm],
             source: LIST_ADD_ALL_OF_ITS_RANGE,
             with_defect: Outcome::Answer("raised [1, 2, 3, null, null]".to_string()),
@@ -169,14 +177,15 @@ fn every_defect_and_only_a_defect_has_a_program() {
 #[test]
 fn kotlinc_has_each_defect_in_the_releases_the_table_names() {
     for (quirk, defect, reference) in defects() {
-        if let Some(outcome) = kotlinc_outcome(defect.platform, defect.source) {
-            assert_eq!(
-                outcome,
-                reference,
-                "{quirk:?} on {:?} kotlinc {}",
-                defect.platform,
-                krusty::kotlin_version::target()
-            );
+        for &platform in defect.platforms {
+            if let Some(outcome) = kotlinc_outcome(platform, defect.source) {
+                assert_eq!(
+                    outcome,
+                    reference,
+                    "{quirk:?} on {platform:?} kotlinc {}",
+                    krusty::kotlin_version::target()
+                );
+            }
         }
     }
 }
@@ -184,8 +193,10 @@ fn kotlinc_has_each_defect_in_the_releases_the_table_names() {
 #[test]
 fn krusty_reproduces_each_defect_by_default() {
     for (quirk, defect, reference) in defects() {
-        if let Some(outcome) = krusty_outcome(defect.platform, defect.source, &[]) {
-            assert_eq!(outcome, reference, "{quirk:?} on {:?}", defect.platform);
+        for &platform in defect.platforms {
+            if let Some(outcome) = krusty_outcome(platform, defect.source, &[]) {
+                assert_eq!(outcome, reference, "{quirk:?} on {platform:?}");
+            }
         }
     }
 }
@@ -193,10 +204,12 @@ fn krusty_reproduces_each_defect_by_default() {
 #[test]
 fn fixing_kotlinc_defects_fixes_each_defect() {
     for (quirk, defect, _) in defects() {
-        if let Some(outcome) =
-            krusty_outcome(defect.platform, defect.source, &["-Xfix-kotlinc-defects"])
-        {
-            assert_eq!(outcome, defect.fixed, "{quirk:?} on {:?}", defect.platform);
+        for &platform in defect.platforms {
+            if let Some(outcome) =
+                krusty_outcome(platform, defect.source, &["-Xfix-kotlinc-defects"])
+            {
+                assert_eq!(outcome, defect.fixed, "{quirk:?} on {platform:?}");
+            }
         }
     }
 }
@@ -220,7 +233,7 @@ fn the_fix_is_what_the_platforms_without_the_defect_give() {
 }
 
 /// kotlinc's outcome for `source` on `platform`; `None` where kotlinc-native is neither provisioned
-/// nor recorded.
+/// nor recorded, or the kotlinc distribution has no Kotlin/Wasm compiler.
 fn kotlinc_outcome(platform: Platform, source: &str) -> Option<Outcome> {
     match platform {
         Platform::Jvm => {
@@ -233,15 +246,33 @@ fn kotlinc_outcome(platform: Platform, source: &str) -> Option<Outcome> {
             })
         }
         Platform::Native => common::kotlin_native_box(source).map(Outcome::Answer),
+        Platform::WasmJs => kotlinc_wasm_outcome(CompilationTarget::WasmJs, source),
+        Platform::WasmWasi => kotlinc_wasm_outcome(CompilationTarget::WasmWasi, source),
     }
 }
 
+fn kotlinc_wasm_outcome(target: CompilationTarget, source: &str) -> Option<Outcome> {
+    let work = common::scratch_dir().expect("allocate the Kotlin/Wasm fixture");
+    let path = work.join("box.kt");
+    std::fs::write(&path, format!("{source}\nfun main() {{ print(box()) }}\n"))
+        .expect("write the Kotlin/Wasm fixture");
+    let run = crate::reference_wasm_program::run_wasm_reference_program(target, &work, &[path]);
+    let _ = std::fs::remove_dir_all(&work);
+    Some(match run? {
+        Ok(answer) => Outcome::Answer(answer.trim_end_matches('\n').to_string()),
+        Err(error) if error.starts_with("reference KLIB:") => Outcome::Rejected,
+        Err(error) => panic!("kotlinc {target:?}: {error}"),
+    })
+}
+
 /// Compile `source` for `platform` with the krusty CLI under `arguments` and run its `box()`;
-/// `None` for Native where this host links no Native program.
+/// `None` for Native where this host links no Native program, and for Kotlin/Wasm (the GAP in the
+/// module documentation).
 fn krusty_outcome(platform: Platform, source: &str, arguments: &[&str]) -> Option<Outcome> {
     match platform {
         Platform::Jvm => Some(krusty_jvm_outcome(source, arguments)),
         Platform::Native => krusty_native_outcome(source, arguments),
+        Platform::WasmJs | Platform::WasmWasi => None,
     }
 }
 
