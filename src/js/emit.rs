@@ -838,6 +838,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     )
                 }
             }
+            Callee::ValueClassAdapter { .. } => {
+                unreachable!("a value-class adapter is built and realized by the JVM backend")
+            }
             Callee::Intrinsic { operation, .. } => match operation {
                 crate::ir::IrIntrinsic::Assert { mode } => {
                     if *mode == crate::types::AssertionMode::AlwaysDisabled {
