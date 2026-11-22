@@ -79,7 +79,6 @@ inlineClasses/toStringOfInlineClassValue.kt
 inlineClasses/toStringOfReferenceInlineClassValue.kt
 inlineClasses/unboxInlineClassFromParameterizedType.kt
 innerClasses/kt27936.kt
-innerClasses/kt57714.kt
 interfaces/addedInterfaceBridge.kt
 interfaces/noPrivateMemberInJavaInterface.kt
 intrinsics/javaObjectType.kt

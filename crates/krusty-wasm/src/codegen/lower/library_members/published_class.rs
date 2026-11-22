@@ -111,7 +111,7 @@ pub(in crate::codegen) fn select(
         let result = fact.declared_ret.unwrap_or(fact.ret);
         let mut frame = vec![REFERENCE];
         for &parameter in params {
-            frame.push(carrier(parameter)?.ok_or("a `Unit` class member parameter")?);
+            frame.push(super::super::parameter_carrier_of(parameter)?);
         }
         let results: Vec<ValType> = carrier(result)?.into_iter().collect();
         if module.func_type(frame, results) != signature {
