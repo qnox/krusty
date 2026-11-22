@@ -188,6 +188,11 @@ pub enum CompilerIntrinsic {
     /// and otherwise goes on with `argument` as its `T`. It is the suspension point of an expanded
     /// `suspendCoroutineUninterceptedOrReturn`, whose block computed `argument`.
     ReturnIfSuspended,
+    /// Kotlin/Wasm's `kotlin.wasm.internal.interceptedIntrinsic<T>(cont)`, an
+    /// `@ExcludedFromCodegen` declaration behind `Continuation<T>.intercepted()`. kotlinc's
+    /// `BuiltInsLowering` expands it to `if (cont is CoroutineImpl) cont.intercepted() else cont`
+    /// over the stdlib's state-machine `kotlin.coroutines.CoroutineImpl`.
+    InterceptedContinuation,
     EnumValues,
     EnumValueOf,
     /// The zero-argument `kotlin.enums.enumEntries<T>()`. Its stdlib body only throws; the selected

@@ -87,7 +87,8 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::ResultFailureException
         | CompilerIntrinsic::PrimitiveIteratorNext
         | CompilerIntrinsic::CurrentContinuation
-        | CompilerIntrinsic::ReturnIfSuspended => return None,
+        | CompilerIntrinsic::ReturnIfSuspended
+        | CompilerIntrinsic::InterceptedContinuation => return None,
     })
 }
 
