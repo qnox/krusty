@@ -479,18 +479,14 @@ fn native_official_dependency_file_private_interface_dispatches_through_its_inst
     let source = include_str!(
         "box_regressions/multimodule/dependencyInstalledInterfaceTypeTestAndMemberCall.kt"
     );
+    super::box_reference_classes::checked_box(
+        source,
+        "dependencyInstalledInterfaceTypeTestAndMemberCall",
+    )
+    .expect("pinned kotlinc must run the whole producer and consumer");
     let Some(target) = host() else {
         if std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_some() {
             panic!("required Native target/KLIB setup is unavailable");
-        }
-        return;
-    };
-    let Some(native_root) = std::env::var_os("KRUSTY_KOTLIN_NATIVE")
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-    else {
-        if std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_some() {
-            panic!("KRUSTY_KOTLIN_NATIVE is required for the official producer");
         }
         return;
     };
@@ -505,18 +501,19 @@ fn native_official_dependency_file_private_interface_dispatches_through_its_inst
     let work = super::common::scratch_dir().expect("official producer directory");
     let producer_file = work.join(format!("{producer_stem}.kt"));
     std::fs::write(&producer_file, producer_text).expect("write the producer source");
-    let library = work.join("library");
-    let produced = Command::new(native_root.join("bin/kotlinc-native"))
-        .args(["-p", "library", "-nopack", "-o"])
-        .arg(&library)
-        .arg(&producer_file)
-        .output()
-        .expect("launch the pinned kotlinc-native producer");
-    assert!(
-        produced.status.success(),
-        "official producer: {}",
-        String::from_utf8_lossy(&produced.stderr)
-    );
+    let Some((produced, library)) = crate::reference_invocation_support::run_reference(
+        krusty::compilation_target::CompilationTarget::Native,
+        &work,
+        &[producer_file],
+        &["-nopack".to_owned()],
+        false,
+    ) else {
+        if std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_some() {
+            panic!("KRUSTY_KOTLIN_NATIVE is required for the official producer");
+        }
+        return;
+    };
+    assert_eq!(produced.status, 0, "official producer: {}", produced.stderr);
     let stdlib = krusty::toolchain::kotlin_stdlib_klib(
         krusty::compilation_target::CompilationTarget::Native,
     )

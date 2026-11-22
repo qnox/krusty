@@ -556,7 +556,11 @@ impl Filler<'_> {
                     for edge in &ir.classes[class as usize].installed_interface_overrides {
                         let key = PlanKey::Installed(edge.overridden);
                         if self.numbers.number(key).is_none() {
-                            continue;
+                            return Err(format!(
+                                "an override of an installed interface member with no number \
+                                 (`{}`)",
+                                ir.classes[id as usize].fq_name()
+                            ));
                         }
                         let slot_key = function_key(ir, class, edge.implementation);
                         let Some(&slot) = table.slots.get(&slot_key) else {

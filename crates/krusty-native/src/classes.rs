@@ -599,15 +599,19 @@ pub(super) fn build(
     ir: &IrFile,
     values: &ValueClassInventory,
     plan: &ModuleSlotPlan,
+    extended: &mut class_tables::module_interfaces::ExtendedNumbers,
     laid_out: &LaidOutClasses,
 ) -> Result<ClassModel, Unsupported> {
     for class in &ir.classes {
         check_supported(class)?;
     }
-    let numbered =
-        class_tables::build_numbered(&NativeRepresentation(values), ir, plan, &|superclass| {
-            laid_out.get(superclass).map(|record| record.table.clone())
-        })?;
+    let numbered = class_tables::build_numbered(
+        &NativeRepresentation(values),
+        ir,
+        plan,
+        extended,
+        &|superclass| laid_out.get(superclass).map(|record| record.table.clone()),
+    )?;
     let mut layouts: Vec<Option<ClassLayout>> = vec![None; ir.classes.len()];
     for &id in &numbered.order {
         let table = &numbered.tables[id as usize];

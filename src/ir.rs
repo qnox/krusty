@@ -955,8 +955,6 @@ pub enum IrEnclosure {
     Classifier(ClassId),
 }
 
-/// A class/interface/object declaration (`IrClass`). Instance fields come from the primary
-/// constructor's `val`/`var` parameters (in order); the constructor stores each.
 /// A method of a class overriding an abstract member of an interface a KLIB lowering unit
 /// installed in the same file ([`IrClass::installed_interface_overrides`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -965,6 +963,8 @@ pub struct IrInstalledOverride {
     pub overridden: FunId,
 }
 
+/// A class/interface/object declaration (`IrClass`). Instance fields come from the primary
+/// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
 pub struct IrClass {
     /// Original checked source context; absent for a class with no source declaration.

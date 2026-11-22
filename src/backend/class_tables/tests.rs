@@ -25,6 +25,7 @@ fn tables(ir: &IrFile) -> Result<NumberedClassTables, Unsupported> {
         &IntsAndReferences,
         ir,
         &super::module_slots::ModuleSlotPlan::empty(),
+        &mut Default::default(),
         &|_| None,
     )
 }
@@ -134,6 +135,7 @@ fn a_superclass_no_file_declares_is_declined_unless_the_target_owns_it() {
         &OwnsEverything,
         &ir,
         &super::module_slots::ModuleSlotPlan::empty(),
+        &mut Default::default(),
         &|_| None,
     )
     .expect("tables");
@@ -165,7 +167,8 @@ fn an_installed_interface_numbers_its_members_in_declaration_order() {
             .map(|function| numbers.number(key(function))),
         [Some(0), Some(1), Some(2)]
     );
-    assert_eq!(numbers.count(), 3);
+    // The module's own count: installed numbers are the module's files' to share beyond it.
+    assert_eq!(numbers.count(), 0);
     assert_eq!(
         numbers.numbers_of(&[ir.classes[second as usize].fq_name].into_iter().collect()),
         vec![2]
@@ -177,6 +180,47 @@ fn an_installed_interface_numbers_its_members_in_declaration_order() {
         Some((vec![Ty::Int], Ty::Int))
     );
     let _ = first;
+}
+
+/// Two files of one module share the numbers beyond the module's own: an interface both install
+/// keeps its numbers in each, an interface only one installs takes numbers no other member has,
+/// and a number a target takes afterwards is fresh too.
+#[test]
+fn installed_interfaces_of_two_files_share_one_numbering() {
+    let mut extended = super::module_interfaces::ExtendedNumbers::default();
+    let mut numbered = |names: &[(&str, &[&str])]| {
+        let mut ir = IrFile::default();
+        let members = names
+            .iter()
+            .map(|(name, members)| installed_interface(&mut ir, name, members).1)
+            .collect::<Vec<_>>();
+        let tables = build_numbered(
+            &IntsAndReferences,
+            &ir,
+            &super::module_slots::ModuleSlotPlan::empty(),
+            &mut extended,
+            &|_| None,
+        )
+        .expect("installed interfaces are numbered");
+        members
+            .iter()
+            .map(|functions| {
+                functions
+                    .iter()
+                    .map(|&function| {
+                        tables
+                            .numbers
+                            .number(super::module_slots::PlanKey::Installed(function))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = numbered(&[("Sink", &["put", "peek"])]);
+    let second = numbered(&[("Source", &["take"]), ("Sink", &["put", "peek"])]);
+    assert_eq!(first, vec![vec![Some(0), Some(1)]]);
+    assert_eq!(second, vec![vec![Some(2)], vec![Some(0), Some(1)]]);
+    assert_eq!(extended.fresh(0), 3);
 }
 
 #[test]
