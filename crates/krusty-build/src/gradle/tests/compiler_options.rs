@@ -93,6 +93,62 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
         );
     }
 
+    // `-Pkrusty.fixKotlincDefects=true` asks krusty to fix kotlinc's defects: the compile stays
+    // krusty's and carries krusty's own switch once, right after the reference version.
+    {
+        let case = "fix-kotlinc-defects";
+        clear_invocation_log(log);
+        build()
+            .property("krusty.fixKotlincDefects", "true")
+            .tasks([":compiler:util:compileKotlin"])
+            .run()
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+        let invocation = single_module_invocation(log, "kotlin-compiler-util");
+        let reference = format!("-Xkotlin-reference-version={}", fixture.kgp);
+        assert_eq!(
+            invocation
+                .windows(2)
+                .filter(|pair| pair == &[reference.as_str(), "-Xfix-kotlinc-defects"])
+                .count(),
+            1,
+            "{case}: {invocation:?}"
+        );
+        assert_eq!(
+            invocation
+                .iter()
+                .filter(|argument| argument.as_str() == "-Xfix-kotlinc-defects")
+                .count(),
+            1,
+            "{case}: {invocation:?}"
+        );
+    }
+
+    // A compile left to kotlinc keeps kotlinc's defects, and the check says so.
+    {
+        let case = "jspecify-free-argument";
+        clear_invocation_log(log);
+        let output = build()
+            .property("krusty.negative", case)
+            .property("krusty.fixKotlincDefects", "true")
+            .tasks([":compiler:util:compileKotlin"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("{case} with defect fixes: {error}"));
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| *line
+                    == "krusty: task ':compiler:util:compileKotlin' keeps kotlinc's defects: \
+                        krusty.fixKotlincDefects applies only to compiles krusty runs")
+                .count(),
+            1,
+            "{case}: {output}"
+        );
+        assert!(
+            !log.exists(),
+            "kotlinc, not krusty, compiles a refused argument"
+        );
+    }
+
     // A Kotlin JVM target that differs from the Java one fails the build, as it does with
     // kotlinc under the default validation mode.
     clear_invocation_log(log);
