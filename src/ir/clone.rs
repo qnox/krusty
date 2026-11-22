@@ -12,6 +12,16 @@ use crate::types::{ty_subst_keep_unbound, Ty};
 /// Clone `root` and every reachable expression, preserving sparse semantic/source facts. Returns
 /// the new root and the complete old-to-new identity map.
 pub fn clone_expression_dag(ir: &mut IrFile, root: ExprId) -> (ExprId, HashMap<ExprId, ExprId>) {
+    let (roots, cloned) = clone_expression_dags(ir, &[root]);
+    (roots[0], cloned)
+}
+
+/// [`clone_expression_dag`] for several roots that may share expressions: a node reachable from
+/// more than one root is copied once, so the copies share it as the originals do.
+pub fn clone_expression_dags(
+    ir: &mut IrFile,
+    roots: &[ExprId],
+) -> (Vec<ExprId>, HashMap<ExprId, ExprId>) {
     fn clone_one(ir: &mut IrFile, source: ExprId, cloned: &mut HashMap<ExprId, ExprId>) -> ExprId {
         if let Some(&existing) = cloned.get(&source) {
             return existing;
@@ -30,8 +40,11 @@ pub fn clone_expression_dag(ir: &mut IrFile, root: ExprId) -> (ExprId, HashMap<E
     }
 
     let mut cloned = HashMap::default();
-    let root = clone_one(ir, root, &mut cloned);
-    (root, cloned)
+    let roots = roots
+        .iter()
+        .map(|&root| clone_one(ir, root, &mut cloned))
+        .collect();
+    (roots, cloned)
 }
 
 /// Clone `root` as kotlinc's IR `deepCopy` copies a declaration body before lambdas are lowered:
@@ -271,6 +284,21 @@ pub(crate) fn clone_with_operands(
     remap_direct_children(&mut expression, map);
     let target = ir.add_expr(expression);
     copy_expression_facts(ir, source, target);
+    target
+}
+
+/// Relocate one operation to a structurally identical expression with remapped direct operands.
+/// Source/value facts are copied to the replacement while operation-owned selection facts follow
+/// the new operation identity and are retired from the old expression slot.
+pub(crate) fn relocate_with_operands(
+    ir: &mut IrFile,
+    source: ExprId,
+    map: impl FnMut(ExprId) -> ExprId,
+) -> ExprId {
+    let mut expression = ir.exprs[source as usize].clone();
+    remap_direct_children(&mut expression, map);
+    let target = ir.add_expr(expression);
+    super::expression_copy::relocate_expression_facts(ir, source, target);
     target
 }
 

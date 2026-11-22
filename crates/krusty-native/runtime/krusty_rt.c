@@ -104,6 +104,35 @@ KT_FUNCTION_TYPE(20)
 KT_FUNCTION_TYPE(21)
 KT_FUNCTION_TYPE(22)
 
+/* Suspend function markers use source arity. Their values also wear the ordinary FunctionN marker
+   for the physical invoke signature, which includes the continuation parameter. */
+#define KT_SUSPEND_FUNCTION_TYPE(arity) \
+    KT_MARKER_TYPE(kt_type_suspend_function##arity, "kotlin.coroutines.", "SuspendFunction" #arity)
+
+KT_SUSPEND_FUNCTION_TYPE(0)
+KT_SUSPEND_FUNCTION_TYPE(1)
+KT_SUSPEND_FUNCTION_TYPE(2)
+KT_SUSPEND_FUNCTION_TYPE(3)
+KT_SUSPEND_FUNCTION_TYPE(4)
+KT_SUSPEND_FUNCTION_TYPE(5)
+KT_SUSPEND_FUNCTION_TYPE(6)
+KT_SUSPEND_FUNCTION_TYPE(7)
+KT_SUSPEND_FUNCTION_TYPE(8)
+KT_SUSPEND_FUNCTION_TYPE(9)
+KT_SUSPEND_FUNCTION_TYPE(10)
+KT_SUSPEND_FUNCTION_TYPE(11)
+KT_SUSPEND_FUNCTION_TYPE(12)
+KT_SUSPEND_FUNCTION_TYPE(13)
+KT_SUSPEND_FUNCTION_TYPE(14)
+KT_SUSPEND_FUNCTION_TYPE(15)
+KT_SUSPEND_FUNCTION_TYPE(16)
+KT_SUSPEND_FUNCTION_TYPE(17)
+KT_SUSPEND_FUNCTION_TYPE(18)
+KT_SUSPEND_FUNCTION_TYPE(19)
+KT_SUSPEND_FUNCTION_TYPE(20)
+KT_SUSPEND_FUNCTION_TYPE(21)
+KT_SUSPEND_FUNCTION_TYPE(22)
+
 /* Kotlin's reflection hierarchy, as far as a PROPERTY REFERENCE wears it. None has instances of
    its own — a reference object's type is one the generator emits per property — so these are what
    an `is` against `KProperty0` or `KMutableProperty` compares with. */
@@ -2044,133 +2073,6 @@ static KRef kt_lazy_to_string(KRef self) {
     return kt_to_string(lazy->value);
 }
 
-/* ---- Delegates.notNull ------------------------------------------------------------------------
-
-   `var x: T by Delegates.notNull()`. One reference and the rule that reading it before it is
-   written is an error — Kotlin's `NotNullVar`, whose whole content is that check. `null` is not a
-   value it can hold (its `T` is non-null by declaration), so the empty slot needs no flag beside
-   it the way a lazy's `computed` does.
-
-   The message names the PROPERTY, as Kotlin's does. The name is a string the generator hands over,
-   read at the call site from the `KProperty` operand the delegate convention passes: the runtime
-   cannot ask the object for it, since a property reference answers `name` from a table of the
-   emitted code's own. The raise itself is `kt_raise_uninitialized_property`, with the other
-   stdlib throwers in `krusty_classes.c`. */
-
-typedef struct KNotNullVar {
-    KObjectHeader header;
-    KRef value;
-} KNotNullVar;
-
-static const uint32_t kt_not_null_var_offsets[] = {offsetof(KNotNullVar, value)};
-
-/* Identity, as Kotlin leaves them: `NotNullVar` is no data class, and `toString` is `Any`'s. */
-static const kt_fn kt_not_null_var_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
-                                           (kt_fn)kt_any_to_string};
-
-const KType kt_type_not_null_var = {KT_NAMED("kotlin.properties.", "NotNullVar"),
-                                    .instance_size = sizeof(KNotNullVar),
-                                    .reference_count = 1,
-                                    .reference_offsets = kt_not_null_var_offsets,
-                                    .super = &kt_type_any,
-                                    .vtable = kt_not_null_var_vtable,
-                                    .vtable_length = 3};
-
-KRef kt_not_null_var(void) {
-    KNotNullVar *var = (KNotNullVar *)kt_gc_allocate(&kt_type_not_null_var, sizeof(KNotNullVar));
-    var->value = NULL;
-    return (KRef)var;
-}
-
-/* `Delegates.observable(initial) { property, old, new -> … }`. Kotlin's `ObservableProperty`: the
-   value, and a callback run AFTER each write with the property and both values. The callback is an
-   ordinary function value, invoked through the one slot every function value declares.
-
-   The `KProperty` is not read here, only passed along — which is what lets this runtime carry it
-   without any reflection: whatever object the emitted code built for the delegation, the callback
-   receives that same object. */
-typedef struct KObservable {
-    KObjectHeader header;
-    KRef value;
-    KRef on_change;
-} KObservable;
-
-static const uint32_t kt_observable_offsets[] = {offsetof(KObservable, value),
-                                                 offsetof(KObservable, on_change)};
-
-static const kt_fn kt_observable_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
-                                             (kt_fn)kt_any_to_string};
-
-const KType kt_type_observable = {KT_NAMED("kotlin.properties.", "ObservableProperty"),
-                                  .instance_size = sizeof(KObservable),
-                                  .reference_count = 2,
-                                  .reference_offsets = kt_observable_offsets,
-                                  .super = &kt_type_any,
-                                  .vtable = kt_observable_vtable,
-                                  .vtable_length = 3};
-
-KRef kt_observable(KRef initial, KRef on_change) {
-    KObservable *observable =
-        (KObservable *)kt_gc_allocate(&kt_type_observable, sizeof(KObservable));
-    observable->value = initial;
-    observable->on_change = on_change;
-    return (KRef)observable;
-}
-
-/* The two entry points a `ReadWriteProperty` receiver reaches, dispatching on the DESCRIPTOR. No
-   static type separates the delegates this runtime builds — `notNull()` and `observable(…)` are
-   both a `ReadWriteProperty<Any?, T>` at the call site — so the object says which it is, exactly as
-   every other runtime answer here does. Each of the two descriptors is checked by name; any other
-   object arriving here is a delegate these two entry points do not implement, and reading its
-   fields as either layout would answer from memory that means something else, so that is a loud
-   failure naming the descriptor.
-
-   `get` is handed the property's NAME rather than the property, because the only thing it can need
-   is the text of the error a `notNull` read-before-write raises. `set` is handed the PROPERTY,
-   because an observable passes it to the callback. */
-KRef kt_rw_property_get(KRef self, KRef name) {
-    if (self == NULL) {
-        kt_null_receiver();
-        return NULL;
-    }
-    if (self->header.type == &kt_type_observable) {
-        return ((const KObservable *)self)->value;
-    }
-    if (self->header.type != &kt_type_not_null_var) {
-        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty read of a ", self->header.type,
-                              ", which is neither Delegates.notNull() nor "
-                              "Delegates.observable()\n");
-    }
-    KRef value = ((const KNotNullVar *)self)->value;
-    if (value == NULL) {
-        kt_raise_uninitialized_property(name);
-        return NULL;
-    }
-    return value;
-}
-
-void kt_rw_property_set(KRef self, KRef property, KRef value) {
-    if (self == NULL) {
-        kt_null_receiver();
-        return;
-    }
-    if (self->header.type == &kt_type_not_null_var) {
-        ((KNotNullVar *)self)->value = value;
-        return;
-    }
-    if (self->header.type != &kt_type_observable) {
-        KT_FAIL_ON_DESCRIPTOR("krusty: a ReadWriteProperty write of a ", self->header.type,
-                              ", which is neither Delegates.notNull() nor "
-                              "Delegates.observable()\n");
-    }
-    KObservable *observable = (KObservable *)self;
-    KRef old = observable->value;
-    observable->value = value;
-    /* AFTER the write, which is Kotlin's order: a callback reading the property sees the new
-       value. `beforeChange` is `observable`'s own constant true, so there is nothing to veto. */
-    (void)kt_invoke_three(observable->on_change, property, old, value);
-}
-
 /* ---- pairs --------------------------------------------------------------------------------- */
 
 /* `a to b`. Two references and nothing else — Kotlin's `Pair` is a data class over two values, and
@@ -2479,6 +2381,59 @@ KRef kt_uint_range(kt_int first, kt_int last) {
 
 KRef kt_ulong_range(kt_long first, kt_long last) {
     return kt_range_new(&kt_type_ulong_range, first, last);
+}
+
+/* `IntProgression(first, last, step)` and its kin constructed directly, as a stdlib body such as
+   `IntProgression.fromClosedRange` does. Kotlin's constructor refuses a zero step, and the minimum
+   step too because the walk negates it; both are its `IllegalArgumentException` with its own
+   message, RECORDED rather than raised, so the return after it must not build the progression. */
+#define KT_PROGRESSION_MINIMUM_STEP(name) \
+    ("Step must be greater than " name " to avoid overflow on negation.")
+
+static KRef kt_progression_new(const KType *type, kt_long first, kt_long last, kt_long step,
+                               kt_long minimum, const char *minimum_message,
+                               kt_int minimum_length) {
+    if (step == 0) {
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
+                                  kt_string_utf8("Step must be non-zero.", 22)));
+        return NULL;
+    }
+    if (step == minimum) {
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
+                                  kt_string_utf8(minimum_message, minimum_length)));
+        return NULL;
+    }
+    return kt_range_allocate(type, first, last, step);
+}
+
+#define KT_INT_MINIMUM_STEP                                                                        \
+    INT32_MIN, KT_PROGRESSION_MINIMUM_STEP("Int.MIN_VALUE"),                                       \
+        (kt_int)(sizeof(KT_PROGRESSION_MINIMUM_STEP("Int.MIN_VALUE")) - 1)
+#define KT_LONG_MINIMUM_STEP                                                                       \
+    INT64_MIN, KT_PROGRESSION_MINIMUM_STEP("Long.MIN_VALUE"),                                      \
+        (kt_int)(sizeof(KT_PROGRESSION_MINIMUM_STEP("Long.MIN_VALUE")) - 1)
+
+KRef kt_int_progression(kt_int first, kt_int last, kt_int step) {
+    return kt_progression_new(&kt_type_int_progression, first, last, step, KT_INT_MINIMUM_STEP);
+}
+
+KRef kt_long_progression(kt_long first, kt_long last, kt_long step) {
+    return kt_progression_new(&kt_type_long_progression, first, last, step, KT_LONG_MINIMUM_STEP);
+}
+
+KRef kt_char_progression(kt_char first, kt_char last, kt_int step) {
+    return kt_progression_new(&kt_type_char_progression, first, last, step, KT_INT_MINIMUM_STEP);
+}
+
+/* Unsigned bounds arrive zero-extended, as for `kt_uint_range`; the step stays signed. */
+KRef kt_uint_progression(kt_int first, kt_int last, kt_int step) {
+    return kt_progression_new(&kt_type_uint_progression, (uint32_t)first, (uint32_t)last, step,
+                              KT_INT_MINIMUM_STEP);
+}
+
+KRef kt_ulong_progression(kt_long first, kt_long last, kt_long step) {
+    return kt_progression_new(&kt_type_ulong_progression, first, last, step,
+                              KT_LONG_MINIMUM_STEP);
 }
 
 /* The half-open form. Kotlin's `until` answers the declared EMPTY range when `last` is the element

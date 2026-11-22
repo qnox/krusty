@@ -237,29 +237,61 @@ impl IrFile {
             })
             .collect::<Vec<_>>();
         for class in copies {
-            remap_class(&mut self.classes[class as usize], names);
-            if let Some(provenance) = self.local_class_name_provenance.get_mut(&class) {
-                local_class_name_provenance(provenance, names);
-            }
-            if let Some(specialized) = self.specialized_anonymous_classes.get_mut(&class) {
-                specialized
-                    .bindings
-                    .values_mut()
-                    .for_each(|value| *value = ty(*value, names));
-                specialized
-                    .reified_bindings
-                    .values_mut()
-                    .for_each(|value| *value = ty(*value, names));
-            }
-            remap_class_value(&mut self.shared_class_capture_fields, class, names);
-            remap_class_value(&mut self.shared_super_capture_parameters, class, names);
-            remap_secondary_capture(self, class, names);
+            remap_copied_class(self, class, names);
         }
         for expression_id in seen {
             remap_expression_facts(self, expression_id, names);
         }
         new_detached
     }
+}
+
+impl IrFile {
+    /// Rename the classifiers `names` regenerated inside the bodies of the call-site copy `class`
+    /// in that copy's own declaration: its fields, properties, override edges, and capture facts. The copy's
+    /// bodies are renamed by [`Self::remap_reachable_classifier_identities`]; its declaration was
+    /// taken before those nested classes were regenerated, so it still names their declarations.
+    pub(crate) fn remap_copied_class_identities(
+        &mut self,
+        class: ClassId,
+        names: &HashMap<TypeName, TypeName>,
+    ) {
+        let names = &IdentityRemap::classifiers(names);
+        if !names.is_identity() {
+            remap_copied_class(self, class, names);
+        }
+    }
+}
+
+fn remap_copied_class(ir: &mut IrFile, class: ClassId, names: &IdentityRemap<'_>) {
+    remap_class(&mut ir.classes[class as usize], names);
+    let class_name = ir.classes[class as usize].fq_name;
+    if let Some(overrides) = ir.property_overrides.get_mut(&class_name) {
+        overrides
+            .iter_mut()
+            .for_each(|edge| property_override(edge, names));
+    }
+    if let Some(overrides) = ir.function_overrides.get_mut(&class_name) {
+        overrides
+            .iter_mut()
+            .for_each(|edge| function_override(edge, names));
+    }
+    if let Some(provenance) = ir.local_class_name_provenance.get_mut(&class) {
+        local_class_name_provenance(provenance, names);
+    }
+    if let Some(specialized) = ir.specialized_anonymous_classes.get_mut(&class) {
+        specialized
+            .bindings
+            .values_mut()
+            .for_each(|value| *value = ty(*value, names));
+        specialized
+            .reified_bindings
+            .values_mut()
+            .for_each(|value| *value = ty(*value, names));
+    }
+    remap_class_value(&mut ir.shared_class_capture_fields, class, names);
+    remap_class_value(&mut ir.shared_super_capture_parameters, class, names);
+    remap_secondary_capture(ir, class, names);
 }
 
 /// Once a copied lambda edge selects an implementation, that implementation body belongs to the
@@ -329,13 +361,18 @@ fn detach_lambda_impl(ir: &mut IrFile, source: FunId) -> FunId {
     shape.body = shape
         .body
         .map(|body| super::super::clone_expression_dag(ir, body).0);
+    let consumed = shape.body.is_none();
     let target = super::super::clone::clone_class_method(ir, source, shape, &HashMap::default());
     // `inline_only` and `must_inline` describe how the source lambda's existing sites were
     // consumed. This detached implementation belongs to a newly copied site and must remain
     // available until that site's own representation pass either consumes or realizes it. Keeping
     // the source state can emit a continuation for the copy while dropping the method it re-enters.
-    ir.inline_only_fns.remove(&target);
-    ir.must_inline_lambdas.remove(&target);
+    // A source whose body a splice already consumed has no body to copy: the copy is that same
+    // consumed implementation, with no method of its own to realize.
+    if !consumed {
+        ir.inline_only_fns.remove(&target);
+        ir.must_inline_lambdas.remove(&target);
+    }
     target
 }
 

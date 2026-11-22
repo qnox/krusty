@@ -250,6 +250,8 @@ pub struct MemberExtProp {
     pub receiver: crate::types::Ty,
     /// Declared property type.
     pub ty: crate::types::Ty,
+    /// Context parameters in declaration order, the leading parameters of each accessor.
+    pub context_params: Vec<(String, crate::types::ContextParameterKind, crate::types::Ty)>,
     pub is_var: bool,
     /// Whether this declaration has no accessor implementation and must be realized abstractly.
     pub is_abstract: bool,

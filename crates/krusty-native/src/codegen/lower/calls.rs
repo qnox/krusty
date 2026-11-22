@@ -419,7 +419,19 @@ impl BodyLowering<'_, '_, '_> {
                         .as_ref()
                         .and_then(|identity| symbols.get(identity))
                 };
-                let export = export_of(realization);
+                // A call through a dependency interface's member is virtual: the receiver's class
+                // may override it. The exported default body is what a class that inherits the
+                // default reaches from its dispatch record, so a call never enters it directly.
+                let virtual_interface_member = dispatch_receiver.is_some()
+                    && realization.owner_is_interface
+                    && realization.is_member_function()
+                    && realization.member_realization
+                        == krusty::libraries::MemberRealization::Dispatch;
+                let export = if virtual_interface_member {
+                    None
+                } else {
+                    export_of(realization)
+                };
                 let provider = match default_provider {
                     Some(provider) if !defaults.is_empty() => self
                         .file
@@ -469,29 +481,12 @@ impl BodyLowering<'_, '_, '_> {
                 // the exact compiler intrinsic the source-form operation uses.
                 // A member's operation travels as its realization; a package function's as its
                 // intrinsic. Either is the same exact provider fact.
-                let intrinsic = realization
-                    .compiler_intrinsic
-                    .or(realization.member_realization.compiler_intrinsic())
-                    .or_else(|| self.unsigned_array_carrier_access(realization));
-                if let Some(realized) = self.compiler_intrinsic_call(
+                if let Some(realized) = self.realized_operation_call(
                     site,
-                    intrinsic,
+                    realization,
                     dispatch_receiver,
                     args,
-                    super::compiler_intrinsics::DeclaredOperands {
-                        operation: super::super::dependency_intrinsics::declaration_operation(
-                            intrinsic,
-                            realization.semantic_role,
-                        ),
-                        receiver: match realization.declaration_owner {
-                            Some(krusty::types::SemanticCallableOwner::Classifier(owner)) => {
-                                Some(Ty::obj_name(owner))
-                            }
-                            _ => None,
-                        },
-                        params: &realization.params,
-                        extension_receiver_parameter: *extension_receiver_parameter,
-                    },
+                    *extension_receiver_parameter,
                     *ret,
                 ) {
                     return realized;
@@ -609,6 +604,11 @@ impl BodyLowering<'_, '_, '_> {
                                         ret: *ret,
                                         physical: &realization.physical_params,
                                     },
+                                    realization
+                                        .owner_is_interface
+                                        .then(|| realization.member_slot_identity())
+                                        .flatten()
+                                        .map(|identity| (identity, params.as_slice())),
                                 ) {
                                     return realized;
                                 }
@@ -890,33 +890,11 @@ impl BodyLowering<'_, '_, '_> {
                             };
                             return self.convert(produced, Some(answer), *ret);
                         }
-                        // A companion member the runtime realizes takes its arguments alone:
-                        // the receiver is an object carrying nothing, and it is not evaluated.
-                        if let Some(symbol) =
-                            super::super::super::intrinsics::runtime_companion_member(
-                                owner, &name, params,
-                            )
-                        {
-                            let mut arguments = Vec::with_capacity(args.len());
-                            for argument in args {
-                                arguments.push(self.reference(*argument)?);
-                            }
-                            if self.terminated {
-                                return Ok(None);
-                            }
-                            let signature = vec![any(); arguments.len()];
-                            let produced =
-                                self.runtime_call(symbol, &signature, any(), &arguments)?;
-                            let Some(produced) = produced else {
-                                return Ok(None);
-                            };
-                            return self.convert(produced, Some(any()), *ret);
-                        }
                         let Some(symbol) =
                             super::super::super::intrinsics::runtime_member(signature)
                         else {
                             if realization.owner_is_interface {
-                                if let Some(identity) = realization.dependency_callable.as_ref() {
+                                if let Some(identity) = realization.member_slot_identity() {
                                     return self.dependency_interface_stub(
                                         identity, signature, receiver, args, params, *ret,
                                     );

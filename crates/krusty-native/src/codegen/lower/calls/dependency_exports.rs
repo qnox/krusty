@@ -49,9 +49,13 @@ impl BodyLowering<'_, '_, '_> {
             let receiver = access
                 .receiver
                 .ok_or("an interface property without its receiver")?;
-            let number = self
-                .file
-                .dependency_interface_property_number(identity, access.writes())?;
+            // A property's getter and setter use the property's canonical identity and distinct
+            // roles, exactly as the declaring interface and its implementations publish them.
+            let member = krusty::backend::interface_identity::property_member_identity(
+                identity,
+                access.writes(),
+            )
+            .ok_or("a dependency interface property without an accessor identity")?;
             let signature = super::super::super::super::intrinsics::FunctionSignature::new(
                 super::super::super::super::intrinsics::DeclarationOwner::callable(
                     realization.physical_owner,
@@ -61,8 +65,8 @@ impl BodyLowering<'_, '_, '_> {
                 &realization.params,
                 realization.ret,
             );
-            self.dependency_interface_stub_at(
-                number,
+            self.dependency_interface_stub(
+                member,
                 signature,
                 receiver,
                 access.arguments,
@@ -142,28 +146,63 @@ impl BodyLowering<'_, '_, '_> {
             realization,
             export,
         } = selected;
+        let semantic_callee = self
+            .file
+            .ir
+            .suspend_call_declarations
+            .get(&site)
+            .unwrap_or(callee);
+        let Callee::External {
+            params: semantic_params,
+            ret: semantic_ret,
+            extension_receiver_parameter: semantic_extension_receiver_parameter,
+            ..
+        } = semantic_callee
+        else {
+            return Err(
+                "a dependency coroutine call without its checked source declaration".into(),
+            );
+        };
         let Callee::External {
             params,
             ret,
-            extension_receiver_parameter,
             defaults,
             ..
         } = callee
         else {
             return Err("an emitted dependency call without a checked external identity".into());
         };
+        if let Some(source) = self.file.ir.suspend_call_declarations.get(&site) {
+            let logical_result =
+                self.file
+                    .ir
+                    .suspend_calls
+                    .get(&site)
+                    .copied()
+                    .ok_or_else(|| {
+                        Unsupported::from("a CPS dependency call without a logical result")
+                    })?;
+            krusty::backend::authenticate_dependency_coroutine_call(
+                source,
+                callee,
+                logical_result,
+                &export.signature,
+            )
+            .map_err(Unsupported::from)?;
+        }
         if args.len() + defaults.len() != params.len() {
             return Err(
                 "a dependency call whose operands disagree with its checked parameters".into(),
             );
         }
-        let instantiated = krusty::backend::instantiate_dependency_signature(realization, callee)
-            .map_err(Unsupported::from)?;
+        let instantiated =
+            krusty::backend::instantiate_dependency_signature(realization, semantic_callee)
+                .map_err(Unsupported::from)?;
         if realization
             .generic_sig
             .as_ref()
             .is_some_and(|signature| !signature.formals.is_empty())
-            && instantiated.result != *ret
+            && instantiated.result != *semantic_ret
         {
             return Err("a dependency generic result disagrees with its checked call".into());
         }
@@ -192,8 +231,8 @@ impl BodyLowering<'_, '_, '_> {
             source_receiver: instantiated.receiver,
             context_count: realization.context_count,
             emitted_params: &instantiated.parameters,
-            call_params: params,
-            extension_receiver_parameter: *extension_receiver_parameter,
+            call_params: semantic_params,
+            extension_receiver_parameter: *semantic_extension_receiver_parameter,
             has_dispatch_receiver: dispatch_receiver.is_some(),
             unread_receiver,
             companion_receiver_position: realization.klib_body_companion_receiver_position(),

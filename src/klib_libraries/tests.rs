@@ -454,6 +454,36 @@ fn a_private_external_reverse_joins_by_its_public_identity_but_names_nothing() {
     assert_eq!(inventory.all_functions().count(), 0);
 }
 
+#[test]
+fn a_dependency_function_joins_only_under_its_declaring_module() {
+    let declaration = function("helper", None, vec![class("kotlin/Int", false)]);
+    let signature = expected_signature(&["lib"], &declaration);
+    let in_module = |module: &str| crate::libraries::KlibDependencyCallable {
+        module: module.to_owned(),
+        declaration: signature.clone(),
+    };
+    let (declared, elsewhere) = (in_module("producer"), in_module("consumer"));
+    let inventory = inventory::PackageInventory::from_package_inputs(vec![(
+        segments(&["lib"]),
+        package_of(vec![declaration]),
+        false,
+        false,
+        Some("producer".to_owned()),
+    )])
+    .expect("the function is signable");
+
+    let (placement, signed) = inventory
+        .dependency_function(&declared)
+        .expect("the declaring module's identity joins");
+    assert_eq!(
+        placement,
+        crate::libraries::CallablePlacement::Package(type_name("lib"))
+    );
+    assert_eq!(signed.declaration.name, "helper");
+    // An identical signature serialized by another module names a different declaration.
+    assert!(inventory.dependency_function(&elsewhere).is_none());
+}
+
 fn single_function(libraries: &KlibLibraries, package: &str, name: &str) -> FunctionInfo {
     let symbols = libraries.symbols(SymbolNamespace::Package(type_name(package)), name);
     assert!(symbols.classifier.is_none());

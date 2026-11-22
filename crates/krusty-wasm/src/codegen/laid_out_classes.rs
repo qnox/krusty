@@ -42,17 +42,47 @@ pub(super) struct FunctionBridgeEntry {
 pub(super) struct SignatureAdapters {
     /// Indexed by physical parameter, including an empty receiver entry at index zero.
     pub(super) parameters: Vec<Option<BoxAdapter>>,
-    pub(super) result: Option<BoxAdapter>,
+    pub(super) result: Option<ResultAdapter>,
     /// What a collection special bridge answers when its argument is not the override's element.
-    pub(super) rejection: Option<i32>,
+    pub(super) rejection: Option<BridgeRejection>,
+    /// The implementation returns `Nothing`: it never answers, so the bridge's reference result
+    /// follows a call that does not return.
+    pub(super) diverges: bool,
+    /// Indexed like `parameters`: whether the override's type excludes `null`, which the bridge
+    /// then rejects as well.
+    pub(super) rejects_null: Vec<bool>,
+}
+
+/// The neutral answer of a collection special bridge.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum BridgeRejection {
+    /// A `Boolean` or an `Int`.
+    Value(i32),
+    /// A nullable reference.
+    Null,
+}
+
+/// Result adaptation selected from the checked logical result while its type is live.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ResultAdapter {
+    Box(BoxAdapter),
+    /// The existing runtime singleton, for a Unit body with no physical result.
+    Unit(u32),
 }
 
 impl SignatureAdapters {
+    /// Whether a bridge rejects a `null` operand, so the member needs a thunk of its own.
+    pub(super) fn guards_null(&self) -> bool {
+        self.rejection.is_some() && self.rejects_null.iter().any(|&rejects| rejects)
+    }
+
     pub(super) fn none(parameter_count: usize) -> Self {
         Self {
             parameters: vec![None; parameter_count],
             result: None,
             rejection: None,
+            diverges: false,
+            rejects_null: vec![false; parameter_count],
         }
     }
 }
@@ -94,6 +124,9 @@ pub(super) struct LaidOutClass {
     pub(super) interface_bodies: HashMap<u32, Placed>,
     /// How it implements each member of a dependency's interface, most derived first.
     pub(super) dependency_implementations: Vec<(MemberRef, DependencyImplementation)>,
+    /// Checked callable membership, retained even when no invocation adapter could be emitted.
+    pub(super) function_arities: Vec<usize>,
+    pub(super) suspend_function_arities: Vec<usize>,
     /// Why a subclass cannot extend it, where it has no instances of its own and so its file
     /// needed none of what a subclass would inherit.
     pub(super) refusal: Option<String>,
@@ -514,6 +547,8 @@ mod tests {
             slot_types: Vec::new(),
             entries: Vec::new(),
             function_bridge: None,
+            function_arities: Vec::new(),
+            suspend_function_arities: Vec::new(),
             ancestors: Vec::new(),
             constructors: vec![None; 3],
             constructor_entries: vec![

@@ -8,6 +8,7 @@ use krusty::diag::{DiagSink, Span};
 use krusty::ir::{FunId, IrFile};
 use krusty::types::TyKind;
 
+mod inherited_signature_diagnostics;
 mod local_function_diagnostics;
 mod package_method_diagnostics;
 mod property_marker_diagnostics;
@@ -65,10 +66,19 @@ pub(crate) fn facade_clashes<'a>(parts: impl IntoIterator<Item = &'a [FacadeSlot
 pub(super) fn validate(
     ir: &IrFile,
     override_results: &crate::override_results::OverrideResults,
+    callables: &krusty::backend::CheckedBackendCallables,
     delegated_arrays: &crate::property_references::DelegatedPropertyArrays,
     diags: &mut DiagSink,
 ) -> Result<(), ()> {
     let platform_clash = report_platform_declaration_clashes(ir, override_results, diags)
+        | inherited_signature_diagnostics::report(
+            ir,
+            &inherited_signature_diagnostics::SlotSignatureFacts {
+                override_results,
+                callables,
+            },
+            diags,
+        )
         | report_jvm_field_companion_alias_clashes(ir, diags)
         | report_jvm_field_enum_entry_clashes(ir, diags)
         | report_jvm_field_companion_block_const_clashes(ir, diags)

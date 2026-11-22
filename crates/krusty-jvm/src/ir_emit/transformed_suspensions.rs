@@ -162,14 +162,20 @@ impl Emitter<'_> {
         target: Ty,
         code: &mut CodeBuilder,
     ) -> bool {
-        if target != Ty::obj("java/lang/Object") {
+        if target != Ty::obj("java/lang/Object") || self.erased_suspension_point(e).is_none() {
             return false;
         }
-        // An implicit coercion to a reference type between them narrows nothing kotlinc writes, nor
-        // does the one narrowing a dependency's erased result to its declared type.
-        // A statement-less block around the point, like the one a value-class tail that already
-        // is the callee's box leaves, is the point itself.
-        let mut e = e;
+        self.emit_erased_suspension(e, code);
+        true
+    }
+
+    /// The suspension point `e` reads, when its value is that point's erased `Object` result up to
+    /// operations that keep the slot: an implicit coercion to a reference type (nor does the one
+    /// narrowing a dependency's erased result to its declared type change it), a statement-less
+    /// block (like the one a value-class tail that already is the callee's box leaves), and a `!!`,
+    /// which checks the value in the slot that produced it. `None` for a point whose result is
+    /// `Unit`, and for any other value.
+    pub(super) fn erased_suspension_point(&self, mut e: ExprId) -> Option<ExprId> {
         loop {
             e = match self.ir.expr(e) {
                 IrExpr::TypeOp {
@@ -185,18 +191,46 @@ impl Emitter<'_> {
                     stmts,
                     value: Some(value),
                 } if stmts.is_empty() => *value,
+                IrExpr::NotNullAssert { operand, .. }
+                    if super::ir_ty_to_jvm(&self.value_ty(*operand)).is_reference() =>
+                {
+                    *operand
+                }
                 _ => break,
             };
         }
-        // A point whose resumption delivers a value class's box leaves that class's carrier on both
-        // paths. kotlinc materializes the call at the value class's JVM type, the carrier, for every
-        // consumer: `return foo()` and `bar().s` alike cast it after the paths merge.
-        if self
+        // Keep value-class resumptions on their declared carrier path, as before the
+        // erased-result consumer split.
+        (self
             .transformed_result(e)
-            .is_none_or(|result| result == Ty::Unit)
-            || self.transformed_suspensions.resumed_boxes.contains_key(&e)
-        {
-            return false;
+            .is_some_and(|result| result != Ty::Unit)
+            && !self.transformed_suspensions.resumed_boxes.contains_key(&e))
+        .then_some(e)
+    }
+
+    /// Emit `e`, whose [`Self::erased_suspension_point`] is a point, leaving the point's erased
+    /// `Object` result checked by every `!!` between them.
+    pub(super) fn emit_erased_suspension(&mut self, e: ExprId, code: &mut CodeBuilder) {
+        match self.ir.expr(e) {
+            IrExpr::NotNullAssert { operand, check } => {
+                let (operand, check) = (*operand, check.clone());
+                self.emit_erased_suspension(operand, code);
+                self.emit_null_assertion_check(e, &check, code);
+                return;
+            }
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: inner,
+                ..
+            }
+            | IrExpr::Block {
+                value: Some(inner), ..
+            } if self.transformed_result(e).is_none() => {
+                let inner = *inner;
+                self.emit_erased_suspension(inner, code);
+                return;
+            }
+            _ => {}
         }
         self.mark_expression_start(e, code);
         self.open_transformed_suspension(e, code);
@@ -205,7 +239,6 @@ impl Emitter<'_> {
         self.mark_after_inlined_call(e, code);
         self.probe_intrinsic_suspension(e, code);
         self.close_transformed_suspension(e, SuspensionResult::Erased, code);
-        true
     }
 
     /// Mark where a call's own invoke starts: its line and, for a suspension point, the markers

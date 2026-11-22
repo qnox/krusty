@@ -149,7 +149,11 @@ impl BodyFirChecker<'_> {
             )
         })?;
         let mut substitutions = HashMap::default();
+        let mut approximations = HashMap::default();
         for (ordinal, value) in self.info.materialized_call_type_arguments(expression) {
+            let approximation = self
+                .info
+                .published_call_type_argument_approximation(expression, ordinal);
             let ordinal = u32::try_from(ordinal).map_err(|_| {
                 self.failure(
                     self.file.expr_span(expression),
@@ -183,6 +187,9 @@ impl BodyFirChecker<'_> {
                     )
                 })?;
             substitutions.insert(name.to_owned(), value);
+            if let Some(approximation) = approximation {
+                approximations.insert(name.to_owned(), approximation);
+            }
         }
         if signature.parameters.len() != fallback.len() {
             return Err(self.failure(
@@ -195,11 +202,18 @@ impl BodyFirChecker<'_> {
         // Callable type arguments are recorded separately, so apply those on top. Starting again
         // from the declaration signature here discarded the receiver substitution and forced
         // lowering to reconstruct it from syntax/receiver types.
+        // A slot inferred to an intersection publishes its approximation wherever the declaration
+        // names that slot's type parameter.
         Ok(fallback
             .iter()
             .copied()
-            .map(|parameter| {
-                crate::symbol_resolver::ty_subst_keep_unbound(parameter, &substitutions)
+            .zip(signature.parameters.iter())
+            .map(|(parameter, declared)| {
+                let parameter =
+                    crate::symbol_resolver::ty_subst_keep_unbound(parameter, &substitutions);
+                crate::types::ty_replace_formals_along(declared.get(), parameter, &|name| {
+                    approximations.get(name).copied()
+                })
             })
             .collect())
     }
@@ -1528,6 +1542,11 @@ impl BodyFirChecker<'_> {
                 )
             })?;
             let value = self.expression(*argument)?;
+            if !crate::kotlin_version::Quirks::target()
+                .has(crate::kotlin_version::Quirk::ContextArgumentEvaluatedBeforeExtensionReceiver)
+            {
+                self.body.record_receiver_ordered_context_argument(value);
+            }
             let target = self.resolved_type(
                 self.file
                     .expr_span(expression)
@@ -1679,28 +1698,47 @@ impl BodyFirChecker<'_> {
                 .map(resolved)
                 .collect::<Result<Box<[_]>, _>>()
         };
-        let method_target = match sam.declaration {
-            Some(crate::symbol_resolver::SamMethodDeclaration::Module(declaration)) => {
-                crate::fir::FirSamMethod::Declared(
-                    crate::fir::ResolvedFunctionOverrideTarget::Module(
-                        self.index
-                            .callable_for_declaration(declaration)
-                            .ok_or_else(|| {
-                                self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)
-                            })?
-                            .id,
-                    ),
-                )
-            }
-            Some(crate::symbol_resolver::SamMethodDeclaration::External(callable)) => {
-                crate::fir::FirSamMethod::Declared(
-                    crate::fir::ResolvedFunctionOverrideTarget::External(callable),
-                )
-            }
-            Some(crate::symbol_resolver::SamMethodDeclaration::FunctionTypeInvoke) => {
-                crate::fir::FirSamMethod::FunctionTypeInvoke
-            }
-            None => return Err(self.failure(span, BodyCheckFailureKind::MissingStableCallTarget)),
+        let method = |declaration| -> Result<_, BodyCheckFailure> {
+            Ok(match declaration {
+                Some(crate::symbol_resolver::SamMethodDeclaration::Module(declaration)) => {
+                    Some(crate::fir::FirSamMethod::Declared(
+                        crate::fir::ResolvedFunctionOverrideTarget::Module(
+                            self.index
+                                .callable_for_declaration(declaration)
+                                .ok_or_else(|| {
+                                    self.failure(
+                                        span,
+                                        BodyCheckFailureKind::MissingStableCallTarget,
+                                    )
+                                })?
+                                .id,
+                        ),
+                    ))
+                }
+                Some(crate::symbol_resolver::SamMethodDeclaration::External(callable)) => {
+                    Some(crate::fir::FirSamMethod::Declared(
+                        crate::fir::ResolvedFunctionOverrideTarget::External(callable),
+                    ))
+                }
+                Some(crate::symbol_resolver::SamMethodDeclaration::FunctionTypeInvoke) => {
+                    Some(crate::fir::FirSamMethod::FunctionTypeInvoke)
+                }
+                None => None,
+            })
+        };
+        let method_target = method(sam.declaration)?
+            .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
+        let frames = |declarations: &[crate::symbol_resolver::SamMethodFrame]| {
+            declarations
+                .iter()
+                .map(|declaration| {
+                    Ok(crate::fir::FirSamMethodFrame {
+                        method: method(declaration.declaration)?,
+                        parameters: resolved_all(&declaration.parameters)?,
+                        result: resolved(declaration.result)?,
+                    })
+                })
+                .collect::<Result<Box<[_]>, BodyCheckFailure>>()
         };
         Ok(FirSamConversion {
             classifier: sam.internal,
@@ -1716,7 +1754,10 @@ impl BodyFirChecker<'_> {
             has_receiver: sam.has_receiver,
             suspend: sam.suspend,
             source_suspend,
+            requires_object_dispatch: sam.requires_object_dispatch,
             overridden_results: resolved_all(&sam.overridden_results)?,
+            dispatch_methods: frames(&sam.dispatch_methods)?,
+            default_methods: frames(&sam.default_methods)?,
             nullable,
             kotlin_interface: sam.kotlin_interface,
             parameter_identities: sam.parameter_identities.clone(),

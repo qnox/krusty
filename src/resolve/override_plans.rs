@@ -8,6 +8,7 @@ use crate::fx_hash::{HashMap, HashSet};
 
 mod inherited_defaults;
 mod inherited_status;
+mod member_slots;
 mod published_recheck;
 
 pub(super) use published_recheck::published_function_override_matches;
@@ -287,11 +288,20 @@ fn declared_properties(
         .1
         .overloads
         .into_iter()
-        .filter(|property| {
-            property.kind == kind
-                && property.context_count == 0
-                && property.visibility != Visibility::Private
-        })
+        .filter(|property| property.kind == kind && property.visibility != Visibility::Private)
+        .collect()
+}
+
+/// [`declared_properties`] without context parameters: an inherited interface implementation is
+/// matched by its property type alone, so it never pairs declarations that take a context.
+fn declared_contextless_properties(
+    source: &dyn crate::symbol_source::SymbolSource,
+    owner: Ty,
+    name: &str,
+) -> Vec<PropertyInfo> {
+    declared_properties(source, owner, name, false)
+        .into_iter()
+        .filter(|property| property.context_count == 0)
         .collect()
 }
 
@@ -389,9 +399,16 @@ pub(super) fn dependency_declaration_signature(
     source: &dyn SymbolSource,
     identity: crate::fir::ExternalCallableId,
 ) -> (Box<[Ty]>, Ty) {
-    let realization = source
-        .external_callable(identity)
-        .expect("the provider that assigned a dependency identity answers for it");
+    realized_dependency_declaration_signature(source, identity)
+        .expect("the provider that assigned a dependency identity answers for it")
+}
+
+/// [`dependency_declaration_signature`], or `None` when the provider cannot realize `identity`.
+fn realized_dependency_declaration_signature(
+    source: &dyn SymbolSource,
+    identity: crate::fir::ExternalCallableId,
+) -> Option<(Box<[Ty]>, Ty)> {
+    let realization = source.external_callable(identity)?;
     let callable = &realization.callable;
     let parameters = callable
         .declared_params
@@ -410,7 +427,7 @@ pub(super) fn dependency_declaration_signature(
         .declared_ret
         .or_else(|| callable.generic_sig.as_ref().map(|signature| signature.ret))
         .unwrap_or(callable.ret);
-    (parameters, result)
+    Some((parameters, result))
 }
 
 /// The overridden declaration's own parameters and result, before any substitution. A backend
@@ -420,22 +437,33 @@ fn overridden_declaration_signature(
     declared: &FunctionInfo,
     overridden: ResolvedFunctionOverrideTarget,
 ) -> (Box<[ResolvedTy]>, ResolvedTy) {
+    realized_overridden_declaration_signature(source, declared, overridden)
+        .expect("the provider that assigned a dependency identity answers for it")
+}
+
+/// [`overridden_declaration_signature`], or `None` for a dependency declaration its provider
+/// cannot realize.
+fn realized_overridden_declaration_signature(
+    source: &dyn SymbolSource,
+    declared: &FunctionInfo,
+    overridden: ResolvedFunctionOverrideTarget,
+) -> Option<(Box<[ResolvedTy]>, ResolvedTy)> {
     let (parameters, result) = match overridden {
         ResolvedFunctionOverrideTarget::Module(_) => (
             declaration_parameters_with_receiver(declared).into_boxed_slice(),
             declared.ret.apply(declared.callable.ret),
         ),
         ResolvedFunctionOverrideTarget::External(identity) => {
-            dependency_declaration_signature(source, identity)
+            realized_dependency_declaration_signature(source, identity)?
         }
     };
-    (
+    Some((
         resolved_types(
             parameters.iter().copied(),
             "overridden function declaration parameters",
         ),
         resolved_ty(result, "overridden function result"),
-    )
+    ))
 }
 
 fn applied_parameters_with_receiver(function: &crate::libraries::FunctionInfo) -> Vec<Ty> {
@@ -612,19 +640,14 @@ fn publish_inherited_interface_function_plans(
                                 .is_some_and(|target| target != overridden)
                     })
                     .filter(|candidate| {
-                        let parameters = applied_parameters_with_receiver(candidate);
-                        parameters.len() == applied_parameters.len()
-                            && parameters.iter().zip(applied_parameters.iter()).all(
-                                |(&implementation, &base)| equivalent(source, implementation, base),
-                            )
-                            && crate::symbol_resolver::resolution_subtype(
-                                source,
-                                candidate
-                                    .ret
-                                    .apply(candidate.callable.ret)
-                                    .canonical_semantic(),
-                                applied_result,
-                            )
+                        // One override slot with a refining result, by the shared rules: a
+                        // generic member such as `CoroutineContext.Element.fold` overrides
+                        // `CoroutineContext.fold` under its own type parameters.
+                        crate::symbol_resolver::function_override_input_slots_match(
+                            source, &applied, candidate,
+                        ) && crate::symbol_resolver::function_result_refines(
+                            source, candidate, &applied,
+                        )
                     })
                     .cloned()
                     .collect::<Vec<_>>();
@@ -729,10 +752,10 @@ fn publish_inherited_interface_property_plans(
         };
         for name in &interface.declared_callable_order {
             let raw = declarations_by_target(
-                declared_properties(source, Ty::obj_name(supertype.classifier), name, false),
+                declared_contextless_properties(source, Ty::obj_name(supertype.classifier), name),
                 |property| target(index, property),
             );
-            for applied in declared_properties(source, supertype.applied.get(), name, false) {
+            for applied in declared_contextless_properties(source, supertype.applied.get(), name) {
                 let Some(overridden) = target(index, &applied) else {
                     continue;
                 };
@@ -782,7 +805,11 @@ fn publish_inherited_interface_property_plans(
                     continue;
                 };
                 let implementation_declarations = declarations_by_target(
-                    declared_properties(source, Ty::obj_name(implementation.owner), name, false),
+                    declared_contextless_properties(
+                        source,
+                        Ty::obj_name(implementation.owner),
+                        name,
+                    ),
                     |property| target(index, property),
                 );
                 let Some(implementation_declared) =
@@ -1114,6 +1141,58 @@ struct OverridingFunction {
 }
 
 impl OverridingFunction {
+    /// Its inputs without the extension receiver, which override matching compares on its own.
+    fn inputs(&self) -> Vec<Ty> {
+        let mut inputs = self.parameters.to_vec();
+        if self.receiver.is_some() {
+            assert!(
+                self.context_count < inputs.len(),
+                "an extension override must retain its declared receiver parameter"
+            );
+            inputs.remove(self.context_count);
+        }
+        inputs
+    }
+
+    /// Whether this declaration's inputs (`inputs`, from [`Self::inputs`]) override `applied`'s.
+    fn overrides_inputs_of(
+        &self,
+        source: &dyn SymbolSource,
+        inputs: &[Ty],
+        applied: &FunctionInfo,
+    ) -> bool {
+        let applied_inputs = applied.semantic_params();
+        let applied_formals = applied
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.formals.as_slice())
+            .unwrap_or_default();
+        let applied_bounds = applied
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.formal_bounds.as_slice())
+            .unwrap_or_default();
+        let applied_shape = crate::symbol_resolver::OverrideInputShape {
+            params: &applied_inputs,
+            receiver: applied
+                .semantic_receiver()
+                .filter(|_| applied.is_extension()),
+            formals: applied_formals,
+            formal_bounds: applied_bounds,
+            context_count: applied.context_count,
+            suspend: applied.flags.suspend,
+        };
+        let own_shape = crate::symbol_resolver::OverrideInputShape {
+            params: inputs,
+            receiver: self.receiver,
+            formals: &self.formals,
+            formal_bounds: &self.formal_bounds,
+            context_count: self.context_count,
+            suspend: self.suspend,
+        };
+        crate::symbol_resolver::override_input_shapes_match(source, applied_shape, own_shape)
+    }
+
     fn of(
         index: &ResolvedModuleIndex,
         declaration: crate::fir::DeclarationId,
@@ -1158,14 +1237,7 @@ fn append_function_override_edges(
 ) {
     let mut seen = HashSet::default();
     let first = overrides.len();
-    let mut implementation_inputs = implementation.parameters.to_vec();
-    if implementation.receiver.is_some() {
-        assert!(
-            implementation.context_count < implementation_inputs.len(),
-            "an extension override must retain its declared receiver parameter"
-        );
-        implementation_inputs.remove(implementation.context_count);
-    }
+    let implementation_inputs = implementation.inputs();
     for supertype in hierarchy.iter().filter(|entry| entry.depth != 0) {
         let overridden_is_interface = source
             .classifier(supertype.classifier)
@@ -1182,48 +1254,24 @@ fn append_function_override_edges(
                 continue;
             };
             let applied_parameters = applied_parameters_with_receiver(&applied);
-            let applied_inputs = applied.semantic_params();
             let applied_formals = applied
                 .generic_sig
                 .as_ref()
                 .map(|signature| signature.formals.as_slice())
                 .unwrap_or_default();
-            let applied_bounds = applied
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.formal_bounds.as_slice())
-                .unwrap_or_default();
-            if !crate::symbol_resolver::override_input_shapes_match(
-                source,
-                crate::symbol_resolver::OverrideInputShape {
-                    params: &applied_inputs,
-                    receiver: applied
-                        .semantic_receiver()
-                        .filter(|_| applied.is_extension()),
-                    formals: applied_formals,
-                    formal_bounds: applied_bounds,
-                    context_count: applied.context_count,
-                    suspend: applied.flags.suspend,
-                },
-                crate::symbol_resolver::OverrideInputShape {
-                    params: &implementation_inputs,
-                    receiver: implementation.receiver,
-                    formals: &implementation.formals,
-                    formal_bounds: &implementation.formal_bounds,
-                    context_count: implementation.context_count,
-                    suspend: implementation.suspend,
-                },
-            ) || !crate::symbol_resolver::resolution_subtype(
-                source,
-                crate::types::ty_canonicalize_params(
-                    implementation.result,
-                    &implementation.formals,
-                ),
-                crate::types::ty_canonicalize_params(
-                    applied.ret.apply(applied.callable.ret).canonical_semantic(),
-                    applied_formals,
-                ),
-            ) || !seen.insert(overridden)
+            if !implementation.overrides_inputs_of(source, &implementation_inputs, &applied)
+                || !crate::symbol_resolver::resolution_subtype(
+                    source,
+                    crate::types::ty_canonicalize_params(
+                        implementation.result,
+                        &implementation.formals,
+                    ),
+                    crate::types::ty_canonicalize_params(
+                        applied.ret.apply(applied.callable.ret).canonical_semantic(),
+                        applied_formals,
+                    ),
+                )
+                || !seen.insert(overridden)
             {
                 continue;
             }
@@ -1321,42 +1369,60 @@ fn with_function_supertypes(
     extended
 }
 
+/// The classifier's function override edges, and the function names that keep more than one
+/// member slot (see [`member_slots`]).
 fn function_override_plans(
     index: &ResolvedModuleIndex,
     source: &dyn SymbolSource,
     class: &super::ClassSig,
     hierarchy: &[crate::fir::ResolvedAppliedClassifier],
-) -> Vec<ResolvedFunctionOverride> {
+) -> (
+    Vec<ResolvedFunctionOverride>,
+    Vec<crate::fir::ResolvedFunctionSlotFamily>,
+) {
     let mut overrides = Vec::new();
-    let mut append_implementation = |name: &str, implementation: &super::Signature| {
-        if !implementation.is_override() {
+    let mut declared = Vec::<(String, Vec<OverridingFunction>)>::new();
+    let mut append_declaration = |name: &str, signature: &super::Signature| {
+        let Some(declaration) = signature.stable_declaration else {
+            return;
+        };
+        if index
+            .declaration_header(declaration)
+            .is_some_and(|header| header.visibility == Visibility::Private)
+        {
             return;
         }
-        let Some(declaration) = implementation.stable_declaration else {
+        let Some(callable) = index.callable_for_declaration(declaration) else {
             return;
         };
-        let Some(implementation_callable) = index.callable_for_declaration(declaration) else {
+        let Some(resolved_signature) = index.signature(declaration) else {
             return;
         };
-        let Some(implementation_signature) = index.signature(declaration) else {
-            return;
-        };
-        let implementation = OverridingFunction::of(
+        let function = OverridingFunction::of(
             index,
             declaration,
-            &implementation_callable,
-            implementation_signature,
-            implementation.is_suspend(),
+            &callable,
+            resolved_signature,
+            signature.is_suspend(),
         );
-        append_function_override_edges(
-            index,
-            source,
-            class.internal_name(),
-            name,
-            &implementation,
-            hierarchy,
-            &mut overrides,
-        );
+        if signature.is_override() {
+            append_function_override_edges(
+                index,
+                source,
+                class.internal_name(),
+                name,
+                &function,
+                hierarchy,
+                &mut overrides,
+            );
+        }
+        match declared
+            .iter_mut()
+            .find(|(declared_name, _)| declared_name == name)
+        {
+            Some((_, functions)) => functions.push(function),
+            None => declared.push((name.to_owned(), vec![function])),
+        }
     };
     // Declaration order, not map order: the plans become bridge methods, and their order is
     // part of the emitted class.
@@ -1365,10 +1431,10 @@ fn function_override_plans(
         class.methods.keys().chain(class.member_ext_funs.keys()),
     ) {
         for implementation in class.methods.get(name).into_iter().flatten() {
-            append_implementation(name, implementation);
+            append_declaration(name, implementation);
         }
         for implementation in class.member_ext_funs.get(name).into_iter().flatten() {
-            append_implementation(name, implementation.signature());
+            append_declaration(name, implementation.signature());
         }
     }
     publish_inherited_interface_function_plans(
@@ -1379,7 +1445,26 @@ fn function_override_plans(
         &mut overrides,
     );
     overrides.sort_by_key(|edge| edge.depth);
-    overrides
+    let declared = declared
+        .iter()
+        .map(|(name, functions)| {
+            (
+                name.clone(),
+                functions
+                    .iter()
+                    .map(|implementation| member_slots::DeclaredFunction { implementation })
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let families = member_slots::function_slot_families(
+        index,
+        source,
+        class.internal_name(),
+        &declared,
+        hierarchy,
+    );
+    (overrides, families)
 }
 
 /// Enum-entry bodies are anonymous subclasses semantically owned by the entry declaration rather
@@ -1969,6 +2054,7 @@ fn publish_inherited_function_defaults(
 }
 
 pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mut SymbolTable) {
+    let mut slot_families = Vec::new();
     let (plans, preorders, inherited_defaults, dependency_superclasses) = {
         let module = ModuleSymbols::new(table);
         let source =
@@ -1997,10 +2083,13 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mu
                         &source,
                         index.classifier_hierarchy(classifier).unwrap_or_default(),
                     );
+                    let (functions, families) =
+                        function_override_plans(index, &source, class, &hierarchy);
+                    slot_families.push((classifier, families));
                     (
                         classifier,
                         property_override_plans(index, &source, class, &hierarchy),
-                        function_override_plans(index, &source, class, &hierarchy),
+                        functions,
                     )
                 })
                 .chain(enum_entry_override_plans(index, &source))
@@ -2050,6 +2139,9 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mu
     publish_inherited_function_defaults(index, &preorders, &function_edges);
     for (classifier, defaults) in inherited_defaults {
         index.publish_inherited_defaults(classifier, defaults);
+    }
+    for (classifier, families) in slot_families {
+        index.publish_function_slot_families(classifier, families);
     }
     let inherited = publish_inherited_statuses(index, &plans);
     publish_inherited_visibilities_to_symbols(table, &inherited);

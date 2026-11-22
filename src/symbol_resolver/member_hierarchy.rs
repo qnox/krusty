@@ -3,6 +3,8 @@
 mod applied_formal_bounds;
 mod bound_inner_aliases;
 mod bound_inner_constructors;
+mod java_accessor_overrides;
+mod receiver_parameter_overrides;
 mod result_enhancement;
 
 pub(crate) use bound_inner_aliases::{
@@ -161,11 +163,55 @@ pub(crate) fn function_override_input_slots_match(
 ) -> bool {
     inherited.kind == implementation.kind
         && (function_input_shapes_match(source, inherited, implementation)
+            || overrides_through_declared_inputs(source, inherited, implementation)
             || inherited
                 .provider_override_slot
                 .as_ref()
                 .zip(implementation.provider_override_slot.as_ref())
                 .is_some_and(|(inherited, implementation)| inherited.same_key(implementation)))
+        || receiver_parameter_overrides::function_receiver_parameter_slots_match(
+            source,
+            inherited,
+            implementation,
+        )
+}
+
+/// Whether `implementation` overrides `inherited` through its own override inputs
+/// ([`FunctionInfo::override_inputs`]). Only the overriding side's language decides how it
+/// matches, so the inherited declaration is compared by its ordinary inputs: a classifier slot
+/// matches an inherited input of that classifier, and every other input compares as usual.
+fn overrides_through_declared_inputs(
+    source: &dyn SymbolSource,
+    inherited: &FunctionInfo,
+    implementation: &FunctionInfo,
+) -> bool {
+    let Some(slots) = implementation.override_inputs.as_deref() else {
+        return false;
+    };
+    let inherited_params = inherited.semantic_params();
+    let implementation_params = implementation.semantic_params();
+    if inherited.kind != implementation.kind
+        || slots.len() != implementation_params.len()
+        || inherited_params.len() != implementation_params.len()
+    {
+        return false;
+    }
+    // The classifier slots are compared here; the remaining shape, other inputs included,
+    // compares as usual with each matched input replaced by the inherited one.
+    let mut aligned = implementation_params.into_owned();
+    for (index, slot) in slots.iter().enumerate() {
+        if let Some(classifier) = slot {
+            if inherited_params[index].nominal_classifier() != Some(*classifier) {
+                return false;
+            }
+            aligned[index] = inherited_params[index];
+        }
+    }
+    override_input_shapes_match(
+        source,
+        function_override_input_shape(inherited, &inherited_params),
+        function_override_input_shape(implementation, &aligned),
+    )
 }
 
 /// A declaration overrides only one whose type parameters carry the same upper bounds, compared
@@ -662,14 +708,16 @@ fn members_in_hierarchy_for(
     name: &str,
     view: HierarchyMemberView,
 ) -> Callables {
-    // A function type carries its callable shape directly in `FnSig`; it is not named by deriving a
-    // `FunctionN` classifier from the parameter count. For ordinary member lookup its declared
-    // classifier is the arity-independent `Function<R>`, whose hierarchy supplies `Any` members.
-    // `invoke` remains a member of the `FnSig` itself and is handled by the caller from that signature.
+    // A function type is an instance of its function classifier (`(A) -> R` is `Function1<A, R>`,
+    // `suspend A.() -> R` is `SuspendFunction1<A, R>`), so its member scope is that classifier's:
+    // the operator `invoke` it declares, then `Function<R>` and `Any`. kotlinc resolves an
+    // implicit-receiver `invoke(a)` inside `fun ((A) -> R).f()` through this scope.
     let intersection_parts =
         super::hierarchy_projection::intersection_components(receiver.non_null());
     let receiver = match receiver.non_null().kind() {
-        TyKind::Fun(signature) => Ty::obj_args("kotlin/Function", &[signature.ret]),
+        TyKind::Fun(_) => {
+            crate::libraries::function_classifiers::supertype_classifier(receiver.non_null())
+        }
         TyKind::Unit => Ty::obj("kotlin/Unit"),
         TyKind::Nothing => Ty::obj("kotlin/Nothing"),
         _ => receiver,
@@ -697,6 +745,14 @@ fn members_in_hierarchy_for(
         };
         let (mut current_functions, mut current_properties) =
             declared_callables(source, &classifier, current, name).into_parts();
+        current_functions.overloads.retain(|function| {
+            !java_accessor_overrides::overrides_kotlin_property_accessor(
+                source,
+                &classifier,
+                current,
+                function,
+            )
+        });
         if view == HierarchyMemberView::Declarations {
             // A member extension is absent from ordinary dispatch lookup: it has an implicit
             // dispatch receiver and a separate extension receiver, so `host.ext()` must not make
@@ -921,10 +977,27 @@ pub(crate) fn function_result_refines(
     implementation: &FunctionInfo,
     inherited: &FunctionInfo,
 ) -> bool {
+    checked_function_result_refines(
+        source,
+        (
+            implementation,
+            implementation.ret.apply(implementation.callable.ret),
+        ),
+        (inherited, inherited.ret.apply(inherited.callable.ret)),
+    )
+}
+
+/// [`function_result_refines`] over the results each side supplies: a checked body's result
+/// rather than its published header, and an inherited result as its call site publishes it.
+pub(crate) fn checked_function_result_refines(
+    source: &dyn SymbolSource,
+    (implementation, result): (&FunctionInfo, Ty),
+    (inherited, inherited_result): (&FunctionInfo, Ty),
+) -> bool {
     resolution_subtype(
         source,
-        normalized_function_result(implementation),
-        normalized_function_result(inherited),
+        normalized_function_result(implementation, result),
+        normalized_function_result(inherited, inherited_result),
     )
 }
 
@@ -932,8 +1005,7 @@ pub(crate) fn function_result_refines(
 /// Override input matching has already established that the declarations have the same generic
 /// shape; result covariance must therefore compare their variables by ordinal, not by source or
 /// metadata spelling (`fun <T> f(): T` and `fun <U> f(): U` are the same contract).
-fn normalized_function_result(function: &FunctionInfo) -> Ty {
-    let result = function.ret.apply(function.callable.ret);
+fn normalized_function_result(function: &FunctionInfo, result: Ty) -> Ty {
     let Some(signature) = function.generic_sig.as_ref() else {
         return result;
     };
@@ -1624,7 +1696,22 @@ fn retain_covariant_inherited_overrides(
                 candidate_is_shadowed = true;
                 break;
             }
-            if !function_input_shapes_match(source, existing, &candidate) {
+            // Override inputs relate a declaration only to one its owner inherits; the shared rank
+            // and owner rules below then let it shadow that declaration.
+            let declared_input_override =
+                |inherited: &FunctionInfo, implementation: &FunctionInfo| {
+                    implementation.callable.owner != inherited.callable.owner
+                        && resolution_subtype(
+                            source,
+                            Ty::obj_name(implementation.callable.owner),
+                            Ty::obj_name(inherited.callable.owner),
+                        )
+                        && overrides_through_declared_inputs(source, inherited, implementation)
+                };
+            if !(function_input_shapes_match(source, existing, &candidate)
+                || declared_input_override(existing, &candidate)
+                || declared_input_override(&candidate, existing))
+            {
                 continue;
             }
             let candidate_is_subtype = candidate_result_refines_existing;
@@ -1966,6 +2053,55 @@ mod tests {
         assert!(function_input_shapes_match(&source, &member, &member));
         assert!(!function_input_shapes_match(&source, &member, &top_level));
         assert!(!function_input_shapes_match(&source, &top_level, &member));
+    }
+
+    #[test]
+    fn declared_override_inputs_match_the_inherited_classifier_in_one_direction() {
+        let source = crate::libraries::EmptySymbolSource;
+        let kotlin = crate::types::type_name("kotlin/concurrent/atomics/AtomicReference");
+        let inherited = member(
+            "sample/KotlinBase",
+            1,
+            vec![Ty::obj_args_name(kotlin, &[Ty::Int])],
+            None,
+        );
+        let raw = Ty::platform_nullable(Ty::obj_args(
+            "java/util/concurrent/atomic/AtomicReference",
+            &[Ty::raw_projection(Ty::platform_nullable(Ty::obj(
+                "kotlin/Any",
+            )))],
+        ));
+        let mut implementation = member("sample/JavaDerived", 0, vec![raw], None);
+        assert!(!function_override_input_slots_match(
+            &source,
+            &inherited,
+            &implementation,
+        ));
+
+        implementation.override_inputs = Some(vec![Some(kotlin)].into_boxed_slice());
+        assert!(function_override_input_slots_match(
+            &source,
+            &inherited,
+            &implementation,
+        ));
+        // The inherited side never matches through its own override inputs.
+        assert!(!function_override_input_slots_match(
+            &source,
+            &implementation,
+            &inherited,
+        ));
+
+        implementation.override_inputs = Some(
+            vec![Some(crate::types::type_name(
+                "kotlin/concurrent/atomics/AtomicInt",
+            ))]
+            .into_boxed_slice(),
+        );
+        assert!(!function_override_input_slots_match(
+            &source,
+            &inherited,
+            &implementation,
+        ));
     }
 
     #[test]

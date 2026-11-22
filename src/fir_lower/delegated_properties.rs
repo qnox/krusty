@@ -700,6 +700,8 @@ pub(super) fn materialize_member_extension_delegate(
             source_order: declaration.source_order,
             receiver: extension_receiver,
             ty: property.ty,
+            // A delegated member extension with context parameters is rejected above.
+            context_params: Vec::new(),
             is_var: property.flags.has(DeclarationFlags::MUTABLE),
             is_abstract: false,
             modifiers: super::properties::member_property_modifiers(property.flags, false),
@@ -1135,6 +1137,9 @@ pub(super) fn delegated_call_with_dispatch(
                 dispatch_receiver: Some(dispatch_receiver),
                 args: arguments,
             });
+            // The convention call is checked at the selected call-site result, as an ordinary
+            // checked call is.
+            ir.set_logical_type_if_absent(expression, result.get());
             if let Some(declared_receiver) = declared_receiver {
                 ir.ext_call_source_receiver
                     .insert(expression, declared_receiver.get());

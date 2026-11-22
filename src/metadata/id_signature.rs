@@ -12,7 +12,8 @@ mod mangling;
 mod metadata_declarations;
 
 pub use mangling::{
-    accessor_signature, callable_signature, class_signature, enum_entry_signature,
+    accessor_mangled, accessor_signature, callable_mangled, callable_signature, class_signature,
+    enclosing_callable_mangled, enum_entry_signature, mangled_id, property_mangled,
     property_signature, Accessor, CallableShape, ClassScope, DeclarationContainer, ManglingError,
     Placement, PropertyShape, SignatureType, TypeParameterShape, TypeView,
 };
@@ -37,6 +38,14 @@ impl KlibNamePath {
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
     }
+}
+
+/// The package and declaration paths of a public signature, without its member id and mask: the
+/// key under which a class is found from a member it declares.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct KlibDeclarationPath {
+    package: KlibNamePath,
+    declaration: KlibNamePath,
 }
 
 /// Kotlin's public `CommonIdSignature`, before any provider or target representation.
@@ -106,13 +115,24 @@ impl KlibPublicIdSignature {
         })
     }
 
-    /// Whether `class` names the class that declares this member.
-    pub(crate) fn is_member_of(&self, class: &Self) -> bool {
-        let segments = self.declaration.segments();
-        self.package == class.package
-            && segments
-                .split_last()
-                .is_some_and(|(_, owner)| owner == class.declaration.segments())
+    /// The package and declaration paths of this signature, without its member id and mask.
+    pub(crate) fn declaration_path(&self) -> KlibDeclarationPath {
+        KlibDeclarationPath {
+            package: self.package.clone(),
+            declaration: self.declaration.clone(),
+        }
+    }
+
+    /// The paths of the class that declares this member: its package, and its declaration path
+    /// without the last segment. `None` for an empty declaration path.
+    pub(crate) fn owner_path(&self) -> Option<KlibDeclarationPath> {
+        let (_, owner) = self.declaration.segments.split_last()?;
+        Some(KlibDeclarationPath {
+            package: self.package.clone(),
+            declaration: KlibNamePath {
+                segments: owner.into(),
+            },
+        })
     }
 
     /// Public class identity for an already-resolved classifier.

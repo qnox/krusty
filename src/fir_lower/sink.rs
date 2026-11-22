@@ -895,6 +895,11 @@ impl<'a> CommonIrBodySink<'a> {
                     .is_none(),
                 "a source classifier may publish property override edges once"
             );
+            if let Some(families) = index.function_slot_families(declaration) {
+                self.ir
+                    .function_slot_families
+                    .insert(classifier_identity, families.to_vec());
+            }
             let function_overrides = lower_function_override_plans(index, declaration);
             assert!(
                 self.ir
@@ -1128,12 +1133,16 @@ impl<'a> CommonIrBodySink<'a> {
                     .insert(
                         class,
                         crate::ir::IrLocalClassNameProvenance {
-                            source: crate::ir::IrModuleSource {
-                                source: provenance.source,
-                                package: index.source_package(provenance.source).ok_or(
-                                    FirFileLoweringFailure::MissingSourcePackage(provenance.source),
-                                )?,
-                            },
+                            source: crate::ir::IrLocalClassNameRoot::Source(
+                                crate::ir::IrModuleSource {
+                                    source: provenance.source,
+                                    package: index.source_package(provenance.source).ok_or(
+                                        FirFileLoweringFailure::MissingSourcePackage(
+                                            provenance.source,
+                                        ),
+                                    )?,
+                                },
+                            ),
                             lexical_owner,
                             segments: provenance.segments,
                             ordinal: provenance.ordinal,

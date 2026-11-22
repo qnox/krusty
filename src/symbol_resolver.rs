@@ -34,7 +34,9 @@ mod extension_specialization;
 mod generic_inference;
 pub(crate) use generic_inference::{reified_runtime_type, ReifiedDeclarations};
 mod builtin_overrides;
-pub(crate) use builtin_overrides::builtin_implementation_facts;
+pub(crate) use builtin_overrides::{
+    builtin_implementation_facts, represented_implementation_facts,
+};
 mod hierarchy_projection;
 mod indexed_convention_selection;
 mod lambda_call_shape;
@@ -71,7 +73,8 @@ mod top_level_selection;
 use argument_compatibility::arg_fits;
 use argument_compatibility::{arg_fits_platform, arg_fits_source, untyped_lambda_pertinent};
 pub(crate) use argument_compatibility::{
-    function_input_types, resolution_subtype, sam_arg_matches, sam_return_matches,
+    function_input_types, resolution_subtype, sam_arg_matches, sam_parameters_admit,
+    sam_return_matches,
 };
 pub(crate) use call_argument::{
     expected_result_keeps_call_evidence, CallArgKind, ProvisionalResult,
@@ -90,23 +93,20 @@ pub(crate) use generic_inference::*;
 pub(crate) use hierarchy_projection::{
     applied_hierarchy, apply_subtype_arguments_from_supertype, classifier_bindings,
     classifier_companion_instance, classifier_value_receiver, direct_supertypes,
-    inherited_classifier_shape, member_scope_receiver, supports_member_lookup, with_implicit_any,
+    inherited_classifier_shape, member_scope_receiver, supports_member_lookup,
     ClassifierCompanionInstance, SupertypeProjectionCache,
 };
-use hierarchy_projection::{
-    classifier_type_parameter_bounds, projected_supertypes, receiver_hierarchy,
-    supertype_with_classifier,
-};
+use hierarchy_projection::{projected_supertypes, receiver_hierarchy, supertype_with_classifier};
 pub use lambda_call_shape::LambdaCallShape;
 pub(crate) use member_hierarchy::{
     apply_inner_alias_outer_in_source, apply_inner_classifier_outer_in_source,
     bound_inner_classifier_in_source, bound_inner_constructor_candidates,
-    declared_member_callables, declared_member_declarations, function_declaration_identity,
-    function_input_shapes_match, function_override_input_slots_match, function_result_refines,
-    imported_object_member_symbols, inherited_nested_classifier_name,
-    inherits_nested_classifiers_through, lexical_enclosing_classifier_names,
-    member_declarations_in_hierarchy, member_is_inheritable, members_in_hierarchy,
-    nested_classifier_supertypes, normalize_inherited_member_functions,
+    checked_function_result_refines, declared_member_callables, declared_member_declarations,
+    function_declaration_identity, function_input_shapes_match,
+    function_override_input_slots_match, function_result_refines, imported_object_member_symbols,
+    inherited_nested_classifier_name, inherits_nested_classifiers_through,
+    lexical_enclosing_classifier_names, member_declarations_in_hierarchy, member_is_inheritable,
+    members_in_hierarchy, nested_classifier_supertypes, normalize_inherited_member_functions,
     override_input_shapes_match, override_parameter_types_match, property_declaration_identity,
     specialize_member_function, supertype_preorder, BoundInnerConstructorContext,
     InheritedNestedClassifier, InnerAliasOuterApplication, OverrideInputShape,
@@ -146,7 +146,7 @@ pub(crate) use resolved_symbol::ErrorReceiverSelection;
 pub use resolved_symbol::{
     AmbiguousExtensionProperty, MemberFacets, ResolvedPropertySetter, SymRecv, Symbol,
 };
-pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
+pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamMethodFrame, SamSignature};
 use scope_level_callables::{
     callables_from_symbols, fn_in_scope, level_functions, level_properties,
     symbol_levels_in_function_scope, symbols_in_function_scope,

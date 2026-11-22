@@ -362,6 +362,7 @@ impl BodyLowering<'_> {
                 },
                 extension_receiver: None,
                 arguments: &[],
+                substitutions: &[],
                 write: false,
             })
             .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))?;
@@ -641,6 +642,7 @@ impl BodyLowering<'_> {
                         argument.receiver.value,
                         argument.receiver.conversion,
                     )?,
+                    context: Default::default(),
                 })
             })
             .collect::<Result<Vec<_>, FirLoweringFailure>>()?;

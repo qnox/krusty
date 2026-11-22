@@ -12,6 +12,7 @@ mod call_sig;
 mod callable_scope_rung;
 mod class_identity;
 mod class_name_property;
+mod classifier_application;
 mod classifier_callables;
 mod classifier_declaration;
 mod classifier_kind;
@@ -44,6 +45,7 @@ mod property_producer;
 mod provider_override;
 mod result_nullability;
 mod runtime_exception;
+mod sam_application;
 mod scalar_instruction;
 mod singleton_dispatch;
 mod source_inputs;
@@ -65,6 +67,9 @@ pub use call_realization::{
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub use class_identity::KlibClassIdentity;
+pub(crate) use classifier_application::{
+    application_arguments_with_star_bounds, classifier_bindings, classifier_type_parameter_bounds,
+};
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
     ConstructorCallConstraints,
@@ -103,6 +108,7 @@ pub use property_producer::PropertyProducer;
 pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
 pub use runtime_exception::{RuntimeExceptionKind, RuntimeExceptionLayout};
+pub(crate) use sam_application::{sam_application_bindings, sam_substitute};
 pub use singleton_dispatch::SingletonDispatch;
 pub(crate) use source_inputs::{ReceiverInputBounds, SourceInputDeclaration};
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
@@ -932,6 +938,21 @@ pub enum Origin {
 
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
+/// The properties whose getter or setter a platform method is named as: a Java `getA()` is the
+/// getter of `a`, and `setOpen(v)` the setter of `open` or `isOpen`. Each candidate names the
+/// methods that would be the same property's other accessor (`setA` for `getA`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PropertyAccessorRole {
+    pub candidates: Box<[PropertyAccessorCandidate]>,
+    pub setter: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PropertyAccessorCandidate {
+    pub property: String,
+    pub counterparts: Box<[String]>,
+}
+
 #[derive(Clone, Debug)]
 pub struct LibraryCallable {
     /// Stable provider-owned declaration identity. Current-module declarations use FIR's
@@ -968,6 +989,10 @@ pub struct LibraryCallable {
     /// Exact language-level role of this declaration, when target realization needs more than its
     /// stable callable identity. Providers assign it at the declaration boundary.
     pub semantic_role: Option<SemanticCallRole>,
+    /// The property accessor a Java method is, when it overrides an inherited Kotlin property's
+    /// accessor. The Java provider derives the candidate properties from the method's platform
+    /// spelling; the hierarchy confirms one with a Kotlin property declaration.
+    pub property_accessor_role: Option<Box<PropertyAccessorRole>>,
     /// Exact identities of the declarations this callable overrides, as the core member hierarchy
     /// proved them while normalizing the selected family; empty for a declaration that overrides
     /// nothing or was not reached through a hierarchy walk.
@@ -1032,6 +1057,11 @@ pub struct LibraryCallable {
     /// default to such a declaration keeps the declaration's identity, with
     /// [`Self::default_call`] set; no platform `$default` symbol is named.
     pub defaults_from_declaration: bool,
+    /// [`Self::defaults_from_declaration`] holds because the declaration's compiled entry takes
+    /// the mask of omitted arguments after these synthetic parameters, which a compiler plugin's
+    /// transformation appended. The provider only reports the tail; whether it is a calling
+    /// convention the call can pass is for an enabled plugin to authenticate.
+    pub transformed_entry_tail: Option<Box<[Ty]>>,
     /// For a generic `vararg` callable resolved with a bound element type (`listOf<Long>(…)` →
     /// `Long`): the *logical* element type the trailing arguments adapt to. `None` for a non-vararg
     /// call or when the element type is not recovered. The backend uses it to coerce each packed
@@ -1180,6 +1210,10 @@ pub struct CallSig {
     /// argument is checked for applicability after inference but contributes no type-variable
     /// constraint itself.
     pub no_infer_params: ParamFlags,
+    /// Per logical parameter: the declared type carries the Compose runtime's `@Composable` type
+    /// annotation, so a function value passed for it is compiled with the composer and `$changed`
+    /// parameters after its own.
+    pub composable_params: ParamFlags,
     /// Per logical parameter, the resolved declaration carries
     /// `kotlin.internal.ImplicitIntegerCoercion`.
     pub implicit_integer_coercion: ParamFlags,
@@ -1410,6 +1444,18 @@ pub struct FunctionInfo {
     /// Provider-owned override-slot identity for declarations whose platform compatibility differs
     /// from their source-language signature. This is distinct from the physical emit handle.
     pub(crate) provider_override_slot: Option<ProviderOverrideSlot>,
+    /// How this declaration's declaring language matches its inputs against an inherited
+    /// declaration's, when that differs from how calls see them. Parallel to
+    /// [`Self::semantic_params`]: a `Some` slot matches an inherited input of exactly that
+    /// classifier, whatever its arguments, as kotlinc's Java override checker matches a raw Java
+    /// `AtomicReference` with a Kotlin `AtomicReference<Int>` by their JVM erasure while callers
+    /// still pass a Java `AtomicReference`; a `None` slot compares as usual. The relation is
+    /// one-directional, so an inherited declaration is always compared by its own inputs.
+    pub(crate) override_inputs: Option<Box<[Option<TypeName>]>>,
+    /// The declaring language has no extension receivers (Java), so its provider publishes that
+    /// this member overrides an inherited Kotlin extension by taking the receiver as its first
+    /// parameter, as kotlinc's Java override checker matches them.
+    pub(crate) receiver_as_first_parameter: bool,
     /// Provider-normalized receiver-less declaration in a classifier's static namespace. The
     /// checker uses this only as source call shape; target realization remains on the callable.
     pub classifier_static: bool,
@@ -1694,6 +1740,8 @@ impl FunctionInfo {
             kind,
             source_inputs: None,
             provider_override_slot: None,
+            override_inputs: None,
+            receiver_as_first_parameter: false,
             classifier_static: false,
             associated_classifier: None,
             associated_access_owner: None,

@@ -331,11 +331,8 @@ module=6:stdlib public package=2[6:kotlin,4:test] declaration=2[8:Asserter,4:fai
 module=6:stdlib public package=2[6:kotlin,4:test] declaration=2[8:Asserter,4:fail] member=13268130985060033788 mask=0
 module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[12:insertString] member=1389012328624175106 mask=0
 module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[12:isISOControl] member=17943489282247053696 mask=0
-module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[13:nativeIndexOf] member=14534778597091083938 mask=0
-module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[13:nativeIndexOf] member=9700176685769910949 mask=0
 module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[14:isLowSurrogate] member=15076346129281003515 mask=0
 module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[15:isHighSurrogate] member=15892398635006204515 mask=0
-module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[17:nativeLastIndexOf] member=14231526681661509617 mask=0
 module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[18:unsafeStringToUtf8] member=17803051194081785767 mask=0
 module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[20:unsafeStringFromUtf8] member=1359884695299616606 mask=0
 module=6:stdlib public package=2[6:kotlin,4:text] declaration=1[25:unsafeStringFromCharArray] member=6386906829983007785 mask=0
@@ -577,7 +574,6 @@ module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:areEqualByValue] member=8476308219019816433 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:areEqualByValue] member=9443869086972263395 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:getCachedIntBox] member=9598583355232989955 mask=0
-module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:getContinuation] member=6918879350330610397 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:inShortBoxCache] member=6369144594771394578 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:theUnitInstance] member=15148086710644393628 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[16:getCachedByteBox] member=12202733112688559858 mask=0
@@ -588,7 +584,6 @@ module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[17:
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[17:getCachedShortBox] member=2872579118843620482 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[17:getObjectTypeInfo] member=3388451657710486421 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[17:inBooleanBoxCache] member=7486213173591177440 mask=0
-module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[17:returnIfSuspended] member=3677002785642516673 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[18:saveCoroutineState] member=13421889234716381105 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[19:enumValuesIntrinsic] member=16455944486165634241 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[19:getCachedBooleanBox] member=6005176233986511368 mask=0

@@ -123,14 +123,29 @@ fn classifier_supertypes_from_templates(
     if classifier.supertype_templates.is_empty() {
         return classifier.supertypes.iter_ids().map(Ty::obj_name).collect();
     }
-    let formals = classifier.type_params();
-    let bounds = classifier.type_param_bounds();
-    let arguments = ty.type_args();
+    applied_supertype_templates(
+        &classifier.type_parameters,
+        &classifier.supertype_templates,
+        ty,
+    )
+}
+
+/// A classifier's direct supertype templates, which name its `formals`, applied to the
+/// classifier's application `ty`.
+pub(crate) fn applied_supertype_templates(
+    formals: &crate::types::TypeParameters<Vec<Vec<Ty>>>,
+    templates: &[Ty],
+    ty: Ty,
+) -> Vec<Ty> {
+    // A decoder-placeholder star reads as the star of its declared bound, as it does for members.
+    let arguments =
+        crate::libraries::application_arguments_with_star_bounds(formals, ty.type_args());
+    let bounds = formals.type_param_bounds();
+    let formals = formals.type_params();
     let any = Ty::obj_name(crate::types::wk::any());
     // Apply only this classifier's arguments. Enclosing type variables remain symbolic, and
     // applied arguments keep their validated nullability instead of being narrowed again here.
-    classifier
-        .supertype_templates
+    templates
         .iter()
         .map(|supertype| {
             crate::types::ty_subst_supertype_template(
@@ -275,6 +290,22 @@ fn is_scalar(t: Ty) -> bool {
 /// - A `TyParam` is checked through `cx` against its bound.
 pub fn is_assignable(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool {
     assignable_inner(cx, oracle, sub, sup)
+}
+
+/// The candidates whose result is a subtype of every other candidate's, in the order given: the
+/// declarations kotlinc's fake-override builder may keep when a class inherits several with
+/// different results. Equal results are equally specific and all stay, so the order decides
+/// between them; incomparable results leave none. `subtype(a, b)` tells whether the result of `a`
+/// is a subtype of the result of `b`, in the caller's own class model.
+pub(crate) fn most_specific_results<T: Copy>(
+    candidates: &[T],
+    subtype: impl Fn(T, T) -> bool,
+) -> Vec<T> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|&candidate| candidates.iter().all(|&other| subtype(candidate, other)))
+        .collect()
 }
 
 /// Pure Kotlin SUBTYPING — like [`is_assignable`] but WITHOUT the value/inline-class erasure step (an
@@ -647,6 +678,13 @@ fn same_type_argument_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool
                     .all(|(&left, &right)| same_flexible_type_with(oracle, left, right))
                 && same_flexible_type_with(oracle, a.ret, b.ret)
         }
+        // An intersection is the set of its components. The order inference found them in is
+        // only how it is spelled, so `A & B` and `B & A` are one argument.
+        (TyKind::Intersection(a), TyKind::Intersection(b)) => {
+            crate::types::same_component_set(&a, &b, |left, right| {
+                same_flexible_type_with(oracle, left, right)
+            })
+        }
         _ => left == right,
     }
 }
@@ -760,6 +798,45 @@ fn class_assignable(oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bool {
     applied_supertype(oracle, sub, sup).is_some()
 }
 
+/// The breadth-first applied hierarchy above `root`, `root` itself first at depth 0, where
+/// `parents` answers an applied classifier's direct supertypes. Each classifier appears once, at
+/// its first application; one declaring no supertype has `kotlin.Any`'s.
+pub(crate) fn applied_hierarchy_through(
+    root: Ty,
+    mut parents: impl FnMut(TypeName, Ty) -> Vec<Ty>,
+) -> Vec<(TypeName, Ty, usize)> {
+    let Some(internal) = root.kotlin_class_internal() else {
+        return Vec::new();
+    };
+    let mut pending = std::collections::VecDeque::from([(internal, root, 0)]);
+    let mut seen = crate::fx_hash::HashSet::default();
+    let mut hierarchy = Vec::new();
+    while let Some((owner, applied, depth)) = pending.pop_front() {
+        if !seen.insert(owner) {
+            continue;
+        }
+        hierarchy.push((owner, applied, depth));
+        let parents = with_implicit_any(owner, parents(owner, applied));
+        pending.extend(
+            parents
+                .into_iter()
+                .filter_map(|parent| Some((parent.kotlin_class_internal()?, parent, depth + 1))),
+        );
+    }
+    hierarchy
+}
+
+/// A classifier's direct supertypes including Kotlin's implicit root: one that declares no
+/// supertype still inherits `kotlin.Any`'s members, and an override of `toString`, `equals` or
+/// `hashCode` overrides that declaration.
+pub(crate) fn with_implicit_any(owner: TypeName, mut parents: Vec<Ty>) -> Vec<Ty> {
+    let any = crate::types::wk::any();
+    if parents.is_empty() && owner != any {
+        parents.push(Ty::obj_name(any));
+    }
+    parents
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,6 +939,26 @@ mod tests {
         assert!(ok(Ty::Int, Ty::Error));
         assert!(ok(Ty::Nothing, s("app/Dog")));
         assert!(ok(Ty::Nothing, Ty::Int));
+    }
+
+    #[test]
+    fn an_intersection_is_the_set_of_its_components() {
+        let forward = Ty::intersection(&[s("app/Dog"), s("app/Pet")]);
+        let reverse = Ty::intersection(&[s("app/Pet"), s("app/Dog")]);
+        assert_ne!(forward, reverse, "each keeps the order it was built in");
+        assert!(ok(forward, reverse) && ok(reverse, forward));
+        let invariant = |argument| g("kotlin/collections/MutableList", &[argument]);
+        assert!(ok(invariant(forward), invariant(reverse)));
+        assert!(!ok(invariant(forward), invariant(s("app/Dog"))));
+        // A nested intersection is compared as a set as well, and a component of one side never
+        // stands for two components of the other.
+        let boxed = |argument| g("app/Box", &[argument]);
+        let nested = Ty::intersection(&[boxed(forward), s("app/Cat")]);
+        let permuted = Ty::intersection(&[s("app/Cat"), boxed(reverse)]);
+        assert!(ok(invariant(nested), invariant(permuted)));
+        let other = Ty::intersection(&[boxed(reverse), s("app/Bird")]);
+        assert!(!ok(invariant(nested), invariant(other)));
+        assert!(!ok(invariant(other), invariant(nested)));
     }
 
     #[test]

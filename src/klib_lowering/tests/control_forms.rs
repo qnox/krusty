@@ -371,6 +371,44 @@ fn increment_blocks_keep_their_ordered_effects_and_selected_value() {
 }
 
 #[test]
+fn compound_assignment_blocks_keep_their_ordered_effects() {
+    // kotlinc wraps `a[i] += v` and other compound assignments that need temporaries in a Unit
+    // block of the operator's origin: the temporaries, then the store.
+    for origin in ["PLUSEQ", "MINUSEQ", "MULTEQ", "DIVEQ", "PERCEQ"] {
+        let demo = demo(&[("f", &[T::Int, T::Int], T::Int)], |_, body| {
+            let initial = body.param(0);
+            let (variable, x) = body.var(T::Int, initial);
+            let operand = body.param(1);
+            let (temporary, saved) =
+                body.variable_with(T::Int, Some(operand), 0, "IR_TEMPORARY_VARIABLE");
+            let stored = body.get(&saved, T::Int);
+            let store = body.set(&x, stored);
+            let block = body.expr(
+                T::Unit,
+                KlibIrExprKind::Block {
+                    statements: vec![temporary, store],
+                    origin: Some(origin.to_owned()),
+                },
+            );
+            let result = body.get(&x, T::Int);
+            Some(vec![
+                variable,
+                KlibIrStatement::Expression(block),
+                body.ret(result),
+            ])
+        });
+        // The block keeps its place between the declaration and the read; its single-use
+        // temporary folds into the store, as an increment's does.
+        assert_eq!(
+            lowered_f(&demo),
+            "scope {scope {val v2: Int = v0!: Int; {v2 = v1!: Int: Unit}: Unit; \
+             return@Some(0) v2~: Int: Nothing}: Nothing}",
+            "{origin}"
+        );
+    }
+}
+
+#[test]
 fn a_local_initializer_cannot_reuse_its_containing_declarations_slot() {
     let demo = demo(&[("f", &[T::Boolean, T::Int], T::Int)], |_, body| {
         let argument = body.param(1);
@@ -1348,11 +1386,11 @@ fn stdlib_star_projected_smart_cast_lowers_as_a_cast() {
         .unwrap_or_else(|decline| panic!("{decline}"));
     validated(unit.ir());
     assert_eq!(unit.ir().functions[function as usize].ret, Ty::Int);
-    // `size` is read at the receiver cast to `Collection<out Any?>`, the serialized `Collection<*>`.
+    // `size` is read at the receiver cast to the serialized `Collection<*>`.
     let ir = unit.ir();
     let collection = Ty::obj_args_name(
         crate::types::type_name("kotlin/collections/Collection"),
-        &[Ty::out_projection(Ty::nullable(Ty::obj_name(
+        &[Ty::star_projection(Ty::nullable(Ty::obj_name(
             crate::types::wk::any(),
         )))],
     );

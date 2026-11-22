@@ -408,6 +408,7 @@ fn hoist_local_classes(file: &mut File) {
     // need telling apart; the statement index is unique by construction.
     let mut taken: crate::fx_hash::HashSet<String> = crate::fx_hash::HashSet::default();
     for (stmt, mut c) in hoisted {
+        let source_name = c.name.clone();
         let mut name = match owner_of.get(&stmt) {
             Some((owner, _, _)) => format!("{owner}.{}", c.name),
             None => format!("loc{}.{}", stmt.0, c.name),
@@ -456,6 +457,7 @@ fn hoist_local_classes(file: &mut File) {
         c.name = name;
         let id = file.add_decl(Decl::Class(c));
         file.decls.push(id);
+        file.hoisted_classifier_source_names.insert(id, source_name);
         file.mark_local_declaration(id);
         file.local_class_decls.insert(stmt, id);
         if let Some(enclosing) = enclosing {
@@ -5681,6 +5683,26 @@ typealias Box<@Marker T> = List<T>
                 "fun choose(a: String?, b: String?): String { a ?: return b ?: \"fallback\"; return a }"
             ),
             "(fun choose (param a String) (param b String) :String (block (?: a (return (?: b \"fallback\"))) (return a)))\n"
+        );
+    }
+
+    #[test]
+    fn full_form_destructure_parses_without_the_feature() {
+        // `NameBasedDestructuring` is off. The statement is still a destructure, so the file keeps
+        // its signatures; the language-version diagnostic is reported later, not as a parse error.
+        assert_eq!(
+            tree("fun read(point: Point) { (val x, val y) = point }"),
+            "(fun read (param point Point) (block (destructure (x y) point)))\n"
+        );
+    }
+
+    #[test]
+    fn short_form_rename_parses_without_the_feature() {
+        // The `=` is not a parse error and the entry stays positional. The experimental diagnostic
+        // is reported later, so `tree` (which rejects parse errors) still accepts the statement.
+        assert_eq!(
+            tree("fun read(point: Point) { val (x = a) = point }"),
+            "(fun read (param point Point) (block (destructure (x) point)))\n"
         );
     }
 
