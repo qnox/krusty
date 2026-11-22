@@ -137,6 +137,20 @@ impl BodyFirChecker<'_> {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let declared_parameters = target
+            .declared_params
+            .as_deref()
+            .map(|declared| {
+                declared
+                    .iter()
+                    .map(|parameter| {
+                        ResolvedTy::new(*parameter).map_err(|error| {
+                            self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
+                        })
+                    })
+                    .collect::<Result<Box<[_]>, _>>()
+            })
+            .transpose()?;
         Ok(FirExprKind::Call(FirCall {
             target: FirCallTarget::Super {
                 qualifier: target.qualifier,
@@ -146,6 +160,7 @@ impl BodyFirChecker<'_> {
                 kind,
                 name: target.name.clone(),
                 parameters: declaration_parameters.into_boxed_slice(),
+                declared_parameters,
                 result,
                 interface: target.interface,
                 realization: target.realization,

@@ -156,7 +156,7 @@ pub use bridges::{
     Bridge, BridgeAccessorRole, BridgeKind, BridgeParameter, BridgePropertyImplementation,
     CollectionBarrierCheck, CollectionBarrierParameter, CollectionBarrierPlan,
 };
-pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget};
+pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget, ValueClassAdapter};
 pub use catches::IrCatch;
 pub use companion_blocks::{IrCompanionBlockProperty, IrCompanionBlocks, IrStaticPlacement};
 pub use constants::IrConst;

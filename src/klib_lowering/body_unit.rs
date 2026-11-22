@@ -1402,10 +1402,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
         sup: Ty,
     ) -> bool {
         let callees = self.sources.callees;
-        super::same_library_class::is_subtype(self.local_classes, sub, sup, &|sub, sup| {
-            callees.is_subtype(parameters, sub, sup)
-                || super::callable_references::function_supertype(sub, sup)
-        })
+        let model = super::same_library_class::MaterializedClassModel {
+            classes: self.local_classes,
+            public: callees.class_type_oracle(),
+        };
+        model.is_subtype(parameters, sub, sup)
+            || super::callable_references::function_supertype(sub, sup)
     }
 
     fn link_reference(
@@ -1421,6 +1423,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
 
     fn same_type(&self, left: Ty, right: Ty) -> bool {
         self.sources.callees.same_type(left, right)
+    }
+
+    fn classifier_parameter_bounds(&self, owner: TypeName, index: usize) -> Vec<Ty> {
+        self.sources
+            .callees
+            .classifier_parameter_bounds(owner, index)
     }
 
     fn link_constructor(
@@ -1458,6 +1466,32 @@ impl<'s> CallLinker for Linker<'_, 's> {
             self.materialize_enum_class(ir, class)?;
         }
         Ok((classifier, name))
+    }
+
+    fn enum_static_member(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<(TypeName, super::enum_classes::EnumStaticMember)>, KlibBodyDeclineReason>
+    {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        let KlibCalleeOrigin::Exact(identity) = self
+            .sources
+            .bodies
+            .linked_origin(&self.active_module, &signature)
+        else {
+            return Ok(None);
+        };
+        let Some((class, member)) =
+            super::enum_classes::authenticate_static_member(self.sources.bodies, &identity)?
+        else {
+            return Ok(None);
+        };
+        let classifier = class.classifier;
+        if !self.realized_classes.contains(&classifier) {
+            self.materialize_enum_class(ir, class)?;
+        }
+        Ok(Some((classifier, member)))
     }
 
     fn static_field(
@@ -1663,6 +1697,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .externals
             .get(&identity)
             .is_some_and(|external| external.realizes_accessor())
+            && !self.is_earlier_abstract_accessor(&identity)
         {
             return Err(unsupported());
         }
@@ -2033,6 +2068,14 @@ impl<'s> Linker<'_, 's> {
         if !abstract_ && !matches!(declaration.body, Some(KlibIrBody::Block(_))) {
             return Ok(None);
         }
+        // An abstract accessor of a class an earlier unit realized is that unit's dispatch slot,
+        // which no body here implements.
+        if abstract_
+            && !self.functions.contains_key(identity)
+            && self.class_realized_earlier(selected)
+        {
+            return Ok(None);
+        }
         let selected = selected_callable_for_header_purpose(
             Some(SelectedKlibCallables::Variants(callables)),
             HeaderPurpose::Body(None),
@@ -2260,6 +2303,23 @@ impl<'s> Linker<'_, 's> {
                     "a member realized outside the unit has no frozen call edge".to_owned(),
                 )
             })
+    }
+
+    /// Whether `identity` is an abstract accessor of a class an earlier unit realized and this
+    /// unit does not declare: a call of it dispatches through the member's frozen declaration.
+    fn is_earlier_abstract_accessor(&self, identity: &KlibDependencyCallable) -> bool {
+        let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(identity) else {
+            return false;
+        };
+        let Some((_, declaration)) = self.sources.bodies.function(identity) else {
+            return false;
+        };
+        declaration.body.is_none()
+            && crate::metadata::semantic::declaration_modality(declaration.base.flags)
+                == crate::metadata::semantic::KotlinModality::Abstract
+            && !self.functions.contains_key(identity)
+            && self.class_realized_earlier(callables[0])
+            && self.sources.callees.reference_target(identity).is_some()
     }
 
     /// A call of the value class member `selected`, which this unit emits as a member of its
