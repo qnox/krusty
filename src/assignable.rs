@@ -137,9 +137,11 @@ pub(crate) fn applied_supertype_templates(
     templates: &[Ty],
     ty: Ty,
 ) -> Vec<Ty> {
+    // A decoder-placeholder star reads as the star of its declared bound, as it does for members.
+    let arguments =
+        crate::libraries::application_arguments_with_star_bounds(formals, ty.type_args());
     let bounds = formals.type_param_bounds();
     let formals = formals.type_params();
-    let arguments = ty.type_args();
     let any = Ty::obj_name(crate::types::wk::any());
     // Apply only this classifier's arguments. Enclosing type variables remain symbolic, and
     // applied arguments keep their validated nullability instead of being narrowed again here.

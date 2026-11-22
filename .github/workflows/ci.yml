@@ -73,7 +73,7 @@ jobs:
         run: if command -v just > /dev/null; then echo "found=true" >> "$GITHUB_OUTPUT"; fi
       - &install-just
         if: steps.just-on-path.outputs.found != 'true'
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: just
       # Only the jobs ready when the run starts: everything after build-tool-bins is placed by its
@@ -119,6 +119,13 @@ jobs:
         env:
           RANGE: ${{ steps.base.outputs.sha }}..${{ github.sha }}
         run: scripts/check-attribution.sh "$RANGE"
+      # The patch's three source files are content-pinned, so the cached copy is the file itself;
+      # a hit never reaches raw.githubusercontent.com.
+      - name: restore pinned IntelliJ sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/krusty-tools/intellij-community
+          key: intellij-community-sources-${{ hashFiles('scripts/check-intellij-patch.sh') }}
       - name: validate pinned IntelliJ patch
         id: intellij_patch
         run: scripts/check-intellij-patch.sh
@@ -179,7 +186,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
       # `java -version`.
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: '17.0.21+0.3.1'
@@ -221,7 +228,7 @@ jobs:
           # Queue branches restore master's entries but never save their own: per-branch copies
           # overflowed the repository cache and evicted the master entries every branch restores.
           save-if: ${{ github.ref == 'refs/heads/master' }}
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: '17.0.21+0.3.1'
@@ -282,7 +289,7 @@ jobs:
       # krusty-toolchain's oracle builds the Build Tools API implementation with its Gradle
       # wrapper, which does not run on JDK 25; the test step points it at JDK 21. The last
       # version listed stays JAVA_HOME.
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: |
@@ -528,7 +535,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
       # Self-hosted runners have no JDK on PATH (ubuntu-latest defaults to 17); the justfile runs
       # `java -version`.
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: '17.0.21+0.3.1'
@@ -604,7 +611,7 @@ jobs:
       - *just-on-path
       - *install-just
       # The last version listed stays JAVA_HOME, as in the ci job.
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: |
@@ -717,7 +724,7 @@ jobs:
           key: recorded-kotlinc-bytes-${{ steps.max-version.outputs.version }}-${{ github.sha }}
       # The same binary's ignored plugin and KSP controls.
       - *plugin-host-runtime-cache
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: '17.0.21+0.3.1'
@@ -810,7 +817,7 @@ jobs:
       # Kotlin's CLI corpus names JDK 8, 11, 17 and 21 homes; kotlin_cli_jvm_conformance finds them
       # through the JAVA_HOME_<release>_X64 variables this exports and fails a case it cannot run.
       # The last version listed stays JAVA_HOME.
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: |
@@ -1254,7 +1261,7 @@ jobs:
   # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, lint, plugin-host, e2e, conformance, build-gradle-plugin, gradle, maven, build-tools, bazel]
+    needs: [ci, lint, plugin-host, e2e, conformance, build-gradle-plugin, gradle, maven, build-tools, analysis-api, bazel]
     if: always()
     runs-on: [self-hosted, utility]
     steps:
@@ -1269,6 +1276,7 @@ jobs:
           GRADLE_RESULT: ${{ needs.gradle.result }}
           MAVEN_RESULT: ${{ needs.maven.result }}
           BUILD_TOOLS_RESULT: ${{ needs.build-tools.result }}
+          ANALYSIS_API_RESULT: ${{ needs.analysis-api.result }}
           BAZEL_RESULT: ${{ needs.bazel.result }}
         run: |
           echo "ci: $CI_RESULT"
@@ -1280,6 +1288,7 @@ jobs:
           echo "gradle: $GRADLE_RESULT"
           echo "maven: $MAVEN_RESULT"
           echo "build-tools: $BUILD_TOOLS_RESULT"
+          echo "analysis-api: $ANALYSIS_API_RESULT"
           echo "bazel: $BAZEL_RESULT"
           if [ "$CI_RESULT" != success ] \
             || [ "$LINT_RESULT" != success ] \
@@ -1290,8 +1299,9 @@ jobs:
             || [ "$GRADLE_RESULT" != success ] \
             || [ "$MAVEN_RESULT" != success ] \
             || [ "$BUILD_TOOLS_RESULT" != success ] \
+            || [ "$ANALYSIS_API_RESULT" != success ] \
             || [ "$BAZEL_RESULT" != success ]; then
-            echo "lint, plugin host tests, the own test suites (including KLIB implementation coverage), e2e, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed" >&2
+            echo "lint, plugin host tests, the own test suites (including KLIB implementation coverage), e2e, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, the Analysis API session provider, and every Bazel lane must succeed" >&2
             exit 1
           fi
 
@@ -1311,7 +1321,7 @@ jobs:
           filter: tree:0
       - *just-on-path
       - *install-just
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: '17.0.21+0.3.1'
@@ -1388,8 +1398,8 @@ jobs:
   # Fills the Gradle cache the build-tools matrix reads. Every matrix job resolves the Build Tools
   # API of its own Kotlin release from Maven Central, and a release no master run has resolved yet
   # (a new one under test) is in no restored cache, so all rows fetched at once and Central answered
-  # 429. This job resolves every release's dependencies serially, retrying a refusal after a wait, and
-  # saves the cache for the rows that follow. Unlike the other Gradle caches it saves on a queue
+  # 429. This job resolves every release's dependencies serially, without retrying a refusal (Central
+  # extends a block for every request made during it), and saves the cache for the rows that follow. Unlike the other Gradle caches it saves on a queue
   # branch too: the rows are in the same run, so they see an entry their own branch saved.
   build-tools-deps:
     needs: [build-tool-bins]
@@ -1398,7 +1408,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - *just-on-path
       - *install-just
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: '17.0.21+0.3.1'
@@ -1414,15 +1424,7 @@ jobs:
         run: |
           set -euo pipefail
           while read -r kotlin; do
-            for attempt in 1 2 3 4 5; do
-              if tools/krusty-build-tools/gradlew --no-daemon -p tools/krusty-build-tools -PkotlinVersion="$kotlin" resolveDependencies; then
-                continue 2
-              fi
-              echo "::warning::resolving Kotlin $kotlin failed (attempt $attempt); waiting before the next"
-              sleep $((attempt * 60))
-            done
-            echo "resolving Kotlin $kotlin failed after 5 attempts" >&2
-            exit 1
+            tools/krusty-build-tools/gradlew --no-daemon -p tools/krusty-build-tools -PkotlinVersion="$kotlin" resolveDependencies
           done < <(just kotlin-versions)
       - name: check for new Gradle files
         id: gradle-grown
@@ -1453,7 +1455,7 @@ jobs:
           filter: tree:0
       - *just-on-path
       - *install-just
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: '17.0.21+0.3.1'
@@ -1483,6 +1485,32 @@ jobs:
           name: krusty-build-tools-kotlin-${{ matrix.kotlin }}
           path: dist-build-tools/*
           if-no-files-found: error
+
+  # krusty's Analysis API session provider (tools/krusty-analysis-api) against the Analysis API that
+  # KSP2 ships. It needs no krusty binary yet: the provider refuses every query.
+  analysis-api:
+    runs-on: ${{ fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          filter: tree:0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: zulu
+          java-version: '17.0.21+0.3.1'
+      - name: select the Gradle user home
+        id: gradle-home
+        run: |
+          echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
+          echo "version=$(sed -n 's/^distributionUrl=.*gradle-\(.*\)-bin\.zip$/\1/p' tools/krusty-analysis-api/gradle/wrapper/gradle-wrapper.properties)" >> "$GITHUB_OUTPUT"
+      - *restore-gradle-home
+      - *count-gradle-home
+      - *setup-gradle
+      - name: test the session provider
+        run: tools/krusty-analysis-api/gradlew --no-daemon -p tools/krusty-analysis-api test
+      - *check-gradle-home
+      - *save-gradle-home
 
   # Execute the exact release bytes against every supported Kotlin Gradle plugin.
   gradle:
@@ -1519,7 +1547,7 @@ jobs:
           filter: tree:0
       - *just-on-path
       - *install-just
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: '17.0.21+0.3.1'
@@ -1632,7 +1660,7 @@ jobs:
           filter: tree:0
       - *just-on-path
       - *install-just
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: '17.0.21+0.3.1'
@@ -1668,7 +1696,7 @@ jobs:
           filter: tree:0
       - *just-on-path
       - *install-just
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: '17.0.21+0.3.1'
@@ -1895,7 +1923,7 @@ jobs:
       - name: publish this validated master commit
         id: tip
         run: scripts/release-publisher.sh check >> "$GITHUB_OUTPUT"
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         if: steps.tip.outputs.publish == 'true'
         with:
           tool: just
@@ -2026,7 +2054,7 @@ jobs:
           fi
       # Each exact version keeps its existing Maven Central deployment journal. The Plugin Portal
       # also checks its immutable marker before retrying a previously successful upload.
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         if: steps.tip.outputs.publish == 'true'
         with:
           distribution: zulu

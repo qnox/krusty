@@ -116,6 +116,13 @@ quirks! {
         since: None,
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
     }
+    /// An explicit context argument of a contextual extension call is evaluated before the
+    /// extension receiver, in the order the parameters are passed, although it is written after it.
+    /// From 2.5 kotlinc evaluates operands in the order they are written.
+    ContextArgumentEvaluatedBeforeExtensionReceiver {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+    }
 }
 
 const _: () = assert!(Quirk::ALL.len() <= u64::BITS as usize);
