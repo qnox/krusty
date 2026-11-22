@@ -1001,7 +1001,6 @@ inference/pcla/substituteStubTypeIntoCR.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt
 inference/pcla/topDownCompletionBreakedByNonBuilderInferenceSession.kt
 inference/plusAssignInsideLambda.kt
-inference/selfBoundedVariableFromFunctionTypeBeforeElvisThrow.kt
 initializers/correctOrder1.kt
 initializers/correctOrder2.kt
 initializers/correctOrder3.kt
