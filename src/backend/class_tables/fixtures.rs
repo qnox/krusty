@@ -142,3 +142,38 @@ pub fn record_semantic_override(
             depth: 1,
         });
 }
+
+/// Record that `implementation` implements a member of a dependency interface, which the program
+/// names only by its external identity.
+pub fn record_external_interface_override(ir: &mut IrFile, class: ClassId, implementation: FunId) {
+    use crate::fir::{CallableId, ExternalCallableId};
+    let owner = ir.classes[class as usize].fq_name_id();
+    let name = ir.functions[implementation as usize].name.clone();
+    ir.function_overrides
+        .entry(owner)
+        .or_default()
+        .push(crate::ir::IrFunctionOverride {
+            implementation: ResolvedFunctionOverrideTarget::Module(CallableId::from_raw(
+                4000 + implementation,
+            )),
+            implementation_function: Some(implementation),
+            implementation_owner: owner,
+            overridden: ResolvedFunctionOverrideTarget::External(ExternalCallableId::from_raw(3)),
+            overridden_owner: crate::types::type_name("fixture/Collection"),
+            overridden_semantic_role: None,
+            collection_barrier: None,
+            overridden_is_interface: true,
+            name,
+            declared_parameters: Vec::new(),
+            declared_result: Ty::Int,
+            applied_parameters: Vec::new(),
+            applied_result: Ty::Int,
+            implementation_parameters: Vec::new(),
+            implementation_parameter_identities: Vec::new(),
+            overridden_parameter_identities: Vec::new(),
+            implementation_result: Ty::Int,
+            suspend: false,
+            has_kotlin_superclass_override: false,
+            depth: 0,
+        });
+}

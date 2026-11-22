@@ -667,6 +667,11 @@ fn materialize_member_extension_property(
             source_order,
             receiver,
             ty: property.ty,
+            context_params: named_context_parameters(
+                index,
+                property.declaration,
+                &context_parameters,
+            )?,
             is_var: mutable,
             is_abstract,
             modifiers: member_property_modifiers(property.flags, interface),
