@@ -774,3 +774,96 @@ fn conflicting_type_forms_invalid_qname_kind_and_variance_are_exact_errors() {
         )
     );
 }
+
+/// The complete `compileTimeValue` messages Kotlin/Native 2.4.21 writes for
+/// tests/fixtures/unsigned_metadata_constants/UnsignedConstants.kt (zero, the high bit and the
+/// maximum of every unsigned width, beside signed contrasts) read back as the declared constants.
+#[test]
+fn official_unsigned_constant_values_read_back_as_their_declared_constants() {
+    use crate::ir::IrConst;
+    use crate::libraries::LibraryConst;
+    use crate::types::Ty;
+
+    let cases: &[(Ty, &[u8], IrConst)] = &[
+        (
+            Ty::UByte,
+            &[0x08, 0x00, 0x10, 0x00, 0x50, 0x01],
+            IrConst::UByte(0),
+        ),
+        (
+            Ty::UByte,
+            &[0x08, 0x00, 0x10, 0xff, 0x01, 0x50, 0x01],
+            IrConst::UByte(128),
+        ),
+        (
+            Ty::UByte,
+            &[0x08, 0x00, 0x10, 0x01, 0x50, 0x01],
+            IrConst::UByte(u8::MAX),
+        ),
+        (
+            Ty::UShort,
+            &[0x08, 0x02, 0x10, 0x00, 0x50, 0x01],
+            IrConst::UShort(0),
+        ),
+        (
+            Ty::UShort,
+            &[0x08, 0x02, 0x10, 0xff, 0xff, 0x03, 0x50, 0x01],
+            IrConst::UShort(32768),
+        ),
+        (
+            Ty::UShort,
+            &[0x08, 0x02, 0x10, 0x01, 0x50, 0x01],
+            IrConst::UShort(u16::MAX),
+        ),
+        (
+            Ty::UInt,
+            &[0x08, 0x03, 0x10, 0x00, 0x50, 0x01],
+            IrConst::UInt(0),
+        ),
+        (
+            Ty::UInt,
+            &[0x08, 0x03, 0x10, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x50, 0x01],
+            IrConst::UInt(2147483648),
+        ),
+        (
+            Ty::UInt,
+            &[0x08, 0x03, 0x10, 0x01, 0x50, 0x01],
+            IrConst::UInt(u32::MAX),
+        ),
+        (
+            Ty::ULong,
+            &[0x08, 0x04, 0x10, 0x00, 0x50, 0x01],
+            IrConst::ULong(0),
+        ),
+        (
+            Ty::ULong,
+            &[
+                0x08, 0x04, 0x10, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0x50,
+                0x01,
+            ],
+            IrConst::ULong(9223372036854775808),
+        ),
+        (
+            Ty::ULong,
+            &[0x08, 0x04, 0x10, 0x01, 0x50, 0x01],
+            IrConst::ULong(u64::MAX),
+        ),
+        (Ty::Byte, &[0x08, 0x00, 0x10, 0x01], IrConst::Byte(-1)),
+        (Ty::Short, &[0x08, 0x02, 0x10, 0x01], IrConst::Short(-1)),
+        (Ty::Int, &[0x08, 0x03, 0x10, 0x01], IrConst::Int(-1)),
+        (Ty::Long, &[0x08, 0x04, 0x10, 0x01], IrConst::Long(-1)),
+    ];
+    let actual = cases
+        .iter()
+        .map(|(ty, message, _)| {
+            super::semantic_constant(message, &[])
+                .expect("an official value message decodes")
+                .and_then(|value| IrConst::from_library_constant(&LibraryConst { ty: *ty, value }))
+        })
+        .collect::<Vec<_>>();
+    let expected = cases
+        .iter()
+        .map(|(_, _, constant)| Some(constant.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
