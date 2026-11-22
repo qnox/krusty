@@ -309,6 +309,12 @@ fn replace_test_paths(
             .ok_or("needs JDK 17 (set KRUSTY_JDK_17_HOME)")?;
         replaced = replaced.replace("$JDK_17$", &home.display().to_string());
     }
+    if replaced.contains(STDLIB_COMMON_PATH) {
+        let klib = stdlib_common_klib()
+            .as_ref()
+            .map_err(|reason| format!("needs {STDLIB_COMMON_PATH}: {reason}"))?;
+        replaced = replaced.replace(STDLIB_COMMON_PATH, &klib.display().to_string());
+    }
     if let Some(start) = replaced.find('$') {
         let rest = &replaced[start + 1..];
         if let Some(end) = rest.find('$') {
@@ -325,6 +331,16 @@ fn replace_test_paths(
         }
     }
     Ok(replaced)
+}
+
+/// `AbstractCliTest` expands this to `ForTestCompileRuntime.stdlibCommonForTests()`, the common
+/// stdlib KLIB, only in the arguments that name it.
+const STDLIB_COMMON_PATH: &str = "$STDLIB_COMMON_PATH$";
+
+/// The reference release's common stdlib KLIB, provisioned once for the whole corpus.
+fn stdlib_common_klib() -> &'static Result<PathBuf, String> {
+    static KLIB: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    KLIB.get_or_init(krusty::toolchain::kotlin_stdlib_common_klib)
 }
 
 /// `CompilerTestUtil.normalizeCompilerOutput` plus `AbstractCliTest.getNormalizedCompilerOutput`.
