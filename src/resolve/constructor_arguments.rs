@@ -456,6 +456,18 @@ impl Checker<'_> {
                 return true;
             }
             if omissions == selected.omitted.len()
+                && self.self_delegation_is_more_specific(
+                    class,
+                    secondary,
+                    label,
+                    arguments,
+                    &selected.argument_types,
+                )
+                && self.report_self_delegation_cycle(class, secondary, span, label, arguments)
+            {
+                return true;
+            }
+            if omissions == selected.omitted.len()
                 && self
                     .report_tied_self_delegation(class, secondary, span, label, arguments, selected)
             {
@@ -470,6 +482,46 @@ impl Checker<'_> {
             return true;
         }
         false
+    }
+
+    /// The delegating constructor's parameters are a stricter match for these arguments than the
+    /// selected constructor. Equal omission counts still leave a type-specific constructor, and
+    /// kotlinc resolves that call to the constructor itself.
+    fn self_delegation_is_more_specific(
+        &self,
+        class: DeclId,
+        secondary: usize,
+        label: &str,
+        arguments: &CtorDelegationCall,
+        selected: &[Ty],
+    ) -> bool {
+        if label != "this" {
+            return false;
+        }
+        let Some(self_types) = self.self_mapped_argument_types(class, secondary, label, arguments)
+        else {
+            return false;
+        };
+        if self_types.len() != selected.len() {
+            return false;
+        }
+        let mut kinds = Vec::with_capacity(arguments.args.len());
+        for argument in &arguments.args {
+            let Some(ty) = self.expr_types.get(argument.0 as usize).copied() else {
+                return false;
+            };
+            kinds.push(super::integer_constants::call_arg_kind(
+                self.file, *argument, ty,
+            ));
+        }
+        matches!(
+            crate::symbol_resolver::most_specific_parameter_shape_index(
+                &self.fed_source(),
+                &[self_types, selected.to_vec()],
+                &kinds,
+            ),
+            crate::symbol_resolver::CandidateSelection::Selected(0)
+        )
     }
 
     /// The delegating constructor accepts `this(...)` with the same omissions as the selected

@@ -522,6 +522,12 @@ class Box(val item: Int = 0) {
 }
 ";
 
+const SPECIFIC_PARAMETER_DELEGATION: &str = "\
+class Box(val item: Number = 0) {
+    constructor(x: Int = 1) : this(1)
+}
+";
+
 #[test]
 fn a_named_delegation_argument_lists_every_candidate() {
     let stdlib = common::stdlib_jar();
@@ -596,6 +602,29 @@ fn a_tied_constructor_delegation_is_ambiguous() {
     let stdlib = common::stdlib_jar();
     let result = common::compiler_diagnostics(
         &[("Tied.kt", TIED_DELEGATION)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+#[test]
+fn a_more_specific_parameter_self_delegation_is_a_cycle() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Specific.kt", SPECIFIC_PARAMETER_DELEGATION)],
         std::slice::from_ref(&stdlib),
     );
     assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
