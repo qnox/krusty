@@ -66,6 +66,30 @@ fn annotation_kclass_signature(
     Some(format!("{prefix}{rendered}>;"))
 }
 
+/// The `-impl` owner and JVM carrier of a member declared as an unsigned value class (`UInt`, an
+/// unsigned array). kotlinc renders and hashes such a member through that class's `toString-impl`
+/// and `hashCode-impl` over the stored carrier, not through the carrier's own signed rendering.
+fn unsigned_member_impl(declared: Ty, stored: Ty) -> Option<(String, Ty)> {
+    if let Some((owner, carrier)) = super::scalar_coercion::native_unsigned_impl_target(declared) {
+        return Some((owner.render(), carrier));
+    }
+    let declared = declared.non_null();
+    declared
+        .is_unsigned_array()
+        .then(|| declared.obj_internal())
+        .flatten()
+        .map(|owner| (owner.render(), stored))
+}
+
+/// The declared type of each annotation member, before the value-class pass erased it to a
+/// carrier: the constructor parameters the pass recorded, else the stored types themselves.
+fn declared_member_types(ir: &IrFile, c: &krusty::ir::IrClass, stored: &[Ty]) -> Vec<Ty> {
+    match ir.vc_ctor_declared_params(c.fq_name_id()) {
+        Some(declared) if declared.len() == stored.len() => declared.to_vec(),
+        _ => stored.to_vec(),
+    }
+}
+
 /// The boxed-wrapper internal name + a static `hashCode` helper descriptor for a primitive `Ty`, used by
 /// the annotation impl's `hashCode`. Returns `(wrapper_internal, hashCode_arg_descriptor)`.
 fn prim_wrapper(t: Ty) -> Option<(&'static str, &'static str)> {
@@ -287,8 +311,9 @@ pub(super) fn emit_annotation_impl_class(
     }
 
     emit_annotation_equals(env, &mut cw, &fq, iface, &members, &stored);
-    emit_annotation_hashcode(ir, env, &mut cw, &fq, &stored, &members);
-    emit_annotation_tostring(&mut cw, &fq, iface, &stored, &members);
+    let declared = declared_member_types(ir, c, &stored);
+    emit_annotation_hashcode(ir, env, &mut cw, &fq, &stored, &declared, &members);
+    emit_annotation_tostring(&mut cw, &fq, iface, &stored, &declared, &members);
     // annotationType(): return <iface>.class. LAST, after the `Object` overrides — kotlinc's member
     // order, and the method table is part of the class file, so emitting it beside the member
     // accessors diverged from the reference on every annotation that is instantiated.
@@ -470,6 +495,7 @@ fn emit_annotation_hashcode(
     cw: &mut ClassWriter,
     fq: &str,
     stored: &[Ty],
+    declared: &[Ty],
     members: &[(String, Ty)],
 ) {
     // kotlinc's shape, instruction for instruction. Two things are deliberate rather than
@@ -498,6 +524,16 @@ fn emit_annotation_hashcode(
         cb.aload(0);
         cb.getfield(fref, slot_words(*jt) as i32);
         match *jt {
+            _ if unsigned_member_impl(declared[index], *jt).is_some() => {
+                let (owner, carrier) =
+                    unsigned_member_impl(declared[index], *jt).expect("guarded by the match arm");
+                let hc = cw.methodref(
+                    &owner,
+                    "hashCode-impl",
+                    &format!("({})I", type_descriptor(carrier)),
+                );
+                cb.invokestatic(hc, slot_words(carrier) as i32, 1);
+            }
             _ if jt.is_array() => {
                 let ad = arrays_param_desc(*jt);
                 let hc = cw.methodref("java/util/Arrays", "hashCode", &format!("({ad})I"));
@@ -566,6 +602,7 @@ fn emit_annotation_tostring(
     fq: &str,
     iface: &str,
     stored: &[Ty],
+    declared: &[Ty],
     members: &[(String, Ty)],
 ) {
     let return_annotation =
@@ -619,6 +656,24 @@ fn emit_annotation_tostring(
         );
         let fref = cw.fieldref(fq, name, &type_descriptor(*jt));
         match *jt {
+            _ if unsigned_member_impl(declared[i], *jt).is_some() => {
+                let (owner, carrier) =
+                    unsigned_member_impl(declared[i], *jt).expect("guarded by the match arm");
+                cb.aload(0);
+                cb.getfield(fref, slot_words(carrier) as i32);
+                let to_string = cw.methodref(
+                    &owner,
+                    "toString-impl",
+                    &format!("({})Ljava/lang/String;", type_descriptor(carrier)),
+                );
+                cb.invokestatic(to_string, slot_words(carrier) as i32, 1);
+                let ap = cw.methodref(
+                    sb,
+                    "append",
+                    "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
+                );
+                cb.invokevirtual(ap, 1, 1);
+            }
             _ if jt.is_array() => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
