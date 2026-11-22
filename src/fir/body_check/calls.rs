@@ -1692,16 +1692,9 @@ impl BodyFirChecker<'_> {
             selected.callable.compiler_intrinsic,
             selected.callable.ret,
         );
-        let assertion_mode = if self.file.assert_always_disabled {
-            crate::types::AssertionMode::AlwaysDisabled
-        } else if self.file.assert_always_enabled {
-            crate::types::AssertionMode::AlwaysEnabled
-        } else {
-            crate::types::AssertionMode::Runtime
-        };
         let selected_intrinsic = super::compiler_intrinsics::selected_top_level(
             selected.callable.compiler_intrinsic,
-            assertion_mode,
+            self.file.assertions,
             selected.callable.name.as_str(),
         );
         let (target, substitutions) =

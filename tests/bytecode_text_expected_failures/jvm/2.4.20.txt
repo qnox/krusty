@@ -79,7 +79,6 @@ inlineClasses/resultApiDoesntCallSpecializedEquals.kt
 inlineClasses/toStringOfInlineClassValue.kt
 inlineClasses/toStringOfReferenceInlineClassValue.kt
 inlineClasses/unboxInlineClassFromParameterizedType.kt
-inlineFromOtherModule.kt
 innerClasses/kt27936.kt
 innerClasses/kt57714.kt
 interfaces/addedInterfaceBridge.kt
