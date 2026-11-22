@@ -57,6 +57,75 @@ struct RejectedInvokeCandidate {
     invoke: bool,
 }
 
+/// Whether a function value's fixed `parameter` certainly cannot take an argument of type
+/// `actual`. A type parameter of an enclosing declaration is rigid inside its body and is judged
+/// like any other type; only a variable that an active postponed call still infers (`open`) and an
+/// argument whose type is not known yet are left to the constraint system. Both the body checker
+/// and implicit-signature evaluation decide the lexical invoke rung with this one rule.
+pub(in crate::resolve) fn function_value_parameter_rejects(
+    oracle: &dyn crate::assignable::TypeOracle,
+    open: &[crate::types::TyParamName],
+    actual: Ty,
+    parameter: Ty,
+) -> bool {
+    actual != Ty::Error
+        && actual != Ty::Nothing
+        && !actual.mentions_pending()
+        && !ty_mentions_param(actual, open)
+        && !ty_mentions_param(parameter, open)
+        && !(actual == Ty::Null && parameter.admits_null())
+        && !crate::assignable::is_assignable(
+            &crate::assignable::TyCtx::new(),
+            oracle,
+            actual,
+            parameter,
+        )
+}
+
+/// The invocation form implicit-signature evaluation selects for a function value: the number of
+/// leading context and receiver parameters a scope supplies, and whether the arguments take every
+/// parameter instead. `None` when no form admits the arguments, by count, by a named or spread
+/// argument, or by a typed argument [`function_value_parameter_rejects`]. Literal, lambda and
+/// provisional call arguments are typed by the selected parameter, so they decide nothing here.
+pub(in crate::resolve) fn signature_function_value_invoke_shape(
+    table: &SymbolTable,
+    source_file: u32,
+    open: &[crate::types::TyParamName],
+    signature: &crate::types::FnSig,
+    arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+) -> Option<(usize, bool)> {
+    let implicit_prefix = signature
+        .context_count
+        .saturating_add(usize::from(signature.has_receiver))
+        .min(signature.params.len());
+    let explicit = signature.params.len() == arguments.len();
+    if (!explicit && signature.params.len() - implicit_prefix != arguments.len())
+        || arguments
+            .iter()
+            .any(|argument| argument.name.is_some() || argument.spread)
+    {
+        return None;
+    }
+    let parameters = &signature.params[if explicit { 0 } else { implicit_prefix }..];
+    let module = crate::module_symbols::ModuleSymbols::for_file(table, source_file);
+    let source = crate::symbol_source::CompositeSource::new(vec![
+        &module as &dyn crate::symbol_source::SymbolSource,
+        &*table.libraries as &dyn crate::symbol_source::SymbolSource,
+    ]);
+    let oracle = crate::symbol_resolver::SourceOracle(&source);
+    let rejected = parameters
+        .iter()
+        .zip(arguments)
+        .any(|(&parameter, argument)| {
+            argument.integer_literal.is_none()
+                && !argument.lambda
+                && !argument.contextual_call
+                && !argument.wrapped_contextual_call
+                && function_value_parameter_rejects(&oracle, open, argument.ty.get(), parameter)
+        });
+    (!rejected).then_some((implicit_prefix, explicit))
+}
+
 impl Checker<'_> {
     /// Every later level declined: report the type-mismatch peers together, or commit the nearer
     /// value before any later mapping-failure reporter. This does not publish a rejected peer.
@@ -101,6 +170,19 @@ impl Checker<'_> {
         let TyKind::Fun(signature) = self.declared_function_semantic_type(value_ty).kind() else {
             return false;
         };
+        // A function type has neither defaults nor varargs: the explicit form takes every
+        // parameter, a context argument may come from scope, and an extension receiver may be an
+        // implicit one. An argument count none of those forms admits cannot be taken.
+        let context_count = signature.context_count.min(signature.params.len());
+        let implicit_context_arity = signature.params.len() - context_count;
+        let admitted_arities = [
+            signature.params.len(),
+            implicit_context_arity,
+            implicit_context_arity.saturating_sub(usize::from(signature.has_receiver)),
+        ];
+        if !admitted_arities.contains(&args.len()) {
+            return true;
+        }
         if signature.params.len() != args.len()
             || args.iter().any(|&argument| {
                 matches!(
@@ -115,21 +197,25 @@ impl Checker<'_> {
         // this probe proved: a cast in a later argument shadows its operand in the scope it is
         // checked in, and records flow facts. The probe checks them in a scope of its own and
         // leaves the call's flow as it found it.
+        // Its diagnostics are dropped too: an argument that cannot be checked against the value's
+        // parameter (`value.let { other(it) }` whose lambda result is not that parameter) makes
+        // the value inapplicable, and the selected level checks the argument again.
         let entry_flow = scope.flow_snapshot();
+        let diagnostics = self.diags.diags.len();
         let probe_scope = scope.parameter_child();
         let arg_tys = self.invoke_operator_arg_tys(&probe_scope, call, value_ty, args);
         scope.restore_flow(&entry_flow);
+        let argument_failed = self.diags.diags.len() > diagnostics;
+        self.diags.diags.truncate(diagnostics);
+        if argument_failed {
+            return true;
+        }
+        let open_variables = self.active_postponed_type_variables();
         arg_tys
             .iter()
             .zip(&signature.params)
             .any(|(&actual, &parameter)| {
-                actual != Ty::Error
-                    && !actual.mentions_pending()
-                    && !actual.mentions_ty_param()
-                    && !parameter.mentions_ty_param()
-                    && actual != Ty::Nothing
-                    && !(actual == Ty::Null && parameter.admits_null())
-                    && !self.receiver_is_assignable(actual, parameter)
+                function_value_parameter_rejects(self, &open_variables, actual, parameter)
             })
     }
 
@@ -644,8 +730,9 @@ impl Checker<'_> {
                 Expr::Lambda { .. } | Expr::CallableRef { .. }
             )
         }) {
-            // Arity and ordinary value-argument mismatches do not make a selected lexical value
-            // disappear from the call tower. Its fixed `invoke` declaration owns the diagnostic.
+            // Arity and ordinary value-argument mismatches are judged once the arguments are
+            // typed (`lexical_invoke_rejects_arguments`); a rejected value is deferred, and its
+            // fixed `invoke` declaration owns the diagnostic only if no later level applies.
             // Only postponed callable literals need this pre-applicability shape check: they can be
             // typed solely after a competing callable supplies an expectation, so a lexical value
             // whose corresponding parameter is not callable must let the next rung participate.

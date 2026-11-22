@@ -44942,14 +44942,30 @@ impl<'a> Checker<'a> {
         // from the surrounding lexical declaration is universally quantified. Both use the same
         // semantic `TyParam` representation, so decide ownership from the active scope rather than
         // treating every generic argument as fixed or every erased upper bound as constructible.
-        if expected.non_null().is_ty_param()
-            && !actual.mentions_ty_param()
-            && scope.is_some_and(|scope| Self::type_is_lexically_fixed(scope, expected))
-        {
+        if scope.is_some_and(|scope| self.lexical_type_parameter_rejects(scope, expected, actual)) {
             self.report_assignability_error(expected, actual, span, "argument");
             return;
         }
         self.expect_assignable(expected, actual, span, "argument");
+    }
+
+    /// Whether `actual` certainly cannot be a value of the type parameter `expected` that an
+    /// enclosing declaration fixes at `scope`. Only values of that very parameter (or of one bounded
+    /// by it) are; its erased `Any?` bound is not a top type. A selected callee's still-open formal,
+    /// on either side, is an inference variable instead and is left to the constraint system.
+    fn lexical_type_parameter_rejects(
+        &self,
+        scope: &CheckerScope<'_>,
+        expected: Ty,
+        actual: Ty,
+    ) -> bool {
+        expected.non_null().is_ty_param()
+            && Self::type_is_lexically_fixed(scope, expected)
+            && actual != Ty::Error
+            && !actual.mentions_pending()
+            && !self.postponed_call_mentions(actual)
+            && Self::type_is_lexically_fixed(scope, actual)
+            && !self.receiver_is_assignable(actual, expected)
     }
 
     fn expect_source_constructor_args(
@@ -45859,7 +45875,7 @@ impl<'a> Checker<'a> {
         // already been admitted by the ordinary nullability relation above.
         if !matches!(ctx, "argument" | "generic argument")
             && expected.non_null().is_ty_param()
-            && !actual.mentions_ty_param()
+            && (!actual.mentions_ty_param() || !self.receiver_is_assignable(actual, expected))
         {
             self.report_assignability_error(declared_expected, declared_actual, span, ctx);
             return;
