@@ -38271,11 +38271,11 @@ impl<'a> Checker<'a> {
         if let Some(receiver) = &selected.outer_receiver {
             self.mark_selected_implicit_receiver_used(scope, receiver, class);
         }
-        if !selected.omitted.is_empty() && selected.default_masks.is_empty() {
-            self.diags.error(
-                span,
-                "constructor delegation cannot omit defaults for this target".to_string(),
-            );
+        if self.report_selected_delegation_diagnostic(
+            (class, secondary, span, label),
+            arguments,
+            &selected,
+        ) {
             return;
         }
         for (index, ((&argument, &expected), &declared)) in arguments

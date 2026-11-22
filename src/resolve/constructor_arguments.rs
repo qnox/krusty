@@ -435,6 +435,45 @@ impl Checker<'_> {
         Some(mismatches)
     }
 
+    /// A selected `this(...)` target that fills defaults loses to the delegating constructor when
+    /// that constructor accepts the same call while omitting fewer parameters. kotlinc resolves
+    /// the call to the constructor itself and reports the cycle.
+    pub(super) fn report_selected_delegation_diagnostic(
+        &mut self,
+        site: (DeclId, usize, Span, &str),
+        arguments: &CtorDelegationCall,
+        selected: &ResolvedCtorDelegation,
+    ) -> bool {
+        let (class, secondary, span, label) = site;
+        if let Some(omissions) = self.self_delegation_omissions(class, secondary, label, arguments)
+        {
+            if omissions < selected.omitted.len()
+                && self.report_self_delegation_cycle(class, secondary, span, label, arguments)
+            {
+                return true;
+            }
+        }
+        if !selected.omitted.is_empty() && selected.default_masks.is_empty() {
+            self.diags.error(
+                span,
+                "constructor delegation cannot omit defaults for this target".to_string(),
+            );
+            return true;
+        }
+        false
+    }
+
+    fn self_delegation_omissions(
+        &self,
+        class: DeclId,
+        secondary: usize,
+        label: &str,
+        arguments: &CtorDelegationCall,
+    ) -> Option<usize> {
+        let (slots, _) = self.mapped_self_delegation(class, secondary, label, arguments)?;
+        Some(slots.iter().filter(|slot| slot.is_none()).count())
+    }
+
     /// The delegating constructor is the only `this(...)` target that accepts these arguments.
     /// kotlinc reports that at the keyword; a constructor that does not accept them is a different
     /// argument error.

@@ -497,6 +497,35 @@ class Box {
 }
 ";
 
+const DEFAULT_SELF_CYCLE: &str = "\
+class Box(val item: Int = 0) {
+    constructor() : this()
+}
+";
+
+#[test]
+fn a_more_specific_self_delegation_is_a_cycle() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("DefaultCycle.kt", DEFAULT_SELF_CYCLE)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
 #[test]
 fn an_excess_delegation_also_reports_the_mapped_type_mismatch() {
     let stdlib = common::stdlib_jar();
