@@ -1266,8 +1266,6 @@ compiler/testData/diagnostics/tests/traitWithRequired/traitRequiresAny.kt
 compiler/testData/diagnostics/tests/typeArguments/inTypeAliasToArrayInGetClass.kt
 compiler/testData/diagnostics/tests/typeExposureAsAnInternalBound.kt
 compiler/testData/diagnostics/tests/typeParameters/cannotHaveManyClassUpperBounds.kt
-compiler/testData/diagnostics/tests/typeParameters/destructuringDeclarations.kt
-compiler/testData/diagnostics/tests/typeParameters/destructuringDeclarationsOld.kt
 compiler/testData/diagnostics/tests/typeParameters/extFunctionTypeAsUpperBound.kt
 compiler/testData/diagnostics/tests/typeParameters/functionTypeAsUpperBound.kt
 compiler/testData/diagnostics/tests/typeParameters/inProjectedDnnParameter.kt
