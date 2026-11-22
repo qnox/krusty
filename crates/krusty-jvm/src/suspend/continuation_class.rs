@@ -301,6 +301,7 @@ pub(super) fn build_continuation_class(
         fq_name: krusty::types::type_name(internal),
         is_source_declared: false,
         is_compiler_generated: false,
+        ownership: krusty::ir::ClassOwnership::ThisUnit,
         is_anonymous_object: false,
         site_name: None,
         enclosure: None,

@@ -10,6 +10,7 @@ pub fn blank_class(fq: &str) -> IrClass {
         declaration_name: None,
         is_source_declared: false,
         is_compiler_generated: false,
+        ownership: crate::ir::ClassOwnership::ThisUnit,
         is_anonymous_object: false,
         site_name: None,
         enclosure: None,

@@ -972,6 +972,22 @@ pub enum IrEnclosure {
     Classifier(ClassId),
 }
 
+/// Which compilation unit emits a class's storage, constructors, and dispatch tables.
+///
+/// A library class has exactly one owner among the dependency support units of a program, though
+/// a later unit may still need a final member of it, which no dispatch table reaches. That unit
+/// carries the class as [`ClassOwnership::EarlierUnit`]: the declaration facts its members read
+/// (fields, type parameters, supertypes) and the final member functions it adds, with the layout,
+/// constructors, and every dispatched member left to the unit that owns the class.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClassOwnership {
+    /// This unit emits the class.
+    #[default]
+    ThisUnit,
+    /// An earlier unit emitted the class; this unit contributes only final member functions.
+    EarlierUnit,
+}
+
 /// A class/interface/object declaration (`IrClass`). Instance fields come from the primary
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
@@ -988,6 +1004,8 @@ pub struct IrClass {
     /// A classifier the compiler generated for a source declaration (the companion a compiler
     /// plugin gives a class). It is declared with no source file.
     pub is_compiler_generated: bool,
+    /// Which dependency support unit emits this class's storage, constructors, and dispatch.
+    pub ownership: ClassOwnership,
     /// A source anonymous-object declaration.
     pub is_anonymous_object: bool,
     /// The declaration site of a local classifier lowered from a serialized body, which has no
