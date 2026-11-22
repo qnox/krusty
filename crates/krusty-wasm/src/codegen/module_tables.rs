@@ -196,7 +196,7 @@ impl ModuleTables {
                 PlannedSignature::Member { parameters, result } => {
                     let mut params = vec![REFERENCE];
                     for &parameter in parameters {
-                        params.push(parameter_carrier_of(parameter)?.ok_or("a `Unit` parameter")?);
+                        params.push(parameter_carrier_of(parameter)?);
                     }
                     module.func_type(params, carrier(result)?.into_iter().collect())
                 }
@@ -238,7 +238,7 @@ impl ModuleTables {
                 PlannedSignature::Member { parameters, result } => {
                     let mut params = vec![REFERENCE];
                     for &parameter in parameters {
-                        params.push(parameter_carrier_of(parameter)?.ok_or("a `Unit` parameter")?);
+                        params.push(parameter_carrier_of(parameter)?);
                     }
                     Some(module.func_type(params, carrier(result)?.into_iter().collect()))
                 }
