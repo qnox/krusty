@@ -996,6 +996,25 @@ impl Checker<'_> {
             .collect::<crate::symbol_resolver::GSigBinds>();
         !crate::symbol_resolver::ty_subst_keep_unbound(ty, &lexical_bindings).mentions_ty_param()
     }
+
+    /// Whether `actual` certainly cannot be a value of the type parameter `expected` that an
+    /// enclosing declaration fixes at `scope`. Only values of that very parameter (or of one bounded
+    /// by it) are; its erased `Any?` bound is not a top type. A selected callee's still-open formal,
+    /// on either side, is an inference variable instead and is left to the constraint system.
+    pub(super) fn lexical_type_parameter_rejects(
+        &self,
+        scope: &CheckerScope<'_>,
+        expected: Ty,
+        actual: Ty,
+    ) -> bool {
+        expected.non_null().is_ty_param()
+            && Self::type_is_lexically_fixed(scope, expected)
+            && actual != Ty::Error
+            && !actual.mentions_pending()
+            && !self.postponed_call_mentions(actual)
+            && Self::type_is_lexically_fixed(scope, actual)
+            && !self.receiver_is_assignable(actual, expected)
+    }
 }
 
 #[cfg(test)]

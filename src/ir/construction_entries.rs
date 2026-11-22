@@ -74,6 +74,22 @@ impl IrFile {
         })
     }
 
+    /// Build the entry answering whether its one reference is an instance of `class`, and record
+    /// it as that class's type-test entry. `None` when the file does not lay out the class.
+    pub(crate) fn add_type_test_entry(&mut self, class: ClassId) -> Option<FunId> {
+        let internal = self.classes[class as usize].fq_name;
+        let class_type = self.declared_class_self_type(internal)?;
+        let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+        let reference = self.parameter_read(0, any);
+        let test = self.add_expr(IrExpr::TypeOp {
+            op: super::IrTypeOp::InstanceOf,
+            arg: reference,
+            type_operand: class_type,
+        });
+        self.set_logical_type(test, Ty::Boolean);
+        Some(self.add_generated_entry("<is>$test", vec![any], Ty::Boolean, test))
+    }
+
     /// A compiler-generated static function of the file returning `value`.
     pub(crate) fn add_generated_entry(
         &mut self,

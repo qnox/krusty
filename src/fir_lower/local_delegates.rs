@@ -293,6 +293,7 @@ impl BodyLowering<'_> {
                         parameter: u32::try_from(parameter)
                             .map_err(|_| FirLoweringFailure::ValueIdentityOverflow)?,
                         value,
+                        context: Default::default(),
                     })
                 })
                 .collect::<Result<Vec<_>, FirLoweringFailure>>()?;

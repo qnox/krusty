@@ -15,6 +15,19 @@ pub(super) fn ir_sam_method(method: crate::fir::FirSamMethod) -> crate::ir::IrSa
     }
 }
 
+pub(super) fn ir_sam_frames(
+    frames: &[crate::fir::FirSamMethodFrame],
+) -> Vec<crate::ir::IrSamMethodFrame> {
+    frames
+        .iter()
+        .map(|frame| crate::ir::IrSamMethodFrame {
+            method: frame.method.map(ir_sam_method),
+            parameters: frame.parameters.iter().map(|ty| ty.get()).collect(),
+            result: frame.result.get(),
+        })
+        .collect()
+}
+
 use super::BodyLowering;
 
 impl BodyLowering<'_> {
@@ -113,11 +126,14 @@ impl BodyLowering<'_> {
             has_receiver: conversion.has_receiver,
             suspend: conversion.suspend,
             source_suspend: conversion.source_suspend,
+            requires_object_dispatch: conversion.requires_object_dispatch,
             overridden_results: conversion
                 .overridden_results
                 .iter()
                 .map(|result| result.get())
                 .collect(),
+            dispatch_methods: ir_sam_frames(&conversion.dispatch_methods),
+            default_methods: ir_sam_frames(&conversion.default_methods),
             function_adapter: false,
             wraps_function_value: true,
             nullable: conversion.nullable,
@@ -128,6 +144,7 @@ impl BodyLowering<'_> {
                 .iter()
                 .map(crate::ir::IrSamTypeParameter::lowered)
                 .collect(),
+            placement: crate::ir::IrSamPlacement::ThisFile,
         };
         let name = format!(
             "$fir_sam_delegate_{}_{}",

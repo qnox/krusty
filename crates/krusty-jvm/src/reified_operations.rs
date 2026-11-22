@@ -486,10 +486,14 @@ fn collect_type_reified_parameters(
                 found.insert(identity.to_owned().to_string());
             }
         }
-        TyKind::Obj(_, arguments) | TyKind::Intersection(arguments) => arguments
+        TyKind::Obj(_, arguments) => arguments
             .iter()
             .copied()
             .for_each(|argument| collect_type_reified_parameters(argument, parameters, found)),
+        TyKind::Intersection(parts) => parts
+            .iter()
+            .copied()
+            .for_each(|part| collect_type_reified_parameters(part, parameters, found)),
         TyKind::Fun(signature) => {
             signature.params.iter().copied().for_each(|parameter| {
                 collect_type_reified_parameters(parameter, parameters, found)
@@ -558,6 +562,7 @@ fn expression_reified_parameters(
             operation:
                 krusty::ir::IrIntrinsic::TypeOf { ty: classifier }
                 | krusty::ir::IrIntrinsic::EnumValueOf { classifier }
+                | krusty::ir::IrIntrinsic::EnumValues { classifier }
                 | krusty::ir::IrIntrinsic::EnumEntries { classifier },
             ..
         } = &**call_callee =>

@@ -234,11 +234,20 @@ pub trait Backend {
         Vec::new()
     }
 
-    /// Whether this target's `StringBuilder` appends a `CharSequence` by reading its `length` and
-    /// each indexed `Char` (Kotlin/Wasm WASI) rather than by rendering it with `toString`
-    /// (Kotlin/Wasm JS). The handoff then freezes those `CharSequence` members for the target to
-    /// call ([`CheckedBackendCallables::char_sequence_protocol`]).
+    /// Whether this target's `StringBuilder` reads an appended `CharSequence` through its members:
+    /// its `length` and each indexed `Char` (Kotlin/Wasm WASI), or its `length` ahead of a
+    /// `toString` rendering (Kotlin/Wasm JS's ranged append). The handoff then freezes those
+    /// `CharSequence` members for the target to call
+    /// ([`CheckedBackendCallables::char_sequence_protocol`]).
     fn appends_char_sequences_by_index(&self) -> bool {
+        false
+    }
+
+    /// Whether this target's own `ArrayList` reads another collection through its interface
+    /// members: walks it with `Iterable.iterator()` and asks it `Collection.contains`, as the
+    /// stdlib's `addAll`, `containsAll`, `removeAll` and `retainAll` do. The handoff then freezes
+    /// those members for the target to call ([`CheckedBackendCallables::collection_protocol`]).
+    fn reads_collections_through_interfaces(&self) -> bool {
         false
     }
 

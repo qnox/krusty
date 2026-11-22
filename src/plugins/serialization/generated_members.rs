@@ -115,14 +115,12 @@ impl GeneratedSerializerMembers {
                 .expect("a declared $serializer publishes every generated member role")
         };
         Self {
-            descriptor: member(crate::ir::IrGeneratedFunctionRole::SerializationDescriptor),
-            serialize: member(crate::ir::IrGeneratedFunctionRole::SerializationSerialize),
-            deserialize: member(crate::ir::IrGeneratedFunctionRole::SerializationDeserialize),
-            child_serializers: member(
-                crate::ir::IrGeneratedFunctionRole::SerializationChildSerializers,
-            ),
+            descriptor: member(super::roles::SerializationFunction::Descriptor),
+            serialize: member(super::roles::SerializationFunction::Serialize),
+            deserialize: member(super::roles::SerializationFunction::Deserialize),
+            child_serializers: member(super::roles::SerializationFunction::ChildSerializers),
             type_parameter_serializers: member(
-                crate::ir::IrGeneratedFunctionRole::SerializationTypeParameterSerializers,
+                super::roles::SerializationFunction::TypeParameterSerializers,
             ),
         }
     }
@@ -331,23 +329,23 @@ pub(super) fn add_serializer_members(
     };
     for (role, function) in [
         (
-            crate::ir::IrGeneratedFunctionRole::SerializationDescriptor,
+            super::roles::SerializationFunction::Descriptor,
             members.descriptor,
         ),
         (
-            crate::ir::IrGeneratedFunctionRole::SerializationSerialize,
+            super::roles::SerializationFunction::Serialize,
             members.serialize,
         ),
         (
-            crate::ir::IrGeneratedFunctionRole::SerializationDeserialize,
+            super::roles::SerializationFunction::Deserialize,
             members.deserialize,
         ),
         (
-            crate::ir::IrGeneratedFunctionRole::SerializationChildSerializers,
+            super::roles::SerializationFunction::ChildSerializers,
             members.child_serializers,
         ),
         (
-            crate::ir::IrGeneratedFunctionRole::SerializationTypeParameterSerializers,
+            super::roles::SerializationFunction::TypeParameterSerializers,
             members.type_parameter_serializers,
         ),
     ] {

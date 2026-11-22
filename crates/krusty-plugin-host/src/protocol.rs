@@ -7,7 +7,7 @@
 
 use std::io::{self, Read, Write};
 
-use krusty_plugin_ir::{
+use krusty_plugin_api::ir::{
     CallableIdentity, CallableKind, ClassName, Classifier, ModuleIr, TypeArgument, TypeIdentity,
     TypeParameterOwner,
 };
@@ -17,7 +17,7 @@ use crate::session::SessionRequest;
 
 mod module_ir;
 
-pub(crate) const PROTOCOL: u32 = 5;
+pub(crate) const PROTOCOL: u32 = 6;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -62,7 +62,8 @@ pub(crate) enum Request<'a> {
     CloseSession,
     /// Find declarations on the session's classpath.
     Resolve(&'a [CallableIdentity]),
-    /// Build the module's IR in the session and run the loaded plugins' IR generation over it.
+    /// Build the module's IR in the session, run the loaded plugins' IR generation over it, and send
+    /// back the module they left.
     Generate(&'a ModuleIr),
     /// Read a script template's definition from its compilation configuration.
     ScriptDefinition {
@@ -79,7 +80,8 @@ pub(crate) enum Reply {
     SessionClosed,
     /// Each resolved declaration rendered as kotlinc renders IR, in request order.
     Resolved(Vec<String>),
-    Generated,
+    /// The module the plugins' IR generation left.
+    Generated(ModuleIr),
     ScriptDefined(ScriptTemplateDefinition),
     /// The request failed in the host; the message says why, as kotlinc would.
     Failed(String),
@@ -182,7 +184,7 @@ pub(crate) fn read_reply(input: &mut impl Read) -> io::Result<Reply> {
         SESSION_OPENED => Ok(Reply::SessionOpened),
         SESSION_CLOSED => Ok(Reply::SessionClosed),
         RESOLVED => Ok(Reply::Resolved(payload.list(|payload| payload.string())?)),
-        GENERATED => Ok(Reply::Generated),
+        GENERATED => Ok(Reply::Generated(module_ir::read_module(&mut payload)?)),
         SCRIPT_DEFINED => Ok(Reply::ScriptDefined(ScriptTemplateDefinition {
             file_extension: payload.string()?,
             base_class: if payload.byte()? != 0 {
@@ -311,6 +313,77 @@ fn put_argument(payload: &mut Vec<u8>, argument: &TypeArgument) {
     }
 }
 
+fn read_callable(payload: &mut Payload) -> io::Result<CallableIdentity> {
+    let tag = payload.byte()?;
+    let package = payload.string()?;
+    let classes = payload.list(|payload| payload.string())?;
+    let kind = match tag {
+        0 => CallableKind::Function {
+            name: payload.string()?,
+        },
+        1 => CallableKind::Property {
+            name: payload.string()?,
+        },
+        2 => CallableKind::Constructor,
+        tag => return Err(malformed(format!("unknown callable kind {tag}"))),
+    };
+    Ok(CallableIdentity {
+        kind,
+        package,
+        classes,
+        type_parameters: payload.u32()?,
+        context_parameters: payload.list(read_type)?,
+        extension_receiver: match payload.byte()? {
+            0 => None,
+            _ => Some(read_type(payload)?),
+        },
+        value_parameters: payload.list(read_type)?,
+    })
+}
+
+fn read_class_name(payload: &mut Payload) -> io::Result<ClassName> {
+    Ok(ClassName {
+        package: payload.string()?,
+        classes: payload.list(|payload| payload.string())?,
+    })
+}
+
+fn read_type(payload: &mut Payload) -> io::Result<TypeIdentity> {
+    let classifier = match payload.byte()? {
+        0 => Classifier::Class {
+            class: read_class_name(payload)?,
+            arguments: payload.list(read_argument)?,
+        },
+        1 => {
+            let owner = match payload.byte()? {
+                0 => TypeParameterOwner::Callable,
+                1 => TypeParameterOwner::Class(read_class_name(payload)?),
+                tag => return Err(malformed(format!("unknown type parameter owner {tag}"))),
+            };
+            Classifier::TypeParameter {
+                owner,
+                index: payload.u32()?,
+            }
+        }
+        tag => return Err(malformed(format!("unknown type kind {tag}"))),
+    };
+    Ok(TypeIdentity {
+        classifier,
+        nullable: payload.byte()? != 0,
+        annotations: payload.list(read_class_name)?,
+    })
+}
+
+fn read_argument(payload: &mut Payload) -> io::Result<TypeArgument> {
+    Ok(match payload.byte()? {
+        0 => TypeArgument::Star,
+        1 => TypeArgument::Invariant(read_type(payload)?),
+        2 => TypeArgument::In(read_type(payload)?),
+        3 => TypeArgument::Out(read_type(payload)?),
+        tag => return Err(malformed(format!("unknown type argument kind {tag}"))),
+    })
+}
+
 pub(crate) fn put_str(payload: &mut Vec<u8>, value: &str) {
     payload.extend_from_slice(&(value.len() as u32).to_be_bytes());
     payload.extend_from_slice(value.as_bytes());
@@ -346,6 +419,18 @@ impl Payload<'_> {
     pub(crate) fn u32(&mut self) -> io::Result<u32> {
         let bytes = self.take(4)?;
         Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    pub(crate) fn i32(&mut self) -> io::Result<i32> {
+        let bytes = self.take(4)?;
+        Ok(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    pub(crate) fn i64(&mut self) -> io::Result<i64> {
+        let bytes = self.take(8)?;
+        let mut value = [0u8; 8];
+        value.copy_from_slice(bytes);
+        Ok(i64::from_be_bytes(value))
     }
 
     pub(crate) fn string(&mut self) -> io::Result<String> {
