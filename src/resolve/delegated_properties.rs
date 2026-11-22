@@ -1099,11 +1099,13 @@ impl Checker<'_> {
         }));
     }
 
+    /// Report the inapplicable candidates. One candidate's result is the property type an
+    /// unannotated delegate still has: kotlinc names that type in both conventions.
     fn report_inapplicable_delegate_convention_failure(
         &mut self,
         query: &DelegateConventionQuery<'_>,
         families: &DelegateConventionFamilies,
-    ) {
+    ) -> Option<Ty> {
         let site = query.site.clone();
         let delegate_ty = query.delegate_ty;
         let name = query.name;
@@ -1139,23 +1141,30 @@ impl Checker<'_> {
             &candidates,
         )
         .expect("retained delegate candidates must produce a diagnostic");
+        let property_type = match candidates.as_slice() {
+            [candidate] => Some(candidate.result),
+            _ => None,
+        };
         self.diags.error(site.by_span, message);
+        property_type
     }
 
     fn report_delegate_operator_failure(
         &mut self,
         query: &DelegateConventionQuery<'_>,
         failure: DelegateOperatorFailure,
-    ) {
+    ) -> Option<Ty> {
         match failure {
             DelegateOperatorFailure::AmbiguousOrdinary(candidates) => {
-                self.report_delegate_convention_ambiguity(query, &candidates)
+                self.report_delegate_convention_ambiguity(query, &candidates);
+                None
             }
             DelegateOperatorFailure::InapplicableCandidates(families) => {
                 self.report_inapplicable_delegate_convention_failure(query, &families)
             }
             DelegateOperatorFailure::AmbiguousMemberExtensions(candidates) => {
-                self.report_member_extension_delegate_convention_ambiguity(query, &candidates)
+                self.report_member_extension_delegate_convention_ambiguity(query, &candidates);
+                None
             }
         }
     }
@@ -1303,7 +1312,11 @@ impl Checker<'_> {
                 return DelegateGetValueAttempt::Complete(None);
             }
             DelegateOperatorSelection::Failure(failure) => {
-                self.report_delegate_operator_failure(
+                // A written type, including an unresolved one, stays that type. An unannotated
+                // property takes the single getValue candidate's result, which setValue then
+                // demands.
+                let unannotated = site.written_property_type.is_none();
+                let property_type = self.report_delegate_operator_failure(
                     &DelegateConventionQuery {
                         site,
                         delegate_ty: stored_ty,
@@ -1314,7 +1327,7 @@ impl Checker<'_> {
                     },
                     failure,
                 );
-                return DelegateGetValueAttempt::Complete(None);
+                return DelegateGetValueAttempt::Complete(property_type.filter(|_| unannotated));
             }
         };
         if let Some(applied_receiver) = target.applied_receiver().filter(|receiver| {
