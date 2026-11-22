@@ -17,16 +17,81 @@ pub(in crate::resolve) struct GeneratedSourceClassifier {
     pub(in crate::resolve) identity: TypeName,
 }
 
-/// Every nested classifier the enabled plugins generate for a source class of `files`. A local or
-/// anonymous class is not reachable through a qualified type, so it contributes none here.
+/// The header facts of a source class that a plugin decides from, and the nested classifiers the
+/// plugins generated from them.
+#[derive(Default)]
+pub(in crate::resolve) struct ClassifierPluginFacts {
+    /// A class-valued annotation argument, resolved next to the annotation's own name and through
+    /// the same classifier rules. Another file of this module reads it from the stable index; it
+    /// never sees this declaration's syntax, so recovering the identity from a spelling later is
+    /// not available to it.
+    pub(in crate::resolve) annotation_class_arguments: Vec<(u32, TypeName)>,
+    pub(in crate::resolve) generated: Vec<crate::types::GeneratedClassifierFact>,
+}
+
+/// The plugins' generated nested classifiers of every source class, decided once from the class's
+/// header. The type universe declares the reachable ones; signature collection records each class's
+/// own facts from here and never asks the plugins again.
+#[derive(Default)]
+pub(in crate::resolve) struct GeneratedClassifiers {
+    by_declaration: HashMap<(usize, DeclId), ClassifierPluginFacts>,
+    reachable: Vec<GeneratedSourceClassifier>,
+}
+
+impl GeneratedClassifiers {
+    /// The plugin facts of class declaration `declaration` of source `source`.
+    pub(in crate::resolve) fn take(
+        &mut self,
+        source: usize,
+        declaration: DeclId,
+    ) -> ClassifierPluginFacts {
+        self.by_declaration
+            .remove(&(source, declaration))
+            .unwrap_or_default()
+    }
+}
+
+/// The source type universe with the plugins' generated nested classifiers declared, so a written
+/// `Owner.Companion` binds to the companion a plugin generates, together with those classifiers.
+pub(in crate::resolve) fn plugin_source_type_universe(
+    files: &[File],
+    libraries: &dyn SemanticPlatform,
+    diags: &mut DiagSink,
+    compact_headers: Option<&crate::fir::StreamedHeaderModule>,
+    compact_local_contexts: Option<&[PassOneLocalClassContext]>,
+    plugins: &crate::plugins::PluginHost,
+) -> (SourceTypeUniverse, GeneratedClassifiers) {
+    let universe = source_type_universe(files, libraries, diags, compact_headers, &[]);
+    let generated = plugin_generated_classifiers(
+        files,
+        compact_headers,
+        compact_local_contexts,
+        &universe,
+        plugins,
+    );
+    if !universe_misses_generated_classifier(&universe, &generated.reachable) {
+        return (universe, generated);
+    }
+    // The first build already reported its declaration conflicts; the generated classifiers add
+    // none, so the second build's diagnostics repeat them.
+    let universe = source_type_universe(
+        files,
+        libraries,
+        &mut DiagSink::new(),
+        compact_headers,
+        &generated.reachable,
+    );
+    (universe, generated)
+}
+
 pub(in crate::resolve) fn plugin_generated_classifiers(
     files: &[File],
     compact_headers: Option<&crate::fir::StreamedHeaderModule>,
     compact_local_contexts: Option<&[PassOneLocalClassContext]>,
     universe: &SourceTypeUniverse,
     plugins: &crate::plugins::PluginHost,
-) -> Vec<GeneratedSourceClassifier> {
-    let mut generated = Vec::new();
+) -> GeneratedClassifiers {
+    let mut generated = GeneratedClassifiers::default();
     for (source, file) in files.iter().enumerate() {
         let names = &universe.file_class_names[source];
         for &declaration in &file.decls {
@@ -44,14 +109,12 @@ pub(in crate::resolve) fn plugin_generated_classifiers(
             if compact_headers.is_some() && stub.is_none() {
                 continue;
             }
-            if stub.is_some_and(|stub| {
+            let reachable = !stub.is_some_and(|stub| {
                 stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
                     || stub
                         .flags
                         .has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT)
-            }) {
-                continue;
-            }
+            });
             let flags = compact_headers.zip(stub).map_or_else(
                 || source_class_flags(class),
                 |(headers, stub)| streamed_source_class_flags(headers, stub),
@@ -106,11 +169,22 @@ pub(in crate::resolve) fn plugin_generated_classifiers(
                 },
                 &mut facts_out,
             );
-            generated.extend(facts_out.into_iter().map(|fact| GeneratedSourceClassifier {
-                source_name: format!("{}.{}", class.name, fact.source_name),
-                simple_name: fact.source_name.to_string(),
-                identity: fact.classifier,
-            }));
+            if reachable {
+                generated.reachable.extend(facts_out.iter().map(|fact| {
+                    GeneratedSourceClassifier {
+                        source_name: format!("{}.{}", class.name, fact.source_name),
+                        simple_name: fact.source_name.to_string(),
+                        identity: fact.classifier,
+                    }
+                }));
+            }
+            generated.by_declaration.insert(
+                (source, declaration),
+                ClassifierPluginFacts {
+                    annotation_class_arguments,
+                    generated: facts_out,
+                },
+            );
         }
     }
     generated
@@ -118,7 +192,7 @@ pub(in crate::resolve) fn plugin_generated_classifiers(
 
 /// Whether a written type of some file stopped at a generated name, so the universe has to be built
 /// again with the generated classifiers declared.
-pub(in crate::resolve) fn universe_misses_generated_classifier(
+fn universe_misses_generated_classifier(
     universe: &SourceTypeUniverse,
     generated: &[GeneratedSourceClassifier],
 ) -> bool {

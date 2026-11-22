@@ -90,3 +90,24 @@ fun box(): String = "${Flag.defaultTrue.value}|${Name.defaultNull.value}|${Flag.
         "true|none|false"
     );
 }
+
+#[test]
+fn an_extension_on_a_nested_class_synthesized_companion_resolves() {
+    let src = r#"import kotlinx.serialization.Serializable
+
+class Outer {
+    @Serializable
+    class Inner(val value: Int = 0)
+}
+
+val Outer.Inner.Companion.seven: Outer.Inner
+    get() = Outer.Inner(7)
+
+fun box(): String =
+    "${Outer.Inner.seven.value}|${Outer.Inner.serializer().descriptor.serialName}"
+"#;
+    assert_eq!(
+        both_compilers_box(src, "synthetic_companion_extension_nested_class"),
+        "7|Outer.Inner"
+    );
+}
