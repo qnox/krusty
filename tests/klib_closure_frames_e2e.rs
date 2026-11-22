@@ -11,6 +11,9 @@ mod elvis_blocks;
 #[path = "klib_closure_frames_e2e/library_enums.rs"]
 mod library_enums;
 
+#[path = "klib_closure_frames_e2e/file_private_function_receivers.rs"]
+mod file_private_function_receivers;
+
 #[path = "klib_closure_frames_e2e/top_level_properties.rs"]
 mod top_level_properties;
 

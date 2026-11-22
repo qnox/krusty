@@ -112,9 +112,7 @@ fn reference_declarations(
             continue;
         }
         pending.extend(
-            libraries
-                .declaration_bodies()
-                .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
+            crate::klib_lowering::emitted_body(libraries.declaration_bodies(), &identity).callables,
         );
         if let Some(declaration) = libraries.external_callable_by_dependency(&identity) {
             declarations.push(declaration);
