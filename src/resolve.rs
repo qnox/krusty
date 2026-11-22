@@ -18259,7 +18259,7 @@ impl<'a> Checker<'a> {
         name: String,
         ty: Option<TypeRef>,
         delegate: ExprId,
-        site: DelegateConventionSite,
+        mut site: DelegateConventionSite,
     ) {
         if self.declared_in_current_scope(scope, &name) {
             self.diags.error(
@@ -18284,7 +18284,7 @@ impl<'a> Checker<'a> {
             Ty::Null,
             Ty::Null,
             explicit_property_ty,
-            site.clone(),
+            &mut site,
         );
         let prop_ty = match explicit_property_ty {
             Some(t) => t,
@@ -41885,7 +41885,7 @@ impl<'a> Checker<'a> {
                             owner_ref,
                             this_ref,
                             expected_property,
-                            site.clone(),
+                            &mut site,
                         );
                         if expected_property.is_none() {
                             body_inferred_property_type = delegate_ret
