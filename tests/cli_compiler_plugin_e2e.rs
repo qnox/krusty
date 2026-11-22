@@ -751,6 +751,39 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
     );
 }
 
+/// A compiled composable getter takes the composer and `$changed` after the property's own
+/// parameters, as a composable function does. The property still resolves as its declaration
+/// states it, whether a class member, a top-level property or an extension, and the pass hands a
+/// module that reads one to kotlinc, since it does not pass a getter those parameters yet.
+#[test]
+fn a_read_of_a_composable_property_resolves_and_the_compose_pass_refuses_it() {
+    assert_compose_rejects(
+        "compose-member-property-read",
+        "val LocalName = androidx.compose.runtime.compositionLocalOf { \"a\" }\n\
+         @Composable fun Greeting(): String = LocalName.current\n",
+        &[],
+        "4:38: error: krusty's Compose compiler plugin does not support a read of a composable \
+         property yet",
+    );
+    assert_compose_rejects(
+        "compose-top-level-property-read",
+        "import androidx.compose.runtime.currentCompositeKeyHash\n\
+         @Composable fun Key(): Int = currentCompositeKeyHash\n",
+        &[],
+        "4:30: error: krusty's Compose compiler plugin does not support a read of a composable \
+         property yet",
+    );
+    assert_compose_rejects(
+        "compose-extension-property-read",
+        "import androidx.compose.foundation.layout.WindowInsets\n\
+         import androidx.compose.foundation.layout.safeDrawing\n\
+         @Composable fun Insets(): WindowInsets = WindowInsets.safeDrawing\n",
+        &[],
+        "5:42: error: krusty's Compose compiler plugin does not support a read of a composable \
+         property yet",
+    );
+}
+
 /// A library composable's default argument is realized by its transformed entry, which only the
 /// Compose plugin's calls pass the mask to: a module compiled without the plugin that omits one
 /// gets the frontend's error for a default nothing can realize.
