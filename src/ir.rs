@@ -156,7 +156,7 @@ pub use bridges::{
     Bridge, BridgeAccessorRole, BridgeKind, BridgeParameter, BridgePropertyImplementation,
     CollectionBarrierCheck, CollectionBarrierParameter, CollectionBarrierPlan,
 };
-pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget};
+pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget, ValueClassAdapter};
 pub use catches::IrCatch;
 pub use companion_blocks::{IrCompanionBlockProperty, IrCompanionBlocks, IrStaticPlacement};
 pub use constants::IrConst;
@@ -2925,7 +2925,9 @@ pub use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
 pub use debug_locals::{IrCatchBinding, IrCatchName, IrLambdaForm, IrLambdaOrigin};
 pub use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
-pub use generated_members::{IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember};
+pub use generated_members::{
+    IrGeneratedClassRole, IrGeneratedFunctionRole, IrMemberPlacement, IrValueClassAnyMember,
+};
 pub use generated_members::{
     IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
