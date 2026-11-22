@@ -1678,7 +1678,7 @@ impl Checker<'_> {
                     // one-input function with implicit `it`. Replacing it with the expectation-free
                     // fallback Function0 here would discard every applicable one-input SAM and turn
                     // a real ambiguity into “none applicable.”
-                    if self.lambda_probe_ty(scope, argument) == Some(Ty::Error) {
+                    if self.lambda_probe_ty(argument) == Some(Ty::Error) {
                         CallArgKind::LambdaLiteral(Ty::Error)
                     } else if let Some(intersection) =
                         self.flow_intersection_argument(scope, argument)

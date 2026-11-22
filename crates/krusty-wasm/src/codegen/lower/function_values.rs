@@ -611,9 +611,10 @@ impl Body<'_> {
         }
     }
 
-    /// Convert the reference on top of `code`'s stack to the carrier of `ty`.
+    /// Convert the reference on top of `code`'s stack to the parameter carrier of `ty`. A
+    /// `Nothing` parameter, such as a lambda's for `Function1<*, *>`, stays a reference.
     fn unpack_argument(&mut self, code: &mut Code, ty: Ty) -> Result<(), Unsupported> {
-        match carrier(ty)? {
+        match parameter_carrier_of(ty)? {
             None => Err("a function value taking a `Unit` value".into()),
             Some(REFERENCE) => Ok(()),
             Some(ValType::Ref { heap, .. }) => {

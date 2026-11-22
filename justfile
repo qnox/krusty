@@ -62,6 +62,7 @@ versioning-tests:
     bash scripts/test-sort-kotlin-versions.sh
     bash scripts/test-install-maven.sh
     bash scripts/test-fetch-conformance-deps.sh
+    bash scripts/test-check-intellij-patch.sh
 
 # The CI runner profile's machine and contention report, against stand-in /proc and /sys trees.
 runner-profile-tests:
@@ -233,7 +234,7 @@ conformance-one VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     v="{{VERSION}}"
-    kc_var="KRUSTY_KOTLINC_${v//./_}"
+    kc_var="KRUSTY_KOTLINC_${v//[.-]/_}"
     kc="${!kc_var:-}"
     vendored="$PWD/target/cache/kotlinc/$v/kotlinc/bin/kotlinc"
     [ -z "$kc" ] && [ -x "$vendored" ] && kc="$vendored"
@@ -584,7 +585,7 @@ test-all *ARGS:
     declare -a pids=() tags=()
     while read -r v; do
         [ -z "$v" ] && continue
-        kc_var="KRUSTY_KOTLINC_${v//./_}"
+        kc_var="KRUSTY_KOTLINC_${v//[.-]/_}"
         kc="${!kc_var:-}"
         vendored="$PWD/target/cache/kotlinc/$v/kotlinc/bin/kotlinc"
         [ -z "$kc" ] && [ -x "$vendored" ] && kc="$vendored"

@@ -408,6 +408,20 @@ fn collect_type_parameters(ty: Ty, output: &mut Vec<crate::types::TyParamName>) 
     }
 }
 
+/// `callable`'s result `selected`, as its owner's hierarchy substitutes it, with the flexibility its
+/// declared occurrences carry: a Java type argument naming a type variable stays flexible
+/// (`Inv<T!>` substituted is `Inv<E!>`), and a position Java enhancement fixed stays rigid.
+pub(super) fn inherited_result(callable: &LibraryCallable, selected: Ty) -> Ty {
+    let (declared, _) = declared_result(
+        callable.generic_sig.as_deref(),
+        selected,
+        callable.declared_ret,
+        &callable.enhanced_result,
+    );
+    let published = publish_selected(declared, selected, &HashMap::default());
+    suppress_enhanced_flexibility(selected, published, &callable.enhanced_result.marks)
+}
+
 fn publish_selected(declared: Ty, selected: Ty, bindings: &crate::types::TyParamBindings) -> Ty {
     match (declared.kind(), selected.kind()) {
         (TyKind::TyParam(name, declared_bound) | TyKind::Var(name, declared_bound), _) => {
