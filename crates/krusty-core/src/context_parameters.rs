@@ -42,7 +42,7 @@ pub enum ContextBindingSource {
 impl ContextBindingSource {
     /// Normalize a lexical coordinate across a nested callable. A required class capture is
     /// already an exact lexical identity and has no depth to reinterpret.
-    pub(crate) fn outside_nested_bindings(self, count: usize) -> Option<Self> {
+    pub fn outside_nested_bindings(self, count: usize) -> Option<Self> {
         match self {
             Self::ProvenLocalDepth {
                 shadow_depth,

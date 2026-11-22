@@ -4,7 +4,7 @@ use super::{DeprecationWarningFormat, LangFeatures};
 
 /// A declaration-use position kotlinc is migrating from a warning to the declaration's level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DeprecationMigration {
+pub enum DeprecationMigration {
     ClassifierInImplicitInvoke,
     OuterImportedClass,
     CompanionInDelegation,
@@ -12,9 +12,9 @@ pub(crate) enum DeprecationMigration {
 
 /// The selected policy for one migrating declaration-use position.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct DeprecationMigrationPolicy {
-    pub(crate) completed: bool,
-    pub(crate) warning_format: Option<DeprecationWarningFormat>,
+pub struct DeprecationMigrationPolicy {
+    pub completed: bool,
+    pub warning_format: Option<DeprecationWarningFormat>,
 }
 
 /// The three declaration-use migration policies selected for one source file.
@@ -26,7 +26,7 @@ pub struct DeprecationMigrations {
 }
 
 impl DeprecationMigrations {
-    pub(crate) fn from_features(features: &LangFeatures) -> Self {
+    pub fn from_features(features: &LangFeatures) -> Self {
         let policy = |feature| DeprecationMigrationPolicy {
             completed: features.has(feature),
             warning_format: features.deprecation_warning_format(feature),
@@ -40,7 +40,7 @@ impl DeprecationMigrations {
         }
     }
 
-    pub(crate) fn policy(&self, migration: DeprecationMigration) -> &DeprecationMigrationPolicy {
+    pub fn policy(&self, migration: DeprecationMigration) -> &DeprecationMigrationPolicy {
         match migration {
             DeprecationMigration::ClassifierInImplicitInvoke => {
                 &self.classifiers_in_implicit_invokes
