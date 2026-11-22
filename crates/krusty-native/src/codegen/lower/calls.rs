@@ -760,6 +760,31 @@ impl BodyLowering<'_, '_, '_> {
                             };
                             return self.convert(produced, Some(operand), *ret);
                         }
+                        // `x.nextUp()` and `x.nextDown()`: the runtime answers on the receiver's own
+                        // width, which is why it is read as a number rather than a reference.
+                        if let Some((symbol, operand)) = receiver_type.and_then(|receiver_type| {
+                            super::super::super::intrinsics::adjacent_floating(
+                                owner,
+                                &name,
+                                receiver_type,
+                                params,
+                            )
+                        }) {
+                            let Some(value) = self.coerce(receiver, operand)? else {
+                                return Err(
+                                    "a `Unit` receiver for an adjacent floating value".into()
+                                );
+                            };
+                            if self.terminated {
+                                return Ok(None);
+                            }
+                            let produced =
+                                self.runtime_call(symbol, &[operand], operand, &[value])?;
+                            let Some(produced) = produced else {
+                                return Ok(None);
+                            };
+                            return self.convert(produced, Some(operand), *ret);
+                        }
                         // `kotlin.experimental`'s bit operations on the narrow integers. Kotlin
                         // gives `Int` and `Long` the same four as members and these as extensions,
                         // which is where the library put them rather than a difference in what

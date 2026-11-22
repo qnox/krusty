@@ -1796,6 +1796,30 @@ pub(super) fn floor_mod(
     }
 }
 
+/// `x.nextUp()` and `x.nextDown()` on `Float` and `Double` — the adjacent representable value toward
+/// positive or negative infinity — as (runtime symbol, operand type). The receiver crosses at its
+/// own width and the answer comes back at it.
+///
+/// The Native stdlib declares these `external`, so no body exists to lower; the runtime answers
+/// them on the bits (`krusty_fp.c`).
+pub(super) fn adjacent_floating(
+    owner: DeclarationOwner,
+    name: &str,
+    receiver: Ty,
+    params: &[Ty],
+) -> Option<(&'static str, Ty)> {
+    if !owner.package_matches("kotlin/math") || !params.is_empty() {
+        return None;
+    }
+    match (name, receiver) {
+        ("nextUp", Ty::Float) => Some(("kt_next_up_float", Ty::Float)),
+        ("nextUp", Ty::Double) => Some(("kt_next_up_double", Ty::Double)),
+        ("nextDown", Ty::Float) => Some(("kt_next_down_float", Ty::Float)),
+        ("nextDown", Ty::Double) => Some(("kt_next_down_double", Ty::Double)),
+        _ => None,
+    }
+}
+
 /// A bit operation `kotlin.experimental` declares for the NARROW integers.
 ///
 /// Kotlin gives `Int` and `Long` `and`/`or`/`xor`/`inv` as members and gives `Byte` and `Short`
