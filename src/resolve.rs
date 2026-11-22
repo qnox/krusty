@@ -16149,6 +16149,7 @@ impl<'a> Checker<'a> {
                         matches!(origin, ReceiverFnValueOrigin::DispatchProperty { .. })
                             .then_some(semantic)
                     })
+                    .or_else(|| self.implicit_receiver_callable_property_function(scope, &fname))
                     .and_then(|semantic| {
                         let TyKind::Fun(signature) = semantic.kind() else {
                             return None;

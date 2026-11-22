@@ -120,6 +120,33 @@ impl Checker<'_> {
         Ok(Some(ty))
     }
 
+    /// The function type of the callable property a bare call `name(...)` reaches on an implicit
+    /// receiver that is not a lexical binding (an extension function's receiver). A member function
+    /// of that name on the same receiver is the nearer callable, so it leaves no expectation.
+    pub(super) fn implicit_receiver_callable_property_function(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+    ) -> Option<Ty> {
+        for receiver in self.implicit_receivers(scope) {
+            if !self
+                .stable_receiver_callables(receiver.ty, name)
+                .functions()
+                .is_empty()
+            {
+                return None;
+            }
+            let Ok(Some(selection)) = self.select_property_read(scope, receiver.ty, name) else {
+                continue;
+            };
+            let property_ty = selection.ty();
+            return (self.value_type_claims_call(scope, property_ty)
+                && property_ty.non_null().is_fun())
+            .then_some(property_ty.non_null());
+        }
+        None
+    }
+
     pub(super) fn invoke_operator_candidates(
         &self,
         receiver_ty: Ty,
