@@ -145,12 +145,14 @@ impl Parser<'_> {
             j += 2;
         }
 
-        // `@Composable () -> Unit` annotates a function type; its parentheses are the type, not
-        // annotation arguments. Mirror the real parser's disambiguation exactly.
+        // `@Composable () -> Unit` and `@Composable (() -> Unit)?` annotate a function or
+        // parenthesized type; their parentheses are the type, not annotation arguments. Mirror the
+        // real parser's disambiguation exactly.
         if self
             .t
             .get(j)
             .is_some_and(|token| token.kind == TokenKind::LParen)
+            && self.token_adjoins_previous(j)
             && !self.paren_group_precedes_arrow(j)
         {
             let mut paren_depth = 0u32;

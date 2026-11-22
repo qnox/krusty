@@ -11,7 +11,7 @@ use crate::types::TyKind;
 /// The function shape a lambda takes from a projected function classifier (`Function1<*, *>`):
 /// each parameter is what the projection admits as input and the result is what it reads back,
 /// so a star parameter is `Nothing` and a star result is its upper bound, as kotlinc types them.
-pub(super) fn projected_function_shape(function: Ty) -> Ty {
+fn projected_function_shape(function: Ty) -> Ty {
     let TyKind::Fun(signature) = function.kind() else {
         return function;
     };
@@ -42,6 +42,29 @@ pub(super) struct UntypedLambdaCall<'a> {
 }
 
 impl Checker<'_> {
+    /// Project an explicitly declared Kotlin function classifier (`FunctionN<P..., R>`) onto the
+    /// exact callable shape published by its semantic provider. Callable objects remain nominal:
+    /// only classifiers whose declaration says they represent a function type are normalized.
+    /// A nullable classifier (`FunctionN<P..., R>?`) projects onto the nullable function type.
+    pub(super) fn declared_function_semantic_type(&self, ty: Ty) -> Ty {
+        let nominal = ty.non_null();
+        let Some(internal) = nominal.kotlin_class_internal() else {
+            return ty;
+        };
+        let source = self.fed_source();
+        if !source
+            .classifier(internal)
+            .is_some_and(|classifier| classifier.represents_function_type())
+        {
+            return ty;
+        }
+        self.stable_classifier_callable_signatures(nominal)
+            .into_iter()
+            .next()
+            .map(|function| ty.rewrap_nullability(projected_function_shape(function)))
+            .unwrap_or(ty)
+    }
+
     /// A lambda argument's shape before a candidate supplies its function type. Written
     /// parameters, or an explicit `->` with none, fix the arity. A lambda that omits its parameter
     /// list has no arity of its own: it fits `() -> R` and, with an implicit `it`, any
