@@ -12,13 +12,13 @@ categories = ["compilers", "development-tools"]
 autotests = false
 
 [workspace]
-members = ["crates/krusty-build", "crates/krusty-jvm", "crates/krusty-native", "crates/krusty-wasm", "crates/krusty-cli", "crates/krusty-lsp", "crates/krusty-names", "crates/krusty-plugin-allopen", "crates/krusty-plugin-assignment", "crates/krusty-plugin-noarg", "crates/krusty-plugin-sam-with-receiver", "crates/krusty-plugin-api", "crates/krusty-plugin-host", "crates/krusty-test-modules", "crates/krusty-test-support", "crates/krusty-toolchain"]
+members = ["crates/krusty-build", "crates/krusty-jvm", "crates/krusty-native", "crates/krusty-wasm", "crates/krusty-cli", "crates/krusty-lsp", "crates/krusty-core", "crates/krusty-plugin-allopen", "crates/krusty-plugin-assignment", "crates/krusty-plugin-noarg", "crates/krusty-plugin-sam-with-receiver", "crates/krusty-plugin-api", "crates/krusty-plugin-host", "crates/krusty-test-modules", "crates/krusty-test-support", "crates/krusty-toolchain"]
 default-members = [".", "crates/krusty-cli"]
 resolver = "2"
 
 [dependencies]
 # The interned classifier identity (`TypeName`) and its name tree, shared with compiler plugins.
-krusty-names = { path = "crates/krusty-names" }
+krusty-core = { path = "crates/krusty-core" }
 # The contract compiler plugins are written against (conventions, the module IR, KSP rounds),
 # and the plugins already extracted.
 krusty-plugin-api = { path = "crates/krusty-plugin-api" }

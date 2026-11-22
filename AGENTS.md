@@ -309,7 +309,7 @@ Every hit requires semantic review; the commands are smell detectors, not blind 
 
 Follow data ownership rather than starting at the changed test:
 
-1. Name identity and segment operations: `crates/krusty-names/src/`, `src/names.rs`.
+1. Name identity and segment operations: `crates/krusty-core/src/`, `src/names.rs`.
 2. Scope-tower lookup and normalized candidate collection: `src/resolve/scope.rs`,
    `src/symbol_source.rs`, `src/symbol_resolver.rs`, `src/module_symbols.rs`.
 3. Candidate union, applicability, overload selection, diagnostics, and recorded decisions:

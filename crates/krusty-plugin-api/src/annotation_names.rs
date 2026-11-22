@@ -1,5 +1,5 @@
 use crate::{PluginOption, TypeName};
-use krusty_names::type_name;
+use krusty_core::type_name;
 
 /// The classifier identities a qualified name written as `a.b.C.D` can denote. The written form
 /// does not say where the package ends, and kotlinc compares it with each annotation's qualified
