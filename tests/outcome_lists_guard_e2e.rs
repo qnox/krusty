@@ -882,8 +882,7 @@ fn a_growing_plugin_not_applicable_inventory_still_fails() {
     );
 }
 
-const PLUGIN_BYTE_NON_IDENTICAL: &str =
-    "src/plugins/demo/boxes/byte_non_identical/jvm/2.4.20.txt";
+const PLUGIN_BYTE_NON_IDENTICAL: &str = "src/plugins/demo/boxes/byte_non_identical/jvm/2.4.20.txt";
 
 const BYTE_ROWS_ONLY_SHRINK: &str =
     "outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n";
