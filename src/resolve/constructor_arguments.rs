@@ -136,6 +136,9 @@ impl Checker<'_> {
         if self.report_inapplicable_this_delegations(class, secondary, span, label, arguments) {
             return;
         }
+        if self.report_single_named_delegation(class, secondary, span, label, arguments) {
+            return;
+        }
         if self.report_missing_delegation_arguments(
             class, secondary, span, label, arguments, candidates,
         ) {
@@ -585,6 +588,113 @@ impl Checker<'_> {
             .unwrap_or(span);
         self.diags.error(span, message);
         true
+    }
+
+    /// The only `this(...)` constructor does not declare a name the call uses. kotlinc reports each
+    /// omitted required parameter at the keyword and each unknown name at that name. Two or more
+    /// constructors keep the candidate list.
+    fn report_single_named_delegation(
+        &mut self,
+        class: DeclId,
+        secondary: usize,
+        span: Span,
+        label: &str,
+        arguments: &CtorDelegationCall,
+    ) -> bool {
+        if label != "this" || !arguments.names.iter().any(Option::is_some) {
+            return false;
+        }
+        let Some(parameters) = self.lone_this_delegation_parameters(class) else {
+            return false;
+        };
+        let Err(failure) = map_param_list_args(
+            &arguments.args,
+            Some(arguments.names.as_slice()),
+            &parameters,
+            arguments.trailing_lambda,
+        ) else {
+            return false;
+        };
+        if failure.errors.iter().any(|error| {
+            !matches!(
+                error,
+                CallArgMappingError::NoParameterNamed { .. }
+                    | CallArgMappingError::MissingRequired { .. }
+            )
+        }) {
+            return false;
+        }
+        let unknown = failure
+            .errors
+            .iter()
+            .any(|error| matches!(error, CallArgMappingError::NoParameterNamed { .. }));
+        if !unknown {
+            return false;
+        }
+        let mut missing = Vec::new();
+        for error in &failure.errors {
+            if let CallArgMappingError::MissingRequired { name } = error {
+                missing.push(name.clone());
+            }
+        }
+        for name in Self::omitted_required_names(arguments, &parameters) {
+            if !missing.iter().any(|existing| existing == &name) {
+                missing.push(name);
+            }
+        }
+        let keyword = self
+            .delegation_keyword_span(class, secondary)
+            .unwrap_or(span);
+        for name in missing {
+            self.diags
+                .error(keyword, format!("no value passed for parameter '{name}'."));
+        }
+        for error in &failure.errors {
+            let CallArgMappingError::NoParameterNamed { argument, .. } = error else {
+                continue;
+            };
+            let name_span = self
+                .delegation_argument_name_span(class, secondary, *argument)
+                .unwrap_or(keyword);
+            self.diags.error(name_span, error.to_string());
+        }
+        true
+    }
+
+    /// Parameter list of a `this(...)` call that has exactly one constructor to consider.
+    fn lone_this_delegation_parameters(
+        &self,
+        class: DeclId,
+    ) -> Option<crate::libraries::ParamList> {
+        let Decl::Class(classifier) = self.file.decl(class) else {
+            return None;
+        };
+        let mut shapes = Self::this_delegation_shapes(classifier);
+        if shapes.len() != 1 {
+            return None;
+        }
+        shapes.pop().map(|(_, parameters)| parameters)
+    }
+
+    fn delegation_argument_name_span(
+        &self,
+        class: DeclId,
+        secondary: usize,
+        argument: usize,
+    ) -> Option<Span> {
+        let Decl::Class(classifier) = self.file.decl(class) else {
+            return None;
+        };
+        let keyword = classifier
+            .secondary_ctors
+            .get(secondary)?
+            .delegation_keyword;
+        self.file
+            .delegation_argument_name_spans
+            .get(&keyword.lo)?
+            .get(argument)
+            .copied()
+            .flatten()
     }
 
     /// Required parameters no argument named or filled. The shared mapper reports these only when

@@ -1692,6 +1692,10 @@ pub struct File {
     /// that have named arguments, so diagnostics can match Kotlin's label location without retaining
     /// source text or adding metadata to positional calls.
     pub call_arg_name_spans: crate::fx_hash::HashMap<u32, Vec<Option<Span>>>,
+    /// Named-argument identifier spans of a constructor delegation, keyed by the `this` or `super`
+    /// keyword's source offset. The delegation call is not an expression, so it cannot share
+    /// `call_arg_name_spans`.
+    pub delegation_argument_name_spans: crate::fx_hash::HashMap<u32, Vec<Option<Span>>>,
     /// Exact `(` locations for syntactically empty calls. For non-empty calls, diagnostics can point at
     /// the first argument; keeping this map sparse avoids adding location fields to every call node.
     pub empty_call_open_paren_spans: crate::fx_hash::HashMap<u32, Span>,

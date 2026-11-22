@@ -38,7 +38,12 @@ impl Parser<'_> {
             } else {
                 String::new()
             };
-            let (args, names) = self.parse_call_arguments_with_names();
+            let (args, names, name_spans) = self.parse_call_arguments_with_names();
+            if delegation_keyword.hi != 0 {
+                self.file
+                    .delegation_argument_name_spans
+                    .insert(delegation_keyword.lo, name_spans);
+            }
             let call = CtorDelegationCall {
                 args,
                 names,

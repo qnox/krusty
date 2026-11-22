@@ -2525,13 +2525,15 @@ impl<'a> Parser<'a> {
         (args, names, name_spans)
     }
 
-    fn parse_call_arguments_with_names(&mut self) -> (Vec<ExprId>, Vec<Option<String>>) {
+    fn parse_call_arguments_with_names(
+        &mut self,
+    ) -> (Vec<ExprId>, Vec<Option<String>>, Vec<Option<Span>>) {
         if !self.eat(TokenKind::LParen) {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new());
         }
-        let (args, names, _) = self.parse_call_argument_list();
+        let (args, names, name_spans) = self.parse_call_argument_list();
         self.expect(TokenKind::RParen, "')'");
-        (args, names)
+        (args, names, name_spans)
     }
 
     /// v0 class: `class Name(val/var p: Type, ...)` with an optional empty body `{}`.
