@@ -2,6 +2,7 @@
 //! rewrite construction and member calls onto `*-impl`, and box or unbox at representation boundaries.
 
 mod accessor_names;
+mod adapter_realization;
 mod aggregate_boundaries;
 mod any_member_calls;
 mod body_scopes;
@@ -68,7 +69,7 @@ pub(crate) use declaration_inventory::record_referenced as record_referenced_val
 use descriptor_parameters::erase_descriptor;
 pub(crate) use inherited_default_calls::InheritedDefaultStatics;
 use krusty::fx_hash::{HashMap, HashSet};
-use krusty::ir::{Callee, ExprId, IrExpr, IrFile};
+use krusty::ir::{Callee, ExprId, IrExpr, IrFile, ValueClassAdapter};
 use krusty::jvm::method_descriptors::jvm_tys;
 use krusty::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use krusty::jvm::physical_type::ir_ty_to_jvm;
@@ -728,7 +729,7 @@ pub(crate) fn lower_value_classes(
     // kept boxed: the body was lowered against the erased convention (the slot IS the underlying), so
     // every read in the implementation gains an `unbox-impl` after the loop (kotlinc reaches the same
     // state via its lambda-class `invoke` bridge; here the unbox is fused into the impl at each use).
-    let mut boxed_own_reads: Vec<(u32, u32, TypeName, Ty)> = Vec::new();
+    let mut boxed_own_reads: Vec<(u32, u32, TypeName)> = Vec::new();
     // User-written value-class members are realized as static `*-impl` functions over the carrier.
     // Keep their declaration identities so return adaptation follows that realized ABI instead of the
     // boxed-instance convention used by synthesized wrapper members.
@@ -892,7 +893,7 @@ pub(crate) fn lower_value_classes(
                 if let Some(x) = p.non_null().obj_internal() {
                     let u = erase(p, &under);
                     if is_ref(&u) && !nullable_is_boxed(x, &under) {
-                        boxed_own_reads.push((fid as u32, idx as u32, x, u));
+                        boxed_own_reads.push((fid as u32, idx as u32, x));
                     }
                 }
                 *p = Ty::nullable(*p);
@@ -1050,7 +1051,7 @@ pub(crate) fn lower_value_classes(
     // is (`inline_body_slots`). In-place: the `GetValue` node itself becomes the unbox call over a fresh
     // `GetValue`, so every reference to the node (including a nested lambda's capture list) picks up
     // the unboxed value.
-    for (fid, slot, x, u) in boxed_own_reads {
+    for (fid, slot, x) in boxed_own_reads {
         let mut reads = HashSet::default();
         if let Some(root) = ir.functions[fid as usize].body {
             collect_reachable_scoped(&ir.exprs, root, &mut reads);
@@ -1062,13 +1063,10 @@ pub(crate) fn lower_value_classes(
         for id in targets {
             let get = ir.add_expr(IrExpr::GetValue(slot));
             ir.exprs[id as usize] = IrExpr::Call {
-                callee: Box::new(Callee::realized_virtual(
-                    x,
-                    "unbox-impl".to_string(),
-                    format!("(){}", desc(&u)),
-                    None,
-                    false,
-                )),
+                callee: Box::new(Callee::ValueClassAdapter {
+                    adapter: ValueClassAdapter::Unbox,
+                    owner: x,
+                }),
                 dispatch_receiver: Some(get),
                 args: vec![],
             };
@@ -1874,18 +1872,11 @@ pub(crate) fn lower_value_classes(
                 && !matches!(repr_ctx.repr(*arg), Repr::Boxed(_)) =>
             {
                 let fq_name = type_operand.non_null().obj_internal().unwrap();
-                let u = under
-                    .get(&fq_name)
-                    .map(|t| erase(t, &under))
-                    .unwrap_or(Ty::Error);
-                let owner_rendered = fq_name.render();
                 Some(Rw::BoxedValue {
                     expr: IrExpr::Call {
-                        callee: Box::new(Callee::Static {
+                        callee: Box::new(Callee::ValueClassAdapter {
+                            adapter: ValueClassAdapter::Box,
                             owner: fq_name,
-                            name: "box-impl".to_string(),
-                            descriptor: format!("({})L{owner_rendered};", desc(&u)),
-                            inline: InlineKind::None,
                         }),
                         dispatch_receiver: None,
                         args: vec![*arg],
@@ -2364,11 +2355,7 @@ pub(crate) fn lower_value_classes(
                 .over(ir)
                 .is_boxed_vc(receiver, owner);
                 let receiver = if inferred_boxed {
-                    let underlying = under
-                        .get(&owner)
-                        .map(|ty| erase(ty, &under))
-                        .unwrap_or(Ty::Error);
-                    unbox_call(ir, receiver, owner, &underlying)
+                    unbox_call(ir, receiver, owner)
                 } else {
                     receiver
                 };
@@ -2985,8 +2972,6 @@ pub(crate) fn lower_value_classes(
                 {
                     if is_value_class_internal(*owner, &under)
                         && name.contains("-impl")
-                        && name != "unbox-impl"
-                        && name != "box-impl"
                         && name != "constructor-impl"
                     {
                         if let Repr::Boxed(x) = repr_ctx.repr(*recv) {
@@ -3447,7 +3432,7 @@ pub(crate) fn lower_value_classes(
         // members like any user value class. (kotlinc observes the boxed form's `toString`/`equals`/
         // `hashCode` for a `Result` in an `Object` slot too.)
         match op {
-            BoxOp::Box(x) => box_wrap(ir, id, x, &under),
+            BoxOp::Box(x) => box_wrap(ir, id, x),
             BoxOp::BoxNull(x) => {
                 box_wrap_nullable(ir, id, x, &under, fresh);
                 fresh += 1;
@@ -3499,7 +3484,7 @@ pub(crate) fn lower_value_classes(
         let erased = ir.statics[si].erased_declared_ty.is_some();
         let declared = ir.statics[si].ty;
         if let Some(root) = ir.statics[si].init.filter(|_| !erased) {
-            box_tail(ir, root, x, &under);
+            box_tail(ir, root, x);
         }
         let property = &mut ir.statics[si];
         if erased {
@@ -3535,7 +3520,7 @@ pub(crate) fn lower_value_classes(
                 let x = fq;
                 if under.contains_key(&x) {
                     if let Some(body) = ir.functions[fid].body {
-                        box_tail(ir, body, x, &under);
+                        box_tail(ir, body, x);
                     }
                 }
             }
@@ -3729,6 +3714,7 @@ pub(crate) fn lower_value_classes(
     let realized =
         property_references::realize(ir, &callable_under, property_reference_realizations);
     type_operation_roles::record_primitive_array_type_operations(ir, &under);
+    adapter_realization::realize(ir, &callable_under);
     realized
 }
 
@@ -4066,26 +4052,19 @@ fn repr(context: &ReprCtx<'_>, id: ExprId) -> Repr {
             callee: call_callee,
             ..
         } if let Callee::Static { owner, name, .. } = &**call_callee
-            && (name == "constructor-impl" || name == "unbox-impl") =>
+            && name == "constructor-impl" =>
         {
             value_class_name(*owner, under).map_or(Repr::NotVc, Repr::Unboxed)
         }
         IrExpr::Call {
             callee: call_callee,
             ..
-        } if let Callee::Static { owner, name, .. } | Callee::Virtual { owner, name, .. } =
-            &**call_callee
-            && (name == "box-impl") =>
-        {
-            value_class_name(*owner, under).map_or(Repr::NotVc, Repr::Boxed)
-        }
-        IrExpr::Call {
-            callee: call_callee,
-            ..
-        } if let Callee::Virtual { owner, name, .. } = &**call_callee
-            && (name == "unbox-impl") =>
-        {
-            value_class_name(*owner, under).map_or(Repr::NotVc, Repr::Unboxed)
+        } if let Callee::ValueClassAdapter { adapter, owner } = &**call_callee => {
+            let repr = match adapter {
+                ValueClassAdapter::Box => Repr::Boxed,
+                ValueClassAdapter::Unbox => Repr::Unboxed,
+            };
+            value_class_name(*owner, under).map_or(Repr::NotVc, repr)
         }
         // Any already-selected call whose declaration returns a value class yields that declaration's
         // physical representation. This includes index-resolved `MethodCall`s (interface/class members),
@@ -4223,7 +4202,7 @@ fn prop_access(
         } else {
             receiver
         };
-        unbox_call(ir, dispatch, x, &u)
+        unbox_call(ir, dispatch, x)
     } else {
         receiver
     };

@@ -92,6 +92,11 @@ abstract class KrustyKotlinPlugin @Inject constructor(
 
 private const val AGGREGATE_TASK_PROPERTY = "krusty.aggregateTaskProvider"
 
+/** The Gradle property that asks krusty to fix kotlinc's defects, and the argument it passes. */
+internal const val FIX_KOTLINC_DEFECTS_PROPERTY = "krusty.fixKotlincDefects"
+
+internal const val FIX_KOTLINC_DEFECTS_ARGUMENT = "-Xfix-kotlinc-defects"
+
 private const val KOTLIN_JVM_PLUGIN_ID = "org.jetbrains.kotlin.jvm"
 
 private const val KOTLIN_MULTIPLATFORM_PLUGIN_ID = "org.jetbrains.kotlin.multiplatform"
@@ -150,6 +155,10 @@ private fun replaceKotlinJvmCompiles(
         )
         releasedCompiler(release, releases, gradleUserHome, offline).absolutePath
     }
+    // `-Pkrusty.fixKotlincDefects=true`: krusty fixes the reference release's defects in the
+    // compiles it replaces instead of reproducing them. A compile left to kotlinc keeps them.
+    val defectFixes = project.providers.gradleProperty(FIX_KOTLINC_DEFECTS_PROPERTY)
+        .map(String::toBoolean).orElse(false)
     val binaryPath = project.providers.gradleProperty("krusty.binary")
         .orElse(project.providers.environmentVariable("KRUSTY_BIN"))
         .orElse(releasedBinary)
@@ -234,6 +243,7 @@ private fun replaceKotlinJvmCompiles(
             kotlinPluginVersion.set(pluginVersion)
             binary.set(project.layout.file(binaryPath.map(::File)))
             refusals.set(compilerChoice)
+            fixKotlincDefects.set(defectFixes)
         }
         // KGP infers producer dependencies from task inputs as well as explicit dependsOn.
         // Every classpath reader needs that complete graph. The Kotlin task also depends on
@@ -288,11 +298,14 @@ private fun replaceKotlinJvmCompiles(
             compilerPluginClasspath.from(kotlinTask.pluginClasspath)
             compilerPluginOptions.set(compilerPluginArguments)
             binary.set(project.layout.file(binaryPath.map(::File)))
+            // The verify compile is compared with kotlinc's, so it reproduces kotlinc's defects.
+            fixKotlincDefects.convention(false)
         }
         replacement.configure {
             group = kotlinTask.group ?: "build"
             description = "${kotlinTask.description ?: kotlinTask.name}, using krusty"
             configureCompilation()
+            fixKotlincDefects.set(defectFixes)
             destinationDirectory.set(kotlinTask.destinationDirectory)
             handoff.set(project.layout.buildDirectory.file("krusty/${kotlinTask.name}/handoff.txt"))
             dependsOn(compilePrerequisites)
@@ -470,6 +483,10 @@ abstract class KrustyCompilation : DefaultTask() {
     @get:PathSensitive(PathSensitivity.NONE)
     abstract val binary: RegularFileProperty
 
+    /** Whether krusty fixes the reference release's defects (`-Xfix-kotlinc-defects`). */
+    @get:Input
+    abstract val fixKotlincDefects: Property<Boolean>
+
     /**
      * The Kotlin and Java sources krusty compiles, in path order. None without a Kotlin source:
      * KGP's task then has no source and compiles nothing, so neither Java sources nor the JVM
@@ -525,6 +542,7 @@ abstract class KrustyCompilation : DefaultTask() {
         kotlinJavaToolchainRefusal(kotlinJavaVersion.get(), javaVersion.get())?.let { throw GradleException(it) }
         val pluginVersion = supportedKotlinPluginVersion(kotlinPluginVersion.get())
         arguments.add("-Xkotlin-reference-version=$pluginVersion")
+        if (fixKotlincDefects.get()) arguments.add(FIX_KOTLINC_DEFECTS_ARGUMENT)
         if ("-no-jdk" !in arguments) {
             arguments.add("-jdk-home")
             arguments.add(jdkHome.get())
@@ -751,6 +769,10 @@ abstract class KrustySupportCheckTask @Inject constructor(
     @get:PathSensitive(PathSensitivity.NONE)
     abstract val binary: RegularFileProperty
 
+    /** Whether the build asked krusty to fix kotlinc's defects, which a compile left to kotlinc keeps. */
+    @get:Input
+    abstract val fixKotlincDefects: Property<Boolean>
+
     @get:OutputFile
     abstract val refusals: RegularFileProperty
 
@@ -793,6 +815,13 @@ abstract class KrustySupportCheckTask @Inject constructor(
             compileTaskPath.get(),
             refused.joinToString("\n") { "  $it" },
         )
+        if (fixKotlincDefects.get()) {
+            logger.warn(
+                "krusty: task '{}' keeps kotlinc's defects: {} applies only to compiles krusty runs",
+                compileTaskPath.get(),
+                FIX_KOTLINC_DEFECTS_PROPERTY,
+            )
+        }
         refusals.get().asFile.writeText(refused.joinToString("\n", postfix = "\n"))
     }
 }
