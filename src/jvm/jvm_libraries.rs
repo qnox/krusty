@@ -98,7 +98,9 @@ use crate::types::{
     TypeName, TypeNameList,
 };
 
-use java_operator_convention::java_method_has_operator_convention;
+use java_operator_convention::{
+    java_method_has_operator_convention, publish_classfile_member_shape, ClassfileMemberShape,
+};
 
 /// The JVM platform's contribution to Kotlin's default imports. The language-level `kotlin.*` set is
 /// composed with this list in the import-level builder and in the seed filter, so neither list is duplicated.
@@ -833,10 +835,10 @@ impl JvmLibraries {
                 continue;
             };
             let getter_inline = property_getter_inline(property.getter_inline, getter_public);
-            let Some((getter_params, getter_ret)) = parse_method_desc(&getter_sig.desc) else {
+            let Some((mut getter_params, getter_ret)) = parse_method_desc(&getter_sig.desc) else {
                 continue;
             };
-            if getter_params.len() != 1 {
+            if !parameter_plans::declared_prefix(&mut getter_params, 1) {
                 continue; // exactly the extension receiver
             }
             let property_gsig = property.generic_sig.clone();
@@ -1671,22 +1673,15 @@ impl JvmLibraries {
                     member.set_ret_nullable(true);
                 }
                 if declaration.is_none() && constructor_declaration.is_none() {
-                    member.call_sig = {
-                        let vararg_index = m
-                            .is_vararg()
-                            .then_some(value_arity)
-                            .and_then(|arity| arity.checked_sub(1));
-                        CallSig::metadata_member(value_arity, Vec::new(), Vec::new(), vararg_index)
-                    };
-                    // Java has no `operator` modifier. Kotlin therefore recognizes a Java method
-                    // as an operator declaration from the language-defined name/arity convention.
-                    // Normalize that capability here; the resolver can then require the same
-                    // semantic flag for Kotlin metadata, Java classfiles, and Java source stubs.
-                    if uses_java_type_semantics
-                        && java_method_has_operator_convention(&member.name, member.params.len())
-                    {
-                        member.set_is_operator(true);
-                    }
+                    publish_classfile_member_shape(
+                        &mut member,
+                        ClassfileMemberShape {
+                            value_arity,
+                            vararg: m.is_vararg(),
+                            java_semantics: uses_java_type_semantics,
+                            java_declaration: !has_kotlin_metadata && m.name != "<init>",
+                        },
+                    );
                 }
                 if let Some(java_nullable) = platform_nullable_params {
                     member.call_sig.platform_nullable_params = java_nullable.into();
@@ -2738,7 +2733,7 @@ impl JvmLibraries {
                     // frontend continues to see only the two semantic receiver roles.
                     let value_dispatch = metadata::class_inline(&ci).is_some();
                     let extension_index = context_count + usize::from(value_dispatch);
-                    if getter_params.len() != extension_index + 1 {
+                    if !parameter_plans::declared_prefix(&mut getter_params, extension_index + 1) {
                         continue;
                     }
                     let Some(physical_receiver) = getter_params.get(extension_index).copied()
@@ -2890,7 +2885,7 @@ impl JvmLibraries {
                 // NOT the value class's own sole property: that one IS the carrier (`Result.value`),
                 // reached as the underlying value itself rather than through a computed `-impl`
                 // accessor, and rerouting it breaks the box/unbox boundary.
-                let carrier_receiver = getter_params.len() == context_count + 1
+                let carrier_receiver = getter_params.len() > context_count
                     && metadata::class_inline(&ci).is_some_and(|inline| {
                         context_count != 0
                             || inline.property_name.as_deref() != Some(mp.name.as_str())
@@ -2898,7 +2893,7 @@ impl JvmLibraries {
                 if carrier_receiver {
                     getter_params.remove(0);
                 }
-                if getter_params.len() != context_count {
+                if !parameter_plans::declared_prefix(&mut getter_params, context_count) {
                     continue;
                 }
                 let semantic_context = property_signature
@@ -4150,7 +4145,7 @@ impl JvmLibraries {
         };
         let until = match elem {
             Ty::Double | Ty::Float => None,
-            Ty::UInt => Some(LibraryCallable::library(
+            Ty::UInt => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/URangesKt"),
                 "until-J1ME1BU",
                 vec![elem, elem],
@@ -4158,7 +4153,7 @@ impl JvmLibraries {
                 Ty::obj(internal),
                 format!("({prim}{prim})L{internal};"),
             )),
-            Ty::ULong => Some(LibraryCallable::library(
+            Ty::ULong => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/URangesKt"),
                 "until-eb3DHEI",
                 vec![elem, elem],
@@ -4166,7 +4161,7 @@ impl JvmLibraries {
                 Ty::obj(internal),
                 format!("({prim}{prim})L{internal};"),
             )),
-            _ if trailing_nulls == 0 => Some(LibraryCallable::library(
+            _ if trailing_nulls == 0 => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/RangesKt"),
                 "until",
                 vec![elem, elem],
@@ -4181,7 +4176,7 @@ impl JvmLibraries {
                 let iface = "kotlin/ranges/ClosedFloatingPointRange";
                 (
                     Ty::obj(iface),
-                    Some(LibraryCallable::library(
+                    Some(LibraryCallable::declared(
                         type_name("kotlin/ranges/RangesKt"),
                         "rangeTo",
                         vec![elem, elem],

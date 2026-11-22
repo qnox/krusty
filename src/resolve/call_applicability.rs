@@ -263,7 +263,9 @@ pub(super) fn score_with_declaration(
             }
             _ => semantic_actual,
         };
-        if !call_sig.parameter_admits(parameter, expected, semantic_actual)
+        if (!call_sig.parameter_admits(parameter, expected, semantic_actual)
+            || (call_sig.vararg_index != Some(parameter)
+                && checker.lexical_type_parameter_rejects(scope, expected, semantic_actual)))
             && !contextual_call_result
         {
             return None;

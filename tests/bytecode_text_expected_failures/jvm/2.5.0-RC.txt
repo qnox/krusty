@@ -75,7 +75,6 @@ inaccessibleTypeInArray.kt
 inline/crossinlineLambdaAtStartOfInlinedCall.kt
 inline/noFakeVariableForInlineOnlyFun.kt
 inline/reifiedSafeAsWithMutable.kt
-inline/specialEnumFunction.kt
 inline/syntheticPropertyReference.kt
 inlineClasses/assertionsForExposedBoxedParameters.kt
 inlineClasses/assertionsForExposedBoxedParametersOfNullableUnderlyingTypes.kt
