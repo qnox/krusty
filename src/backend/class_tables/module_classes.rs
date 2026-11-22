@@ -92,6 +92,8 @@ pub(crate) enum ModuleInterfaceMember {
         callable: CallableId,
         parameters: Box<[Ty]>,
         result: Ty,
+        /// A `suspend` function, which takes its caller's continuation after `parameters`.
+        suspend: bool,
     },
     Property {
         property: PropertyId,
@@ -496,6 +498,7 @@ fn interface_members(
                     callable: callable.id,
                     parameters: parameters.into_boxed_slice(),
                     result,
+                    suspend: flags.has(DeclarationFlags::SUSPEND),
                 });
             }
             DeclarationKind::Property => {
