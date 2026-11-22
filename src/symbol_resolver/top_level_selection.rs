@@ -97,8 +97,7 @@ impl SymbolResolver<'_> {
         expected: Option<Ty>,
         include_invisible: bool,
     ) -> TopLevelSelection<(Option<FunctionInfo>, LibraryCallable)> {
-        let level =
-            |function: &FunctionInfo| function.scope_rung.selection_key(function.scope_rank);
+        let level = super::scope_level_callables::scope_level;
         let mut levels = fs.overloads.iter().map(level).collect::<Vec<_>>();
         levels.sort_unstable();
         levels.dedup();

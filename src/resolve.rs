@@ -10012,18 +10012,14 @@ impl<'a> Checker<'a> {
         });
         let low_priority_annotation =
             crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
-        if fitted.iter().any(|(_, index, ..)| {
-            !overloads[*index]
+        let ordinary = |index: usize| {
+            !overloads[index]
                 .callable
                 .annotations
                 .contains(&low_priority_annotation)
-        }) {
-            fitted.retain(|(_, index, ..)| {
-                !overloads[*index]
-                    .callable
-                    .annotations
-                    .contains(&low_priority_annotation)
-            });
+        };
+        if fitted.iter().any(|(_, index, ..)| ordinary(*index)) {
+            fitted.retain(|(_, index, ..)| ordinary(*index));
         }
         let best_rank = fitted.iter().map(|(score, ..)| score.rank).max()?;
         let maximal = fitted
@@ -14779,9 +14775,7 @@ impl<'a> Checker<'a> {
                 // A top-level NON-public (`@InlineOnly`) inline fn (`require`/`check`) inlines its lambda
                 // argument (or the file is skipped), so a mutable capture is an inline capture — type the
                 // lambda body with mutation allowed (don't `Ref`-box the captured var).
-                let top_level_functions = crate::libraries::FunctionSet {
-                    overloads: self.resolver().top_level_candidates(&fname),
-                };
+                let top_level_functions = self.resolver().owning_level_top_level_functions(&fname);
                 let toplevel_inline = toplevel_lambda_shape
                     .as_ref()
                     .is_some_and(|shape| shape.param_types.is_some())

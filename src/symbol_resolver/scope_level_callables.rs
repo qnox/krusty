@@ -368,6 +368,28 @@ pub(crate) fn retain_nearest_scope_level<T>(
     }
 }
 
+/// Keep the functions of the level that owns the family, the level of its first candidate: what a
+/// query about the family the source names sees, as opposed to a selection, which falls through.
+pub(super) fn owning_scope_level(mut functions: Vec<FunctionInfo>) -> Vec<FunctionInfo> {
+    if let Some(owner) = functions.first().map(scope_level) {
+        functions.retain(|function| scope_level(function) == owner);
+    }
+    functions
+}
+
+/// The distinct values that the nearest scope-tower level among `fitting` produces, in order: the
+/// [`retain_nearest_scope_level`] rule for a use that only needs what its candidates produce.
+pub(crate) fn nearest_level_distinct<T: PartialEq>(fitting: Vec<((u8, u32), T)>) -> Vec<T> {
+    let nearest = fitting.iter().map(|(level, _)| *level).min();
+    let mut distinct = Vec::new();
+    for (level, value) in fitting {
+        if Some(level) == nearest && !distinct.contains(&value) {
+            distinct.push(value);
+        }
+    }
+    distinct
+}
+
 /// The nearest-first scope-tower position of the level that offers `function`.
 pub(crate) fn scope_level(function: &FunctionInfo) -> (u8, u32) {
     function.scope_rung.selection_key(function.scope_rank)
@@ -455,11 +477,7 @@ impl SymbolResolver<'_> {
     /// explicitly imported `ByteString(vararg Byte)` that does not accept the arguments leaves the
     /// call to a current-package `ByteString(ByteBuffer)`.
     pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
-        let Some(scope) = self.fn_scope else {
-            return Vec::new();
-        };
-        let levels = tagged_symbol_levels_in_function_scope(&self.src, name, scope);
-        let functions = self.top_level_tower_functions(&levels);
+        let (functions, _) = self.top_level_tower(name);
         crate::trace_compiler!(
             "resolve",
             "top-level candidate inventory {name}: {:?}",
@@ -488,6 +506,41 @@ impl SymbolResolver<'_> {
             // by declaration order and later append `$default` a second time.
             .filter(|function| !function.callable.default_call)
             .collect()
+    }
+
+    /// Callable records by Kotlin scope-tower level, nearest first. A declaration with the same
+    /// spelling but the wrong callable facet or an inapplicable receiver does not hide a declaration
+    /// at the next level; selection, not lookup, decides which level is the first applicable one.
+    pub(super) fn symbol_levels_in_scope(&self, name: &str) -> Vec<Vec<Rc<ResolvedSymbols>>> {
+        self.fn_scope
+            .map(|scope| symbol_levels_in_function_scope(&self.src, name, scope))
+            .unwrap_or_default()
+    }
+
+    /// [`Self::top_level_candidates`] at the level that owns `name` only. A query about the
+    /// family a call names (whether it inlines a lambda, its unique stable signature) must not
+    /// mix in a farther level that only a failed selection would fall through to.
+    pub(crate) fn owning_level_top_level_functions(&self, name: &str) -> FunctionSet {
+        FunctionSet {
+            overloads: owning_scope_level(self.top_level_candidates(name)),
+        }
+    }
+
+    /// The receiver-less tower named `name`: its function family from the owning level outward
+    /// ([`Self::top_level_tower_functions`]) and every level's symbols, nearest first.
+    pub(super) fn top_level_tower(
+        &self,
+        name: &str,
+    ) -> (FunctionSet, Vec<Vec<Rc<ResolvedSymbols>>>) {
+        let levels = self
+            .fn_scope
+            .map(|scope| tagged_symbol_levels_in_function_scope(&self.src, name, scope))
+            .unwrap_or_default();
+        let functions = self.top_level_tower_functions(&levels);
+        (
+            functions,
+            levels.into_iter().map(|level| level.symbols).collect(),
+        )
     }
 
     /// The top-level properties named `name` at the nearest scope level that declares a visible

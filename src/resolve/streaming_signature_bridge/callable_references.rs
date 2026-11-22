@@ -135,7 +135,7 @@ impl ProductionSignatureSemantics<'_> {
         let context = crate::assignable::TyCtx::new();
         let binds_contexts = self.headers.scopes.binds_reference_contexts(scope.source);
         let subtype = |a, b| crate::assignable::is_subtype(&context, &oracle, a, b);
-        let mut selected = candidates_with_finalized_signatures
+        let selected = candidates_with_finalized_signatures
             .into_iter()
             .filter(|candidate| !candidate.callable.suspend || expected.suspend)
             .filter_map(|mut candidate| {
@@ -181,7 +181,7 @@ impl ProductionSignatureSemantics<'_> {
                     expected.ret
                 };
                 Some((
-                    candidate,
+                    crate::symbol_resolver::scope_level(&candidate),
                     Ty::fun_with_shape(
                         parameters,
                         result,
@@ -192,18 +192,7 @@ impl ProductionSignatureSemantics<'_> {
                 ))
             })
             .collect::<Vec<_>>();
-        crate::symbol_resolver::retain_nearest_scope_level(&mut selected, |(candidate, _)| {
-            crate::symbol_resolver::scope_level(candidate)
-        });
-        Ok(selected
-            .into_iter()
-            .map(|(_, ty)| ty)
-            .fold(Vec::new(), |mut unique, ty| {
-                if !unique.contains(&ty) {
-                    unique.push(ty);
-                }
-                unique
-            }))
+        Ok(crate::symbol_resolver::nearest_level_distinct(selected))
     }
 
     pub(super) fn applied_source_alias_expansion(
