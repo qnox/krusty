@@ -2,8 +2,12 @@
 
 use super::abstract_obligations::UnimplementedDeclaration;
 use super::{class_declaration_label, declaration_rendering, Checker};
-use crate::ast::{ClassDecl, Decl, DeclId};
+use crate::ast::{ClassDecl, Decl, DeclId, File};
+use crate::diag::Span;
 use crate::types::TypeName;
+
+const SUPERTYPE_WITHOUT_PRIMARY: &str =
+    "supertype initialization is impossible without a primary constructor.";
 
 impl Checker<'_> {
     /// The class's own identity, its selected superclass, and whether that superclass is emitted
@@ -199,4 +203,59 @@ impl Checker<'_> {
             .collect::<Vec<_>>()
             .join(".")
     }
+
+    /// A secondary `this` or `super` call on a class whose header already invoked a constructor
+    /// without declaring a primary. Kotlinc reports that at the callee and does not also diagnose
+    /// the delegation. The unresolved supertype, recorded earlier at the same span, stays after it.
+    pub(super) fn note_supertype_initialization_without_primary(&mut self, class: DeclId) -> bool {
+        let Decl::Class(classifier) = self.file.decl(class) else {
+            return false;
+        };
+        let Some(span) = header_constructor_call_without_primary(self.file, classifier) else {
+            return false;
+        };
+        let file = self.file_index;
+        if self.diags.diags.iter().any(|diagnostic| {
+            diagnostic.file == file
+                && diagnostic.span.lo == span.lo
+                && diagnostic.msg == SUPERTYPE_WITHOUT_PRIMARY
+        }) {
+            return true;
+        }
+        let prior = self.diags.diags.len();
+        let span = self.diags.diags[..prior]
+            .iter()
+            .find(|diagnostic| diagnostic.file == file && diagnostic.span.lo == span.lo)
+            .map_or(span, |diagnostic| diagnostic.span);
+        self.diags.error(span, SUPERTYPE_WITHOUT_PRIMARY);
+        if self.diags.diags.len() == prior {
+            return true;
+        }
+        if let Some(index) = self.diags.diags[..prior]
+            .iter()
+            .position(|diagnostic| diagnostic.file == file && diagnostic.span == span)
+        {
+            if let Some(diagnostic) = self.diags.diags.pop() {
+                self.diags.diags.insert(index, diagnostic);
+            }
+        }
+        true
+    }
+
+    pub(super) fn report_unmatched_constructor_delegation(&mut self, span: Span, label: &str) {
+        self.diags.error(
+            span,
+            format!("krusty: {label}(...) has no matching target constructor"),
+        );
+    }
+}
+
+/// The callee of a written superclass constructor call (`: Missing()`) when the class has no
+/// primary constructor. A parenless supertype is not a constructor call.
+fn header_constructor_call_without_primary(file: &File, class: &ClassDecl) -> Option<Span> {
+    if class.primary_ctor_annotations.is_some() {
+        return None;
+    }
+    let header = class.base_class_span?;
+    file.base_class_callee_spans.get(&header.lo).copied()
 }

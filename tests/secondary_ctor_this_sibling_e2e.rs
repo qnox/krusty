@@ -286,3 +286,32 @@ fn an_unresolved_secondary_constructor_parameter_matches_kotlinc() {
         result.krusty_stderr, result.reference_stderr
     );
 }
+
+const SUPERTYPE_WITHOUT_PRIMARY: &str = "\
+class Box : Missing() {
+    constructor(x: Int) : this()
+}
+";
+
+#[test]
+fn a_supertype_initialization_without_a_primary_constructor_matches_kotlinc() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Supertype.kt", SUPERTYPE_WITHOUT_PRIMARY)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the supertype");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the supertype");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}

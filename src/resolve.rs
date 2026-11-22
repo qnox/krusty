@@ -38247,6 +38247,9 @@ impl<'a> Checker<'a> {
             span,
             label,
         } = site;
+        if self.note_supertype_initialization_without_primary(class) {
+            return;
+        }
         let selected = match self.select_source_constructor(scope, arguments, &candidates) {
             SourceConstructorSelection::Selected {
                 resolved: selected, ..
@@ -38258,10 +38261,7 @@ impl<'a> Checker<'a> {
                     &candidates,
                     &rejected,
                 ) {
-                    self.diags.error(
-                        span,
-                        format!("krusty: {label}(...) has no matching target constructor"),
-                    );
+                    self.report_unmatched_constructor_delegation(span, label);
                 }
                 return;
             }
