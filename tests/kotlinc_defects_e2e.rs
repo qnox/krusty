@@ -4,10 +4,21 @@
 //! reference release no longer has the defect, kotlinc and krusty agree on the fixed outcome in
 //! either mode, so the table's release range is checked against kotlinc too.
 //!
+//! A library defect belongs to the platforms whose standard library has it; on another platform
+//! the program already gives the fixed outcome, which is what the fix mode gives on the defect's.
+//!
 //! The defect mode is process-wide, so krusty compiles each program in a CLI process of its own.
+//! kotlinc-native answers from its recording when its distribution is not provisioned, and a Native
+//! check runs where the host links Native programs, as every Native test does. A Kotlin/Wasm
+//! program runs under the exact kotlinc-wasm and Node.js.
+//!
+//! GAP: krusty's Wasm runtime lays out its own `ArrayList`, which reads `addAll`'s argument before it
+//! grows, so krusty's Wasm programs are not checked here yet. They will be once the target stdlib's
+//! `ArrayList` body replaces that runtime list (#3836).
 
 use std::path::Path;
 
+use krusty::compilation_target::CompilationTarget;
 use krusty::kotlin_version::{Quirk, Quirks};
 
 use super::common;
@@ -21,8 +32,21 @@ enum Outcome {
     Answer(String),
 }
 
+/// The platform a program is compiled for.
+#[derive(Clone, Copy, Debug)]
+enum Platform {
+    Jvm,
+    Native,
+    WasmJs,
+    WasmWasi,
+}
+
 /// A program that a defect makes kotlinc compile wrongly.
 struct Defect {
+    /// The platforms whose kotlinc has the defect.
+    platforms: &'static [Platform],
+    /// Platforms whose own kotlinc and library already give the fixed outcome.
+    fixed_on: &'static [Platform],
     /// One `Main.kt`, its `// LANGUAGE:` directives included.
     source: &'static str,
     /// What a release with the defect gives.
@@ -67,24 +91,52 @@ fun box(): String {
 }
 "#;
 
+/// `ArrayListAddAllGrowsBeforeReadingItsArgument`: a list appends a range of itself.
+const LIST_ADD_ALL_OF_ITS_RANGE: &str = "fun box(): String {\n\
+    \x20   val list = ArrayList<Int>()\n\
+    \x20   list.add(1)\n\
+    \x20   list.add(2)\n\
+    \x20   list.add(3)\n\
+    \x20   val answer = try {\n\
+    \x20       list.addAll((list as List<Int>).subList(0, 2))\n\
+    \x20       \"appended\"\n\
+    \x20   } catch (e: ConcurrentModificationException) {\n\
+    \x20       \"raised\"\n\
+    \x20   }\n\
+    \x20   return \"$answer $list\"\n\
+    }\n";
+
 /// The program that shows `quirk`, for a defect. Every quirk is named, so a new one has to say
 /// here whether it is a defect and, if so, which program shows it.
 fn defect(quirk: Quirk) -> Option<Defect> {
     match quirk {
         Quirk::UnitConversionRejectsNonUnitResult => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
             source: UNIT_CONVERSION,
             with_defect: Outcome::Rejected,
             fixed: Outcome::Answer("OK".to_string()),
         }),
         Quirk::VarargReferenceTakesTypeVariableInputAsElement => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
             source: VARARG_REFERENCE,
             with_defect: Outcome::Answer("1".to_string()),
             fixed: Outcome::Answer("2".to_string()),
         }),
         Quirk::ContextArgumentEvaluatedBeforeExtensionReceiver => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
             source: CONTEXT_ARGUMENT_ORDER,
             with_defect: Outcome::Answer("crv".to_string()),
             fixed: Outcome::Answer("rcv".to_string()),
+        }),
+        Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument => Some(Defect {
+            platforms: &[Platform::Native, Platform::WasmJs, Platform::WasmWasi],
+            fixed_on: &[Platform::Jvm],
+            source: LIST_ADD_ALL_OF_ITS_RANGE,
+            with_defect: Outcome::Answer("raised [1, 2, 3, null, null]".to_string()),
+            fixed: Outcome::Answer("appended [1, 2, 3, 1, 2]".to_string()),
         }),
         Quirk::DelegateFailureNamesFirstRungOnly
         | Quirk::SuspendUnitTailCallKeepsCalleeResult
@@ -125,44 +177,106 @@ fn every_defect_and_only_a_defect_has_a_program() {
 #[test]
 fn kotlinc_has_each_defect_in_the_releases_the_table_names() {
     for (quirk, defect, reference) in defects() {
-        assert_eq!(
-            kotlinc_outcome(defect.source),
-            reference,
-            "{quirk:?} on kotlinc {}",
-            krusty::kotlin_version::target()
-        );
+        for &platform in defect.platforms {
+            if let Some(outcome) = kotlinc_outcome(platform, defect.source) {
+                assert_eq!(
+                    outcome,
+                    reference,
+                    "{quirk:?} on {platform:?} kotlinc {}",
+                    krusty::kotlin_version::target()
+                );
+            }
+        }
     }
 }
 
 #[test]
 fn krusty_reproduces_each_defect_by_default() {
     for (quirk, defect, reference) in defects() {
-        assert_eq!(krusty_outcome(defect.source, &[]), reference, "{quirk:?}");
+        for &platform in defect.platforms {
+            if let Some(outcome) = krusty_outcome(platform, defect.source, &[]) {
+                assert_eq!(outcome, reference, "{quirk:?} on {platform:?}");
+            }
+        }
     }
 }
 
 #[test]
 fn fixing_kotlinc_defects_fixes_each_defect() {
     for (quirk, defect, _) in defects() {
-        assert_eq!(
-            krusty_outcome(defect.source, &["-Xfix-kotlinc-defects"]),
-            defect.fixed,
-            "{quirk:?}"
-        );
+        for &platform in defect.platforms {
+            if let Some(outcome) =
+                krusty_outcome(platform, defect.source, &["-Xfix-kotlinc-defects"])
+            {
+                assert_eq!(outcome, defect.fixed, "{quirk:?} on {platform:?}");
+            }
+        }
     }
 }
 
-fn kotlinc_outcome(source: &str) -> Outcome {
-    let arguments = common::language_directives::kotlinc_args(source);
-    let (code, _) = common::reference_compiler_run(&[("Main.kt", source)], &arguments);
-    if code != 0 {
-        return Outcome::Rejected;
+/// On a platform without a library defect, kotlinc and krusty already give the fixed outcome.
+#[test]
+fn the_fix_is_what_the_platforms_without_the_defect_give() {
+    for (quirk, defect, _) in defects() {
+        for &platform in defect.fixed_on {
+            for outcome in [
+                kotlinc_outcome(platform, defect.source),
+                krusty_outcome(platform, defect.source, &[]),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                assert_eq!(outcome, defect.fixed, "{quirk:?} on {platform:?}");
+            }
+        }
     }
-    Outcome::Answer(common::kotlinc_box_result(source))
 }
 
-/// Compile `source` with the krusty CLI under `arguments` and run its `box()`.
-fn krusty_outcome(source: &str, arguments: &[&str]) -> Outcome {
+/// kotlinc's outcome for `source` on `platform`; `None` where kotlinc-native is neither provisioned
+/// nor recorded, or the kotlinc distribution has no Kotlin/Wasm compiler.
+fn kotlinc_outcome(platform: Platform, source: &str) -> Option<Outcome> {
+    match platform {
+        Platform::Jvm => {
+            let arguments = common::language_directives::kotlinc_args(source);
+            let (code, _) = common::reference_compiler_run(&[("Main.kt", source)], &arguments);
+            Some(if code != 0 {
+                Outcome::Rejected
+            } else {
+                Outcome::Answer(common::kotlinc_box_result(source))
+            })
+        }
+        Platform::Native => common::kotlin_native_box(source).map(Outcome::Answer),
+        Platform::WasmJs => kotlinc_wasm_outcome(CompilationTarget::WasmJs, source),
+        Platform::WasmWasi => kotlinc_wasm_outcome(CompilationTarget::WasmWasi, source),
+    }
+}
+
+fn kotlinc_wasm_outcome(target: CompilationTarget, source: &str) -> Option<Outcome> {
+    let work = common::scratch_dir().expect("allocate the Kotlin/Wasm fixture");
+    let path = work.join("box.kt");
+    std::fs::write(&path, format!("{source}\nfun main() {{ print(box()) }}\n"))
+        .expect("write the Kotlin/Wasm fixture");
+    let run = crate::reference_wasm_program::run_wasm_reference_program(target, &work, &[path]);
+    let _ = std::fs::remove_dir_all(&work);
+    Some(match run? {
+        Ok(answer) => Outcome::Answer(answer.trim_end_matches('\n').to_string()),
+        Err(error) if error.starts_with("reference KLIB:") => Outcome::Rejected,
+        Err(error) => panic!("kotlinc {target:?}: {error}"),
+    })
+}
+
+/// Compile `source` for `platform` with the krusty CLI under `arguments` and run its `box()`;
+/// `None` for Native where this host links no Native program, and for Kotlin/Wasm (the GAP in the
+/// module documentation).
+fn krusty_outcome(platform: Platform, source: &str, arguments: &[&str]) -> Option<Outcome> {
+    match platform {
+        Platform::Jvm => Some(krusty_jvm_outcome(source, arguments)),
+        Platform::Native => krusty_native_outcome(source, arguments),
+        Platform::WasmJs | Platform::WasmWasi => None,
+    }
+}
+
+fn krusty_jvm_outcome(source: &str, arguments: &[&str]) -> Outcome {
     let work = common::scratch_dir().expect("allocate the CLI fixture");
     let path = work.join("Main.kt");
     let output = work.join("out");
@@ -184,6 +298,42 @@ fn krusty_outcome(source: &str, arguments: &[&str]) -> Outcome {
     Outcome::Answer(
         common::run_box(&classes, &box_class, &[common::stdlib_jar()]).expect("box() answers"),
     )
+}
+
+fn krusty_native_outcome(source: &str, arguments: &[&str]) -> Option<Outcome> {
+    let target = krusty_native::NativeTarget::host()?;
+    if !krusty_native::can_link(target) {
+        return None;
+    }
+    let work = common::scratch_dir().expect("allocate the Native fixture");
+    let path = work.join("box.kt");
+    std::fs::write(&path, format!("{source}\nfun main() {{ print(box()) }}\n"))
+        .expect("write the Native fixture");
+    let result = std::process::Command::new(common::krusty_binary())
+        .arg("kotlinc-native")
+        .args(arguments)
+        .arg(&path)
+        .arg("-o")
+        .arg(work.join("program"))
+        .output()
+        .expect("run krusty kotlinc-native");
+    if !result.status.success() {
+        let _ = std::fs::remove_dir_all(&work);
+        return Some(Outcome::Rejected);
+    }
+    let run = std::process::Command::new(work.join("program.kexe"))
+        .output()
+        .expect("run the krusty Native program");
+    let _ = std::fs::remove_dir_all(&work);
+    assert!(
+        run.status.success(),
+        "the krusty Native program exited with {}:\n{}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    Some(Outcome::Answer(
+        String::from_utf8(run.stdout).expect("box() answers text"),
+    ))
 }
 
 fn collect_classes(root: &Path, dir: &Path, classes: &mut Vec<(String, Vec<u8>)>) {

@@ -170,6 +170,17 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: true,
     }
+    /// The Kotlin/Native and Kotlin/Wasm standard library's `ArrayList.addAll` makes room for the
+    /// new elements before it reads the argument, so a range of the list being appended to is
+    /// invalidated first: `list.addAll(list.subList(0, 2))` raises
+    /// `ConcurrentModificationException` and leaves the list grown by two nulls. The JVM's reads
+    /// the argument first and appends the range. A library quirk, which only those platforms'
+    /// backends test.
+    ArrayListAddAllGrowsBeforeReadingItsArgument {
+        since: None,
+        fixed_in: None,
+        defect: true,
+    }
 }
 
 const _: () = assert!(Quirk::ALL.len() <= u64::BITS as usize);
