@@ -392,6 +392,17 @@ pub(super) trait CallLinker {
         unsupported("an enum entry")
     }
 
+    /// The dependency enum class whose compiler-generated `values()` or `valueOf` the public
+    /// declaration `callee` is, with which of the two. `None` for any other callee, which links
+    /// as an ordinary call; a linker that materializes no enum class knows none.
+    fn enum_static_member(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<Option<(TypeName, super::enum_classes::EnumStaticMember)>> {
+        Ok(None)
+    }
+
     /// `sub` as the class `owner` it is a subtype of, with the type arguments its hierarchy applies
     /// to `owner`.
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty>;
