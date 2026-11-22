@@ -781,6 +781,7 @@ impl BodyLowering<'_> {
                 kind,
                 name,
                 parameters,
+                declared_parameters,
                 result,
                 interface,
                 realization,
@@ -852,6 +853,13 @@ impl BodyLowering<'_> {
                     dispatch_receiver: Some(dispatch_receiver),
                     args: arguments,
                 });
+                // The selected declaration's own parameters, not the call site's substituted ones,
+                // are the representation boundary of every argument: a generic `T` slot takes a
+                // box even where the call applies it to a value class.
+                if let Some(declared) = declared_parameters {
+                    let declared = declared.iter().map(|parameter| parameter.get()).collect();
+                    self.ir.call_declared_params.insert(call, declared);
+                }
                 // A suspend super call keeps its checked suspension on the concrete expression, as
                 // any other selected suspend call does; JVM coroutine lowering appends the
                 // continuation and must not infer suspendness from the realized descriptor.

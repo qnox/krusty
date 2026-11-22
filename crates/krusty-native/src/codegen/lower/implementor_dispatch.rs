@@ -234,6 +234,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 signature.name
             ));
         }
+        if let Some(reason) = self.file.unimplementable_interface_members.get(&identity) {
+            return Err(declined!("{reason}"));
+        }
         Ok((
             self.file.dependency_interface_number(identity),
             declared_member_params,
@@ -397,9 +400,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return true;
         }
         let ty = Ty::obj_name(internal);
-        let bridge = self.file.mapped_collection(ty).is_some_and(|collection| {
-            super::super::super::intrinsics::has_special_bridge(collection, signature.name)
-        });
+        let bridge = self
+            .file
+            .mapped_collection(ty)
+            .is_some_and(|collection| collection.has_special_bridge(signature.name));
         bridge && !matches!(signature.ret, Ty::Boolean | Ty::Int)
     }
 
@@ -447,7 +451,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return None;
         }
         let declared = self.file.implementors_of(internal);
-        if declared.is_empty() {
+        // With no class of its own behind the type (a dependency body realized apart from the
+        // classes that inherit it), the interface stub still reaches every implementation record.
+        if declared.is_empty() && stub.is_none() {
             return None;
         }
         let implementors: Vec<ImplementorArm> = declared
@@ -474,9 +480,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let bridge = self
             .file
             .mapped_collection(Ty::obj_name(internal))
-            .is_some_and(|collection| {
-                super::super::super::intrinsics::has_special_bridge(collection, signature.name)
-            });
+            .is_some_and(|collection| collection.has_special_bridge(signature.name));
         // A runtime collection is not one of the classes above. The member's own runtime function
         // is the remaining arm; an abstract-method trap would be a call the program did make.
         let collection = self.checked_type(call.receiver).and_then(|ty| {

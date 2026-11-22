@@ -1833,6 +1833,10 @@ pub struct File {
     /// checker types it as a `suspend (…) -> …` function type; the lowerer builds a
     /// `SuspendLambda` state machine for it instead of a plain `FunctionN` closure.
     pub suspend_lambdas: crate::fx_hash::HashSet<u32>,
+    /// `ExprId.0` of each name reference written as underscores only and without back-ticks (`_`,
+    /// `__`). Such a name is reserved: kotlinc reports its use once the reference resolves, so the
+    /// checker consults this syntax fact rather than re-reading the spelling.
+    pub unescaped_underscore_names: crate::fx_hash::HashSet<u32>,
     /// The EXPLICIT label a lambda literal was written with (`list.forEach outer@{ … }`), keyed by the
     /// lambda's `ExprId.0`. A labelled lambda REPLACES the implicit label (the callee's name) a
     /// `return@name` inside it targets, so the splicer must register `outer`, not `forEach`. Absent ⇒
@@ -2005,6 +2009,7 @@ impl File {
         self.local_delegates = Default::default();
         self.anon_fun_receivers = Default::default();
         self.suspend_lambdas = Default::default();
+        self.unescaped_underscore_names = Default::default();
         self.lambda_labels = Default::default();
         self.lambda_call_labels = Default::default();
         self.destructuring = Default::default();
@@ -2299,11 +2304,6 @@ impl File {
             Stmt::LocalClass(_) | Stmt::LocalTypeAlias(_) => false,
             Stmt::CompoundAssign { target, value, .. } => fe(*target) || fe(*value),
         }
-    }
-
-    pub fn expr_uses_name(&self, e: ExprId, name: &str) -> bool {
-        let names: crate::fx_hash::HashSet<&str> = std::iter::once(name).collect();
-        expr_refs_name(self, e, &names)
     }
 
     pub fn expr_uses_any_name(&self, e: ExprId, names: &crate::fx_hash::HashSet<&str>) -> bool {

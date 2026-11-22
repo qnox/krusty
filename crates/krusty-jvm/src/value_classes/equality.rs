@@ -153,7 +153,7 @@ pub(super) fn realize(
     let read = |ir: &mut IrFile, slot: u32| ir.add_expr(IrExpr::GetValue(slot));
     let mut left_value = read(ir, left_slot);
     if left_check && !left.unboxed {
-        left_value = unbox(ir, left_value, owner, &carrier);
+        left_value = unbox(ir, left_value, owner);
     }
     let right_value = read(ir, right_slot);
     let mut equals = compare(ir, owner, &carrier, right.unboxed, left_value, right_value);
@@ -255,6 +255,6 @@ fn constant(ir: &mut IrFile, value: IrConst) -> ExprId {
     ir.add_expr(IrExpr::Const(value))
 }
 
-fn unbox(ir: &mut IrFile, receiver: ExprId, owner: TypeName, carrier: &Ty) -> ExprId {
-    super::unboxing_rewrites::unbox_call(ir, receiver, owner, carrier)
+fn unbox(ir: &mut IrFile, receiver: ExprId, owner: TypeName) -> ExprId {
+    super::unboxing_rewrites::unbox_call(ir, receiver, owner)
 }

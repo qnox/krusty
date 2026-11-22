@@ -202,6 +202,14 @@ fn list_symbol(
         ("subList", [Ty::Int, Ty::Int], ret) if (reads || mutates) && ret.is_reference() => {
             ("kt_list_sub_list", vec![any(), Ty::Int, Ty::Int], any())
         }
+        // The iterator over a list from its start or from an index: either face selects it, as
+        // `subList` does, because the iterator is the runtime's own.
+        ("listIterator", [], ret) if (reads || mutates) && ret.is_reference() => {
+            ("kt_list_list_iterator_from_start", vec![any()], any())
+        }
+        ("listIterator", [Ty::Int], ret) if (reads || mutates) && ret.is_reference() => {
+            ("kt_list_list_iterator", vec![any(), Ty::Int], any())
+        }
         ("indexOf", [element], Ty::Int) if reads && element.is_reference() => {
             ("kt_list_index_of", vec![any(), any()], Ty::Int)
         }
@@ -795,7 +803,14 @@ impl BodyLowering<'_, '_, '_> {
         // REPRESENTATION rather than about walking. A file that also puts a class of its own
         // behind the receiver's type dispatches that class first; this direct call is only for a
         // receiver no class of the file can be. See [`FileLowering::implements_collection_of`].
-        if self.file.implements_collection_of(ty) {
+        // The shape is as coarse as `Iterable`, so a class implementing only `Collection` marks
+        // `List` too; only a class that can stand behind this very type is one to dispatch to.
+        if self.file.implements_collection_of(ty)
+            && ty
+                .non_null()
+                .obj_internal()
+                .is_none_or(|internal| !self.file.implementors_of(internal).is_empty())
+        {
             return None;
         }
         let (symbol, carried, answer) =
@@ -833,14 +848,8 @@ impl BodyLowering<'_, '_, '_> {
         // shape the receiver is the runtime's own and the walk IS the member.
         if self.file.implements_collection_of(ty)
             && ty.non_null().obj_internal().is_some_and(|internal| {
-                classifier_shapes::mapped_collection(self.file.classifiers, internal).is_some_and(
-                    |collection| {
-                        super::super::super::intrinsics::has_special_bridge(
-                            collection,
-                            signature.name,
-                        )
-                    },
-                )
+                classifier_shapes::mapped_collection(self.file.classifiers, internal)
+                    .is_some_and(|collection| collection.has_special_bridge(signature.name))
             })
         {
             return None;
@@ -1084,9 +1093,9 @@ impl BodyLowering<'_, '_, '_> {
         // argument cannot be what the declaration accepts, and there is no bridge here to put in
         // front of an implementor's arm. Every one of them takes an argument, so the nullary
         // members are untouched.
-        if classifier_shapes::mapped_collection(self.file.classifiers, internal).is_some_and(
-            |collection| super::super::super::intrinsics::has_special_bridge(collection, name),
-        ) {
+        if classifier_shapes::mapped_collection(self.file.classifiers, internal)
+            .is_some_and(|collection| collection.has_special_bridge(name))
+        {
             return None;
         }
         let ty = self.checked_type(receiver)?;

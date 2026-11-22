@@ -339,13 +339,28 @@ pub fn language_argument(argument: &str) -> Option<LanguageArgument> {
     if !selects_language {
         return None;
     }
-    let separate_value =
-        spec.kind == ValueKind::String && !spec.is_advanced() && !argument.contains('=');
-    Some(if separate_value {
+    Some(occupancy(spec, argument))
+}
+
+/// How `argument`, any argument of the reference release's table, occupies a command line: as
+/// kotlinc's tokenizer reads it, an argument with a value that is not joined by `=` takes the
+/// next one, and a boolean stands alone. `None` for an argument the table does not list.
+pub fn argument_occupancy(argument: &str) -> Option<LanguageArgument> {
+    let reference =
+        krusty::kotlin_version::configured_target().unwrap_or_else(|_| KotlinVersion::newest());
+    let catalog = Catalog::for_version(reference)
+        .expect("every supported reference release has an argument table");
+    let key = argument.split_once('=').map_or(argument, |(key, _)| key);
+    Some(occupancy(catalog.by_name(key)?, argument))
+}
+
+fn occupancy(spec: &kotlinc_arguments::ArgumentSpec, argument: &str) -> LanguageArgument {
+    let separate_value = spec.kind != ValueKind::Bool && !argument.contains('=');
+    if separate_value {
         LanguageArgument::WithValue
     } else {
         LanguageArgument::Alone
-    })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

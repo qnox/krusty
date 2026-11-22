@@ -942,6 +942,17 @@ impl BodyLowering<'_, '_, '_> {
         )
     }
 
+    /// Whether the interface `receiver` is typed by is one a class of this file implements.
+    ///
+    /// The runtime answers a range's members from the objects it builds, and no static type tells
+    /// those from an instance of that class, so a read of such a member declines, as a call of
+    /// one does.
+    pub(super) fn range_has_source_implementor(&self, receiver: u32) -> bool {
+        self.checked_type(receiver)
+            .and_then(|ty| ty.non_null().obj_internal())
+            .is_some_and(|internal| self.file.implements_dependency(internal))
+    }
+
     /// The owner, name and result of a dependency getter naming a member of a range type.
     ///
     /// `range.first` reaches the generator as a checked read of a dependency property rather than as
