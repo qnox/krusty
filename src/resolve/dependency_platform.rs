@@ -570,6 +570,10 @@ impl SemanticPlatform for DependencyPlatform {
         self.platform.array_of_nullable_nothing_error()
     }
 
+    fn rejects_suspension_in_critical_sections(&self) -> bool {
+        self.platform.rejects_suspension_in_critical_sections()
+    }
+
     fn library_value_form(&self, ty: Ty) -> Ty {
         self.platform.library_value_form(ty)
     }

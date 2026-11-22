@@ -302,6 +302,15 @@ impl LambdaReturnScopes {
         &self.active_chain
     }
 
+    /// The lambda whose root body is `body`, when that lambda is active in this body.
+    pub(super) fn active_lambda_of_body(&self, body: ExprId) -> Option<ExprId> {
+        let position = self
+            .active_bodies
+            .iter()
+            .position(|active| *active == body)?;
+        self.active_chain.get(position).copied()
+    }
+
     /// Start collecting the type of each value `lambda` returns through a labelled `return`,
     /// individually rather than joined.
     pub(super) fn collect_returns(&mut self, lambda: ExprId) {

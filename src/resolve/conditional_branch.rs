@@ -730,6 +730,10 @@ pub(super) struct ExpectationFrame {
 }
 
 impl ExpectationFrame {
+    pub(super) fn expression(&self) -> ExprId {
+        self.expression
+    }
+
     pub(super) fn new(expression: ExprId, declared: bool) -> Self {
         Self {
             expression,

@@ -10,6 +10,7 @@ impl Checker<'_> {
         self.check_expression_opt_in(scope, expression);
         self.check_expression_deprecation(expression);
         self.check_reserved_underscore_reference(expression);
+        self.record_suspension_point(expression);
     }
 
     /// Report a resolved reference or call whose written name is underscores only and not
