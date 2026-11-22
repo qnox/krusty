@@ -55,8 +55,7 @@ pub(super) type Signature = (Vec<ValType>, Vec<ValType>);
 pub(super) fn member_signature(params: &[Ty], result: Ty) -> Result<Signature, Unsupported> {
     let mut carriers = vec![REFERENCE];
     for param in params {
-        carriers
-            .push(parameter_carrier_of(*param)?.ok_or_else(|| "a `Unit` parameter".to_string())?);
+        carriers.push(parameter_carrier_of(*param)?);
     }
     Ok((carriers, carrier(result)?.into_iter().collect()))
 }
@@ -848,14 +847,27 @@ impl FileRecorder<'_, '_, '_> {
                         }
                     }
                 }
-                let Some(member) = self.dependency_member(target, MemberRole::Function)? else {
+                // An accessor overriding an interface property's implements that property's.
+                let role = match self
+                    .recording
+                    .callables
+                    .callable(target)
+                    .and_then(|fact| fact.klib_body_accessor.as_ref())
+                {
+                    Some(accessor) if accessor.is_setter() => MemberRole::Setter,
+                    Some(_) => MemberRole::Getter,
+                    None => MemberRole::Function,
+                };
+                let Some(member) = self.dependency_member(target, role)? else {
                     continue;
                 };
                 if self.implements(member.member) {
                     continue;
                 }
                 // A default the interface publishes, which the class does not override, is its own
-                // implementation: the exported body, not a slot of the class.
+                // implementation: the exported body, not a slot of the class. So is an inherited
+                // default overriding the member, such as `CoroutineContext.Element.fold` for
+                // `CoroutineContext.fold`.
                 let implemented = if edge.implementation == edge.overridden
                     && edge.implementation_function.is_some_and(|function| {
                         ir.functions[function as usize].dispatch_receiver
@@ -866,6 +878,8 @@ impl FileRecorder<'_, '_, '_> {
                         target,
                         edge.implementation_function,
                     )
+                } else if let Some(default) = self.inherited_interface_default(edge) {
+                    self.dependency_default_implementation(member, default, None)
                 } else {
                     match self.function_edge_implementation(
                         owner,
@@ -971,6 +985,24 @@ impl FileRecorder<'_, '_, '_> {
         )
     }
 
+    /// The dependency interface default the class implements `edge`'s member with, when it
+    /// inherits that default (directly or through a library superclass) without overriding it.
+    fn inherited_interface_default(
+        &self,
+        edge: &krusty::ir::IrFunctionOverride,
+    ) -> Option<krusty::fir::ExternalCallableId> {
+        let ResolvedFunctionOverrideTarget::External(implementation) = edge.implementation else {
+            return None;
+        };
+        let fact = self.recording.callables.callable(implementation)?;
+        (edge.implementation_function.is_none()
+            && fact.owner_is_interface
+            && fact
+                .klib_body_declaration_modifiers
+                .is_some_and(|modifiers| !modifiers.is_abstract()))
+        .then_some(implementation)
+    }
+
     /// The function `owner` implements the dependency member `edge` overrides with: its own or
     /// inherited override, read off its own table so the most derived one stands, or a default of
     /// this module's interface, at that interface member's number (`numbered`).
@@ -997,21 +1029,39 @@ impl FileRecorder<'_, '_, '_> {
                 None,
             ),
             None => {
-                let function = edge
-                    .implementation_function
-                    .or_else(|| {
-                        implementation.and_then(|callable| {
-                            ir.checked_callable_functions.get(&callable).copied()
-                        })
-                    })
-                    .ok_or_else(|| {
-                        self.declined("a dependency's interface member with no body here")
-                    })?;
-                let key = function_key(ir, owner, function);
-                let slot =
-                    self.classes.tables.slot(owner, &key).ok_or_else(|| {
-                        self.declined("a dependency's interface member with no slot")
-                    })?;
+                let function = edge.implementation_function.or_else(|| {
+                    implementation
+                        .and_then(|callable| ir.checked_callable_functions.get(&callable).copied())
+                });
+                let slot = match function {
+                    Some(function) => {
+                        let key = function_key(ir, owner, function);
+                        self.classes.tables.slot(owner, &key)
+                    }
+                    // A member the class inherits from a superclass an earlier file laid out:
+                    // the slot that file's table holds it at. A dependency member, an accessor
+                    // among them, is found by its declaration's slot identity: the callable
+                    // identity another module's file gave it numbers nothing here.
+                    None => {
+                        let callables = self.recording.callables;
+                        self.classes
+                            .laid_out_superclass(self.id)
+                            .and_then(|superclass| match edge.implementation {
+                                ResolvedFunctionOverrideTarget::Module(callable) => superclass
+                                    .table
+                                    .members
+                                    .get(&PlanKey::Callable(callable))
+                                    .copied(),
+                                ResolvedFunctionOverrideTarget::External(target) => callables
+                                    .callable(target)
+                                    .and_then(BackendCallableFact::member_slot_identity)
+                                    .and_then(|identity| {
+                                        superclass.declaration_slots.get(&identity).copied()
+                                    }),
+                            })
+                    }
+                }
+                .ok_or_else(|| self.declined("a dependency's interface member with no slot"))?;
                 if self.slot_is_abstract(slot) {
                     return Ok(None);
                 }

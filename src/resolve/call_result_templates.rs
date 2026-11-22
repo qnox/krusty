@@ -147,6 +147,7 @@ impl Checker<'_> {
                 &generic,
                 expected,
                 &bindings,
+                |actual, bound| self.receiver_is_assignable(actual, bound),
             )
         })
     }

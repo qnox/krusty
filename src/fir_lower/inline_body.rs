@@ -1074,6 +1074,7 @@ impl BodyLowering<'_> {
                 Some(IrCheckedArgument::Expression {
                     parameter: u32::try_from(parameter).ok()?,
                     value: *value,
+                    context: Default::default(),
                 })
             })
             .collect::<Option<Vec<_>>>()?;

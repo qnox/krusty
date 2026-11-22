@@ -592,6 +592,22 @@ impl LibraryCallable {
         }
     }
 
+    /// As [`Self::library`], for a callable the provider builds from its Kotlin declaration's own
+    /// parameters, which are therefore its declared parameters. A caller that has only a JVM
+    /// descriptor's parameters uses [`Self::library`], which declares none.
+    pub fn declared(
+        owner: impl Into<TypeName>,
+        name: impl Into<String>,
+        params: Vec<Ty>,
+        ret: Ty,
+        physical_ret: Ty,
+        descriptor: impl Into<String>,
+    ) -> Self {
+        let mut callable = Self::library(owner, name, params, ret, physical_ret, descriptor);
+        callable.declared_params = Some(callable.params.clone().into_boxed_slice());
+        callable
+    }
+
     /// Normalize a selected classifier constructor into the provider-owned callable identity consumed
     /// after FIR selection. Constructor declarations return their classifier semantically, while the
     /// platform invocation itself returns `Unit`; keep that boundary in one conversion so realization

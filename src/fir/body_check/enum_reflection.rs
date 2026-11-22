@@ -4,9 +4,28 @@
 //! statics once the call's result names a concrete classifier. A type parameter stays
 //! unrealized until an inline expansion substitutes it.
 
-use crate::fir::FirClassifierCallable;
+use crate::fir::{FirClassifierCallable, FirIntrinsic, ResolvedTy};
 use crate::libraries::CompilerIntrinsic;
 use crate::types::{Ty, TypeName};
+
+/// `enumValues` of a reified type parameter, which only an inline template holds. It stays a
+/// compiler operation on that parameter: the builtin declaration has no body to expand, and inline
+/// specialization substitutes the enum the call site names.
+pub(super) fn reified_parameter_operation<E>(
+    intrinsic: Option<CompilerIntrinsic>,
+    ret: Ty,
+    resolve: impl FnOnce(Ty) -> Result<ResolvedTy, E>,
+) -> Result<Option<FirIntrinsic>, E> {
+    let Some(CompilerIntrinsic::EnumValues) = intrinsic else {
+        return Ok(None);
+    };
+    let Some(classifier) = ret.array_elem().filter(|ty| ty.non_null().is_ty_param()) else {
+        return Ok(None);
+    };
+    Ok(Some(FirIntrinsic::EnumValues {
+        classifier: resolve(classifier)?,
+    }))
+}
 
 pub(super) fn selected_classifier_call(
     intrinsic: Option<CompilerIntrinsic>,
@@ -101,6 +120,37 @@ mod tests {
         assert_eq!(
             selected_classifier_call(Some(CompilerIntrinsic::EnumValues), Ty::array(parameter)),
             None
+        );
+    }
+
+    fn resolved(ty: Ty) -> Result<ResolvedTy, ()> {
+        ResolvedTy::new(ty).map_err(|_| ())
+    }
+
+    #[test]
+    fn enum_values_of_a_reified_parameter_is_a_template_operation() {
+        let parameter = Ty::ty_param("T", Ty::obj("kotlin/Enum"));
+        assert_eq!(
+            reified_parameter_operation(
+                Some(CompilerIntrinsic::EnumValues),
+                Ty::array(parameter),
+                resolved
+            ),
+            Ok(Some(FirIntrinsic::EnumValues {
+                classifier: ResolvedTy::new(parameter).unwrap()
+            }))
+        );
+    }
+
+    #[test]
+    fn a_concrete_enum_is_no_template_operation() {
+        assert_eq!(
+            reified_parameter_operation(
+                Some(CompilerIntrinsic::EnumValues),
+                Ty::array(Ty::obj("Color")),
+                resolved
+            ),
+            Ok(None)
         );
     }
 }
