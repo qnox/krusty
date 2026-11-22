@@ -455,6 +455,12 @@ impl Checker<'_> {
             {
                 return true;
             }
+            if omissions == selected.omitted.len()
+                && self
+                    .report_tied_self_delegation(class, secondary, span, label, arguments, selected)
+            {
+                return true;
+            }
         }
         if !selected.omitted.is_empty() && selected.default_masks.is_empty() {
             self.diags.error(
@@ -464,6 +470,160 @@ impl Checker<'_> {
             return true;
         }
         false
+    }
+
+    /// The delegating constructor accepts `this(...)` with the same omissions as the selected
+    /// target, and the arguments do not make one parameter list more specific. kotlinc lists every
+    /// constructor the call can reach.
+    fn report_tied_self_delegation(
+        &mut self,
+        class: DeclId,
+        secondary: usize,
+        span: Span,
+        label: &str,
+        arguments: &CtorDelegationCall,
+        selected: &ResolvedCtorDelegation,
+    ) -> bool {
+        if label != "this"
+            || !self.current_constructor_accepts_delegation(class, secondary, label, arguments)
+        {
+            return false;
+        }
+        let Some(self_types) = self.self_mapped_argument_types(class, secondary, label, arguments)
+        else {
+            return false;
+        };
+        if self_types != selected.argument_types {
+            return false;
+        }
+        let Some(lines) = self.applicable_this_delegation_lines(class, arguments) else {
+            return false;
+        };
+        if lines.len() < 2 {
+            return false;
+        }
+        let mut message = String::from("overload resolution ambiguity between candidates:");
+        for line in lines {
+            message.push('\n');
+            message.push_str(&line);
+        }
+        let span = self
+            .delegation_keyword_span(class, secondary)
+            .unwrap_or(span);
+        self.diags.error(span, message);
+        true
+    }
+
+    /// Expected parameter type of each source argument when the call is mapped onto the delegating
+    /// constructor. Omitted defaults contribute no entry.
+    fn self_mapped_argument_types(
+        &self,
+        class: DeclId,
+        secondary: usize,
+        label: &str,
+        arguments: &CtorDelegationCall,
+    ) -> Option<Vec<Ty>> {
+        let (slots, types) = self.mapped_self_delegation(class, secondary, label, arguments)?;
+        arguments
+            .args
+            .iter()
+            .map(|argument| {
+                let parameter = slots.iter().position(|slot| slot == &Some(*argument))?;
+                types.get(parameter).copied()
+            })
+            .collect()
+    }
+
+    fn applicable_this_delegation_lines(
+        &self,
+        class: DeclId,
+        arguments: &CtorDelegationCall,
+    ) -> Option<Vec<String>> {
+        let shapes = {
+            let Decl::Class(classifier) = self.file.decl(class) else {
+                return None;
+            };
+            Self::this_delegation_shapes(classifier)
+        };
+        let types = self.delegation_shape_types(class)?;
+        if types.len() != shapes.len() {
+            return None;
+        }
+        let mut lines = Vec::new();
+        for ((signature, parameters), parameter_types) in shapes.into_iter().zip(types) {
+            if self.delegation_shape_accepts(arguments, &parameters, &parameter_types) {
+                lines.push(signature);
+            }
+        }
+        Some(lines)
+    }
+
+    fn delegation_shape_accepts(
+        &self,
+        arguments: &CtorDelegationCall,
+        parameters: &crate::libraries::ParamList,
+        types: &[Ty],
+    ) -> bool {
+        if types.len() != parameters.names.len() {
+            return false;
+        }
+        let names = arguments
+            .names
+            .iter()
+            .any(Option::is_some)
+            .then_some(arguments.names.as_slice());
+        let Ok(slots) = map_param_list_args(
+            &arguments.args,
+            names,
+            parameters,
+            arguments.trailing_lambda,
+        ) else {
+            return false;
+        };
+        slots.iter().enumerate().all(|(index, slot)| {
+            let Some(argument) = slot else {
+                return true;
+            };
+            let (Some(&expected), Some(actual)) = (
+                types.get(index),
+                self.expr_types.get(argument.0 as usize).copied(),
+            ) else {
+                return false;
+            };
+            actual == Ty::Error
+                || expected == Ty::Error
+                || self.receiver_is_assignable(actual, expected)
+                || expected.accepts_numeric(actual)
+        })
+    }
+
+    fn delegation_shape_types(&self, class: DeclId) -> Option<Vec<Vec<Ty>>> {
+        let index = self.resolved_index?;
+        let owner = self
+            .active_declarations?
+            .canonical_classifier_declaration(class, index)?;
+        let Decl::Class(classifier) = self.file.decl(class) else {
+            return None;
+        };
+        let mut lists = Vec::new();
+        if classifier.primary_ctor_annotations.is_some() {
+            let declaration =
+                index.owned_declaration(owner, crate::fir::DeclarationKind::Constructor, 0)?;
+            lists.push(match index.signature(declaration) {
+                Some(signature) => signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.get())
+                    .collect(),
+                None => vec![Ty::Error; classifier.context_params.len() + classifier.props.len()],
+            });
+        }
+        lists.extend(
+            super::source_constructors::published_secondary_parameter_shapes(
+                index, owner, classifier,
+            )?,
+        );
+        Some(lists)
     }
 
     fn self_delegation_omissions(
