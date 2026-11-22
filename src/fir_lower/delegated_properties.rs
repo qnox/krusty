@@ -996,6 +996,15 @@ pub(super) fn delegated_call_with_dispatch(
                         dispatch_receiver: Some(receiver),
                         args: arguments,
                     });
+                    ir.call_declared_params.insert(
+                        expression,
+                        signature
+                            .parameters
+                            .iter()
+                            .map(|ty| ty.get())
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    );
                     record_delegated_member_access(
                         ir,
                         expression,
@@ -1049,6 +1058,7 @@ pub(super) fn delegated_call_with_dispatch(
                 parameters.insert(position, extension_receiver.get());
             }
             let function = ir.checked_callable_functions.get(target).copied();
+            let declared_parameters = parameters.clone().into_boxed_slice();
             let callee = match function {
                 Some(function) => Callee::Local(function),
                 None => Callee::Module {
@@ -1068,6 +1078,8 @@ pub(super) fn delegated_call_with_dispatch(
                 dispatch_receiver: None,
                 args: arguments,
             });
+            ir.call_declared_params
+                .insert(expression, declared_parameters);
             Ok(materialize_delegated_result(
                 ir,
                 expression,
