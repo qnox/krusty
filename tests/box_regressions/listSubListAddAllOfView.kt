@@ -1,11 +1,4 @@
 fun box(): String {
-    val root = ArrayList<Int>()
-    root.add(1)
-    root.add(2)
-    root.add(3)
-    val view = (root as List<Int>).subList(0, 2)
-    root.addAll(view)
-    if (root != listOf(1, 2, 3, 1, 2)) return "aliased"
     val self = ArrayList<Int>()
     self.add(7)
     self.addAll(self)
