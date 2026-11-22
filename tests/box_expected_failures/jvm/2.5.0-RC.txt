@@ -15,6 +15,5 @@ contextParameters/callableReferences/contextual/delegation/unboundReceiver.kt
 contextParameters/callableReferences/contextual/delegation/unboundReceiverVar.kt
 contextParameters/callableReferences/contextual/delegation/varProperty.kt
 contextParameters/callableReferences/contextual/generic.kt
-contextParameters/callableReferences/contextual/valueClassContextArg.kt
 regressions/contextParameters/contextualReferenceNullableValueClassContext.kt
 suspendConversion/suspendConversionNullableNpe2.kt
