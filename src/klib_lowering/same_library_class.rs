@@ -846,24 +846,11 @@ fn abstract_members<'a>(
                 if function.constructor {
                     return Err(mismatch("an interface declares a constructor"));
                 }
-                members.push(prepare_abstract_member(arena, function, scope, false)?);
+                members.push(prepare_abstract_member(arena, function, scope)?);
             }
             KlibIrMember::Property(property) => {
-                if let Some(id) = property.getter {
-                    members.push(prepare_abstract_member(
-                        arena,
-                        arena.function(id),
-                        scope,
-                        false,
-                    )?);
-                }
-                if let Some(id) = property.setter {
-                    members.push(prepare_abstract_member(
-                        arena,
-                        arena.function(id),
-                        scope,
-                        true,
-                    )?);
+                for id in [property.getter, property.setter].into_iter().flatten() {
+                    members.push(prepare_abstract_member(arena, arena.function(id), scope)?);
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {
@@ -884,7 +871,6 @@ fn prepare_abstract_member<'a>(
     arena: &'a KlibIrArena,
     function: &'a KlibIrFunction,
     scope: &MemberScope<'_>,
-    setter: bool,
 ) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
     if function.body.is_some() {
         return Err(unsupported(
@@ -900,7 +886,6 @@ fn prepare_abstract_member<'a>(
         header,
         overrides: member_overrides(function, scope)?,
         visibility: declaration_visibility(function.base.flags),
-        setter,
     })
 }
 

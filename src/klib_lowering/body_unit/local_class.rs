@@ -363,7 +363,6 @@ impl<'s> Linker<'_, 's> {
                 LocalFunction {
                     function,
                     class: prepared.key.clone(),
-                    setter: member.setter,
                     formals: member.formals.clone(),
                 },
             );
