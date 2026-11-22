@@ -3,6 +3,7 @@
 mod applied_formal_bounds;
 mod bound_inner_aliases;
 mod bound_inner_constructors;
+mod java_accessor_overrides;
 mod receiver_parameter_overrides;
 mod result_enhancement;
 
@@ -742,6 +743,14 @@ fn members_in_hierarchy_for(
         };
         let (mut current_functions, mut current_properties) =
             declared_callables(source, &classifier, current, name).into_parts();
+        current_functions.overloads.retain(|function| {
+            !java_accessor_overrides::overrides_kotlin_property_accessor(
+                source,
+                &classifier,
+                current,
+                function,
+            )
+        });
         if view == HierarchyMemberView::Declarations {
             // A member extension is absent from ordinary dispatch lookup: it has an implicit
             // dispatch receiver and a separate extension receiver, so `host.ext()` must not make
@@ -966,10 +975,27 @@ pub(crate) fn function_result_refines(
     implementation: &FunctionInfo,
     inherited: &FunctionInfo,
 ) -> bool {
+    checked_function_result_refines(
+        source,
+        (
+            implementation,
+            implementation.ret.apply(implementation.callable.ret),
+        ),
+        (inherited, inherited.ret.apply(inherited.callable.ret)),
+    )
+}
+
+/// [`function_result_refines`] over the results each side supplies: a checked body's result
+/// rather than its published header, and an inherited result as its call site publishes it.
+pub(crate) fn checked_function_result_refines(
+    source: &dyn SymbolSource,
+    (implementation, result): (&FunctionInfo, Ty),
+    (inherited, inherited_result): (&FunctionInfo, Ty),
+) -> bool {
     resolution_subtype(
         source,
-        normalized_function_result(implementation),
-        normalized_function_result(inherited),
+        normalized_function_result(implementation, result),
+        normalized_function_result(inherited, inherited_result),
     )
 }
 
@@ -977,8 +1003,7 @@ pub(crate) fn function_result_refines(
 /// Override input matching has already established that the declarations have the same generic
 /// shape; result covariance must therefore compare their variables by ordinal, not by source or
 /// metadata spelling (`fun <T> f(): T` and `fun <U> f(): U` are the same contract).
-fn normalized_function_result(function: &FunctionInfo) -> Ty {
-    let result = function.ret.apply(function.callable.ret);
+fn normalized_function_result(function: &FunctionInfo, result: Ty) -> Ty {
     let Some(signature) = function.generic_sig.as_ref() else {
         return result;
     };

@@ -2,6 +2,7 @@
 //! with how the JVM realizes each declaration ([`JvmClassSignatures`]) beside it.
 
 use super::*;
+use crate::coroutine_classes::{is_continuation_class, is_coroutine_state_machine};
 use krusty::metadata::class_builder::{
     FnMeta, JvmClassSignatures, JvmConstructorSignature, JvmFieldSignature, JvmFunctionSignature,
     JvmPropertySignature, PropMeta,

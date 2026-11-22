@@ -1238,13 +1238,13 @@ fn encode_type_with_parameter(
             if expansion == Expansion::Expanded {
                 encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
             }
+            add_type_annotations(&mut message, strings, annotations);
             if signature.has_receiver {
                 add_extension_function_annotation(&mut message, strings);
             }
             if signature.context_count > 0 {
                 add_context_function_annotation(&mut message, strings, signature.context_count);
             }
-            add_type_annotations(&mut message, strings, annotations);
             if signature.suspend {
                 message.field_varint(1, 1); // Type.flags: SUSPEND_TYPE
             }

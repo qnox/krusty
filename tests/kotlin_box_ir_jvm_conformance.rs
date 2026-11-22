@@ -899,6 +899,26 @@ fn compose_captured_local_read_is_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_receiver_lambdas_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("receiverLambdas");
+}
+
+#[test]
+fn compose_receiver_invoke_trivia_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("receiverInvokeTrivia");
+}
+
+#[test]
+fn compose_library_receiver_lambdas_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("libraryReceiverLambdas");
+}
+
+#[test]
+fn compose_function_type_parameters_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("functionTypeParameters");
+}
+
+#[test]
 fn compose_library_lambda_parameters_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("libraryLambdaParameters");
 }
@@ -924,15 +944,33 @@ fn assert_plugin_case_matches_kotlinc(source: &str, stem: &str) {
     let reference = box_reference_classes::checked_prepared_box(&source, stem)
         .expect("the reference compiler compiles the fixture and its box() returns OK");
     let classpath = common::classpath_jars_for(&source);
+    let classes = krusty_classes_matching_reference(&source, stem, &classpath, &reference)
+        .unwrap_or_else(|difference| panic!("{difference}"));
+    let box_class = find_box_class(&classes).expect("the fixture emits box()");
+    assert_eq!(
+        common::run_box(&classes, &box_class, &classpath),
+        Some("OK".to_string())
+    );
+}
+
+/// Compile a case with krusty, every module its own, and require each module's classes to equal
+/// the reference compiler's byte for byte. `Ok` carries all of krusty's class files; `Err` names the
+/// first difference, or says krusty could not compile the case.
+pub(super) fn krusty_classes_matching_reference(
+    source: &str,
+    stem: &str,
+    classpath: &[PathBuf],
+    reference: &box_reference_classes::ReferenceClasses,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let jdk = common::jdk_modules();
     // Every module is krusty's own: a library module is compiled before the modules using it.
     let compiled = if source.contains("// MODULE:") {
-        compile_module_test(&source, &classpath, Some(jdk.as_path()), &|_| {})
+        compile_module_test(source, classpath, Some(jdk.as_path()), &|_| {})
     } else {
-        compile_multifile(&source, stem, &classpath, Some(jdk.as_path()))
+        compile_multifile(source, stem, classpath, Some(jdk.as_path()))
             .map(CompiledClasses::single_module)
     }
-    .expect("krusty compiles the fixture");
+    .map_err(|failure| format!("krusty cannot compile the case: {failure:?}"))?;
     let class_file = |(_, bytes): &&(String, Vec<u8>)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]);
     for (module, range) in &compiled.module_ranges {
         let classes: Vec<_> = compiled.flat[range.clone()]
@@ -942,19 +980,11 @@ fn assert_plugin_case_matches_kotlinc(source: &str, stem: &str) {
             .collect();
         let expected = reference
             .module(module)
-            .unwrap_or_else(|| panic!("the reference compiler emits module {module}"));
-        assert_eq!(
-            compare_class_sets(&classes, expected),
-            Ok(()),
-            "module {module}"
-        );
+            .ok_or_else(|| format!("the reference compiler emits no module {module}"))?;
+        compare_class_sets(&classes, expected)
+            .map_err(|difference| format!("module {module}: {difference}"))?;
     }
-    let classes: Vec<_> = compiled.flat.iter().filter(class_file).cloned().collect();
-    let box_class = find_box_class(&classes).expect("the fixture emits box()");
-    assert_eq!(
-        common::run_box(&classes, &box_class, &classpath),
-        Some("OK".to_string())
-    );
+    Ok(compiled.flat.iter().filter(class_file).cloned().collect())
 }
 
 /// `(module, internal name)` of every class in one inventory.

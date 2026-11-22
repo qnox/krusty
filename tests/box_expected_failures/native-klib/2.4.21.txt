@@ -5,22 +5,15 @@
 # native-klib run. The lists only shrink.
 annotations/annotations0.kt
 annotations/instances/AnnotationInstantiationWithArray.kt
-annotations/instances/annotationAnyDispatch.kt
 annotations/instances/annotationFromStdlib.kt
-annotations/instances/annotationInlineMultiModule.kt
 annotations/instances/annotationInstances.kt
 annotations/instances/annotationInstancesEmptyDefault.kt
 annotations/instances/annotationInstancesEmptyDefaultLowered.kt
 annotations/instances/annotationToString.kt
-annotations/instances/annotationToStringDefaultsAndEmptyArrays.kt
 annotations/instances/annotationWithTypeParameters.kt
-annotations/instances/enumAndKClass.kt
 annotations/instances/inInlineFunction.kt
-annotations/instances/instanceEquality.kt
 annotations/instances/multifileEqHc.kt
 annotations/instances/multimoduleTypeParams.kt
-annotations/instances/nested.kt
-annotations/instances/typeAliasesAndGenericsInterop.kt
 arithmetic/basic_charConversions.kt
 arithmetic/basic_charCornerCases.kt
 arithmetic/basic_compareIntToFloat.kt
@@ -41,7 +34,6 @@ arrays/forInReversed/reversedReversedOriginalUpdatedInLoopBody.kt
 arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
 arrays/forInUnsignedArray/forInUnsignedArrayWithIndexReversed.kt
 arrays/indices.kt
-arrays/kt42932.kt
 arrays/multiArrayConstructors.kt
 arrays/primitiveArrays.kt
 associatedObjects/associatedObjectNested.kt
@@ -208,7 +200,6 @@ classLiteral/bound/primitives.kt
 classes/kt1538.kt
 classes/kt2566_2.kt
 classes/kt3001.kt
-classes/overloadUnaryOperator.kt
 classes/typedDelegation.kt
 closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
@@ -293,7 +284,6 @@ controlStructures/breakContinueInExpressions/inlinedBreakContinue/lambdaPassedTo
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/loopWithinInlineFunction.kt
 controlStructures/breakContinueInExpressions/kt17384.kt
 controlStructures/factorialTest.kt
-controlStructures/forInArrayWithIndex/forInArrayOfObjectArrayWithIndex.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexContinuesAsUnmodified.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNotDestructured.kt
@@ -883,10 +873,8 @@ fir/sourceBinarySource.kt
 fp/atan2ZeroGuadrantsDouble.kt
 fp/powDouble.kt
 fp/powFloat.kt
-fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
 fullValueClasses/nonFinal.kt
-fullValueClasses/vararg.kt
 funInterface/basicFunInterfaceConversionClash.kt
 funInterface/funInterfaceWithSuspendMethod.kt
 funInterface/implIsNotFunction.kt
@@ -1063,7 +1051,6 @@ inline/propertyAccessorInline.kt
 inline/redundantCoercionsCleaner.kt
 inline/redundantCoercionsCleanerKT48876.kt
 inline/redundantCoercionsCleanerKT49356.kt
-inline/requireNotNull.kt
 inline/rootConstructor.kt
 inline/safeCall.kt
 inline/sharedVar.kt
@@ -1111,7 +1098,6 @@ inlineClasses/functionNameMangling/reflectionForFunctionWithMangledName.kt
 inlineClasses/functionNameMangling/reflectionForFunctionWithMangledNameGeneric.kt
 inlineClasses/functionNameMangling/reflectionForPropertyOfInlineClassType.kt
 inlineClasses/functionNameMangling/reflectionForPropertyOfInlineClassTypeGeneric.kt
-inlineClasses/genericVararg2ndConstructor.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClass.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClassGeneric.kt
 inlineClasses/inlineClassCollection/inlineListOfInlineClass.kt
@@ -1308,7 +1294,6 @@ multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
-multiplatform/k2/hmpp/genericTypealiasSameNameTwoLibs.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
 multiplatform/k2/hmpp/inheritanceFromExpected3-3.kt
@@ -1319,7 +1304,6 @@ multiplatform/k2/hmpp/mutlipleExpectsForOneActual.kt
 multiplatform/k2/hmpp/overloadAlias3-3.kt
 multiplatform/k2/hmpp/propertyAlias3-3.kt
 multiplatform/k2/hmpp/propertyAliasTwoLibs.kt
-multiplatform/k2/hmpp/typealiasNameClash.kt
 multiplatform/k2/internalOverride2.kt
 multiplatform/k2/kt66970.kt
 nameBasedDestructuring/fullFormExtraPropType.kt
@@ -1360,7 +1344,6 @@ properties/accessorForProtectedPropertyWithPrivateSetter.kt
 properties/accessorForProtectedPropertyWithPrivateSetterInObjectLiteral.kt
 properties/accessorForProtectedPropertyWithPrivateSetterViaSuper.kt
 properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
-properties/backingField/backingFieldWithSmartTypeParameters.kt
 properties/complexPropertyInitializer.kt
 properties/eagerInitializationGlobal1.kt
 properties/eagerInitializationGlobal2.kt
@@ -1399,7 +1382,6 @@ ranges/contains/generated/uintDownTo.kt
 ranges/contains/generated/uintUntil.kt
 ranges/contains/generated/ulongDownTo.kt
 ranges/contains/generated/ulongUntil.kt
-ranges/contains/inCharSequence.kt
 ranges/contains/inComparableRange.kt
 ranges/contains/inCustomObjectRange.kt
 ranges/contains/inDoubleRangeLiteralVsComparableRangeLiteral.kt
@@ -2030,7 +2012,6 @@ reflection/types/typeArguments.kt
 reflection/types/useSiteVariance.kt
 regressions/directInvokeNameBasedDestructuring.kt
 regressions/floatingRangeContainsMixedWidths.kt
-regressions/kt15196.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
 regressions/kt2246.kt
@@ -2173,10 +2154,8 @@ unsignedTypes/forInUnsignedRangeWithCoercion.kt
 unsignedTypes/inUnsignedDownTo.kt
 unsignedTypes/kt47716.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
-vararg/kt37715.kt
 vararg/spreadCopiesArray.kt
 vararg/useSuspendFunResultAsVararg.kt
-vararg/varargInTailrec.kt
 volatile/atomicArrayIntrinsics.kt
 volatile/intrinsicWithInlineFunction.kt
 volatile/intrinsics.kt
@@ -2199,7 +2178,6 @@ when/stringOptimization/expression.kt
 when/stringOptimization/nullability.kt
 when/stringOptimization/sameHashCode.kt
 when/stringOptimization/statement.kt
-when/stringOptimization/temporaryVarInWhenByStringIsDisposedProperly.kt
 when/whenSubjectVariable/whenByEnum.kt
 when/whenSubjectVariable/whenByNullableEnum.kt
 when/whenSubjectVariable/whenByString.kt

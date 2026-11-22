@@ -3,13 +3,13 @@
 //!
 //! KSP processors only read declarations and write new files, so a round needs the module's
 //! headers, never its bodies: a driver analyzes the sources for declarations only, hands the
-//! [`KspRound`] built here to a KSP host (`krusty-plugin-host`'s `KspHost`), adds the sources the
-//! processors generate, and analyzes again for the next round. The compiler itself never starts the
-//! host.
+//! [`KspRound`] built here to the processors through the plugin API's round model, adds the sources
+//! they generate, and analyzes again for the next round. The compiler itself never runs a
+//! processor.
 //!
-//! The round carries what the host serves so far. Where a declaration has more than the round can
-//! describe, it says so (`declarations_complete`), and the host refuses a processor that asks for
-//! the rest rather than answer with a part of it.
+//! The round carries what a processor can be served so far. Where a declaration has more than the
+//! round can describe, it says so (`declarations_complete`), and a processor that asks for the rest
+//! is refused rather than answered with a part of it.
 
 mod accessors;
 mod all_members;
@@ -23,7 +23,7 @@ mod type_model;
 
 pub use library::KspLibraries;
 
-use krusty_plugin_ir::{
+use krusty_plugin_api::ksp::{
     KspAnnotation, KspClass, KspClassKind, KspDeclaration, KspFile, KspRound, KspType,
     KspTypeAlias, KspTypeParameter,
 };
@@ -338,7 +338,7 @@ impl Source<'_> {
     }
 
     /// The KSP modifiers of the modifier list of the declaration that `offset` identifies.
-    fn written_modifiers(&self, offset: u32) -> Option<Vec<krusty_plugin_ir::KspModifier>> {
+    fn written_modifiers(&self, offset: u32) -> Option<Vec<krusty_plugin_api::ksp::KspModifier>> {
         self.file
             .declaration_prefixes
             .at(offset)
@@ -478,7 +478,7 @@ mod tests {
     use crate::features::LangFeatures;
     use crate::frontend::{analyze_source_set_prefix_with_features, PlatformProvider, SourceInput};
     use crate::libraries::EmptySymbolSource;
-    use krusty_plugin_ir::{
+    use krusty_plugin_api::ksp::{
         KspFunction, KspFunctionKind, KspParameter, KspProperty, KspTypeArgument,
         KspTypeDeclaration, KspTypeSlot,
     };
@@ -530,7 +530,7 @@ mod tests {
         ty.as_ref().map_or("<undescribed>".to_string(), render)
     }
 
-    fn modifiers(modifiers: &Option<Vec<krusty_plugin_ir::KspModifier>>) -> String {
+    fn modifiers(modifiers: &Option<Vec<krusty_plugin_api::ksp::KspModifier>>) -> String {
         let mut names: Vec<&str> = modifiers
             .as_ref()
             .expect("modifiers")

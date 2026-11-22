@@ -71,8 +71,8 @@ jobs:
         with:
           distribution: zulu
           java-version: |
-            21
-            25
+            21.0.13+0.3.1
+            25.0.5+0.3.1
       # Toolchain entries are named by the exact toolchain they hold, never by a hash of the
       # checkout, and every job that needs one restores the same entry.
       - name: select the maximum Kotlin version
@@ -89,7 +89,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/cache/ser-corpus
+            target/cache/plugin-corpus
             target/cache/ksp-corpus
           key: kotlin-test-corpora-${{ steps.max-version.outputs.version }}
       - name: restore box corpus

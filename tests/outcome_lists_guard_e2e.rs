@@ -108,6 +108,9 @@ const CLI_NOT_APPLICABLE: &str = "tests/cli_expected_not_applicable/jvm/2.4.20.t
 const FALSE_ACCEPTS: &str = "tests/diagnostics_false_accepts/jvm/2.4.20.txt";
 const LATER_FALSE_ACCEPTS: &str = "tests/diagnostics_false_accepts/jvm/2.4.21.txt";
 const KLIB_UNCOVERED: &str = "tests/klib_uncovered_implementations/native/2.4.20.txt";
+const INCLUDED: &str = "src/plugins/demo/boxes/included/jvm/2.4.20.txt";
+const LATER_INCLUDED: &str = "src/plugins/demo/boxes/included/jvm/2.4.21.txt";
+const PLUGIN_NOT_APPLICABLE: &str = "src/plugins/demo/boxes/expected_not_applicable/jvm/2.4.20.txt";
 const MIGRATIONS: &str = "scripts/outcome-list-migrations.tsv";
 
 fn migration_row(repo: &Repo, base: &str) -> String {
@@ -601,5 +604,130 @@ fn dropping_a_diagnostics_release_file_that_inherits_more_false_accepts_fails() 
         String::from_utf8(output.stderr).expect("stderr is UTF-8"),
         "outcome-lists: tests/diagnostics_false_accepts/jvm/2.4.21.txt (reads tests/diagnostics_false_accepts/jvm/2.4.20.txt) gains 1 entry:\n    tests/b.kt\n\
          outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
+    );
+}
+
+const INCLUDED_ONLY_GROWS: &str =
+    "outcome-lists: a plugin corpus's included cases only grow; fix the failing cases above instead of dropping them\n";
+
+#[test]
+fn a_growing_plugin_included_inventory_passes() {
+    let repo = Repo::new("included-grows");
+    repo.write(INCLUDED, "a/one.kt\n");
+    let base = repo.commit();
+    repo.write(INCLUDED, "a/one.kt\nb/two.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stderr, b"");
+}
+
+#[test]
+fn removing_an_included_plugin_case_fails_and_names_it() {
+    let repo = Repo::new("included-removed");
+    repo.write(INCLUDED, "a/one.kt\nb/two.kt\n");
+    let base = repo.commit();
+    repo.write(INCLUDED, "a/one.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        format!("outcome-lists: {INCLUDED} loses 1 entry:\n    b/two.kt\n{INCLUDED_ONLY_GROWS}")
+    );
+}
+
+#[test]
+fn replacing_an_included_plugin_case_fails() {
+    let repo = Repo::new("included-replaced");
+    repo.write(INCLUDED, "a/one.kt\nb/two.kt\n");
+    let base = repo.commit();
+    repo.write(INCLUDED, "a/one.kt\nc/three.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        format!("outcome-lists: {INCLUDED} loses 1 entry:\n    b/two.kt\n{INCLUDED_ONLY_GROWS}")
+    );
+}
+
+#[test]
+fn deleting_an_included_release_file_that_falls_back_to_fewer_cases_fails() {
+    let repo = Repo::new("included-fallback");
+    repo.write("kotlin-versions", "2.4.20 a\n2.4.21 b\n");
+    repo.write(INCLUDED, "a/one.kt\n");
+    repo.write(LATER_INCLUDED, "a/one.kt\nb/two.kt\n");
+    let base = repo.commit();
+    repo.git(&["rm", "-q", LATER_INCLUDED]);
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        format!(
+            "outcome-lists: src/plugins/demo/boxes/included/jvm/2.4.21.txt (reads {INCLUDED}) \
+             loses 1 entry:\n    b/two.kt\n{INCLUDED_ONLY_GROWS}"
+        )
+    );
+}
+
+#[test]
+fn deleting_an_included_release_file_equal_to_its_fallback_passes() {
+    let repo = Repo::new("included-fallback-equal");
+    repo.write("kotlin-versions", "2.4.20 a\n2.4.21 b\n");
+    repo.write(INCLUDED, "a/one.kt\n");
+    repo.write(LATER_INCLUDED, "a/one.kt\n");
+    let base = repo.commit();
+    repo.git(&["rm", "-q", LATER_INCLUDED]);
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stderr, b"");
+}
+
+#[test]
+fn an_included_inventory_for_a_newly_supported_release_is_exempt() {
+    let repo = Repo::new("included-new-release");
+    repo.write(INCLUDED, "a/one.kt\nb/two.kt\n");
+    let base = repo.commit();
+    repo.write(
+        "src/plugins/demo/boxes/included/jvm/2.5.0.txt",
+        "a/one.kt\n",
+    );
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
+
+#[test]
+fn a_growing_plugin_not_applicable_inventory_still_fails() {
+    let repo = Repo::new("plugin-not-applicable");
+    repo.write(PLUGIN_NOT_APPLICABLE, "a/one.kt\n");
+    let base = repo.commit();
+    repo.write(PLUGIN_NOT_APPLICABLE, "a/one.kt\nb/two.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        format!(
+            "outcome-lists: {PLUGIN_NOT_APPLICABLE} gains 1 entry:\n    b/two.kt\n\
+             outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
+        )
     );
 }

@@ -509,6 +509,31 @@ impl Checker<'_> {
         (ty, argument_scope)
     }
 
+    /// Check a call. A member call types its receiver once, then its arguments, in one scope of
+    /// its own, so the facts the receiver proved reach the arguments. When the call returns, the
+    /// facts the receiver and the arguments proved belong to the code that follows it
+    /// (`b.take(x!!)` proves `x` non-null afterwards), exactly as for any other call.
+    pub(super) fn check_call(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        callee: ExprId,
+        args: &[ExprId],
+        span: Span,
+        expected: Option<Ty>,
+    ) -> Ty {
+        if !matches!(self.file.expr(callee), Expr::Member { .. }) {
+            return self.check_call_in_argument_scope(scope, call, callee, args, span, expected);
+        }
+        let argument_scope = scope.child(ScopeKind::Block);
+        let ty =
+            self.check_call_in_argument_scope(&argument_scope, call, callee, args, span, expected);
+        if self.completed_normally(call) {
+            CompletedFlow::capture(self, &argument_scope).publish(self, scope);
+        }
+        ty
+    }
+
     /// A lambda literal whose parameter shape is supplied by the call's argument probes. An
     /// anonymous function declares that shape itself and is an ordinary callee.
     fn postponed_lambda_callee(&self, callee: ExprId) -> bool {
@@ -581,7 +606,7 @@ impl Checker<'_> {
             .args
             .iter()
             .map(|&argument| {
-                self.lambda_probe_ty(scope, argument).unwrap_or_else(|| {
+                self.lambda_probe_ty(argument).unwrap_or_else(|| {
                     if matches!(self.file.expr(argument), Expr::CallableRef { .. }) {
                         Ty::Error
                     } else {
@@ -667,7 +692,7 @@ impl Checker<'_> {
     /// The type an argument contributes before its callee's parameter type is known. A callable
     /// reference and a lambda literal stay postponed; every other argument is checked once.
     fn probe_or_check_argument(&mut self, scope: &CheckerScope<'_>, argument: ExprId) -> Ty {
-        self.lambda_probe_ty(scope, argument).unwrap_or_else(|| {
+        self.lambda_probe_ty(argument).unwrap_or_else(|| {
             if matches!(self.file.expr(argument), Expr::CallableRef { .. }) {
                 Ty::Error
             } else {

@@ -8,7 +8,8 @@
 
 use super::{mismatch, unsupported, BodyLowering, Lowered};
 use crate::ir::{ExprId, IrExpr, IrTypeOp};
-use crate::metadata::klib_ir::tree::{KlibIrExprId, KlibIrTypeId, KlibIrTypeOperator};
+use crate::metadata::klib_ir::tree::{KlibIrExprId, KlibIrType, KlibIrTypeId, KlibIrTypeOperator};
+use crate::metadata::klib_ir::KlibIrSymbolKind;
 use crate::types::{Ty, TyKind};
 
 use super::super::decline::KlibBodyDeclineReason;
@@ -24,6 +25,7 @@ impl BodyLowering<'_> {
         argument: KlibIrExprId,
         ty: Ty,
     ) -> Lowered<ExprId> {
+        self.install_operand_interface(operand)?;
         let target = self.semantic(operand)?;
         let op = match operator {
             KlibIrTypeOperator::SamConversion => return self.sam_conversion(operand, argument, ty),
@@ -53,12 +55,7 @@ impl BodyLowering<'_> {
                 if ty != target {
                     return Err(mismatch("a cast is typed apart from its target"));
                 }
-                // A cast to a non-null type also rejects `null`.
-                if target.is_nullable() {
-                    IrTypeOp::Cast
-                } else {
-                    IrTypeOp::CastNonNull
-                }
+                IrTypeOp::cast_to(target)
             }
             other => return unsupported(type_operator_name(other)),
         };
@@ -76,6 +73,22 @@ impl BodyLowering<'_> {
             self.ir.written_casts.insert(lowered);
         }
         Ok(self.typed(lowered, ty))
+    }
+
+    /// Install the non-public interface `operand` names, if it names one, so the test or cast of
+    /// it has a class to name and its supertypes are known to the narrowing it permits.
+    fn install_operand_interface(&mut self, operand: KlibIrTypeId) -> Lowered<()> {
+        let KlibIrType::Simple { classifier, .. } = self.arena.ty(operand) else {
+            return Ok(());
+        };
+        if classifier.kind != KlibIrSymbolKind::Class
+            || self.linker.local_class(&classifier.signature)?.is_none()
+            || !self.linker.is_local_interface(&classifier.signature)
+        {
+            return Ok(());
+        }
+        self.linker
+            .link_local_interface(self.ir, &classifier.signature)
     }
 
     /// `argument is target` (or `!is`) for a nullable `target`, through the test checked FIR
@@ -138,6 +151,11 @@ impl BodyLowering<'_> {
             return Ok(proven);
         }
         let arg = self.expression(argument)?;
+        self.implicit_cast_of(arg, target, ty)
+    }
+
+    /// The lowered `arg` implicitly cast to `target`, typed `ty`; see [`Self::implicit_cast`].
+    pub(super) fn implicit_cast_of(&mut self, arg: ExprId, target: Ty, ty: Ty) -> Lowered<ExprId> {
         let actual = self.lowered_type(arg);
         if super::is_value_of(actual, target) {
             return Ok(arg);

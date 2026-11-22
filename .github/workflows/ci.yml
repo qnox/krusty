@@ -119,6 +119,13 @@ jobs:
         env:
           RANGE: ${{ steps.base.outputs.sha }}..${{ github.sha }}
         run: scripts/check-attribution.sh "$RANGE"
+      # The patch's three source files are content-pinned, so the cached copy is the file itself;
+      # a hit never reaches raw.githubusercontent.com.
+      - name: restore pinned IntelliJ sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/krusty-tools/intellij-community
+          key: intellij-community-sources-${{ hashFiles('scripts/check-intellij-patch.sh') }}
       - name: validate pinned IntelliJ patch
         id: intellij_patch
         run: scripts/check-intellij-patch.sh
@@ -135,6 +142,33 @@ jobs:
             echo "pin each action above to a full commit SHA, with its version as a comment" >&2
             exit 1
           fi
+      # A bare major resolves differently by pool: a runner keeps the build already in its tool
+      # cache, while a GitHub-hosted runner downloads Azul's newest. The kotlinc reference caches are
+      # keyed by the producing JDK, so a cache saved on one pool then misses on the other.
+      - name: JDKs are pinned to an exact build
+        id: jdk_pins
+        run: |
+          python3 - .github/workflows/*.yml <<'PY'
+          import re, sys
+          bad = []
+          for path in sys.argv[1:]:
+              block = False
+              for n, line in enumerate(open(path), 1):
+                  single = re.match(r"\s*java-version:\s*(?!\|)(\S+)", line)
+                  if re.match(r"\s*java-version:\s*\|\s*$", line):
+                      block = True
+                      continue
+                  item = re.match(r"\s+([^\s:#]+)\s*$", line) if block else None
+                  if not item:
+                      block = False
+                  value = (single or item)
+                  if value and not re.fullmatch(r"['\"]?\d+\.\d+\.\d+\+[\d.]+['\"]?", value.group(1)):
+                      bad.append(f"{path}:{n}: {line.strip()}")
+          if bad:
+              print("\n".join(bad), file=sys.stderr)
+              print("name each JDK by its exact build, as setup-java resolves it (major.minor.patch+build)", file=sys.stderr)
+              sys.exit(1)
+          PY
       - name: outcome manifests only shrink
         id: outcome_lists
         env:
@@ -155,7 +189,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - *just-on-path
       - *install-just
       - name: lint
@@ -197,7 +231,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       # The host tests start real compiler-plugin hosts from their pinned toolchains on the
       # runner's JDK. The toolchains and compiled adapters stay in krusty's cache. Each job keeps
       # its own entry: this job and ci provision different Kotlin versions, and an entry is never
@@ -259,8 +293,8 @@ jobs:
         with:
           distribution: zulu
           java-version: |
-            21
-            25
+            21.0.13+0.3.1
+            25.0.5+0.3.1
       # Toolchain entries are named by the exact toolchain they hold, never by a hash of the
       # checkout, and every job that needs one restores the same entry.
       - name: select the maximum Kotlin version
@@ -277,7 +311,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/cache/ser-corpus
+            target/cache/plugin-corpus
             target/cache/ksp-corpus
           key: kotlin-test-corpora-${{ steps.max-version.outputs.version }}
       - name: restore box corpus
@@ -454,7 +488,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/cache/ser-corpus
+            target/cache/plugin-corpus
             target/cache/ksp-corpus
           key: ${{ steps.kotlin-corpora.outputs.cache-primary-key }}
       - name: save box corpus
@@ -504,7 +538,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - *just-on-path
       - *install-just
       - name: select supported Kotlin versions
@@ -581,8 +615,8 @@ jobs:
         with:
           distribution: zulu
           java-version: |
-            21
-            25
+            21.0.13+0.3.1
+            25.0.5+0.3.1
       # The Wasm e2e programs run under Node.js, which runs WasmGC without flags from version 22.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -693,7 +727,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - name: compiler plugin integration tests
         env:
           RUST_MIN_STACK: "134217728"
@@ -766,6 +800,9 @@ jobs:
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['conformance'][format('{0}|{1}', matrix.version, matrix.target)] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     env:
       KRUSTY_BOX_CASE_TIMEOUT_MS: '8000'
+      # Every target row reads the reference plugin and runtime jars the plugin corpora name from
+      # here; the "provision plugin jars" step below fills it before any test runs.
+      KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
       # Each target row keeps its own kotlinc box reference cache; see its restore step.
       BOX_REFERENCES: box-reference-classes-${{ matrix.target != 'jvm' && format('{0}-', matrix.target) || '' }}${{ matrix.version }}
     steps:
@@ -784,11 +821,11 @@ jobs:
         with:
           distribution: zulu
           java-version: |
-            8
-            11
-            17
-            21
-            25
+            8.0.512+9
+            11.0.33+10
+            17.0.21+0.3.1
+            21.0.13+0.3.1
+            25.0.5+0.3.1
       # Every row and the ci job restore one kotlinc entry per version, named by that version.
       - name: restore kotlinc ${{ matrix.version }}
         id: kotlinc
@@ -812,10 +849,23 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/cache/ser-corpus/${{ matrix.version }}
+            target/cache/plugin-corpus/*/${{ matrix.version }}
             target/cache/ksp-toolchain
             target/cache/krusty-deps
           key: kotlin-conformance-inputs-v2-${{ matrix.version }}
+      # The atomicfu plugin jar is not in the distribution. A test process fetches a missing jar
+      # under one shared download budget, and a slow transfer used to spend it so that every later
+      # case failed with "needs the atomicfu compiler plugin jar". Provision the jars the
+      # descriptors name here instead, with retries, keyed by the descriptors so a change to a pin
+      # fetches afresh.
+      - name: restore plugin jars (${{ matrix.version }})
+        id: plugin-jars
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: plugin-jars-v1-${{ matrix.version }}-${{ hashFiles('src/plugins/*/boxes/corpus.txt') }}
+      - name: provision plugin jars (${{ matrix.version }})
+        run: scripts/provision-plugin-jars.sh "${{ matrix.version }}"
       - name: restore Wasm target KLIB dependencies (${{ matrix.version }})
         if: startsWith(matrix.target, 'wasm-')
         id: wasm-klibs
@@ -1164,10 +1214,16 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/cache/ser-corpus/${{ matrix.version }}
+            target/cache/plugin-corpus/*/${{ matrix.version }}
             target/cache/ksp-toolchain
             target/cache/krusty-deps
           key: ${{ steps.conformance-inputs.outputs.cache-primary-key }}
+      - name: save plugin jars (${{ matrix.version }})
+        if: matrix.target == 'jvm' && github.ref == 'refs/heads/master' && steps.plugin-jars.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: ${{ steps.plugin-jars.outputs.cache-primary-key }}
       - name: save Wasm target KLIB dependencies (${{ matrix.version }})
         if: startsWith(matrix.target, 'wasm-') && github.ref == 'refs/heads/master' && steps.wasm-klibs.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1205,7 +1261,7 @@ jobs:
   # which fails this aggregate too.
   ci-and-conformance:
     name: ci-and-conformance
-    needs: [ci, lint, plugin-host, e2e, conformance, build-gradle-plugin, gradle, maven, build-tools, bazel]
+    needs: [ci, lint, plugin-host, e2e, conformance, build-gradle-plugin, gradle, maven, build-tools, analysis-api, bazel]
     if: always()
     runs-on: [self-hosted, utility]
     steps:
@@ -1220,6 +1276,7 @@ jobs:
           GRADLE_RESULT: ${{ needs.gradle.result }}
           MAVEN_RESULT: ${{ needs.maven.result }}
           BUILD_TOOLS_RESULT: ${{ needs.build-tools.result }}
+          ANALYSIS_API_RESULT: ${{ needs.analysis-api.result }}
           BAZEL_RESULT: ${{ needs.bazel.result }}
         run: |
           echo "ci: $CI_RESULT"
@@ -1231,6 +1288,7 @@ jobs:
           echo "gradle: $GRADLE_RESULT"
           echo "maven: $MAVEN_RESULT"
           echo "build-tools: $BUILD_TOOLS_RESULT"
+          echo "analysis-api: $ANALYSIS_API_RESULT"
           echo "bazel: $BAZEL_RESULT"
           if [ "$CI_RESULT" != success ] \
             || [ "$LINT_RESULT" != success ] \
@@ -1241,8 +1299,9 @@ jobs:
             || [ "$GRADLE_RESULT" != success ] \
             || [ "$MAVEN_RESULT" != success ] \
             || [ "$BUILD_TOOLS_RESULT" != success ] \
+            || [ "$ANALYSIS_API_RESULT" != success ] \
             || [ "$BAZEL_RESULT" != success ]; then
-            echo "lint, plugin host tests, the own test suites (including KLIB implementation coverage), e2e, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed" >&2
+            echo "lint, plugin host tests, the own test suites (including KLIB implementation coverage), e2e, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, the Analysis API session provider, and every Bazel lane must succeed" >&2
             exit 1
           fi
 
@@ -1265,7 +1324,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - name: select the Gradle user home
         id: gradle-home
         run: |
@@ -1339,8 +1398,8 @@ jobs:
   # Fills the Gradle cache the build-tools matrix reads. Every matrix job resolves the Build Tools
   # API of its own Kotlin release from Maven Central, and a release no master run has resolved yet
   # (a new one under test) is in no restored cache, so all rows fetched at once and Central answered
-  # 429. This job resolves every release's dependencies serially, retrying a refusal after a wait, and
-  # saves the cache for the rows that follow. Unlike the other Gradle caches it saves on a queue
+  # 429. This job resolves every release's dependencies serially, without retrying a refusal (Central
+  # extends a block for every request made during it), and saves the cache for the rows that follow. Unlike the other Gradle caches it saves on a queue
   # branch too: the rows are in the same run, so they see an entry their own branch saved.
   build-tools-deps:
     needs: [build-tool-bins]
@@ -1365,15 +1424,7 @@ jobs:
         run: |
           set -euo pipefail
           while read -r kotlin; do
-            for attempt in 1 2 3 4 5; do
-              if tools/krusty-build-tools/gradlew --no-daemon -p tools/krusty-build-tools -PkotlinVersion="$kotlin" resolveDependencies; then
-                continue 2
-              fi
-              echo "::warning::resolving Kotlin $kotlin failed (attempt $attempt); waiting before the next"
-              sleep $((attempt * 60))
-            done
-            echo "resolving Kotlin $kotlin failed after 5 attempts" >&2
-            exit 1
+            tools/krusty-build-tools/gradlew --no-daemon -p tools/krusty-build-tools -PkotlinVersion="$kotlin" resolveDependencies
           done < <(just kotlin-versions)
       - name: check for new Gradle files
         id: gradle-grown
@@ -1407,7 +1458,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - name: select the Gradle user home
         id: gradle-home
         run: |
@@ -1434,6 +1485,32 @@ jobs:
           name: krusty-build-tools-kotlin-${{ matrix.kotlin }}
           path: dist-build-tools/*
           if-no-files-found: error
+
+  # krusty's Analysis API session provider (tools/krusty-analysis-api) against the Analysis API that
+  # KSP2 ships. It needs no krusty binary yet: the provider refuses every query.
+  analysis-api:
+    runs-on: ${{ fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          filter: tree:0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: zulu
+          java-version: '17.0.21+0.3.1'
+      - name: select the Gradle user home
+        id: gradle-home
+        run: |
+          echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
+          echo "version=$(sed -n 's/^distributionUrl=.*gradle-\(.*\)-bin\.zip$/\1/p' tools/krusty-analysis-api/gradle/wrapper/gradle-wrapper.properties)" >> "$GITHUB_OUTPUT"
+      - *restore-gradle-home
+      - *count-gradle-home
+      - *setup-gradle
+      - name: test the session provider
+        run: tools/krusty-analysis-api/gradlew --no-daemon -p tools/krusty-analysis-api test
+      - *check-gradle-home
+      - *save-gradle-home
 
   # Execute the exact release bytes against every supported Kotlin Gradle plugin.
   gradle:
@@ -1473,7 +1550,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - name: select Android integration requirements
         id: android
         run: |
@@ -1560,6 +1637,7 @@ jobs:
           # The SDK setup uses the same Gradle compatibility decision as the test inventory.
           if [ "${{ steps.android.outputs.enabled }}" = true ]; then
             tests="$tests android_variants_compile_through_krusty"
+            tests="$tests android_compose_app_is_compiled_by_krusty_with_a_handoff_for_what_it_refuses"
           fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
@@ -1585,7 +1663,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
           cache: maven
           cache-dependency-path: tools/krusty-maven/pom.xml
       - *restore-maven
@@ -1621,7 +1699,7 @@ jobs:
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
           cache: maven
           cache-dependency-path: tools/krusty-maven/pom.xml
       - *restore-maven
@@ -1674,6 +1752,17 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
+      # The smoke test consumes the reference release's own kotlin-stdlib.jar from the kotlinc
+      # distribution the other jobs cache; Maven Central refused the jar to GitHub-hosted runners
+      # (HTTP 404 on every retry for minutes) while it stayed published.
+      - name: select the maximum Kotlin version
+        id: max-version
+        run: echo "version=$(just max-version)" >> "$GITHUB_OUTPUT"
+      - name: restore kotlinc ${{ steps.max-version.outputs.version }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/kotlinc/${{ steps.max-version.outputs.version }}
+          key: kotlinc-${{ steps.max-version.outputs.version }}
       # ubuntu-latest has Bazelisk installed as `bazel`; the self-hosted image installs it as
       # `bazelisk`.
       - name: put bazelisk on PATH as bazel
@@ -1684,16 +1773,25 @@ jobs:
             ln -s "$(command -v bazelisk)" "$RUNNER_TEMP/bin/bazel"
             echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           fi
+      # Bazelisk's downloads and the repository cache (the BCR modules the consumer resolves) are
+      # kept by setup-bazel, which saves them from a master run only. It keys the Bazelisk cache on
+      # .bazelversion, so the matrix's Bazel is written there, and the repository cache on the smoke
+      # script because it writes the consumer's MODULE.bazel.
+      - name: record the Bazel version for the Bazelisk cache key
+        run: echo '${{ matrix.bazel }}' > .bazelversion
+      - uses: bazel-contrib/setup-bazel@f34d6a05eae3c24acab7fa54587492daeaeffdab # 0.19.2
+        with:
+          bazelisk-cache: true
+          repository-cache: scripts/bazel-smoke.sh
+          cache-save: ${{ github.ref == 'refs/heads/master' }}
       - name: build the packaged Bazel module with Bazel ${{ matrix.bazel }}
         env:
           USE_BAZEL_VERSION: ${{ matrix.bazel }}
         run: |
           set -euo pipefail
           chmod +x krusty
-          kotlin=$(just max-version)
-          curl -fsSLo "$RUNNER_TEMP/kotlin-stdlib.jar" \
-            "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$kotlin/kotlin-stdlib-$kotlin.jar"
-          scripts/bazel-smoke.sh "$PWD/krusty" "$RUNNER_TEMP/kotlin-stdlib.jar"
+          kotlinc=$(just kotlinc "${{ steps.max-version.outputs.version }}")
+          scripts/bazel-smoke.sh "$PWD/krusty" "$(dirname "$kotlinc")/../lib/kotlin-stdlib.jar"
 
   # A release is started by hand (`release` input) or by the daily schedule on a master commit and
   # builds its own immutable artifacts there, even after master advances. All six platforms build
@@ -1960,7 +2058,7 @@ jobs:
         if: steps.tip.outputs.publish == 'true'
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       # No setup-gradle here: it injects an init script into every Gradle build, and these builds
       # hold the signing key and publishing credentials. The lint job validates the wrapper jar,
       # whose properties pin the distribution's checksum.
