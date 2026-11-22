@@ -16,7 +16,7 @@
 //! template leaves the file as it was.
 
 use super::body_lowering::{
-    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor, LinkedAccessorTarget,
+    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessorCall,
     LinkedCallableReference, LinkedCallee, LinkedConstructor, LoweredFunction,
 };
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -65,12 +65,18 @@ pub struct TemplateCallees<'a> {
     pub source: &'a dyn crate::symbol_source::SymbolSource,
     /// Checker-frozen hierarchy for the selected inline body and its reachable callees. Required
     /// so template type checks cannot fall back to provider queries.
-    pub(crate) type_hierarchy: &'a crate::ir::CheckedKlibTypeFacts,
+    pub(crate) dependency_facts: &'a crate::ir::CheckedKlibDependencyFacts,
 }
 
 impl TemplateCallees<'_> {
+    fn hierarchy(&self) -> &crate::ir::CheckedKlibTypeFacts {
+        self.dependency_facts
+            .type_hierarchy()
+            .expect("checked inline dependency hierarchy")
+    }
+
     fn applied_supertype(&self, sub: Ty, owner: crate::types::TypeName) -> Option<Ty> {
-        crate::assignable::applied_supertype(self.type_hierarchy, sub, Ty::obj_name(owner))
+        crate::assignable::applied_supertype(self.hierarchy(), sub, Ty::obj_name(owner))
     }
 
     fn is_subtype(
@@ -79,11 +85,15 @@ impl TemplateCallees<'_> {
         sub: Ty,
         sup: Ty,
     ) -> bool {
-        super::type_evidence::ordinary_subtype(Some(self.type_hierarchy), parameters, sub, sup)
+        super::type_evidence::ordinary_subtype(Some(self.hierarchy()), parameters, sub, sup)
     }
 
     fn same_type(&self, left: Ty, right: Ty) -> bool {
-        super::type_evidence::same_type(Some(self.type_hierarchy), left, right)
+        super::type_evidence::same_type(Some(self.hierarchy()), left, right)
+    }
+
+    fn classifier_parameter_bounds(&self, owner: crate::types::TypeName, index: usize) -> Vec<Ty> {
+        super::type_evidence::classifier_parameter_bounds(Some(self.hierarchy()), owner, index)
     }
 
     fn constructor_bound(
@@ -92,7 +102,7 @@ impl TemplateCallees<'_> {
         argument: Ty,
         bound: Ty,
     ) -> bool {
-        super::type_evidence::satisfies(Some(self.type_hierarchy), parameters, argument, bound)
+        super::type_evidence::satisfies(Some(self.hierarchy()), parameters, argument, bound)
     }
 }
 
@@ -335,7 +345,7 @@ fn sign_template(
 /// How a call expands each parameter, as checked FIR publishes it for a source inline function:
 /// the extension receiver is a receiver, and a value or context parameter splices when it is a
 /// non-null function type that did not write `noinline`.
-fn expansion_modes(
+pub(super) fn expansion_modes(
     params: &[Ty],
     receiver: Option<usize>,
     modifiers: &[InlineParameterModifier],
@@ -359,7 +369,7 @@ fn expansion_modes(
 }
 
 /// The modifiers aligned with every parameter: the extension receiver writes none.
-fn modifiers_with_receiver(
+pub(super) fn modifiers_with_receiver(
     modifiers: &[InlineParameterModifier],
     receiver: Option<usize>,
 ) -> Vec<InlineParameterModifier> {
@@ -438,6 +448,20 @@ impl TemplateCalls<'_> {
 }
 
 impl CallLinker for TemplateCalls<'_> {
+    fn sam_declaration(
+        &self,
+        classifier: &KlibPublicIdSignature,
+    ) -> Result<crate::ir::CheckedKlibSamDeclaration, KlibBodyDeclineReason> {
+        self.callees
+            .dependency_facts
+            .sam_declarations()
+            .get(&(self.module.to_owned(), classifier.clone()))
+            .cloned()
+            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a SAM conversion without a checked declaration",
+            ))
+    }
+
     fn site_container(&self) -> Option<crate::ir::IrSiteClassContainer> {
         super::site_containers::site_container(self.bodies, self.identity)
     }
@@ -629,6 +653,10 @@ impl CallLinker for TemplateCalls<'_> {
         self.callees.same_type(left, right)
     }
 
+    fn classifier_parameter_bounds(&self, owner: crate::types::TypeName, index: usize) -> Vec<Ty> {
+        self.callees.classifier_parameter_bounds(owner, index)
+    }
+
     fn link_constructor(
         &mut self,
         _ir: &mut IrFile,
@@ -665,6 +693,7 @@ impl CallLinker for TemplateCalls<'_> {
         Ok(LinkedConstructor {
             target,
             declaration,
+            materialized: None,
         })
     }
 
@@ -772,7 +801,7 @@ impl CallLinker for TemplateCalls<'_> {
         &mut self,
         _: &mut IrFile,
         callee: &KlibAccessorIdSignature,
-    ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
+    ) -> Result<LinkedAccessorCall, KlibBodyDeclineReason> {
         let signature = KlibDeclarationSignature::Accessor(callee.clone());
         let identity = self.origin(&signature, callee.property())?;
         let declined = |reason| {
@@ -828,9 +857,8 @@ impl CallLinker for TemplateCalls<'_> {
                     "an inline-template property accessor without an exact selected contract",
                 ))
             })?;
-        linked.target = LinkedAccessorTarget::External(property);
         linked.callable = Some(target);
-        Ok(linked)
+        Ok(LinkedAccessorCall::Property(linked))
     }
 
     fn requires_declaration(

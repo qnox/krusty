@@ -48,7 +48,10 @@ pub(crate) fn attach_dependency_function_realization(
     function.callable.semantic_role = match semantic_role {
         Some(
             crate::types::SemanticCallRole::KotlinCharSequenceIterator
-            | crate::types::SemanticCallRole::IntrinsicConstNumeric(_),
+            | crate::types::SemanticCallRole::IntrinsicConstNumeric(_)
+            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateGet(_)
+            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateSet(_)
+            | crate::types::SemanticCallRole::KotlinSuspendCoroutine,
         ) if !compiler_builtin_owner => None,
         role => role,
     };
@@ -108,6 +111,9 @@ pub(crate) fn function_semantic_role(
         && !facts.is_infix
     {
         return Some(SemanticCallRole::KotlinCharSequenceIterator);
+    }
+    if suspend_coroutine(facts) {
+        return Some(SemanticCallRole::KotlinSuspendCoroutine);
     }
     if facts.package != crate::types::wk::kotlin_package()
         || facts.kind != FnKind::Extension
@@ -171,6 +177,29 @@ fn function_shape(ty: Ty, arity: usize, suspend: bool) -> bool {
             && signature.context_count == 0
             && !signature.has_receiver
             && signature.suspend == suspend)
+}
+
+/// `suspend inline fun <T> suspendCoroutine(crossinline block: (Continuation<T>) -> Unit): T`,
+/// the top-level declaration of `kotlin.coroutines`.
+fn suspend_coroutine(facts: &BuiltinFunctionDeclaration<'_>) -> bool {
+    facts.package.matches("kotlin/coroutines")
+        && facts.name == "suspendCoroutine"
+        && facts.kind == FnKind::TopLevel
+        && facts.receiver.is_none()
+        && facts.context_count == 0
+        && facts.type_parameter_count == 1
+        && facts.vararg.is_none()
+        && facts.is_suspend
+        && !facts.is_operator
+        && !facts.is_infix
+        && matches!(facts.params, [block]
+            if function_shape(*block, 1, false)
+                && block.fun_ret() == Some(Ty::Unit)
+                && block
+                    .fun_params()
+                    .and_then(|params| params.first().copied())
+                    .and_then(continuation_argument)
+                    == Some(facts.ret))
 }
 
 fn continuation_argument(ty: Ty) -> Option<Ty> {
@@ -1940,6 +1969,109 @@ mod tests {
     }
 
     #[test]
+    fn dependency_property_reference_roles_require_stdlib_ownership_and_the_exact_shape() {
+        use crate::libraries::{GenericSig, LibraryCallable};
+        use crate::types::SemanticCallRole;
+
+        fn declaration(arity: u8, mutable: bool) -> FunctionInfo {
+            let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+            let value = Ty::ty_param("V", any);
+            let owner = Ty::ty_param("T", any);
+            let arguments = if arity == 0 {
+                vec![value]
+            } else {
+                vec![owner, value]
+            };
+            let receiver = Ty::obj_args(
+                match (arity, mutable) {
+                    (0, false) => "kotlin/reflect/KProperty0",
+                    (1, false) => "kotlin/reflect/KProperty1",
+                    (0, true) => "kotlin/reflect/KMutableProperty0",
+                    (1, true) => "kotlin/reflect/KMutableProperty1",
+                    _ => unreachable!(),
+                },
+                &arguments,
+            );
+            let property = Ty::obj_args("kotlin/reflect/KProperty", &[Ty::star_projection(any)]);
+            let mut params = vec![if arity == 0 { any } else { owner }, property];
+            if mutable {
+                params.push(value);
+            }
+            let ret = if mutable { Ty::Unit } else { value };
+            let name = if mutable { "setValue" } else { "getValue" };
+            let callable = LibraryCallable::library("kotlin", name, params.clone(), ret, ret, "");
+            let mut function = FunctionInfo::plain(FnKind::Extension, Some(receiver), callable);
+            function.flags.operator = true;
+            function.generic_sig = Some(GenericSig {
+                formals: if arity == 0 {
+                    vec!["V".into()]
+                } else {
+                    vec!["T".into(), "V".into()]
+                },
+                formal_bounds: vec![vec![]; arity as usize + 1],
+                receiver: Some(receiver),
+                params,
+                ret,
+                return_policy: Default::default(),
+            });
+            function
+        }
+
+        for arity in [0, 1] {
+            for mutable in [false, true] {
+                let name = if mutable { "setValue" } else { "getValue" };
+                let expected = if mutable {
+                    SemanticCallRole::KotlinPropertyReferenceDelegateSet(arity)
+                } else {
+                    SemanticCallRole::KotlinPropertyReferenceDelegateGet(arity)
+                };
+                for compiler_builtin_owner in [false, true] {
+                    let mut function = declaration(arity, mutable);
+                    attach_dependency_function_realization(
+                        crate::types::wk::kotlin_package(),
+                        name,
+                        compiler_builtin_owner,
+                        &mut function,
+                        None,
+                    );
+                    assert_eq!(
+                        function.callable.semantic_role,
+                        compiler_builtin_owner.then_some(expected)
+                    );
+                    assert_eq!(function.callable.compiler_intrinsic, None);
+
+                    let mut wrong_shape = declaration(arity, mutable);
+                    wrong_shape.flags.operator = false;
+                    attach_dependency_function_realization(
+                        crate::types::wk::kotlin_package(),
+                        name,
+                        compiler_builtin_owner,
+                        &mut wrong_shape,
+                        None,
+                    );
+                    assert_eq!(wrong_shape.callable.semantic_role, None);
+
+                    let mut explicit_out = declaration(arity, mutable);
+                    explicit_out.generic_sig.as_mut().unwrap().params[1] = Ty::obj_args(
+                        "kotlin/reflect/KProperty",
+                        &[Ty::out_projection(Ty::nullable(Ty::obj_name(
+                            crate::types::wk::any(),
+                        )))],
+                    );
+                    attach_dependency_function_realization(
+                        crate::types::wk::kotlin_package(),
+                        name,
+                        compiler_builtin_owner,
+                        &mut explicit_out,
+                        None,
+                    );
+                    assert_eq!(explicit_out.callable.semantic_role, None);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn char_sequence_iterator_role_requires_the_complete_stdlib_declaration() {
         let declaration = BuiltinFunctionDeclaration {
             package: crate::types::type_name("kotlin/text"),
@@ -1962,6 +2094,54 @@ mod tests {
         assert_eq!(
             function_semantic_role(&BuiltinFunctionDeclaration {
                 package: crate::types::type_name("fixture"),
+                ..declaration
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn suspend_coroutine_role_requires_the_complete_stdlib_declaration() {
+        let value = Ty::ty_param("T", Ty::nullable(Ty::obj_name(crate::types::wk::any())));
+        let block = [Ty::fun(
+            vec![Ty::obj_args("kotlin/coroutines/Continuation", &[value])],
+            Ty::Unit,
+        )];
+        let declaration = BuiltinFunctionDeclaration {
+            package: crate::types::type_name("kotlin/coroutines"),
+            name: "suspendCoroutine",
+            kind: FnKind::TopLevel,
+            receiver: None,
+            params: &block,
+            ret: value,
+            context_count: 0,
+            type_parameter_count: 1,
+            vararg: None,
+            is_suspend: true,
+            is_operator: false,
+            is_infix: false,
+        };
+        assert_eq!(
+            function_semantic_role(&declaration),
+            Some(crate::types::SemanticCallRole::KotlinSuspendCoroutine)
+        );
+        assert_eq!(
+            function_semantic_role(&BuiltinFunctionDeclaration {
+                package: crate::types::type_name("fixture"),
+                ..declaration
+            }),
+            None
+        );
+        assert_eq!(
+            function_semantic_role(&BuiltinFunctionDeclaration {
+                is_suspend: false,
+                ..declaration
+            }),
+            None
+        );
+        assert_eq!(
+            function_semantic_role(&BuiltinFunctionDeclaration {
+                ret: Ty::String,
                 ..declaration
             }),
             None

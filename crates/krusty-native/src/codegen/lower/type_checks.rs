@@ -893,9 +893,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         // `ArrayList()`, the runtime's growable list. Declared in no file either, like `Any` and
         // the throwables above, so the runtime allocates it rather than the generator laying one
-        // out. The capacity overload is a HINT with nothing observable depending on it; a copy
-        // constructor takes a collection and declines, because sharing that collection's storage
-        // would let a write through the new list reach it.
+        // out. The capacity overload is a HINT with nothing observable depending on it. The copy
+        // constructor takes any collection and walks it into storage of the new list's own, so a
+        // later write to either list is not seen by the other.
         if self.file.standard_collection_implementation(internal)
             == Some(super::classifier_shapes::StandardCollectionImplementation::List)
         {
@@ -914,6 +914,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         any(),
                         &[capacity],
                     )
+                }
+                ([argument], Some([only])) if only.is_reference() => {
+                    let elements = self.reference(*argument)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call("kt_mutable_list_copy_of", &[any()], any(), &[elements])
                 }
                 _ => Err(declined!("this constructor of `{name}`")),
             };

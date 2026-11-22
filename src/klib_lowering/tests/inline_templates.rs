@@ -27,15 +27,84 @@ fn template(
     libraries: &KlibLibraries,
     selected: &ExternalCallableRealization,
 ) -> Result<KlibInlineTemplate, crate::klib_lowering::KlibBodyDecline> {
-    let hierarchy = checked_template_hierarchy(libraries, selected);
+    let hierarchy = checked_template_facts(libraries, selected);
     let callees = TemplateCallees {
         declarations: libraries.declaration_bodies(),
         references: libraries.reference_bindings(),
         source: libraries,
-        type_hierarchy: &hierarchy,
+        dependency_facts: &hierarchy,
     };
     lower_inline_template(ir, selected, libraries.inline_declaration_bodies(), callees)
         .expect("a KLIB function")
+}
+
+#[test]
+fn iterable_star_template_preserves_the_serialized_readable_iterator_result() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/collections")),
+        "filterIsInstance",
+    );
+    let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let receiver = Ty::obj_args("kotlin/collections/Iterable", &[Ty::star_projection(any)]);
+    let matching = symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| function.semantic_receiver() == Some(receiver))
+        .collect::<Vec<_>>();
+    let [selected] = matching.as_slice() else {
+        panic!("one Iterable<*>.filterIsInstance declaration");
+    };
+    let selected = libraries
+        .external_callable(
+            selected
+                .callable
+                .external_identity
+                .expect("provider identity"),
+        )
+        .expect("selected realization");
+    assert!(selected.callable.inline.must_inline());
+    let mut ir = IrFile::default();
+    let lowered = template(&mut ir, &libraries, &selected)
+        .unwrap_or_else(|decline| panic!("Iterable<*>.filterIsInstance: {decline}"));
+    assert_eq!(
+        ir.functions[lowered.function as usize].params,
+        selected.callable.params
+    );
+    let iterable = libraries
+        .classifier(type_name("kotlin/collections/Iterable"))
+        .expect("Iterable declaration");
+    let [iterator] = iterable.declared_callables["iterator"].functions() else {
+        panic!("one authenticated Iterable.iterator declaration");
+    };
+    let iterator = iterator
+        .callable
+        .external_identity
+        .expect("iterator provider identity");
+    let readable_iterator = Ty::obj_args("kotlin/collections/Iterator", &[any]);
+    let iterator_results = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, expression)| {
+            let IrExpr::Call { callee, .. } = expression else {
+                return None;
+            };
+            let Callee::External { target, ret, .. } = callee.as_ref() else {
+                return None;
+            };
+            (*target == iterator).then_some((*ret, ir.checked_type(index as u32)))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        iterator_results,
+        [(readable_iterator, Some(readable_iterator))]
+    );
+    validated(&ir);
 }
 
 #[test]

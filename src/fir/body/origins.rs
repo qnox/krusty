@@ -27,6 +27,10 @@ pub enum SyntheticOriginKind {
     /// declaration rather than from source syntax, such as the companion accessor call that
     /// supplies kotlinx's `serializer<T>()`. It belongs to the planned expression's line.
     PluginOperand,
+    /// The root of a `crossinline` literal's body an inline expansion spliced into its caller.
+    /// kotlinc reaches private declarations from such a body through accessors wherever the body
+    /// runs, so the origin outlives every copy of the node.
+    CrossinlineLiteralBody,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

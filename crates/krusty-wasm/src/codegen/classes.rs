@@ -406,8 +406,9 @@ impl FileClasses {
                     .copied()
                     .flatten();
                 match (inherited, function) {
-                    // The superclass adapts no function type, so neither does this class.
-                    (None, None) => return Ok(None),
+                    // The superclass adapts no function type, so neither does this class: the slot
+                    // is the first ordinary member it inherits.
+                    (None, _) => return Ok(None),
                     (Some(inherited), Some(function)) if inherited.function == function => {
                         inherited
                     }
@@ -640,10 +641,7 @@ pub(super) fn method_type(
     };
     let mut params = vec![receiver];
     for parameter in 0..declaration.params.len() {
-        params.push(
-            parameter_carrier(module, ir, function, parameter as u32)?
-                .ok_or_else(|| "a `Unit` parameter".to_string())?,
-        );
+        params.push(parameter_carrier(module, ir, function, parameter as u32)?);
     }
     let results = carrier(declaration.ret)?.into_iter().collect();
     Ok(module.func_type(params, results))
@@ -658,7 +656,7 @@ fn declared_method_type(
 ) -> Result<u32, Unsupported> {
     let mut params = vec![REFERENCE];
     for parameter in parameters {
-        params.push(carrier(*parameter)?.ok_or_else(|| "a `Unit` parameter".to_string())?);
+        params.push(super::lower::parameter_carrier_of(*parameter)?);
     }
     let results = carrier(result)?.into_iter().collect();
     Ok(module.func_type(params, results))
@@ -1012,15 +1010,26 @@ pub(super) fn declare(
             OwnedBase::Enum => objects.enum_base,
             OwnedBase::Exception(structure) => structure,
         };
-        let structure = module.subtype(SubType {
-            composite: CompositeType::Struct(fields),
-            supertype: Some(match (parent, laid_out_parent) {
-                (Some(parent), _) => parent.structure.expect("a superclass has a struct"),
-                (None, Some(superclass)) => superclass.structure,
-                (None, None) => root,
-            }),
-            open: true,
-        });
+        let supertype = match (parent, laid_out_parent) {
+            (Some(parent), _) => parent.structure.expect("a superclass has a struct"),
+            (None, Some(superclass)) => superclass.structure,
+            (None, None) => root,
+        };
+        let mut declare_structure = |fields: Vec<_>| {
+            module.subtype(SubType {
+                composite: CompositeType::Struct(fields),
+                supertype: Some(supertype),
+                open: true,
+            })
+        };
+        // A dependency class is the whole program's, whichever module lays it out next.
+        let structure = if laid_out.lays_out_dependencies() {
+            module_tables.dependency_structure(class.fq_name, &fields, Some(supertype), || {
+                declare_structure(fields.clone())
+            })?
+        } else {
+            declare_structure(fields)
+        };
         // A class the module plan covers takes the table type every file reads from the plan,
         // so a file dispatching through it from elsewhere casts to this one type.
         let table_type = match module_tables.table(plan, class.fq_name, module, objects) {
@@ -1254,7 +1263,13 @@ impl TableEntries<'_> {
                     Slot::FunctionBridge { arity, .. } => {
                         runtime.function_shape(module, *arity).invoke
                     }
-                    Slot::Inherited { slot } if *slot == FUNCTION_SLOT => {
+                    // Slot 3 is a function value's body only in a table whose producer defines
+                    // one; in any other class it is the first ordinary member slot.
+                    Slot::Inherited { slot }
+                        if *slot == FUNCTION_SLOT
+                            && laid_out
+                                .is_some_and(|superclass| superclass.function_bridge.is_some()) =>
+                    {
                         let inherited = laid_out.and_then(|superclass| superclass.function_bridge);
                         let function = laid_out.and_then(|superclass| {
                             superclass.entries.get(*slot as usize).copied().flatten()

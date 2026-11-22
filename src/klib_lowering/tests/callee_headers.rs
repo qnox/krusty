@@ -558,6 +558,7 @@ impl Record {
                 generic_signature: self.generic.as_ref(),
                 type_parameters: &self.formals,
                 reified_type_parameter_ordinals: &self.reified,
+                inline_modifiers: &[],
                 compiler_intrinsic: None,
                 range_construction: None,
                 declaration_modifiers: None,

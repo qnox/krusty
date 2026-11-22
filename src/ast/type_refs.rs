@@ -219,6 +219,17 @@ impl TypeRef {
     pub fn fun_has_receiver(&self) -> bool {
         self.flags.has(TrFlags::FUN_HAS_RECEIVER)
     }
+    /// Whether this function type's receiver starts where the function type does, as an
+    /// unparenthesized one does: the type-use annotations recorded at that offset belong to the
+    /// function type, not to its receiver.
+    #[inline]
+    pub fn fun_receiver_starts_here(&self) -> bool {
+        self.fun_has_receiver()
+            && self
+                .fun_params
+                .first()
+                .is_some_and(|receiver| receiver.span.lo == self.span.lo)
+    }
     #[inline]
     pub fn fun_suspend(&self) -> bool {
         self.flags.has(TrFlags::FUN_SUSPEND)

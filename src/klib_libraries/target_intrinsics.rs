@@ -716,12 +716,14 @@ pub(super) fn authenticate(
     {
         return None;
     }
-    // Past the continuation intrinsics above, only `wasm_array_copy` is generic: its one type
-    // parameter is the GC array type both operands share.
+    // Past the continuation intrinsics above, only `wasm_array_copy` and `interceptedIntrinsic`
+    // are generic: the one type parameter is the GC array type both operands share, or the
+    // continuation's result type.
     match (platform?, declaration.formals.is_empty()) {
         (TargetIntrinsicPlatform::Native, true) => native(placement, declaration),
         (TargetIntrinsicPlatform::Wasm, true) => wasm(placement, declaration),
-        (TargetIntrinsicPlatform::Wasm, false) => wasm_array_copy(placement, declaration),
+        (TargetIntrinsicPlatform::Wasm, false) => wasm_array_copy(placement, declaration)
+            .or_else(|| wasm_intercepted_continuation(placement, declaration)),
         (TargetIntrinsicPlatform::Native, false) => None,
     }
 }
@@ -882,6 +884,69 @@ fn wasm_array_copy(
     })
 }
 
+/// `interceptedIntrinsic<T>(cont: Continuation<T>): Continuation<T>` in `kotlin.wasm.internal`,
+/// the `@ExcludedFromCodegen` body of Kotlin/Wasm's `Continuation<T>.intercepted()`. kotlinc binds
+/// the declaration by this name and expands its call to the stdlib's
+/// `if (cont is CoroutineImpl) cont.intercepted() else cont`.
+fn wasm_intercepted_continuation(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let [result] = declaration.formals.as_slice() else {
+        return None;
+    };
+    let is_continuation = |ty: &KotlinType| {
+        matches!(
+            ty,
+            KotlinType::Class {
+                internal,
+                args,
+                nullable: false,
+                shape: KotlinFunctionTypeShape {
+                    receiver: false,
+                    context_count: 0,
+                    suspend: false,
+                },
+            } if internal == "kotlin/coroutines/Continuation"
+                && matches!(
+                    args.as_slice(),
+                    [KotlinType::Param { id, nullable: false, .. }] if *id == result.id
+                )
+        )
+    };
+    let excluded = declaration
+        .annotation_applications
+        .iter()
+        .filter(|annotation| {
+            annotation.identity == type_name("kotlin/wasm/internal/ExcludedFromCodegen")
+        })
+        .count();
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"))
+        && declaration.name == "interceptedIntrinsic"
+        && excluded == 1
+        && declaration.receiver.is_none()
+        && !result.reified
+        && result.bounds.iter().all(is_nullable_any)
+        && matches!(declaration.params.as_slice(), [continuation] if is_continuation(continuation))
+        && is_continuation(&declaration.ret))
+    .then(|| {
+        let continuation = Ty::obj_args(
+            "kotlin/coroutines/Continuation",
+            &[Ty::ty_param(
+                &result.name,
+                Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+            )],
+        );
+        KlibIntrinsicShape {
+            operation: CompilerIntrinsic::InterceptedContinuation,
+            kind: ExternalCallableKind::TopLevel,
+            receiver: None,
+            params: vec![continuation],
+            ret: continuation,
+        }
+    })
+}
+
 /// `intToString(value: Int, radix: Int): String` and its `Long` counterpart in `kotlin.text`.
 fn radix_to_string(
     placement: crate::libraries::CallablePlacement,
@@ -931,6 +996,36 @@ fn string_range_equals(
         receiver: Some(string),
         params: vec![string, Ty::Int, string, Ty::Int, Ty::Int],
         ret: Ty::Boolean,
+    })
+}
+
+/// `String.nativeIndexOf(sought, fromIndex: Int): Int` and `String.nativeLastIndexOf(sought,
+/// fromIndex: Int): Int` in `kotlin.text`, where `sought` is a `String` or a `Char`.
+fn string_index_of(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    sought: Ty,
+    sought_name: &str,
+    last: bool,
+) -> Option<KlibIntrinsicShape> {
+    let string = Ty::obj("kotlin/String");
+    let [value, from] = declaration.params.as_slice() else {
+        return None;
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/text"))
+        && declaration
+            .receiver
+            .as_ref()
+            .is_some_and(|receiver| exact_type(receiver, "kotlin/String"))
+        && exact_type(value, sought_name)
+        && semantic_type(from) == Some(Ty::Int)
+        && exact_type(&declaration.ret, "kotlin/Int"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::StringIndexOf { sought, last },
+        kind: ExternalCallableKind::Extension,
+        receiver: Some(string),
+        params: vec![string, sought, Ty::Int],
+        ret: Ty::Int,
     })
 }
 
@@ -1093,6 +1188,21 @@ fn native(
             }
             "Kotlin_String_unsafeRangeEquals" => {
                 return string_range_equals(placement, declaration)
+            }
+            "Kotlin_String_indexOfString" => {
+                return string_index_of(
+                    placement,
+                    declaration,
+                    Ty::obj("kotlin/String"),
+                    "kotlin/String",
+                    false,
+                )
+            }
+            "Kotlin_String_indexOfChar" => {
+                return string_index_of(placement, declaration, Ty::Char, "kotlin/Char", false)
+            }
+            "Kotlin_String_lastIndexOfChar" => {
+                return string_index_of(placement, declaration, Ty::Char, "kotlin/Char", true)
             }
             _ => return None,
         };
@@ -2006,6 +2116,95 @@ mod tests {
         assert!(authenticate(wasm, internal, &reified).is_none());
         let mut concrete = generic("wasm_array_copy", excluded);
         concrete.params[2] = KotlinType::class("kotlin/Int");
+        assert!(authenticate(wasm, internal, &concrete).is_none());
+    }
+
+    #[test]
+    fn wasm_intercepted_continuation_requires_its_exact_generic_declaration() {
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let internal =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"));
+        let excluded = AnnotationApplication {
+            identity: type_name("kotlin/wasm/internal/ExcludedFromCodegen"),
+            arguments: Vec::new(),
+        };
+        let result = crate::metadata::semantic::KotlinTypeParameterId(3);
+        let continuation = |argument: KotlinType| KotlinType::Class {
+            internal: "kotlin/coroutines/Continuation".to_owned(),
+            args: vec![argument],
+            nullable: false,
+            shape: KotlinFunctionTypeShape {
+                receiver: false,
+                context_count: 0,
+                suspend: false,
+            },
+        };
+        let formal = KotlinType::Param {
+            name: "T".to_owned(),
+            id: result,
+            nullable: false,
+        };
+        let generic = |name: &str, annotation: AnnotationApplication| {
+            let mut intercepted = declaration(name, &["kotlin/Int"], "kotlin/Int", annotation);
+            intercepted.is_external = false;
+            intercepted.formals = vec![crate::metadata::semantic::KotlinTypeParameter {
+                id: result,
+                name: "T".to_owned(),
+                bounds: Vec::new(),
+                variance: crate::types::TypeVariance::Invariant,
+                only_input: false,
+                reified: false,
+            }];
+            intercepted.params[0] = continuation(formal.clone());
+            intercepted.ret = continuation(formal.clone());
+            intercepted
+        };
+        let exact = generic("interceptedIntrinsic", excluded.clone());
+        let operand = Ty::obj_args(
+            "kotlin/coroutines/Continuation",
+            &[Ty::ty_param(
+                "T",
+                Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+            )],
+        );
+        assert_eq!(
+            authenticate(wasm, internal, &exact),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::InterceptedContinuation,
+                kind: ExternalCallableKind::TopLevel,
+                receiver: None,
+                params: vec![operand],
+                ret: operand,
+            })
+        );
+        assert!(authenticate(Some(TargetIntrinsicPlatform::Native), internal, &exact).is_none());
+        assert!(authenticate(
+            wasm,
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/coroutines")),
+            &exact
+        )
+        .is_none());
+        assert!(authenticate(wasm, internal, &generic("intercepted", excluded.clone())).is_none());
+        let mut included = generic("interceptedIntrinsic", excluded.clone());
+        included.annotation_applications.clear();
+        assert!(authenticate(wasm, internal, &included).is_none());
+        let mut nullable = generic("interceptedIntrinsic", excluded.clone());
+        nullable.ret = KotlinType::Class {
+            internal: "kotlin/coroutines/Continuation".to_owned(),
+            args: vec![formal.clone()],
+            nullable: true,
+            shape: KotlinFunctionTypeShape {
+                receiver: false,
+                context_count: 0,
+                suspend: false,
+            },
+        };
+        assert!(authenticate(wasm, internal, &nullable).is_none());
+        let mut reified = generic("interceptedIntrinsic", excluded.clone());
+        reified.formals[0].reified = true;
+        assert!(authenticate(wasm, internal, &reified).is_none());
+        let mut concrete = generic("interceptedIntrinsic", excluded);
+        concrete.params[0] = continuation(KotlinType::class("kotlin/Int"));
         assert!(authenticate(wasm, internal, &concrete).is_none());
     }
 

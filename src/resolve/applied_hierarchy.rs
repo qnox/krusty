@@ -89,7 +89,7 @@ impl SymbolTable {
             } else {
                 crate::symbol_resolver::direct_supertypes(&*self.libraries, applied)
             };
-            let parents = crate::symbol_resolver::with_implicit_any(owner, parents);
+            let parents = crate::assignable::with_implicit_any(owner, parents);
             pending.extend(
                 parents
                     .into_iter()
