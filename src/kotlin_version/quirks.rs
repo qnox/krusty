@@ -168,6 +168,7 @@ quirks! {
     ContextArgumentEvaluatedBeforeExtensionReceiver {
         since: None,
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: true,
     }
 }
 

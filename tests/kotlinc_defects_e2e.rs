@@ -43,6 +43,30 @@ const UNIT_CONVERSION: &str = "// LANGUAGE: +UnitConversionsOnArbitraryExpressio
 const VARARG_REFERENCE: &str = "fun <E> countG(vararg xs: E): Int = xs.size\n\
     fun box(): String { val arr = arrayOf(\"a\", \"b\"); return \"\" + arr.let(::countG) }\n";
 
+/// `ContextArgumentEvaluatedBeforeExtensionReceiver`: a context argument written after the
+/// receiver; `box()` reports the order the operands were evaluated in.
+const CONTEXT_ARGUMENT_ORDER: &str = r#"// LANGUAGE: +ContextParameters +ExplicitContextArguments
+var log = ""
+
+fun logged(label: String): Int {
+    log += label
+    return label.length
+}
+
+fun receiver(): Double {
+    log += "r"
+    return 1.0
+}
+
+context(c: Int)
+fun Double.contextual(value: Int): Int = c + value + toInt()
+
+fun box(): String {
+    receiver().contextual(c = logged("c"), value = logged("v"))
+    return log
+}
+"#;
+
 /// The program that shows `quirk`, for a defect. Every quirk is named, so a new one has to say
 /// here whether it is a defect and, if so, which program shows it.
 fn defect(quirk: Quirk) -> Option<Defect> {
@@ -56,6 +80,11 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             source: VARARG_REFERENCE,
             with_defect: Outcome::Answer("1".to_string()),
             fixed: Outcome::Answer("2".to_string()),
+        }),
+        Quirk::ContextArgumentEvaluatedBeforeExtensionReceiver => Some(Defect {
+            source: CONTEXT_ARGUMENT_ORDER,
+            with_defect: Outcome::Answer("crv".to_string()),
+            fixed: Outcome::Answer("rcv".to_string()),
         }),
         Quirk::DelegateFailureNamesFirstRungOnly
         | Quirk::SuspendUnitTailCallKeepsCalleeResult
