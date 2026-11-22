@@ -229,7 +229,7 @@ impl Checker<'_> {
                 ))
             }
             Some(CallableCandidateSelection::Ambiguous(ambiguous, _)) => {
-                self.report_callable_ambiguity(call, name, &ambiguous);
+                self.report_callable_ambiguity(scope, call, name, &ambiguous);
                 AssociatedCall::Selected(Ty::Error)
             }
             None => AssociatedCall::Inapplicable(candidates),
