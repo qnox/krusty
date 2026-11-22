@@ -72,7 +72,8 @@ impl BoundContexts<'_> {
     }
 
     /// Push each context from `this.boundContextArguments`, cast or unboxed to the type the
-    /// accessor takes: its declared type, or the carrier of a value class.
+    /// accessor takes: its declared type, or the carrier of a value class. A nullable value-class
+    /// context's bound `null` reaches its (nullable) carrier unchanged.
     fn emit(&self, cw: &mut ClassWriter, code: &mut CodeBuilder) {
         for (index, ty) in self.types.iter().enumerate() {
             code.aload(0);
@@ -82,7 +83,14 @@ impl BoundContexts<'_> {
             code.array_load(0x32, 1);
             match self.value_class_carrier(index) {
                 Some((value_class, carrier)) => {
-                    adapt_property_reference_value(cw, code, Some(value_class), carrier);
+                    property_reference_values::value_class_boundary_conversion(
+                        cw,
+                        code,
+                        ty.is_nullable(),
+                        |cw, code| {
+                            adapt_property_reference_value(cw, code, Some(value_class), carrier);
+                        },
+                    );
                 }
                 None => emit_object_as(cw, code, *ty),
             }
