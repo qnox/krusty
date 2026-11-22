@@ -168,3 +168,51 @@ fn folded_constant_conditions_still_run() {
         "ConstantConditionsBox",
     );
 }
+
+/// Comparisons whose Boolean is materialized (`iconst_1; goto L; …; iconst_0; L: ifne`) and then
+/// tested by an `||`/`&&` condition. From kotlinc 2.5 the elimination sends each `goto` that
+/// carries a known `int` straight to the branch that value takes, past the second test; before
+/// it the `goto` still jumps to the test.
+const MATERIALIZED_CONDITIONS: &str = "fun primitives(flag: Byte, ratio: Float): String {\n\
+    \x20   if (flag != 1.toByte() || ratio != 1.5f) return \"primitives\"\n\
+    \x20   return \"OK\"\n\
+    }\n\
+    fun both(score: Double, other: Double): Boolean = score == 2.5 && other != 0.5\n\
+    fun either(a: Float, b: Float): String =\n\
+    \x20   if (a == 0f ||\n\
+    \x20       b == 0f) \"zero\" else \"none\"\n\
+    fun box(): String {\n\
+    \x20   if (primitives(1, 1.5f) != \"OK\") return \"fail primitives\"\n\
+    \x20   if (primitives(1, 2f) != \"primitives\") return \"fail ratio\"\n\
+    \x20   if (!both(2.5, 1.0) || both(2.5, 0.5)) return \"fail both\"\n\
+    \x20   if (either(1f, 0f) != \"zero\" || either(1f, 2f) != \"none\") return \"fail either\"\n\
+    \x20   return \"OK\"\n\
+    }\n";
+
+#[test]
+fn a_materialized_comparison_tested_again_matches_kotlinc() {
+    let built = compare_with_kotlinc_plugin(
+        "MaterializedConditions",
+        MATERIALIZED_CONDITIONS,
+        "MaterializedConditionsKt",
+        &[common::stdlib_jar()],
+        "17",
+        &[],
+    )
+    .expect("reference kotlinc and javap are required");
+    // Each method's instructions, branch targets included.
+    for member in [
+        "java.lang.String primitives(byte, float)",
+        "boolean both(double, double)",
+        "java.lang.String either(float, float)",
+        "java.lang.String box()",
+    ] {
+        let reference = method_instructions(&built.reference, member);
+        assert!(!reference.is_empty(), "{member} not found");
+        assert_eq!(
+            method_instructions(&built.krusty, member),
+            reference,
+            "{member}"
+        );
+    }
+}

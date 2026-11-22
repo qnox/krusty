@@ -170,6 +170,14 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: true,
     }
+    /// The JVM optimizer's constant-condition elimination leaves a `goto` that carries a known
+    /// `int` to an `if<cond>` jumping there, instead of sending it straight to the branch that
+    /// constant takes: a materialized Boolean is tested again (`iconst_1; goto L; …; L: ifne`).
+    ConstantGotoNotThreadedToComparison {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// The Kotlin/Native and Kotlin/Wasm standard library's `ArrayList.addAll` makes room for the
     /// new elements before it reads the argument, so a range of the list being appended to is
     /// invalidated first: `list.addAll(list.subList(0, 2))` raises
