@@ -404,6 +404,11 @@ pub(super) trait CallLinker {
     /// from projections that restate their parameter's declaration-site variance.
     fn same_type(&self, left: Ty, right: Ty) -> bool;
 
+    /// The declared upper bounds of the classifier `owner`'s type parameter at `index` in the
+    /// calling compilation's class model: what a star or `out` projection of that slot captures
+    /// besides its own read type.
+    fn classifier_parameter_bounds(&self, owner: TypeName, index: usize) -> Vec<Ty>;
+
     /// Constructor generic bounds consume explicit hierarchy/full-formal evidence without
     /// changing the independent operand-coercion capability.
     fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool;

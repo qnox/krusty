@@ -238,6 +238,9 @@ pub struct FileInput<'a> {
     /// The interface member numbers beyond the module's own, shared by every file in the source
     /// module: installed interfaces' members and the dependency members its files call.
     pub dependency_interface_numbers: &'a mut ModuleInterfaceNumbers,
+    /// Dependency interface members a library default implements without a lowered body, with
+    /// the reason; shared by the whole emission session.
+    pub unimplementable_interface_members: &'a mut HashMap<Vec<u8>, String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -279,6 +282,7 @@ pub fn lower_file(
         dependency_symbols,
         dependency_instances,
         dependency_interface_numbers,
+        unimplementable_interface_members,
         value_classes,
         slot_plan,
         module_facts,
@@ -396,6 +400,7 @@ pub fn lower_file(
         dependency_symbols,
         dependency_interface_calls: Vec::new(),
         dependency_interface_numbers,
+        unimplementable_interface_members,
         dependency_instances,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
@@ -675,6 +680,8 @@ struct FileLowering<'a> {
     /// The local vector above is only this file's emitted identity records; the shared numbering
     /// prevents a second file from reusing one stub number for another member.
     dependency_interface_numbers: &'a mut ModuleInterfaceNumbers,
+    /// See [`FileInput::unimplementable_interface_members`].
+    unimplementable_interface_members: &'a mut krusty::fx_hash::HashMap<Vec<u8>, String>,
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,

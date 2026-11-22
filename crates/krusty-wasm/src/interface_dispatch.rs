@@ -83,6 +83,9 @@ struct Member {
     /// Declaring nominal classifiers of its exact identities, including published aliases.
     /// Every instance of each classifier must implement this member.
     declaring_owners: Vec<TypeName>,
+    /// The body the library interface declares for this member, which implements it for every
+    /// instance of the interface whose class does not override it.
+    default: Option<u32>,
     protocol_arity: Option<usize>,
 }
 
@@ -151,6 +154,7 @@ impl InterfaceDispatch {
             representations: Vec::new(),
             unimplementable: None,
             declaring_owners: Vec::new(),
+            default: None,
             protocol_arity: None,
         });
         member
@@ -355,6 +359,47 @@ impl InterfaceDispatch {
         }
     }
 
+    /// Record that `function`, the body the library interface declares for `member`, implements
+    /// it for every instance of the interface whose class does not override it.
+    pub(super) fn interface_default(
+        &mut self,
+        member: MemberRef,
+        function: u32,
+    ) -> Result<(), String> {
+        match self.members[member.0 as usize].default.replace(function) {
+            Some(known) if known != function => {
+                Err("an interface member with two default bodies".to_string())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The classes advertising `member`'s library interface that implement it with nothing of
+    /// their own.
+    fn unimplemented_classes<'m>(
+        &'m self,
+        member: &'m Member,
+    ) -> impl Iterator<Item = ClassRef> + 'm {
+        self.classes
+            .iter()
+            .enumerate()
+            .filter(move |(class, record)| {
+                let advertised = member
+                    .protocol_arity
+                    .is_some_and(|arity| record.function_arities.contains(&arity))
+                    || member
+                        .declaring_owners
+                        .iter()
+                        .any(|owner| record.interfaces.contains(owner));
+                advertised
+                    && !member
+                        .implementations
+                        .iter()
+                        .any(|(known, _)| known.0 as usize == *class)
+            })
+            .map(|(class, _)| ClassRef(class as u32))
+    }
+
     /// Record that a class implements the library member `member` with something this generator
     /// cannot write, which declines the program only if a call goes through the member.
     pub(super) fn unimplementable(&mut self, member: MemberRef, reason: String) {
@@ -371,6 +416,9 @@ impl InterfaceDispatch {
         for member in called {
             if let Some(reason) = &member.unimplementable {
                 return Some(reason.clone());
+            }
+            if member.default.is_some() {
+                continue;
             }
             if let Some(arity) = member.protocol_arity {
                 let unimplemented = self.classes.iter().enumerate().any(|(class, record)| {
@@ -448,7 +496,18 @@ impl InterfaceDispatch {
     }
 
     /// Write every stub, interface table and `is` function from what the program recorded.
-    pub(super) fn finalize(self, module: &mut Module, objects: &ObjectRoot) {
+    pub(super) fn finalize(mut self, module: &mut Module, objects: &ObjectRoot) {
+        // An interface default implements its member for every class that does not override it.
+        for index in 0..self.members.len() {
+            let member = &self.members[index];
+            let Some(default) = member.default.filter(|_| member.stub.is_some()) else {
+                continue;
+            };
+            let inheriting = self.unimplemented_classes(member).collect::<Vec<_>>();
+            self.members[index]
+                .implementations
+                .extend(inheriting.into_iter().map(|class| (class, default)));
+        }
         let mut tables: Vec<Vec<Option<u32>>> = vec![Vec::new(); self.classes.len()];
         let mut stubs = Vec::new();
         for member in &self.members {

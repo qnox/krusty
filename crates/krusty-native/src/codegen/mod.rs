@@ -148,6 +148,10 @@ pub struct CodegenModule {
         krusty::fx_hash::HashMap<krusty::backend::KlibDependencyCallable, DependencyExport>,
     /// Stable imported-interface member numbers, shared by every file in each source module.
     dependency_interface_numbers: krusty::fx_hash::HashMap<String, lower::ModuleInterfaceNumbers>,
+    /// The dependency interface members, by cross-module identity, that a class implements with a
+    /// library default whose body lowering does not model: a call through one declines with the
+    /// reason, rather than reaching an instance nothing implements it on.
+    unimplementable_interface_members: krusty::fx_hash::HashMap<Vec<u8>, String>,
     /// The exported entry answering each object instance and enum constant another file reads,
     /// linked by the instance (see `krusty::backend::instance_links`).
     instances: krusty::backend::module_links::ModuleLinks<
@@ -572,6 +576,7 @@ impl Backend for CraneliftBackend {
                 dependency_symbols: &state.dependency_symbols,
                 dependency_instances: &instance_reads,
                 dependency_interface_numbers: &mut dependency_interface_numbers,
+                unimplementable_interface_members: &mut state.unimplementable_interface_members,
                 laid_out: &state.laid_out,
                 #[cfg(feature = "test-support")]
                 driver_entries: self
