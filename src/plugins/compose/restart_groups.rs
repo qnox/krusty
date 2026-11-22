@@ -81,6 +81,9 @@ fn bits_for_slot(bits: i32, slot: u32) -> i32 {
 /// the source ones, then `$dirty` when the body reads a parameter.
 #[derive(Clone, Copy)]
 struct Slots {
+    /// The value index of the first parameter the group compares: a function's first parameter, or
+    /// the first value its lambda is called with, after the values it captures.
+    first: u32,
     composer: u32,
     /// The first `$changed`; the `changed_ints` of them follow one another.
     changed: u32,
@@ -93,15 +96,21 @@ struct Slots {
 }
 
 impl Slots {
-    /// A composable lambda's, after the `captures` values it captures: it takes nothing else, and
-    /// decides on `$changed` alone.
-    fn lambda(captures: u32) -> Self {
+    /// A composable lambda's, after the values it captures and takes: it decides on `$changed`
+    /// alone.
+    fn lambda(lambda: &ComposableLambda) -> Self {
+        let leading = lambda.captures + lambda.parameters.len() as u32;
         Self {
-            composer: captures,
-            changed: captures + 1,
+            first: lambda.captures,
+            composer: leading,
+            changed: leading + 1,
             changed_ints: 1,
             default: None,
-            dirty: None,
+            dirty: lambda
+                .parameters
+                .iter()
+                .any(|parameter| parameter.used)
+                .then_some(leading + 2),
         }
     }
 
@@ -111,6 +120,7 @@ impl Slots {
         let default = has_defaults(facts).then_some(parameters + 1 + changed_ints);
         let next = parameters + 1 + changed_ints + u32::from(default.is_some());
         Self {
+            first: 0,
             composer: parameters,
             changed: parameters + 1,
             changed_ints,
@@ -204,7 +214,7 @@ pub(super) fn transform(ir: &mut IrFile) {
     // or remember it.
     for lambda in &facts.lambdas {
         add_lambda_composer_parameters(ir, lambda);
-        let slots = Slots::lambda(lambda.captures);
+        let slots = Slots::lambda(lambda);
         for site in &lambda.calls {
             pass_composer(ir, slots, &callees, site);
         }
@@ -296,19 +306,19 @@ fn add_composer_parameters(ir: &mut IrFile, facts: &RestartableFunction) {
 /// is called with, after the values it captures, and move its locals past them.
 fn add_lambda_composer_parameters(ir: &mut IrFile, lambda: &ComposableLambda) {
     let function = lambda.implementation;
-    let captures = lambda.captures as usize;
+    let leading = lambda.captures as usize + lambda.parameters.len();
     let declaration = &mut ir.functions[function as usize];
     debug_assert_eq!(
         declaration.params.len(),
-        captures,
-        "a `() -> Unit` lambda takes only its captures"
+        leading,
+        "a composable lambda takes only its captures and its own parameters"
     );
     declaration.params.extend([runtime::composer(), Ty::Int]);
-    declaration.param_checks.resize(captures + 2, None);
+    declaration.param_checks.resize(leading + 2, None);
     let body = declaration.body.expect("a lambda has a body");
-    crate::ir::shift_value_indices(ir, body, lambda.captures, 2);
+    crate::ir::shift_value_indices(ir, body, leading as u32, Slots::lambda(lambda).generated());
     let identities = &mut ir.fn_params.entry(function).or_default().identities;
-    identities.truncate(captures);
+    identities.truncate(leading);
     identities.extend([
         IrParameterIdentity::producer_value("$composer"),
         IrParameterIdentity::producer_value("$changed"),
@@ -319,7 +329,7 @@ fn add_lambda_composer_parameters(ir: &mut IrFile, lambda: &ComposableLambda) {
     else {
         unreachable!("a composable lambda is a lambda");
     };
-    *arity = 2;
+    *arity = (lambda.parameters.len() + 2) as u8;
     // The value is called through the runtime's wrapper, never inlined.
     let template = inline_body.take();
     if let Some(template) = template {
@@ -364,7 +374,7 @@ fn retire_library_calls(ir: &mut IrFile, template: ExprId) {
 fn lambda_group(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda) {
     let body =
         lambda_body(ir, lambda.implementation).expect("a composable lambda has a block body");
-    let slots = Slots::lambda(lambda.captures);
+    let slots = Slots::lambda(lambda);
     let mut statements = Vec::new();
     if let Some(information) = &lambda.source_information {
         let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
@@ -377,9 +387,11 @@ fn lambda_group(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLa
         ));
     }
     let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
-    let state = and_constant(ir, slots.changed, STATIC);
-    let any_changed = int_comparison(ir, IrBinOp::Ne, state, DIFFERENT);
-    let force = and_constant(ir, slots.changed, 1);
+    dirty_preamble(ir, runtime, &lambda.parameters, 0, slots, &mut statements);
+    let read = lambda_read_bits(lambda);
+    let state = and_constant(ir, slots.decided(0), 1 | read);
+    let any_changed = int_comparison(ir, IrBinOp::Ne, state, read);
+    let force = and_constant(ir, slots.decided(0), 1);
     let execute = runtime::call(
         ir,
         &runtime.should_execute,
@@ -455,7 +467,7 @@ fn remember(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda
     let value = ir.add_expr(IrExpr::TypeOp {
         op: IrTypeOp::ImplicitCoercion,
         arg: remembered,
-        type_operand: runtime::composable_lambda(),
+        type_operand: runtime::composable_function(&lambda.parameter_types()),
     });
     // kotlinc builds the call at the lambda's offsets, so the lambda's line begins at its key.
     if lambda.opening_line != 0 {
@@ -516,10 +528,9 @@ fn traced(
 /// A parameter's type after `ComposerParamTransformer`, which gives a composable function value the
 /// calling convention too.
 fn physical_type(parameter: &TrackedParameter) -> Ty {
-    if parameter.lambda {
-        runtime::composable_lambda()
-    } else {
-        parameter.ty
+    match (parameter.lambda, parameter.ty.kind()) {
+        (Some(_), TyKind::Fun(signature)) => runtime::composable_function(&signature.params),
+        _ => parameter.ty,
     }
 }
 
@@ -796,13 +807,24 @@ fn int_comparison(ir: &mut IrFile, op: IrBinOp, lhs: ExprId, rhs: i32) -> ExprId
     })
 }
 
+/// The states a lambda's group needs to see unchanged to skip: those of the parameters its body
+/// reads and, in the slot after its parameters, the lambda's own, which the runtime's wrapper adds.
+fn lambda_read_bits(lambda: &ComposableLambda) -> i32 {
+    (0u32..)
+        .zip(&lambda.parameters)
+        .filter(|(_, parameter)| parameter.used)
+        .fold(0, |mask, (slot, _)| mask | bits_for_slot(SAME, slot))
+        | bits_for_slot(SAME, lambda.parameters.len() as u32)
+}
+
 /// `var $dirty = $changed`, then for each parameter the body reads, a comparison when the caller
 /// left its state uncertain:
 /// `if ($changed and 0b0110 == 0) $dirty = $dirty or if ($composer.changed(p)) 0b0100 else 0b0010`.
 fn dirty_preamble(
     ir: &mut IrFile,
     runtime: &ComposeRuntime,
-    facts: &RestartableFunction,
+    parameters: &[TrackedParameter],
+    receiver: u32,
     slots: Slots,
     statements: &mut Vec<ExprId>,
 ) {
@@ -820,7 +842,7 @@ fn dirty_preamble(
         ir.value_names.insert(declaration, int_name("$dirty", int));
         statements.push(declaration);
     }
-    for (index, parameter) in (0u32..).zip(&facts.parameters) {
+    for (index, parameter) in (0u32..).zip(parameters) {
         if !parameter.used {
             continue;
         }
@@ -832,11 +854,11 @@ fn dirty_preamble(
         let isolated = and_constant(ir, slots.changed_int(int), bits_for_slot(STATIC, slot));
         let uncertain = int_comparison(ir, IrBinOp::Eq, isolated, 0);
         let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
-        let value = ir.add_expr(IrExpr::GetValue(index));
+        let value = ir.add_expr(IrExpr::GetValue(slots.first + index));
         let compared = match parameter.stability {
             ParameterStability::Stable => {
                 // A function value is compared by identity too, whatever its stability.
-                let changed = if parameter.lambda
+                let changed = if parameter.lambda.is_some()
                     || matches!(parameter.ty.non_null().kind(), TyKind::Fun(_))
                 {
                     &runtime.changed_instance
@@ -861,7 +883,7 @@ fn dirty_preamble(
                     vec![value],
                 );
                 let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
-                let value = ir.add_expr(IrExpr::GetValue(index));
+                let value = ir.add_expr(IrExpr::GetValue(slots.first + index));
                 let by_identity =
                     runtime::call(ir, &runtime.changed_instance, Some(composer), vec![value]);
                 let when = ir.add_expr(IrExpr::When {
@@ -881,7 +903,7 @@ fn dirty_preamble(
         let compare = match (parameter.default, slots.default) {
             // A constant default is static: an omitted argument needs no comparison.
             (Some(_), Some(default)) => {
-                let omitted = is_omitted(ir, default, index - u32::from(facts.receiver));
+                let omitted = is_omitted(ir, default, index - receiver);
                 let static_bits =
                     ir.add_expr(IrExpr::Const(IrConst::Int(bits_for_slot(STATIC, slot))));
                 let defaulted = or_into(ir, dirty, static_bits);
@@ -924,6 +946,7 @@ fn is_omitted(ir: &mut IrFile, default: u32, index: u32) -> ExprId {
 /// `if ($default and bit != 0) p = <default>` for each parameter with a default value, which the
 /// group runs before the body.
 fn assign_defaults(ir: &mut IrFile, facts: &RestartableFunction, slots: Slots) -> Vec<ExprId> {
+    let receiver = u32::from(facts.receiver);
     let Some(default) = slots.default else {
         return Vec::new();
     };
@@ -931,7 +954,7 @@ fn assign_defaults(ir: &mut IrFile, facts: &RestartableFunction, slots: Slots) -
         .zip(&facts.parameters)
         .filter_map(|(index, parameter)| Some((index, parameter.default?)))
         .map(|(index, value)| {
-            let omitted = is_omitted(ir, default, index - u32::from(facts.receiver));
+            let omitted = is_omitted(ir, default, index - receiver);
             let assign = ir.add_expr(IrExpr::SetValue { var: index, value });
             if_then(ir, omitted, assign)
         })
@@ -1016,7 +1039,14 @@ fn restart_group(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableF
             vec![composer, text],
         ));
     }
-    dirty_preamble(ir, runtime, facts, slots, &mut statements);
+    dirty_preamble(
+        ir,
+        runtime,
+        &facts.parameters,
+        u32::from(facts.receiver),
+        slots,
+        &mut statements,
+    );
 
     // `$composer.shouldExecute(<differences>, $dirty and 1)`
     let composer = ir.add_expr(IrExpr::GetValue(slots.composer));

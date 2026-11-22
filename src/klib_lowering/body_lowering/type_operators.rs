@@ -55,12 +55,7 @@ impl BodyLowering<'_> {
                 if ty != target {
                     return Err(mismatch("a cast is typed apart from its target"));
                 }
-                // A cast to a non-null type also rejects `null`.
-                if target.is_nullable() {
-                    IrTypeOp::Cast
-                } else {
-                    IrTypeOp::CastNonNull
-                }
+                IrTypeOp::cast_to(target)
             }
             other => return unsupported(type_operator_name(other)),
         };
@@ -156,6 +151,11 @@ impl BodyLowering<'_> {
             return Ok(proven);
         }
         let arg = self.expression(argument)?;
+        self.implicit_cast_of(arg, target, ty)
+    }
+
+    /// The lowered `arg` implicitly cast to `target`, typed `ty`; see [`Self::implicit_cast`].
+    pub(super) fn implicit_cast_of(&mut self, arg: ExprId, target: Ty, ty: Ty) -> Lowered<ExprId> {
         let actual = self.lowered_type(arg);
         if super::is_value_of(actual, target) {
             return Ok(arg);

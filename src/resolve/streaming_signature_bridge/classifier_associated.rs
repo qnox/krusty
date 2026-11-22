@@ -28,11 +28,6 @@ pub(super) struct AssociatedSignatureArguments<'call, 'argument> {
     pub(super) expected: Option<crate::fir::ResolvedTy>,
 }
 
-pub(super) type Demand<'demand> = dyn FnMut(
-        crate::fir::DeclarationId,
-    ) -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>
-    + 'demand;
-
 impl ProductionSignatureSemantics<'_> {
     /// The classifier a companion-associated declaration is associated with.
     pub(super) fn declaration_associated_classifier(
@@ -143,7 +138,7 @@ impl ProductionSignatureSemantics<'_> {
         classifier: crate::types::TypeName,
         spelling: &str,
         call: &AssociatedSignatureArguments<'_, '_>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<AssociatedSignatureCall, crate::fir::DiagnosticId> {
         let candidates = self
             .with_resolver(scope, |resolver| {
@@ -161,7 +156,7 @@ impl ProductionSignatureSemantics<'_> {
         classifier: crate::types::TypeName,
         spelling: &str,
         call: &AssociatedSignatureArguments<'_, '_>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<AssociatedSignatureCall, crate::fir::DiagnosticId> {
         let candidates = self
             .with_resolver(scope, |resolver| {
@@ -179,7 +174,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
         candidates: Vec<crate::libraries::FunctionInfo>,
         call: &AssociatedSignatureArguments<'_, '_>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<AssociatedSignatureCall, crate::fir::DiagnosticId> {
         if candidates.is_empty() {
             return Ok(AssociatedSignatureCall::Absent);
@@ -257,7 +252,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         (classifier, spelling): (crate::types::TypeName, &str),
         expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
         let (functions, properties) = self
             .with_resolver(scope, |resolver| {
@@ -280,7 +275,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         (classifier, spelling): (crate::types::TypeName, &str),
         expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
         let expected_fun = match expected
             .map(|expected| expected.get().non_null())
@@ -331,7 +326,7 @@ impl ProductionSignatureSemantics<'_> {
         functions: Vec<crate::libraries::FunctionInfo>,
         properties: Vec<crate::libraries::PropertyInfo>,
         expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
         if let (false, Some(TyKind::Fun(expected))) = (
             functions.is_empty(),
@@ -404,7 +399,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         classifier: crate::types::TypeName,
         spelling: &str,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<SelectedValue>, crate::fir::DiagnosticId> {
         let properties = self
             .with_resolver(scope, |resolver| {
@@ -420,7 +415,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         classifier: crate::types::TypeName,
         spelling: &str,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<SelectedValue>, crate::fir::DiagnosticId> {
         let properties = self
             .with_resolver(scope, |resolver| {
@@ -433,7 +428,7 @@ impl ProductionSignatureSemantics<'_> {
     fn associated_property_result(
         &self,
         properties: Vec<crate::libraries::PropertyInfo>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<SelectedValue>, crate::fir::DiagnosticId> {
         let Some(nearest) = properties
             .iter()

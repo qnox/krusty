@@ -249,6 +249,16 @@ impl<'s> Linker<'_, 's> {
                 &member.installed_overrides,
             )?;
         }
+        // A member the class inherits from a superclass this unit installed or materialized
+        // implements the interface declarations the class reaches only through its supertypes.
+        let inherited = self
+            .sources
+            .bodies
+            .inherited_implementations_of(&prepared.key.module, &prepared.key.signature)
+            .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
+        for (body, implemented) in &inherited {
+            self.record_inherited_implementation(ir, prepared.classifier, body, implemented);
+        }
         let constructor = super::super::same_library_class::LocalConstructor {
             declaration: prepared.declaration.clone(),
             access: prepared.access,

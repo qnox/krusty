@@ -35,6 +35,8 @@ pub(super) enum CommonPrimitive {
     /// arguments are packed into is the array it returns, as checked FIR lowers a source call of
     /// it to an array literal.
     ArrayLiteral,
+    /// `emptyArray<T>()`: a new reference array of no elements, of the array type the call has.
+    EmptyArray,
 }
 
 pub(crate) struct CommonPrimitiveCall {
@@ -61,6 +63,11 @@ pub(super) fn authenticate(
         selected.compiler_intrinsic()
     {
         return array_literal(selected, element).map(Some);
+    }
+    if let Some(CompilerIntrinsic::ArrayFactory(ArrayFactoryKind::EmptyReference)) =
+        selected.compiler_intrinsic()
+    {
+        return empty_array(selected).map(Some);
     }
     let operation = match selected.compiler_intrinsic() {
         Some(CompilerIntrinsic::PrimitiveUnary(operation)) => CommonPrimitive::Unary(operation),
@@ -109,6 +116,7 @@ pub(super) fn authenticate(
         | CommonPrimitive::StringGet
         | CommonPrimitive::ArrayLiteral => 1,
         CommonPrimitive::Unary(_)
+        | CommonPrimitive::EmptyArray
         | CommonPrimitive::PropertyRead(_)
         | CommonPrimitive::Conversion => 0,
     };
@@ -127,7 +135,8 @@ pub(super) fn authenticate(
         | CommonPrimitive::Compare { .. }
         | CommonPrimitive::Conversion
         | CommonPrimitive::StringGet
-        | CommonPrimitive::ArrayLiteral => {
+        | CommonPrimitive::ArrayLiteral
+        | CommonPrimitive::EmptyArray => {
             matches!(selected.signature(), KlibDeclarationSignature::Public(_))
         }
         CommonPrimitive::PropertyRead(_) => {
@@ -210,7 +219,8 @@ pub(super) fn authenticate(
         | CommonPrimitive::Compare { .. }
         | CommonPrimitive::Conversion
         | CommonPrimitive::StringGet
-        | CommonPrimitive::ArrayLiteral => None,
+        | CommonPrimitive::ArrayLiteral
+        | CommonPrimitive::EmptyArray => None,
     };
     Ok(Some(CommonPrimitiveCall {
         operation,
@@ -245,6 +255,33 @@ fn array_literal(
         operation: CommonPrimitive::ArrayLiteral,
         receiver: None,
         params: vec![ret],
+        ret,
+        class_type_parameters: Vec::new(),
+        property: None,
+    })
+}
+
+/// The empty reference array `emptyArray<T>()` is: a top-level function of one type parameter and
+/// no value parameters, returning a reference array.
+fn empty_array(
+    selected: KlibBodyCallable<'_>,
+) -> Result<CommonPrimitiveCall, KlibBodyDeclineReason> {
+    let ret = selected.ret();
+    if selected.is_member()
+        || selected.context_count() != 0
+        || selected.type_parameters().len() != 1
+        || selected.vararg_index().is_some()
+        || !selected.params().is_empty()
+        || !ret.is_reference_array()
+    {
+        return Err(mismatch(
+            "an empty array factory has a different selected call shape",
+        ));
+    }
+    Ok(CommonPrimitiveCall {
+        operation: CommonPrimitive::EmptyArray,
+        receiver: None,
+        params: Vec::new(),
         ret,
         class_type_parameters: Vec::new(),
         property: None,

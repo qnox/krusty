@@ -4,8 +4,8 @@
 # exact version and the pinned atomicfu runtime for the JVM, Native and Wasm targets. The names and
 # the runtime version are the ones src/toolchain.rs resolves, so a row that restores this cache never
 # downloads them. The pinned serialization, Compose runtime and coroutines jars the e2e suite
-# provisions come with them. A file already in place is kept; a refused download is retried after a wait
-# (Central answers 429 under load) and then fails naming the URL.
+# provisions come with them. A file already in place is kept; a refused download is not retried (Central extends a block
+# for every request made during it) and fails naming the URL.
 set -euo pipefail
 
 version="${1:?usage: fetch-conformance-deps.sh <kotlin-version>}"
@@ -34,18 +34,13 @@ fetch() { # group artifact version extension [repository]
   local url="${5:-$central}/${1//./\/}/$2/$3/$2-$3.$4"
   local part="$file.part.$$"
   trap 'rm -f "$part"' RETURN
-  local attempt
-  for attempt in 1 2 3 4 5; do
-    if curl -sSfL -o "$part" "$url" 2> "$part.err"; then
-      mv "$part" "$file"
-      rm -f "$part.err"
-      return 0
-    fi
-    echo "attempt $attempt of $url: $(tr '\n' ' ' < "$part.err")" >&2
-    sleep "${FETCH_RETRY_WAIT:-$((attempt * 10))}"
-  done
+  if curl -sSfL -o "$part" "$url" 2> "$part.err"; then
+    mv "$part" "$file"
+    rm -f "$part.err"
+    return 0
+  fi
+  echo "error: $url was not downloaded: $(tr '\n' ' ' < "$part.err")" >&2
   rm -f "$part" "$part.err"
-  echo "error: $url was not downloaded after 5 attempts" >&2
   return 1
 }
 

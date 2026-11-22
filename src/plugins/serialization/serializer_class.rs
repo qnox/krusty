@@ -8,7 +8,7 @@
 //! library), annotation markers and caches.
 
 use super::*;
-use crate::ir::{IrGeneratedClassRole, IrGeneratedFunctionRole};
+
 use deserialization_constructor::{
     complete_deserialization_constructor, declare_deserialization_constructor,
 };
@@ -222,7 +222,7 @@ pub(super) fn declare(
     }
     ir.record_generated_class(
         class_name,
-        IrGeneratedClassRole::SerializationSerializer,
+        super::roles::SerializationClass::Serializer,
         serializer_class,
     );
     // `Foo.$serializer` is nameable Kotlin, so kotlinc records it under the serialized
@@ -271,7 +271,7 @@ pub(super) fn complete(
     let ser_id = ir
         .generated_class(
             ir.classes[class_id as usize].fq_name_id(),
-            IrGeneratedClassRole::SerializationSerializer,
+            super::roles::SerializationClass::Serializer,
         )
         .expect("a plain serializable class has its declared $serializer");
     assert_eq!(ir.classes[ser_id as usize].fq_name_id(), serializer_name);
@@ -788,7 +788,7 @@ fn add_write_self(
     );
     ir.record_generated_function(
         owner,
-        IrGeneratedFunctionRole::SerializationWriteSelf,
+        super::roles::SerializationFunction::WriteSelf,
         write_self,
     );
 }
@@ -907,7 +907,7 @@ fn add_type_serializer_getters(ir: &mut IrFile, serializer: ClassId, n_tp: usize
         ir.classes[serializer as usize].methods.push(getter);
         ir.record_generated_function(
             owner,
-            IrGeneratedFunctionRole::SerializationTypeSerializerGetter(k as u32),
+            super::roles::SerializationFunction::TypeSerializerGetter(k as u32),
             getter,
         );
         ir.publish_generated_debug_function(

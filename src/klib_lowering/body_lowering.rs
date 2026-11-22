@@ -337,6 +337,15 @@ pub(super) trait CallLinker {
 
     /// The function a file-local call invokes: a top-level function private to the lowered
     /// body's file, or a member of a file-local class. Template linkers keep the refusal.
+    /// The getter of an inherited property that a call of the fake override `callee` of a local
+    /// class stands for. `None` when `callee` is no such fake override.
+    fn inherited_getter(
+        &self,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<Option<crate::metadata::klib_ir::KlibIrSignature>> {
+        Ok(None)
+    }
+
     fn link_local_function(
         &mut self,
         _ir: &mut IrFile,
@@ -1348,7 +1357,15 @@ impl<'a> BodyLowering<'a> {
             return Err(KlibBodyDeclineReason::ForeignReturnTarget);
         }
         let expected = self.member_result.unwrap_or(self.header.body_result());
-        let mut value = self.operand(value, expected)?;
+        let mut value = if !member && self.header.erases_result() {
+            // An erased body leaves the smart cast of its result to a type parameter out with the
+            // parameter (`checkNotNull` returns its `value: T?` as `T` after its `null` test), and
+            // Kotlin's inliner casts the inlined result to the call's result type implicitly.
+            let lowered = self.expression(value)?;
+            self.implicit_cast_of(lowered, expected, expected)?
+        } else {
+            self.operand(value, expected)?
+        };
         if !member && self.header.body_result() != self.header.result() {
             value = self.declared_value(value, self.header.result());
         }
