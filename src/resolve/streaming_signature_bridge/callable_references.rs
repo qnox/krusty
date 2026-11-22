@@ -135,7 +135,7 @@ impl ProductionSignatureSemantics<'_> {
         let context = crate::assignable::TyCtx::new();
         let binds_contexts = self.headers.scopes.binds_reference_contexts(scope.source);
         let subtype = |a, b| crate::assignable::is_subtype(&context, &oracle, a, b);
-        let selected = candidates_with_finalized_signatures
+        let mut selected = candidates_with_finalized_signatures
             .into_iter()
             .filter(|candidate| !candidate.callable.suspend || expected.suspend)
             .filter_map(|mut candidate| {
@@ -180,21 +180,30 @@ impl ProductionSignatureSemantics<'_> {
                 } else {
                     expected.ret
                 };
-                Some(Ty::fun_with_shape(
-                    parameters,
-                    result,
-                    expected.context_count,
-                    expected.has_receiver,
-                    expected.suspend,
+                Some((
+                    candidate,
+                    Ty::fun_with_shape(
+                        parameters,
+                        result,
+                        expected.context_count,
+                        expected.has_receiver,
+                        expected.suspend,
+                    ),
                 ))
             })
             .collect::<Vec<_>>();
-        Ok(selected.into_iter().fold(Vec::new(), |mut unique, ty| {
-            if !unique.contains(&ty) {
-                unique.push(ty);
-            }
-            unique
-        }))
+        crate::symbol_resolver::retain_nearest_scope_level(&mut selected, |(candidate, _)| {
+            crate::symbol_resolver::scope_level(candidate)
+        });
+        Ok(selected
+            .into_iter()
+            .map(|(_, ty)| ty)
+            .fold(Vec::new(), |mut unique, ty| {
+                if !unique.contains(&ty) {
+                    unique.push(ty);
+                }
+                unique
+            }))
     }
 
     pub(super) fn applied_source_alias_expansion(

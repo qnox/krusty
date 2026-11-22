@@ -10007,6 +10007,9 @@ impl<'a> Checker<'a> {
             let ret = crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, &bindings);
             fitted.push((score, overload_index, params, ret, bindings));
         }
+        crate::symbol_resolver::retain_nearest_scope_level(&mut fitted, |(_, i, ..)| {
+            crate::symbol_resolver::scope_level(&overloads[*i])
+        });
         let low_priority_annotation =
             crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
         if fitted.iter().any(|(_, index, ..)| {
@@ -32745,7 +32748,7 @@ impl<'a> Checker<'a> {
         let mut unavailable_default = None;
         let mut unresolved_type_arguments = false;
         let mut context_parameter_candidate = None;
-        let candidates = candidates
+        let mut candidates = candidates
             .into_iter()
             .filter_map(|mut function| {
                 if function.kind != crate::libraries::FnKind::TopLevel {
@@ -32919,6 +32922,9 @@ impl<'a> Checker<'a> {
                 ))
             })
             .collect::<Vec<_>>();
+        crate::symbol_resolver::retain_nearest_scope_level(&mut candidates, |c| {
+            crate::symbol_resolver::scope_level(&c.0)
+        });
         if candidates.is_empty() {
             if let Some(function) = context_parameter_candidate {
                 return Some(self.report_context_parameter_reference(expression, name, &function));

@@ -152,7 +152,10 @@ use scope_level_callables::{
     symbol_levels_in_function_scope, symbols_in_function_scope,
     tagged_symbol_levels_in_function_scope, FunctionScopeRef,
 };
-pub(crate) use scope_level_callables::{CallableImport, FunctionImportScope};
+pub(crate) use scope_level_callables::{
+    retain_nearest_scope_level, same_callable_declaration, scope_level, CallableImport,
+    FunctionImportScope,
+};
 pub(crate) use statically_known_subtype::{nominal_type, statically_known_subtype};
 
 pub(crate) type GSigBinds = crate::types::TyParamBindings;
@@ -1783,8 +1786,11 @@ impl<'a> SymbolResolver<'a> {
                 // scoped to `pkg` (the package is scope, not part of the name) and calling this. The caller
                 // reads `overloads` to inspect the family, or `top_level_call` for the arg/type-arg selected
                 // callable (default/vararg-aware) ready to emit.
-                let levels = self.symbol_levels_in_scope(name);
-                let fs = self.nearest_top_level_functions(&levels);
+                let levels = self
+                    .fn_scope
+                    .map(|scope| tagged_symbol_levels_in_function_scope(&self.src, name, scope))
+                    .unwrap_or_default();
+                let fs = self.top_level_tower_functions(&levels);
                 crate::trace_compiler!(
                     "signature_inference",
                     "top-level candidates={name} {:?}",
@@ -1804,8 +1810,20 @@ impl<'a> SymbolResolver<'a> {
                         .collect::<Vec<_>>(),
                 );
                 let top_level_call = self.pick_top_level(name, &fs, args, type_args, None);
-                let overloads = fs.overloads;
-                let values = self.nearest_top_level_properties(levels);
+                // The family a caller inspects is the level that owns the name; selection above
+                // already fell through the farther levels the tower offers.
+                let mut overloads = fs.overloads;
+                if let Some(nearest) = overloads
+                    .first()
+                    .map(|function| function.scope_rung.selection_key(function.scope_rank))
+                {
+                    overloads.retain(|function| {
+                        function.scope_rung.selection_key(function.scope_rank) == nearest
+                    });
+                }
+                let values = self.nearest_top_level_properties(
+                    levels.into_iter().map(|level| level.symbols).collect(),
+                );
                 if overloads.is_empty() && top_level_call.is_none() && values.is_empty() {
                     return None;
                 }
