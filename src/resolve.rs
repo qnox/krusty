@@ -38354,12 +38354,7 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>();
         for cycle in constructor_delegation_cycles(&edges) {
-            if let Some(&index) = cycle.first() {
-                self.diags.error(
-                    declaration.secondary_ctors[index].span,
-                    "constructor delegation cycle".to_string(),
-                );
-            }
+            self.report_constructor_delegation_cycle(declaration, &cycle);
             for index in cycle {
                 self.resolved_ctor_delegations.remove(&(class, index));
             }

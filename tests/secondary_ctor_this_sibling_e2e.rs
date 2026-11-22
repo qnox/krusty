@@ -142,13 +142,20 @@ fn constructor_delegation_cycle_is_diagnosed() {
         \x20 constructor(value: Boolean): this(if (value) 1 else 0)\n\
         }\n";
     let stdlib = common::stdlib_jar();
-    let diagnostics =
-        common::front_end_diagnostics(SRC, &[stdlib], Some(common::jdk_modules().as_path()));
+    let result = common::compiler_diagnostics(&[("Cycle.kt", SRC)], std::slice::from_ref(&stdlib));
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("constructor delegation cycle")),
-        "expected constructor delegation cycle diagnostic, got {diagnostics:?}"
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
     );
 }
 

@@ -365,6 +365,25 @@ impl Checker<'_> {
         true
     }
 
+    /// A delegation chain that returns to a constructor. kotlinc reports that at every `this` in
+    /// the chain. The delegating constructor's own span is the fallback when it wrote no keyword.
+    pub(super) fn report_constructor_delegation_cycle(
+        &mut self,
+        declaration: &ClassDecl,
+        cycle: &[usize],
+    ) {
+        for &index in cycle {
+            let Some(constructor) = declaration.secondary_ctors.get(index) else {
+                continue;
+            };
+            let span = (constructor.delegation_keyword.lo != 0)
+                .then_some(constructor.delegation_keyword)
+                .unwrap_or(constructor.span);
+            self.diags
+                .error(span, "there's a cycle in the delegation calls chain.");
+        }
+    }
+
     /// Every `this(...)` constructor, including the one delegating, rejects the arguments for a
     /// missing parameter. kotlinc lists them together. One constructor keeps the single-candidate
     /// wording, and a named or extra argument keeps its own diagnostic.
