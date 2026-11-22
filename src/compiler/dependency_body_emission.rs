@@ -338,7 +338,8 @@ pub(super) fn emit_dependencies<B: Backend>(
         .with_checked_dependency_facts(source.callables.klib_dependency_facts())
         .with_authorized_member_edges(authorized_member_edges)
         .with_read_objects(read_objects)
-        .with_target_classifiers(&target_represents_classifier);
+        .with_target_classifiers(&target_represents_classifier)
+        .with_expansion_copies(facts.inline_bodies());
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,

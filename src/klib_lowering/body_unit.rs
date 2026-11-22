@@ -19,7 +19,8 @@ use super::body_lowering::{
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::{
-    declare_function, function_header, raw_function_header, FunctionHeader, HeaderPurpose,
+    declare_function, function_header, prepared_inline_header, raw_function_header, FunctionHeader,
+    HeaderPurpose,
 };
 use super::ir_builtins::{BuiltinCallDisposition, IrBuiltinOperators};
 use super::lowering_checkpoint::LoweringCheckpoint;
@@ -1081,6 +1082,15 @@ struct Linker<'u, 's> {
 }
 
 impl<'s> CallLinker for Linker<'_, 's> {
+    /// A call this unit links to a function realized outside it (another unit's export) calls the
+    /// provider's declaration, which says whether it is `suspend`.
+    fn is_suspend_callable(&self, target: ExternalCallableId) -> bool {
+        self.sources
+            .declarations
+            .external_callable(target)
+            .is_some_and(|realization| realization.callable.suspend)
+    }
+
     fn atomic_field(
         &self,
         callee: &KlibPublicIdSignature,
@@ -1992,16 +2002,39 @@ impl<'s> Linker<'_, 's> {
         declaration: &'s KlibIrFunction,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
         let selected = selected_callable_for_header(selected, None, arena, declaration)?;
-        let function = match self.functions.get(identity) {
-            Some(function) => {
+        let copy = self.sources.callees.expansion_copy(identity, declaration);
+        let function = match (self.functions.get(identity), copy) {
+            (Some(function), _) => {
                 // The function was declared under another lowering's selection, or from its
                 // header alone; this lowering's selection must describe it too.
                 if let Some(selected) = selected {
-                    function_header(Some(selected), arena, declaration)?;
+                    match copy {
+                        Some((arena, copy)) => {
+                            prepared_inline_header(
+                                selected,
+                                selected.type_parameters(),
+                                arena,
+                                copy,
+                            )?;
+                        }
+                        None => {
+                            function_header(Some(selected), arena, declaration)?;
+                        }
+                    }
                 }
                 *function
             }
-            None => self.declare(ir, identity, selected, arena, declaration)?,
+            // A call of a suspend inline function expands from the copy its library prepared,
+            // whose header is the selected declaration's.
+            (None, Some((arena, copy))) => {
+                let selected = selected.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a call of a suspend inline function without a selected declaration",
+                ))?;
+                let header =
+                    prepared_inline_header(selected, selected.type_parameters(), arena, copy)?;
+                self.declare_with_header(ir, identity, Some(selected), arena, copy, header)?
+            }
+            (None, None) => self.declare(ir, identity, selected, arena, declaration)?,
         };
         let parameter_defaults = parameter_defaults(declaration);
         let declaration = &ir.functions[function as usize];
@@ -2492,6 +2525,11 @@ impl<'s> Linker<'_, 's> {
         let declared = declare_function(ir, &header);
         let callee = inline_functions::Candidate::new(declared, function, &header, selected);
         callee.declare(ir, self.root, identity, &mut |name| self.is_interface(name))?;
+        // A suspend body is a suspend function of the unit, as a source one is of its file: the
+        // common coroutine preparation gives it its continuation and state machine.
+        if function.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0 {
+            ir.suspend_funs.push(declared);
+        }
         self.functions.insert(identity.clone(), declared);
         if let Some(formals) = self.private_members.get_mut(identity) {
             *formals = header.own_formals(function);

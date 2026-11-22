@@ -86,11 +86,6 @@ pub(super) fn declare(
     selected: Option<KlibBodyCallable<'_>>,
     is_interface: &mut dyn FnMut(TypeName) -> Result<bool, KlibBodyDeclineReason>,
 ) -> Result<(), KlibBodyDeclineReason> {
-    if declaration.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0 {
-        return Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "a call of a suspend inline function",
-        ));
-    }
     let receiver = header.extension_receiver_index();
     let modifiers = match selected {
         Some(selected) => selected.inline_modifiers().to_vec(),
@@ -222,6 +217,12 @@ pub(super) fn expand_calls(ir: &mut IrFile) -> Result<(), KlibBodyDeclineReason>
     };
     for site in sites {
         expansion.call(ir, site)?;
+    }
+    // Every lambda passed for an inlined parameter now runs only as the copies of its body. Its
+    // expression stays in the arena, orphaned, with the implementation consumed, as checked FIR
+    // lowering leaves a lambda it spliced into an inline caller: no target creates it.
+    for lambda in expansion.lambdas.into_values() {
+        ir.functions[lambda.function as usize].body = None;
     }
     Ok(())
 }
