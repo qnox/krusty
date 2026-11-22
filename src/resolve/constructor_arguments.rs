@@ -127,6 +127,9 @@ impl Checker<'_> {
         {
             return;
         }
+        if self.report_self_delegation_cycle(class, secondary, span, label, arguments) {
+            return;
+        }
         if self.report_missing_delegation_arguments(
             class, secondary, span, label, arguments, candidates,
         ) {
@@ -279,6 +282,88 @@ impl Checker<'_> {
             return None;
         };
         Some(format!("constructor({}): {owner}", parts.join(", ")))
+    }
+
+    /// The delegating constructor is the only `this(...)` target that accepts these arguments.
+    /// kotlinc reports that at the keyword; a constructor that does not accept them is a different
+    /// argument error.
+    fn report_self_delegation_cycle(
+        &mut self,
+        class: DeclId,
+        secondary: usize,
+        span: Span,
+        label: &str,
+        arguments: &CtorDelegationCall,
+    ) -> bool {
+        if !self.current_constructor_accepts_delegation(class, secondary, label, arguments) {
+            return false;
+        }
+        let span = self
+            .delegation_keyword_span(class, secondary)
+            .unwrap_or(span);
+        self.diags
+            .error(span, "there's a cycle in the delegation calls chain.");
+        true
+    }
+
+    fn current_constructor_accepts_delegation(
+        &self,
+        class: DeclId,
+        secondary: usize,
+        label: &str,
+        arguments: &CtorDelegationCall,
+    ) -> bool {
+        if label != "this" {
+            return false;
+        }
+        let Some(parameters) = self.delegation_argument_parameters(class, secondary, label, &[])
+        else {
+            return false;
+        };
+        let names = arguments
+            .names
+            .iter()
+            .any(Option::is_some)
+            .then_some(arguments.names.as_slice());
+        let Ok(slots) = map_param_list_args(
+            &arguments.args,
+            names,
+            &parameters,
+            arguments.trailing_lambda,
+        ) else {
+            return false;
+        };
+        let Some(types) = self.secondary_parameter_types(class, secondary) else {
+            return false;
+        };
+        slots.iter().enumerate().all(|(index, slot)| {
+            let Some(argument) = slot else {
+                return true;
+            };
+            let (Some(expected), Some(actual)) = (
+                types.get(index).copied(),
+                self.expr_types.get(argument.0 as usize).copied(),
+            ) else {
+                return false;
+            };
+            actual == Ty::Error
+                || expected == Ty::Error
+                || self.receiver_is_assignable(actual, expected)
+                || expected.accepts_numeric(actual)
+        })
+    }
+
+    fn secondary_parameter_types(&self, class: DeclId, secondary: usize) -> Option<Vec<Ty>> {
+        let index = self.resolved_index?;
+        let owner = self
+            .active_declarations?
+            .canonical_classifier_declaration(class, index)?;
+        let Decl::Class(classifier) = self.file.decl(class) else {
+            return None;
+        };
+        super::source_constructors::published_secondary_parameter_shapes(index, owner, classifier)?
+            .into_iter()
+            .nth(secondary)
     }
 
     /// The written `this` or `super`. Delegation argument errors point there.
