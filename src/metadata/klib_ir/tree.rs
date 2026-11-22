@@ -814,6 +814,21 @@ pub struct KlibIrParameter {
     pub default_value: Option<KlibIrExprId>,
 }
 
+impl KlibIrParameter {
+    /// The `crossinline`/`noinline` modifier the declaration wrote. A serialized value parameter's
+    /// IrFlags store IS_CROSSINLINE at bit 2 and IS_NOINLINE at bit 3: the serialized IR layout,
+    /// not metadata.proto's value-parameter flags.
+    pub(crate) fn inline_modifier(&self) -> crate::types::InlineParameterModifier {
+        if self.base.flags & (1 << 2) != 0 {
+            crate::types::InlineParameterModifier::Crossinline
+        } else if self.base.flags & (1 << 3) != 0 {
+            crate::types::InlineParameterModifier::Noinline
+        } else {
+            crate::types::InlineParameterModifier::None
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrTypeParameter {
     pub base: KlibIrDeclarationBase,

@@ -874,11 +874,9 @@ fn header(
         .map(IrParameterIdentity::resolved)
         .collect::<Vec<_>>();
     let first_parameter = match value_receiver {
-        Some(_)
-            if !function.context_parameters.is_empty() || function.extension_receiver.is_some() =>
-        {
+        Some(_) if !function.context_parameters.is_empty() => {
             return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                "a value class member with context parameters or an extension receiver",
+                "a value class member with context parameters",
             ));
         }
         Some((symbol, _)) => {
