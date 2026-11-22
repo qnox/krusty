@@ -1308,20 +1308,11 @@ impl BodyFirChecker<'_> {
                     .map(|singleton| self.singleton_call_receiver(expression, singleton))
                     .transpose()?;
                 let declaration = access.property.stable_declaration;
-                let substitutions = declaration.map_or_else(
-                    || {
-                        Ok::<_, BodyCheckFailure>(
-                            Vec::<FirTypeSubstitution>::new().into_boxed_slice(),
-                        )
-                    },
-                    |declaration| {
-                        self.selected_property_substitutions(
-                            expression,
-                            declaration,
-                            &access.property,
-                            false,
-                        )
-                    },
+                let substitutions = self.selected_property_substitutions(
+                    expression,
+                    declaration,
+                    &access.property,
+                    false,
                 )?;
                 (
                     declaration,
@@ -1516,11 +1507,12 @@ impl BodyFirChecker<'_> {
     /// Publish the declaration type arguments already fixed by extension-property selection.
     /// The selected property carries its specialized receiver/result while its generic signature
     /// retains the declaration templates; matching those shapes only serializes the resolver's
-    /// decision into stable FIR and performs no new candidate selection.
+    /// decision into stable FIR and performs no new candidate selection. A dependency property has
+    /// no module `declaration`; its accessor's provider identity names its formals instead.
     fn selected_property_substitutions(
         &self,
         expression: ExprId,
-        declaration: DeclarationId,
+        declaration: Option<DeclarationId>,
         selected: &crate::libraries::PropertyInfo,
         setter: bool,
     ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
@@ -1555,7 +1547,7 @@ impl BodyFirChecker<'_> {
     ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
         self.selected_accessor_substitutions(
             expression,
-            declaration,
+            Some(declaration),
             getter,
             selected_receiver,
             selected_type,
@@ -1566,7 +1558,7 @@ impl BodyFirChecker<'_> {
     fn selected_accessor_substitutions(
         &self,
         expression: ExprId,
-        declaration: DeclarationId,
+        declaration: Option<DeclarationId>,
         accessor: &crate::libraries::LibraryCallable,
         selected_receiver: Option<Ty>,
         selected_type: Ty,
@@ -1575,6 +1567,11 @@ impl BodyFirChecker<'_> {
         let Some(generic) = accessor.generic_sig.as_deref() else {
             return Ok(Box::new([]));
         };
+        // Kotlin admits a reified formal only on an inline accessor, and no provider records which
+        // formals of an inline dependency accessor are reified; its read binds none here.
+        if declaration.is_none() && accessor.inline.can_inline() {
+            return Ok(Box::new([]));
+        }
         let mut bindings = crate::symbol_resolver::GSigBinds::default();
         if let (Some(declared), Some(actual)) = (generic.receiver, selected_receiver) {
             crate::symbol_resolver::unify_inferred_ty(declared, actual, &mut bindings);
@@ -1608,22 +1605,34 @@ impl BodyFirChecker<'_> {
                         BodyCheckFailureKind::UnsupportedCallShape,
                     )
                 })?;
-                let parameter =
-                    self.index
-                        .type_parameter(declaration, ordinal)
-                        .ok_or_else(|| {
-                            self.failure(
-                                self.file.expr_span(expression),
-                                BodyCheckFailureKind::MissingStablePropertyTarget,
-                            )
-                        })?;
-                let header = self.index.type_parameter_header(parameter).ok_or_else(|| {
+                let missing_target = || {
                     self.failure(
                         self.file.expr_span(expression),
                         BodyCheckFailureKind::MissingStablePropertyTarget,
                     )
-                })?;
-                let reified = header.flags.is_reified();
+                };
+                let external = accessor.external_identity.map(|callable| {
+                    crate::fir::FirTypeParameterRef::External { callable, ordinal }
+                });
+                let (parameter, reified) = match declaration {
+                    Some(declaration) => {
+                        let parameter = self
+                            .index
+                            .type_parameter(declaration, ordinal)
+                            .ok_or_else(missing_target)?;
+                        let header = self
+                            .index
+                            .type_parameter_header(parameter)
+                            .ok_or_else(missing_target)?;
+                        (
+                            external.unwrap_or_else(|| parameter.into()),
+                            header.flags.is_reified(),
+                        )
+                    }
+                    // A non-inline dependency accessor: its provider identity names the formal,
+                    // which cannot be reified.
+                    None => (external.ok_or_else(missing_target)?, false),
+                };
                 let value = self.resolved_type(
                     self.file.expr_span(expression).ok_or_else(|| {
                         self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
@@ -1631,10 +1640,7 @@ impl BodyFirChecker<'_> {
                     value,
                 )?;
                 Ok(FirTypeSubstitution {
-                    parameter: accessor.external_identity.map_or_else(
-                        || parameter.into(),
-                        |callable| crate::fir::FirTypeParameterRef::External { callable, ordinal },
-                    ),
+                    parameter,
                     reified,
                     value,
                     reified_runtime: self.reified_substitution_runtime(reified, value, None),
@@ -2750,11 +2756,11 @@ impl BodyFirChecker<'_> {
         let checked_value = self.expression(value)?;
         let conversion =
             self.selected_value_conversion(value, checked_value, value_target, cause)?;
-        let substitutions = match (declaration, selected_property.as_ref()) {
-            (Some(declaration), Some(property)) => {
+        let substitutions = match selected_property.as_ref() {
+            Some(property) => {
                 self.selected_property_substitutions(value, declaration, property, true)?
             }
-            _ => Box::new([]),
+            None => Box::new([]),
         };
         let target = self.property_target(value, declaration, external, true, &substitutions)?;
         Ok(Some(FirExprKind::PropertyWrite {
