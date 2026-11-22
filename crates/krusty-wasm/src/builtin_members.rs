@@ -127,14 +127,14 @@ enum Operation {
     StringCompare,
     /// The characters of a string between two indices (`String.subSequence`).
     StringSubSequence,
+    /// The builder's entry for a member it does not realize while no builder exists: nothing can
+    /// call it, and a program constructing a builder declines a call through the member.
+    Unreachable,
     /// The order of the value a box holds and the value another box of its class holds
     /// (`Int.compareTo(Int)`).
     Compare,
     /// A builder member the runtime realizes (`StringBuilder.append(Char)`).
     Builder(BuilderMember),
-    /// The builder's entry for a member it does not realize while no builder exists: nothing can
-    /// call it, and a program constructing a builder declines a call through the member.
-    Unreachable,
     /// A call of the runtime function realizing a list member (`ArrayList.add(E)`), which takes
     /// the member's parameters, this many with the receiver, as they are carried. With `bound`,
     /// the index the member takes first must stay within it, or the runtime
@@ -447,9 +447,6 @@ impl Runtime {
                     .local_get(2)
                     .call(slice);
             }
-            (Receiver::Runtime, Operation::Unreachable) => {
-                code.unreachable();
-            }
             (Receiver::Box(form), Operation::Convert(to)) => {
                 form.emit_unbox(&mut code);
                 numeric_conversions::convert(&mut code, form.boxed, to)?;
@@ -492,6 +489,9 @@ impl Runtime {
                     code.local_get(parameter);
                 }
                 code.call(function);
+            }
+            (Receiver::Runtime, Operation::Unreachable) => {
+                code.unreachable();
             }
             (Receiver::Runtime, Operation::Builder(builder)) => {
                 let builders = &self.string_builders;
