@@ -575,6 +575,7 @@ fn target_regressions_run_only_their_focused_module_after_provisioning() {
         .args(["wasm", binary.to_str().unwrap(), "2.4.10"])
         .env("KRUSTY_KOTLINC", "/bin/true")
         .env("KRUSTY_DEPS_CACHE", &temp)
+        .env("KRUSTY_TARGET_CONFORMANCE_THREADS", "3")
         .env_remove("KRUSTY_KOTLIN_BOX_DIR")
         .env("KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS", "3")
         .env_remove("KRUSTY_REQUIRE_NATIVE_CONFORMANCE")
@@ -590,7 +591,7 @@ fn target_regressions_run_only_their_focused_module_after_provisioning() {
          kotlin_box_wasm_conformance::\n--skip\n\
          kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance\n--skip\n\
          kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance\n\
-         --test-threads\n1\n"
+         --test-threads\n3\n"
     );
     fs::remove_dir_all(temp).expect("remove target ownership fixture");
 }
