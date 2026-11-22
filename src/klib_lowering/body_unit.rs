@@ -1365,10 +1365,6 @@ impl<'s> CallLinker for Linker<'_, 's> {
         fake_overrides::inherited_getter(self, callee)
     }
 
-    fn inherited_getter(&self, callee: &KlibIrSignature) -> fake_overrides::Inherited {
-        fake_overrides::inherited_getter(self, callee)
-    }
-
     fn link_local_function(
         &mut self,
         ir: &mut IrFile,
