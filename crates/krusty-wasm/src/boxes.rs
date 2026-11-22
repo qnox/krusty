@@ -100,6 +100,11 @@ impl BoxAdapter {
             .struct_new(self.structure);
     }
 
+    /// Replace the reference on the stack with whether it is this box. A `null` is not.
+    pub(super) fn emit_is_box(self, code: &mut Code) {
+        code.ref_test(false, HeapType::Concrete(self.structure));
+    }
+
     /// Replace the reference on the stack, which the frontend checked is this box, with its value.
     pub(super) fn emit_unbox(self, code: &mut Code) {
         code.ref_cast(false, HeapType::Concrete(self.structure))

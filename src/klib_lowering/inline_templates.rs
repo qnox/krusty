@@ -92,6 +92,10 @@ impl TemplateCallees<'_> {
         super::type_evidence::same_type(Some(self.hierarchy()), left, right)
     }
 
+    fn classifier_parameter_bounds(&self, owner: crate::types::TypeName, index: usize) -> Vec<Ty> {
+        super::type_evidence::classifier_parameter_bounds(Some(self.hierarchy()), owner, index)
+    }
+
     fn constructor_bound(
         &self,
         parameters: &super::klib_types::KlibTypeParameters,
@@ -341,7 +345,7 @@ fn sign_template(
 /// How a call expands each parameter, as checked FIR publishes it for a source inline function:
 /// the extension receiver is a receiver, and a value or context parameter splices when it is a
 /// non-null function type that did not write `noinline`.
-fn expansion_modes(
+pub(super) fn expansion_modes(
     params: &[Ty],
     receiver: Option<usize>,
     modifiers: &[InlineParameterModifier],
@@ -365,7 +369,7 @@ fn expansion_modes(
 }
 
 /// The modifiers aligned with every parameter: the extension receiver writes none.
-fn modifiers_with_receiver(
+pub(super) fn modifiers_with_receiver(
     modifiers: &[InlineParameterModifier],
     receiver: Option<usize>,
 ) -> Vec<InlineParameterModifier> {
@@ -647,6 +651,10 @@ impl CallLinker for TemplateCalls<'_> {
 
     fn same_type(&self, left: Ty, right: Ty) -> bool {
         self.callees.same_type(left, right)
+    }
+
+    fn classifier_parameter_bounds(&self, owner: crate::types::TypeName, index: usize) -> Vec<Ty> {
+        self.callees.classifier_parameter_bounds(owner, index)
     }
 
     fn link_constructor(
