@@ -132,40 +132,6 @@ impl ProductionSignatureSemantics<'_> {
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
         if let Some(member) = member.as_ref() {
-            if let Some(declaration) = member.stable_declaration {
-                if self
-                    .headers
-                    .stub(declaration)
-                    .is_some_and(|stub| stub.signature_inference.is_some())
-                {
-                    let signature = demand(declaration)?;
-                    let parameters = signature
-                        .parameters
-                        .iter()
-                        .map(|parameter| parameter.get())
-                        .collect::<Vec<_>>();
-                    self.record_scoped_member_constraints(
-                        scope,
-                        receiver.get(),
-                        member,
-                        &parameters,
-                        &argument_types,
-                    );
-                    let ty = self.apply_demanded_member_expecting(
-                        receiver.get(),
-                        member,
-                        &signature,
-                        &argument_types,
-                        type_arguments,
-                        expected.map(crate::fir::ResolvedTy::get),
-                    )?;
-                    self.record_final_selected_publication(origin, publication, ty);
-                    return Ok(crate::fir::ResolvedMemberCall {
-                        ty: Some(ty),
-                        declaration: Some(declaration),
-                    });
-                }
-            }
             if let Some(signature) =
                 self.demanded_member_signature(member.stable_declaration, demand)?
             {
@@ -228,13 +194,25 @@ impl ProductionSignatureSemantics<'_> {
                 });
             }
         }
-        let declaration = member.and_then(|member| member.stable_declaration);
-        let ty = crate::fir::ResolvedTy::new(result).ok();
-        if ty.is_none() && declaration.is_none() {
-            return Err(Self::failure());
-        }
+        let declaration = member
+            .and_then(|member| member.stable_declaration)
+            .or(source_declaration);
+        // A selection without a provider call shape (a member extension imported from an object)
+        // still owns its signature: demand it instead of leaving the result unexplained.
+        let Some(ty) = crate::fir::ResolvedTy::new(result).ok() else {
+            let declaration = declaration.ok_or_else(Self::failure)?;
+            let ty = demand(declaration)?.result;
+            self.record_final_selected_publication(origin, publication, ty);
+            return Ok(crate::fir::ResolvedMemberCall {
+                ty: Some(ty),
+                declaration: Some(declaration),
+            });
+        };
         self.record_selected_result_publication(origin, publication);
-        Ok(crate::fir::ResolvedMemberCall { ty, declaration })
+        Ok(crate::fir::ResolvedMemberCall {
+            ty: Some(ty),
+            declaration,
+        })
     }
 }
 
