@@ -48,6 +48,10 @@ pub enum InstanceEntry {
         module: Box<str>,
         declaration: DeclarationId,
     },
+    /// Whether a reference is an instance of the named class another file of the module
+    /// declares: only the declaring file knows the class's object layout, so it answers with a
+    /// function of one reference that returns the test's result.
+    TypeTest(TypeName),
 }
 
 impl InstanceEntry {
@@ -58,7 +62,8 @@ impl InstanceEntry {
             Self::Object(_)
             | Self::EnumMember { .. }
             | Self::Constructor { .. }
-            | Self::ConstructorDefaults { .. } => None,
+            | Self::ConstructorDefaults { .. }
+            | Self::TypeTest(_) => None,
         }
     }
 }
@@ -121,9 +126,9 @@ pub fn link_reads<V: Clone>(
             InstanceEntry::EnumConstant(constant) => {
                 ir.class_id_by_name(constant.classifier).is_some()
             }
-            InstanceEntry::Constructor { .. } | InstanceEntry::ConstructorDefaults { .. } => {
-                continue
-            }
+            InstanceEntry::Constructor { .. }
+            | InstanceEntry::ConstructorDefaults { .. }
+            | InstanceEntry::TypeTest(_) => continue,
         };
         if declared_here || reads.contains_key(&instance) {
             continue;
@@ -179,6 +184,46 @@ pub fn link_constructor_reads<V: Clone>(
             }
             _ => continue,
         };
+        if reads.contains_key(&instance) {
+            continue;
+        }
+        let declared = module.declares_instance(&instance);
+        if let Some(link) = links.read(instance.clone(), declared, &mut allocate) {
+            reads.insert(instance, link);
+        }
+    }
+    reads
+}
+
+/// The link of each type test against another file's class that `ir` emits: an `is` or `!is`
+/// whose class `ir` does not declare and `module` certifies a file declares. One `module` does
+/// not certify has no link, and the target declines it.
+pub fn link_type_test_reads<V: Clone>(
+    ir: &IrFile,
+    module: &BackendModuleFacts,
+    links: &mut ModuleLinks<InstanceEntry, V>,
+    mut allocate: impl FnMut() -> V,
+) -> HashMap<InstanceEntry, V> {
+    let mut reads = HashMap::default();
+    for expression in crate::ir::emitted_body_roots(ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+    {
+        let IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::InstanceOf | crate::ir::IrTypeOp::NotInstanceOf,
+            type_operand,
+            ..
+        } = ir.expr(expression)
+        else {
+            continue;
+        };
+        let Some(classifier) = type_operand.non_null().obj_internal() else {
+            continue;
+        };
+        if ir.class_id_by_name(classifier).is_some() {
+            continue;
+        }
+        let instance = InstanceEntry::TypeTest(classifier);
         if reads.contains_key(&instance) {
             continue;
         }

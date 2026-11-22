@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Aggregates the corpus projects' results into one Markdown report and one JSON document.
 
-usage: summarize.py [--stars <stars.tsv>] [--plugins <dir>] [--json <out.json>] [--title <text>]
-                    <compare.json>...
+usage: summarize.py [--stars <stars.tsv>] [--expected <names.tsv>] [--results <dir>] [--plugins <dir>]
+                    [--json <out.json>] [--title <text>] [--previous <summary.json>] <compare.json>...
 
-`--stars` lists `<name>\t<stars>` per project. `--plugins` is searched for the `<name>.plugins.tsv`
-plugin surveys the reference builds wrote. The report has the per-project table, the reasons for
-every missed compilation, every error krusty's verify compiles reported grouped by cause, the
+`--stars` lists `<name>\t<stars>` per project. `--expected` lists the projects the run should measure
+(`<name>\t...`); one with no comparison is reported as not measured, with the reason read from the
+logs its job uploaded under `--results` (`corpus-<name>/logs`). `--plugins` is searched for the `<name>.plugins.tsv`
+plugin surveys the reference builds wrote. `--previous` is an earlier run's summary.json, which the
+report compares this run with. The report has the per-project table, the failed tasks ranked by the
+compilations they kept from running, the reasons for every missed compilation, every error krusty's
+verify compiles reported grouped by cause, the
 projects' own tests run on krusty's classes, what each build cost, and the Gradle and Kotlin compiler
 plugins the corpus uses most.
 """
@@ -16,6 +20,69 @@ import glob
 import json
 import os
 import re
+
+
+def read_names(path):
+    """The project names of a `<name>\t...` listing, in file order; none without a listing."""
+    if not path:
+        return []
+    with open(path) as f:
+        return [line.rstrip('\n').split('\t')[0] for line in f if line.strip()]
+
+
+def failure_reason(results, name):
+    """Why a project has no result: the first build of its job that failed, with the first line Gradle
+    gave as the cause and the HTTP status a failed download answered with, read from the logs the
+    job uploaded; or that it uploaded none."""
+    logs = os.path.join(results, f'corpus-{name}', 'logs')
+    try:
+        with open(os.path.join(logs, 'STATUS')) as f:
+            text = f.read()
+    except OSError:
+        return 'its job uploaded no logs: it stopped before a build ran, or the artifact is missing'
+    # `<name> <mode> exit <code> seconds <n>` of a build, `<name> <mode> tests exit ...` of its test
+    # build, whose log is `<name>.<mode>.tests.log`.
+    records = re.findall(r'^\S+ (\S+)( tests)? exit (\d+) seconds (\d+)$', text, re.MULTILINE)
+    failed = next(((mode, tests, code_, secs) for mode, tests, code_, secs in records if code_ != '0'), None)
+    if failed is None:
+        return 'every build exited 0 but the job wrote no comparison'
+    mode, tests, code_, secs = failed
+    reason = f"the {mode}{tests} build exited {code_} after {secs} s"
+    try:
+        with open(os.path.join(logs, f'{name}.{mode}{tests.replace(" ", ".")}.log'), errors='replace') as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return reason + ' and left no log'
+    for i, line in enumerate(lines):
+        if line.startswith('* What went wrong:'):
+            cause = next((l.strip() for l in lines[i + 1:] if l.strip()), '')
+            if cause:
+                reason += f': {cause}'
+            break
+    status = next((m.group(1) for l in lines for m in [re.search(r'Received status code (\d+)', l)] if m), None)
+    if status:
+        reason += f' (a download answered HTTP {status})'
+    return reason
+
+
+def not_measured(expected, projects, results):
+    """Every project the corpus lists that produced no comparison, with why."""
+    measured = {p['name'] for p in projects}
+    return [dict(name=name, reason=failure_reason(results, name))
+            for name in sorted(set(expected) - measured, key=str.lower)]
+
+
+def not_measured_section(missing):
+    """The projects with no result, so none is absent without a reason."""
+    if not missing:
+        return []
+    out = ['', '## Not measured', '',
+           'These projects are in the corpus but produced no comparison in this run, so they have no row above:',
+           '', '| Project | Why |', '| --- | --- |']
+    for entry in missing:
+        reason = entry['reason'].replace('|', '\\|')
+        out.append(f"| {entry['name']} | {reason} |")
+    return out
 
 
 def read_stars(path):
@@ -131,6 +198,81 @@ def error_causes(project):
     return sorted(ranked, key=lambda entry: (-compilations(entry), -len(entry[1]), entry[0]))
 
 
+def roots(project):
+    """Every failed task of a project's krusty build with the first error it logged and how many
+    compilations it kept from running, most first; None for a result recorded before the corpus
+    traced them (it has no `failed_tasks`)."""
+    failed = project.get('failed_tasks')
+    if failed is None:
+        return None
+    blocked = collections.Counter(task for r in project['rows'] for task in r.get('blocked_by') or [])
+    return [dict(task=task, error=error, blocked=blocked[task])
+            for task, error in sorted(failed.items(), key=lambda kv: (-blocked[kv[0]], kv[0]))]
+
+
+def roots_section(projects):
+    """The failed tasks that kept compilations from running, ranked across the corpus."""
+    ranked = sorted(((p['name'], root) for p in projects for root in roots(p) or [] if root['blocked']),
+                    key=lambda entry: (-entry[1]['blocked'], entry[0].lower(), entry[1]['task']))
+    if not ranked:
+        return []
+    out = ['', '## Root failures', '',
+           'Each failed task of the krusty builds, ranked by the compilations that did not run because it failed:',
+           'fixing it lets them run. A compilation stopped by two failed tasks counts for each.', '',
+           '| Project | Failed task | First error | Compilations it kept from running |',
+           '| --- | --- | --- | ---: |']
+    for name, root in ranked:
+        error = code(root['error']).replace('|', '\\|') if root['error'] else 'no error recorded'
+        out.append(f"| {name} | {code(root['task'])} | {error} | {root['blocked']} |")
+    return out
+
+
+def moved(before, now):
+    """`before → now (±change)`, or the number alone when it did not change."""
+    return f'{now}' if before == now else f'{before} → {now} ({now - before:+d})'
+
+
+def changes_section(projects, previous):
+    """What changed since the previous run's `summary.json`: per project that changed, the
+    compilations krusty built and the identical classes, then every compilation krusty no longer
+    builds, with its error, and every one it now builds."""
+    if previous is None:
+        return []
+    before = {p['name']: p for p in previous}
+    now = {p['name']: p for p in projects}
+    table, lost, gained = [], [], []
+    for name in sorted(before.keys() | now.keys(), key=str.lower):
+        p, q = now.get(name), before.get(name)
+        if q is None:
+            table.append(f"| {name} | new: {p['built']} / {p['compilations']} | new: {p['identical']} / {p['classes']} |")
+            continue
+        if p is None:
+            table.append(f"| {name} | not measured (was {q['built']} / {q['compilations']}) | "
+                         f"not measured (was {q['identical']} / {q['classes']}) |")
+            continue
+        was = {r['task']: r['built'] for r in q['rows']}
+        dropped = [r for r in p['rows'] if was.get(r['task']) and not r['built']]
+        added = [r['task'] for r in p['rows'] if r['built'] and not was.get(r['task'])]
+        if dropped:
+            lost += [f"- **{name}** {code(r['task'])}: {code(r.get('error') or r.get('fallback') or 'krusty wrote no class')}"
+                     for r in dropped]
+        if added:
+            gained.append(f"- **{name}** " + ', '.join(code(task) for task in added))
+        if (p['built'], p['compilations'], p['identical'], p['classes']) != \
+                (q['built'], q['compilations'], q['identical'], q['classes']) or dropped or added:
+            table.append(f"| {name} | {moved(q['built'], p['built'])} / {p['compilations']} | "
+                         f"{moved(q['identical'], p['identical'])} / {p['classes']} |")
+    out = ['', '## Since the previous run', '']
+    if not (table or lost or gained):
+        return out + ['Nothing changed.']
+    out += ['| Project | Compilations built by krusty | Identical classes |', '| --- | ---: | ---: |'] + table
+    if lost:
+        out += ['', 'No longer built by krusty:', ''] + lost
+    if gained:
+        out += ['', 'Newly built by krusty:', ''] + gained
+    return out
+
+
 def counted(number, noun):
     return f'{number} {noun}' + ('' if number == 1 else 's')
 
@@ -212,7 +354,7 @@ def measured_cell(project):
     """`2026-10-25, krusty 4dd7475` linked to the run, from the `measured` record publishing adds."""
     m = project.get('measured')
     if not m:
-        return ''
+        return 'not recorded'
     text = f"{m['date']}, krusty {m['commit'][:7]}"
     return f"[{text}]({m['run']})" if m.get('run') else text
 
@@ -264,8 +406,9 @@ def cost_section(projects):
             totals['krusty', key] += r[key]
     total = {key: pair(totals['kotlinc', key], totals['krusty', key], seconds, key == 'built_compile_seconds')
              for key in ('built_compile_seconds', 'compile_seconds', 'wall_seconds', 'cpu_seconds')}
-    out.append(f"| **Total** | **{total['built_compile_seconds']}** | **{total['compile_seconds']}** | | | "
-               f"**{total['wall_seconds']}** | **{total['cpu_seconds']}** |")
+    out += ['', f"**Total** over {counted(len(measured), 'project')}: compile time of the compilations krusty built "
+                f"{total['built_compile_seconds']}, of all compilations {total['compile_seconds']}, "
+                f"build wall time {total['wall_seconds']}, build CPU time {total['cpu_seconds']}."]
     return out
 
 
@@ -296,11 +439,12 @@ def test_section(projects):
            'Each project\'s own JVM tests run after each build, on the classes it compiled. Only a test that passed on',
            'kotlinc\'s classes is compared. A test task runs on *krusty\'s classes only* when krusty built every',
            'compilation it runs; the other tasks also run classes kotlinc compiled.',
-           '',
-           '| Project | Test builds (kotlinc / krusty exit) | Passing on krusty\'s classes, all tasks | Fail | Skipped |'
-           ' Not run | Passing, tasks on krusty\'s classes only |',
-           '| --- | --- | ---: | ---: | ---: | ---: | ---: |']
+           '']
     totals = {scope: collections.Counter() for scope in ('total', 'krusty_classes')}
+    if tested:
+        out += ['| Project | Test builds (kotlinc / krusty exit) | Passing on krusty\'s classes, all tasks | Fail | Skipped |'
+                ' Not run | Passing, tasks on krusty\'s classes only |',
+                '| --- | --- | ---: | ---: | ---: | ---: | ---: |']
     for p in tested:
         t, own = p['tests']['total'], p['tests']['krusty_classes']
         exits = p['tests']['exit']
@@ -309,14 +453,19 @@ def test_section(projects):
                    f"{passing(own)} in {own['tasks']} / {t['tasks']} tasks |")
         for scope in totals:
             totals[scope].update(p['tests'][scope])
-    for p in unavailable:
-        reasons = '; '.join(f'the {mode} test build {why}' for mode, entry in p['tests']['unavailable'].items()
-                            for why in unavailable_reasons(entry))
-        out.append(f"| {p['name']} | {p['tests']['exit'].get('kotlinc')} / {p['tests']['exit'].get('krusty')} | "
-                   f"unavailable: {reasons} | | | | |")
     t, own = totals['total'], totals['krusty_classes']
-    out.append(f"| **Total** | | **{passing(t)}** | **{t['failed']:,}** | **{t['skipped']:,}** | "
-               f"**{t['not_run']:,}** | **{passing(own)} in {own['tasks']} / {t['tasks']} tasks** |")
+    if tested:
+        out += ['', f"**Total** over {counted(len(tested), 'project')}: {passing(t)} passing on krusty's classes, "
+                    f"{t['failed']:,} failing, {t['skipped']:,} skipped, {t['not_run']:,} not run; "
+                    f"{passing(own)} in {own['tasks']} / {t['tasks']} tasks on krusty's classes only."]
+    if unavailable:
+        out += ([''] if tested else []) + [
+            'Tests not compared, each with the reason its test builds cannot be compared:', '']
+        for p in unavailable:
+            reasons = '; '.join(f'the {mode} test build {why}' for mode, entry in p['tests']['unavailable'].items()
+                                for why in unavailable_reasons(entry))
+            exits = p['tests']['exit']
+            out.append(f"- **{p['name']}** (test builds {exits.get('kotlinc')} / {exits.get('krusty')}): {reasons}")
     lost = [(p['name'], task) for p in tested for task in p['tests']['tasks'] if task['not_passing']]
     if lost:
         out += ['', 'First tests that pass on kotlinc\'s classes and not on krusty\'s:', '']
@@ -353,7 +502,7 @@ def hotspot_section(projects):
     return out
 
 
-def report(projects, stars, surveys, title):
+def report(projects, stars, surveys, title, previous=None, not_measured=()):
     out = []
     if title:
         out += [f'# {title}', '']
@@ -366,7 +515,7 @@ def report(projects, stars, surveys, title):
     for p in projects:
         measured = p['reference_exit'] == 0
         reference = 'ok' if measured else f"failed (exit {p['reference_exit']})"
-        star = f"{stars[p['name']]:,}" if p['name'] in stars else ''
+        star = f"{stars[p['name']]:,}" if p['name'] in stars else 'not fetched'
         out.append(f"| {p['name']} | {star} | {p['loc']['kotlin']:,} | {p['loc']['java']:,} | {reference} | "
                    f"{p['built']} / {p['compilations']} | {p['identical']:,} / {p['classes']:,}"
                    f"{share(p['identical'], p['classes'])} |" + (f" {measured_cell(p)} |" if dated else ''))
@@ -375,8 +524,12 @@ def report(projects, stars, surveys, title):
             compilations += p['compilations']
             identical += p['identical']
             classes += p['classes']
-    out.append(f'| **Measured total** | | | | | **{built} / {compilations}** | '
-               f'**{identical:,} / {classes:,}{share(identical, classes)}** |' + (' |' if dated else ''))
+    out += ['', f'**Measured total:** {built} / {compilations} compilations built by krusty, '
+                f'{identical:,} / {classes:,} identical classes{share(identical, classes)}.']
+    out += not_measured_section(not_measured)
+
+    out += roots_section(projects)
+    out += changes_section(projects, previous)
 
     out += ['', '## Missed compilations', '']
     any_miss = False
@@ -416,9 +569,12 @@ def report(projects, stars, surveys, title):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--stars')
+    parser.add_argument('--expected', help='a `<name>\\t...` listing of every project the run should measure')
+    parser.add_argument('--results', help='the directory of the jobs\' corpus-<name> artifacts')
     parser.add_argument('--plugins')
     parser.add_argument('--json')
     parser.add_argument('--title')
+    parser.add_argument('--previous', help="the previous run's summary.json")
     parser.add_argument('reports', nargs='+')
     args = parser.parse_args()
     projects = []
@@ -428,13 +584,18 @@ def main():
     projects.sort(key=lambda p: p['name'].lower())
     stars = read_stars(args.stars)
     surveys = read_plugins(args.plugins, [p['name'] for p in projects])
-    print(report(projects, stars, surveys, args.title), end='')
+    previous = None
+    if args.previous:
+        with open(args.previous) as f:
+            previous = json.load(f)['projects']
+    missing = not_measured(read_names(args.expected), projects, args.results or '')
+    print(report(projects, stars, surveys, args.title, previous, missing), end='')
     if args.json:
         with open(args.json, 'w') as f:
-            json.dump(dict(projects=[dict(p, stars=stars.get(p['name']), misses=misses(p),
+            json.dump(dict(not_measured=missing, projects=[dict(p, stars=stars.get(p['name']), misses=misses(p),
                                           errors=[dict(cause=c, errors=[dict(error=e, compilations=t) for e, t in errors])
                                                   for c, errors in error_causes(p)],
-                                          verification=verification(p),
+                                          verification=verification(p), roots=roots(p),
                                           plugins=surveys.get(p['name'], {})) for p in projects]),
                       f, indent=1)
 

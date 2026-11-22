@@ -18,7 +18,9 @@ use crate::kt_string::KtString;
 use crate::types::{Ty, TypeName, TypeNameList};
 
 mod checked_klib_facts;
+mod checked_klib_sam;
 pub(crate) use checked_klib_facts::{CheckedKlibDependencyFacts, CheckedKlibTypeFacts};
+pub(crate) use checked_klib_sam::{CheckedKlibSamDeclaration, KlibSamKey};
 mod checked_member_call_edge;
 pub(crate) use checked_member_call_edge::CheckedMemberCallEdge;
 
@@ -61,6 +63,8 @@ mod default_arguments;
 mod enum_switch_whens;
 pub use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
+mod plugin_file_facts;
+pub use plugin_file_facts::PluginFileFacts;
 mod enums;
 mod expect_actualization;
 mod expression_copy;
@@ -152,7 +156,7 @@ pub use bridges::{
     Bridge, BridgeAccessorRole, BridgeKind, BridgeParameter, BridgePropertyImplementation,
     CollectionBarrierCheck, CollectionBarrierParameter, CollectionBarrierPlan,
 };
-pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget};
+pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget, ValueClassAdapter};
 pub use catches::IrCatch;
 pub use companion_blocks::{IrCompanionBlockProperty, IrCompanionBlocks, IrStaticPlacement};
 pub use constants::IrConst;
@@ -181,7 +185,7 @@ pub use lambda_classes::{IrInvokeBridge, IrLambdaCapture, IrLambdaClass, IrSamWr
 pub(crate) use lifting_sequences::IrLiftingEntry;
 pub use lifting_sequences::{IrLiftingRoot, IrLiftingSequence};
 pub use local_class_names::{
-    IrClassDeclarationContext, IrLocalClassNameProvenance, IrLocalClassOwner,
+    IrClassDeclarationContext, IrLocalClassNameProvenance, IrLocalClassNameRoot, IrLocalClassOwner,
 };
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
@@ -203,16 +207,33 @@ pub use properties::{
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
-    FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable,
-    IrConstructorReferenceDeclaration, IrPropertyFunctionReference, IrReferencedProperty, PropRef,
-    ReflectedCallable,
+    BoundContextUnbox, FuncRef, IrCallableReference, IrCallableReferenceTarget,
+    IrClassifierCallable, IrConstructorReferenceDeclaration, IrPropertyFunctionReference,
+    IrReferencedProperty, PropRef, ReflectedCallable,
 };
-pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
+pub use sam_target::{
+    IrSamMethod, IrSamMethodFrame, IrSamPlacement, IrSamTarget, IrSamTypeParameter,
+};
 pub use site_class_names::{IrSiteClassContainer, IrSiteClassName};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
+
+/// What checking decided about a context argument's evaluation, recorded with the argument so a copy
+/// of the call keeps it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IrContextArgumentRole {
+    /// A value argument, or a context argument written as an ordinary source argument.
+    #[default]
+    Ordinary,
+    /// A context parameter or implicit receiver the scope supplied. It is no source argument, so it
+    /// never reorders a call's written operands.
+    Implicit,
+    /// An explicit context argument evaluated after the extension receiver, as it is written,
+    /// although it is passed before it.
+    AfterReceiver,
+}
 
 /// One checker-selected argument after source-order evaluation has been preserved. Parameter
 /// ordinals and omitted/default/vararg decisions are semantic facts; no later phase remaps them.
@@ -221,6 +242,8 @@ pub enum IrCheckedArgument {
     Expression {
         parameter: u32,
         value: ExprId,
+        /// Whether checking selected this argument from the scope or ordered it after the receiver.
+        context: IrContextArgumentRole,
     },
     Default {
         parameter: u32,
@@ -1754,9 +1777,10 @@ pub struct IrFile {
     /// What the Compose plugin recorded from this file's source at the handoff, for its body
     /// transform. `None` unless the plugin is active and the file declares a composable function.
     pub compose: Option<Box<crate::plugins::compose::ComposeFileFacts>>,
-    /// What the atomicfu plugin recorded from this file's source at the handoff, for its body
-    /// transform. `None` unless the plugin is active and the file declares an atomic it lowers.
-    pub atomicfu: Option<Box<crate::plugins::atomicfu::AtomicfuFileFacts>>,
+    /// What compiler plugins recorded from this file's source at the handoff, for their own later
+    /// phases. The atomicfu plugin records its facts here when the file declares an atomic it
+    /// lowers.
+    pub plugin_facts: PluginFileFacts,
     /// The Parcelize plugin's handoff facts; `None` unless the file declares a parcelized class.
     pub parcelize: Option<Box<crate::plugins::parcelize::ParcelizeFileFacts>>,
     /// Package functions a compiler plugin gave physical parameters their declaration does not
@@ -2901,7 +2925,9 @@ pub use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
 pub use debug_locals::{IrCatchBinding, IrCatchName, IrLambdaForm, IrLambdaOrigin};
 pub use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
-pub use generated_members::{IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember};
+pub use generated_members::{
+    IrGeneratedClassRole, IrGeneratedFunctionRole, IrMemberPlacement, IrValueClassAnyMember,
+};
 pub use generated_members::{
     IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,

@@ -98,10 +98,7 @@ pub(super) fn define(
             let params = accessor
                 .parameters
                 .iter()
-                .map(|ty| {
-                    super::parameter_carrier_of(*ty)?
-                        .ok_or_else(|| "a `Unit` parameter".to_string())
-                })
+                .map(|ty| super::parameter_carrier_of(*ty))
                 .collect::<Result<Vec<_>, Unsupported>>()?;
             let results = carrier(accessor.result)?.into_iter().collect::<Vec<_>>();
             let signature = module.func_type(params, results);
@@ -173,7 +170,7 @@ impl Body<'_> {
             );
         }
         for (argument, ty) in arguments.into_iter().zip(parameters) {
-            self.value(argument, ty)?;
+            self.argument(argument, ty)?;
         }
         self.code.call(function);
         Ok(())

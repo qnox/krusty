@@ -55,6 +55,11 @@ The script registers a `krustyModel` task and prints JSON records for:
   Java toolchain.
 
 The init script is stored in the system temporary directory. It does not edit the project.
+The daemon that compiles the script runs on a JVM the project's Gradle can execute. When that
+JVM is outside the range the release supports, the build action selects an installed JDK the
+release can run.
+The probe passes `--no-configuration-cache` except when the build enables isolated projects.
+That mode requires the configuration cache and rejects the flag.
 Non-JVM multiplatform compilations are filtered by both the script and the Rust parser so native or
 JavaScript roots and `.klib` files cannot enter the JVM analysis classpath.
 

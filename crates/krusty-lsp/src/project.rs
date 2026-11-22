@@ -5,6 +5,7 @@ pub mod classpath_presence;
 pub mod detect;
 pub mod fingerprint;
 pub mod gradle;
+mod gradle_daemon_jvm;
 mod intellij_classpath;
 pub mod jdk;
 pub mod jps;
