@@ -37,7 +37,7 @@ impl CallLinker for NoCalls {
         &mut self,
         _: &mut IrFile,
         _: &KlibAccessorIdSignature,
-    ) -> Lowered<LinkedAccessor> {
+    ) -> Lowered<LinkedAccessorCall> {
         panic!("no accessor")
     }
     fn singleton(&mut self, _: &mut IrFile, _: TypeName) -> Lowered<()> {
