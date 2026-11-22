@@ -375,6 +375,7 @@ impl CallArgKind {
                     generic_sig,
                     parameter,
                     &bindings,
+                    admits,
                 )
             })
         };
@@ -475,21 +476,23 @@ pub(crate) struct ProvisionalResult {
     pub(crate) open: bool,
 }
 
-/// Whether binding a nested call's result to an enclosing expectation keeps the nullability the
+/// Whether binding a nested call's result to an enclosing expectation keeps the type evidence the
 /// call itself established.
 ///
 /// A declared nullable result (`fun <R> f(c: Column<R>): Column<R>?`) stays nullable under every
-/// binding, so a non-null expectation cannot accept it. An input-constrained result also keeps a
-/// nullable lower bound its own arguments put on a result formal, read back from the call's
-/// expectation-free `provisional` type: `id(x)` with `x: String?` cannot become a `String`, so a
-/// `String` parameter does not accept it. Only nullability is read back. A provisional's classifier
-/// may still be a placeholder when the call's own inputs are contextual (`forward(produce())`),
-/// and the expectation may widen a binding anyway (`mutableListOf(1)` as `MutableList<Number>`).
+/// binding, so a non-null expectation cannot accept it. An input-constrained result carries lower
+/// bounds its own arguments put on its result formals, read back from the call's expectation-free
+/// `provisional` type. The expectation may widen such a binding (`mutableListOf(1)` as
+/// `MutableList<Number>`) but never narrow it: `id(x)` with `x: String?` cannot become a `String`,
+/// and `value.let { f(it) }` whose lambda returns `T` cannot become an `R`. A lower bound that is
+/// only its formal's declared bound is a placeholder, not evidence: the call's own inputs were
+/// contextual (`forward(produce())`), so only its nullability is read back.
 pub(crate) fn expected_result_keeps_call_evidence(
     provisional: ProvisionalResult,
     generic_sig: &GenericSig,
     expected: Ty,
     expected_bindings: &super::GSigBinds,
+    is_subtype: impl Fn(Ty, Ty) -> bool,
 ) -> bool {
     let admits_null = |ty: Ty| ty.admits_null() || ty.upper_bound_admits_null();
     if generic_sig.ret.is_nullable() && !admits_null(expected) {
@@ -501,12 +504,41 @@ pub(crate) fn expected_result_keeps_call_evidence(
     let mut input_bindings = super::GSigBinds::default();
     super::unify_inferred_ty(generic_sig.ret, provisional.ty, &mut input_bindings);
     input_bindings.iter().all(|(formal, input)| {
-        !formal_is_input_constrained(generic_sig, formal)
-            || !input.admits_null()
-            || expected_bindings
-                .get(formal)
-                .is_none_or(|expected| admits_null(*expected))
+        if !formal_is_input_constrained(generic_sig, formal) {
+            return true;
+        }
+        let Some(&expected) = expected_bindings.get(formal) else {
+            return true;
+        };
+        if input.admits_null() && !admits_null(expected) {
+            return false;
+        }
+        formal_bound_placeholder(generic_sig, formal, *input)
+            || *input == Ty::Error
+            || input.mentions_pending()
+            || is_subtype(*input, expected)
     })
+}
+
+/// Whether `input` is only `formal`'s declared upper bound, which a provisional result reads when
+/// nothing but the enclosing expectation constrains that formal.
+fn formal_bound_placeholder(
+    generic_sig: &GenericSig,
+    formal: &crate::types::TyParamName,
+    input: Ty,
+) -> bool {
+    let bounds = generic_sig
+        .formals
+        .iter()
+        .position(|declared| declared == formal)
+        .and_then(|index| generic_sig.formal_bounds.get(index))
+        .filter(|bounds| !bounds.is_empty());
+    match bounds {
+        Some(bounds) => bounds
+            .iter()
+            .any(|bound| bound.non_null() == input.non_null()),
+        None => input.non_null().is_semantic_top(),
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,6 @@
-use super::fixtures::{add_method, class, field, function, record_override};
+use super::fixtures::{
+    add_method, class, field, function, record_external_interface_override, record_override,
+};
 use super::*;
 use crate::ir::IrFile;
 
@@ -220,4 +222,52 @@ fn an_installed_interface_extending_another_installed_one_is_refused() {
             "an installed interface extending one with module-wide numbers (`Derived`)".to_string()
         )
     );
+}
+
+#[test]
+fn a_value_classs_own_member_that_overrides_nothing_takes_no_table_slot() {
+    // Every support unit that emits some of a value class's members must lay its table out
+    // alike, so a member no one overrides is called directly and carries no slot.
+    let mut plain = IrFile::default();
+    let ordinary = class(&mut plain, "Box", "kotlin/Any", 0);
+    add_method(
+        &mut plain,
+        ordinary,
+        function("own", "Box", vec![], Ty::Int, false),
+    );
+    let mut value = IrFile::default();
+    let boxed = class(&mut value, "Box", "kotlin/Any", 0);
+    value.classes[boxed as usize].is_value = true;
+    add_method(
+        &mut value,
+        boxed,
+        function("own", "Box", vec![], Ty::Int, false),
+    );
+    let slots = |ir: &IrFile, class| tables(ir).expect("tables").table(class).vtable.len();
+    assert_eq!(slots(&plain, ordinary), slots(&value, boxed) + 1);
+}
+
+#[test]
+fn a_value_classs_member_implementing_a_dependency_interface_keeps_its_slot() {
+    // `UIntArray.iterator` implements `Collection.iterator`, which the program names only by
+    // an override edge: interface dispatch reaches the member through its slot.
+    let mut value = IrFile::default();
+    let boxed = class(&mut value, "Box", "kotlin/Any", 0);
+    value.classes[boxed as usize].is_value = true;
+    let own = add_method(
+        &mut value,
+        boxed,
+        function("own", "Box", vec![], Ty::Int, false),
+    );
+    let implemented = add_method(
+        &mut value,
+        boxed,
+        function("size", "Box", vec![], Ty::Int, false),
+    );
+    record_external_interface_override(&mut value, boxed, implemented);
+    let tables = tables(&value).expect("tables");
+    let vtable = &tables.table(boxed).vtable;
+    assert_eq!(vtable.len(), 5);
+    assert_eq!(vtable[4], Slot::Function(implemented));
+    assert!(!vtable.contains(&Slot::Function(own)));
 }

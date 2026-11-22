@@ -204,6 +204,7 @@ pub(super) fn record(
         },
         rejections,
     );
+    reject_composable_property_reads(ir, source, composable, rejections);
     super::class_stability::declare(ir, source, runtime, rejections);
     if ir.file_annotations.applications().any(|annotation| {
         GROUP_ANNOTATIONS[4..]
@@ -2202,6 +2203,43 @@ fn composable_calls(
             ))
         })
         .collect()
+}
+
+/// Reject every read of a dependency property whose getter is composable: the pass does not give
+/// a getter call the caller's composer and `$changed` yet.
+fn reject_composable_property_reads(
+    ir: &IrFile,
+    source: &PluginSourceView<'_>,
+    composable: TypeName,
+    rejections: &mut Vec<PluginRejection>,
+) {
+    for (index, expression) in ir.exprs.iter().enumerate() {
+        let IrExpr::Checked(operation) = expression else {
+            continue;
+        };
+        let crate::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } = &**operation
+        else {
+            continue;
+        };
+        let composable_getter = source
+            .checked
+            .dependency_property_getter(*target)
+            .is_some_and(|getter| {
+                source
+                    .checked
+                    .dependency_annotations(getter)
+                    .contains(&composable)
+            });
+        if composable_getter {
+            rejections.push(PluginRejection {
+                refusal: true,
+                span: source
+                    .expression_span(ir, index as ExprId)
+                    .unwrap_or(crate::diag::Span::new(0, 0)),
+                message: unsupported("a read of a composable property"),
+            });
+        }
+    }
 }
 
 /// Reject every declared type that names a composable function type, except the parameters
