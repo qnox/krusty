@@ -200,6 +200,16 @@ fn wasm_official_dependency_definitely_non_null_assertions_lower_from_their_bodi
     );
 }
 
+/// Two files of the consumer each install a different file-private interface of the library:
+/// their members take distinct module-wide numbers, so each call reaches its own member.
+#[test]
+fn wasm_official_dependency_interfaces_installed_by_two_files_keep_distinct_numbers() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyInstalledInterfacesInTwoFiles.kt"),
+        "DependencyInstalledInterfacesInTwoFiles",
+    );
+}
+
 /// Run the shared two-module program through the product producer, then compile its consumer
 /// against the library the exact official Wasm compiler produces and run it, on every target.
 fn run_against_official_producer(source: &str, name: &str) {

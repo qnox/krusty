@@ -483,14 +483,32 @@ fn native_reference_runner_calls_the_packaged_final_module_box() {
 /// installed in the unit, so the type test and the member call dispatch through it.
 #[test]
 fn native_official_dependency_file_private_interface_dispatches_through_its_installed_class() {
-    let source = include_str!(
-        "box_regressions/multimodule/dependencyInstalledInterfaceTypeTestAndMemberCall.kt"
-    );
-    super::box_reference_classes::checked_box(
-        source,
+    run_native_against_official_producer(
+        include_str!(
+            "box_regressions/multimodule/dependencyInstalledInterfaceTypeTestAndMemberCall.kt"
+        ),
         "dependencyInstalledInterfaceTypeTestAndMemberCall",
-    )
-    .expect("pinned kotlinc must run the whole producer and consumer");
+    );
+}
+
+// PLATFORM-SPECIFIC: official Kotlin/Native KLIB production and linking, as above. The complete
+// portable Kotlin input is the shared multi-module regression.
+//
+/// Two files of the consumer each install a different file-private interface of the library:
+/// their members take distinct module-wide numbers, so each call reaches its own member.
+#[test]
+fn native_official_dependency_interfaces_installed_by_two_files_keep_distinct_numbers() {
+    run_native_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyInstalledInterfacesInTwoFiles.kt"),
+        "dependencyInstalledInterfacesInTwoFiles",
+    );
+}
+
+/// Run the shared two-module program's consumer against the library the pinned kotlinc-native
+/// produces, after kotlinc has established the program's result.
+fn run_native_against_official_producer(source: &str, stem: &str) {
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole producer and consumer");
     let Some(target) = host() else {
         if std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_some() {
             panic!("required Native target/KLIB setup is unavailable");
@@ -570,7 +588,7 @@ fn native_official_dependency_file_private_interface_dispatches_through_its_inst
     }
     .run_artifacts(
         &work,
-        "officialDependencyInstalledInterface",
+        stem,
         "import",
         source,
         box_lane::CompiledProgram {
