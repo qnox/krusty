@@ -37712,8 +37712,7 @@ impl<'a> Checker<'a> {
         }
         for (index, constructor) in class.secondary_ctors.iter().enumerate() {
             let params = &secondary_params[index];
-            // An unpublished parameter type is still a `this(...)` candidate, including on the
-            // constructor that writes the delegation. kotlinc lists that constructor.
+            // An unpublished parameter stays a `this(...)` candidate, including this constructor.
             if index == secondary && !params.iter().copied().any(Ty::mentions_error) {
                 continue;
             }
@@ -38255,14 +38254,13 @@ impl<'a> Checker<'a> {
                 resolved: selected, ..
             } => *selected,
             SourceConstructorSelection::NoMatch { rejected, .. } => {
-                if !self.report_single_constructor_argument_mismatches(
+                self.report_rejected_delegation(
                     scope,
                     arguments,
                     &candidates,
                     &rejected,
-                ) {
-                    self.report_unmatched_constructor_delegation(span, label);
-                }
+                    (class, secondary, span, label),
+                );
                 return;
             }
             SourceConstructorSelection::Ambiguous => {

@@ -315,3 +315,37 @@ fn a_supertype_initialization_without_a_primary_constructor_matches_kotlinc() {
         result.krusty_stderr, result.reference_stderr
     );
 }
+
+const MISSING_DELEGATION: &str = "\
+class Box {
+    constructor(x: Int) : this()
+}
+
+open class Base(val item: Int)
+class Child : Base {
+    constructor(item: Int) : super()
+}
+";
+
+#[test]
+fn a_missing_constructor_delegation_argument_matches_kotlinc() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Delegation.kt", MISSING_DELEGATION)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}

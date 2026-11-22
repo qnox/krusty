@@ -110,6 +110,146 @@ impl Checker<'_> {
         !reportable.is_empty()
     }
 
+    /// A delegation no constructor accepted. A single candidate that is only missing required
+    /// arguments reports those the way any other call does; several candidates and every other
+    /// mismatch keep the caller's own diagnostic.
+    pub(super) fn report_rejected_delegation(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        arguments: &CtorDelegationCall,
+        candidates: &[CtorDelegationCandidate],
+        rejected: &[ConstructorCandidateRejection],
+        site: (DeclId, usize, Span, &str),
+    ) {
+        let (class, secondary, span, label) = site;
+        if self
+            .report_single_constructor_argument_mismatches(scope, arguments, candidates, rejected)
+        {
+            return;
+        }
+        if self.report_missing_delegation_arguments(
+            class, secondary, span, label, arguments, candidates,
+        ) {
+            return;
+        }
+        self.report_unmatched_constructor_delegation(span, label);
+    }
+
+    fn report_missing_delegation_arguments(
+        &mut self,
+        class: DeclId,
+        secondary: usize,
+        span: Span,
+        label: &str,
+        arguments: &CtorDelegationCall,
+        candidates: &[CtorDelegationCandidate],
+    ) -> bool {
+        let Some(parameters) =
+            self.delegation_argument_parameters(class, secondary, label, candidates)
+        else {
+            return false;
+        };
+        let span = self
+            .delegation_keyword_span(class, secondary)
+            .unwrap_or(span);
+        let names = arguments
+            .names
+            .iter()
+            .any(Option::is_some)
+            .then_some(arguments.names.as_slice());
+        let Err(failure) = map_param_list_args(
+            &arguments.args,
+            names,
+            &parameters,
+            arguments.trailing_lambda,
+        ) else {
+            return false;
+        };
+        if !failure
+            .errors
+            .iter()
+            .all(|error| matches!(error, CallArgMappingError::MissingRequired { .. }))
+        {
+            return false;
+        }
+        for error in &failure.errors {
+            self.diags.error(span, error.to_string());
+        }
+        true
+    }
+
+    /// The written `this` or `super`. Delegation argument errors point there.
+    fn delegation_keyword_span(&self, class: DeclId, secondary: usize) -> Option<Span> {
+        let Decl::Class(classifier) = self.file.decl(class) else {
+            return None;
+        };
+        let keyword = classifier
+            .secondary_ctors
+            .get(secondary)?
+            .delegation_keyword;
+        (keyword.lo != 0).then_some(keyword)
+    }
+
+    /// Parameter names of the one constructor a delegation could reach. The current secondary is
+    /// not a selectable `this(...)` candidate, but it is that constructor when nothing else is.
+    fn delegation_argument_parameters(
+        &self,
+        class: DeclId,
+        secondary: usize,
+        label: &str,
+        candidates: &[CtorDelegationCandidate],
+    ) -> Option<crate::libraries::ParamList> {
+        if let [candidate] = candidates {
+            return Some(crate::libraries::ParamList {
+                visibility: Visibility::Public,
+                names: candidate.param_names.clone(),
+                defaults: candidate.defaults.as_slice().into(),
+                types: candidate.target.params().to_vec(),
+                recv_fun: candidate.lambda_receivers.as_slice().into(),
+                vararg: candidate.vararg,
+                annotation: None,
+            });
+        }
+        if !candidates.is_empty() || label != "this" {
+            return None;
+        }
+        let Decl::Class(classifier) = self.file.decl(class) else {
+            return None;
+        };
+        let constructor = classifier.secondary_ctors.get(secondary)?;
+        let context = classifier.context_params.len();
+        Some(crate::libraries::ParamList {
+            visibility: Visibility::Public,
+            names: classifier
+                .context_params
+                .iter()
+                .map(|parameter| parameter.name.clone())
+                .chain(
+                    constructor
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.name.clone()),
+                )
+                .collect(),
+            defaults: std::iter::repeat_n(false, context)
+                .chain(
+                    constructor
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.default.is_some()),
+                )
+                .collect(),
+            types: Vec::new(),
+            recv_fun: crate::libraries::ParamFlags::new(),
+            vararg: constructor
+                .params
+                .iter()
+                .position(|parameter| parameter.is_vararg)
+                .map(|ordinal| ordinal + context),
+            annotation: None,
+        })
+    }
+
     pub(super) fn match_ctor_delegation_candidate(
         &self,
         scope: &CheckerScope<'_>,
