@@ -1699,11 +1699,24 @@ impl BodyFirChecker<'_> {
         } else {
             crate::types::AssertionMode::Runtime
         };
+        let reified_enum_operation = super::enum_reflection::reified_parameter_operation(
+            selected.callable.compiler_intrinsic,
+            selected.callable.ret,
+            |classifier| {
+                ResolvedTy::new(classifier).map_err(|error| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnpublishableType(error),
+                    )
+                })
+            },
+        )?;
         let selected_intrinsic = super::compiler_intrinsics::selected_top_level(
             selected.callable.compiler_intrinsic,
             assertion_mode,
             selected.callable.name.as_str(),
-        );
+        )
+        .or(reified_enum_operation);
         let (target, substitutions) =
             if let Some((classifier, operation)) = selected_classifier_intrinsic {
                 if dispatch_receiver.is_some() {

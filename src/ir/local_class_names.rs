@@ -512,6 +512,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             *ret = ty(*ret, names);
             match operation {
                 super::IrIntrinsic::EnumValueOf { classifier }
+                | super::IrIntrinsic::EnumValues { classifier }
                 | super::IrIntrinsic::EnumEntries { classifier }
                 | super::IrIntrinsic::PrimitiveCompare {
                     operand: classifier,
