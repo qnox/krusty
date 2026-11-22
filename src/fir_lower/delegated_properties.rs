@@ -728,6 +728,8 @@ pub(super) fn materialize_member_extension_delegate(
             source_order: declaration.source_order,
             receiver: extension_receiver,
             ty: property.ty,
+            // A delegated member extension with context parameters is rejected above.
+            context_params: Vec::new(),
             is_var: property.flags.has(DeclarationFlags::MUTABLE),
             is_abstract: false,
             modifiers: super::properties::member_property_modifiers(property.flags, false),

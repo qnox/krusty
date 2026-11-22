@@ -27,6 +27,32 @@ use super::implementor_dispatch::ImplementorArm;
 use super::*;
 use krusty::types::CollectionKind;
 
+/// Whether a list's `addAll` makes room before it reads its argument, as kotlinc-native's library
+/// does ([`krusty::kotlin_version::Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument`]), or
+/// reads the argument first, under `-Xfix-kotlinc-defects`.
+fn add_all_grows_first() -> bool {
+    krusty::kotlin_version::Quirks::target()
+        .has(krusty::kotlin_version::Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument)
+}
+
+/// The runtime's `MutableCollection.addAll`, read as [`add_all_grows_first`] says.
+pub(super) fn collection_add_all_symbol() -> &'static str {
+    if add_all_grows_first() {
+        "kt_mutable_collection_add_all"
+    } else {
+        "kt_mutable_collection_add_all_reading_first"
+    }
+}
+
+/// The runtime's `list += elements`, read as [`add_all_grows_first`] says.
+fn list_add_all_symbol() -> &'static str {
+    if add_all_grows_first() {
+        "kt_mutable_list_add_all"
+    } else {
+        "kt_mutable_list_add_all_reading_first"
+    }
+}
+
 /// Whether a type is one of the list shapes the runtime builds.
 ///
 /// `Iterable` is deliberately NOT one of them — a range is one, and answering a range's `size` out
@@ -266,11 +292,9 @@ fn list_symbol(
             Ty::Boolean,
         ),
         ("clear", [], Ty::Unit) if mutates => ("kt_mutable_list_clear", vec![any()], Ty::Unit),
-        ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
-            "kt_mutable_collection_add_all",
-            vec![any(), any()],
-            Ty::Boolean,
-        ),
+        ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => {
+            (collection_add_all_symbol(), vec![any(), any()], Ty::Boolean)
+        }
         _ => return None,
     })
 }
@@ -366,11 +390,9 @@ fn collection_symbol(
             vec![any(), any()],
             Ty::Boolean,
         ),
-        ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
-            "kt_mutable_collection_add_all",
-            vec![any(), any()],
-            Ty::Boolean,
-        ),
+        ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => {
+            (collection_add_all_symbol(), vec![any(), any()], Ty::Boolean)
+        }
         ("clear", [], Ty::Unit) if mutates => {
             ("kt_mutable_collection_clear", vec![any()], Ty::Unit)
         }
@@ -1049,12 +1071,7 @@ impl BodyLowering<'_, '_, '_> {
                     && is_list(self.file, receiver_ty)
                     && !self.file.implements_collection_of(receiver_ty) =>
             {
-                (
-                    "kt_mutable_list_add_all",
-                    vec![any(), any()],
-                    Ty::Unit,
-                    args,
-                )
+                (list_add_all_symbol(), vec![any(), any()], Ty::Unit, args)
             }
             _ => return None,
         };

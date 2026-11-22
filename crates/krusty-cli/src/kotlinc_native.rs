@@ -14,6 +14,7 @@
 
 use std::path::PathBuf;
 
+use krusty::kotlin_version::KotlincDefects;
 use krusty_native::{NativeCompileOptions, NativeSource, NativeTarget};
 
 use crate::cli::LanguageArgument;
@@ -38,6 +39,7 @@ Options:
     -target <target> -> native target to compile to (linux_x64, linux_arm64) [host]
     -module-name <name> -> the program's module name [the output's file name]
     -no-default-libs -> don't link the libraries from dist/klib automatically
+    -Xfix-kotlinc-defects -> fix kotlinc's defects instead of reproducing them (krusty's own)
     -help, -h -> usage info
 The language settings, -opt-in, -Xmulti-platform and the -Xfragments structure are read as
 kotlinc reads them.
@@ -47,7 +49,8 @@ kotlinc reads them.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Invocation {
     Help,
-    Compile(Box<NativeCompileOptions>),
+    /// A program to compile, and whether to reproduce kotlinc's defects in it.
+    Compile(Box<NativeCompileOptions>, KotlincDefects),
 }
 
 /// Read the arguments that follow `krusty kotlinc-native`.
@@ -59,6 +62,7 @@ pub fn parse(arguments: &[String]) -> Result<Invocation, String> {
     let mut output = None;
     let mut target = None;
     let mut module_name = None;
+    let mut defects = KotlincDefects::Reproduce;
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
         let (name, joined) = match argument.split_once('=') {
@@ -100,6 +104,7 @@ pub fn parse(arguments: &[String]) -> Result<Invocation, String> {
             // krusty never links the platform libraries implicitly: a compilation is always what
             // `-no-default-libs` makes.
             "-no-default-libs" | "-nodefaultlibs" => {}
+            crate::cli::FIX_KOTLINC_DEFECTS if joined.is_none() => defects = KotlincDefects::Fix,
             other if other.starts_with('-') => {
                 let occupancy = if SHARED_ARGUMENTS.contains(&other) {
                     crate::cli::argument_occupancy(argument)
@@ -169,7 +174,7 @@ pub fn parse(arguments: &[String]) -> Result<Invocation, String> {
     options.libraries = libraries;
     options.output = output;
     options.module_name = module_name;
-    Ok(Invocation::Compile(Box::new(options)))
+    Ok(Invocation::Compile(Box::new(options), defects))
 }
 
 #[cfg(test)]
@@ -182,13 +187,14 @@ mod tests {
 
     #[test]
     fn kotlin_native_spellings_build_the_options() {
-        let Invocation::Compile(options) = parse(&arguments(
+        let Invocation::Compile(options, defects) = parse(&arguments(
             "-p program -o out/app -target linux_arm64 -l a.klib -library=b -module-name app \
              -no-default-libs a.kt b.kt",
         ))
         .expect("parses") else {
             panic!("not a compilation");
         };
+        assert_eq!(defects, KotlincDefects::Reproduce);
         let mut expected = NativeCompileOptions::new(
             vec![
                 NativeSource::plain(PathBuf::from("a.kt")),
@@ -207,7 +213,7 @@ mod tests {
 
     #[test]
     fn a_shared_flag_stands_alone_and_a_shared_value_follows_its_option() {
-        let Invocation::Compile(options) = parse(&arguments(
+        let Invocation::Compile(options, _) = parse(&arguments(
             "-Xexpect-actual-classes a.kt -opt-in kotlin.ExperimentalStdlibApi b.kt",
         ))
         .expect("parses") else {
@@ -220,7 +226,7 @@ mod tests {
                 NativeSource::plain(PathBuf::from("b.kt")),
             ]
         );
-        let Invocation::Compile(options) = parse(&arguments(
+        let Invocation::Compile(options, _) = parse(&arguments(
             "a.kt -Xexpect-actual-classes -o app -Xexpect-actual-classes",
         ))
         .expect("parses") else {
@@ -231,6 +237,25 @@ mod tests {
             vec![NativeSource::plain(PathBuf::from("a.kt"))]
         );
         assert_eq!(options.output, Some(PathBuf::from("app")));
+    }
+
+    #[test]
+    fn fixing_kotlinc_defects_is_asked_by_name() {
+        let Invocation::Compile(_, defects) =
+            parse(&arguments("-Xfix-kotlinc-defects -target linux_x64 a.kt")).expect("parses")
+        else {
+            panic!("not a compilation");
+        };
+        assert_eq!(defects, KotlincDefects::Fix);
+        assert_eq!(
+            parse(&arguments(
+                "-Xfix-kotlinc-defects=true -target linux_x64 a.kt"
+            )),
+            Err(
+                "option -Xfix-kotlinc-defects is not supported by krusty kotlinc-native"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
