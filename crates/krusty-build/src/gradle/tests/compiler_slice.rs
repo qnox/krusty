@@ -131,6 +131,8 @@ import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.compile.JavaCompile
+import java.nio.file.Files
+import java.nio.file.LinkOption
 
 plugins {
     kotlin("jvm")
@@ -224,14 +226,24 @@ if (krustyNegative == "java-only-source-set") {
 }
 
 // The Kotlin task's own Java toolchain: the build's JDK, declared as another release, so the
-// build needs no second JDK.
+// build needs no second JDK. Gradle answers its own JDK home with that JDK's release, so the JDK
+// is reached through a home of links.
 if (krustyNegative == "kotlin-java-toolchain") {
     logger.lifecycle("fixture: Gradle Java " + JavaVersion.current().majorVersion)
+    val linkedJdk = layout.buildDirectory.dir("linked-jdk").get().asFile
+    linkedJdk.mkdirs()
+    File(System.getProperty("java.home")).listFiles().orEmpty().forEach { entry ->
+        val link = linkedJdk.resolve(entry.name).toPath()
+        if (!Files.exists(link, LinkOption.NOFOLLOW_LINKS)) {
+            Files.createSymbolicLink(link, entry.toPath())
+        }
+    }
     tasks.named<KotlinJvmCompile>("compileKotlin") {
         kotlinJavaToolchain.jdk.use(
-            File(System.getProperty("java.home")),
+            linkedJdk,
             JavaVersion.toVersion(JavaVersion.current().majorVersion.toInt() - 1),
         )
+        logger.lifecycle("fixture: Kotlin task Java " + kotlinJavaToolchain.javaVersion.get().majorVersion)
     }
 }
 "#,
