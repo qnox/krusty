@@ -377,8 +377,6 @@ impl Constructor {
         Ok((fields, reads_lambda))
     }
 
-    /// The new constructor: a label, every captured field's store from its parameter, then the
-    /// copied `body`, whose locals that started at its first label now start at the new one.
     /// A name for the lambda passed as argument `argument` that no field the original body
     /// accesses has.
     fn unused_field_name(&self, argument: usize) -> String {
@@ -439,6 +437,8 @@ impl Constructor {
         Ok(())
     }
 
+    /// The new constructor: a label, every captured field's store from its parameter, then the
+    /// copied `body`, whose locals that started at its first label now start at the new one.
     pub(super) fn assemble(&self, new_class: &str, mut body: MethodNode) -> MethodNode {
         let old_start = match body.nodes.first() {
             Some(Node::Label(label)) => Some(*label),
