@@ -161,13 +161,9 @@ pub(super) fn lower_file(
         classes: laid_out_classes,
         tables: module_tables,
     } = state;
+    // A classifier-owned static (an object or companion `const val`) is the same storage as a
+    // top-level one: a global initialized with the file, which its qualified reads address.
     for property in &ir.statics {
-        // An owner places a companion's `const val` on its outer class for the JVM; a Wasm global
-        // has no class to be placed in. Only when its initializer runs could depend on the owner,
-        // and a constant's cannot observe it. Any other property a class owns still declines.
-        if property.owner.is_some() && !property.is_const {
-            return Err("a non-`const` static property of a class".to_string());
-        }
         if property.is_lateinit {
             return Err("a `lateinit` top-level property".to_string());
         }
