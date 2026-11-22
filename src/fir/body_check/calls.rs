@@ -1843,6 +1843,11 @@ impl BodyFirChecker<'_> {
         selected: &crate::symbol_resolver::ResolvedMember,
         receiver: FirReceiver,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        if let Some(invoke) =
+            self.function_classifier_invoke(expression, arguments, selected, receiver)?
+        {
+            return Ok(invoke);
+        }
         if let crate::libraries::MemberRealization::RangeConstruction { open_end } =
             selected.member.realization
         {

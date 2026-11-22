@@ -7,6 +7,70 @@ use crate::resolve::{
 use crate::types::TyKind;
 
 impl BodyFirChecker<'_> {
+    /// `FunctionN.invoke` selected on a function value is the invocation of that value, whichever
+    /// receiver syntax selected it: `f.invoke(a)`, `f?.invoke(a)`, or a bare `invoke(a)` whose
+    /// implicit receiver is a function value (`fun ((A) -> R).f() = invoke(a)`). A function value
+    /// is one of a function type or of a function classifier written nominally (`Function1<A, R>`);
+    /// a class implementing a function type keeps its own `invoke` member. The selected member's
+    /// parameters are the function type's, its context and extension receiver slots included.
+    pub(super) fn function_classifier_invoke(
+        &mut self,
+        expression: ExprId,
+        arguments: &[ExprId],
+        selected: &crate::symbol_resolver::ResolvedMember,
+        receiver: FirReceiver,
+    ) -> Result<Option<FirExprKind>, BodyCheckFailure> {
+        if selected.member.semantic_role
+            != Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
+        {
+            return Ok(None);
+        }
+        let callee_ty = self
+            .body
+            .expr(receiver.value)
+            .ok_or_else(|| {
+                self.failure(
+                    self.file.expr_span(expression),
+                    BodyCheckFailureKind::UnsupportedCallShape,
+                )
+            })?
+            .ty;
+        let function_value = match callee_ty.get().non_null().kind() {
+            TyKind::Fun(_) => true,
+            TyKind::Obj(classifier, _) => {
+                crate::libraries::function_classifiers::classifier(classifier).is_some()
+            }
+            _ => false,
+        };
+        if !function_value {
+            return Ok(None);
+        }
+        let parameters = selected.member.params.as_slice();
+        if parameters.len() != arguments.len() {
+            return Err(self.failure(
+                self.file.expr_span(expression),
+                BodyCheckFailureKind::UnsupportedCallShape,
+            ));
+        }
+        let span = self
+            .file
+            .expr_span(expression)
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        let parameter_types = parameters
+            .iter()
+            .map(|parameter| self.resolved_type(span, *parameter))
+            .collect::<Result<Vec<_>, _>>()?;
+        let callee = self.convert_fir_value(receiver.value, callee_ty, receiver.conversion);
+        Ok(Some(FirExprKind::FunctionInvoke {
+            callee,
+            context_arguments: Box::new([]),
+            arguments: self.call_arguments(expression, arguments, parameters)?,
+            parameter_types: parameter_types.into_boxed_slice(),
+            result: self.resolved_type(span, selected.ret)?,
+            suspend: selected.suspend,
+        }))
+    }
+
     pub(super) fn extension_function_binding(
         &mut self,
         expression: ExprId,

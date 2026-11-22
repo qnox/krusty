@@ -18400,10 +18400,15 @@ impl<'a> Checker<'a> {
                     };
                     let receiver = implicit_receiver.ty;
                     let mut receiver_extension = None;
+                    // A function-typed receiver's members are its function classifier's, so a bare
+                    // `invoke(a)` inside `fun ((A) -> R).f()` selects `FunctionN.invoke` here.
                     if receiver == Ty::String
                         || matches!(
                             receiver.kind(),
-                            TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Var(..)
+                            TyKind::Obj(..)
+                                | TyKind::TyParam(..)
+                                | TyKind::Var(..)
+                                | TyKind::Fun(..)
                         )
                     {
                         match self.record_member_call_with_slots(
@@ -46404,8 +46409,10 @@ impl<'a> Checker<'a> {
     /// Project an explicitly declared Kotlin function classifier (`FunctionN<P..., R>`) onto the
     /// exact callable shape published by its semantic provider. Callable objects remain nominal:
     /// only classifiers whose declaration says they represent a function type are normalized.
+    /// A nullable classifier (`FunctionN<P..., R>?`) projects onto the nullable function type.
     fn declared_function_semantic_type(&self, ty: Ty) -> Ty {
-        let Some(internal) = ty.non_null().kotlin_class_internal() else {
+        let nominal = ty.non_null();
+        let Some(internal) = nominal.kotlin_class_internal() else {
             return ty;
         };
         let source = self.fed_source();
@@ -46415,7 +46422,7 @@ impl<'a> Checker<'a> {
         {
             return ty;
         }
-        self.stable_classifier_callable_signatures(ty)
+        self.stable_classifier_callable_signatures(nominal)
             .into_iter()
             .next()
             .map(|function| ty.rewrap_nullability(projected_function_shape(function)))
