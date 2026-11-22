@@ -1107,6 +1107,10 @@ pub(super) fn compact(file: &mut File) {
     file.anon_fun_receivers =
         remap_u32_map(std::mem::take(&mut file.anon_fun_receivers), &expressions);
     file.suspend_lambdas = remap_u32_set(std::mem::take(&mut file.suspend_lambdas), &expressions);
+    file.unescaped_underscore_names = remap_u32_set(
+        std::mem::take(&mut file.unescaped_underscore_names),
+        &expressions,
+    );
     file.callable_reference_provenance = remap_u32_map(
         std::mem::take(&mut file.callable_reference_provenance),
         &expressions,

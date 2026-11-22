@@ -2,11 +2,13 @@
 """The projects' own tests run on kotlinc's and on krusty's classes: `compare.py` compares only the
 tests that passed on kotlinc's classes, separates the test tasks that run classes krusty built only,
 `run.sh` moves each test build's JUnit reports out of the checkout, and `summarize.py` reports it."""
+import http.server
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -152,7 +154,7 @@ class RunScript(unittest.TestCase):
         commit = subprocess.run(git + ['rev-parse', 'HEAD'], check=True, capture_output=True,
                                 text=True).stdout.strip()
         write(f'{work}/projects.tsv', f'p\tfile://{repo}\t{commit}\t.\t21\t-\n')
-        env = dict(os.environ, CORPUS_PROJECTS=f'{work}/projects.tsv', CORPUS_RETRY_PAUSE='0')
+        env = dict(os.environ, CORPUS_PROJECTS=f'{work}/projects.tsv')
         env.pop('CORPUS_PERF', None)
         result = subprocess.run(['bash', os.path.join(HERE, 'run.sh'), 'p', f'{work}/corpus',
                                  '/nonexistent/krusty', '/nonexistent/repository', '0'],
@@ -176,8 +178,18 @@ class RunScript(unittest.TestCase):
         self.assertEqual(project['reference_exit'], 3)
         self.assertIn("p: the reference kotlinc build failed (exit 3); see p.kotlinc.log", self.stderr)
 
+    def test_a_failed_krusty_build_is_compared_and_then_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as work:
+            # Every build records its one compilation; only the krusty builds fail.
+            project = self.run_corpus(work, '#!/bin/sh\n'
+                                            'if [ -n "$CORPUS_COMPILATIONS" ]; then : > "$CORPUS_COMPILATIONS"; fi\n'
+                                            'case "$*" in *krusty.binary*) exit 4;; *) exit 0;; esac\n',
+                                      expected_exit=1)
+        self.assertEqual(project['reference_exit'], 0)
+        self.assertEqual(self.stderr.splitlines()[-1], 'p: the krusty build failed (exit 4); see p.krusty.log')
+
     # The warm-up is the only build that is not offline. This one fails to download on its first
-    # `failures` attempts, then succeeds; every other build records its one compilation.
+    # `failures` attempts; every other build records its one compilation.
     FLAKY_WARMUP = ('#!/bin/sh\n'
                     'case "$*" in *--offline*) ;; *)\n'
                     '  n=$(cat "$HOME/attempts" 2>/dev/null || echo 0); echo $((n + 1)) > "$HOME/attempts"\n'
@@ -187,27 +199,46 @@ class RunScript(unittest.TestCase):
                     'esac\n'
                     'if [ -n "$CORPUS_COMPILATIONS" ]; then : > "$CORPUS_COMPILATIONS"; fi\n')
 
-    def test_a_warm_up_that_could_not_download_is_retried(self):
+    def test_a_warm_up_that_could_not_download_stops_the_run_after_one_attempt(self):
         with tempfile.TemporaryDirectory() as work:
             os.environ['HOME'], home = work, os.environ.get('HOME')
             try:
-                project = self.run_corpus(work, self.FLAKY_WARMUP.replace('{failures}', '2'))
+                self.run_corpus(work, self.FLAKY_WARMUP.replace('{failures}', '1'), expected_exit=1, compared=False)
             finally:
                 os.environ['HOME'] = home
-        self.assertEqual(project['reference_exit'], 0)
-        self.assertEqual([line.split(' seconds')[0] for line in self.status if ' warmup ' in line],
-                         ['p warmup exit 1', 'p warmup exit 1', 'p warmup exit 0'])
-
-    def test_a_warm_up_that_never_downloads_stops_the_run(self):
-        with tempfile.TemporaryDirectory() as work:
-            os.environ['HOME'], home = work, os.environ.get('HOME')
-            try:
-                self.run_corpus(work, self.FLAKY_WARMUP.replace('{failures}', '3'), expected_exit=1, compared=False)
-            finally:
-                os.environ['HOME'] = home
-        self.assertEqual([line.split(' seconds')[0] for line in self.status],
-                         ['p warmup exit 1', 'p warmup exit 1', 'p warmup exit 1'])
+        self.assertEqual([line.split(' seconds')[0] for line in self.status], ['p warmup exit 1'])
         self.assertIn('p: the warm-up could not download what the build needs; see p.warmup.log', self.stderr)
+
+    def test_a_failed_warm_up_records_the_status_of_the_repositories_it_names(self):
+        class Dead(http.server.BaseHTTPRequestHandler):
+            def do_HEAD(self):
+                self.send_response(503)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(('127.0.0.1', 0), Dead)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        url = f'http://127.0.0.1:{server.server_port}/dead/'
+        gradlew = ('#!/bin/sh\n'
+                   f"echo \"Plugin [id: 'x'] was not found: could not resolve plugin artifact 'x:x:1'\"\n"
+                   f'echo "    maven({url})"\n'
+                   'exit 1\n')
+        try:
+            with tempfile.TemporaryDirectory() as work:
+                os.environ['CORPUS_PROBE_URLS'] = ''
+                try:
+                    self.run_corpus(work, gradlew, expected_exit=1, compared=False)
+                finally:
+                    del os.environ['CORPUS_PROBE_URLS']
+                with open(f'{work}/corpus/logs/p.warmup.http.tsv') as f:
+                    recorded = f.read().splitlines()
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(recorded, [f'503 {url}'])
+        self.assertEqual(self.stderr.count(f'503 {url}'), 1)
 
     def test_each_test_build_reports_on_its_own_classes(self):
         with tempfile.TemporaryDirectory() as work:

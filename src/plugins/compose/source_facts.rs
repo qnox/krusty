@@ -215,6 +215,7 @@ pub(super) fn record(
         },
         rejections,
     );
+    reject_composable_property_reads(ir, source, composable, rejections);
     super::class_stability::declare(ir, source, runtime, rejections);
     if ir.file_annotations.applications().any(|annotation| {
         GROUP_ANNOTATIONS[4..]
@@ -370,7 +371,10 @@ pub(super) fn record(
             .statements
             .iter()
             .copied()
-            .filter(|&statement| calls.contains_key(&statement) || invoked(statement).is_some())
+            .filter_map(|statement| {
+                let call = initializing_call(ir, statement, &calls);
+                (calls.contains_key(&call) || invoked(call).is_some()).then_some(call)
+            })
             .collect::<Vec<_>>();
         direct_calls.extend(direct.iter().copied());
         // The calls that may pass a composable lambda: the composable ones and those of functions
@@ -2065,7 +2069,8 @@ impl BodyScope<'_> {
             .statements
             .iter()
             .copied()
-            .filter(|statement| self.calls.contains_key(statement))
+            .map(|statement| initializing_call(ir, statement, self.calls))
+            .filter(|call| self.calls.contains_key(call))
             .collect::<Vec<_>>();
         direct_calls.extend(direct.iter().copied());
         if let Some(what) = unsupported_body_expression(ir, body.block, &[], &[]) {
@@ -2256,6 +2261,21 @@ fn composable_arity(
             .iter()
             .any(|argument| spelled_mentions(argument, composable)))
     .then_some(signature.params.len() as u32)
+}
+
+/// The expression of `statement` that makes its composable call: the statement itself, or the
+/// initializer of the local `val` it declares.
+fn initializing_call(
+    ir: &IrFile,
+    statement: ExprId,
+    calls: &HashMap<ExprId, ComposableCall>,
+) -> ExprId {
+    match ir.exprs[statement as usize] {
+        IrExpr::Variable {
+            init: Some(init), ..
+        } if calls.contains_key(&init) => init,
+        _ => statement,
+    }
 }
 
 /// A default argument the pass does not apply yet: one that is not a constant, which kotlinc
@@ -2551,6 +2571,43 @@ fn composable_calls(
             ))
         })
         .collect()
+}
+
+/// Reject every read of a dependency property whose getter is composable: the pass does not give
+/// a getter call the caller's composer and `$changed` yet.
+fn reject_composable_property_reads(
+    ir: &IrFile,
+    source: &PluginSourceView<'_>,
+    composable: TypeName,
+    rejections: &mut Vec<PluginRejection>,
+) {
+    for (index, expression) in ir.exprs.iter().enumerate() {
+        let IrExpr::Checked(operation) = expression else {
+            continue;
+        };
+        let crate::ir::IrCheckedOperation::ExternalPropertyRead { target, .. } = &**operation
+        else {
+            continue;
+        };
+        let composable_getter = source
+            .checked
+            .dependency_property_getter(*target)
+            .is_some_and(|getter| {
+                source
+                    .checked
+                    .dependency_annotations(getter)
+                    .contains(&composable)
+            });
+        if composable_getter {
+            rejections.push(PluginRejection {
+                refusal: true,
+                span: source
+                    .expression_span(ir, index as ExprId)
+                    .unwrap_or(crate::diag::Span::new(0, 0)),
+                message: unsupported("a read of a composable property"),
+            });
+        }
+    }
 }
 
 /// Reject every declared type that names a composable function type, except the parameters
