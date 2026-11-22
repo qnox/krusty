@@ -15,13 +15,13 @@ use krusty::compilation_target::CompilationTarget;
 use krusty::diag::DiagSink;
 use krusty::features::LangFeatures;
 use krusty::klib_libraries::{KlibLibraryInput, KlibStdlibSemantics};
-use krusty::source::SourceInput;
+use krusty::source::{SourceFragment, SourceInput};
 
 /// One program compilation, as Kotlin/Native's `kotlinc-native` takes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeCompileOptions {
     /// The Kotlin source files.
-    pub sources: Vec<PathBuf>,
+    pub sources: Vec<NativeSource>,
     /// `-library`/`-l`: the KLIBs the sources compile against, besides the stdlib.
     pub libraries: Vec<PathBuf>,
     /// `-output`/`-o`: the program to write; `.kexe` is appended unless it is already there.
@@ -30,17 +30,41 @@ pub struct NativeCompileOptions {
     pub target: NativeTarget,
     /// `-module-name`: the program's module, in place of the output's file name.
     pub module_name: Option<String>,
+    /// The language features the language settings select.
+    pub features: LangFeatures,
+}
+
+/// One Kotlin source file of a compilation, with its place in a multiplatform source set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeSource {
+    pub path: PathBuf,
+    /// The `-Xfragments` fragment that lists the file; none outside a fragment structure.
+    pub fragment: Option<SourceFragment>,
+    /// The file belongs to a fragment the platform leaf refines: a common source.
+    pub common: bool,
+}
+
+impl NativeSource {
+    /// A source file outside any multiplatform source set.
+    pub fn plain(path: PathBuf) -> Self {
+        Self {
+            path,
+            fragment: None,
+            common: false,
+        }
+    }
 }
 
 impl NativeCompileOptions {
     /// The options of a compilation of `sources` into a program for `target`.
-    pub fn new(sources: Vec<PathBuf>, target: NativeTarget) -> Self {
+    pub fn new(sources: Vec<NativeSource>, target: NativeTarget) -> Self {
         Self {
             sources,
             libraries: Vec::new(),
             output: None,
             target,
             module_name: None,
+            features: LangFeatures::new(),
         }
     }
 
@@ -131,7 +155,8 @@ pub fn compile_native(
     let mut texts = Vec::new();
     let mut stems = Vec::new();
     let mut paths = Vec::new();
-    for path in &options.sources {
+    for source in &options.sources {
+        let path = &source.path;
         texts.push(
             std::fs::read_to_string(path)
                 .map_err(|error| failed(format!("cannot read {}: {error}", path.display())))?,
@@ -146,14 +171,26 @@ pub fn compile_native(
     let source_inputs = texts
         .iter()
         .zip(&stems)
-        .map(|(text, stem)| SourceInput::kotlin(text).with_file_stem(stem))
+        .zip(&options.sources)
+        .map(|((text, stem), source)| {
+            let input = SourceInput::kotlin(text).with_file_stem(stem);
+            let input = match source.fragment {
+                Some(fragment) => input.with_fragment(fragment),
+                None => input,
+            };
+            if source.common {
+                input.common()
+            } else {
+                input
+            }
+        })
         .collect::<Vec<_>>();
 
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
         &source_inputs,
         krusty::frontend::PlatformProvider::new(CompilationTarget::Native, Box::new(libraries)),
-        &LangFeatures::new(),
+        &options.features,
         &module_name,
         &mut diags,
     );
@@ -207,7 +244,7 @@ mod tests {
     fn the_program_takes_the_kexe_suffix_once() {
         let paths = [None, Some("out/app"), Some("app.kexe")].map(|output| {
             let mut options = NativeCompileOptions::new(
-                vec![PathBuf::from("main.kt")],
+                vec![NativeSource::plain(PathBuf::from("main.kt"))],
                 NativeTarget::new(Arch::X86_64, Os::Linux),
             );
             options.output = output.map(PathBuf::from);

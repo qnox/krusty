@@ -66,6 +66,18 @@ pub(super) fn ordinary_subtype(
     sub == sup || classes.is_some_and(|classes| satisfies(Some(classes), parameters, sub, sup))
 }
 
+/// The declared upper bounds of `owner`'s type parameter at `index`, from the calling
+/// compilation's class model. Without the model no bound is known.
+pub(super) fn classifier_parameter_bounds(
+    classes: Option<&dyn TypeOracle>,
+    owner: TypeName,
+    index: usize,
+) -> Vec<Ty> {
+    classes.map_or_else(Vec::new, |classes| {
+        classes.type_param_upper_bounds(owner, index)
+    })
+}
+
 /// Whether `left` and `right` are one type once every projection that only restates its
 /// parameter's declaration-site variance is dropped: `Iterator<out T>` is `Iterator<T>` because
 /// `Iterator` declares its parameter `out`. A star in that covariant slot likewise reads its
@@ -97,6 +109,11 @@ fn without_restated_variance(classes: &dyn TypeOracle, ty: Ty) -> Ty {
                                 TypeVariance::Out,
                             )
                             | (TyKind::InProjection(inner), TypeVariance::In) => inner,
+                            // An invariant slot's star reads its bound as `out` does, so the
+                            // two spellings of that one projection are one type.
+                            (TyKind::StarProjection(inner), TypeVariance::Invariant) => {
+                                Ty::out_projection(inner)
+                            }
                             _ => argument,
                         };
                     without_restated_variance(classes, argument)
@@ -163,6 +180,30 @@ mod tests {
             projected,
             Ty::obj_args("fixture/Other", &[any]),
         ));
+    }
+
+    #[test]
+    fn an_invariant_slots_star_is_its_bound_read_as_out() {
+        struct Classes;
+        impl TypeOracle for Classes {
+            fn direct_supertypes(&self, _ty: Ty) -> Vec<Ty> {
+                Vec::new()
+            }
+            fn type_param_variance(&self, _owner: TypeName, _index: usize) -> TypeVariance {
+                TypeVariance::Invariant
+            }
+        }
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let star = Ty::obj_args("fixture/Box", &[Ty::star_projection(any)]);
+        let out = Ty::obj_args("fixture/Box", &[Ty::out_projection(any)]);
+        assert!(same_type(Some(&Classes), star, out));
+        assert!(same_type(Some(&Classes), out, star));
+        assert!(!same_type(
+            Some(&Classes),
+            star,
+            Ty::obj_args("fixture/Box", &[any]),
+        ));
+        assert!(!same_type(None, star, out));
     }
 
     #[test]
