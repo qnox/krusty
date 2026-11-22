@@ -408,8 +408,9 @@ impl FileClasses {
                     .copied()
                     .flatten();
                 match (inherited, function) {
-                    // The superclass adapts no function type, so neither does this class.
-                    (None, None) => return Ok(None),
+                    // The superclass adapts no function type, so neither does this class: the slot
+                    // is the first ordinary member it inherits.
+                    (None, _) => return Ok(None),
                     (Some(inherited), Some(function)) if inherited.function == function => {
                         inherited
                     }
@@ -1269,7 +1270,13 @@ impl TableEntries<'_> {
                     Slot::FunctionBridge { arity, .. } => {
                         runtime.function_shape(module, *arity).invoke
                     }
-                    Slot::Inherited { slot } if *slot == FUNCTION_SLOT => {
+                    // Slot 3 is a function value's body only in a table whose producer defines
+                    // one; in any other class it is the first ordinary member slot.
+                    Slot::Inherited { slot }
+                        if *slot == FUNCTION_SLOT
+                            && laid_out
+                                .is_some_and(|superclass| superclass.function_bridge.is_some()) =>
+                    {
                         let inherited = laid_out.and_then(|superclass| superclass.function_bridge);
                         let function = laid_out.and_then(|superclass| {
                             superclass.entries.get(*slot as usize).copied().flatten()
