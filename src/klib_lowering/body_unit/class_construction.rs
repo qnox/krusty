@@ -933,7 +933,10 @@ impl<'u, 's> Linker<'u, 's> {
             KlibDeclarationSignature::Accessor(signature) => {
                 KlibIrSignature::Accessor(signature.clone())
             }
-            _ => return None,
+            KlibDeclarationSignature::FileLocal { file, slot } => KlibIrSignature::FileLocal {
+                file: *file,
+                slot: *slot,
+            },
         };
         self.local_functions
             .get(&super::super::same_library_class::LocalIdentity {
