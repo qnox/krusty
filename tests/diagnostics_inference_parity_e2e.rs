@@ -1095,3 +1095,46 @@ fn qualified_type_failure_messages_match_kotlinc() {
     assert_eq!(krusty_messages, expected);
     assert_eq!(kotlinc_messages, expected);
 }
+
+#[test]
+fn distinct_type_parameters_are_not_assignable_to_each_other() {
+    // A type parameter bounded by `Any?` erases to `Object`, but it is not the top type: only
+    // values of that very parameter are its subtypes.
+    let source = "fun <T, R> initialize(v: T): R {\n\
+                  \x20   val r: R = v\n\
+                  \x20   return r\n\
+                  }\n\
+                  \n\
+                  class Box<R> {\n\
+                  \x20   fun take(x: R) {}\n\
+                  \x20   fun <T> pass(v: T) = take(v)\n\
+                  }\n";
+    let result = common::compiler_diagnostics(
+        &[("DistinctTypeParameters.kt", source)],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+
+    let expected = vec![
+        ObservedError {
+            file: "DistinctTypeParameters.kt".to_string(),
+            line: 2,
+            column: 14,
+            message: "initializer type mismatch: expected 'R (of fun <T, R> initialize)', actual \
+                      'T (of fun <T, R> initialize)'."
+                .to_string(),
+        },
+        ObservedError {
+            file: "DistinctTypeParameters.kt".to_string(),
+            line: 8,
+            column: 31,
+            message: "argument type mismatch: actual type is 'T (of fun <T> pass)', but 'R (of \
+                      class Box<R>)' was expected."
+                .to_string(),
+        },
+    ];
+    let mut krusty = errors(&result.krusty_stderr);
+    krusty.extend(errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+    assert_eq!(errors(&result.reference_stderr), expected);
+}

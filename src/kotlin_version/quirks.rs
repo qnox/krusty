@@ -12,6 +12,15 @@
 //!
 //! - **A new quirk** is one entry in that table and one `has` test at the place that implements
 //!   the old behavior. Adding a release to the `kotlin-versions` manifest needs no edit here.
+//! - **A defect** is a quirk that makes kotlinc compile a program wrongly: it rejects valid code,
+//!   computes a wrong value, or binds a call the language rules bind otherwise. Every defect has a
+//!   program in `tests/kotlinc_defects_e2e.rs` that shows kotlinc still has it in the releases the
+//!   table names and that the fix mode fixes it. krusty reproduces
+//!   it by default, as it reproduces every quirk, and fixes it only when the compilation asks for
+//!   [`super::KotlincDefects::Fix`], which compiles as if the release did not have it: the behavior
+//!   of the release that fixed it, or of the language rule when none has yet. Output details
+//!   (metadata stamps, debug names, diagnostic wording) are quirks, not defects, and stay as the
+//!   release has them in either mode.
 //! - **Dropping an old release** from the manifest leaves quirks that no supported release has
 //!   anymore. `every_quirk_affects_a_supported_release` names them; deleting the entry makes the
 //!   compiler point at every consumer, whose quirk branch is then dead and goes with it.
@@ -52,12 +61,12 @@ const fn precedes(left: KotlinVersion, right: KotlinVersion) -> bool {
     left.patch < right.patch
 }
 
-/// Declares every [`Quirk`] with the releases that have it. Each entry documents the behavior the
-/// affected releases show, which is what a `has` test selects.
+/// Declares every [`Quirk`] with the releases that have it and whether it is a defect. Each entry
+/// documents the behavior the affected releases show, which is what a `has` test selects.
 macro_rules! quirks {
     ($(
         $(#[$doc:meta])*
-        $name:ident { since: $since:expr, fixed_in: $fixed_in:expr $(,)? }
+        $name:ident { since: $since:expr, fixed_in: $fixed_in:expr, defect: $defect:expr $(,)? }
     )*) => {
         /// One release-specific kotlinc behavior. See the module documentation.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -75,6 +84,13 @@ macro_rules! quirks {
                     $(Quirk::$name => Affected { since: $since, fixed_in: $fixed_in },)*
                 }
             }
+
+            /// Whether this quirk is a defect, which [`super::KotlincDefects::Fix`] fixes.
+            pub const fn is_defect(self) -> bool {
+                match self {
+                    $(Quirk::$name => $defect,)*
+                }
+            }
         }
     };
 }
@@ -83,30 +99,59 @@ quirks! {
     /// A delegate whose `getValue`/`setValue` resolves nowhere names only the candidates of the
     /// earliest convention rung that contributed any (members, then member extensions, then
     /// extensions). Later releases name every rung's candidates, members first.
-    DelegateFailureNamesFirstRungOnly { since: None, fixed_in: Some(KotlinVersion::V2_4_20) }
+    DelegateFailureNamesFirstRungOnly {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
     /// `+UnitConversionsOnArbitraryExpressions` is known but converts no function value whose
     /// result is not `Unit` (KT-84393).
-    UnitConversionRejectsNonUnitResult { since: None, fixed_in: Some(KotlinVersion::V2_4_20) }
+    UnitConversionRejectsNonUnitResult {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: true,
+    }
     /// A suspend function declared to return `Unit` that forwards a tail call returns the callee's
     /// result as it is, instead of adapting it to `Unit`.
-    SuspendUnitTailCallKeepsCalleeResult { since: None, fixed_in: Some(KotlinVersion::V2_4_20) }
+    SuspendUnitTailCallKeepsCalleeResult {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
     /// An anonymous context parameter is unnamed in the IR, so it gets no local-variable row; its
     /// label reaches only reflection and null assertions.
-    AnonymousContextParameterIsNotLocal { since: None, fixed_in: Some(KotlinVersion::V2_4_20) }
+    AnonymousContextParameterIsNotLocal {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
     /// A repeated anonymous context label is numbered after `#` (`$context-String#1`) instead of
     /// `$` (`$context-String$1`).
-    AnonymousContextOrdinalAfterHash { since: None, fixed_in: Some(KotlinVersion::V2_4_20) }
+    AnonymousContextOrdinalAfterHash {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
     /// `@Metadata.xi` of a `k=3` synthetic class holds the IR flags alone, without the class's
     /// normalized visibility in bits 8–10.
-    SyntheticClassXiOmitsVisibility { since: None, fixed_in: Some(KotlinVersion::V2_4_20) }
+    SyntheticClassXiOmitsVisibility {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
     /// A synthetic annotation implementation stamps nullability on its constructor, `equals` and
     /// `toString`.
-    AnnotationImplCarriesNullability { since: None, fixed_in: Some(KotlinVersion::V2_4_20) }
+    AnnotationImplCarriesNullability {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
     /// A library compiled below language 2.3 stamps KLIB `metadata_version` `1.4.1` instead of the
     /// language level's own (read off `kotlinc-native -p library -Xmetadata-klib`).
     KlibLegacyMetadataVersionBelowLanguage23 {
         since: None,
         fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
     }
     /// A callable reference to a `vararg` function takes an expected input that the enclosing call
     /// declares as one of its own type variables (`f: (T) -> Int`) as one collected element, even
@@ -115,6 +160,7 @@ quirks! {
     VarargReferenceTakesTypeVariableInputAsElement {
         since: None,
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: true,
     }
     /// An explicit context argument of a contextual extension call is evaluated before the
     /// extension receiver, in the order the parameters are passed, although it is written after it.
@@ -122,6 +168,18 @@ quirks! {
     ContextArgumentEvaluatedBeforeExtensionReceiver {
         since: None,
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: true,
+    }
+    /// The Kotlin/Native and Kotlin/Wasm standard library's `ArrayList.addAll` makes room for the
+    /// new elements before it reads the argument, so a range of the list being appended to is
+    /// invalidated first: `list.addAll(list.subList(0, 2))` raises
+    /// `ConcurrentModificationException` and leaves the list grown by two nulls. The JVM's reads
+    /// the argument first and appends the range. A library quirk, which only those platforms'
+    /// backends test.
+    ArrayListAddAllGrowsBeforeReadingItsArgument {
+        since: None,
+        fixed_in: None,
+        defect: true,
     }
 }
 
@@ -149,13 +207,36 @@ impl Quirks {
         Self(bits)
     }
 
-    /// The profile of the reference release this process reproduces ([`super::target`]),
-    /// resolved on first use. The reference release is process-wide, so this is the profile every
-    /// phase reproduces; a hot path may hoist the copy, but reading it is one load and a bit test.
+    /// The profile this process reproduces: the reference release's ([`super::target`]), without
+    /// its defects when the process fixes them ([`super::kotlinc_defects`]). Resolved on first use.
+    /// Both settings are process-wide, so this is the profile every phase reproduces; a hot path
+    /// may hoist the copy, but reading it is one load and a bit test.
     pub fn target() -> Self {
         static TARGET: std::sync::OnceLock<Quirks> = std::sync::OnceLock::new();
-        *TARGET.get_or_init(|| Self::of_release(super::target()))
+        *TARGET.get_or_init(|| Self::of_release(super::target()).under(super::kotlinc_defects()))
     }
+
+    /// This profile as a compilation under `defects` reproduces it: unchanged, or without its
+    /// defects.
+    pub const fn under(self, defects: super::KotlincDefects) -> Self {
+        match defects {
+            super::KotlincDefects::Reproduce => self,
+            super::KotlincDefects::Fix => Self(self.0 & !Self::DEFECTS.0),
+        }
+    }
+
+    /// Every defect in the table.
+    const DEFECTS: Self = {
+        let mut bits = 0;
+        let mut index = 0;
+        while index < Quirk::ALL.len() {
+            if Quirk::ALL[index].is_defect() {
+                bits |= Self::bit(Quirk::ALL[index]);
+            }
+            index += 1;
+        }
+        Self(bits)
+    };
 
     /// Whether this profile has `quirk`.
     pub const fn has(self, quirk: Quirk) -> bool {
@@ -256,6 +337,27 @@ mod tests {
         assert!(on.has(quirk));
         assert_eq!(on.iter().collect::<Vec<_>>(), [quirk]);
         assert_eq!(on.with(quirk, false), Quirks::NONE);
+    }
+
+    #[test]
+    fn fixing_defects_drops_exactly_the_defects() {
+        use super::super::KotlincDefects;
+        for release in KotlinVersion::supported() {
+            let profile = Quirks::of_release(release);
+            assert_eq!(
+                profile.under(KotlincDefects::Reproduce),
+                profile,
+                "{release}"
+            );
+            let fixed = profile.under(KotlincDefects::Fix);
+            for &quirk in Quirk::ALL {
+                assert_eq!(
+                    fixed.has(quirk),
+                    profile.has(quirk) && !quirk.is_defect(),
+                    "{quirk:?} on {release}"
+                );
+            }
+        }
     }
 
     #[test]

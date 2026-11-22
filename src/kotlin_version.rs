@@ -11,6 +11,9 @@
 //! the `-Xkotlin-reference-version=` flag ([`set_target`]) wins, then `KRUSTY_LANGUAGE_VERSION`
 //! (already part of the build-cache key), then the newest manifest entry. A worker or daemon
 //! therefore serves one reference version for its lifetime.
+//!
+//! A compilation reproduces its release's defects too, unless it asks krusty to fix them
+//! (`-Xfix-kotlinc-defects`, [`set_kotlinc_defects`]); that choice is process-wide in the same way.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -208,6 +211,41 @@ pub fn set_target(version: KotlinVersion) -> Result<(), String> {
 /// The reference version this process reproduces.
 pub fn target() -> KotlinVersion {
     *TARGET.get_or_init(|| configured_target().unwrap_or_else(|error| panic!("{error}")))
+}
+
+/// Whether a compilation reproduces the reference release's defects ([`Quirk::is_defect`]) or fixes
+/// them. kotlinc is the specification, so the default reproduces them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum KotlincDefects {
+    #[default]
+    Reproduce,
+    Fix,
+}
+
+static DEFECTS: OnceLock<KotlincDefects> = OnceLock::new();
+
+/// Fix whether this process reproduces or fixes kotlinc's defects. Must run before anything reads
+/// [`kotlinc_defects`] or [`Quirks::target`]; a second, different choice is refused.
+pub fn set_kotlinc_defects(defects: KotlincDefects) -> Result<(), String> {
+    let chosen = *DEFECTS.get_or_init(|| defects);
+    if chosen == defects {
+        Ok(())
+    } else {
+        Err(match chosen {
+            KotlincDefects::Reproduce => {
+                "this process already reproduces kotlinc's defects; cannot fix them".to_string()
+            }
+            KotlincDefects::Fix => {
+                "this process already fixes kotlinc's defects; cannot reproduce them".to_string()
+            }
+        })
+    }
+}
+
+/// Whether this process reproduces or fixes kotlinc's defects: [`KotlincDefects::Reproduce`]
+/// unless [`set_kotlinc_defects`] chose otherwise first.
+pub fn kotlinc_defects() -> KotlincDefects {
+    *DEFECTS.get_or_init(KotlincDefects::default)
 }
 
 /// The environment variable that selects the reference version when no flag does.

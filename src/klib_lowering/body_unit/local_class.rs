@@ -204,7 +204,6 @@ impl<'s> Linker<'_, 's> {
                 LocalFunction {
                     function,
                     class: prepared.key.clone(),
-                    setter: member.setter,
                     formals: member.formals.clone(),
                 },
             );
@@ -245,7 +244,7 @@ impl<'s> Linker<'_, 's> {
             .inherited_implementations_of(&prepared.key.module, &prepared.key.signature)
             .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
         for (body, implemented) in &inherited {
-            self.record_inherited_implementation(ir, prepared.classifier, body, implemented);
+            self.record_inherited_implementation(ir, prepared.classifier, body, None, implemented);
         }
         let constructor = super::super::same_library_class::LocalConstructor {
             declaration: prepared.declaration.clone(),
@@ -364,7 +363,6 @@ impl<'s> Linker<'_, 's> {
                 LocalFunction {
                     function,
                     class: prepared.key.clone(),
-                    setter: member.setter,
                     formals: member.formals.clone(),
                 },
             );
@@ -725,17 +723,12 @@ impl<'s> Linker<'_, 's> {
         &self,
         ir: &IrFile,
         identity: &KlibDependencyCallable,
-    ) -> Result<Option<(LinkedCallee, bool)>, KlibBodyDeclineReason> {
+    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
         let key = installed_identity(identity);
-        let Some(setter) = self
-            .local_functions
-            .get(&key)
-            .map(|function| function.setter)
-        else {
+        if !self.local_functions.contains_key(&key) {
             return Ok(None);
-        };
-        self.linked_installed_member(ir, &key)
-            .map(|linked| Some((linked, setter)))
+        }
+        self.linked_installed_member(ir, &key).map(Some)
     }
 }
 
