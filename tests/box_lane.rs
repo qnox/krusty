@@ -272,6 +272,7 @@ fn atomicfu_plugins(
         classpath: &[],
         module_name: "box",
         codegen_host: false,
+        module_ir_host: false,
     });
     let errors = resolved
         .diagnostics
