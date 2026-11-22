@@ -10,15 +10,15 @@ pub(super) fn is_exact_argument_rank(expected: Ty, actual: Ty) -> bool {
 }
 
 /// The call-site signature's parameters, before inference binds its variables, in the order of
-/// the scored shape.
+/// the scored shape. `None` when the shape names a parameter the signature does not declare.
 fn shaped_declared_parameters(
     signature: &crate::libraries::GenericSig,
     shape: &ContextualCallShape,
-) -> Vec<Ty> {
+) -> Option<Vec<Ty>> {
     shape
         .parameter_indices
         .iter()
-        .map(|&index| signature.params.get(index).copied().unwrap_or(Ty::Error))
+        .map(|&index| signature.params.get(index).copied())
         .collect()
 }
 
@@ -1026,7 +1026,14 @@ impl Checker<'_> {
                     argument_names,
                 )?
             };
-            let declared_params = shaped_declared_parameters(&signature, &shape);
+            let Some(declared_params) = shaped_declared_parameters(&signature, &shape) else {
+                crate::trace_compiler!(
+                    "resolve",
+                    "candidate {} rejected: call shape names an undeclared parameter",
+                    candidate.callable.name,
+                );
+                continue;
+            };
             let Some(mut score) = call_applicability::score_with_declaration(
                 self,
                 scope,
@@ -1125,7 +1132,14 @@ impl Checker<'_> {
                         argument_names,
                     )?
                 };
-                let declared_params = shaped_declared_parameters(&signature, &shape);
+                let Some(declared_params) = shaped_declared_parameters(&signature, &shape) else {
+                    crate::trace_compiler!(
+                        "resolve",
+                        "candidate {} rejected: call shape names an undeclared parameter",
+                        candidate.callable.name,
+                    );
+                    continue;
+                };
                 let Some(specialized_score) = call_applicability::score_with_declaration(
                     self,
                     scope,
