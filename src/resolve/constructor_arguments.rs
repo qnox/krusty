@@ -110,9 +110,9 @@ impl Checker<'_> {
         !reportable.is_empty()
     }
 
-    /// A delegation no constructor accepted. A single candidate that is only missing required
-    /// arguments reports those the way any other call does; several candidates and every other
-    /// mismatch keep the caller's own diagnostic.
+    /// A delegation no constructor accepted. One candidate that is only missing required
+    /// arguments, or that was given arguments past its parameter list, reports that the way any
+    /// other call does. Several candidates and every other mismatch keep the caller's diagnostic.
     pub(super) fn report_rejected_delegation(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -165,17 +165,120 @@ impl Checker<'_> {
         ) else {
             return false;
         };
-        if !failure
+        if failure
             .errors
             .iter()
             .all(|error| matches!(error, CallArgMappingError::MissingRequired { .. }))
         {
+            for error in &failure.errors {
+                self.diags.error(span, error.to_string());
+            }
+            return true;
+        }
+        if failure
+            .errors
+            .iter()
+            .all(|error| matches!(error, CallArgMappingError::TooManyArguments { .. }))
+        {
+            return self.report_excess_delegation_arguments(
+                class, secondary, arguments, candidates, &failure,
+            );
+        }
+        false
+    }
+
+    /// Each extra argument of the one constructor a delegation could reach. kotlinc repeats the
+    /// constructor signature at every argument past that constructor's parameter list.
+    fn report_excess_delegation_arguments(
+        &mut self,
+        class: DeclId,
+        secondary: usize,
+        arguments: &CtorDelegationCall,
+        candidates: &[CtorDelegationCandidate],
+        failure: &CallArgMappingFailure,
+    ) -> bool {
+        let Some(signature) = self.delegation_arity_signature(class, secondary, candidates) else {
             return false;
-        }
+        };
+        let message = format!("too many arguments for '{signature}'.");
+        let mut reported = false;
         for error in &failure.errors {
-            self.diags.error(span, error.to_string());
+            let CallArgMappingError::TooManyArguments { argument, .. } = error else {
+                continue;
+            };
+            let Some(&expression) = arguments.args.get(*argument) else {
+                continue;
+            };
+            self.diags.error(self.span(expression), message.clone());
+            reported = true;
         }
-        true
+        reported
+    }
+
+    fn delegation_arity_signature(
+        &self,
+        class: DeclId,
+        secondary: usize,
+        candidates: &[CtorDelegationCandidate],
+    ) -> Option<String> {
+        let Decl::Class(classifier) = self.file.decl(class) else {
+            return None;
+        };
+        let (owner, parts) = if let [candidate] = candidates {
+            let owner = match &candidate.target {
+                ResolvedCtorDelegationTarget::Super { owner, .. } => {
+                    owner.segment_ref().replace('$', ".")
+                }
+                ResolvedCtorDelegationTarget::ThisPrimary { .. }
+                | ResolvedCtorDelegationTarget::ThisSecondary { .. } => classifier.name.clone(),
+            };
+            let start = candidate.context_count;
+            let types = candidate.target.params();
+            let end = candidate.param_names.len().min(types.len());
+            let parts = (start..end)
+                .map(|index| {
+                    let vararg = if candidate.vararg == Some(index) {
+                        "vararg "
+                    } else {
+                        ""
+                    };
+                    let default = if candidate.defaults.get(index).copied().unwrap_or(false) {
+                        " = ..."
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{vararg}{}: {}{default}",
+                        candidate.param_names[index],
+                        types[index].source_name()
+                    )
+                })
+                .collect::<Vec<_>>();
+            (owner, parts)
+        } else if candidates.is_empty() {
+            let constructor = classifier.secondary_ctors.get(secondary)?;
+            let parts = constructor
+                .params
+                .iter()
+                .map(|parameter| {
+                    let vararg = if parameter.is_vararg { "vararg " } else { "" };
+                    let default = if parameter.default.is_some() {
+                        " = ..."
+                    } else {
+                        ""
+                    };
+                    let rendered = super::delegated_properties::diagnostic_type_syntax(
+                        &parameter.ty,
+                        |name| Some(name.replace('/', ".")),
+                    );
+                    format!("{vararg}{}: {rendered}{default}", parameter.name)
+                })
+                .collect::<Vec<_>>();
+            (classifier.name.clone(), parts)
+        } else {
+            return None;
+        };
+        Some(format!("constructor({}): {owner}", parts.join(", ")))
     }
 
     /// The written `this` or `super`. Delegation argument errors point there.
