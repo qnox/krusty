@@ -99,7 +99,8 @@ pub(crate) fn realized_property_accessor(
 /// Start the identity source map kotlinc writes for a class whose nearest enclosing function is
 /// `inline` (`visitSMAP(…, intoInline = true)`), or which is a call-site copy of such a class:
 /// code inlining that function copies the class and maps its lines through it. A class one
-/// function further in carries none.
+/// function further in carries none, and neither does one declared in another class's
+/// constructor, initializer or body, whose code is that class's.
 pub(super) fn start_inline_body_source_map(
     ir: &IrFile,
     override_results: &crate::override_results::OverrideResults,
@@ -112,9 +113,18 @@ pub(super) fn start_inline_body_source_map(
         .iter()
         .copied()
         .find(|method| ir.specialized_functions.contains_key(method));
-    let in_inline_body = enclosing_functions(ir, class.enclosure)
-        .next()
-        .is_some_and(|(function, _)| ir.inline_fns.contains(&function));
+    let declared_in_class_code = matches!(
+        class.enclosure,
+        Some(
+            krusty::ir::IrEnclosure::Constructor { .. }
+                | krusty::ir::IrEnclosure::ClassInitializer(_)
+                | krusty::ir::IrEnclosure::Classifier(_)
+        )
+    );
+    let in_inline_body = !declared_in_class_code
+        && enclosing_functions(ir, class.enclosure)
+            .next()
+            .is_some_and(|(function, _)| ir.inline_fns.contains(&function));
     (specialized.is_some() || in_inline_body).then(|| {
         start_inline_class_source_map(ir, override_results, class, specialized, facade, writer)
     })

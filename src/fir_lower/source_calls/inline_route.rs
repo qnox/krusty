@@ -45,8 +45,6 @@ pub(in super::super) enum ExpansionReason {
     CrossinlineParameter,
     /// The callee has no body of its own in this file's IR.
     NoTemplate,
-    /// The callee's body creates an object of a local or anonymous class.
-    LocalClassInBody,
     /// The callee is another file's and its body holds a subject `when` that switches on an enum's
     /// keys. The keys are read from a table of the callee's own class (the JVM's `$WhenMappings`),
     /// numbered by every `when` of that class in source order; this file's emission sees only the
@@ -150,20 +148,6 @@ impl BodyLowering<'_> {
             }
             if foreign && self.ir.enum_switch_when(expression).is_some() {
                 return Some(ExpansionReason::EnumSwitchInBody);
-            }
-            match self.ir.expr(expression) {
-                IrExpr::New { internal, .. }
-                    if self
-                        .ir
-                        .class_id_by_name(*internal)
-                        .and_then(|class| self.ir.classes.get(class as usize))
-                        // An inner class of a local class needs an instance of one, which only
-                        // the body itself can create.
-                        .is_some_and(|class| class.is_local_class || class.is_anonymous_object) =>
-                {
-                    return Some(ExpansionReason::LocalClassInBody);
-                }
-                _ => {}
             }
             crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
         }
