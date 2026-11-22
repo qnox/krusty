@@ -1,13 +1,32 @@
-//! The declared parameters a call to a same-file function supplies.
+//! The declared parameters a call to a same-file or sibling-source function supplies.
 //!
 //! A call whose callee is a function of this file takes its parameter vector from that function's
-//! declaration. A call that omits defaulted parameters supplies only the rest, and a default stub
+//! declaration; a sibling-source default call takes its provider's. A call that omits defaulted parameters supplies only the rest, and a default stub
 //! receives the parameters it boxes as nullable.
 
 use krusty::ir::{Callee, IrFile};
 use krusty::types::Ty;
 
 pub(super) fn supplied(ir: &IrFile, callee: &Callee, declared: &[Vec<Ty>]) -> Option<Vec<Ty>> {
+    if let Callee::ModuleWithDefaults {
+        target,
+        default_provider,
+        defaults,
+        ..
+    } = callee
+    {
+        // A sibling-source default call supplies only the provider declaration parameters that
+        // remain after removing the omitted ordinals.
+        return Some(
+            super::default_calls::supplied_provider_parameters(
+                ir,
+                *target,
+                *default_provider,
+                defaults,
+            )
+            .collect(),
+        );
+    }
     let function = callee.source_function()?;
     let mut parameters = declared[function as usize].clone();
     if matches!(
