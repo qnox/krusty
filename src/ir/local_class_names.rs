@@ -507,11 +507,13 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
         | Callee::ClassStaticWithDefaults { owner, .. }
         | Callee::ClassStaticDefault { owner, .. }
         | Callee::Static { owner, .. }
+        | Callee::ValueClassAdapter { owner, .. }
         | Callee::Special { owner, .. } => name(owner, names),
         Callee::Intrinsic { operation, ret } => {
             *ret = ty(*ret, names);
             match operation {
                 super::IrIntrinsic::EnumValueOf { classifier }
+                | super::IrIntrinsic::EnumValues { classifier }
                 | super::IrIntrinsic::EnumEntries { classifier }
                 | super::IrIntrinsic::PrimitiveCompare {
                     operand: classifier,
@@ -1495,6 +1497,9 @@ impl super::IrFile {
             for property in properties {
                 property.receiver = ty(property.receiver, names);
                 property.ty = ty(property.ty, names);
+                for (_, _, parameter) in &mut property.context_params {
+                    *parameter = ty(*parameter, names);
+                }
                 type_parameters(&mut property.type_params, names);
             }
         }

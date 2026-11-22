@@ -2225,13 +2225,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let (owner, name) = self
                     .range_getter(*target, *receiver)
                     .expect("checked by the guard");
-                if self.range_has_source_implementor(*receiver) {
-                    return Err(declined!(
-                        "the member `{name}` of a range type this file implements itself"
-                    ));
-                }
-                self.range_property_member(owner, &name, *receiver, *result)
-                    .expect("a range member, by the guard")
+                self.range_property_through_implementors(*target, owner, &name, *receiver, *result)
             }
             IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::ExternalPropertyRead {
@@ -2848,6 +2842,7 @@ fn callee_kind(callee: &Callee) -> &'static str {
         Callee::Static { .. } => "static",
         Callee::Virtual { .. } => "virtual",
         Callee::Super { .. } => "super",
+        Callee::ValueClassAdapter { .. } => "value-class adapter",
         Callee::Special { .. } => "special",
     }
 }

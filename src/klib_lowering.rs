@@ -29,6 +29,7 @@ mod enum_classes;
 mod for_loops;
 mod function_lowering;
 mod inline_templates;
+mod intercepted_continuation;
 mod ir_builtins;
 mod klib_types;
 mod local_values;
@@ -44,7 +45,7 @@ mod type_evidence;
 pub use crate::libraries::KlibBodyCallable as KlibCallable;
 pub use body_unit::DependencyBodyUnit;
 pub(crate) use body_unit::{
-    is_private_class_member, is_receiver_member, EmittedDependencyCallable,
+    emitted_body, is_private_class_member, is_receiver_member, EmittedDependencyCallable,
 };
 pub(crate) use callee_facts::CallEdge;
 pub use callee_facts::KlibCalleeFacts;
@@ -53,6 +54,7 @@ pub(crate) use class_initialization::{
 };
 pub(crate) use closure_forms::emitted_closure_function;
 pub(crate) use enum_classes::materializes as materializes_enum_class;
+pub(crate) use intercepted_continuation::expansion_member;
 
 /// The classifier a serialized object symbol names, when its signature names a class.
 pub(crate) fn object_classifier(
