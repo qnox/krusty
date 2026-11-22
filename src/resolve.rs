@@ -38696,7 +38696,11 @@ impl<'a> Checker<'a> {
                 annotations.record_parameter_name(occurrence, name);
             }
             if checked_source_facts.is_some_and(|facts| {
-                !annotations.record_checked_source_facts(binding_reference, facts)
+                !crate::spelling::record_checked_source_facts(
+                    &mut annotations,
+                    binding_reference,
+                    facts,
+                )
             }) {
                 self.resolved_declaration_types
                     .insert((reference.span.lo, reference.span.hi), Ty::Error);

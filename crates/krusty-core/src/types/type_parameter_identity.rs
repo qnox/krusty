@@ -21,16 +21,16 @@ static POSTPONED_VARIABLE_ORIGINS: OnceLock<Mutex<HashMap<&'static str, Postpone
 /// arguments published before the call was solved (a retained capture) completes its type from the
 /// solution signature inference reached for exactly these arguments.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PostponedVariableOrigin {
-    pub(crate) formal: super::TyParamName,
-    pub(crate) file: u32,
-    pub(crate) arguments: Vec<crate::diag::Span>,
+pub struct PostponedVariableOrigin {
+    pub formal: super::TyParamName,
+    pub file: u32,
+    pub arguments: Vec<crate::span::Span>,
 }
 
 /// Allocate an opaque identity for a type parameter owned by a dependency declaration. The
 /// provider retains the identity beside the exact declaration key it decoded; only the source
 /// spelling is registered here for diagnostics.
-pub(crate) fn metadata_type_parameter(source: &str) -> &'static str {
+pub fn metadata_type_parameter(source: &str) -> &'static str {
     let ordinal = NEXT_METADATA_TYPE_PARAMETER.fetch_add(1, Ordering::Relaxed);
     let semantic = intern(&format!("\0metadata-tp:{ordinal}"));
     let source = intern(source);
@@ -66,28 +66,25 @@ pub fn declaration_type_parameter(
 
 /// One call expression, the owner of the inference variables that call solves.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct CallSiteIdentity {
-    pub(crate) compilation: u64,
-    pub(crate) file: u32,
-    pub(crate) call: u32,
+pub struct CallSiteIdentity {
+    pub compilation: u64,
+    pub file: u32,
+    pub call: u32,
 }
 
 /// The call and declaration formal an inference variable minted by [`call_site_type_variable`]
 /// stands for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CallSiteVariable {
-    pub(crate) site: CallSiteIdentity,
-    pub(crate) formal: &'static str,
+pub struct CallSiteVariable {
+    pub site: CallSiteIdentity,
+    pub formal: &'static str,
 }
 
 /// The inference variable that call `site` solves for declaration formal `declared`. Every call
 /// owns its own: two calls to one declaration, nested or recursive, never share a variable, and a
 /// variable never equals the declaration-owned identity the enclosing declaration may have in
 /// scope. It keeps the declaration's source spelling for diagnostics.
-pub(crate) fn call_site_type_variable(
-    site: CallSiteIdentity,
-    declared: &'static str,
-) -> &'static str {
+pub fn call_site_type_variable(site: CallSiteIdentity, declared: &'static str) -> &'static str {
     let CallSiteIdentity {
         compilation,
         file,
@@ -120,7 +117,7 @@ pub(crate) fn call_site_type_variable(
 /// inputs left unfixed (`update(column, wrap("x"))` with `fun <T : Any> wrap(label: String)`). The
 /// nested call's provisional result names it in place of the declaration formal, so enclosing
 /// overload selection reads that argument as a result-only producer rather than as a fixed type.
-pub(crate) fn nested_result_type_variable(declared: &'static str) -> &'static str {
+pub fn nested_result_type_variable(declared: &'static str) -> &'static str {
     let fresh = intern(&format!("\0nested-result:{declared}"));
     let mut sources = TYPE_PARAMETER_SOURCES
         .get_or_init(|| Mutex::new(HashMap::default()))
@@ -137,7 +134,7 @@ pub(crate) fn nested_result_type_variable(declared: &'static str) -> &'static st
 }
 
 /// Whether `identity` was produced by [`nested_result_type_variable`].
-pub(crate) fn is_nested_result_type_variable(identity: &str) -> bool {
+pub fn is_nested_result_type_variable(identity: &str) -> bool {
     NESTED_RESULT_TYPE_VARIABLES
         .get()
         .is_some_and(|variables| variables.lock().unwrap().contains(identity))
@@ -146,7 +143,7 @@ pub(crate) fn is_nested_result_type_variable(identity: &str) -> bool {
 /// `ty` with call `site`'s own inference variables expressed as the formals they stand for. A call
 /// publishes its selection over the called declaration's formals; another call's variable is not
 /// this call's to translate and stays.
-pub(crate) fn ty_declared_at_call(ty: super::Ty, site: CallSiteIdentity) -> super::Ty {
+pub fn ty_declared_at_call(ty: super::Ty, site: CallSiteIdentity) -> super::Ty {
     super::ty_map_symbols(ty, &|symbol, bound| match symbol.kind() {
         super::TyKind::Var(name, _) => match call_site_variable(name) {
             Some(variable) if variable.site == site => super::Ty::ty_param(variable.formal, bound),
@@ -159,12 +156,12 @@ pub(crate) fn ty_declared_at_call(ty: super::Ty, site: CallSiteIdentity) -> supe
 /// Whether `ty` names one of call `site`'s own inference variables: a variable that call's
 /// selection has not solved. A declaration formal never does, even when it is the called
 /// declaration's own formal in scope at a recursive call.
-pub(crate) fn ty_mentions_call_variable(ty: super::Ty, site: CallSiteIdentity) -> bool {
+pub fn ty_mentions_call_variable(ty: super::Ty, site: CallSiteIdentity) -> bool {
     ty_declared_at_call(ty, site) != ty
 }
 
 /// The call and formal behind a call's inference variable; `None` for every other identity.
-pub(crate) fn call_site_variable(variable: super::TyParamName) -> Option<CallSiteVariable> {
+pub fn call_site_variable(variable: super::TyParamName) -> Option<CallSiteVariable> {
     CALL_SITE_VARIABLES
         .get()?
         .lock()
@@ -178,9 +175,9 @@ pub(crate) fn call_site_variable(variable: super::TyParamName) -> Option<CallSit
 /// the call's candidate selection, so the argument's checked type and the selected signature speak
 /// about one variable. It also records `argument` as one of the function arguments analysed under
 /// the variable ([`postponed_variable_origin`]).
-pub(crate) fn postponed_call_type_variable(
+pub fn postponed_call_type_variable(
     site: CallSiteIdentity,
-    argument: crate::diag::Span,
+    argument: crate::span::Span,
     declared: &str,
 ) -> &'static str {
     let declared = intern(declared);
@@ -204,9 +201,7 @@ pub(crate) fn postponed_call_type_variable(
 }
 
 /// The call and formal behind a postponed-call inference variable; `None` for every other identity.
-pub(crate) fn postponed_variable_origin(
-    variable: super::TyParamName,
-) -> Option<PostponedVariableOrigin> {
+pub fn postponed_variable_origin(variable: super::TyParamName) -> Option<PostponedVariableOrigin> {
     POSTPONED_VARIABLE_ORIGINS
         .get()?
         .lock()
@@ -219,7 +214,7 @@ pub(crate) fn postponed_variable_origin(
 /// The JVM signature uses one name for both; they are different inference variables. `declaration`
 /// is the caller's stable constructor identity (owner alone cannot separate overloads) and is not
 /// interpreted. Diagnostics still print the source spelling.
-pub(crate) fn constructor_type_parameter(
+pub fn constructor_type_parameter(
     owner: super::TypeName,
     declaration: &str,
     ordinal: usize,
@@ -242,7 +237,7 @@ pub(crate) fn constructor_type_parameter(
 /// same spelling (`class Outer<T> { class Inner<T> }`). Java names both `T`; the captured one still
 /// takes its slot in `Outer<A>.Inner<B>` but no member can name it, so it gets an identity of its
 /// own. `owner` is the capturing class and `ordinal` the slot; neither is interpreted.
-pub(crate) fn hidden_captured_type_parameter(
+pub fn hidden_captured_type_parameter(
     owner: super::TypeName,
     ordinal: usize,
     source: &str,
@@ -263,7 +258,7 @@ pub(crate) fn hidden_captured_type_parameter(
 /// A type parameter a compiler plugin declares on a function it generates for `owner`, copying one
 /// of the owner's own. It never equals the owner's parameter it copies: the function binds its own.
 /// `function` is the producer's stable name for the generated function and is not interpreted.
-pub(crate) fn generated_function_type_parameter(
+pub fn generated_function_type_parameter(
     owner: super::TypeName,
     function: &str,
     ordinal: usize,
@@ -301,7 +296,7 @@ mod tests {
         postponed_call_type_variable, postponed_variable_origin, type_parameter_source_name,
         CallSiteIdentity, PostponedVariableOrigin,
     };
-    use crate::diag::Span;
+    use crate::span::Span;
     use crate::types::TyParamName;
 
     #[test]

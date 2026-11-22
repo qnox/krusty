@@ -74,7 +74,7 @@ pub mod token;
 pub mod toolchain;
 pub mod trace;
 pub mod type_engine;
-pub mod types;
+pub use krusty_core::types;
 pub mod value_classes;
 pub mod wide_stack;
 

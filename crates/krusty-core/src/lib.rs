@@ -2,6 +2,7 @@
 //! phase and every compiler plugin shares it, so it lives below both.
 
 pub mod context_parameters;
+pub mod enhanced_nullability;
 pub mod features;
 pub mod fx_hash;
 pub mod inline_parameter_modifier;
@@ -11,8 +12,10 @@ pub mod language_version;
 pub mod name_tree;
 mod qualified_name;
 pub mod span;
+pub mod spelled;
 mod spelling;
 mod type_name;
+pub mod types;
 
 pub use spelling::{
     existing_type_name, existing_type_name_child, type_name, type_name_from,

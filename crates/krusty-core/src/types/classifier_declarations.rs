@@ -23,7 +23,7 @@ impl ClassifierDeclarationName {
     }
 
     /// Publish this declaration's identity from its retained container and exact segment.
-    pub(crate) fn identity(&self) -> TypeName {
+    pub fn identity(&self) -> TypeName {
         match self {
             Self::TopLevel { package, name } => super::type_name_child(*package, name),
             Self::Nested { owner, name } => super::type_name_nested_child(*owner, name),
@@ -36,14 +36,14 @@ impl ClassifierDeclarationName {
 /// closed result crosses common lowering without retaining a provider or reopening member lookup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SerializationGeneratedMemberStatuses {
-    pub(crate) serialize: ReturnValueStatus,
-    pub(crate) deserialize: ReturnValueStatus,
-    pub(crate) child_serializers: ReturnValueStatus,
-    pub(crate) type_parameter_serializers: ReturnValueStatus,
+    pub serialize: ReturnValueStatus,
+    pub deserialize: ReturnValueStatus,
+    pub child_serializers: ReturnValueStatus,
+    pub type_parameter_serializers: ReturnValueStatus,
 }
 
 impl SerializationGeneratedMemberStatuses {
-    pub(crate) fn new(
+    pub fn new(
         serialize: ReturnValueStatus,
         deserialize: ReturnValueStatus,
         child_serializers: ReturnValueStatus,
@@ -125,7 +125,7 @@ pub struct SerializableElement {
     pub contextual: bool,
     /// How the property's type is spelled, with the type-use annotations at each position
     /// (`List<@Serializable(with = S::class) Item>`).
-    pub type_spelling: crate::spelling::Spelled,
+    pub type_spelling: crate::spelled::Spelled,
 }
 
 /// Declaration facts of a classifier, as its declaring compilation fixed them.

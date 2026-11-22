@@ -117,7 +117,7 @@ fn decompose(ty: Ty, inherited_nullable: bool, out: &mut Vec<Piece>) {
 
 /// Whether two types have one structure, with every intersection inside compared as the set of
 /// its components: `A & B` and `B & A` are one type in two spellings.
-pub(crate) fn same_structure(left: Ty, right: Ty) -> bool {
+pub fn same_structure(left: Ty, right: Ty) -> bool {
     if left == right {
         return true;
     }
@@ -158,7 +158,7 @@ pub(crate) fn same_structure(left: Ty, right: Ty) -> bool {
 
 /// Whether two intersections have the same components: every component of each has an equal one
 /// in the other, so neither side may match two of its components to one of the other's.
-pub(crate) fn same_component_set(left: &[Ty], right: &[Ty], same: impl Fn(Ty, Ty) -> bool) -> bool {
+pub fn same_component_set(left: &[Ty], right: &[Ty], same: impl Fn(Ty, Ty) -> bool) -> bool {
     let covered = |from: &[Ty], to: &[Ty]| from.iter().all(|&a| to.iter().any(|&b| same(a, b)));
     left.len() == right.len() && covered(left, right) && covered(right, left)
 }
