@@ -1395,7 +1395,6 @@ mangling/internalOverrideSuperCall.kt
 mangling/multipleConstructors.kt
 mangling/publicOverrideSuperCall.kt
 multiDecl/component.kt
-multiDecl/kt9828_hashMap.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
 multiplatform/k2/basic/contextInFakeOverride.kt
 multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
