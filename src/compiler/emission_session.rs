@@ -4,7 +4,8 @@
 //! metadata produced by earlier modules. A target program can have a longer lifetime. Native links
 //! every module's objects, while Wasm assembles one module and therefore must retain one backend
 //! state until the complete source-module graph has been lowered. This session owns that lifetime
-//! without flattening source modules into one analysis.
+//! without flattening source modules into one analysis. A target that emits dependency support
+//! lowers no module until `finish`, so that support closes over every module's uses at once.
 
 use super::{emit_analyzed_into, Artifact, Backend};
 use crate::backend::DependencyMetadata;
@@ -39,6 +40,8 @@ pub struct EmissionSession<'a, B: Backend> {
     state: Option<B::State>,
     dependency_support: super::dependency_body_emission::DependencySupportState,
     target_artifacts: Vec<Artifact>,
+    /// Checked modules whose target emission waits until every module is checked.
+    checked: Vec<super::target_emission::CheckedModule>,
     failed: bool,
 }
 
@@ -49,12 +52,14 @@ impl<'a, B: Backend> EmissionSession<'a, B> {
             state: Some(B::State::default()),
             dependency_support: Default::default(),
             target_artifacts: Vec::new(),
+            checked: Vec::new(),
             failed: false,
         }
     }
 
-    /// Lower one source module into the retained target state and emit its dependency metadata
-    /// from the same checked files. The metadata state is intentionally fresh for this call.
+    /// Lower one source module into the retained target state, or keep its checked files for
+    /// `finish` when the target emits dependency support, and emit its dependency metadata from
+    /// the same checked files. The metadata state is intentionally fresh for this call.
     pub fn emit_module<M: DependencyMetadata>(
         &mut self,
         analysis: impl Into<StreamingSourceSetAnalysis>,
@@ -89,10 +94,10 @@ impl<'a, B: Backend> EmissionSession<'a, B> {
             .as_mut()
             .expect("an unfinished emission session retains its backend state");
         let mut outputs = Vec::new();
-        emit_analyzed_into(
+        let checked = emit_analyzed_into(
             analysis,
             stems,
-            super::TargetEmission {
+            &mut super::TargetEmission {
                 backend: self.backend,
                 state,
                 dependency_support: &mut self.dependency_support,
@@ -118,6 +123,7 @@ impl<'a, B: Backend> EmissionSession<'a, B> {
             return None;
         }
         self.target_artifacts.extend(outputs);
+        self.checked.extend(checked);
         Some(EmittedDependencyModule {
             name: module_name.to_string(),
             artifacts: metadata.finalize(metadata_state, module_name),
@@ -129,10 +135,27 @@ impl<'a, B: Backend> EmissionSession<'a, B> {
         if self.failed || diags.has_errors() {
             return Vec::new();
         }
-        let state = self
+        let mut state = self
             .state
             .take()
             .expect("an unfinished emission session retains its backend state");
+        // Every module is checked: emit the program's dependency support once, then each module's
+        // files in the order the modules arrived.
+        let mut target = super::TargetEmission {
+            backend: self.backend,
+            state: &mut state,
+            dependency_support: &mut self.dependency_support,
+        };
+        let target_artifacts = &mut self.target_artifacts;
+        super::target_emission::emit_program(
+            std::mem::take(&mut self.checked),
+            &mut target,
+            diags,
+            &mut |_, artifact| target_artifacts.push(artifact),
+        );
+        if diags.has_errors() {
+            return Vec::new();
+        }
         self.backend.check_module(&state, diags);
         if diags.has_errors() {
             return Vec::new();

@@ -667,13 +667,16 @@ impl<'u, 's> Linker<'u, 's> {
     /// The class a member of the final ordinary class `header` declares belongs to: the class
     /// the constructors that initialize it materialize, which created every instance the member
     /// is called on.
-    fn materialize_ordinary_member_class(
+    pub(super) fn materialize_ordinary_member_class(
         &mut self,
         ir: &mut IrFile,
         header: &super::super::class_headers::ClassMemberHeader<'s, 's>,
     ) -> Result<super::MemberClass<'s>, KlibBodyDeclineReason> {
         let contract = header.contract;
-        let class = if contract.kind == crate::libraries::TypeKind::Object {
+        let class = if contract.kind == crate::libraries::TypeKind::Enum {
+            // Every constant is an instance of the enum class the unit materializes for them.
+            self.materialize_member_enum(ir, header)?
+        } else if contract.kind == crate::libraries::TypeKind::Object {
             // An object's instance is the one its own private constructor created.
             let primary = contract.primary_constructor.as_ref().ok_or(
                 KlibBodyDeclineReason::UnsupportedDeclaration(
