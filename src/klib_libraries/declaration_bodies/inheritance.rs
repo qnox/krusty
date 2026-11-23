@@ -267,7 +267,7 @@ impl KlibDeclarationBodies {
             local @ KlibIrSignature::FileLocal { .. } => {
                 Ok(self.module_local_class(body_module, local))
             }
-            KlibIrSignature::Accessor(_) => Ok(None),
+            KlibIrSignature::Accessor(_) | KlibIrSignature::TypeParameter { .. } => Ok(None),
         }
     }
 
@@ -367,7 +367,7 @@ impl KlibDeclarationBodies {
             local @ KlibIrSignature::FileLocal { .. } => {
                 self.module_local_class(body_module, local)
             }
-            KlibIrSignature::Accessor(_) => None,
+            KlibIrSignature::Accessor(_) | KlibIrSignature::TypeParameter { .. } => None,
         };
         match class {
             Some((arena, class)) => self.inherited_implementations(body_module, arena, class),

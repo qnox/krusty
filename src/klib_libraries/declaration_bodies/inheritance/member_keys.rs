@@ -52,7 +52,7 @@ fn signature_key(signature: &KlibIrSignature) -> Option<MemberKey> {
             member_id: accessor.member_id(),
             mask: accessor.mask(),
         }),
-        KlibIrSignature::FileLocal { .. } => None,
+        KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => None,
     }
 }
 
@@ -77,6 +77,8 @@ pub(super) fn member_identity(
         KlibIrSignature::Accessor(signature) => {
             KlibDeclarationSignature::Accessor(signature.clone())
         }
+        // A type parameter is no member.
+        KlibIrSignature::TypeParameter { .. } => return Ok(None),
     };
     match bodies.callee_origin(module, &declaration) {
         super::KlibCalleeOrigin::Exact(identity) => Ok(Some(identity)),
