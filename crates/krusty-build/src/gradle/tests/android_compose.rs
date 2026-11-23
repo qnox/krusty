@@ -63,7 +63,7 @@ fn android_compose_app_is_compiled_by_krusty_with_a_handoff_for_what_it_refuses(
         root.display()
     );
     let expected = [
-        ("27:1", "a lambda in a composable lambda"),
+        ("27:1", "a lambda in a composable function"),
         (
             "22:20",
             "a composable lambda passed other than by a statement of a function body",
