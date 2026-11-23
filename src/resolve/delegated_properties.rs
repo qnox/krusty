@@ -329,11 +329,38 @@ fn delegate_callable_diagnostic_id(function: &crate::libraries::FunctionInfo) ->
             format!("{package}/{name}")
         };
     }
-    let owner = function.callable.owner.render().replace('$', ".");
-    if owner.contains('/') {
-        format!("{owner}.{name}")
+    let owner = delegate_member_owner(function.callable.owner);
+    format!("{owner}.{name}")
+}
+
+/// `package/Outer.Inner`, or `/Outer.$serializer` when the nested simple name itself contains `$`.
+/// Nesting comes from the name tree, so a `$` that belongs to the class name stays a `$`.
+fn delegate_member_owner(owner: TypeName) -> String {
+    let mut parts = Vec::new();
+    let mut current = owner;
+    loop {
+        match current.exact_nested_owner().and_then(|enclosing| {
+            current
+                .nested_segment_within(enclosing)
+                .map(|segment| (enclosing, segment))
+        }) {
+            Some((enclosing, segment)) => {
+                parts.push(segment);
+                current = enclosing;
+            }
+            None => {
+                parts.push(current.segment_ref());
+                break;
+            }
+        }
+    }
+    parts.reverse();
+    let class_name = parts.join(".");
+    let package = owner.package();
+    if package.is_empty() {
+        format!("/{class_name}")
     } else {
-        format!("/{owner}.{name}")
+        format!("{package}/{class_name}")
     }
 }
 
