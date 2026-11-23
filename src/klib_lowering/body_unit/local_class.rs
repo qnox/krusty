@@ -60,22 +60,12 @@ impl<'s> Linker<'_, 's> {
                     }
                 };
                 let params = declaration.declared_parameters().to_vec();
-                if params.len() != superclass.operands.len() {
+                if params.len() != superclass.arguments.len() {
                     return Err(KlibBodyDeclineReason::SignatureMismatch(
                         "a superclass delegation passes another number of arguments".to_owned(),
                     ));
                 }
-                let args = superclass
-                    .operands
-                    .iter()
-                    .zip(&params)
-                    .map(|(&slot, &ty)| {
-                        let value = ir.add_expr(IrExpr::GetValue(slot));
-                        ir.set_logical_type(value, ty);
-                        value
-                    })
-                    .collect::<Vec<_>>();
-                Some((declaration.classifier, params, args))
+                Some((declaration.classifier, params))
             }
             None => None,
         };
@@ -85,10 +75,10 @@ impl<'s> Linker<'_, 's> {
             self.install_local_interface(ir, interface)?;
         }
         let mut class = super::super::same_library_class::installed_class(&prepared);
-        if let Some((name, params, args)) = superclass {
+        // The initializer lowers the arguments the constructor passes, as its body reads them.
+        if let Some((name, params)) = superclass {
             class.superclass = name;
             class.super_ctor_params = params;
-            class.super_args = args;
         }
         let class_id = ir.add_class(class);
         if let Some(naming) = prepared.naming.clone() {
@@ -101,8 +91,8 @@ impl<'s> Linker<'_, 's> {
         ir.note_class_method(class_id, init);
         let receiver = ir.add_expr(IrExpr::GetValue(0));
         ir.set_logical_type(receiver, prepared.self_type);
-        // The initialization takes the constructor's value parameters, after an outer instance.
-        let prefix = usize::from(prepared.outer.is_some());
+        // The initialization takes the constructor's parameters, an outer instance among them,
+        // at the slots the constructor numbers them.
         let args = prepared
             .init_header
             .params()
@@ -110,7 +100,7 @@ impl<'s> Linker<'_, 's> {
             .enumerate()
             .map(|(index, ty)| {
                 let value = ir.add_expr(IrExpr::GetValue(
-                    u32::try_from(index + 1 + prefix).expect("a value index fits u32"),
+                    u32::try_from(index + 1).expect("a value index fits u32"),
                 ));
                 ir.set_logical_type(value, *ty);
                 Some(value)
@@ -144,6 +134,10 @@ impl<'s> Linker<'_, 's> {
                     fields: prepared.stored.clone(),
                     steps: prepared.steps,
                     outer: prepared.outer,
+                    superclass_arguments: prepared
+                        .superclass
+                        .map(|superclass| superclass.arguments)
+                        .unwrap_or_default(),
                 },
             )),
             static_initialization: None,
