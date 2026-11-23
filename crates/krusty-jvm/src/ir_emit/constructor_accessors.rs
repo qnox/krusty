@@ -12,7 +12,7 @@
 //! in declaration order. A private constructor's is planned with the class's other synthetic
 //! accessors (`static_accessors`), at the first call from another class.
 
-use super::constructor_defaults::emit_ctor_marker_accessor;
+use super::constructor_defaults::{emit_ctor_marker_accessor, MarkerAccessorAttributes};
 use super::{class_ctor_jvm_tys, jvm_tys, secondary_prefix_jvm_tys, ClassWriter};
 use crate::method_parameters::{
     primary_constructor_identities, secondary_constructor_identities, OwnerConstructorPrefix,
@@ -136,7 +136,7 @@ pub(super) fn emit_accessor(
             .copied()
             .chain(declared)
             .collect::<Vec<_>>();
-        emit_ctor_marker_accessor(owner, &parameters, &identities, cw);
+        emit_ctor_marker_accessor(owner, &parameters, &identities, None, cw);
         return;
     };
     let constructor = &class.secondary_ctors[secondary as usize];
@@ -149,7 +149,27 @@ pub(super) fn emit_accessor(
         .collect::<Vec<_>>();
     let identities =
         secondary_constructor_identities(ir, class, constructor, &owner_prefix, &parameters);
-    emit_ctor_marker_accessor(owner, &parameters, &identities, cw);
+    let attributes = secondary_annotations_ride_accessor(class, constructor).then_some(
+        MarkerAccessorAttributes {
+            annotations: &constructor.annotations,
+            parameters: &[],
+        },
+    );
+    emit_ctor_marker_accessor(owner, &parameters, &identities, attributes, cw);
+}
+
+/// Whether kotlinc writes the declared annotations of the primary constructor of `class` on its
+/// marker accessor: it takes a value class, and the private constructor keeps none of them.
+pub(super) fn primary_annotations_ride_accessor(ir: &IrFile, class: &IrClass) -> bool {
+    !class.is_sealed && !class.is_enum && ir.has_value_param_ctor(&class.fq_name())
+}
+
+/// The same for the secondary `constructor` of `class`.
+pub(super) fn secondary_annotations_ride_accessor(
+    class: &IrClass,
+    constructor: &krusty::ir::IrSecondaryCtor,
+) -> bool {
+    !class.is_sealed && !class.is_enum && constructor.vc_params
 }
 
 /// Private constructor `target` of a non-sealed class, as `(class, ordinal)`, when code outside

@@ -717,7 +717,9 @@ fn attach_synth_nullability(
     }
     // The USER annotations written on the primary-constructor parameters, per source parameter
     // (the same slots `ctor_params` above describes).
-    if !c.ctor_param_annotations.is_empty() {
+    if !c.ctor_param_annotations.is_empty()
+        && !constructor_accessors::primary_annotations_ride_accessor(ir, c)
+    {
         let user: Vec<krusty::ir::DeclarationAnnotations> = source_parameters
             .iter()
             .map(|parameter| {
@@ -2415,11 +2417,13 @@ fn emit_class(
         }
         // Declared PRIMARY-constructor annotations (`class C @Mark constructor(…)`), with the same
         // `Deprecated` / `ACC_SYNTHETIC` companions a secondary constructor's carry.
-        function_annotations::emit_constructor_declared(
-            &mut cw,
-            &c.primary_ctor_annotations,
-            &method_descriptor(&param_tys, Ty::Unit),
-        );
+        if !constructor_accessors::primary_annotations_ride_accessor(ir, c) {
+            function_annotations::emit_constructor_declared(
+                &mut cw,
+                &c.primary_ctor_annotations,
+                &method_descriptor(&param_tys, Ty::Unit),
+            );
+        }
         // A default on any primary-ctor parameter → kotlinc's synthetic
         // `<init>(params…, int mask, DefaultConstructorMarker)` overload (fills the masked slots from the
         // defaults, then `invokespecial` the real `<init>`).

@@ -60,12 +60,16 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
         ..
     } = seed;
     let ctor_desc = primary_ctor_descriptor(ir, c);
+    // kotlinc writes the annotations of a constructor that takes a value class on its marker
+    // accessor, so they intern there rather than with the constructor.
+    let annotations_move = super::constructor_accessors::primary_annotations_ride_accessor(ir, c);
     let parameters: Vec<krusty::jvm::classfile::SeedCtorParameter> =
         primary_ctor_source_parameters(ir, c)
             .into_iter()
             .map(|parameter| {
                 let (visible, invisible) = parameter
                     .annotations
+                    .filter(|_| !annotations_move)
                     .map(krusty::jvm::classfile::split_declaration_annotations)
                     .unwrap_or_default();
                 krusty::jvm::classfile::SeedCtorParameter {
@@ -82,7 +86,11 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_>, cw: &mut ClassWriter) {
         &krusty::jvm::classfile::MemberSignatures {
             ctor: ctor_signature,
         },
-        &primary_ctor_annotations(c),
+        &if annotations_move {
+            Vec::new()
+        } else {
+            primary_ctor_annotations(c)
+        },
     );
 }
 

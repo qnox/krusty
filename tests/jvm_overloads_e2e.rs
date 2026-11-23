@@ -142,41 +142,34 @@ fn enum_constructor_overloads_keep_the_name_and_ordinal_prefix_like_kotlinc() {
     );
 }
 
-// PLATFORM-SPECIFIC: kotlinc moves the annotations of a constructor hidden behind a value-class
-// marker accessor onto that accessor, which krusty does not model for any such constructor yet, so
-// the class files are compared by behaviour here and not byte for byte.
-const VALUE_CLASS_CONSTRUCTORS: &str = "@JvmInline value class V(val v: Int)
+const VALUE_CLASS_CONSTRUCTORS: &str = "package p
+
+@JvmInline value class V(val v: Int)
+
+annotation class Mark
 
 class HiddenSecondary(val x: String) {
-    @JvmOverloads constructor(a: V, b: Int = 1, c: Int = 2) : this(\"${a.v}$b$c\")
+    @Mark @Deprecated(\"d\") @JvmOverloads constructor(a: V, b: Int = 1, c: Int = 2) : this(\"\")
 }
 
-class HiddenPrimary @JvmOverloads constructor(val v: V, val a: Int = 1, val b: String = \"b\") {
-    override fun toString() = \"${v.v}$a$b\"
-}
+class HiddenPrimary @Mark @Deprecated(\"d\") @JvmOverloads constructor(
+    @Mark val v: V,
+    val a: Int = 1,
+    val b: String = \"b\",
+)
 
-fun box(): String {
-    val int = Int::class.javaPrimitiveType
-    val marker = Class.forName(\"kotlin.jvm.internal.DefaultConstructorMarker\")
-    val secondary = HiddenSecondary::class.java
-    val one = secondary.getDeclaredConstructor(int)
-    one.isAccessible = true
-    if ((one.newInstance(7) as HiddenSecondary).x != \"712\") return \"secondary: ${(one.newInstance(7) as HiddenSecondary).x}\"
-    val accessor = secondary.getConstructor(int, marker)
-    if ((accessor.newInstance(8, null) as HiddenSecondary).x != \"812\") return \"secondary accessor\"
-    val primary = HiddenPrimary::class.java
-    val first = primary.getDeclaredConstructor(int)
-    first.isAccessible = true
-    if (first.newInstance(5).toString() != \"51b\") return \"primary: ${first.newInstance(5)}\"
-    val hidden = primary.getConstructor(int, marker)
-    if (hidden.newInstance(6, null).toString() != \"61b\") return \"primary accessor\"
-    return \"OK\"
+class PlainSecondary(val x: String) {
+    @Mark constructor(a: V, b: Int = 1) : this(\"\")
 }
 ";
 
 #[test]
-fn value_class_constructor_overloads_are_reachable_through_marker_accessors() {
-    common::expect_box_same_as_kotlinc(VALUE_CLASS_CONSTRUCTORS, "jvm_overloads_value_class");
+fn value_class_constructor_overloads_and_annotations_sit_on_the_marker_accessors_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "JvmOverloadsValueClassConstructors",
+        VALUE_CLASS_CONSTRUCTORS,
+        &["p/HiddenSecondary", "p/HiddenPrimary", "p/PlainSecondary"],
+    );
 }
 
 const COMPANION: &str = "package p
