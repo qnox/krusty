@@ -25,7 +25,7 @@ set -euo pipefail
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
 order_versions() {
-  "$script_dir/order-kotlin-versions.sh"
+  "$script_dir/sort-kotlin-versions.sh" | uniq
 }
 
 if [ "$#" -ne 2 ]; then

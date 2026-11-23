@@ -1,6 +1,8 @@
 //! Frontend publication of serialization's generated nested classifier.
 
-use crate::plugins::{FrontendCallable, FrontendCallableOwner, FrontendClassContext};
+use crate::plugins::{
+    FrontendCallable, FrontendCallableOwner, FrontendClassContext, FrontendClassifierHeader,
+};
 use crate::types::{type_name, GeneratedClassifierFact, GeneratedClassifierKind, Visibility};
 
 use super::{KSERIALIZER_FQ, SERIALIZABLE_FQ};
@@ -19,6 +21,7 @@ pub(super) fn publish_serializer_accessor_declaration(
     members: &mut Vec<FrontendCallable>,
 ) {
     if !ctx
+        .header
         .annotations
         .iter()
         .any(|annotation| annotation.matches(SERIALIZABLE_FQ))
@@ -35,7 +38,7 @@ pub(super) fn publish_serializer_accessor_declaration(
         .iter()
         .map(|name| crate::types::Ty::ty_param(name, any))
         .collect::<Vec<_>>();
-    let class = crate::types::Ty::obj_args_name(ctx.classifier, &parameters);
+    let class = crate::types::Ty::obj_args_name(ctx.header.classifier, &parameters);
     let params = parameters
         .iter()
         .map(|&parameter| crate::types::Ty::obj_args_name(serializer, &[parameter]))
@@ -55,7 +58,7 @@ pub(super) fn publish_serializer_accessor_declaration(
     members.push(FrontendCallable {
         // A named object is already the singleton value through which its generated accessor is
         // called. Ordinary classes expose the accessor through their companion value.
-        owner: if ctx.kind == crate::libraries::TypeKind::Object {
+        owner: if ctx.header.kind == crate::libraries::TypeKind::Object {
             FrontendCallableOwner::Classifier
         } else {
             FrontendCallableOwner::Companion
@@ -74,20 +77,20 @@ pub(super) fn publish_serializer_accessor_declaration(
 }
 
 pub(super) fn publish_generated_classifier_facts(
-    ctx: &FrontendClassContext<'_>,
+    header: &FrontendClassifierHeader<'_>,
     classifiers: &mut Vec<GeneratedClassifierFact>,
 ) {
-    classifiers.extend(generated_serializer_classifier_fact(ctx));
-    if ctx
+    classifiers.extend(generated_serializer_classifier_fact(header));
+    if header
         .annotations
         .iter()
         .any(|annotation| annotation.matches(SERIALIZABLE_FQ))
-        && ctx.kind != crate::libraries::TypeKind::Object
-        && ctx.companion.is_none()
+        && header.kind != crate::libraries::TypeKind::Object
+        && header.companion.is_none()
     {
         classifiers.push(GeneratedClassifierFact {
-            classifier: ctx.classifier.nested_child("Companion"),
-            lexical_owner: ctx.classifier,
+            classifier: header.classifier.nested_child("Companion"),
+            lexical_owner: header.classifier,
             purpose: crate::types::GeneratedClassifierPurpose::SerializationCompanion,
             source_name: "Companion".into(),
             visibility: Visibility::Public,
@@ -121,24 +124,24 @@ pub(super) fn serializable_by_plugin(
 }
 
 pub(super) fn generated_serializer_classifier_fact(
-    ctx: &FrontendClassContext<'_>,
+    header: &FrontendClassifierHeader<'_>,
 ) -> Option<GeneratedClassifierFact> {
     // An enum, a sealed base, an abstract class and an object build their serializer at run time
     // (`EnumSerializer`, `SealedClassSerializer`, `PolymorphicSerializer`, `ObjectSerializer`); only
     // an ordinary class gets a `$serializer`.
-    if !serializable_by_plugin(ctx.annotations, ctx.annotation_class_arguments)
+    if !serializable_by_plugin(header.annotations, header.annotation_class_arguments)
         || matches!(
-            ctx.kind,
+            header.kind,
             crate::libraries::TypeKind::Enum | crate::libraries::TypeKind::Object
         )
-        || ctx.is_sealed
-        || super::cached_serializer::frontend_is_polymorphic_base(ctx)
+        || header.is_sealed
+        || super::cached_serializer::frontend_is_polymorphic_base(header)
     {
         return None;
     }
     Some(GeneratedClassifierFact {
-        classifier: ctx.classifier.nested_child(SERIALIZER_OBJECT_NAME),
-        lexical_owner: ctx.classifier,
+        classifier: header.classifier.nested_child(SERIALIZER_OBJECT_NAME),
+        lexical_owner: header.classifier,
         purpose: crate::types::GeneratedClassifierPurpose::SerializationSerializer,
         source_name: SERIALIZER_OBJECT_NAME.into(),
         visibility: Visibility::Public,
@@ -165,18 +168,20 @@ mod tests {
         let mut members = Vec::new();
         SerializationPlugin::default().generate_frontend_declarations(
             &FrontendClassContext {
-                classifier,
-                companion: None,
-                kind: crate::libraries::TypeKind::Class,
-                is_sealed: false,
-                is_abstract: false,
+                header: FrontendClassifierHeader {
+                    classifier,
+                    companion: None,
+                    kind: crate::libraries::TypeKind::Class,
+                    is_sealed: false,
+                    is_abstract: false,
+                    annotations: &annotation,
+                    annotation_class_arguments: &[],
+                },
                 type_parameters: &crate::types::TypeParameters::new(
                     vec!["T".to_string()],
                     vec![Ty::nullable(Ty::obj("kotlin/Any"))],
                     vec![crate::types::TypeVariance::Invariant],
                 ),
-                annotations: &annotation,
-                annotation_class_arguments: &[],
                 declared_functions: &[],
             },
             &mut members,
@@ -231,14 +236,16 @@ mod tests {
         let mut members = Vec::new();
         SerializationPlugin::default().generate_frontend_declarations(
             &FrontendClassContext {
-                classifier: type_name("demo/Singleton"),
-                companion: None,
-                kind: crate::libraries::TypeKind::Object,
-                is_sealed: false,
-                is_abstract: false,
+                header: FrontendClassifierHeader {
+                    classifier: type_name("demo/Singleton"),
+                    companion: None,
+                    kind: crate::libraries::TypeKind::Object,
+                    is_sealed: false,
+                    is_abstract: false,
+                    annotations: &annotation,
+                    annotation_class_arguments: &[],
+                },
                 type_parameters: &crate::types::TypeParameters::default(),
-                annotations: &annotation,
-                annotation_class_arguments: &[],
                 declared_functions: &[],
             },
             &mut members,
@@ -252,17 +259,14 @@ mod tests {
     fn publishes_the_exact_generated_serializer_classifier_fact() {
         let annotation = [type_name(SERIALIZABLE_FQ)];
         let classifier = type_name("demo/Box");
-        let parameters = crate::types::TypeParameters::default();
-        let context = FrontendClassContext {
+        let context = FrontendClassifierHeader {
             classifier,
             companion: None,
             kind: crate::libraries::TypeKind::Class,
             is_sealed: false,
             is_abstract: false,
-            type_parameters: &parameters,
             annotations: &annotation,
             annotation_class_arguments: &[],
-            declared_functions: &[],
         };
 
         assert_eq!(
@@ -303,20 +307,17 @@ mod tests {
         let (mut index, _, _, _) = analysis.streamed.unwrap().module.into_parts();
         let owner = type_name("header_names/Owner$Literal");
         let declaration = index.classifier_declaration(owner).unwrap();
-        let parameters = crate::types::TypeParameters::default();
         let annotations = [type_name(SERIALIZABLE_FQ)];
         let mut generated = Vec::new();
         publish_generated_classifier_facts(
-            &FrontendClassContext {
+            &FrontendClassifierHeader {
                 classifier: owner,
                 companion: None,
                 kind: crate::libraries::TypeKind::Class,
                 is_sealed: false,
                 is_abstract: false,
-                type_parameters: &parameters,
                 annotations: &annotations,
                 annotation_class_arguments: &[],
-                declared_functions: &[],
             },
             &mut generated,
         );
@@ -350,7 +351,6 @@ mod tests {
     fn rejects_non_generating_serializable_forms() {
         let annotation = [type_name(SERIALIZABLE_FQ)];
         let custom = [(0, type_name("demo/OwnSerializer"))];
-        let parameters = crate::types::TypeParameters::default();
         for (kind, is_sealed, is_abstract, arguments) in [
             (
                 crate::libraries::TypeKind::Class,
@@ -362,16 +362,14 @@ mod tests {
             (crate::libraries::TypeKind::Class, true, true, &[][..]),
             (crate::libraries::TypeKind::Class, false, true, &[][..]),
         ] {
-            let context = FrontendClassContext {
+            let context = FrontendClassifierHeader {
                 classifier: type_name("demo/NotGenerated"),
                 companion: None,
                 kind,
                 is_sealed,
                 is_abstract,
-                type_parameters: &parameters,
                 annotations: &annotation,
                 annotation_class_arguments: arguments,
-                declared_functions: &[],
             };
             assert_eq!(
                 generated_serializer_classifier_fact(&context),
