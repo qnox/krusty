@@ -164,8 +164,30 @@ impl<'a> Layout<'a> {
         }
         let mut parts: Vec<[Vec<u16>; 4]> = relaid.iter().map(|_| Default::default()).collect();
         let mut rewritten_reach = vec![false; count];
+        // The rewritten method that interned each entry, and whether that same method's code still
+        // names it: another rewritten method naming it does not keep it where its owner left it.
+        let mut owner: Vec<Option<usize>> = vec![None; count];
+        for method in relaid {
+            for index in method.added.clone().chain(method.interned.clone()) {
+                if let Some(entry_owner) = owner.get_mut(usize::from(index)) {
+                    *entry_owner = Some(method.index);
+                }
+            }
+        }
+        let mut owner_reach = vec![false; count];
         for slot in &read.slots {
             reach(read, slot.index, &mut kept);
+            if let Holder::Code(method, _) = slot.holder {
+                if by_method.contains_key(&method) {
+                    let mut named = vec![false; count];
+                    reach(read, slot.index, &mut named);
+                    for (index, named) in named.into_iter().enumerate() {
+                        if named && owner[index] == Some(method) {
+                            owner_reach[index] = true;
+                        }
+                    }
+                }
+            }
             let rewritten = match slot.holder {
                 Holder::Code(method, part) => by_method.get(&method).map(|&at| (at, part)),
                 Holder::Class
@@ -231,7 +253,7 @@ impl<'a> Layout<'a> {
             .map(|index| {
                 owned[index]
                     && kept[index]
-                    && !rewritten_reach[index]
+                    && !owner_reach[index]
                     && !leading[index]
                     // A class signature is visited with the class header by ASM. It may fall into
                     // the first method's coarse pool range, but that method never owns it.
