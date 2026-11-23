@@ -97,6 +97,11 @@ pub struct ActualizationTypeBindings {
     /// Per source classifier, the members its dependency supertypes declare.
     inherited_dependency_members:
         crate::fx_hash::HashMap<DeclarationId, Vec<InheritedDependencyMember>>,
+    /// The `actual typealias`es whose dependency target's member scope was published, even when it
+    /// holds none of the names asked for. A target with type arguments, or one that did not
+    /// resolve, publishes nothing, and an alias without a published scope proves no member
+    /// missing.
+    dependency_scopes: crate::fx_hash::HashSet<DeclarationId>,
 }
 
 impl ActualizationTypeBindings {
@@ -115,6 +120,10 @@ impl ActualizationTypeBindings {
         classifier: crate::types::TypeName,
     ) {
         self.by_declaration.insert(declaration, classifier);
+    }
+
+    pub(crate) fn publish_dependency_scope(&mut self, alias: DeclarationId) {
+        self.dependency_scopes.insert(alias);
     }
 
     pub(crate) fn bind_inherited_dependency_members(
@@ -1181,11 +1190,30 @@ pub fn actualization(
         bindings: &ActualizationTypeBindings,
         actualized_aliases: &[ActualizedAlias],
     ) -> Option<(DeclarationKind, String, ReceiverKey, usize)> {
-        let name = stub
-            .lookup_name
-            .and_then(|name| headers.lookup_names.get(name))
-            .unwrap_or_default()
-            .to_string();
+        let lookup_name = |stub: &DeclarationStub| {
+            stub.lookup_name
+                .and_then(|name| headers.lookup_names.get(name))
+                .unwrap_or_default()
+                .to_string()
+        };
+        let mut name = lookup_name(stub);
+        // A nested classifier is spelled through its owner (`Outer.Nested`), and an owner an
+        // `actual typealias` stands for is spelled differently on the two sides (`Outer`,
+        // `OuterImpl`). Within one owner's children it is the name relative to that owner that
+        // identifies it.
+        if stub.kind == DeclarationKind::Classifier {
+            let owner_name = headers
+                .declarations
+                .anchor(stub.id)
+                .and_then(|anchor| anchor.owner)
+                .and_then(|owner| headers.stub(owner))
+                .map(lookup_name);
+            if let Some(relative) = owner_name
+                .and_then(|owner| name.strip_prefix(&format!("{owner}.")).map(str::to_owned))
+            {
+                name = relative;
+            }
+        }
         // The receiver a member extension declares, as the CLASSIFIER it identifies. The two sides
         // of a pair may write it differently — one imports it, the other qualifies it, and an
         // `expect class` actualized by a `typealias` is written as the alias's target on the
@@ -1290,6 +1318,32 @@ pub fn actualization(
                 visible.extend(inherited);
             }
         }
+        // An `actual typealias` answers from its target's member scope. For a dependency class
+        // that is what the provider publishes, which is not everything the class declares: a
+        // dependency's `internal` members are not published, and the `equals`/`hashCode`/
+        // `toString` the compiler generates for a data or value class are members every class
+        // has. Neither is evidence that the class lacks the member, so neither is owed, and an
+        // alias whose scope was not published owes nothing.
+        let alias_owners = actual_member_owners(headers, bindings, pair.actual)
+            .into_iter()
+            .filter(|owner| {
+                headers
+                    .stub(*owner)
+                    .is_some_and(|stub| stub.kind == DeclarationKind::TypeAlias)
+            })
+            .collect::<Vec<_>>();
+        let dependency_alias_target = !alias_owners.is_empty();
+        let unpublished_scope = alias_owners
+            .iter()
+            .any(|alias| !bindings.dependency_scopes.contains(alias));
+        let owes = |child: &DeclarationStub| {
+            !(unpublished_scope
+                || dependency_alias_target
+                    && (child
+                        .flags
+                        .has(crate::fir::DeclarationFlags::GENERATED_STRUCTURAL_MEMBER)
+                        || child.visibility == crate::types::Visibility::Internal))
+        };
         let mut owed = Vec::new();
         for child in expect_children {
             let Some(key) = child_key(headers, child, bindings, &actualized_aliases) else {
@@ -1302,6 +1356,7 @@ pub fn actualization(
                 dependency_members::implementations(
                     headers,
                     bindings,
+                    &actualized_aliases,
                     child,
                     &key.1,
                     actual_member_owners(headers, bindings, pair.actual)
@@ -1311,7 +1366,7 @@ pub fn actualization(
                 ) == 1
             };
             let Some(candidates) = actual_children.get(&key) else {
-                if !discharged_by_dependency() {
+                if !discharged_by_dependency() && owes(child) {
                     owed.push(child.id);
                 }
                 continue;
@@ -1345,7 +1400,7 @@ pub fn actualization(
                     TypeParameterScope::Positional,
                 ) {
                     incompatible_members.insert(renamed);
-                } else if !discharged_by_dependency() {
+                } else if !discharged_by_dependency() && owes(child) {
                     owed.push(child.id);
                 }
                 continue;
@@ -1803,6 +1858,8 @@ mod tests {
             parameters: parameters.into(),
             result,
             mutable: false,
+            operator: false,
+            infix: false,
         }
     }
 
@@ -1817,6 +1874,8 @@ mod tests {
             parameters: Box::default(),
             result,
             mutable,
+            operator: false,
+            infix: false,
         }
     }
 
@@ -1904,5 +1963,27 @@ mod tests {
             vec![inherited_function("ping", &[], crate::types::Ty::Unit)]
         });
         assert_eq!(owed, 1);
+    }
+
+    /// `operator` is part of an `expect` member's contract and the inherited record carries it, so
+    /// the two must agree in both directions.
+    #[test]
+    fn an_inherited_operator_implements_only_an_expect_operator() {
+        let operator = |token: crate::types::Ty| InheritedDependencyMember {
+            operator: true,
+            ..inherited_function("plus", &[token], token)
+        };
+        let plain = |token: crate::types::Ty| inherited_function("plus", &[token], token);
+        let matched = owed_with_inherited("operator fun plus(other: Token): Token", |token, _| {
+            vec![operator(token)]
+        });
+        let expect_lacks = owed_with_inherited("fun plus(other: Token): Token", |token, _| {
+            vec![operator(token)]
+        });
+        let actual_lacks =
+            owed_with_inherited("operator fun plus(other: Token): Token", |token, _| {
+                vec![plain(token)]
+            });
+        assert_eq!((matched, expect_lacks, actual_lacks), (0, 1, 1));
     }
 }

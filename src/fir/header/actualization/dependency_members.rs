@@ -25,6 +25,10 @@ pub struct InheritedDependencyMember {
     pub(crate) result: Ty,
     /// A property declared `var`; always false for a function.
     pub(crate) mutable: bool,
+    /// A function declared `operator` or `infix`: kotlinc requires the implementation to state the
+    /// same, so the two sides must agree on both.
+    pub(crate) operator: bool,
+    pub(crate) infix: bool,
 }
 
 /// The inherited members, of the one name `name`, that implement `expect`.
@@ -37,25 +41,32 @@ pub struct InheritedDependencyMember {
 pub(super) fn implementations<'a>(
     headers: &StreamedHeaderModule,
     bindings: &ActualizationTypeBindings,
+    actualized_aliases: &[(crate::types::TypeName, HeaderTypeId, SourceFileId)],
     expect: &DeclarationStub,
     name: &str,
     members: impl Iterator<Item = &'a InheritedDependencyMember>,
 ) -> usize {
     members
-        .filter(|member| implements(headers, bindings, expect, name, member))
+        .filter(|member| implements(headers, bindings, actualized_aliases, expect, name, member))
         .count()
 }
 
 fn implements(
     headers: &StreamedHeaderModule,
     bindings: &ActualizationTypeBindings,
+    actualized_aliases: &[(crate::types::TypeName, HeaderTypeId, SourceFileId)],
     expect: &DeclarationStub,
     name: &str,
     member: &InheritedDependencyMember,
 ) -> bool {
     // A constructor is named by its class, not by a member name the record keeps.
     let named_alike = expect.kind == DeclarationKind::Constructor || member.name == name;
-    if member.kind != expect.kind || !named_alike || carries_unprojected_modifier(expect) {
+    if member.kind != expect.kind
+        || !named_alike
+        || carries_unprojected_modifier(expect)
+        || member.operator != expect.flags.has(DeclarationFlags::OPERATOR)
+        || member.infix != expect.flags.has(DeclarationFlags::INFIX)
+    {
         return false;
     }
     match headers
@@ -83,15 +94,21 @@ fn implements(
                             && type_matches(
                                 headers,
                                 bindings,
+                                actualized_aliases,
                                 expect.source,
                                 parameter.ty,
                                 *inherited,
                             )
                     })
                 && match result {
-                    HeaderResultType::Explicit(written) => {
-                        type_matches(headers, bindings, expect.source, written, member.result)
-                    }
+                    HeaderResultType::Explicit(written) => type_matches(
+                        headers,
+                        bindings,
+                        actualized_aliases,
+                        expect.source,
+                        written,
+                        member.result,
+                    ),
                     HeaderResultType::ImplicitUnit => member.result.kind() == TyKind::Unit,
                     // An inferred result states no type to compare.
                     HeaderResultType::Inferred => false,
@@ -112,6 +129,7 @@ fn implements(
                             && type_matches(
                                 headers,
                                 bindings,
+                                actualized_aliases,
                                 expect.source,
                                 parameter.ty,
                                 *inherited,
@@ -130,7 +148,14 @@ fn implements(
                 && headers.syntax.parameters(context_parameters).is_empty()
                 && headers.syntax.type_parameters(type_parameters).is_empty()
                 && mutable == member.mutable
-                && type_matches(headers, bindings, expect.source, written, member.result)
+                && type_matches(
+                    headers,
+                    bindings,
+                    actualized_aliases,
+                    expect.source,
+                    written,
+                    member.result,
+                )
         }
         _ => false,
     }
@@ -145,8 +170,6 @@ fn carries_unprojected_modifier(expect: &DeclarationStub) -> bool {
         DeclarationFlags::INLINE,
         DeclarationFlags::EXTERNAL,
         DeclarationFlags::TAILREC,
-        DeclarationFlags::OPERATOR,
-        DeclarationFlags::INFIX,
         DeclarationFlags::LATEINIT,
         DeclarationFlags::CONST,
     ]
@@ -155,10 +178,12 @@ fn carries_unprojected_modifier(expect: &DeclarationStub) -> bool {
 }
 
 /// Whether the written `expect` type names the same classifier, with the same nullability and no
-/// type arguments, as `inherited`.
+/// type arguments, as `inherited`. An `expect` classifier an `actual typealias` actualizes is the
+/// alias's target.
 fn type_matches(
     headers: &StreamedHeaderModule,
     bindings: &ActualizationTypeBindings,
+    actualized_aliases: &[(crate::types::TypeName, HeaderTypeId, SourceFileId)],
     source: SourceFileId,
     expect: HeaderTypeId,
     inherited: Ty,
@@ -178,8 +203,20 @@ fn type_matches(
     {
         return false;
     }
-    let TyKind::Obj(classifier, arguments) = inherited.non_null().kind() else {
+    let Some(mut classifier) = bindings.type_classifier(source, expect) else {
         return false;
     };
-    arguments.is_empty() && bindings.type_classifier(source, expect) == Some(classifier)
+    let mut aliases = actualized_aliases
+        .iter()
+        .filter(|(name, _, _)| *name == classifier);
+    if let (Some((_, target, alias_source)), None) = (aliases.next(), aliases.next()) {
+        let Some(target) = bindings.type_classifier(*alias_source, *target) else {
+            return false;
+        };
+        classifier = target;
+    }
+    let TyKind::Obj(inherited, arguments) = inherited.non_null().kind() else {
+        return false;
+    };
+    arguments.is_empty() && classifier == inherited
 }

@@ -383,6 +383,7 @@ fn bind_inherited_dependency_members(
         else {
             continue;
         };
+        bindings.publish_dependency_scope(stub.id);
         let receiver = crate::types::Ty::obj_name(target);
         let members = expected_names
             .iter()
@@ -456,6 +457,8 @@ fn dependency_constructors(
             parameters: constructor.params.clone().into_boxed_slice(),
             result: crate::types::Ty::Unit,
             mutable: false,
+            operator: false,
+            infix: false,
         })
         .collect()
 }
@@ -480,7 +483,7 @@ fn has_type_arguments(
 /// and specialization, so a member a nearer declaration overrides is absent. Private members are
 /// never inherited. A member the `expect` side cannot state is excluded here, with its evidence
 /// intact, rather than projected into a record it would then equal: one with a receiver, context
-/// parameters, type parameters, a modifier the record cannot carry (`suspend`, `operator`, `infix`, `inline`) or `vararg`, an accessor with its own availability or
+/// parameters, type parameters, a modifier the record cannot carry (`suspend`, `inline`) or `vararg`, an accessor with its own availability or
 /// visibility, or a property that is a Java field or synthesized from Java accessors.
 fn inherited_members(
     platform: &dyn SemanticPlatform,
@@ -492,16 +495,36 @@ fn inherited_members(
     // is still a member that can actualize, so two compatible ones are ambiguous.
     let callables =
         crate::symbol_resolver::member_declarations_in_hierarchy(platform, receiver, name);
+    // A member the hierarchy also lists beside the one that overrides it (`String.length` and
+    // `CharSequence.length`) is that one's overridden declaration, not a second member.
+    let overridden = callables
+        .functions()
+        .iter()
+        .flat_map(|function| function.callable.overridden_declarations.iter())
+        .chain(
+            callables
+                .properties()
+                .iter()
+                .flat_map(|property| property.getter.overridden_declarations.iter()),
+        )
+        .collect::<Vec<_>>();
     let functions = callables
         .functions()
         .iter()
         .filter(|function| {
-            function.kind == crate::libraries::FnKind::Member
+            let declared = function
+                .callable
+                .declared_params
+                .as_deref()
+                .unwrap_or(&function.callable.params);
+            !overridden.iter().any(|over| {
+                over.owner == function.callable.owner
+                    && *over.name == *name
+                    && *over.params == *declared
+            }) && function.kind == crate::libraries::FnKind::Member
                 && crate::symbol_resolver::member_is_inheritable(function.callable.visibility)
                 && function.context_count == 0
                 && !function.flags.suspend
-                && !function.flags.operator
-                && !function.flags.infix
                 && function.flags.inline == crate::libraries::InlineKind::None
                 && !function.call_sig.vararg
                 && function
@@ -515,12 +538,16 @@ fn inherited_members(
             parameters: function.callable.params.clone().into_boxed_slice(),
             result: function.callable.ret,
             mutable: false,
+            operator: function.flags.operator,
+            infix: function.flags.infix,
         });
     let properties = callables
         .properties()
         .iter()
         .filter(|property| {
-            property.kind == crate::libraries::PropKind::Member
+            !overridden.iter().any(|over| {
+                over.owner == property.owner && *over.name == *name && over.params.is_empty()
+            }) && property.kind == crate::libraries::PropKind::Member
                 && property.producer == crate::libraries::PropertyProducer::KotlinAccessor
                 && crate::symbol_resolver::member_is_inheritable(property.visibility)
                 && property.context_count == 0
@@ -537,6 +564,8 @@ fn inherited_members(
             parameters: Box::default(),
             result: property.ty,
             mutable: property.setter.is_some(),
+            operator: false,
+            infix: false,
         });
     functions.chain(properties).collect()
 }

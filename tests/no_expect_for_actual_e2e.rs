@@ -1833,3 +1833,46 @@ actual typealias FromKotlin = KotlinTarget
     assert_eq!(reference, Vec::new(), "the reference compiler is silent");
     assert_eq!(krusty, reference);
 }
+
+/// An alias to a builtin class answers for the members it declares and the ones it overrides: the
+/// hierarchy lists `String.length` beside the `CharSequence.length` it overrides, and the pair is
+/// one implementation of the `expect` member, not two competing ones.
+#[test]
+fn an_actual_typealias_to_a_class_that_overrides_its_supertypes_members_is_silent() {
+    let common_source = "\
+expect class Text {
+    val length: Int
+    fun subSequence(startIndex: Int, endIndex: Int): CharSequence
+}
+";
+    let (reference, krusty) = both_split(
+        "alias_overridden_members",
+        &[("Common.kt", common_source)],
+        &[("Platform.kt", "actual typealias Text = String\n")],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
+
+/// An `expect value class` actualized by an alias to a dependency class owes nothing for what the
+/// compiler generates (`equals`, `hashCode`, `toString`) or for the `internal` members the
+/// dependency does not publish, and its constructor parameter, an `expect` class actualized by
+/// another alias, is that alias's target.
+#[test]
+fn an_actual_typealias_to_a_dependency_value_class_is_silent() {
+    let common_source = "\
+expect class Signed
+expect value class Unsigned internal constructor(internal val data: Signed)
+";
+    let platform = "\
+actual typealias Signed = Int
+actual typealias Unsigned = UInt
+";
+    let (reference, krusty) = both_split(
+        "alias_dependency_value_class",
+        &[("Common.kt", common_source)],
+        &[("Platform.kt", platform)],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
