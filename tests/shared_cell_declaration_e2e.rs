@@ -103,3 +103,22 @@ fn a_nested_closure_inside_an_inlined_literal_writes_through_the_holder() {
         .expect("the reference kotlinc is provisioned");
     assert_eq!(output, "OK");
 }
+
+/// A generic call's erased result assigned to a captured local goes into the holder's `Object`
+/// `element` as it is: kotlinc narrows it only for a consumer that needs the narrower type, so the
+/// store writes no `checkcast`.
+const GENERIC_RESULT_STORE: &str = "fun <T> pick(x: Any?): T = x as T\n\
+    fun run1(f: () -> Unit) = f()\n\
+    fun assign(): String { var result = \"\"; run1 { result = pick(\"OK\") }; return result }\n";
+
+#[test]
+fn a_captured_local_stores_a_generic_result_without_narrowing_it() {
+    common::byte_diff_against_kotlinc_cp(
+        "SharedCellGenericResult",
+        GENERIC_RESULT_STORE,
+        "SharedCellGenericResultKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("the reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("SharedCellGenericResultKt differs from kotlinc:\n{diff}"));
+}

@@ -128,6 +128,12 @@ impl Emitter<'_> {
         {
             return;
         }
+        if ir_ty_to_jvm(&elem).is_reference() {
+            // The holder's `element` is `Object`, so a generic call's erased result is stored as it
+            // is: kotlinc narrows it only for a consumer that needs the narrower type.
+            self.emit_consumed_operand(value, code);
+            return;
+        }
         self.emit_value(value, code);
     }
 
