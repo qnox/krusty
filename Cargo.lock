@@ -859,9 +859,10 @@ name = "krusty-build"
 version = "0.0.1"
 dependencies = [
  "krusty",
+ "krusty-native",
  "krusty-test-support",
  "libc",
- "object 0.41.0",
+ "object 0.40.0",
  "once_cell",
 ]
 
