@@ -584,6 +584,31 @@ jobs:
             krusty
             krusty-build-tests
           if-no-files-found: error
+      # Every conformance row and the e2e job restore these libraries with fail-on-cache-miss. They
+      # are provisioned here, in the job those rows already wait for, rather than in a job of their
+      # own that held the rows for another runner. A hit is only looked up, never downloaded.
+      - name: look up the extra conformance libraries
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: conformance-deps-v1-${{ hashFiles('scripts/fetch-conformance-deps.sh', 'kotlin-versions', 'src/toolchain.rs') }}
+          lookup-only: true
+      - name: download the libraries of every Kotlin release
+        if: steps.deps.outputs.cache-hit != 'true'
+        env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+        run: |
+          set -euo pipefail
+          while read -r kotlin; do
+            scripts/fetch-conformance-deps.sh "$kotlin"
+          done < <(just kotlin-versions)
+      - name: save the extra conformance libraries
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
       # Last, so the jobs this releases are placed on the queues as they are the moment they become
       # ready. A failed ask leaves the answer empty and every job keeps its own labels.
       - id: route
@@ -599,7 +624,7 @@ jobs:
   # through the checkout path it was built in, which every runner of this pool shares, so it runs on
   # the pool that built it. Coverage runs it instrumented every night (.github/workflows/coverage.yml).
   e2e:
-    needs: [build-tool-bins, conformance-deps]
+    needs: [build-tool-bins]
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['e2e'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -685,7 +710,7 @@ jobs:
       - *install-cross-runners
       - *save-cross-packages
       # The suite provisions the pinned serialization, Compose runtime and coroutines jars; the
-      # conformance-deps job downloaded them in this run, so a runner never asks Central for them.
+      # build-tool-bins job provisioned them in this run, so a runner never asks Central for them.
       - name: restore the pinned dependency jars
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -754,38 +779,9 @@ jobs:
   # for the rows that follow. A row whose own cache entry was missing used to download them itself,
   # and a refused or missing answer from Central failed that row (Native 2.4.20 on master). It saves
   # on a queue branch too: the rows are in the same run, so they see an entry their own branch saved.
-  conformance-deps:
-    needs: [build-tool-bins]
-    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['conformance-deps'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - *just-on-path
-      - *install-just
-      - name: restore the extra conformance libraries
-        id: deps
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/cache/krusty-deps
-          key: conformance-deps-v1-${{ hashFiles('scripts/fetch-conformance-deps.sh', 'kotlin-versions', 'src/toolchain.rs') }}
-      - name: download the libraries of every Kotlin release
-        if: steps.deps.outputs.cache-hit != 'true'
-        env:
-          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
-        run: |
-          set -euo pipefail
-          while read -r kotlin; do
-            scripts/fetch-conformance-deps.sh "$kotlin"
-          done < <(just kotlin-versions)
-      - name: save the extra conformance libraries
-        if: steps.deps.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/cache/krusty-deps
-          key: ${{ steps.deps.outputs.cache-primary-key }}
-
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    needs: [build-tool-bins, conformance-deps]
+    needs: [build-tool-bins]
     strategy:
       fail-fast: false
       matrix:
@@ -833,8 +829,8 @@ jobs:
         with:
           path: target/cache/kotlinc/${{ matrix.version }}
           key: kotlinc-${{ matrix.version }}
-      # The conformance-deps job downloaded the atomicfu plugin and runtimes of every release and
-      # saved them under this key in this run; a row never fetches them from Central itself.
+      # The build-tool-bins job provisioned the atomicfu plugin and runtimes of every release under
+      # this key in this run; a row never fetches them from Central itself.
       - name: restore the extra conformance libraries
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
