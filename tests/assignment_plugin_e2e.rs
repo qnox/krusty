@@ -186,10 +186,7 @@ fn non_unit_assign_is_rejected_like_kotlinc() {
     );
     assert_eq!(
         fixture.krusty_rejects("main-krusty", &sources, &[], &switches),
-        format!(
-            "{}krusty: 5 error(s)\n",
-            reference.replace("/main/", "/main-krusty/")
-        )
+        format!("{}", reference.replace("/main/", "/main-krusty/"))
     );
 }
 
@@ -288,9 +285,6 @@ fn inapplicable_assign_is_rejected_like_kotlinc() {
     );
     assert_eq!(
         fixture.krusty_rejects("main-krusty", &sources, &[], &switches),
-        format!(
-            "{}krusty: 10 error(s)\n",
-            reference.replace("/main/", "/main-krusty/")
-        )
+        format!("{}", reference.replace("/main/", "/main-krusty/"))
     );
 }

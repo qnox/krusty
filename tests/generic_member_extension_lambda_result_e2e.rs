@@ -129,7 +129,7 @@ fn a_non_unit_generic_member_extension_lambda_still_needs_an_exhaustive_when() {
             1,
             format!(
                 "{path}:5:12: error: 'when' expression must be exhaustive. Add an 'else' \
-                 branch.\n  h.pick {{ when {{ flag -> \"a\" }} }}\n{}{}\nkrusty: 1 error(s)\n",
+                 branch.\n  h.pick {{ when {{ flag -> \"a\" }} }}\n{}{}\n",
                 " ".repeat(11),
                 "^".repeat(20)
             )

@@ -141,7 +141,7 @@ fn an_incompatible_expected_type_rejects_the_try_result_exactly_once() {
             1,
             format!(
                 "{krusty_path}:3:26: error: return type mismatch: expected 'Box<String>', actual \
-                 'Box<out Any>'.\nfun bad(): Box<String> = try {{\n{}^\nkrusty: 1 error(s)\n",
+                 'Box<out Any>'.\nfun bad(): Box<String> = try {{\n{}^\n",
                 " ".repeat(25)
             )
             .as_str()

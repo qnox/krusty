@@ -34,8 +34,6 @@ fn named_diagnostics_render_their_names_like_kotlinc() {
         arguments: &'static [&'static str],
         code: i32,
         diagnostics: Vec<String>,
-        /// What krusty prints after kotlinc's ledger.
-        krusty_summary: Option<&'static str>,
     }
 
     let krusty = common::krusty_binary();
@@ -65,14 +63,12 @@ fn named_diagnostics_render_their_names_like_kotlinc() {
                 format!("{location}:1:1: warning: visibility must be specified in explicit API mode."),
                 format!("{location}:1:5: warning: return type must be specified in explicit API mode."),
             ],
-            krusty_summary: None,
         },
         Case {
             tag: "named-source-warnings",
             arguments: &["-Xexplicit-api=warning", "-Xrender-internal-diagnostic-names"],
             code: 0,
             diagnostics: vec![named_visibility.clone(), named_return.clone()],
-            krusty_summary: None,
         },
         Case {
             tag: "named-source-errors",
@@ -82,7 +78,6 @@ fn named_diagnostics_render_their_names_like_kotlinc() {
                 format!("{location}:1:1: error: [NO_EXPLICIT_VISIBILITY_IN_API_MODE] Visibility must be specified in explicit API mode."),
                 format!("{location}:1:5: error: [NO_EXPLICIT_RETURN_TYPE_IN_API_MODE] Return type must be specified in explicit API mode."),
             ],
-            krusty_summary: Some("krusty: 2 error(s)"),
         },
         Case {
             tag: "named-module-warning",
@@ -97,7 +92,6 @@ fn named_diagnostics_render_their_names_like_kotlinc() {
                 named_visibility.clone(),
                 named_return.clone(),
             ],
-            krusty_summary: None,
         },
         Case {
             tag: "named-command-line-warning",
@@ -112,7 +106,6 @@ fn named_diagnostics_render_their_names_like_kotlinc() {
                 named_visibility.clone(),
                 named_return.clone(),
             ],
-            krusty_summary: None,
         },
         Case {
             tag: "werror-summary-stays-unnamed",
@@ -127,7 +120,6 @@ fn named_diagnostics_render_their_names_like_kotlinc() {
                 named_visibility.clone(),
                 named_return.clone(),
             ],
-            krusty_summary: None,
         },
         Case {
             tag: "named-level-disables-a-source-warning",
@@ -138,7 +130,6 @@ fn named_diagnostics_render_their_names_like_kotlinc() {
             ],
             code: 0,
             diagnostics: vec![named_return],
-            krusty_summary: None,
         },
         Case {
             tag: "named-level-promotes-the-module-warning",
@@ -152,7 +143,6 @@ fn named_diagnostics_render_their_names_like_kotlinc() {
             diagnostics: vec![
                 "error: [OPT_IN_REQUIREMENT_MARKER_IS_UNRESOLVED] Opt-in requirement marker 'does.not.Exist' is unresolved. Make sure it's present in the module dependencies.".to_string(),
             ],
-            krusty_summary: Some("krusty: 1 error(s)"),
         },
         Case {
             tag: "no-level-reaches-the-pre-release-warning",
@@ -173,7 +163,6 @@ fn named_diagnostics_render_their_names_like_kotlinc() {
             ]
             .map(str::to_string)
             .to_vec(),
-            krusty_summary: None,
         },
     ];
 
@@ -211,11 +200,9 @@ fn named_diagnostics_render_their_names_like_kotlinc() {
             .output()
             .expect("run krusty");
         assert_eq!(result.status.code(), Some(case.code), "{}", case.tag);
-        let mut expected = case.diagnostics.clone();
-        expected.extend(case.krusty_summary.map(str::to_string));
         assert_eq!(
             diagnostic_ledger(&result.stderr),
-            expected,
+            case.diagnostics,
             "{}: krusty diagnostics",
             case.tag
         );
@@ -243,8 +230,6 @@ fn named_errors_render_their_names_like_kotlinc() {
         source: &'static str,
         arguments: &'static [&'static str],
         diagnostics: &'static [&'static str],
-        /// krusty's error count.
-        errors: usize,
     }
 
     let cases = [
@@ -283,7 +268,6 @@ fun f5(b: Boolean) = ra(if (b) C12() else D12())
                 "Errors.kt:12:18: error: [DEFINITELY_NON_NULLABLE_AS_REIFIED] Cannot use definitely-non-nullable type as a reified type argument.",
                 "Errors.kt:18:22: error: [TYPE_INTERSECTION_AS_REIFIED_ERROR] Type argument for reified type parameter 'T' was inferred to the intersection of ['I1' & 'I2']. Reification of an intersection type results in the common supertype being used. This may lead to subtle issues and an explicit type argument is encouraged.",
             ],
-            errors: 10,
         },
         Case {
             file: "Forbidden.kt",
@@ -305,7 +289,6 @@ fun p() = (kotlin).collections.listOf(1)
                 "Forbidden.kt:6:28: error: [TYPE_ARGUMENTS_NOT_ALLOWED] Type arguments are not allowed when static member is accessed.",
                 "Forbidden.kt:7:11: error: [PARENTHESIZED_PACKAGE_QUALIFIER_ERROR] Wrapping package qualifiers in parentheses is not allowed.",
             ],
-            errors: 5,
         },
     ];
 
@@ -362,11 +345,9 @@ fun p() = (kotlin).collections.listOf(1)
             .output()
             .expect("run krusty");
         assert_eq!(result.status.code(), Some(1), "{}", case.file);
-        let mut krusty_expected = expected.clone();
-        krusty_expected.push(format!("krusty: {} error(s)", case.errors));
         assert_eq!(
             source_ledger(&result.stderr, case.source),
-            krusty_expected,
+            expected,
             "{}: krusty diagnostics",
             case.file
         );

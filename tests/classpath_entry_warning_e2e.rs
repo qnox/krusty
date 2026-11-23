@@ -61,8 +61,7 @@ fn a_truncated_jar_on_the_classpath_is_a_terminal_inventory_error() {
              (invalid Zip archive: Could not find EOCD)\n\
              {source}:1:1: error: cannot inventory classpath entry {jar}: package/class catalog is incomplete\n\
              fun main() {{ println(\"x\") }}\n\
-             ^\n\
-             krusty: 1 error(s)\n",
+             ^\n",
             jar = jar.display(),
             source = source.display(),
         )

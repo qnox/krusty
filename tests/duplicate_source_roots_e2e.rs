@@ -164,7 +164,7 @@ fn a_symlinked_spelling_is_a_second_source_like_kotlinc() {
         )
     };
     let krusty_expected = format!(
-        "{}{}krusty: 2 error(s)\n",
+        "{}{}",
         krusty_conflict(&src),
         krusty_conflict(&dir.join("alias"))
     );

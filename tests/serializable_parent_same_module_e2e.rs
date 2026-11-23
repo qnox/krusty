@@ -107,8 +107,7 @@ fn a_sibling_file_parent_element_with_a_type_use_serializer_declines() {
         fixture.krusty_rejects("main", &sources, &runtime, &switches),
         "<fixture>/main/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
          import kotlinx.serialization.Serializable\n\
-         ^\n\
-         krusty: 1 error(s)\n"
+         ^\n"
     );
 }
 
