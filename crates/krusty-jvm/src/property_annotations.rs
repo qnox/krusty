@@ -70,6 +70,9 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
             ir.fn_source_order.insert(marker, property.source_order);
             ir.property_annotation_markers
                 .insert((class_identity, property.source_order), marker);
+            if let Some(visibility) = marker_visibility(ir, class_index, property.source_order) {
+                ir.set_method_visibility(marker, visibility);
+            }
             let methods = &mut ir.classes[class_index].methods;
             match after {
                 Some(index) => methods.insert(index + 1, marker),
@@ -103,6 +106,26 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
         }
         ir.function_annotations.insert(marker, annotations);
         ir.mark_jvm_package_property_annotation_marker(property.property, marker);
+    }
+}
+
+/// A member property's marker keeps the property's own `private` or `protected` access, as in
+/// kotlinc; every other visibility, `internal` included, leaves it public.
+fn marker_visibility(
+    ir: &IrFile,
+    class_index: usize,
+    source_order: u32,
+) -> Option<krusty::types::Visibility> {
+    let property = ir.classes[class_index]
+        .properties
+        .iter()
+        .find(|property| property.source_order == source_order)?;
+    if property.is_private {
+        Some(krusty::types::Visibility::Private)
+    } else if property.visibility == krusty::types::Visibility::Protected {
+        Some(krusty::types::Visibility::Protected)
+    } else {
+        None
     }
 }
 
