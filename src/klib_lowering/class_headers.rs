@@ -108,8 +108,7 @@ pub(super) fn authenticate<'a, 'b>(
                 "the serialized class header has a non-class symbol",
             ));
         }
-        let (types, formals) =
-            bind_class_parameters(&class.parameters, member.arena, member.class)?;
+        let (types, formals) = bind_class_parameters(class, bodies, member.arena, member.class)?;
         return Ok(ClassMemberHeader {
             contract: class,
             arena: member.arena,
@@ -202,8 +201,7 @@ pub(super) fn authenticate_private_member<'a, 'b>(
         ));
     }
     authenticate_receiver(class, member.arena, member.function)?;
-    let (mut types, formals) =
-        bind_class_parameters(&class.parameters, member.arena, member.class)?;
+    let (mut types, formals) = bind_class_parameters(class, bodies, member.arena, member.class)?;
     super::private_signature_classes::bind(
         &mut types,
         bodies,
@@ -264,7 +262,7 @@ pub(super) fn authenticate_object_constructor<'a, 'b>(
             "an object's primary constructor is not its private constructor taking no value",
         ));
     }
-    let (types, formals) = bind_class_parameters(&class.parameters, member.arena, member.class)?;
+    let (types, formals) = bind_class_parameters(class, bodies, member.arena, member.class)?;
     Ok(Some(ClassMemberHeader {
         contract: class,
         arena: member.arena,
@@ -276,10 +274,12 @@ pub(super) fn authenticate_object_constructor<'a, 'b>(
 }
 
 fn bind_class_parameters(
-    parameters: &KlibBodyClassParameters,
+    class: &KlibBodyClassContract,
+    bodies: &KlibDeclarationBodies,
     arena: &KlibIrArena,
     raw_class: &KlibIrClass,
 ) -> Result<(KlibTypeParameters, Vec<String>), KlibBodyDeclineReason> {
+    let parameters = &class.parameters;
     let formals = class_parameter_identities(parameters)?;
     let count = formals.len();
     if raw_class.type_parameters.len() != count {
@@ -319,6 +319,7 @@ fn bind_class_parameters(
             return Err(mismatch("a class repeats a semantic formal identity"));
         }
     }
+    super::foreign_type_parameters::bind(&mut types, arena, bodies, &class.module)?;
     Ok((types, formals))
 }
 

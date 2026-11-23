@@ -27,6 +27,7 @@ mod continuation_intrinsics;
 mod decline;
 mod enum_classes;
 mod for_loops;
+mod foreign_type_parameters;
 mod function_lowering;
 mod inline_templates;
 mod intercepted_continuation;
@@ -54,6 +55,7 @@ pub(crate) use class_initialization::{
     delegated_superclass_constructor, initializing_constructors, value_class_overrides,
 };
 pub(crate) use closure_forms::emitted_closure_function;
+pub(crate) use enum_classes::materializes as materializes_enum_class;
 pub(crate) use intercepted_continuation::expansion_member;
 
 /// The classifier a serialized object symbol names, when its signature names a class.
