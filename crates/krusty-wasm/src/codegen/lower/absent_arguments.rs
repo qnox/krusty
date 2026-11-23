@@ -10,6 +10,10 @@ use crate::encode::HeapType;
 impl Body<'_> {
     /// An [`IrExpr::AbsentArgument`] of type `ty`.
     pub(super) fn absent_argument(&mut self, ty: Ty) -> Result<(), Unsupported> {
+        // A `Unit` operand has no value of its own; its parameter receives the `Unit` instance.
+        if ty == Ty::Unit {
+            return Ok(());
+        }
         let carrier =
             carrier(ty)?.ok_or_else(|| "a defaulted call with a `Unit` parameter".to_string())?;
         push_zero(&mut self.code, carrier);
