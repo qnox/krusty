@@ -322,7 +322,7 @@ kotlinc-arguments VERSION=`just max-version`:
             "scripts/kotlinc-arguments/$main.java" > "$own"
         previous=$(find "$releases" -maxdepth 1 -name "*$suffix" -printf '%f\n' |
             sed -nE "s/^([0-9]+\\.[0-9]+\\.[0-9]+(-RC[1-9][0-9]*|-RC|-Beta[1-9][0-9]*)?)${suffix//./\\.}\$/\\1/p" |
-            { cat; echo "{{VERSION}}"; } | scripts/order-kotlin-versions.sh |
+            { cat; echo "{{VERSION}}"; } | bash scripts/sort-kotlin-versions.sh |
             awk -v version="{{VERSION}}" '$0 == version { exit } { previous = $0 } END { print previous }')
         if [ -n "$previous" ] && cmp -s "$own" "$releases/$previous$suffix"; then
             rm "$own"
@@ -801,20 +801,20 @@ install-hooks: install-merge-drivers
 
 # Supported Kotlin reference versions, oldest first.
 kotlin-versions:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | bash scripts/sort-kotlin-versions.sh
 
 # Comma-separated list of supported Kotlin reference versions (advertised by `krusty -version`).
 supported-kotlin:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh | paste -sd, -
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | bash scripts/sort-kotlin-versions.sh | paste -sd, -
 
 # Newest stable Kotlin reference version — krusty's release version (without the build suffix).
 # A pre-release can sort last and still not be this version.
 max-version:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh | awk '!/-/ { stable = $0 } END { print stable }'
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | bash scripts/sort-kotlin-versions.sh | awk '!/-/ { stable = $0 } END { print stable }'
 
 # JSON array of supported Kotlin reference versions, for the GitHub Actions test matrix.
 matrix-json:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | scripts/order-kotlin-versions.sh | awk 'BEGIN{printf "["} {printf "%s\"%s\"",(NR>1?",":""),$0} END{print "]"}'
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | bash scripts/sort-kotlin-versions.sh | awk 'BEGIN{printf "["} {printf "%s\"%s\"",(NR>1?",":""),$0} END{print "]"}'
 
 # Build number for a Kotlin reference version: commits since its baseline + 1 (resets per version,
 # reproducible from any clone, no CI state).

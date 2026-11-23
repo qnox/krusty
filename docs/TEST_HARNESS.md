@@ -61,7 +61,7 @@ when the test step fails. These are outputs of the original attempt, not diagnos
   recipe is a plain download, so do what it does:
 
   ```sh
-  ver=$(sed 's/#.*//' kotlin-versions | awk 'NF { print $1 }' | scripts/order-kotlin-versions.sh | tail -n 1)
+  ver=$(sed 's/#.*//' kotlin-versions | awk 'NF { print $1 }' | scripts/sort-kotlin-versions.sh | tail -n 1)
   dest="$PWD/target/cache/kotlinc/$ver"
   mkdir -p "$dest"
   curl -fsSL "https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-compiler-${ver}.zip" -o /tmp/kotlinc.zip
