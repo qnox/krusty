@@ -152,8 +152,21 @@ impl Body<'_> {
             }
             None => match function_value_names::sam_class_name(self.ir, site) {
                 Some(name) => self.runtime.function_value_to_string(self.module, &name),
-                // kotlinc-wasm names this value's class otherwise, or prints it otherwise.
-                None => self.runtime.objects.trap(self.module, to_string_ty),
+                None => match self.ir.expr(site) {
+                    IrExpr::CallableReference(reference)
+                        if function_value_names::is_reflective_property_reference(reference) =>
+                    {
+                        let text = function_value_names::property_reference_text(
+                            self.ir,
+                            self.callables,
+                            reference,
+                        )
+                        .ok_or("a property reference whose name cannot be printed")?;
+                        self.runtime.constant_to_string(self.module, &text)
+                    }
+                    // kotlinc-wasm names this value's class otherwise, or prints it otherwise.
+                    _ => self.runtime.objects.trap(self.module, to_string_ty),
+                },
             },
         };
         let callable = sam.is_none_or(|target| {

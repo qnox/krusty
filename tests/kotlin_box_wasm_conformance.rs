@@ -532,6 +532,36 @@ fun box(): String {
     );
 }
 
+/// A property reference prints `property <name> (Kotlin reflection is not available)`, bound or
+/// not, `val` or `var`, top-level, member, object member or extension, read through `Any?` or a
+/// `KProperty` type. The text is kotlinc-wasm's for this program (wasm-js and wasm-wasi agree on
+/// 2.4.21), taken by running it there. The JVM and Native print it otherwise, so this is
+/// target-owned.
+#[test]
+fn wasm_property_references_print_their_name_without_reflection() {
+    expect_wasm_box(
+        r##"class A { var city: Int = 1; val ro = 2 }
+object O { val o = 3 }
+val top = 4
+val String.ext: Int get() = length
+
+fun text(value: Any?): String = "$value"
+
+fun box(): String {
+    val a = A()
+    val values: List<Any> = listOf(a::city, A::city, a::ro, A::ro, ::top, O::o, String::ext)
+    var result = ""
+    for (value in values) result += text(value) + ";"
+    val tail = " (Kotlin reflection is not available);"
+    val expected = "property city$tail" + "property city$tail" + "property ro$tail" +
+        "property ro$tail" + "property top$tail" + "property o$tail" + "property ext$tail"
+    return if (result == expected) "OK" else result
+}
+"##,
+        "wasmPropertyReferenceNames",
+    );
+}
+
 /// How kotlinc-wasm names the object a lambda converted to a `fun interface` is, which
 /// `kotlin.Any.toString` prints before the identity hash: the qualified name of the classifier
 /// whose member holds the conversion, or else of the file's package, then `sam$`, the interface's

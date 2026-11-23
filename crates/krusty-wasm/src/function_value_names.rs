@@ -11,11 +11,13 @@
 //!
 //! A lambda converted to a `fun interface` is an instance of a class named for the interface and
 //! for where the code holding the conversion stands ([`sam_class_name`]). A reference to a property
-//! is not given a name here: it prints the property instead.
+//! is not given a name here: it prints the property instead ([`property_reference_text`]).
 
 use krusty::backend::class_names::{member_class_names, site_container_name};
-use krusty::backend::BackendClassifierSource;
-use krusty::ir::{ExprId, IrCallableReferenceTarget, IrExpr, IrFile, IrSamPlacement};
+use krusty::backend::{BackendClassifierSource, CheckedBackendCallables};
+use krusty::ir::{
+    ExprId, IrCallableReference, IrCallableReferenceTarget, IrExpr, IrFile, IrSamPlacement,
+};
 use krusty::types::{FnSig, Ty, TyKind};
 
 /// What a function value's class name is derived from, apart from its captures.
@@ -47,6 +49,28 @@ pub(super) fn named_shape(expression: &IrExpr, instance: Option<Ty>) -> Option<N
         suspend: signature.suspend,
         arity: signature.params.len(),
     })
+}
+
+/// Whether `reference` is a `KProperty` value, which prints its property rather than a class name.
+pub(super) fn is_reflective_property_reference(reference: &IrCallableReference) -> bool {
+    matches!(&reference.target, IrCallableReferenceTarget::Property(property) if property.reflective)
+}
+
+/// What `toString` of the `KProperty` value `reference` creates prints: kotlinc-wasm's runtime has
+/// no reflection, so it prints `property <name>` and says so, bound or not, `val` or `var`, on
+/// wasm-js and wasm-wasi alike. `None` when the property's name cannot be read or is not ASCII,
+/// which the constant rendering holds.
+pub(super) fn property_reference_text(
+    ir: &IrFile,
+    callables: &CheckedBackendCallables,
+    reference: &IrCallableReference,
+) -> Option<String> {
+    if !is_reflective_property_reference(reference) {
+        return None;
+    }
+    let name = krusty::backend::reference_names::callable_reference_name(ir, callables, reference)?;
+    name.is_ascii()
+        .then(|| format!("property {name} (Kotlin reflection is not available)"))
 }
 
 /// The qualified name of the class kotlinc-wasm compiles the conversion `expression` of a lambda

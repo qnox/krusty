@@ -23,7 +23,9 @@ use krusty::types::{Ty, TyKind};
 
 use super::super::super::super::boxes::is_boxed_scalar;
 use super::super::super::super::encode::ValType;
-use super::super::super::super::function_value_names::{named_shape, sam_class_name};
+use super::super::super::super::function_value_names::{
+    is_reflective_property_reference, named_shape, sam_class_name,
+};
 use super::super::super::any_member_reach::Receiver;
 use super::{carrier, Body, Unsupported};
 
@@ -329,6 +331,8 @@ fn first_unprinted_value(ir: &IrFile) -> Option<u32> {
         .find(|&expression| {
             let node = ir.expr(expression);
             matches!(node, IrExpr::Lambda { .. } | IrExpr::CallableReference(_))
+                && !matches!(node, IrExpr::CallableReference(reference)
+                    if is_reflective_property_reference(reference))
                 && named_shape(node, ir.checked_type(expression)).is_none()
                 && sam_class_name(ir, expression).is_none()
         })
