@@ -1113,13 +1113,9 @@ fn an_erased_factory_freezes_only_the_private_classes_its_body_constructs() {
         .unwrap();
     let callable = selected.klib_body_callable().unwrap();
     assert_eq!(callable.ret(), Ty::obj("kotlin/Any"));
-    let roots = libraries
-        .declaration_bodies()
-        .emitted_body(
-            callable.identity(),
-            crate::klib_lowering::EMITTED_CALL_FORMS,
-        )
-        .hierarchy_roots;
+    let roots =
+        crate::klib_lowering::emitted_body(libraries.declaration_bodies(), callable.identity())
+            .hierarchy_roots;
     assert!(roots.contains(&crate::types::type_name("fixture/Leaf")));
     assert!(!roots.contains(&crate::types::type_name("fixture/Unused")));
     // The declaring header is a hierarchy root, not a new public callable or source candidate.
@@ -1375,8 +1371,7 @@ fn a_constructed_class_of_its_own_tree_contributes_its_member_callees() {
     let make = demo.callable("make").identity().clone();
     let helper = demo.callable("helper").identity().clone();
     assert_eq!(
-        demo.bodies
-            .emitted_body_callables(&make, crate::klib_lowering::EMITTED_CALL_FORMS),
+        crate::klib_lowering::emitted_body(&demo.bodies, &make).callables,
         vec![helper]
     );
 }
@@ -1408,9 +1403,7 @@ fn a_colliding_file_local_symbol_of_another_component_contributes_nothing() {
     let ordinary = demo_with(&shapes, vec![helper_calling_class(helper)], build);
     let make = ordinary.callable("make").identity().clone();
     assert_eq!(
-        ordinary
-            .bodies
-            .emitted_body_callables(&make, crate::klib_lowering::EMITTED_CALL_FORMS),
+        crate::klib_lowering::emitted_body(&ordinary.bodies, &make).callables,
         vec![ordinary.callable("helper").identity().clone()]
     );
     // The other component serializes the same constructing body but no class at those
@@ -1419,7 +1412,7 @@ fn a_colliding_file_local_symbol_of_another_component_contributes_nothing() {
     let prepared = KlibDeclarationBodies::from_libraries(vec![("demo".to_owned(), prepared)])
         .expect("one library");
     assert_eq!(
-        prepared.emitted_body_callables(&make, crate::klib_lowering::EMITTED_CALL_FORMS),
+        crate::klib_lowering::emitted_body(&prepared, &make).callables,
         Vec::new()
     );
 }
@@ -1621,9 +1614,7 @@ fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_
         module: "demo".into(),
         declaration: crate::libraries::KlibDeclarationSignature::Public(constructor_key),
     };
-    let before = demo
-        .bodies
-        .emitted_body_callables(&constructor, crate::klib_lowering::EMITTED_CALL_FORMS);
+    let before = crate::klib_lowering::emitted_body(&demo.bodies, &constructor).callables;
     let facts = demo
         .bodies
         .constructor_initializer_callables(&constructor, crate::klib_lowering::EMITTED_CALL_FORMS);
@@ -1632,8 +1623,7 @@ fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_
         [field_key.clone(), init_key].into_iter().collect()
     );
     assert_eq!(
-        demo.bodies
-            .emitted_body_callables(&constructor, crate::klib_lowering::EMITTED_CALL_FORMS),
+        crate::klib_lowering::emitted_body(&demo.bodies, &constructor).callables,
         before
     );
     assert!(demo
@@ -1971,3 +1961,38 @@ fn official_klib_private_interface_is_installed_for_a_type_test_and_a_member_cal
 }
 
 mod hierarchy_publication;
+
+const PRIVATE_COMPANION: &str = "\
+package fixture
+private class Box {
+    private companion object {
+        val Shared = Box()
+    }
+    fun shared(): Box = Shared
+}
+fun make(): Any = Box().shared()
+";
+
+/// An object private to its enclosing class is linked as a class private to its enclosing class
+/// is: installed in the unit that lowers the library's bodies, its value one shared instance.
+#[test]
+fn a_body_reads_the_value_of_an_object_private_to_its_enclosing_class() {
+    let Some((directory, libraries)) = produce_library("private-companion", PRIVATE_COMPANION)
+    else {
+        return;
+    };
+    let mut unit = DependencyBodyUnit::default();
+    let externals = ProducedExternals::default();
+    lower_fixture(&mut unit, &libraries, "make", &externals, &libraries);
+    validated(unit.ir());
+    let ir = unit.ir();
+    let objects = ir.classes.iter().filter(|class| class.is_object).count();
+    assert_eq!(objects, 1, "the companion is the one installed object");
+    let values = ir
+        .exprs
+        .iter()
+        .filter(|expression| matches!(expression, IrExpr::SingletonValue { .. }))
+        .count();
+    assert_eq!(values, 1, "one read of the companion's value");
+    let _ = std::fs::remove_dir_all(&directory);
+}

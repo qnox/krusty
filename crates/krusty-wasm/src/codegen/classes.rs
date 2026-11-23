@@ -71,9 +71,7 @@ use super::super::runtime::Runtime;
 use super::laid_out_classes::{
     DependencyImplementation, FunctionBridgeEntry, LaidOutClass, LaidOutClasses, Placed,
 };
-use super::lower::{
-    carrier, cell_reference, parameter_carrier, parameter_carrier_of, Unsupported, STRING,
-};
+use super::lower::{carrier, cell_reference, parameter_carrier, Unsupported, STRING};
 
 mod constructor_prefix;
 mod published_slots;
@@ -643,10 +641,7 @@ pub(super) fn method_type(
     };
     let mut params = vec![receiver];
     for parameter in 0..declaration.params.len() {
-        params.push(
-            parameter_carrier(module, ir, function, parameter as u32)?
-                .ok_or_else(|| "a `Unit` parameter".to_string())?,
-        );
+        params.push(parameter_carrier(module, ir, function, parameter as u32)?);
     }
     let results = carrier(declaration.ret)?.into_iter().collect();
     Ok(module.func_type(params, results))
@@ -661,9 +656,7 @@ fn declared_method_type(
 ) -> Result<u32, Unsupported> {
     let mut params = vec![REFERENCE];
     for parameter in parameters {
-        params.push(
-            parameter_carrier_of(*parameter)?.ok_or_else(|| "a `Unit` parameter".to_string())?,
-        );
+        params.push(super::lower::parameter_carrier_of(*parameter)?);
     }
     let results = carrier(result)?.into_iter().collect();
     Ok(module.func_type(params, results))
@@ -938,6 +931,7 @@ pub(super) fn declare(
         &WasmRepresentation { classifiers },
         ir,
         plan,
+        &mut module_tables.extended,
         &|superclass| {
             laid_out
                 .get(superclass)
@@ -1017,15 +1011,26 @@ pub(super) fn declare(
             OwnedBase::Enum => objects.enum_base,
             OwnedBase::Exception(structure) => structure,
         };
-        let structure = module.subtype(SubType {
-            composite: CompositeType::Struct(fields),
-            supertype: Some(match (parent, laid_out_parent) {
-                (Some(parent), _) => parent.structure.expect("a superclass has a struct"),
-                (None, Some(superclass)) => superclass.structure,
-                (None, None) => root,
-            }),
-            open: true,
-        });
+        let supertype = match (parent, laid_out_parent) {
+            (Some(parent), _) => parent.structure.expect("a superclass has a struct"),
+            (None, Some(superclass)) => superclass.structure,
+            (None, None) => root,
+        };
+        let mut declare_structure = |fields: Vec<_>| {
+            module.subtype(SubType {
+                composite: CompositeType::Struct(fields),
+                supertype: Some(supertype),
+                open: true,
+            })
+        };
+        // A dependency class is the whole program's, whichever module lays it out next.
+        let structure = if laid_out.lays_out_dependencies() {
+            module_tables.dependency_structure(class.fq_name, &fields, Some(supertype), || {
+                declare_structure(fields.clone())
+            })?
+        } else {
+            declare_structure(fields)
+        };
         // A class the module plan covers takes the table type every file reads from the plan,
         // so a file dispatching through it from elsewhere casts to this one type.
         let table_type = match module_tables.table(plan, class.fq_name, module, objects) {

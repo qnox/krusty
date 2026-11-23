@@ -334,7 +334,7 @@ pub(crate) fn member_signature(signature: &KlibIrSignature) -> Option<KlibDeclar
         KlibIrSignature::Accessor(signature) => {
             Some(KlibDeclarationSignature::Accessor(signature.clone()))
         }
-        KlibIrSignature::FileLocal { .. } => None,
+        KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => None,
     }
 }
 

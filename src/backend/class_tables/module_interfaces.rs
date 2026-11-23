@@ -48,10 +48,13 @@ pub struct NumberedInterface {
 }
 
 /// The module's interface member numbers.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ModuleInterfaces {
     numbers: HashMap<PlanKey, u32>,
     members: Vec<NumberedMember>,
+    /// The members of interfaces a KLIB unit installed in this file, at the numbers
+    /// [`ExtendedNumbers`] gave them, all beyond [`Self::members`].
+    installed: HashMap<u32, NumberedMember>,
     interfaces: HashMap<TypeName, Result<NumberedInterface, Unsupported>>,
     /// Each numbered member's carriers as its declaration states them.
     carriers: HashMap<PlanKey, Carriers>,
@@ -93,6 +96,7 @@ impl ModuleInterfaces {
                     callable,
                     parameters,
                     result,
+                    ..
                 } = member
                 {
                     numbering
@@ -121,12 +125,17 @@ impl ModuleInterfaces {
                         callable,
                         parameters,
                         result: returned,
+                        suspend,
                     } => {
+                        // A call and an implementation carry a suspend member in its
+                        // continuation-passing form.
+                        let (parameters, returned) =
+                            super::module_slots::carried(parameters, *returned, *suspend);
                         result.carriers.insert(
                             PlanKey::Callable(*callable),
                             Carriers::Function {
-                                parameters: parameters.clone(),
-                                result: *returned,
+                                parameters,
+                                result: returned,
                             },
                         );
                     }
@@ -142,6 +151,80 @@ impl ModuleInterfaces {
             }
         }
         result
+    }
+
+    /// This numbering extended with the interfaces `ir` holds that the module did not number:
+    /// the ones a KLIB lowering unit installed with the body that uses them. Their members are
+    /// numbered by `extended`, which the module's files share: one member of one library
+    /// interface has one number in every file that installs it, no two members share one, and
+    /// every number follows the module's own, so a call through one never reads a module
+    /// member's. An installed interface that extends another numbered interface is refused,
+    /// whichever of the two the IR declares first: its members would have to share that
+    /// interface's numbers.
+    pub(crate) fn with_installed(
+        &self,
+        ir: &crate::ir::IrFile,
+        extended: &mut ExtendedNumbers,
+    ) -> Result<Self, Unsupported> {
+        let mut result = self.clone();
+        // The installed interfaces are all known before any inheritance is checked, so the refusal
+        // does not depend on whether a base is declared before or after the interface extending it.
+        let installed: std::collections::HashSet<_> = ir
+            .classes
+            .iter()
+            .filter(|class| class.is_interface && !self.interfaces.contains_key(&class.fq_name))
+            .map(|class| class.fq_name)
+            .collect();
+        for class in &ir.classes {
+            if !installed.contains(&class.fq_name) {
+                continue;
+            }
+            let name = class.fq_name;
+            let qualified = || name.render().replace('/', ".");
+            if class
+                .interfaces
+                .iter()
+                .any(|base| self.interfaces.contains_key(&base) || installed.contains(&base))
+            {
+                return Err(format!(
+                    "an installed interface extending one with module-wide numbers (`{}`)",
+                    qualified()
+                ));
+            }
+            for (ordinal, &function) in class.methods.iter().enumerate() {
+                let declaration = &ir.functions[function as usize];
+                let key = PlanKey::Installed(function);
+                let ordinal = u32::try_from(ordinal).expect("a method ordinal fits u32");
+                let number = extended.installed(self.count(), name, ordinal);
+                result.installed.insert(
+                    number,
+                    NumberedMember {
+                        key,
+                        aliases: Vec::new(),
+                        declarations: vec![MemberDeclaration {
+                            interface: name,
+                            member: key,
+                            bridged_from: None,
+                        }],
+                    },
+                );
+                result.numbers.insert(key, number);
+                result.carriers.insert(
+                    key,
+                    Carriers::Function {
+                        parameters: declaration.params.clone().into_boxed_slice(),
+                        result: declaration.ret,
+                    },
+                );
+            }
+            result.interfaces.insert(
+                name,
+                Ok(NumberedInterface {
+                    closure: vec![name],
+                }),
+            );
+        }
+        Ok(result)
     }
 
     /// How many interface members this module numbered. A call through a dependency interface
@@ -162,7 +245,10 @@ impl ModuleInterfaces {
     }
 
     pub(crate) fn member(&self, number: u32) -> &NumberedMember {
-        &self.members[number as usize]
+        self.members
+            .get(number as usize)
+            .or_else(|| self.installed.get(&number))
+            .expect("a number this numbering gave")
     }
 
     /// The numbered interface `interface`, `None` when the module declares no such interface.
@@ -182,20 +268,66 @@ impl ModuleInterfaces {
 
     /// Every number `interfaces` (each with its closure) declares, ascending.
     pub fn numbers_of(&self, interfaces: &HashSet<TypeName>) -> Vec<u32> {
-        let mut numbers = self
+        let module = self
             .members
             .iter()
             .enumerate()
+            .map(|(number, member)| (number as u32, member));
+        let installed = self
+            .installed
+            .iter()
+            .map(|(&number, member)| (number, member));
+        let mut numbers = module
+            .chain(installed)
             .filter(|(_, member)| {
                 member
                     .declarations
                     .iter()
                     .any(|declaration| interfaces.contains(&declaration.interface))
             })
-            .map(|(number, _)| number as u32)
+            .map(|(number, _)| number)
             .collect::<Vec<_>>();
         numbers.sort_unstable();
         numbers
+    }
+}
+
+/// The interface member numbers a module's files take beyond the module's own
+/// ([`ModuleInterfaces::count`]): the members of interfaces KLIB units install, by their library
+/// identity, and the dependency interface members a target numbers as its files call them. One
+/// module's files share one, so each number names one member module-wide.
+#[derive(Clone, Debug, Default)]
+pub struct ExtendedNumbers {
+    next: u32,
+    installed: HashMap<InstalledMember, u32>,
+}
+
+/// A member of an installed interface, by the interface's classifier (named by its library,
+/// file and slot, so every file installing it names it alike) and the member's place in it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct InstalledMember {
+    interface: TypeName,
+    ordinal: u32,
+}
+
+impl ExtendedNumbers {
+    /// A number no member of this module has, after the module's own `count` numbers.
+    pub fn fresh(&mut self, count: u32) -> u32 {
+        let number = self.next.max(count);
+        self.next = number + 1;
+        number
+    }
+
+    /// The number of the `ordinal`-th member of the installed `interface`: the one an earlier
+    /// file gave it, or a fresh one.
+    fn installed(&mut self, count: u32, interface: TypeName, ordinal: u32) -> u32 {
+        let member = InstalledMember { interface, ordinal };
+        if let Some(&number) = self.installed.get(&member) {
+            return number;
+        }
+        let number = self.fresh(count);
+        self.installed.insert(member, number);
+        number
     }
 }
 
@@ -274,6 +406,7 @@ impl Numbering<'_> {
                 callable,
                 parameters,
                 result,
+                ..
             } => {
                 let edges = interface
                     .function_overrides

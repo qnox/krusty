@@ -186,6 +186,7 @@ pub(super) fn class_table(
         // mismatch are the same question about the same exact edge.
         // Before the search below consumes them.
         let edges = override_edges.clone();
+        let has_override_edge = edges.clone().next().is_some();
         let invoke_edge = override_edges.find(|edge| {
             edge.overridden_semantic_role
                 == Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
@@ -294,6 +295,21 @@ pub(super) fn class_table(
                 },
             },
         };
+        // A value class's own member that overrides nothing is called directly: no table slot
+        // carries it, so every unit that emits some of the class's members lays its table out as
+        // the others do. A recorded override edge is an override too, a dependency interface's
+        // member (`Collection.iterator` under `UIntArray`) among them.
+        if class.is_value
+            && !has_override_edge
+            && replaces.is_none()
+            && interface_keys.is_empty()
+            && bridged.is_empty()
+            && accessor_bridged.is_empty()
+            && function_bridge.is_none()
+            && matches!(own_key, SlotKey::Function(_))
+        {
+            continue;
+        }
         let slot = match replaces {
             Some(slot) => {
                 vtable[slot as usize] = entry;

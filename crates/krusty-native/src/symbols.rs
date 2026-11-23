@@ -60,6 +60,24 @@ pub(super) fn module_property_setter_symbol(
     )
 }
 
+/// Symbol of a source-written accessor of an extension or context property no other file of the
+/// module calls (another file reaches none of them). The accessor is a function of the declaring
+/// file, but its name is the checked property identity: the spelling `getX` alone is shared by
+/// every overload of `x` and by same-named properties of the module's other files, which are
+/// lowered without seeing this one and would otherwise export the same strong symbol.
+fn module_property_accessor_symbol(
+    module_name: &str,
+    property: krusty::fir::PropertyId,
+    setter: bool,
+) -> String {
+    format!(
+        "kt_modprop_{}_{}_{}",
+        if setter { "setter" } else { "getter" },
+        module_namespace(module_name),
+        property.raw()
+    )
+}
+
 /// The declaration identity every reference to a module property shares, whichever of the
 /// module's files writes it.
 pub(super) fn property_reference_symbol(
@@ -264,6 +282,25 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
         taken.insert(module_property_getter_symbol(module_name, *property));
         taken.insert(module_property_setter_symbol(module_name, *property));
     }
+    // A top-level accessor is named by the property it realizes, which is unique in the module.
+    for (property, layout) in &ir.local_property_layouts {
+        let krusty::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } = layout
+        else {
+            continue;
+        };
+        let accessors =
+            std::iter::once((*getter, false)).chain(setter.map(|setter| (setter, true)));
+        for (function, is_setter) in accessors {
+            let Some(slot) = functions.get_mut(function as usize) else {
+                continue;
+            };
+            if slot.is_empty() {
+                let symbol = module_property_accessor_symbol(module_name, *property, is_setter);
+                taken.insert(symbol.clone());
+                *slot = symbol;
+            }
+        }
+    }
     let mut unique = |base: String, family: &dyn Fn(&str) -> Vec<String>| -> String {
         let mut candidate = base.clone();
         let mut ordinal = 0;
@@ -414,6 +451,43 @@ mod tests {
         first_file.functions.push(first_file.functions[0].clone());
         let repeated = symbols(&first_file, "shared-module", HashSet::default());
         assert_ne!(repeated.functions[0], repeated.functions[1]);
+    }
+
+    #[test]
+    fn top_level_accessors_are_named_by_their_property_across_source_files() {
+        let accessor_file = |property: u32| {
+            let mut ir = fallback_function("getSize");
+            ir.functions.push(ir.functions[0].clone());
+            ir.functions[1].name = "setSize".to_string();
+            ir.local_property_layouts.insert(
+                krusty::fir::PropertyId::from_raw(property),
+                krusty::ir::IrLocalPropertyLayout::TopLevelAccessor {
+                    getter: 0,
+                    setter: Some(1),
+                    receiver: Some(Ty::Int),
+                    context_parameters: Vec::new(),
+                    delegate: None,
+                },
+            );
+            ir
+        };
+        let first = symbols(&accessor_file(3), "shared-module", HashSet::default());
+        let second = symbols(&accessor_file(4), "shared-module", HashSet::default());
+        assert_eq!(
+            first.functions,
+            [
+                "kt_modprop_getter_shared_2d_module_3",
+                "kt_modprop_setter_shared_2d_module_3"
+            ]
+        );
+        assert_eq!(
+            second.functions,
+            [
+                "kt_modprop_getter_shared_2d_module_4",
+                "kt_modprop_setter_shared_2d_module_4"
+            ]
+        );
+        assert_eq!(first.cross_file, [false, false]);
     }
 
     #[test]
