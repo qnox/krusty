@@ -209,8 +209,9 @@ pub(super) fn emit_value_class_inherited_defaults(
     env: &EmitEnv,
 ) {
     debug_assert!(c.is_value);
+    let formatter = JvmSignatureFormatter::new(ir, env);
     for forwarder in forwarders(ir, c, env) {
-        write_value_class_static(c, cw, &forwarder, env.java_parameters);
+        write_value_class_static(ir, c, cw, &formatter, &forwarder, env.java_parameters);
         write_forwarder(c, cw, &forwarder, env.java_parameters);
     }
 }
@@ -637,8 +638,10 @@ fn write_forwarder(
 /// signature and writes the carrier ahead of its parameters by its erased JVM type, without
 /// declaring the class's type parameters.
 fn write_value_class_static(
+    ir: &IrFile,
     c: &krusty::ir::IrClass,
     cw: &mut ClassWriter,
+    formatter: &JvmSignatureFormatter<'_>,
     forwarder: &InheritedForwarder,
     java_parameters: bool,
 ) {
@@ -660,10 +663,23 @@ fn write_value_class_static(
     params.extend_from_slice(&forwarder.param_tys);
     let desc = method_descriptor(&params, forwarder.ret);
     let carrier_descriptor = type_descriptor(carrier);
-    let signature = forwarder
-        .signature
-        .as_ref()
-        .map(|signature| signature.render(Some(&carrier_descriptor)));
+    // The static's leading parameter is the value class itself, which a signature expands to the
+    // declared type it represents (`List<? extends Integer>`). That is what makes the static
+    // generic even when the forwarder itself is not.
+    let carrier_element = formatter
+        .parameter_ty(&ir.class_type(c))
+        .unwrap_or_else(|| carrier_descriptor.clone());
+    let signature = match &forwarder.signature {
+        Some(signature) => Some(signature.render(Some(&carrier_element))),
+        None => {
+            let erased_parameters = method_descriptor(&forwarder.param_tys, forwarder.ret);
+            let generic = format!(
+                "({carrier_element}{}",
+                erased_parameters.strip_prefix('(').unwrap_or_default()
+            );
+            (generic != desc).then_some(generic)
+        }
+    };
     let local_variable_names = forwarder.local_variable_names(ForwarderSite::ValueClassStatic);
     assert_eq!(
         local_variable_names.len(),
