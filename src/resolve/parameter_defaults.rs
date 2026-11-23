@@ -3,15 +3,54 @@
 //! Defaults share type checking and left-to-right parameter initialization across callable kinds.
 //! Every parameter identity is in scope throughout the default list, but the current and later
 //! parameters are uninitialized until their declaration point has been crossed.
+//!
+//! A parameter's annotations are the suppression scope of its whole declaration, as kotlinc's
+//! `@Suppress` on any enclosing element: its type reference and its default are checked inside
+//! their policies.
 
 use super::{Checker, CheckerScope, PlatformNarrowing};
-use crate::ast::ExprId;
+use crate::ast::{AnnotationRef, ExprId};
 use crate::types::{Ty, TyKind};
 
 #[derive(Clone, Copy)]
 pub(super) enum ParameterDefaultFlow {
     Function,
     Constructor,
+}
+
+/// One declared parameter: its identity, its default, and the annotations written on it, whose
+/// policies (`@Suppress`) hold for its whole declaration, type reference and default included.
+#[derive(Clone, Copy)]
+pub(super) struct DeclaredParameter<'p> {
+    pub(super) name: &'p str,
+    pub(super) default: Option<ExprId>,
+    pub(super) declaration: crate::diag::Span,
+    pub(super) annotations: &'p [AnnotationRef],
+    pub(super) annotation_args: &'p [Vec<ExprId>],
+}
+
+impl<'p> From<&'p crate::ast::Param> for DeclaredParameter<'p> {
+    fn from(parameter: &'p crate::ast::Param) -> Self {
+        Self {
+            name: &parameter.name,
+            default: parameter.default,
+            declaration: parameter.span,
+            annotations: &parameter.annotations,
+            annotation_args: &parameter.annotation_args,
+        }
+    }
+}
+
+impl<'p> From<&'p crate::ast::PropParam> for DeclaredParameter<'p> {
+    fn from(parameter: &'p crate::ast::PropParam) -> Self {
+        Self {
+            name: &parameter.name,
+            default: parameter.default,
+            declaration: parameter.declaration_span,
+            annotations: &parameter.annotations,
+            annotation_args: &parameter.annotation_args,
+        }
+    }
 }
 
 impl ParameterDefaultFlow {
@@ -49,13 +88,34 @@ impl Checker<'_> {
         );
     }
 
+    /// The declared value types of a local function's `parameters`, each type reference resolved
+    /// in `types` under its parameter's own policies, whose annotations resolve in `annotations`.
+    pub(super) fn local_parameter_types(
+        &mut self,
+        annotations: &CheckerScope<'_>,
+        types: &CheckerScope<'_>,
+        parameters: &[crate::ast::Param],
+    ) -> Vec<Ty> {
+        parameters
+            .iter()
+            .map(|parameter| {
+                self.with_parameter_policies(annotations, parameter.into(), |checker| {
+                    super::semantic_value_parameter_ty(
+                        checker.type_ref_ty(types, &parameter.ty),
+                        parameter.is_vararg,
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// Check one callable's defaults in declaration order. All parameter identities shadow outer
     /// values from the beginning of the list, while reads or writes before a parameter's own
     /// declaration point report that exact parameter as uninitialized.
     pub(super) fn check_parameter_defaults<'p>(
         &mut self,
         scope: &CheckerScope<'_>,
-        parameters: impl ExactSizeIterator<Item = (&'p str, Option<ExprId>, crate::diag::Span)>,
+        parameters: impl ExactSizeIterator<Item = DeclaredParameter<'p>>,
         parameter_types: &[Ty],
         flow: ParameterDefaultFlow,
     ) {
@@ -68,24 +128,36 @@ impl Checker<'_> {
         let identities = parameters
             .iter()
             .zip(parameter_types)
-            .map(|(&(name, _, declaration), &ty)| {
-                (name != "_").then(|| {
-                    let identity = self.declare(scope, name, ty, false);
-                    self.record_lexical_declaration(
-                        scope,
-                        name,
-                        super::lexical_bindings::LexicalValueRole::Parameter(declaration),
-                    );
-                    self.uninitialized_default_parameters
-                        .insert(identity, name.to_string());
-                    identity
-                })
-            })
+            .map(
+                |(
+                    &DeclaredParameter {
+                        name, declaration, ..
+                    },
+                    &ty,
+                )| {
+                    (name != "_").then(|| {
+                        let identity = self.declare(scope, name, ty, false);
+                        self.record_lexical_declaration(
+                            scope,
+                            name,
+                            super::lexical_bindings::LexicalValueRole::Parameter(declaration),
+                        );
+                        self.uninitialized_default_parameters
+                            .insert(identity, name.to_string());
+                        identity
+                    })
+                },
+            )
             .collect::<Vec<_>>();
-        for (((_name, default, _declaration), &ty), identity) in
+        for ((parameter, &ty), identity) in
             parameters.into_iter().zip(parameter_types).zip(identities)
         {
-            if let Some(default) = default {
+            if let Some(default) = parameter.default {
+                let policy_depth = self.push_declaration_policies(
+                    scope,
+                    parameter.annotations,
+                    parameter.annotation_args,
+                );
                 if self.signature_defaults_only {
                     self.signature_default_expression_depth += 1;
                 }
@@ -96,6 +168,7 @@ impl Checker<'_> {
                 if self.signature_defaults_only {
                     self.signature_default_expression_depth -= 1;
                 }
+                self.active_lexical_policies.truncate(policy_depth);
             }
             if let Some(identity) = identity {
                 self.uninitialized_default_parameters.remove(&identity);

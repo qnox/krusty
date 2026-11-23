@@ -135,6 +135,29 @@ impl Checker<'_> {
         self.push_selected_declaration_policies(scope, annotations, arguments, &|_| true)
     }
 
+    /// Run `operation` inside the policies of `parameter`'s annotations, then close them. They
+    /// hold for everything written in its declaration: its type reference and its default value.
+    pub(super) fn with_parameter_policies<R>(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        parameter: super::parameter_defaults::DeclaredParameter<'_>,
+        operation: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let depth = self.push_parameter_policies(scope, parameter);
+        let result = operation(self);
+        self.active_lexical_policies.truncate(depth);
+        result
+    }
+
+    /// Open the policies of `parameter`'s annotations. Returns the depth to truncate back to.
+    pub(super) fn push_parameter_policies(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        parameter: super::parameter_defaults::DeclaredParameter<'_>,
+    ) -> usize {
+        self.push_declaration_policies(scope, parameter.annotations, parameter.annotation_args)
+    }
+
     /// [`Self::push_declaration_policies`] for only the applications `include` selects. An
     /// application it excludes is never checked here, so it can neither bind nor publish.
     pub(super) fn push_selected_declaration_policies(
