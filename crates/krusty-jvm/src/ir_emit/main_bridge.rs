@@ -44,11 +44,6 @@ impl MainBridge {
         })
     }
 
-    /// Whether the bridge follows `function`, the entry point it calls.
-    pub(super) fn follows(&self, function: u32) -> bool {
-        self.entry == function
-    }
-
     pub(super) fn emit(&self, ir: &IrFile, facade: &str, cw: &mut ClassWriter) {
         // kotlinc visits the bridge's header before its body's call to `main()`.
         cw.reserve_method_pool(LAUNCHER_NAME, LAUNCHER_DESCRIPTOR, None, &[]);

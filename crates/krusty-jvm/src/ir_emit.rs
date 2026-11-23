@@ -1223,7 +1223,7 @@ fn emit_pass(
         emitted.then_some(i)
     });
     let facade_functions: Vec<u32> = facade_functions.collect();
-    let main_bridge = main_bridge::MainBridge::plan(ir, env, &facade_functions);
+    let mut main_bridge = main_bridge::MainBridge::plan(ir, env, &facade_functions);
     for member in member_schedule::facade_source_ordered_members(ir, facade_functions.into_iter()) {
         let i = match member {
             member_schedule::FacadeMember::Function(function) => function as usize,
@@ -1240,6 +1240,13 @@ fn emit_pass(
                 continue;
             }
         };
+        // kotlinc appends the launcher bridge to the file's declarations: it follows every declared
+        // function and precedes the lifted lambdas and local functions, which have no source order.
+        if !ir.fn_source_order.contains_key(&(i as u32)) {
+            if let Some(bridge) = main_bridge.take() {
+                bridge.emit(ir, facade, &mut cw);
+            }
+        }
         let f = &ir.functions[i];
         let rescued = lambdas.rescued.contains(&(i as u32));
         if rescued {
@@ -1280,12 +1287,6 @@ fn emit_pass(
             &mut cw,
         );
         facade_has_method = true;
-        if let Some(bridge) = main_bridge
-            .as_ref()
-            .filter(|bridge| bridge.follows(i as u32))
-        {
-            bridge.emit(ir, facade, &mut cw);
-        }
         // A top-level function (or extension) with parameter defaults gets kotlinc's
         // `foo$default(params…, int mask, Object marker)` synthetic (dispatches to the real method,
         // filling the masked slots from the defaults), so an omitted-argument caller — same-file or
@@ -1320,6 +1321,9 @@ fn emit_pass(
                     .collect::<Vec<_>>())
             );
         }
+    }
+    if let Some(bridge) = main_bridge.take() {
+        bridge.emit(ir, facade, &mut cw);
     }
     // A multifile facade forwards to the part's declared members and their `$default` stubs,
     // never to the synthetic accessors emitted below.
