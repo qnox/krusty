@@ -42,6 +42,27 @@ fn mapped_builtin_property_and_function_calls_match_kotlinc_bytes() {
 }
 
 #[test]
+fn suspend_member_leaves_the_mutable_declaration_its_stub_byte_for_byte() {
+    // `suspend fun clear()` takes a continuation, so it does not implement `MutableMap.clear()`:
+    // kotlinc still writes the throwing `clear()` stub beside it.
+    assert_byte_equal(
+        "SuspendClearStubBytes",
+        "abstract class SuspendClearStubBytes<K : Any, V : Any> : Map<K, V> {\n\
+        \x20   abstract suspend fun clear()\n\
+        \x20   override val entries: Set<Map.Entry<K, V>> get() = TODO()\n\
+        \x20   override val keys: Set<K> get() = TODO()\n\
+        \x20   override val size: Int get() = TODO()\n\
+        \x20   override val values: Collection<V> get() = TODO()\n\
+        \x20   override fun isEmpty(): Boolean = TODO()\n\
+        \x20   override fun get(key: K): V? = TODO()\n\
+        \x20   override fun containsValue(value: V): Boolean = TODO()\n\
+        \x20   override fun containsKey(key: K): Boolean = TODO()\n\
+        }\n",
+        "SuspendClearStubBytes",
+    );
+}
+
+#[test]
 fn collection_size_reachable_through_interface() {
     const SRC: &str = "class C : Collection<String> {\n\
         \x20   override val size: Int get() = 3\n\

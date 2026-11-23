@@ -917,6 +917,7 @@ fn superclass_chain(
             for &function_id in &source.methods {
                 let function = &ir.functions[function_id as usize];
                 if function.is_static
+                    || ir.suspend_funs.contains(&function_id)
                     || !inherited_along(ir.method_visibility(function_id), same_package_path)
                 {
                     continue;
@@ -1152,7 +1153,8 @@ pub(super) fn classifier_closure(
 }
 
 /// kotlinc's effective-override check: the class's own members, whatever their modality, and the
-/// non-abstract members it inherits from its superclasses and interface defaults.
+/// non-abstract members it inherits from its superclasses and interface defaults. A `suspend`
+/// member never overrides a collection member: it takes a continuation the declaration does not.
 /// Each key maps to the physical JVM parameters of the implementation the class reaches: its own
 /// member first, then the nearest superclass's, then an interface default.
 fn implemented_members(
@@ -1165,6 +1167,7 @@ fn implemented_members(
     for (function_id, function) in class
         .methods
         .iter()
+        .filter(|function| !ir.suspend_funs.contains(function))
         .map(|&function| (function, &ir.functions[function as usize]))
         .filter(|(_, function)| !function.is_static)
     {
