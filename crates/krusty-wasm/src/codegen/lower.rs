@@ -457,7 +457,7 @@ pub(super) fn lower_file(
             }
         }
     }
-    if objects::holds_unprinted_values(ir) {
+    if objects::holds_unprinted_values(ir, callables) {
         reach.bodiless_value(AnyMember::ToString);
     }
     class_literals::name_type_infos(module, runtime, classifiers);

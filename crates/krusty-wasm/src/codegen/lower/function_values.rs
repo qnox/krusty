@@ -150,10 +150,14 @@ impl Body<'_> {
                 let name = function_value_names::class_name(shape, &codes);
                 self.runtime.function_value_to_string(self.module, &name)
             }
-            None => match function_value_names::sam_class_name(self.ir, site) {
-                Some(name) => self.runtime.function_value_to_string(self.module, &name),
+            None => match (
+                function_value_names::sam_class_name(self.ir, site),
+                self.property_reference_text(site),
+            ) {
+                (Some(name), _) => self.runtime.function_value_to_string(self.module, &name),
+                (None, Some(text)) => self.runtime.constant_to_string(self.module, &text),
                 // kotlinc-wasm names this value's class otherwise, or prints it otherwise.
-                None => self.runtime.objects.trap(self.module, to_string_ty),
+                (None, None) => self.runtime.objects.trap(self.module, to_string_ty),
             },
         };
         let callable = sam.is_none_or(|target| {
@@ -323,6 +327,28 @@ impl Body<'_> {
             },
         );
         Ok(invoke)
+    }
+
+    /// The text a function value that is a property reference prints, as kotlinc-wasm prints it:
+    /// `property NAME (Kotlin reflection is not available)`. `None` for any other value.
+    fn property_reference_text(&self, site: u32) -> Option<String> {
+        let IrExpr::CallableReference(reference) = self.ir.expr(site) else {
+            return None;
+        };
+        let krusty::ir::IrCallableReferenceTarget::Property(property) = &reference.target else {
+            return None;
+        };
+        if !property.reflective {
+            return None;
+        }
+        let name = krusty::backend::reference_names::callable_reference_name(
+            self.ir,
+            self.callables,
+            reference,
+        )?;
+        Some(format!(
+            "property {name} (Kotlin reflection is not available)"
+        ))
     }
 
     /// A new function value for the callable reference `id`. Its adapter takes the referenced
