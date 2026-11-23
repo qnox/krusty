@@ -837,7 +837,7 @@ fn signed_constructors_and_implicit_enum_callables_are_inventory_entries() {
                     },
                     DecodedBodyState::Bodyless,
                     false,
-                    false,
+                    true,
                 ),
             ),
             (
@@ -852,7 +852,7 @@ fn signed_constructors_and_implicit_enum_callables_are_inventory_entries() {
                     },
                     DecodedBodyState::Bodyless,
                     false,
-                    false,
+                    true,
                 ),
             ),
             (
@@ -867,7 +867,7 @@ fn signed_constructors_and_implicit_enum_callables_are_inventory_entries() {
                     },
                     DecodedBodyState::Bodyless,
                     false,
-                    false,
+                    true,
                 ),
             ),
         ])

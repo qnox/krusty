@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::libraries::{
     AtomicOperation, CompilerIntrinsic, ExternalCallableKind, KlibDeclarationSignature,
-    KlibDependencyCallable, ScalarClass, ScalarComparison, ScalarInstruction,
+    KlibDependencyCallable, ScalarClass, ScalarComparison, ScalarInstruction, SurrogateHalf,
 };
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrExprKind, KlibIrFunction, KlibIrNullability, KlibIrType,
@@ -1063,6 +1063,32 @@ fn array_copy(
     })
 }
 
+/// Native's `Char.isHighSurrogate()`/`isLowSurrogate()`: an external `kotlin.text` extension on
+/// `Char` with no parameters and a `Boolean` result.
+fn char_is_surrogate(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    half: SurrogateHalf,
+) -> Option<KlibIntrinsicShape> {
+    if placement != crate::libraries::CallablePlacement::Package(type_name("kotlin/text"))
+        || !declaration.params.is_empty()
+        || !declaration
+            .receiver
+            .as_ref()
+            .is_some_and(|receiver| exact_type(receiver, "kotlin/Char"))
+        || !exact_type(&declaration.ret, "kotlin/Boolean")
+    {
+        return None;
+    }
+    Some(KlibIntrinsicShape {
+        operation: CompilerIntrinsic::CharIsSurrogate(half),
+        kind: ExternalCallableKind::Extension,
+        receiver: Some(Ty::Char),
+        params: vec![Ty::Char],
+        ret: Ty::Boolean,
+    })
+}
+
 fn native(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
@@ -1099,6 +1125,12 @@ fn native(
                 },
                 Ty::Double,
             ),
+            "Kotlin_Char_isHighSurrogate" => {
+                return char_is_surrogate(placement, declaration, SurrogateHalf::High)
+            }
+            "Kotlin_Char_isLowSurrogate" => {
+                return char_is_surrogate(placement, declaration, SurrogateHalf::Low)
+            }
             "Kotlin_Array_copyImpl" => {
                 let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
                 return array_copy(
@@ -1928,6 +1960,90 @@ mod tests {
             &exact,
         )
         .is_none());
+    }
+
+    #[test]
+    fn native_gc_unsafe_surrogate_predicates_require_the_exact_entry_package_and_shape() {
+        let gc_unsafe = |callee: &str| AnnotationApplication {
+            identity: type_name("kotlin/native/internal/GCUnsafeCall"),
+            arguments: vec![(
+                "callee".to_owned(),
+                AnnotationArgument::String(callee.to_owned()),
+            )],
+        };
+        let native = Some(TargetIntrinsicPlatform::Native);
+        let text = crate::libraries::CallablePlacement::Package(type_name("kotlin/text"));
+        let predicate = |name: &str, entry: &str, receiver: &str| {
+            let mut function = declaration(name, &[], "kotlin/Boolean", gc_unsafe(entry));
+            function.receiver = Some(KotlinType::class(receiver));
+            function
+        };
+        for (name, entry, half) in [
+            (
+                "isHighSurrogate",
+                "Kotlin_Char_isHighSurrogate",
+                SurrogateHalf::High,
+            ),
+            (
+                "isLowSurrogate",
+                "Kotlin_Char_isLowSurrogate",
+                SurrogateHalf::Low,
+            ),
+        ] {
+            assert_eq!(
+                authenticate(native, text, &predicate(name, entry, "kotlin/Char")),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::CharIsSurrogate(half),
+                    kind: ExternalCallableKind::Extension,
+                    receiver: Some(Ty::Char),
+                    params: vec![Ty::Char],
+                    ret: Ty::Boolean,
+                })
+            );
+            assert_eq!(
+                authenticate(
+                    native,
+                    crate::libraries::CallablePlacement::Package(type_name("kotlin")),
+                    &predicate(name, entry, "kotlin/Char"),
+                ),
+                None
+            );
+            assert_eq!(
+                authenticate(native, text, &predicate(name, entry, "kotlin/Int")),
+                None
+            );
+            let mut with_parameter = predicate(name, entry, "kotlin/Char");
+            with_parameter.params = vec![KotlinType::class("kotlin/Char")];
+            with_parameter.param_names = vec!["p0".to_owned()];
+            with_parameter.param_defaults = vec![false];
+            with_parameter.inline_modifiers = vec![crate::types::InlineParameterModifier::None];
+            assert_eq!(authenticate(native, text, &with_parameter), None);
+            let mut wrong_result = predicate(name, entry, "kotlin/Char");
+            wrong_result.ret = KotlinType::class("kotlin/Int");
+            assert_eq!(authenticate(native, text, &wrong_result), None);
+            assert_eq!(
+                authenticate(None, text, &predicate(name, entry, "kotlin/Char")),
+                None
+            );
+        }
+        assert_eq!(
+            authenticate(
+                native,
+                text,
+                &predicate(
+                    "isHighSurrogate",
+                    "User_Char_isHighSurrogate",
+                    "kotlin/Char"
+                ),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn surrogate_halves_cover_the_utf16_surrogate_block_without_overlap() {
+        assert_eq!(SurrogateHalf::High.code_units(), 0xD800..=0xDBFF);
+        assert_eq!(SurrogateHalf::Low.code_units(), 0xDC00..=0xDFFF);
     }
 
     #[test]

@@ -25,6 +25,14 @@ pub enum SemanticCallRole {
     /// The `name` property `kotlin.Enum` declares. A read on a direct entry is that entry's
     /// declaration name, a constant kotlinc evaluates without initializing the enum.
     KotlinEnumName,
+    /// The `values()` every enum class declares implicitly: a fresh array of its constants, which
+    /// the common enum realization of the declaring class answers.
+    KotlinEnumValues,
+    /// The `valueOf(value)` every enum class declares implicitly: its constant of that name.
+    KotlinEnumValueOf,
+    /// The getter of the `entries` property every enum class compiled for Kotlin 1.9 or later
+    /// declares implicitly: the list of its constants.
+    KotlinEnumEntries,
     /// A property-reference read with this many unbound receivers.
     KotlinPropertyReferenceGet(u8),
     /// A mutable property-reference write with this many unbound receivers.

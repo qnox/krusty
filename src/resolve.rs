@@ -38,6 +38,7 @@ mod builtin_implementation;
 mod char_sequence_protocol;
 pub(crate) mod collection_protocol;
 mod coroutine_runtime;
+mod enum_entries_factory;
 mod selected_external_members;
 use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,
@@ -2860,6 +2861,7 @@ pub(crate) struct PassTwoSymbols {
     libraries: std::rc::Rc<dyn SemanticPlatform>,
     coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
     char_sequence_protocol: Option<crate::fir::CharSequenceProtocol>,
+    enum_entries_factory: Option<crate::fir::EnumEntriesFactory>,
     native_plugins: crate::plugins::registry::NativePlugins,
 }
 
@@ -2884,6 +2886,12 @@ impl PassTwoSymbols {
         self.char_sequence_protocol
     }
 
+    /// The `kotlin.enums.enumEntries(Array)` resolution selected for a target that builds an
+    /// enum's `entries` by it.
+    pub(crate) fn enum_entries_factory(&self) -> Option<crate::fir::EnumEntriesFactory> {
+        self.enum_entries_factory
+    }
+
     pub(crate) fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
         &self.native_plugins
     }
@@ -2893,11 +2901,13 @@ impl SymbolTable {
     pub(crate) fn into_pass_two_symbols(self) -> PassTwoSymbols {
         let coroutine_runtime = coroutine_runtime::selected(&*self.libraries);
         let char_sequence_protocol = char_sequence_protocol::selected(&*self.libraries);
+        let enum_entries_factory = enum_entries_factory::selected(&*self.libraries);
         PassTwoSymbols {
             compilation_id: self.compilation_id,
             libraries: std::rc::Rc::from(self.libraries),
             coroutine_runtime,
             char_sequence_protocol,
+            enum_entries_factory,
             native_plugins: self.native_plugins,
         }
     }

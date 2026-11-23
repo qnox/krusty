@@ -18,6 +18,7 @@ mod control_forms;
 mod demo_package;
 mod elvis_blocks;
 mod enum_entries;
+mod enum_entry_frames;
 mod for_loop_bindings;
 mod generic_receiver_hierarchy;
 mod inline_calls;
