@@ -33,6 +33,7 @@
 //! identity, and the syntax it is found in is not the syntax the classifier itself is found in —
 //! and they live in [`members`].
 
+mod candidates;
 mod expected;
 mod members;
 mod resolved;
@@ -426,13 +427,27 @@ pub(super) fn report_unactualized_members(
             Target::Function { .. } | Target::Property { .. } => continue,
         };
         // The reference compiler lists what the classifier owes under the line that names it,
-        // each member as the common source declared it.
-        let listing = owed
-            .expected
-            .iter()
-            .filter_map(|member| expected.get(member))
-            .map(|member| format!("\n\n    {member}"))
-            .collect::<String>();
+        // each member as the common source declared it, and beneath an alias's member the
+        // members of its target that did not implement it.
+        let mut listing = String::new();
+        let mut unlisted = None;
+        for member in &owed.expected {
+            let Some(written) = expected.get(&member.declaration) else {
+                continue;
+            };
+            listing.push_str("\n\n    ");
+            listing.push_str(written);
+            if matches!(actual.target, Target::TypeAlias { .. }) {
+                match candidates::listing(&member.candidates) {
+                    Ok(candidates) => listing.push_str(&candidates),
+                    Err(reason) => unlisted = Some(reason),
+                }
+            }
+        }
+        let subject = match (subject, unlisted) {
+            (Ok(_), Some(reason)) => Err(reason),
+            (subject, _) => subject,
+        };
         match subject {
             Ok(rendered) => diags.error(
                 actual.name,

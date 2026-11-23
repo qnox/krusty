@@ -430,8 +430,9 @@ fn bind_inherited_dependency_members(
 
 /// The constructors an `actual typealias` to a dependency class makes available: they are the
 /// target's own, not inherited, and an `expect` constructor is implemented by the one that agrees
-/// on its value parameters. A constructor with a type parameter, a receiver-like context or a
-/// `vararg` cannot be stated by the record and is left out, with its evidence intact.
+/// on its value parameters. A constructor with a type parameter, a context parameter or a `vararg`
+/// is kept but marked not plain: it never implements an `expect` constructor, and a report that
+/// would have to list it as a candidate says so rather than render it.
 fn dependency_constructors(
     platform: &dyn SemanticPlatform,
     target: TypeName,
@@ -442,24 +443,23 @@ fn dependency_constructors(
     class
         .constructors
         .iter()
-        .filter(|constructor| {
-            crate::symbol_resolver::member_is_inheritable(constructor.visibility)
-                && constructor.context_count == 0
-                && !constructor.call_sig.vararg
-                && constructor
-                    .generic_sig
-                    .as_ref()
-                    .is_none_or(|signature| signature.formals.is_empty())
-        })
+        .filter(|constructor| crate::symbol_resolver::member_is_inheritable(constructor.visibility))
         .map(|constructor| crate::fir::InheritedDependencyMember {
             kind: crate::fir::DeclarationKind::Constructor,
             name: String::new(),
             parameters: constructor.params.clone().into_boxed_slice(),
-            result: crate::types::Ty::Unit,
+            parameter_names: source_parameter_names(&constructor.call_sig).into_boxed_slice(),
+            result: crate::types::Ty::obj_name(target),
             mutable: false,
             operator: false,
             infix: false,
             inline: false,
+            plain: constructor.context_count == 0
+                && !constructor.call_sig.vararg
+                && constructor
+                    .generic_sig
+                    .as_ref()
+                    .is_none_or(|signature| signature.formals.is_empty()),
         })
         .collect()
 }
@@ -482,10 +482,11 @@ fn has_type_arguments(
 /// The members of one name the shared member hierarchy selects for `receiver`, normalized to the
 /// evidence an `expect` member states. The hierarchy has already decided inheritance, overriding
 /// and specialization, so a member a nearer declaration overrides is absent. Private members are
-/// never inherited. A member the `expect` side cannot state is excluded here, with its evidence
-/// intact, rather than projected into a record it would then equal: one with a receiver, context
-/// parameters, type parameters, a modifier the record cannot carry (`suspend`) or `vararg`, an accessor with its own availability or
-/// visibility, or a property that is a Java field or synthesized from Java accessors.
+/// never inherited. A member the `expect` side cannot state is kept with `plain` false, its
+/// evidence intact, rather than projected into a record it would then equal: one with a receiver,
+/// context parameters, type parameters, a modifier the record cannot carry (`suspend`) or `vararg`, an accessor with its own availability or visibility, or a
+/// property that is a Java field or synthesized from Java accessors. Such a member implements
+/// nothing, and is never rendered as a candidate.
 fn inherited_members(
     platform: &dyn SemanticPlatform,
     receiver: crate::types::Ty,
@@ -524,23 +525,24 @@ fn inherited_members(
                     && *over.params == *declared
             }) && function.kind == crate::libraries::FnKind::Member
                 && crate::symbol_resolver::member_is_inheritable(function.callable.visibility)
-                && function.context_count == 0
-                && !function.flags.suspend
-                && !function.call_sig.vararg
-                && function
-                    .generic_sig
-                    .as_ref()
-                    .is_none_or(|signature| signature.formals.is_empty())
         })
         .map(|function| crate::fir::InheritedDependencyMember {
             kind: crate::fir::DeclarationKind::Function,
             name: name.to_owned(),
             parameters: function.callable.params.clone().into_boxed_slice(),
+            parameter_names: source_parameter_names(&function.call_sig).into_boxed_slice(),
             result: function.callable.ret,
             mutable: false,
             operator: function.flags.operator,
             infix: function.flags.infix,
             inline: function.flags.inline != crate::libraries::InlineKind::None,
+            plain: function.context_count == 0
+                && !function.flags.suspend
+                && !function.call_sig.vararg
+                && function
+                    .generic_sig
+                    .as_ref()
+                    .is_none_or(|signature| signature.formals.is_empty()),
         });
     let properties = callables
         .properties()
@@ -549,25 +551,26 @@ fn inherited_members(
             !overridden.iter().any(|over| {
                 over.owner == property.owner && *over.name == *name && over.params.is_empty()
             }) && property.kind == crate::libraries::PropKind::Member
-                && property.producer == crate::libraries::PropertyProducer::KotlinAccessor
                 && crate::symbol_resolver::member_is_inheritable(property.visibility)
+        })
+        .map(|property| crate::fir::InheritedDependencyMember {
+            kind: crate::fir::DeclarationKind::Property,
+            name: name.to_owned(),
+            parameters: Box::default(),
+            parameter_names: Box::default(),
+            result: property.ty,
+            mutable: property.setter.is_some(),
+            operator: false,
+            infix: false,
+            inline: false,
+            plain: property.producer == crate::libraries::PropertyProducer::KotlinAccessor
                 && property.context_count == 0
                 && property.formals.is_empty()
                 && property.readable()
                 && property.setter.as_ref().is_none_or(|_| {
                     property.accessor_availability.setter
                         && property.setter_visibility == property.visibility
-                })
-        })
-        .map(|property| crate::fir::InheritedDependencyMember {
-            kind: crate::fir::DeclarationKind::Property,
-            name: name.to_owned(),
-            parameters: Box::default(),
-            result: property.ty,
-            mutable: property.setter.is_some(),
-            operator: false,
-            infix: false,
-            inline: false,
+                }),
         });
     functions.chain(properties).collect()
 }
@@ -762,5 +765,16 @@ mod tests {
         let actualization = crate::fir::actualization(&different, &bindings);
         assert!(actualization.pairs.is_empty());
         assert_eq!(actualization.incompatible.len(), 1);
+    }
+}
+
+/// The parameter names a candidate listing spells: the ones a Kotlin declaration carries, or the
+/// ones a Java declaration wrote. A Java method has no named-argument names, so its declared ones
+/// are kept in their own field and read only here.
+fn source_parameter_names(call_sig: &crate::libraries::CallSig) -> Vec<String> {
+    if call_sig.declared_parameter_names.is_empty() {
+        call_sig.param_names.clone()
+    } else {
+        call_sig.declared_parameter_names.clone()
     }
 }

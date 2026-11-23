@@ -9,7 +9,9 @@ use super::*;
 
 mod dependency_members;
 
-pub use dependency_members::InheritedDependencyMember;
+pub use dependency_members::{
+    IncompatibilityReason, IncompatibleCandidate, InheritedDependencyMember,
+};
 
 /// Match top-level multiplatform headers using compact Pass-1 facts and resolver-published
 /// classifier identities. The returned stable ids identify expect declarations shadowed by a
@@ -82,7 +84,15 @@ pub struct Actualization {
 #[derive(Clone, Debug)]
 pub struct UnactualizedMembers {
     pub classifier: DeclarationId,
-    pub expected: Vec<DeclarationId>,
+    pub expected: Vec<OwedMember>,
+}
+
+/// One `expect` member an `actual` classifier owes, and the same-named members of its scope that
+/// the reference compiler lists beneath it as incompatible.
+#[derive(Clone, Debug)]
+pub struct OwedMember {
+    pub declaration: DeclarationId,
+    pub candidates: Vec<IncompatibleCandidate>,
 }
 
 /// Classifier identities already bound by the ordinary resolver for compact actualization syntax.
@@ -1340,6 +1350,12 @@ pub fn actualization(
             // A source member nearer than a dependency supertype hides an inherited one only when
             // it implements the `expect` member itself, so the dependency candidates are
             // consulted whenever no source member does, not only when no source bucket exists.
+            let dependency_scope = || {
+                actual_member_owners(headers, bindings, pair.actual)
+                    .into_iter()
+                    .filter_map(|owner| bindings.inherited_dependency_members.get(&owner))
+                    .flatten()
+            };
             let discharged_by_dependency = || {
                 dependency_members::implementations(
                     headers,
@@ -1347,15 +1363,23 @@ pub fn actualization(
                     &actualized_aliases,
                     child,
                     &key.1,
-                    actual_member_owners(headers, bindings, pair.actual)
-                        .into_iter()
-                        .filter_map(|owner| bindings.inherited_dependency_members.get(&owner))
-                        .flatten(),
+                    dependency_scope(),
                 ) == 1
+            };
+            let owed_member = || OwedMember {
+                declaration: child.id,
+                candidates: dependency_members::incompatible_candidates(
+                    headers,
+                    bindings,
+                    &actualized_aliases,
+                    child,
+                    &key.1,
+                    dependency_scope(),
+                ),
             };
             let Some(candidates) = actual_children.get(&key) else {
                 if !discharged_by_dependency() && owes(child) {
-                    owed.push(child.id);
+                    owed.push(owed_member());
                 }
                 continue;
             };
@@ -1389,7 +1413,7 @@ pub fn actualization(
                 ) {
                     incompatible_members.insert(renamed);
                 } else if !discharged_by_dependency() && owes(child) {
-                    owed.push(child.id);
+                    owed.push(owed_member());
                 }
                 continue;
             };
@@ -1844,11 +1868,13 @@ mod tests {
             kind: DeclarationKind::Function,
             name: name.to_owned(),
             parameters: parameters.into(),
+            parameter_names: Box::default(),
             result,
             mutable: false,
             operator: false,
             infix: false,
             inline: false,
+            plain: true,
         }
     }
 
@@ -1861,11 +1887,13 @@ mod tests {
             kind: DeclarationKind::Property,
             name: name.to_owned(),
             parameters: Box::default(),
+            parameter_names: Box::default(),
             result,
             mutable,
             operator: false,
             infix: false,
             inline: false,
+            plain: true,
         }
     }
 
