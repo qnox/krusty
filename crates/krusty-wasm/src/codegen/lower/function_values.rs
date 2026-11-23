@@ -108,8 +108,7 @@ impl Body<'_> {
         };
         let mut captured_types = Vec::with_capacity(captures.len());
         for parameter in 0..captures.len() {
-            let value = parameter_carrier(self.module, self.ir, function, parameter as u32)?
-                .ok_or("a function value capturing a `Unit` value")?;
+            let value = parameter_carrier(self.module, self.ir, function, parameter as u32)?;
             captured_types.push(value);
             fields.push(immutable(value));
         }
@@ -297,8 +296,7 @@ impl Body<'_> {
             .to_vec();
         let ret = declaration.ret;
         for (parameter, &carrier) in layout.carriers.iter().enumerate() {
-            if parameter_carrier(self.module, self.ir, function, parameter as u32)? != Some(carrier)
-            {
+            if parameter_carrier(self.module, self.ir, function, parameter as u32)? != carrier {
                 return Err("a function value entry whose captures differ from its value's".into());
             }
         }
@@ -733,14 +731,14 @@ impl Body<'_> {
     /// Convert the reference on top of `code`'s stack to the parameter carrier of `ty`. A
     /// `Nothing` parameter, such as a lambda's for `Function1<*, *>`, stays a reference.
     fn unpack_argument(&mut self, code: &mut Code, ty: Ty) -> Result<(), Unsupported> {
+        // A `Unit` operand is the `Unit` instance, the reference its parameter's slot holds.
         match parameter_carrier_of(ty)? {
-            None => Err("a function value taking a `Unit` value".into()),
-            Some(REFERENCE) => Ok(()),
-            Some(ValType::Ref { heap, .. }) => {
+            REFERENCE => Ok(()),
+            ValType::Ref { heap, .. } => {
                 code.ref_cast(true, heap);
                 Ok(())
             }
-            Some(value) => {
+            value => {
                 let form = self
                     .runtime
                     .box_form(self.module, ty, value)?
