@@ -419,6 +419,12 @@ pub(super) fn materialize_member_delegate(
         if property.flags.has(DeclarationFlags::OPEN) {
             ir.open_methods.insert(function);
         }
+        // Like a concrete accessor with a backing field, a delegated accessor is synthesized from
+        // the property: record its semantic shape so an enclosing class type parameter survives
+        // erasure in the JVM Signature (`class C<T> { val property: T by lazy { … } }`).
+        let signature = &ir.functions[function as usize];
+        ir.member_semantic_sigs
+            .insert(function, (signature.params.clone(), signature.ret));
         attach_accessor_type_parameters(ir, function, &type_params);
     }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
