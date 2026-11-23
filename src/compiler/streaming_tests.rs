@@ -167,7 +167,7 @@ fn attributed_signature_failure_is_not_duplicated_by_recovery() {
     assert!(diagnostic.identity.is_none());
     assert_eq!(
         diagnostics.render("Existing.kt", "abc"),
-        "Existing.kt:1:2: error: existing signature error\n"
+        "Existing.kt:1:2: error: existing signature error\nabc\n ^\n"
     );
 }
 
