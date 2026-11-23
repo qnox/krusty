@@ -2088,7 +2088,7 @@ impl<'s> Linker<'_, 's> {
         if class.is_value {
             return Ok(true);
         }
-        if class.kind == crate::libraries::TypeKind::Object {
+        if class.declares_instances() {
             return Ok(super::class_initialization::declared_instances_plan(
                 class,
                 self.sources.bodies,
