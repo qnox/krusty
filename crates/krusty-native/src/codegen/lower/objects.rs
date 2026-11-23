@@ -2545,7 +2545,40 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         &self,
         target: &krusty::fir::PropertyId,
     ) -> Result<CheckedProperty, Unsupported> {
-        match self.file.ir.local_property_layouts.get(target) {
+        self.checked_property_layout(self.file.ir.local_property_layouts.get(target))
+    }
+
+    /// Whether this file holds a layout for `target` at `operation`: the property of a class it
+    /// declares, or of a copy it realizes of another file's local class.
+    pub(super) fn has_property_layout_at(
+        &self,
+        operation: krusty::ir::ExprId,
+        target: &krusty::fir::PropertyId,
+    ) -> bool {
+        self.file
+            .ir
+            .property_layout_at(operation, *target)
+            .is_ok_and(|layout| layout.is_some())
+    }
+
+    pub(super) fn checked_property_at(
+        &self,
+        operation: krusty::ir::ExprId,
+        target: &krusty::fir::PropertyId,
+    ) -> Result<CheckedProperty, Unsupported> {
+        let layout = self
+            .file
+            .ir
+            .property_layout_at(operation, *target)
+            .map_err(|_| "a malformed property specialization".to_owned())?;
+        self.checked_property_layout(layout.as_ref())
+    }
+
+    fn checked_property_layout(
+        &self,
+        layout: Option<&krusty::ir::IrLocalPropertyLayout>,
+    ) -> Result<CheckedProperty, Unsupported> {
+        match layout {
             Some(krusty::ir::IrLocalPropertyLayout::Member {
                 class, property, ..
             }) => Ok(CheckedProperty::Member(*class, *property as usize)),
