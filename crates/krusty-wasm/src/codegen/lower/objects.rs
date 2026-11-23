@@ -455,9 +455,20 @@ impl Body<'_> {
                     Some(*getter)
                 }
             }
+            Some(IrLocalPropertyLayout::Member {
+                getter,
+                setter: property_setter,
+                ..
+            }) => {
+                if setter {
+                    *property_setter
+                } else {
+                    *getter
+                }
+            }
             _ => None,
         }
-        .ok_or_else(|| "a member-extension property call with no recorded accessor".to_string())?;
+        .ok_or_else(|| "a contextual property call with no recorded accessor".to_string())?;
         let params = self.ir.functions[function as usize].params.clone();
         if params.len() != args.len() {
             return Err("a property call whose arguments do not match its accessor".into());
@@ -922,6 +933,12 @@ impl Body<'_> {
                             .dispatch_member_extension_property(
                                 class, *property, false, receiver, args,
                             ),
+                        Some(IrLocalPropertyLayout::Member {
+                            context_parameters, ..
+                        }) if !context_parameters.is_empty() => self
+                            .dispatch_member_extension_property(
+                                class, *property, false, receiver, args,
+                            ),
                         _ if args.is_empty() => self.property_read(None, *property, Some(receiver)),
                         _ => Err("a property getter call with arguments".to_string()),
                     },
@@ -929,6 +946,12 @@ impl Body<'_> {
                         property,
                     )) => match self.ir.local_property_layouts.get(property) {
                         Some(IrLocalPropertyLayout::MemberExtension { .. }) => self
+                            .dispatch_member_extension_property(
+                                class, *property, true, receiver, args,
+                            ),
+                        Some(IrLocalPropertyLayout::Member {
+                            context_parameters, ..
+                        }) if !context_parameters.is_empty() => self
                             .dispatch_member_extension_property(
                                 class, *property, true, receiver, args,
                             ),
