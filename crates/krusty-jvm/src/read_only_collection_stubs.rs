@@ -13,6 +13,7 @@
 use crate::backend::SkipReason;
 use crate::collection_barriers::BarrierOutcome;
 use crate::inherited_collection_bridges::InheritedCollectionBridges;
+use crate::internal_names::MangledMembers;
 use crate::override_results::scalar_over_reference;
 use crate::value_classes::collection_stub_replacements::{
     collection_stub_realization, StubRealization,
@@ -171,6 +172,9 @@ pub(super) enum StubBody {
         /// The source order of the class's own implementing member, which places its bridge among
         /// the ordinary ones; `u32::MAX` for an inherited member, whose bridge follows them.
         order: u32,
+        /// The implementing member's JVM name, which the bridge calls: not the declaration's when
+        /// the member is `internal` or a source member of a different JVM name.
+        target_name: String,
         /// The implementing member's physical JVM parameters and result, which the bridge calls.
         target: Vec<Ty>,
         target_result: Ty,
@@ -246,6 +250,7 @@ pub(super) fn select(
     ir: &IrFile,
     classpath: &Classpath,
     classifiers: &dyn BackendClassifierSource,
+    mangled: &MangledMembers,
 ) -> Result<ReadOnlyCollectionStubs, SkipReason> {
     let mut result = ReadOnlyCollectionStubs::default();
     for class_index in 0..ir.classes.len() {
@@ -256,7 +261,7 @@ pub(super) fn select(
         if class.is_interface || class.is_annotation {
             continue;
         }
-        let stubs = class_stubs(ir, classpath, classifiers, class)?;
+        let stubs = class_stubs(ir, classpath, classifiers, mangled, class)?;
         if !stubs.is_empty() {
             result.by_class.insert(class.fq_name_id(), stubs);
         }
@@ -276,6 +281,7 @@ fn class_stubs(
     ir: &IrFile,
     classpath: &Classpath,
     classifiers: &dyn BackendClassifierSource,
+    mangled: &MangledMembers,
     class: &IrClass,
 ) -> Result<Vec<ReadOnlyStub>, SkipReason> {
     let Some(hierarchy) = ir.classifier_hierarchies.get(&class.fq_name_id()) else {
@@ -309,7 +315,7 @@ fn class_stubs(
 
     // kotlinc's `computeStubsForSuperClasses`: a stub a superclass already realizes, built in this
     // class's substitution context, is not repeated.
-    let chain = superclass_chain(ir, classpath, classifiers, class, &candidates)?;
+    let chain = superclass_chain(ir, classpath, classifiers, mangled, class, &candidates)?;
     let mut present: HashSet<(String, String)> = HashSet::default();
     for superclass in &chain {
         let faces = applicable_faces(classpath, &superclass.supertypes);
@@ -322,7 +328,7 @@ fn class_stubs(
 
     // An effectively overridden member keeps only its bridge, and only when the mutable
     // declaration's erased descriptor differs from the implementation's.
-    let implemented = implemented_members(ir, class, &chain);
+    let implemented = implemented_members(ir, mangled, class, &chain);
     let own_order: HashMap<(String, String), u32> = class
         .methods
         .iter()
@@ -379,7 +385,8 @@ fn class_stubs(
                 .unwrap_or_else(|| (stub.physical_parameters(), stub.physical_result()));
             let bridge = (method_descriptor(&erased.0, erased.1)
                 != method_descriptor(&implementation.parameters, implementation.physical_result))
-            .then_some(erased);
+            .then_some(erased.clone())
+            .or_else(|| (implementation.name != stub.name).then_some(erased));
             if bridge.is_none() && !stub.is_renamed() {
                 return None;
             }
@@ -390,6 +397,7 @@ fn class_stubs(
             Some(ReadOnlyStub {
                 body: StubBody::Implemented {
                     order,
+                    target_name: implementation.name.clone(),
                     target: implementation.parameters.clone(),
                     target_result: implementation.physical_result,
                 },
@@ -742,6 +750,8 @@ struct Superclass {
 /// A member that may implement a candidate, as the class reaches it.
 #[derive(Clone)]
 struct Implementation {
+    /// Its JVM name, which differs from the declaration's when the member is `internal`.
+    name: String,
     /// Its result in the class's substitution context, compared with the candidate's.
     result: Ty,
     /// Its physical JVM parameters and result, which a bridge to it calls.
@@ -860,6 +870,7 @@ fn superclass_chain(
     ir: &IrFile,
     classpath: &Classpath,
     classifiers: &dyn BackendClassifierSource,
+    mangled: &MangledMembers,
     class: &IrClass,
     candidates: &[ReadOnlyStub],
 ) -> Result<Vec<Superclass>, SkipReason> {
@@ -937,6 +948,7 @@ fn superclass_chain(
                         .implemented_members
                         .entry((function.name.clone(), parameter_descriptor(&parameters)))
                         .or_insert_with(|| Implementation {
+                            name: mangled.jvm_name(ir, function_id),
                             result,
                             parameters: jvm_tys(&function.params),
                             physical_result: jvm_declared_ty(&function.ret),
@@ -1085,6 +1097,7 @@ fn superclass_chain(
                     .implemented_members
                     .entry((method.name.clone(), key))
                     .or_insert(Implementation {
+                        name: method.name.clone(),
                         result,
                         parameters: physical,
                         physical_result,
@@ -1144,15 +1157,16 @@ pub(super) fn classifier_closure(
 /// member first, then the nearest superclass's, then an interface default.
 fn implemented_members(
     ir: &IrFile,
+    mangled: &MangledMembers,
     class: &IrClass,
     chain: &[Superclass],
 ) -> HashMap<(String, String), Implementation> {
     let mut implemented: HashMap<(String, String), Implementation> = HashMap::default();
-    for function in class
+    for (function_id, function) in class
         .methods
         .iter()
-        .map(|&function| &ir.functions[function as usize])
-        .filter(|function| !function.is_static)
+        .map(|&function| (function, &ir.functions[function as usize]))
+        .filter(|(_, function)| !function.is_static)
     {
         implemented
             .entry((
@@ -1160,6 +1174,7 @@ fn implemented_members(
                 parameter_descriptor(&function.params),
             ))
             .or_insert_with(|| Implementation {
+                name: mangled.jvm_name(ir, function_id),
                 result: function.ret,
                 parameters: jvm_tys(&function.params),
                 physical_result: jvm_declared_ty(&function.ret),
@@ -1185,6 +1200,7 @@ fn implemented_members(
                     parameter_descriptor(&default.applied_parameters),
                 ))
                 .or_insert_with(|| Implementation {
+                    name: name.to_string(),
                     result: default.applied_result,
                     parameters: jvm_tys(&default.applied_parameters),
                     physical_result: jvm_declared_ty(&default.applied_result),

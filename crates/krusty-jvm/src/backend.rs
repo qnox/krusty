@@ -371,7 +371,12 @@ fn run_backend_passes_after_plugins(
             classpath,
             &facts.override_results,
         ),
-        read_only_stubs: crate::read_only_collection_stubs::select(ir, classpath, classifiers)?,
+        read_only_stubs: crate::read_only_collection_stubs::select(
+            ir,
+            classpath,
+            classifiers,
+            &crate::internal_names::MangledMembers::plan(ir, module_name, facade),
+        )?,
         abstract_overrides,
         to_array: crate::collection_to_array::select(ir, classpath, classifiers)?,
     };

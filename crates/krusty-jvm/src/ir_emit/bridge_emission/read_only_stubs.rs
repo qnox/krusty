@@ -20,7 +20,7 @@ use crate::bridge_adaptations::ValueClassAdapter;
 use crate::collection_barriers::BarrierOutcome;
 use crate::read_only_collection_stubs::{ReadOnlyStub, StubBarrier, StubBody};
 use krusty::ir::{IrClass, IrFile};
-use krusty::types::{wk, Ty};
+use krusty::types::{wk, Ty, TyKind};
 
 const MESSAGE: &str = "Operation is not supported for read-only collection";
 const EXCEPTION: &str = "java/lang/UnsupportedOperationException";
@@ -130,11 +130,12 @@ fn emit_stub_bridge(
     if let StubBody::Implemented {
         target,
         target_result,
+        target_name,
         ..
     } = &stub.body
     {
         let mut target = Target {
-            name: &stub.name,
+            name: target_name,
             parameters: target,
             result: *target_result,
             result_box: None,
@@ -421,7 +422,7 @@ fn emit_type_check(
     physical: Ty,
     outcome: BarrierOutcome,
 ) {
-    if declared.is_nullable() && declared.non_null().obj_internal() == Some(wk::any()) {
+    if is_any_or_nullable_any_bound(declared) {
         let next = code.new_label();
         code.aload(slot);
         code.ifnonnull(next);
@@ -451,6 +452,15 @@ fn emit_type_check(
     code.ifne(next);
     super::emit_barrier_outcome(outcome, cw, code);
     code.bind(next);
+}
+
+/// A declared type every argument is an instance of: `Any?`, or a type parameter bounded by it.
+fn is_any_or_nullable_any_bound(declared: Ty) -> bool {
+    let mut current = declared;
+    while let TyKind::TyParam(_, bound) = current.kind() {
+        current = bound;
+    }
+    current.is_nullable() && current.non_null().obj_internal() == Some(wk::any())
 }
 
 fn method_locals(class: &IrClass, method: &ThrowingMethod) -> Vec<(String, String, u16)> {

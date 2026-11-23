@@ -34,7 +34,6 @@ collectionStubs/abstractStubSignatures/stringGenericMutableMap.kt
 collectionStubs/collectionByDelegation.kt
 collectionStubs/collectionByDelegation2.kt
 collectionStubs/collectionByDelegation3.kt
-collectionStubs/collectionWithInternalRemove.kt
 collectionStubs/extendingAbstractCollection.kt
 collectionStubs/inheritingFromAbstractCollections.kt
 collectionStubs/inheritingFromAbstractMap.kt
