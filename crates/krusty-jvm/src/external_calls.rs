@@ -222,6 +222,13 @@ fn realize_expressions(
                     constructed,
                     callable.physical_ret,
                 );
+                // The static construction takes its arguments as the checked constructor declares
+                // them. A construction that omits defaults supplies placeholders for them, which
+                // are not declared-parameter operands.
+                let declared_parameters = defaults
+                    .is_empty()
+                    .then(|| ir.construction_declared_params(expression).map(Box::from))
+                    .flatten();
                 ir.exprs[index] = IrExpr::Call {
                     callee: Box::new(Callee::Static {
                         owner,
@@ -232,6 +239,9 @@ fn realize_expressions(
                     dispatch_receiver: None,
                     args,
                 };
+                if let Some(parameters) = declared_parameters {
+                    ir.call_declared_params.insert(expression, parameters);
+                }
                 continue;
             }
             let default = if defaults.is_empty() {
