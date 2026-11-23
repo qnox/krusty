@@ -1383,7 +1383,15 @@ fn external_serializers(
                         None => return None,
                     }
                 }
-                (None, None) => return None,
+                // An interface that names no serializer is serialized polymorphically, whoever
+                // declares it; any other classifier without one has no serializer to reach.
+                (None, None) => {
+                    let declaration = classifiers.classifier_declaration(classifier)?;
+                    if declaration.kind != crate::types::ClassifierDeclarationKind::Interface {
+                        return None;
+                    }
+                    serialization::ExternalSerializer::Polymorphic
+                }
             };
             if let serialization::ExternalSerializer::Object {
                 serial_info_unsupported,
