@@ -308,6 +308,7 @@ mod name_read_demand;
 mod named_class_constructors;
 pub(crate) mod operator_calls;
 mod operator_declarations;
+mod operator_of_declarations;
 mod opt_in_usage;
 mod primitive_reference;
 use operator_calls::{
@@ -23696,6 +23697,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_fun_rets: HashMap::default(),
         inferred_ext_fun_rets: HashMap::default(),
         inferred_method_rets: HashMap::default(),
+        operator_of_overloads: Vec::new(),
         inferred_source_member_rets: HashMap::default(),
         inferred_stable_declaration_rets: HashMap::default(),
         inferred_declaration_publications: Default::default(),
@@ -24697,6 +24699,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.narrow_value_class_receivers();
     c.narrow_script_template_receivers();
     c.publish_member_declaring_receivers();
+    c.report_operator_of_overloads();
     let enhanced_values = c.enhanced_value_heads();
     let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
         Ok(implementations) => implementations,
@@ -24730,6 +24733,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         inferred_fun_rets,
         inferred_ext_fun_rets,
         inferred_method_rets,
+        operator_of_overloads: _,
         inferred_source_member_rets,
         inferred_stable_declaration_rets,
         inferred_declaration_publications,
@@ -25737,6 +25741,7 @@ struct Checker<'a> {
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
+    operator_of_overloads: Vec<operator_of_declarations::OperatorOfOverload>,
     inferred_source_member_rets: HashMap<crate::libraries::SourceMember, Ty>,
     inferred_stable_declaration_rets: HashMap<crate::fir::DeclarationId, Ty>,
     inferred_declaration_publications: declaration_publication::InferredDeclarationPublications,
