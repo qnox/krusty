@@ -179,7 +179,12 @@ impl<'a> SymbolResolver<'a> {
             }
         }
         if let Some(declared_receiver) = semantic.receiver {
-            unify_ty(declared_receiver, binding_receiver, &mut bindings);
+            unify_ty_from_symbols(
+                &self.src,
+                declared_receiver,
+                binding_receiver,
+                &mut bindings,
+            );
             // A caller-owned symbolic receiver is a real binding fact. Extension result
             // specialization used to preserve it in a second, return-only binder; retain it in
             // the one call-site binding set instead.
