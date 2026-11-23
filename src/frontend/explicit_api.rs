@@ -1,8 +1,10 @@
-//! Explicit API mode (`-Xexplicit-api=strict|warning`), a port of kotlinc's
+//! Explicit API mode (`-Xexplicit-api=strict|warning`) and its return-type half
+//! (`-XXexplicit-return-types=strict|warning`), a port of kotlinc's
 //! `FirExplicitApiDeclarationChecker`.
 //!
 //! A declaration that is part of the public API must write its visibility, and one whose type would
-//! be inferred must write that too. Public API means effectively public: the declaration and every
+//! be inferred must write that too. Explicit return types mode checks only the types; when both
+//! modes are on they agree, since kotlinc rejects two different enabled modes. Public API means effectively public: the declaration and every
 //! classifier containing it are `public` or `protected`, and none of them is local. The checks read
 //! the modifier list as written, which the parser keeps in [`File::declaration_prefixes`].
 
@@ -49,13 +51,15 @@ impl Finding {
 
 /// Report every explicit API violation in `file`, in source order.
 pub(super) fn check(file: &File, features: &LangFeatures, diagnostics: &mut DiagSink) {
-    let mode = if features.has("ExplicitApiStrict") {
-        Mode::Strict
-    } else if features.has("ExplicitApiWarning") {
-        Mode::Warning
-    } else {
+    let explicit_api = mode(features, "ExplicitApiStrict", "ExplicitApiWarning");
+    let return_types = explicit_api.or(mode(
+        features,
+        "ExplicitReturnTypesStrict",
+        "ExplicitReturnTypesWarning",
+    ));
+    if return_types.is_none() {
         return;
-    };
+    }
     let mut findings = Findings {
         file,
         reports: Vec::new(),
@@ -75,11 +79,28 @@ pub(super) fn check(file: &File, features: &LangFeatures, diagnostics: &mut Diag
     }
     findings.reports.sort_by_key(|(span, _)| span.lo);
     for (span, finding) in findings.reports {
+        let Some(mode) = (match finding {
+            Finding::Visibility => explicit_api,
+            Finding::ReturnType => return_types,
+        }) else {
+            continue;
+        };
         let name = finding.name(mode);
         match mode {
             Mode::Strict => diagnostics.error_named(span, name, finding.message()),
             Mode::Warning => diagnostics.warning_named(span, name, finding.message()),
         }
+    }
+}
+
+/// The mode a pair of pseudo-features selects, strict first.
+fn mode(features: &LangFeatures, strict: &str, warning: &str) -> Option<Mode> {
+    if features.has(strict) {
+        Some(Mode::Strict)
+    } else if features.has(warning) {
+        Some(Mode::Warning)
+    } else {
+        None
     }
 }
 

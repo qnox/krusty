@@ -439,6 +439,21 @@ impl LangFeatures {
         true
     }
 
+    /// Select kotlinc's explicit return types mode (`-XXexplicit-return-types`: `strict`,
+    /// `warning`, or `disable`), the return-type half of explicit API mode. Returns `false` for any
+    /// other spelling.
+    pub fn apply_explicit_return_types_mode(&mut self, mode: &str) -> bool {
+        self.disable("ExplicitReturnTypesStrict");
+        self.disable("ExplicitReturnTypesWarning");
+        match mode {
+            "strict" => self.enable("ExplicitReturnTypesStrict"),
+            "warning" => self.enable("ExplicitReturnTypesWarning"),
+            "disable" => {}
+            _ => return false,
+        }
+        true
+    }
+
     /// Select one of kotlinc's two unconditional `-Xassertions` modes for the `assert(...)`
     /// intrinsic, carried as pseudo-features. Returns `false`, changing nothing, for any other
     /// spelling, including the runtime-checked `jvm` and `legacy` modes.
