@@ -12,11 +12,12 @@
 //! entry its module exports. A published class dispatches through its producer-owned class table
 //! even when a concrete member also has an executable export, preserving virtual overrides.
 
+use crate::callable_references::{AccessorShape, PropertyAccess};
 use krusty::backend::interface_identity::property_member_identity;
 use krusty::backend::{BackendCallableFact, BackendPropertyFact, CheckedBackendCallables};
 use krusty::libraries::ExternalCallableKind;
 use krusty::libraries::MemberRealization;
-use krusty::types::{SemanticCallableOwner, TypeName};
+use krusty::types::{SemanticCallRole, SemanticCallableOwner, TypeName};
 
 use super::super::super::objects::{slot_field, REFERENCE};
 use super::super::interface_members::{accessor_types, member_signature, Signature};
@@ -410,6 +411,29 @@ impl Body<'_> {
         }
         if reference_name {
             self.runtime.reference_name_member(self.module, member)?;
+        }
+        let accessor = match fact.semantic_role {
+            Some(SemanticCallRole::KotlinPropertyReferenceGet(arity))
+                if usize::from(arity) == args.len() =>
+            {
+                Some(PropertyAccess::Read)
+            }
+            Some(SemanticCallRole::KotlinPropertyReferenceSet(arity))
+                if usize::from(arity) + 1 == args.len() =>
+            {
+                Some(PropertyAccess::Write)
+            }
+            _ => None,
+        };
+        if let Some(access) = accessor {
+            self.runtime.property_reference_accessor_member(
+                self.module,
+                member,
+                AccessorShape {
+                    access,
+                    operands: args.len(),
+                },
+            )?;
         }
         self.runtime
             .null_receiver_throws(self.module, self.classifiers)?;
