@@ -26,9 +26,10 @@ pub(super) fn declare_members(
     ctx: &FrontendClassContext<'_>,
     members: &mut Vec<FrontendCallable>,
 ) {
-    if ctx.is_abstract
-        || ctx.is_sealed
+    if ctx.header.is_abstract
+        || ctx.header.is_sealed
         || !ctx
+            .header
             .annotations
             .iter()
             .any(|annotation| annotations.contains(annotation))
