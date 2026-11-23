@@ -196,17 +196,26 @@ fun box(): String {
 /// must return `OK` under kotlinc and krusty.
 #[test]
 fn a_null_function_value_converts_as_kotlinc_does() {
-    let adapter = krusty::kotlin_version::Quirks::target()
-        .has(krusty::kotlin_version::Quirk::NullFunctionValueConvertsToAdapter);
-    let programs = if adapter {
+    let quirks = krusty::kotlin_version::Quirks::target();
+    let programs = if !quirks.has(krusty::kotlin_version::Quirk::NullFunctionValueConvertsToAdapter) {
+        [
+            include_str!("box_regressions/NullFunctionValueSuspendConversion.kt"),
+            include_str!("box_regressions/NullFunctionValueStartCoroutine.kt"),
+        ]
+    } else if quirks.has(krusty::kotlin_version::Quirk::NullTypeParameterFunctionValueIsDereferenced)
+    {
         [
             include_str!("box_regressions/NullFunctionValueSuspendConversionAdapter.kt"),
             include_str!("box_regressions/NullFunctionValueStartCoroutineAdapter.kt"),
         ]
     } else {
         [
-            include_str!("box_regressions/NullFunctionValueSuspendConversion.kt"),
-            include_str!("box_regressions/NullFunctionValueStartCoroutine.kt"),
+            include_str!(
+                "box_regressions/NullFunctionValueSuspendConversionAdapterBeforeTypeParameterConversion.kt"
+            ),
+            include_str!(
+                "box_regressions/NullFunctionValueStartCoroutineAdapterBeforeTypeParameterConversion.kt"
+            ),
         ]
     };
     for src in programs {

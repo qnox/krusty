@@ -153,6 +153,15 @@ quirks! {
         fixed_in: Some(KotlinVersion::V2_5_0),
         defect: true,
     }
+    /// A `null` function value held by a type parameter with a nullable function bound, passed
+    /// where a suspend function type is expected, converts to an adapter that invokes it without a
+    /// null check: calling it throws `NullPointerException`. Earlier releases leave the value
+    /// `null`.
+    NullTypeParameterFunctionValueIsDereferenced {
+        since: Some(KotlinVersion::V2_4_20),
+        fixed_in: Some(KotlinVersion::V2_5_0),
+        defect: true,
+    }
     /// A library compiled below language 2.3 stamps KLIB `metadata_version` `1.4.1` instead of the
     /// language level's own (read off `kotlinc-native -p library -Xmetadata-klib`).
     KlibLegacyMetadataVersionBelowLanguage23 {

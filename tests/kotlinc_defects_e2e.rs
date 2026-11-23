@@ -67,6 +67,30 @@ const UNIT_CONVERSION: &str = "// LANGUAGE: +UnitConversionsOnArbitraryExpressio
 const VARARG_REFERENCE: &str = "fun <E> countG(vararg xs: E): Int = xs.size\n\
     fun box(): String { val arr = arrayOf(\"a\", \"b\"); return \"\" + arr.let(::countG) }\n";
 
+/// KT-89451: a `null` function value converted to a nullable suspend function type becomes an
+/// adapter, so the callee sees a non-null value.
+const NULL_FUNCTION_VALUE_CONVERSION: &str = "import kotlin.coroutines.*\n\
+    suspend fun observe(f: (suspend () -> String?)?): String = if (f == null) \"null\" else \"adapter\"\n\
+    suspend fun pass(f: (() -> String?)?) = observe(f)\n\
+    fun box(): String {\n\
+    \x20   var answer = \"unset\"\n\
+    \x20   suspend { pass(null) }.startCoroutine(Continuation(EmptyCoroutineContext) { answer = it.getOrThrow() })\n\
+    \x20   return answer\n\
+    }\n";
+
+/// A `null` function value held by a type parameter with a nullable function bound, converted to a
+/// nullable suspend function type: the adapter invokes it, so completing the coroutine throws.
+const NULL_TYPE_PARAMETER_FUNCTION_VALUE_CONVERSION: &str = "import kotlin.coroutines.*\n\
+    suspend fun observe(f: (suspend () -> String?)?): String = if (f == null) \"null\" else \"adapter\"\n\
+    suspend fun <F : (() -> String?)?> pass(f: F) = observe(f)\n\
+    fun box(): String {\n\
+    \x20   var answer = \"unset\"\n\
+    \x20   suspend { pass(null) }.startCoroutine(Continuation(EmptyCoroutineContext) {\n\
+    \x20       answer = it.fold({ r -> r }, { e -> if (e is NullPointerException) \"NPE\" else \"other\" })\n\
+    \x20   })\n\
+    \x20   return answer\n\
+    }\n";
+
 /// `ContextArgumentEvaluatedBeforeExtensionReceiver`: a context argument written after the
 /// receiver; `box()` reports the order the operands were evaluated in.
 const CONTEXT_ARGUMENT_ORDER: &str = r#"// LANGUAGE: +ContextParameters +ExplicitContextArguments
@@ -156,6 +180,20 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             source: VARARG_REFERENCE,
             with_defect: Outcome::Answer("1".to_string()),
             fixed: Outcome::Answer("2".to_string()),
+        }),
+        Quirk::NullFunctionValueConvertsToAdapter => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
+            source: NULL_FUNCTION_VALUE_CONVERSION,
+            with_defect: Outcome::Answer("adapter".to_string()),
+            fixed: Outcome::Answer("null".to_string()),
+        }),
+        Quirk::NullTypeParameterFunctionValueIsDereferenced => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
+            source: NULL_TYPE_PARAMETER_FUNCTION_VALUE_CONVERSION,
+            with_defect: Outcome::Answer("NPE".to_string()),
+            fixed: Outcome::Answer("null".to_string()),
         }),
         Quirk::ContextArgumentEvaluatedBeforeExtensionReceiver => Some(Defect {
             platforms: &[Platform::Jvm],

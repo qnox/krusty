@@ -1,5 +1,5 @@
-// KOTLINC_VERSION: (,2.5.0)
-// Before Kotlin 2.5 a null value of a nullable function type converted to a nullable suspend
+// KOTLINC_VERSION: [2.4.20,2.5.0)
+// From Kotlin 2.4.20 until 2.5 a null value of a nullable function type converted to a nullable suspend
 // function type becomes an adapter: calling it yields null, or, for a type parameter with a
 // nullable function bound, throws NullPointerException, since that adapter invokes the value
 // without a null check. Kotlin 2.5 keeps the value null (KT-89451); see
