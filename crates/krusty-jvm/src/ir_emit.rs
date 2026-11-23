@@ -3553,7 +3553,6 @@ fn emit_enum_class(
         &synthetic_enum_fields.entries,
         "Lkotlin/enums/EnumEntries;",
     );
-    cw.reserve_method_name("$values");
     // values(): `$VALUES.clone()` cast back to the array type.
     let mut vals = CodeBuilder::new(0);
     let valref = cw.fieldref(&fq, &synthetic_enum_fields.values, &arr_desc);
@@ -3602,6 +3601,7 @@ fn emit_enum_class(
         Some(&format!("()Lkotlin/enums/EnumEntries<L{fq};>;")),
     );
     emit_members(&mut cw, &schedule.local_functions);
+    cw.reserve_method_name("$values");
     // $values(): build the backing array — `new E[n]` filled with each entry constant (kotlinc factors
     // this out of `<clinit>`). Private static final synthetic, returning `E[]`.
     let mut vbuild = CodeBuilder::new(1);
