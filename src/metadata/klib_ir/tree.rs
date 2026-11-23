@@ -66,6 +66,15 @@ impl KlibIrArena {
         &self.functions[id.index()]
     }
 
+    /// The class of this arena that declares `class` as a member.
+    pub(crate) fn enclosing_class(&self, class: &KlibIrClass) -> Option<&KlibIrClass> {
+        self.classes.iter().find(|candidate| {
+            candidate.members.iter().any(|member| {
+                matches!(member, KlibIrMember::Class(id) if std::ptr::eq(self.class(*id), class))
+            })
+        })
+    }
+
     pub fn class(&self, id: KlibIrClassId) -> &KlibIrClass {
         &self.classes[id.index()]
     }
@@ -865,6 +874,21 @@ pub struct KlibIrFunction {
     pub body: Option<KlibIrBody>,
 }
 
+impl KlibIrFunction {
+    /// The synthetic body of an enum's compiler-generated member (`values`, `valueOf` or the
+    /// `entries` getter): the producer's own record that the backend provides the implementation.
+    pub fn enum_special_member(&self) -> Option<KlibIrSyntheticBody> {
+        match &self.body {
+            Some(KlibIrBody::Synthetic(body))
+                if self.base.origin == "ENUM_CLASS_SPECIAL_MEMBER" =>
+            {
+                Some(*body)
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrVariable {
     pub base: KlibIrDeclarationBase,
@@ -1226,6 +1250,7 @@ mod tests {
                         folded_call: |_, _| false,
                         folded_calls: |_, _| Vec::new(),
                         implied_callee: |_, _| None,
+                        converted_closure: |_, _| None,
                     }
                 )
                 .into_iter()
@@ -1242,6 +1267,7 @@ mod tests {
                         folded_call: |_, _| false,
                         folded_calls: |_, _| Vec::new(),
                         implied_callee: |_, _| None,
+                        converted_closure: |_, _| None,
                     }
                 )
                 .into_iter()

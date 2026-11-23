@@ -44,7 +44,22 @@ pub(super) struct SignatureAdapters {
     pub(super) parameters: Vec<Option<BoxAdapter>>,
     pub(super) result: Option<ResultAdapter>,
     /// What a collection special bridge answers when its argument is not the override's element.
-    pub(super) rejection: Option<i32>,
+    pub(super) rejection: Option<BridgeRejection>,
+    /// The implementation returns `Nothing`: it never answers, so the bridge's reference result
+    /// follows a call that does not return.
+    pub(super) diverges: bool,
+    /// Indexed like `parameters`: whether the override's type excludes `null`, which the bridge
+    /// then rejects as well.
+    pub(super) rejects_null: Vec<bool>,
+}
+
+/// The neutral answer of a collection special bridge.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum BridgeRejection {
+    /// A `Boolean` or an `Int`.
+    Value(i32),
+    /// A nullable reference.
+    Null,
 }
 
 /// Result adaptation selected from the checked logical result while its type is live.
@@ -56,11 +71,18 @@ pub(super) enum ResultAdapter {
 }
 
 impl SignatureAdapters {
+    /// Whether a bridge rejects a `null` operand, so the member needs a thunk of its own.
+    pub(super) fn guards_null(&self) -> bool {
+        self.rejection.is_some() && self.rejects_null.iter().any(|&rejects| rejects)
+    }
+
     pub(super) fn none(parameter_count: usize) -> Self {
         Self {
             parameters: vec![None; parameter_count],
             result: None,
             rejection: None,
+            diverges: false,
+            rejects_null: vec![false; parameter_count],
         }
     }
 }

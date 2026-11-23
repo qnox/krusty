@@ -75,17 +75,28 @@ pub fn not_applicable_path(platform: Platform, version: KotlinVersion) -> PathBu
     read_path(NOT_APPLICABLE, platform.name(), version)
 }
 
+/// The directory the repository-wide inventories live under.
+fn tests_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests")
+}
+
 /// The file `version` reads under `tests/<directory>/<lane>/`: its own, or its predecessor's. A
 /// release no file covers reads its own path, which does not exist.
 pub fn read_path(directory: &str, lane: &str, version: KotlinVersion) -> PathBuf {
-    krusty::kotlin_version::recorded_file(version, |release| own_path(directory, lane, release))
-        .unwrap_or_else(|| own_path(directory, lane, version))
+    read_path_in(&tests_root(), directory, lane, version)
 }
 
-fn own_path(directory: &str, lane: &str, version: KotlinVersion) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join(directory)
+/// [`read_path`] under `root` instead of `tests/`: a compiler plugin keeps its own inventories
+/// beside its box corpus descriptor.
+pub fn read_path_in(root: &Path, directory: &str, lane: &str, version: KotlinVersion) -> PathBuf {
+    krusty::kotlin_version::recorded_file(version, |release| {
+        own_path(root, directory, lane, release)
+    })
+    .unwrap_or_else(|| own_path(root, directory, lane, version))
+}
+
+fn own_path(root: &Path, directory: &str, lane: &str, version: KotlinVersion) -> PathBuf {
+    root.join(directory)
         .join(lane)
         .join(format!("{version}.txt"))
 }
@@ -99,9 +110,21 @@ pub fn record(
     paths: &BTreeSet<String>,
     rendered: &str,
 ) -> std::io::Result<()> {
-    let own = own_path(directory, lane, version);
+    record_in(&tests_root(), directory, lane, version, paths, rendered)
+}
+
+/// [`record`] under `root` instead of `tests/`.
+pub fn record_in(
+    root: &Path,
+    directory: &str,
+    lane: &str,
+    version: KotlinVersion,
+    paths: &BTreeSet<String>,
+    rendered: &str,
+) -> std::io::Result<()> {
+    let own = own_path(root, directory, lane, version);
     let inherited = krusty::kotlin_version::inherited_file(version, |release| {
-        own_path(directory, lane, release)
+        own_path(root, directory, lane, release)
     });
     if let Some(inherited) = inherited {
         let text = std::fs::read_to_string(&inherited)?;
@@ -117,15 +140,15 @@ pub fn record(
 
 pub fn load(platform: Platform, version: KotlinVersion) -> Baseline {
     Baseline {
-        // A JVM release without a failure inventory of its own or inherited requires no failures;
-        // every other lane's failure inventory is part of its committed baseline and may never
-        // disappear silently.
+        // JVM has no failure ratchet: absence means exactly the required empty set. Every other
+        // lane's failure inventory is part of its committed baseline and may never disappear
+        // silently.
         failures: load_path(&failure_path(platform, version), platform != Platform::Jvm),
         not_applicable: load_path(&not_applicable_path(platform, version), true),
     }
 }
 
-fn load_path(path: &Path, required: bool) -> BTreeSet<String> {
+pub fn load_path(path: &Path, required: bool) -> BTreeSet<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => parse(&text)
             .unwrap_or_else(|error| panic!("invalid box expectation {}: {error}", path.display())),
@@ -230,6 +253,20 @@ pub fn write(
         version,
         &not_applicable,
         &render_not_applicable(platform, version, &not_applicable),
+    )
+}
+
+pub fn write_not_applicable(
+    platform: Platform,
+    version: KotlinVersion,
+    paths: &BTreeSet<String>,
+) -> std::io::Result<()> {
+    record(
+        NOT_APPLICABLE,
+        platform.name(),
+        version,
+        paths,
+        &render_not_applicable(platform, version, paths),
     )
 }
 

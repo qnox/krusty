@@ -1,5 +1,7 @@
 //! Checked member-call facts for declarations selected by serialized KLIB bodies.
 
+#[path = "klib_sam_facts.rs"]
+mod klib_sam_facts;
 #[path = "klib_type_facts.rs"]
 mod klib_type_facts;
 
@@ -20,6 +22,7 @@ pub(crate) fn for_checked_klib_bodies<'a>(
     represented: &[TypeName],
 ) -> Result<CheckedKlibDependencyFacts, ExternalCallableId> {
     let mut builtin_implementations = crate::fx_hash::HashMap::default();
+    let mut sam_declarations = crate::fx_hash::HashMap::default();
     let mut member_edges = crate::fx_hash::HashMap::default();
     #[cfg(test)]
     let mut reached_constructors = crate::fx_hash::HashSet::default();
@@ -40,20 +43,27 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         if !visited.insert(identity.clone()) {
             continue;
         }
+        let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
         classifier_roots.extend(bodies.type_classifiers_in_body(&identity));
+        classifier_roots.extend(emitted.hierarchy_roots);
+        for (signature, name) in emitted.sam_classifiers {
+            let key = (identity.module.clone(), signature.clone());
+            if sam_declarations.contains_key(&key) {
+                continue;
+            }
+            if let Some(declaration) =
+                klib_sam_facts::freeze(source, bodies, &identity.module, &signature, name)
+            {
+                sam_declarations.insert(key, declaration);
+            }
+        }
         pending.extend(bodies.direct_callees(&identity));
         pending.extend(bodies.overridden_callables(&identity));
-        pending.extend(
-            bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
-        );
+        pending.extend(emitted.callables);
 
         // An object the body reads as a value is materialized with its initialization and the
         // members dispatch reaches, as the emission closure walks it.
-        pending.extend(read_object_callees(
-            source,
-            bodies,
-            &bodies.emitted_body_objects(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
-        ));
+        pending.extend(read_object_callees(source, bodies, &emitted.objects));
 
         // A reached constructor's initialization is serialized on its owning class. These are
         // declaration facts only: common class initialization still selects executable roots.
@@ -92,6 +102,11 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         let Some(selected) = realization.klib_body_callable() else {
             continue;
         };
+        // A continuation interception's call expands to its coroutine class's own interception.
+        match crate::klib_lowering::expansion_member(selected, bodies) {
+            Ok(member) => pending.extend(member),
+            Err(_) => return Err(external),
+        }
         semantic_types.extend(selected.params().iter().copied());
         semantic_types.push(selected.ret());
         semantic_types.extend(selected.type_parameters().iter().copied());
@@ -177,7 +192,8 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         builtin_implementations,
         member_edges,
         Some(type_hierarchy),
-    );
+    )
+    .with_sam_declarations(sam_declarations);
     #[cfg(test)]
     let mut facts = facts;
     #[cfg(test)]

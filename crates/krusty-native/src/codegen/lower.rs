@@ -202,6 +202,8 @@ fn isa_for(
 /// One struct rather than a growing parameter list, and BORROWED rather than owned, because the
 /// pass that made them owns them for the whole lowering.
 pub struct FileInput<'a> {
+    #[cfg(feature = "test-support")]
+    pub driver_entries: &'a [super::DriverEntry],
     pub ir: &'a IrFile,
     /// Provider-normalized facts for classifiers whose representation this file needs.
     pub classifiers: &'a dyn krusty::backend::BackendClassifierSource,
@@ -236,6 +238,9 @@ pub struct FileInput<'a> {
     pub dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
     /// Stable dependency-member numbers shared by every file in the source module.
     pub dependency_interface_numbers: &'a mut HashMap<Vec<u8>, u32>,
+    /// Dependency interface members a library default implements without a lowered body, with
+    /// the reason; shared by the whole emission session.
+    pub unimplementable_interface_members: &'a mut HashMap<Vec<u8>, String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -260,6 +265,8 @@ pub fn lower_file(
     verify: bool,
 ) -> Result<Lowered, Unsupported> {
     let FileInput {
+        #[cfg(feature = "test-support")]
+        driver_entries,
         ir,
         classifiers,
         callables,
@@ -275,6 +282,7 @@ pub fn lower_file(
         dependency_symbols,
         dependency_instances,
         dependency_interface_numbers,
+        unimplementable_interface_members,
         value_classes,
         slot_plan,
         module_facts,
@@ -395,6 +403,7 @@ pub fn lower_file(
         dependency_symbols,
         dependency_interface_calls: Vec::new(),
         dependency_interface_numbers,
+        unimplementable_interface_members,
         dependency_instances,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
@@ -448,6 +457,14 @@ pub fn lower_file(
             super::super::c_abi::file_records(ir, abi_symbols)
         }
         krusty::backend::CheckedIrUnitKind::DependencySupport => Vec::new(),
+    };
+    #[cfg(feature = "test-support")]
+    let abi = if unit_kind == krusty::backend::CheckedIrUnitKind::Source {
+        let mut abi = abi;
+        abi.extend(lowering.driver_records(driver_entries, abi_symbols)?);
+        abi
+    } else {
+        abi
     };
     lowering.define_c_exports(file_init, &abi)?;
     lowering.define_dependency_exports(file_init, dependency_exports)?;
@@ -672,6 +689,8 @@ struct FileLowering<'a> {
     /// this file's emitted identity records; the shared map prevents a second file from reusing
     /// one stub number for another dependency member.
     dependency_interface_numbers: &'a mut krusty::fx_hash::HashMap<Vec<u8>, u32>,
+    /// See [`FileInput::unimplementable_interface_members`].
+    unimplementable_interface_members: &'a mut krusty::fx_hash::HashMap<Vec<u8>, String>,
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
@@ -681,7 +700,7 @@ impl<'a> FileLowering<'a> {
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
         for param in params {
-            match self.carrier(*param).abi_param() {
+            match self.carrier(parameter_slot(*param)).abi_param() {
                 Some(abi) => signature.params.push(abi),
                 None => return Err("a `Unit` parameter".into()),
             }
@@ -699,16 +718,10 @@ impl<'a> FileLowering<'a> {
         if let Some(owner) = function.dispatch_receiver {
             // A value class's member takes the VALUE as `this`; its box reaches it through a
             // bridge. Every other member takes the object, as a reference.
-            params.push(match self.value_receiver(owner) {
-                Some(value) => value,
-                None if self.ir.class_id_by_name(owner).is_some() => any(),
-                None => {
-                    return Err(declined!(
-                        "a method of `{}`, which is not declared in this file",
-                        owner.render()
-                    ))
-                }
-            });
+            // An owner this file does not declare is a library classifier whose members the
+            // dependency unit lowers as functions of the instance (an interface's default body),
+            // so its receiver is the instance reference too.
+            params.push(self.value_receiver(owner).unwrap_or_else(any));
         }
         params.extend(super::super::captures::carried_parameters(self.ir, id));
         self.signature_of(&params, function.ret)
@@ -1031,8 +1044,7 @@ impl<'a> FileLowering<'a> {
                 lowering.scope = krusty::ir::IrEnclosure::Function(index as krusty::ir::FunId);
                 lowering.record_semantic_slots(&semantic_slots);
                 for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
-                    let variable = lowering.declare_value(slot as u32, *ty)?;
-                    lowering.builder.def_var(variable, *value);
+                    lowering.bind_parameter(slot as u32, *value, *ty)?;
                 }
                 if let Some(class) = block_class {
                     lowering.activate_class(class)?;
@@ -1175,6 +1187,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 "common-IR value slot {slot} has two semantic declaration types"
             );
         }
+    }
+
+    /// Bind an entry parameter to its slot. A `Unit` parameter arrives as the `Unit` instance;
+    /// reading it answers `Unit` exactly as a `Unit`-typed local does, so nothing is stored.
+    pub(super) fn bind_parameter(
+        &mut self,
+        slot: u32,
+        value: Value,
+        ty: Ty,
+    ) -> Result<(), Unsupported> {
+        if ty == Ty::Unit {
+            self.unit_values.insert(slot);
+            return Ok(());
+        }
+        let variable = self.declare_value(slot, ty)?;
+        self.builder.def_var(variable, value);
+        Ok(())
     }
 
     fn declare_value(&mut self, slot: u32, ty: Ty) -> Result<Variable, Unsupported> {
@@ -1594,11 +1623,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(());
                 }
                 // A property declared in another file of the module has no layout here; its
-                // declaring file exports the entry points of one shared plan.
-                if self.file.is_imported_property(target) {
+                // declaring file exports the entry points of one shared plan. A copy of its
+                // class this file realizes keeps the property's layout, and its own storage.
+                if self.file.is_imported_property(target)
+                    && !self.has_property_layout_at(id, target)
+                {
                     return self.module_property_write(target, *dispatch_receiver, *value);
                 }
-                match self.checked_property(target) {
+                match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
                         self.property_write(class, index, *dispatch_receiver, *value)?
                     }
@@ -2234,8 +2266,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let (owner, name) = self
                     .range_getter(*target, *receiver)
                     .expect("checked by the guard");
-                self.range_property_member(owner, &name, *receiver, *result)
-                    .expect("a range member, by the guard")
+                self.range_property_through_implementors(*target, owner, &name, *receiver, *result)
             }
             IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::ExternalPropertyRead {
@@ -2327,10 +2358,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         None,
                     );
                 }
-                if self.file.is_imported_property(target) {
+                if self.file.is_imported_property(target)
+                    && !self.has_property_layout_at(id, target)
+                {
                     return self.module_property_read(target, *dispatch_receiver);
                 }
-                match self.checked_property(target) {
+                match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
                         self.property_read(class, index, *dispatch_receiver)
                     }
@@ -2815,7 +2848,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let mut values = Vec::with_capacity(args.len());
         for (index, argument) in args.iter().enumerate() {
             let value = match parameters.get(index) {
-                Some(ty) => self.coerce(*argument, *ty)?,
+                Some(ty) => self.coerce(*argument, parameter_slot(*ty))?,
                 None => self.expression(*argument)?,
             };
             if self.terminated {
@@ -2835,6 +2868,17 @@ fn any() -> Ty {
     Ty::nullable(Ty::obj("kotlin/Any"))
 }
 
+/// The type a parameter declared `ty` is passed as. A `Unit` parameter is passed the `Unit`
+/// instance in a reference slot, as kotlinc passes it: the argument is evaluated, and the callee
+/// receives the singleton.
+fn parameter_slot(ty: Ty) -> Ty {
+    if ty == Ty::Unit {
+        any()
+    } else {
+        ty
+    }
+}
+
 fn callee_kind(callee: &Callee) -> &'static str {
     match callee {
         Callee::Local(_) => "local",
@@ -2852,6 +2896,7 @@ fn callee_kind(callee: &Callee) -> &'static str {
         Callee::Static { .. } => "static",
         Callee::Virtual { .. } => "virtual",
         Callee::Super { .. } => "super",
+        Callee::ValueClassAdapter { .. } => "value-class adapter",
         Callee::Special { .. } => "special",
     }
 }

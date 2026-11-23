@@ -28,9 +28,9 @@ pub(super) struct ImplementorArm {
 /// `Comparable<II>.compareTo` takes a `T`, carried as a reference, where `II.compareTo` takes the
 /// `II` value. The operand crosses that declared boundary first and becomes the implementation's
 /// type from there, as it would through the bridge a virtual call reaches.
-struct ParameterBoundary {
-    declared: Ty,
-    implementation: Ty,
+pub(super) struct ParameterBoundary {
+    pub(super) declared: Ty,
+    pub(super) implementation: Ty,
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
@@ -97,14 +97,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// The slot of `class`'s getter overriding the dependency property whose getter is
-    /// `overridden`, answering `declared`: the class registers the overridden declaration's
-    /// identity at the slot of its own accessor. `None` where the override's representation is not the declaration's, which a
-    /// direct dispatch could not reconcile.
+    /// `overridden`: the class registers the overridden declaration's identity at the slot of its
+    /// own accessor, which answers the override's own type; the call site converts it to the one
+    /// the declaration states.
     pub(super) fn external_property_getter_slot(
         &self,
         class: ClassId,
         overridden: krusty::fir::ExternalCallableId,
-        declared: Ty,
     ) -> Option<ImplementorArm> {
         let target = krusty::fir::ResolvedPropertyOverrideTarget::External(overridden);
         let ir = self.file.ir;
@@ -122,9 +121,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
             at = self.file.model.layout(id).superclass;
         };
-        if self.carrier(implementation) != self.carrier(declared) {
-            return None;
-        }
         let slot = self
             .file
             .model
@@ -233,6 +229,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 "the dependency interface member `{}` is called with another arity than it declares",
                 signature.name
             ));
+        }
+        if let Some(reason) = self.file.unimplementable_interface_members.get(&identity) {
+            return Err(declined!("{reason}"));
         }
         Ok((
             self.file.dependency_interface_number(identity),
@@ -397,9 +396,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return true;
         }
         let ty = Ty::obj_name(internal);
-        let bridge = self.file.mapped_collection(ty).is_some_and(|collection| {
-            super::super::super::intrinsics::has_special_bridge(collection, signature.name)
-        });
+        let bridge = self
+            .file
+            .mapped_collection(ty)
+            .is_some_and(|collection| collection.has_special_bridge(signature.name));
         bridge && !matches!(signature.ret, Ty::Boolean | Ty::Int)
     }
 
@@ -447,7 +447,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return None;
         }
         let declared = self.file.implementors_of(internal);
-        if declared.is_empty() {
+        // With no class of its own behind the type (a dependency body realized apart from the
+        // classes that inherit it), the interface stub still reaches every implementation record.
+        if declared.is_empty() && stub.is_none() {
             return None;
         }
         let implementors: Vec<ImplementorArm> = declared
@@ -474,9 +476,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let bridge = self
             .file
             .mapped_collection(Ty::obj_name(internal))
-            .is_some_and(|collection| {
-                super::super::super::intrinsics::has_special_bridge(collection, signature.name)
-            });
+            .is_some_and(|collection| collection.has_special_bridge(signature.name));
         // A runtime collection is not one of the classes above. The member's own runtime function
         // is the remaining arm; an abstract-method trap would be a call the program did make.
         let collection = self.checked_type(call.receiver).and_then(|ty| {
@@ -682,23 +682,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             self.jump_to_merge(merge, carried, rejected);
             return Ok(true);
         }
-        let Some(descriptor) = self.file.type_descriptor(boundary.implementation)? else {
+        let Some((accepted, rejected)) = self.bridge_argument_guard(*value, boundary)? else {
             return Ok(false);
         };
-        let type_address = self.data_address(descriptor);
-        let matches = self
-            .runtime_call(
-                "kt_is_instance",
-                &[any(), any()],
-                Ty::Boolean,
-                &[*value, type_address],
-            )?
-            .expect("`kt_is_instance` returns a Boolean");
-        let accepted = self.builder.create_block();
-        let rejected = self.builder.create_block();
-        self.builder
-            .ins()
-            .brif(matches, accepted, &[], rejected, &[]);
         self.continue_in(rejected);
         self.builder.seal_block(rejected);
         let rejected_value = self.bridge_rejection(answer);
@@ -708,8 +694,46 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(false)
     }
 
+    /// The branch of a collection special bridge on one erased reference argument: it goes to the
+    /// first block when the argument is an instance of the override's parameter type (a `null` the
+    /// type admits too), and to the second, which the caller fills with the bridge's rejection,
+    /// when it is not. A primitive parameter is asked through its box, so a `null` and a value of
+    /// another type are rejected rather than unboxed. `None` where the override's parameter is the
+    /// declared one, or has no type descriptor to test, so there is nothing to bridge.
+    pub(super) fn bridge_argument_guard(
+        &mut self,
+        value: Value,
+        boundary: &ParameterBoundary,
+    ) -> Result<Option<(Block, Block)>, Unsupported> {
+        if boundary.implementation.non_null() == boundary.declared.non_null() {
+            return Ok(None);
+        }
+        let Some(descriptor) = self.file.type_descriptor(boundary.implementation)? else {
+            return Ok(None);
+        };
+        let type_address = self.data_address(descriptor);
+        let mut matches = self
+            .runtime_call(
+                "kt_is_instance",
+                &[any(), any()],
+                Ty::Boolean,
+                &[value, type_address],
+            )?
+            .expect("`kt_is_instance` returns a Boolean");
+        if boundary.implementation.admits_null() {
+            let absent = self.builder.ins().icmp_imm_u(IntCC::Equal, value, 0);
+            matches = self.builder.ins().bor(matches, absent);
+        }
+        let accepted = self.builder.create_block();
+        let rejected = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(matches, accepted, &[], rejected, &[]);
+        Ok(Some((accepted, rejected)))
+    }
+
     /// `contains`/`remove` answer `false` for a foreign argument; an index answers `-1`.
-    fn bridge_rejection(&mut self, answer: Ty) -> Option<Value> {
+    pub(super) fn bridge_rejection(&mut self, answer: Ty) -> Option<Value> {
         let clif = self.carrier(answer).clif()?;
         let bits = if answer == Ty::Int { -1 } else { 0 };
         Some(self.builder.ins().iconst(clif, bits))

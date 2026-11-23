@@ -31,6 +31,16 @@ impl KlibBodyDeclarationModifiers {
         self.is_suspend
     }
 
+    /// Whether a body unit lowers the declaration from its serialized body as an inline function
+    /// whose every call it expands, as kotlinc expands a call of one in a library it links.
+    pub(crate) fn permits_expanded_body(self) -> bool {
+        self.is_inline
+            && !self.is_suspend
+            && !self.is_external
+            && !self.property_is_external
+            && self.modality == KotlinModality::Final
+    }
+
     pub(crate) fn permits_ordinary_body(self) -> bool {
         !self.is_inline
             && !self.is_suspend

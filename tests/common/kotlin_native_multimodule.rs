@@ -438,7 +438,7 @@ mod tests {
     // PLATFORM-SPECIFIC: Native oracle configuration and prepared module inputs, not JVM ABI.
     #[test]
     fn every_native_module_receives_prepared_sources_and_case_language_settings() {
-        let source = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        let source = "// LANGUAGE: +CompanionBlocks\n\
                       // JVM_TARGET: 1.8\n\
                       // MODULE: lib\n// FILE: W.kt\n\
                       OPTIONAL_JVM_INLINE_ANNOTATION\n\
@@ -454,7 +454,7 @@ mod tests {
                 depends_on: Vec::new(),
                 files: vec![(
                     "W".to_owned(),
-                    "// LANGUAGE: +CompanionBlocksAndExtensions\n// JVM_TARGET: 1.8\n\n\
+                    "// LANGUAGE: +CompanionBlocks\n// JVM_TARGET: 1.8\n\n\
                      // FILE: W.kt\n\n\
                      value class W(val value: Int) { companion { fun answer() = 1 } }\n"
                         .to_owned(),

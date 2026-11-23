@@ -779,8 +779,23 @@ fn compose_restartable_functions_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_hidden_class_annotation_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("hiddenClassAnnotation");
+}
+
+#[test]
 fn compose_tracked_parameters_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("trackedParameters");
+}
+
+#[test]
+fn compose_cross_file_calls_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("crossFileCalls");
+}
+
+#[test]
+fn compose_result_functions_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("resultFunctions");
 }
 
 #[test]
@@ -839,6 +854,46 @@ fn compose_library_calls_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_library_default_arguments_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("libraryDefaultArguments");
+}
+
+#[test]
+fn compose_inferred_parameter_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("inferredStability");
+}
+
+#[test]
+fn compose_runtime_parameter_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("runtimeParameterStability");
+}
+
+#[test]
+fn compose_library_calls_with_many_parameters_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("libraryManyParameters");
+}
+
+#[test]
+fn compose_qualified_library_call_names_its_selector_in_source_information() {
+    assert_compose_fixture_matches_kotlinc("libraryDefaultArgumentsSized");
+}
+
+#[test]
+fn compose_library_extension_calls_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("libraryExtensionCalls");
+}
+
+#[test]
+fn compose_file_extension_calls_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("fileExtensionCalls");
+}
+
+#[test]
+fn compose_extension_receiver_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("extensionReceiverStability");
+}
+
+#[test]
 fn compose_captured_locals_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("capturedLocals");
 }
@@ -846,6 +901,36 @@ fn compose_captured_locals_are_byte_identical_to_kotlinc() {
 #[test]
 fn compose_captured_local_read_is_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("capturedLocalRead");
+}
+
+#[test]
+fn compose_receiver_lambdas_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("receiverLambdas");
+}
+
+#[test]
+fn compose_receiver_invoke_trivia_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("receiverInvokeTrivia");
+}
+
+#[test]
+fn compose_library_receiver_lambdas_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("libraryReceiverLambdas");
+}
+
+#[test]
+fn compose_function_type_parameters_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("functionTypeParameters");
+}
+
+#[test]
+fn compose_library_lambda_parameters_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("libraryLambdaParameters");
+}
+
+#[test]
+fn compose_call_initializers_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("callInitializers");
 }
 
 #[test]
@@ -869,15 +954,33 @@ fn assert_plugin_case_matches_kotlinc(source: &str, stem: &str) {
     let reference = box_reference_classes::checked_prepared_box(&source, stem)
         .expect("the reference compiler compiles the fixture and its box() returns OK");
     let classpath = common::classpath_jars_for(&source);
+    let classes = krusty_classes_matching_reference(&source, stem, &classpath, &reference)
+        .unwrap_or_else(|difference| panic!("{difference}"));
+    let box_class = find_box_class(&classes).expect("the fixture emits box()");
+    assert_eq!(
+        common::run_box(&classes, &box_class, &classpath),
+        Some("OK".to_string())
+    );
+}
+
+/// Compile a case with krusty, every module its own, and require each module's classes to equal
+/// the reference compiler's byte for byte. `Ok` carries all of krusty's class files; `Err` names the
+/// first difference, or says krusty could not compile the case.
+pub(super) fn krusty_classes_matching_reference(
+    source: &str,
+    stem: &str,
+    classpath: &[PathBuf],
+    reference: &box_reference_classes::ReferenceClasses,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let jdk = common::jdk_modules();
     // Every module is krusty's own: a library module is compiled before the modules using it.
     let compiled = if source.contains("// MODULE:") {
-        compile_module_test(&source, &classpath, Some(jdk.as_path()), &|_| {})
+        compile_module_test(source, classpath, Some(jdk.as_path()), &|_| {})
     } else {
-        compile_multifile(&source, stem, &classpath, Some(jdk.as_path()))
+        compile_multifile(source, stem, classpath, Some(jdk.as_path()))
             .map(CompiledClasses::single_module)
     }
-    .expect("krusty compiles the fixture");
+    .map_err(|failure| format!("krusty cannot compile the case: {failure:?}"))?;
     let class_file = |(_, bytes): &&(String, Vec<u8>)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]);
     for (module, range) in &compiled.module_ranges {
         let classes: Vec<_> = compiled.flat[range.clone()]
@@ -887,19 +990,11 @@ fn assert_plugin_case_matches_kotlinc(source: &str, stem: &str) {
             .collect();
         let expected = reference
             .module(module)
-            .unwrap_or_else(|| panic!("the reference compiler emits module {module}"));
-        assert_eq!(
-            compare_class_sets(&classes, expected),
-            Ok(()),
-            "module {module}"
-        );
+            .ok_or_else(|| format!("the reference compiler emits no module {module}"))?;
+        compare_class_sets(&classes, expected)
+            .map_err(|difference| format!("module {module}: {difference}"))?;
     }
-    let classes: Vec<_> = compiled.flat.iter().filter(class_file).cloned().collect();
-    let box_class = find_box_class(&classes).expect("the fixture emits box()");
-    assert_eq!(
-        common::run_box(&classes, &box_class, &classpath),
-        Some("OK".to_string())
-    );
+    Ok(compiled.flat.iter().filter(class_file).cloned().collect())
 }
 
 /// `(module, internal name)` of every class in one inventory.
@@ -1534,12 +1629,12 @@ fn kotlin_codegen_box_conformance() {
                     };
                     (
                         file.clone(),
-                        TestResult::Panic(format!("compiler panic: {message}")),
+                        TestResult::Fail(format!("compiler panic: {message}")),
                         case_score,
                     )
                 });
                 t_closure.fetch_add(tc0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                if let TestResult::Fail(why) | TestResult::Panic(why) = &__ret.1 {
+                if let TestResult::Fail(why) = &__ret.1 {
                     let summary = why.lines().next().unwrap_or(why).to_string();
                     recent_failures
                         .lock()
@@ -1630,7 +1725,7 @@ fn kotlin_codegen_box_conformance() {
                 compiled += 1;
                 passed += 1;
             }
-            TestResult::Fail(why) | TestResult::Panic(why) => {
+            TestResult::Fail(why) => {
                 compiled += 1;
                 failures.push(format!("{}: {why}", file.display()));
             }
@@ -1653,7 +1748,7 @@ fn kotlin_codegen_box_conformance() {
             let tag = match r {
                 TestResult::NotApplicable => "NOT-APPLICABLE",
                 TestResult::Pass => "PASS",
-                TestResult::Fail(_) | TestResult::Panic(_) => "FAIL",
+                TestResult::Fail(_) => "FAIL",
             };
             listing.push(format!("{tag} {}", file.display()));
         }
@@ -1770,7 +1865,7 @@ fn kotlin_codegen_box_conformance() {
             let tag = match r {
                 TestResult::NotApplicable => "NOT-APPLICABLE",
                 TestResult::Pass => "PASS",
-                TestResult::Fail(_) | TestResult::Panic(_) => "FAIL",
+                TestResult::Fail(_) => "FAIL",
             };
             eprintln!("  {tag} {}", file.display());
         }
@@ -1814,10 +1909,7 @@ fn kotlin_codegen_box_conformance() {
     }
 }
 
-/// Hold every outcome to the exact JVM inventory of this release. A failure is accepted only when
-/// the release's committed failure baseline lists it, and that baseline only shrinks. A compiler
-/// panic, a failing owned regression, or an owned case that is not applicable is never accepted and
-/// can never be blessed.
+/// Reject every applicable failure and hold exclusions to the exact JVM applicability inventory.
 fn check_jvm_outcomes(
     box_dir: &Path,
     results: &[(PathBuf, TestResult, box_byte_score::CaseScore)],
@@ -1825,34 +1917,32 @@ fn check_jvm_outcomes(
     full_run: bool,
 ) {
     let version = krusty::kotlin_version::target();
-    let fatal: Vec<String> = results
+    let failures: Vec<String> = results
         .iter()
-        .filter_map(|(file, result, _)| {
-            let key = box_ratchet::corpus_key(box_dir, file);
-            match result {
-                TestResult::Panic(reason) => Some(format!("{key}: {reason}")),
-                TestResult::Fail(reason) if super::box_inventory::owned(file) => {
-                    Some(format!("{key}: owned box regression failed: {reason}"))
-                }
-                TestResult::NotApplicable if super::box_inventory::owned(file) => Some(format!(
-                    "{key}: owned portable box case may not be not-applicable"
-                )),
-                TestResult::Pass | TestResult::NotApplicable | TestResult::Fail(_) => None,
-            }
+        .filter_map(|(file, result, _)| match result {
+            TestResult::Fail(reason) => Some(format!(
+                "{}: {reason}",
+                box_ratchet::corpus_key(box_dir, file)
+            )),
+            TestResult::NotApplicable if super::box_inventory::owned(file) => Some(format!(
+                "{}: owned portable box case may not be not-applicable",
+                box_ratchet::corpus_key(box_dir, file)
+            )),
+            TestResult::Pass | TestResult::NotApplicable => None,
         })
         .collect();
     assert!(
-        fatal.is_empty(),
-        "{} JVM box case(s) failed in a way no baseline may accept:\n  {}",
-        fatal.len(),
-        fatal.join("\n  ")
+        failures.is_empty(),
+        "{} applicable JVM box case(s) failed:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
     );
     let outcomes: BTreeMap<String, Outcome> = results
         .iter()
         .map(|(file, result, _)| {
             let outcome = match result {
                 TestResult::Pass => Outcome::Pass,
-                TestResult::Fail(_) | TestResult::Panic(_) => Outcome::Fail,
+                TestResult::Fail(_) => Outcome::Fail,
                 TestResult::NotApplicable => Outcome::NotApplicable,
             };
             (box_ratchet::corpus_key(box_dir, file), outcome)
@@ -1869,41 +1959,36 @@ fn check_jvm_outcomes(
             env("CI").is_none(),
             "KRUSTY_BLESS_BOX_EXPECTATIONS is refused under CI: expectations are blessed locally and reviewed"
         );
-        box_ratchet::write(Platform::Jvm, version, &outcomes)
-            .unwrap_or_else(|err| panic!("failed to write the JVM box expectations: {err}"));
+        let not_applicable: BTreeSet<String> = outcomes
+            .iter()
+            .filter(|(_, outcome)| **outcome == Outcome::NotApplicable)
+            .map(|(path, _)| path.clone())
+            .collect();
+        let not_applicable_path = box_ratchet::not_applicable_path(Platform::Jvm, version);
+        box_ratchet::write_not_applicable(Platform::Jvm, version, &not_applicable).unwrap_or_else(
+            |err| panic!("failed to replace {}: {err}", not_applicable_path.display()),
+        );
         eprintln!(
-            "JVM box expectations: wrote {} and {}",
-            box_ratchet::failure_path(Platform::Jvm, version).display(),
-            box_ratchet::not_applicable_path(Platform::Jvm, version).display(),
+            "JVM box expectations: wrote {} expected not-applicable cases to {}",
+            not_applicable.len(),
+            not_applicable_path.display(),
         );
         return;
     }
     let expected = box_ratchet::load(Platform::Jvm, version);
+    assert!(
+        expected.failures.is_empty(),
+        "JVM expected-failure inventories are obsolete; remove every entry from {}",
+        box_ratchet::failure_path(Platform::Jvm, version).display()
+    );
     let mismatches = box_ratchet::compare(&expected, &outcomes, corpus);
-    if !mismatches.is_empty() {
-        let reasons: Vec<String> = results
-            .iter()
-            .filter_map(|(file, result, _)| {
-                let key = box_ratchet::corpus_key(box_dir, file);
-                match result {
-                    TestResult::Fail(reason) if mismatches.unexpected_failures.contains(&key) => {
-                        Some(format!("{key}: {reason}"))
-                    }
-                    _ => None,
-                }
-            })
-            .collect();
-        let mut report = mismatches.report(Platform::Jvm, version);
-        if !reasons.is_empty() {
-            report.push_str("\nunexpected JVM box failures:\n  ");
-            report.push_str(&reasons.join("\n  "));
-        }
-        panic!("{report}");
-    }
+    assert!(
+        mismatches.is_empty(),
+        "{}",
+        mismatches.report(Platform::Jvm, version)
+    );
     eprintln!(
-        "JVM box outcomes match {} ({} expected failures) and {} ({} expected not-applicable)",
-        box_ratchet::failure_path(Platform::Jvm, version).display(),
-        expected.failures.len(),
+        "JVM box applicability matches {} ({} expected not-applicable)",
         box_ratchet::not_applicable_path(Platform::Jvm, version).display(),
         expected.not_applicable.len(),
     );
@@ -1913,8 +1998,6 @@ enum TestResult {
     NotApplicable,
     Pass,
     Fail(String),
-    /// The compiler crashed: a defect to fix, never an outcome a baseline records.
-    Panic(String),
 }
 
 // ===================== Byte-identity differential mode =====================

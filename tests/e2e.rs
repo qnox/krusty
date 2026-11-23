@@ -9,6 +9,7 @@
 krusty_test_modules::declare_test_modules!("_e2e.rs");
 
 mod failure_evidence;
+mod native_klib_driver;
 
 #[path = "common/bytecode_comparison.rs"]
 mod bytecode_comparison_support;
@@ -26,10 +27,14 @@ mod inner_class_rows_support;
 mod reference_box_support;
 #[path = "common/reference_compiler.rs"]
 mod reference_compiler_support;
+#[path = "common/reference_targets/invocation.rs"]
+mod reference_invocation_support;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;
 #[path = "common/reference_targets.rs"]
 mod reference_targets_support;
+#[path = "common/reference_targets/wasm_program.rs"]
+mod reference_wasm_program;
 #[path = "common/target_diagnostics.rs"]
 mod target_diagnostics_support;
 

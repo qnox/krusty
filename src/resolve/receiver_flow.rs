@@ -123,6 +123,8 @@ impl Checker<'_> {
             self.selected_value_smartcasts.insert(read, narrowed);
             receiver.ty = narrowed;
         }
+        // `this@label` names its receiver explicitly, so `@DslMarker` scope control never applies.
+        receiver.dsl_shadowed = false;
         self.mark_implicit_receiver_selection(read, receiver);
         narrowed
     }
@@ -345,6 +347,19 @@ impl Checker<'_> {
             .find(|types| !types.is_empty())
             .unwrap_or_default()
     }
+
+    /// The intersection a stable-path argument is proved to have, when it has several
+    /// constituents. Overload comparison treats the argument as that type, so a parameter of any
+    /// one constituent admits it.
+    pub(super) fn flow_intersection_argument(
+        &self,
+        scope: &CheckerScope<'_>,
+        argument: ExprId,
+    ) -> Option<Ty> {
+        let path = self.expr_access_path(argument)?;
+        let constituents = self.lookup_intersection_narrowing(scope, &path);
+        (constituents.len() > 1).then(|| Ty::intersection(&constituents))
+    }
 }
 
 /// Flow a completing expression proved in one scope frame: narrowing shadows, property paths, and
@@ -494,6 +509,31 @@ impl Checker<'_> {
         (ty, argument_scope)
     }
 
+    /// Check a call. A member call types its receiver once, then its arguments, in one scope of
+    /// its own, so the facts the receiver proved reach the arguments. When the call returns, the
+    /// facts the receiver and the arguments proved belong to the code that follows it
+    /// (`b.take(x!!)` proves `x` non-null afterwards), exactly as for any other call.
+    pub(super) fn check_call(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        callee: ExprId,
+        args: &[ExprId],
+        span: Span,
+        expected: Option<Ty>,
+    ) -> Ty {
+        if !matches!(self.file.expr(callee), Expr::Member { .. }) {
+            return self.check_call_in_argument_scope(scope, call, callee, args, span, expected);
+        }
+        let argument_scope = scope.child(ScopeKind::Block);
+        let ty =
+            self.check_call_in_argument_scope(&argument_scope, call, callee, args, span, expected);
+        if self.completed_normally(call) {
+            CompletedFlow::capture(self, &argument_scope).publish(self, scope);
+        }
+        ty
+    }
+
     /// A lambda literal whose parameter shape is supplied by the call's argument probes. An
     /// anonymous function declares that shape itself and is an ordinary callee.
     fn postponed_lambda_callee(&self, callee: ExprId) -> bool {
@@ -566,7 +606,7 @@ impl Checker<'_> {
             .args
             .iter()
             .map(|&argument| {
-                self.lambda_probe_ty(scope, argument).unwrap_or_else(|| {
+                self.lambda_probe_ty(argument).unwrap_or_else(|| {
                     if matches!(self.file.expr(argument), Expr::CallableRef { .. }) {
                         Ty::Error
                     } else {
@@ -652,12 +692,124 @@ impl Checker<'_> {
     /// The type an argument contributes before its callee's parameter type is known. A callable
     /// reference and a lambda literal stay postponed; every other argument is checked once.
     fn probe_or_check_argument(&mut self, scope: &CheckerScope<'_>, argument: ExprId) -> Ty {
-        self.lambda_probe_ty(scope, argument).unwrap_or_else(|| {
+        self.lambda_probe_ty(argument).unwrap_or_else(|| {
             if matches!(self.file.expr(argument), Expr::CallableRef { .. }) {
                 Ty::Error
             } else {
                 self.expr(scope, argument)
             }
+        })
+    }
+}
+
+/// The type a flow fact proved for one implicit receiver, named by that receiver's tower identity.
+#[derive(Clone, Copy)]
+pub(super) struct ReceiverNarrowing {
+    pub(super) receiver: (usize, usize),
+    pub(super) ty: Ty,
+}
+
+impl Checker<'_> {
+    pub(super) fn with_this_narrow<R>(
+        &mut self,
+        narrow: Option<ReceiverNarrowing>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let prev = self.this_narrow;
+        if let Some(n) = narrow {
+            self.this_narrow = Some(n);
+        }
+        let r = f(self);
+        self.this_narrow = prev;
+        r
+    }
+
+    /// Current smart-cast type of the implicit receiver.
+    pub(super) fn effective_this_narrow(&self, scope: &CheckerScope<'_>) -> Option<Ty> {
+        self.current_receiver_narrowing(scope).or_else(|| {
+            self.lookup(scope, "this")
+                .map(|local| self.local_narrowing(scope, "this").unwrap_or(local.ty))
+        })
+    }
+
+    /// The type `if (this is B)` proved for the receiver `this` currently denotes. The proof belongs
+    /// to the receiver it was made about, so it is absent inside a receiver lambda that pushed a
+    /// nearer one.
+    pub(super) fn current_receiver_narrowing(&self, scope: &CheckerScope<'_>) -> Option<Ty> {
+        let narrowing = self.this_narrow?;
+        let current = self.declared_implicit_receivers(scope).into_iter().next()?;
+        (current.identity == narrowing.receiver).then_some(narrowing.ty)
+    }
+
+    pub(super) fn actual_this_narrow(&self, scope: &CheckerScope<'_>) -> Option<Ty> {
+        self.current_receiver_narrowing(scope)
+            .or_else(|| self.local_narrowing(scope, "this"))
+            .or_else(|| self.lookup_path_narrowing(scope, &self.current_receiver_path(scope)?))
+            .or_else(|| {
+                let declared = scope.this_ty()?;
+                let shadow = self.lookup(scope, "this")?.ty;
+                (shadow != declared).then_some(shadow)
+            })
+    }
+
+    /// The narrowed implicit-receiver type established by `if (this is B)` (`this !is B` in the
+    /// else-branch): `this` is a subtype `B` of the declared receiver. `this` is immutable, so the
+    /// narrowing is sound across nested scopes. Only a KNOWN reference subtype narrows (a primitive /
+    /// nullable / unresolved target is left un-narrowed, so the file skips rather than miscompiles).
+    pub(super) fn this_is_narrowing(
+        &self,
+        scope: &CheckerScope<'_>,
+        cond: ExprId,
+        for_else: bool,
+    ) -> Option<ReceiverNarrowing> {
+        let Expr::Is {
+            operand,
+            ty,
+            negated,
+        } = self.file.expr(cond).clone()
+        else {
+            return None;
+        };
+        if negated != for_else {
+            return None;
+        }
+        if !matches!(self.file.expr(operand), Expr::Name(n) if n == "this") {
+            return None;
+        }
+        if ty.nullable() {
+            return None;
+        }
+        let tt = self
+            .resolved_type_tys
+            .get(&(ty.span.lo, ty.span.hi))
+            .copied()
+            .unwrap_or_else(|| self.type_ref_ty_silent(scope, &ty));
+        let runtime_tt =
+            crate::symbol_resolver::classifier_callable_signature(&self.fed_source(), tt)
+                .unwrap_or(tt);
+        // Context-sensitive nested type syntax may omit the subclass's type arguments (`is Right`)
+        // while the subject supplies them through its sealed/generic supertype (`Either<E, A>`).
+        // The general smart-cast path already reconstructs `Right<A>` from that relation; the
+        // implicit-`this` fast path must preserve the same applied target instead of replacing it
+        // with raw `Right`, whose `value` property subsequently erases to `Any?`.
+        let runtime_tt = self
+            .current_receiver_path(scope)
+            .and_then(|path| self.stable_path_ty(scope, &path, self.span(cond)))
+            .filter(|_| ty.targs.is_empty())
+            .map(|declared| {
+                crate::symbol_resolver::apply_subtype_arguments_from_supertype(
+                    &self.fed_source(),
+                    runtime_tt,
+                    declared,
+                )
+            })
+            .unwrap_or(runtime_tt);
+        let scope::PathRoot::Receiver(receiver) = self.current_receiver_path(scope)?.root else {
+            return None;
+        };
+        runtime_tt.is_reference().then_some(ReceiverNarrowing {
+            receiver,
+            ty: runtime_tt,
         })
     }
 }

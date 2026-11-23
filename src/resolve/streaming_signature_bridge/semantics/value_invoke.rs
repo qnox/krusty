@@ -1,7 +1,6 @@
 //! Selection of the `invoke` convention on a callee value. No applicable `invoke` is a typed
 //! outcome, not a failure, so a bare call's tower can move on to its later levels.
 
-use super::super::classifier_associated::Demand;
 use super::*;
 
 impl ProductionSignatureSemantics<'_> {
@@ -11,7 +10,7 @@ impl ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
         callee: crate::fir::ResolvedTy,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::InvokeSelection, crate::fir::DiagnosticId> {
         crate::trace_compiler!(
             "signature",
@@ -27,25 +26,21 @@ impl ProductionSignatureSemantics<'_> {
             callee.get().non_null(),
         );
         if let Some(TyKind::Fun(signature)) = callable.map(|ty| ty.kind()) {
-            let implicit_prefix = signature
-                .context_count
-                .saturating_add(usize::from(signature.has_receiver))
-                .min(signature.params.len());
-            let accepts_explicit_shape = signature.params.len() == arguments.len();
-            let accepts_implicit_shape =
-                signature.params.len() - implicit_prefix == arguments.len();
-            if (!accepts_explicit_shape && !accepts_implicit_shape)
-                || arguments
-                    .iter()
-                    .any(|argument| argument.name.is_some() || argument.spread)
-            {
+            let Some(implicit_prefix) =
+                crate::resolve::lexical_value_invoke::signature_function_value_invoke_shape(
+                    self.table,
+                    scope.source.raw(),
+                    &self.active_postponed_type_variables(scope),
+                    signature,
+                    arguments,
+                )
+            else {
                 return Ok(crate::fir::InvokeSelection::Inapplicable(Self::failure()));
-            }
+            };
             self.record_function_value_invoke_constraints(
                 scope,
                 signature,
                 implicit_prefix,
-                accepts_explicit_shape,
                 arguments,
             );
             return Self::selected_invoke(signature.ret);
@@ -175,7 +170,7 @@ impl ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
         callee: crate::fir::ResolvedTy,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         match self.select_value_invoke(scope, origin, callee, arguments, demand)? {
             crate::fir::InvokeSelection::Selected(result) => Ok(result),

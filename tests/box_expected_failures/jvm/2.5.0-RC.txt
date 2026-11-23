@@ -16,7 +16,6 @@ contextParameters/callableReferences/contextual/delegation/unboundReceiver.kt
 contextParameters/callableReferences/contextual/delegation/unboundReceiverVar.kt
 contextParameters/callableReferences/contextual/delegation/varProperty.kt
 contextParameters/callableReferences/contextual/generic.kt
-contextParameters/callableReferences/contextual/localFunction.kt
 contextParameters/callableReferences/contextual/valueClassContextArg.kt
 contextParameters/contextualCallableReferenceReturnType.kt
 inference/selfBoundedVariableFromFunctionTypeBeforeElvisThrow.kt

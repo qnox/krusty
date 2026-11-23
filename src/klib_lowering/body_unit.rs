@@ -13,8 +13,8 @@ use std::collections::VecDeque;
 
 use super::body_lowering::{
     constant_value, publish_parameter_defaults, BodyLowering, CallLinker, ConstructorRole,
-    LinkedAccessor, LinkedAccessorTarget, LinkedCallableReference, LinkedCallee, LinkedConstructor,
-    LoweredFunction, StaticField,
+    LinkedAccessorCall, LinkedCallableReference, LinkedCallee, LinkedConstructor, LoweredFunction,
+    StaticField,
 };
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -38,11 +38,19 @@ use crate::types::{Ty, TypeName};
 
 mod class_construction;
 pub(crate) use class_construction::superclass_constructor_ordinal;
+mod constructor_linking;
 mod enum_materialization;
+mod fake_overrides;
+pub(crate) use fake_overrides::emitted_body;
 #[cfg(test)]
 mod initializer_capability_tests;
+mod inline_functions;
 mod local_class;
+mod private_members;
+mod sam_placement;
 mod static_properties;
+
+pub(crate) use private_members::is_private_class_member;
 
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
 /// leaves and constructor calls have distinct realization contracts.
@@ -206,8 +214,9 @@ pub struct DependencyBodyUnit {
     realized_classes: HashSet<TypeName>,
     authenticated_singleton_dispatches: HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: HashMap<KlibDependencyCallable, TypeName>,
-    /// Private members of value classes, which only this unit's members of their class call.
-    private_members: HashSet<KlibDependencyCallable>,
+    /// Private members of value classes and file-private functions, which only this unit's bodies
+    /// call, each with its own formals and their bounds: no provider records them.
+    private_members: HashMap<KlibDependencyCallable, OwnFormals>,
     /// The dispatch receiver type of each class member this unit emits, its `this`.
     member_receivers: HashMap<KlibDependencyCallable, Ty>,
     /// File-local classes materialized for bodies of their own library, keyed by that library.
@@ -250,8 +259,8 @@ struct MaterializedConstructor {
 struct LocalFunction {
     function: FunId,
     class: super::same_library_class::LocalIdentity,
-    /// Whether the function is its property's setter.
-    setter: bool,
+    /// The function's own type parameters and their declared bounds.
+    formals: Vec<(crate::types::TyParamName, Vec<Ty>)>,
 }
 
 impl Default for DependencyBodyUnit {
@@ -265,7 +274,7 @@ impl Default for DependencyBodyUnit {
             realized_classes: HashSet::default(),
             authenticated_singleton_dispatches: HashMap::default(),
             authenticated_singleton_classifiers: HashMap::default(),
-            private_members: HashSet::default(),
+            private_members: HashMap::default(),
             member_receivers: HashMap::default(),
             local_classes: HashMap::default(),
             local_functions: HashMap::default(),
@@ -319,9 +328,9 @@ struct PendingBody<'a> {
 enum PendingInitialization<'a> {
     /// The admitted initialization of the class's own fields and initializers.
     Class(Box<super::class_initialization::ClassInitialization<'a, 'a>>),
-    /// A secondary constructor's statements after its delegation to the primary constructor,
-    /// whose arguments the class's secondary constructor `secondary` passes.
-    PrimaryDelegation {
+    /// A secondary constructor's statements after its delegation to another constructor of the
+    /// class, whose arguments the class's secondary constructor `secondary` passes.
+    OwnDelegation {
         secondary: usize,
         arguments: Vec<crate::metadata::klib_ir::tree::KlibIrExprId>,
     },
@@ -698,7 +707,7 @@ impl DependencyBodyUnit {
     }
 
     /// Whether `identity` is a member of a class this unit installed with all of its members.
-    fn installs_member(&self, identity: &KlibDependencyCallable) -> bool {
+    pub(super) fn installs_member(&self, identity: &KlibDependencyCallable) -> bool {
         self.local_functions
             .contains_key(&local_class::installed_identity(identity))
     }
@@ -717,7 +726,10 @@ impl DependencyBodyUnit {
     ) -> impl Iterator<Item = (&KlibDependencyCallable, FunId)> + '_ {
         self.functions
             .iter()
-            .filter(|(identity, _)| !self.private_members.contains(*identity))
+            .filter(|(identity, function)| {
+                !self.private_members.contains_key(*identity)
+                    && !self.ir.inline_only_fns.contains(*function)
+            })
             .map(|(identity, &function)| (identity, function))
     }
 
@@ -884,6 +896,7 @@ impl DependencyBodyUnit {
         sources: Sources<'a>,
         seed: impl FnOnce(&mut Linker<'_, 'a>, &mut IrFile) -> Result<T, KlibBodyDeclineReason>,
     ) -> Result<T, KlibBodyDecline> {
+        let (first_class, classes) = (self.ir.classes.len(), sources.callees.class_type_oracle());
         let mut pending = VecDeque::new();
         let mut linker = Linker {
             functions: &mut self.functions,
@@ -906,6 +919,7 @@ impl DependencyBodyUnit {
             active_module: identity.module.clone(),
             active_identity: identity.clone(),
             active_value_class: None,
+            member_classes: Vec::new(),
             sources,
         };
         let root = seed(&mut linker, &mut self.ir)
@@ -925,6 +939,9 @@ impl DependencyBodyUnit {
             linker.active_module.clone_from(&body.identity.module);
             linker.active_identity.clone_from(&body.identity);
             linker.active_value_class.clone_from(&body.value_member);
+            if let Some(member) = &body.value_member {
+                linker.record_member_class(member);
+            }
             let function = LoweredFunction {
                 symbol: body.symbol,
                 function: body.function,
@@ -967,22 +984,22 @@ impl DependencyBodyUnit {
                     (
                         Some((
                             class,
-                            PendingInitialization::PrimaryDelegation {
+                            PendingInitialization::OwnDelegation {
                                 secondary,
                                 arguments,
                             },
                         )),
                         Some(member),
-                    ) => lowering.delegate_to_primary(
+                    ) => lowering.delegate_within_class(
                         *class,
                         *secondary,
                         member,
                         arguments,
                         body.statements,
                     ),
-                    (Some((_, PendingInitialization::PrimaryDelegation { .. })), None) => {
+                    (Some((_, PendingInitialization::OwnDelegation { .. })), None) => {
                         Err(KlibBodyDeclineReason::SignatureMismatch(
-                            "a primary constructor delegation has no materialized class".to_owned(),
+                            "a delegation within the class has no materialized class".to_owned(),
                         ))
                     }
                     (None, value_member) => match value_member {
@@ -1016,6 +1033,9 @@ impl DependencyBodyUnit {
             })?;
             self.ir.functions[body.function as usize].body = Some(lowered);
         }
+        let decline = |reason| KlibBodyDecline::new(identity.declaration.clone(), reason);
+        super::class_hierarchies::publish(&mut self.ir, first_class, classes).map_err(decline)?;
+        inline_functions::expand_calls(&mut self.ir).map_err(decline)?;
         Ok(root)
     }
 }
@@ -1030,7 +1050,7 @@ struct Linker<'u, 's> {
     realized_classes: &'u HashSet<TypeName>,
     authenticated_singleton_dispatches: &'u mut HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
-    private_members: &'u mut HashSet<KlibDependencyCallable>,
+    private_members: &'u mut HashMap<KlibDependencyCallable, OwnFormals>,
     member_receivers: &'u mut HashMap<KlibDependencyCallable, Ty>,
     local_classes: &'u mut HashMap<
         super::same_library_class::LocalIdentity,
@@ -1054,6 +1074,9 @@ struct Linker<'u, 's> {
     /// The class and value field of the value class member being lowered, the class of every
     /// private member it calls.
     active_value_class: Option<MemberClass<'s>>,
+    /// Each class whose member body this lowering has made active. A nested class's body calls a
+    /// private member of its outer class through it.
+    member_classes: Vec<MemberClass<'s>>,
     sources: Sources<'s>,
 }
 
@@ -1085,6 +1108,22 @@ impl<'s> CallLinker for Linker<'_, 's> {
         })
     }
 
+    fn intercepted_continuation(
+        &self,
+        signature: &KlibDeclarationSignature,
+    ) -> Result<
+        Option<super::intercepted_continuation::InterceptedContinuationExpansion>,
+        KlibBodyDeclineReason,
+    > {
+        let bodies = self.sources.bodies;
+        match bodies.linked_origin(&self.active_module, signature) {
+            KlibCalleeOrigin::Exact(identity) => {
+                super::intercepted_continuation::expansion(self.sources.callees, bodies, &identity)
+            }
+            KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => Ok(None),
+        }
+    }
+
     fn continuation_intrinsic(
         &self,
         signature: &KlibDeclarationSignature,
@@ -1112,6 +1151,19 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.primitive_at(signature, false, |facts, identity, bodies| {
             facts.range_literal_bounds(identity, bodies)
         })
+    }
+
+    fn sam_declaration(
+        &self,
+        classifier: &KlibPublicIdSignature,
+    ) -> Result<crate::ir::CheckedKlibSamDeclaration, KlibBodyDeclineReason> {
+        self.sources
+            .callees
+            .sam_declaration(&self.active_module, classifier)
+            .cloned()
+            .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                "a SAM conversion without a checked declaration",
+            ))
     }
 
     fn declares_implementation(
@@ -1296,29 +1348,36 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .is_some()
     }
 
+    fn link_local_object(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<TypeName, KlibBodyDeclineReason> {
+        self.install_local_object(ir, signature)
+    }
+
+    fn is_local_interface(&self, signature: &KlibIrSignature) -> bool {
+        self.names_local_interface(signature)
+    }
+
+    fn link_local_interface(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        self.install_local_interface(ir, signature)
+    }
+
     fn link_local_constructor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibIrSignature,
     ) -> Result<super::same_library_class::LocalConstructor, KlibBodyDeclineReason> {
-        let module = self.active_module.clone();
-        let bodies = self.sources.bodies;
-        let callees = self.sources.callees;
-        match super::same_library_class::link(
-            super::same_library_class::LocalClassSource {
-                bodies,
-                declarations: self.sources.declarations,
-                module: &module,
-                validate_root: &|root| callees.validate_root_constructor(&module, root, bodies),
-            },
-            callee,
-            self.local_classes,
-        )? {
-            super::same_library_class::LocalLink::Ready(constructor) => Ok(constructor),
-            super::same_library_class::LocalLink::Prepared(prepared) => {
-                self.install_local_class(ir, prepared)
-            }
-        }
+        self.link_constructor_of_local_class(ir, callee)
+    }
+
+    fn inherited_getter(&self, callee: &KlibIrSignature) -> fake_overrides::Inherited {
+        fake_overrides::inherited_getter(self, callee)
     }
 
     fn link_local_function(
@@ -1358,10 +1417,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
         sup: Ty,
     ) -> bool {
         let callees = self.sources.callees;
-        super::same_library_class::is_subtype(self.local_classes, sub, sup, &|sub, sup| {
-            callees.is_subtype(parameters, sub, sup)
-                || super::callable_references::function_supertype(sub, sup)
-        })
+        let model = super::same_library_class::MaterializedClassModel {
+            classes: self.local_classes,
+            public: callees.class_type_oracle(),
+        };
+        model.is_subtype(parameters, sub, sup)
+            || super::callable_references::function_supertype(sub, sup)
     }
 
     fn link_reference(
@@ -1379,84 +1440,19 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.sources.callees.same_type(left, right)
     }
 
+    fn classifier_parameter_bounds(&self, owner: TypeName, index: usize) -> Vec<Ty> {
+        self.sources
+            .callees
+            .classifier_parameter_bounds(owner, index)
+    }
+
     fn link_constructor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
         role: ConstructorRole,
     ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
-        let identity = self.callee_identity(callee)?;
-        let (_, function) = self.sources.bodies.function(&identity).ok_or_else(|| {
-            KlibBodyDeclineReason::SignatureMismatch(
-                "a constructor call has no serialized function header".to_owned(),
-            )
-        })?;
-        super::constructor_calls::require_constructor_kind(function)?;
-        if matches!(self.sources.callees.get(&identity), Some(KlibCalleeFact::Selected(callables))
-            if callables[0].kind() != crate::libraries::ExternalCallableKind::Constructor)
-        {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "a constructor call selected a non-constructor provider declaration".to_owned(),
-            ));
-        }
-        // An earlier unit's retained initializer runs on an instance a subclass allocated; it
-        // never allocates its own class.
-        let retained_initializer = self.sources.externals.get(&identity).filter(|external| {
-            matches!(
-                external.realization,
-                DependencyExternalRealization::ConstructorInitializer
-            )
-        });
-        if retained_initializer.is_some() && role == ConstructorRole::Allocation {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "an initializer-only dependency does not permit class allocation".to_owned(),
-            ));
-        }
-        let declaration = self
-            .sources
-            .callees
-            .constructor(&identity, self.sources.bodies)?
-            // Producer lookup above already proved the serialized declaration exists. Without
-            // exact provider evidence this unit cannot realize construction; that is not a
-            // missing declaration and must not invent a constructor handle.
-            .ok_or_else(|| KlibBodyDeclineReason::UnsupportedCallee(Box::new(callee.clone())))?;
-        if let Some(initializer) = retained_initializer {
-            return Ok(LinkedConstructor {
-                target: initializer.target(),
-                declaration,
-            });
-        }
-        let external = self
-            .sources
-            .externals
-            .get(&identity)
-            .filter(|external| external.is_constructor())
-            .ok_or_else(|| {
-                KlibBodyDeclineReason::SignatureMismatch(
-                    "an authenticated constructor has no exact constructor external handle"
-                        .to_owned(),
-                )
-            })?;
-        let target = external.target();
-        let allocating = matches!(
-            external.realization,
-            DependencyExternalRealization::AllocatingConstructor
-        );
-        let selected = match self.sources.callees.get(&identity) {
-            Some(KlibCalleeFact::Selected(callables)) => callables[0],
-            _ => {
-                return Err(KlibBodyDeclineReason::SignatureMismatch(
-                    "an authenticated constructor lost its provider declaration".to_owned(),
-                ))
-            }
-        };
-        if !allocating {
-            self.materialize_class(ir, &identity, selected)?;
-        }
-        Ok(LinkedConstructor {
-            target,
-            declaration,
-        })
+        self.link_selected_constructor(ir, callee, role)
     }
 
     fn constructor_bound(
@@ -1485,6 +1481,32 @@ impl<'s> CallLinker for Linker<'_, 's> {
             self.materialize_enum_class(ir, class)?;
         }
         Ok((classifier, name))
+    }
+
+    fn enum_static_member(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<(TypeName, super::enum_classes::EnumStaticMember)>, KlibBodyDeclineReason>
+    {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        let KlibCalleeOrigin::Exact(identity) = self
+            .sources
+            .bodies
+            .linked_origin(&self.active_module, &signature)
+        else {
+            return Ok(None);
+        };
+        let Some((class, member)) =
+            super::enum_classes::authenticate_static_member(self.sources.bodies, &identity)?
+        else {
+            return Ok(None);
+        };
+        let classifier = class.classifier;
+        if !self.realized_classes.contains(&classifier) {
+            self.materialize_enum_class(ir, class)?;
+        }
+        Ok(Some((classifier, member)))
     }
 
     fn static_field(
@@ -1539,7 +1561,17 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn applied_supertype(&self, sub: Ty, owner: TypeName) -> Option<Ty> {
-        self.sources.callees.applied_supertype(sub, owner)
+        let callees = self.sources.callees;
+        super::same_library_class::applied_supertype(
+            self.local_classes,
+            sub,
+            owner,
+            &|sub, owner| callees.applied_supertype(sub, owner),
+        )
+    }
+
+    fn sam_placement(&self) -> Result<crate::ir::IrSamPlacement, KlibBodyDeclineReason> {
+        self.active_sam_placement()
     }
 
     fn dependency_override(
@@ -1592,19 +1624,19 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
-        match self.sources.declarations.classifier(name) {
-            Some(record) => Ok(record.is_interface()),
-            None => Err(KlibBodyDeclineReason::SignatureMismatch(format!(
+        let record = self.sources.declarations.classifier(name);
+        record.map(|record| record.is_interface()).ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(format!(
                 "an object literal's supertype {name:?} is not a selected classifier"
-            ))),
-        }
+            ))
+        })
     }
 
     fn link_accessor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibAccessorIdSignature,
-    ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
+    ) -> Result<LinkedAccessorCall, KlibBodyDeclineReason> {
         let unsupported = || {
             KlibBodyDeclineReason::UnsupportedOperation(
                 "a call through a property accessor signature",
@@ -1624,54 +1656,19 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 )))
             }
         };
-        // A materialized class's accessor was installed with its class.
-        if let Some((linked, setter)) = self.installed_member(ir, &identity)? {
-            let Callee::Local(function) = linked.callee else {
-                unreachable!("an installed member is a local function");
-            };
-            return Ok(LinkedAccessor {
-                target: LinkedAccessorTarget::Local(function),
-                write: setter,
-                receiver: linked.receiver,
-                params: linked.params,
-                ret: linked.ret,
-                context_count: linked.context_count,
-                class_type_parameters: linked.class_type_parameters,
-                callable: None,
-                type_parameters: Vec::new(),
-                type_parameter_bounds: Vec::new(),
-                reified_type_parameters: Vec::new(),
-            });
+        // An accessor the unit emits is called as any function of the unit is: a member of a class
+        // it materializes, as the class's other members are, or a top-level accessor.
+        if let Some(linked) = self.installed_member(ir, &identity)? {
+            return Ok(LinkedAccessorCall::Function(linked));
         }
-        // An accessor with a body of a class the unit materializes is emitted here, as the class's
-        // other members are.
         if let Some(linked) = self.materialized_member_accessor(ir, &identity)? {
-            return Ok(linked);
+            return Ok(LinkedAccessorCall::Function(linked));
         }
         if let Some(linked) = self.private_class_member(ir, &identity)? {
-            let Callee::Local(function) = linked.callee else {
-                unreachable!("a value class member is a local function");
-            };
-            return Ok(LinkedAccessor {
-                target: LinkedAccessorTarget::Local(function),
-                write: false,
-                receiver: linked.receiver,
-                params: linked.params,
-                ret: linked.ret,
-                context_count: linked.context_count,
-                class_type_parameters: linked.class_type_parameters,
-                callable: None,
-                type_parameters: Vec::new(),
-                type_parameter_bounds: Vec::new(),
-                reified_type_parameters: Vec::new(),
-            });
+            return Ok(LinkedAccessorCall::Function(linked));
         }
-        // An accessor of a top-level property is a function of this unit, unless an earlier unit
-        // already emitted it.
-        if !self.sources.externals.contains_key(&identity) {
-            if let Some(linked) = self.top_level_accessor(ir, &identity)? {
-                return Ok(linked);
-            }
+        if let Some(linked) = self.top_level_accessor(ir, &identity)? {
+            return Ok(LinkedAccessorCall::Function(linked));
         }
         // A complete retained export or positive target plan owns this edge. Other accessors
         // retain the explicit unsupported boundary instead of acquiring a header-only body path.
@@ -1680,6 +1677,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .externals
             .get(&identity)
             .is_some_and(|external| external.realizes_accessor())
+            && !self.is_earlier_abstract_accessor(&identity)
         {
             return Err(unsupported());
         }
@@ -1699,7 +1697,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         // The exact external callable names an accessor's own formals in the substitutions its
         // read carries; an accessor without formals of its own needs no such name.
         if linked.type_parameters.is_empty() {
-            return Ok(linked);
+            return Ok(LinkedAccessorCall::Property(linked));
         }
         let (callable, realization) = self
             .sources
@@ -1724,7 +1722,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             ));
         }
         linked.callable = Some(callable);
-        Ok(linked)
+        Ok(LinkedAccessorCall::Property(linked))
     }
 
     fn requires_declaration(
@@ -1769,7 +1767,8 @@ impl<'s> CallLinker for Linker<'_, 's> {
         let identity = self.callee_identity(callee)?;
         // The active selection decides every call, including one of a function an earlier
         // lowering already put in the unit.
-        let selected = if let Some(root) = self.root.filter(|root| &identity == root.identity()) {
+        let root = self.root.filter(|root| &identity == root.identity());
+        let selected = if let Some(root) = &root {
             Some(SelectedKlibCallables::One(root))
         } else {
             match self.sources.callees.get(&identity) {
@@ -1857,6 +1856,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             let purpose = if emitted.target_intrinsic().is_some()
                 || emitted.is_target_member()
                 || declaration.body.is_none()
+                || self.is_published_member(&identity, arena, declaration, selected.is_none())
             {
                 HeaderPurpose::External
             } else {
@@ -1915,7 +1915,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 return Ok(linked);
             }
         }
-        if let Some((linked, _)) = self
+        if let Some(linked) = self
             .installed_member(ir, &identity)
             .map_err(callee_declined)?
         {
@@ -1926,7 +1926,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             // member of that class. A member of a class realized outside the unit is called
             // through its frozen declaration, as a source call of it is.
             let candidates = match &selected {
-                Some(SelectedKlibCallables::One(candidate)) => std::slice::from_ref(candidate),
+                Some(SelectedKlibCallables::One(candidate)) => std::slice::from_ref(*candidate),
                 Some(SelectedKlibCallables::Variants(candidates)) => *candidates,
                 None => &[],
             };
@@ -1974,20 +1974,34 @@ impl<'s> CallLinker for Linker<'_, 's> {
                 .value_member(ir, &identity, selected, arena, declaration)
                 .map_err(callee_declined);
         }
-        let selected = selected_callable_for_header(selected, None, arena, declaration)
-            .map_err(callee_declined)?;
-        let function = match self.functions.get(&identity) {
+        self.top_level_function(ir, &identity, selected, arena, declaration)
+            .map_err(callee_declined)
+    }
+}
+
+impl<'s> Linker<'_, 's> {
+    /// A top-level function the unit emits, linked under the active selection: an ordinary
+    /// function or a top-level property's accessor, generic or not. A call of it binds the
+    /// selected declaration's own type parameters, as a call of any function the unit lowers does.
+    fn top_level_function(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        selected: Option<SelectedKlibCallables<'s, '_>>,
+        arena: &'s KlibIrArena,
+        declaration: &'s KlibIrFunction,
+    ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+        let selected = selected_callable_for_header(selected, None, arena, declaration)?;
+        let function = match self.functions.get(identity) {
             Some(function) => {
                 // The function was declared under another lowering's selection, or from its
                 // header alone; this lowering's selection must describe it too.
                 if let Some(selected) = selected {
-                    function_header(Some(selected), arena, declaration).map_err(callee_declined)?;
+                    function_header(Some(selected), arena, declaration)?;
                 }
                 *function
             }
-            None => self
-                .declare(ir, &identity, selected, arena, declaration)
-                .map_err(callee_declined)?,
+            None => self.declare(ir, identity, selected, arena, declaration)?,
         };
         let parameter_defaults = parameter_defaults(declaration);
         let declaration = &ir.functions[function as usize];
@@ -2009,17 +2023,14 @@ impl<'s> CallLinker for Linker<'_, 's> {
             edge: super::CallEdge::default(),
         })
     }
-}
 
-impl<'s> Linker<'_, 's> {
-    /// The type parameters of the generic class declaring `selected`, which a call of the member
-    /// binds from its dispatch receiver; none for a top-level function or a non-generic class.
-    /// The accessor of a property of a class whose members the unit emits, when it has a body.
+    /// The accessor of a property of a class whose members the unit emits, when it has a body or
+    /// is abstract.
     fn materialized_member_accessor(
         &mut self,
         ir: &mut IrFile,
         identity: &KlibDependencyCallable,
-    ) -> Result<Option<LinkedAccessor>, KlibBodyDeclineReason> {
+    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
         if self.sources.externals.contains_key(identity) {
             return Ok(None);
         }
@@ -2027,20 +2038,30 @@ impl<'s> Linker<'_, 's> {
             return Ok(None);
         };
         let selected = callables[0];
-        let Some(accessor) = selected.accessor() else {
-            return Ok(None);
-        };
-        let write = accessor.role == crate::libraries::KlibAccessorRole::Setter;
-        if !selected
-            .class_contract()
-            .is_some_and(crate::libraries::KlibBodyClassContract::emits_members)
+        if selected.accessor().is_none()
+            || !selected
+                .class_contract()
+                .is_some_and(crate::libraries::KlibBodyClassContract::emits_members)
         {
             return Ok(None);
         }
         let Some((arena, declaration)) = self.sources.bodies.function(identity) else {
             return Ok(None);
         };
-        if !matches!(declaration.body, Some(KlibIrBody::Block(_))) {
+        // An abstract accessor is declared with its class, as an abstract member function is,
+        // and a call of it dispatches to the instance's override.
+        let abstract_ = declaration.body.is_none()
+            && crate::metadata::semantic::declaration_modality(declaration.base.flags)
+                == crate::metadata::semantic::KotlinModality::Abstract;
+        if !abstract_ && !matches!(declaration.body, Some(KlibIrBody::Block(_))) {
+            return Ok(None);
+        }
+        // An abstract accessor of a class an earlier unit realized is that unit's dispatch slot,
+        // which no body here implements.
+        if abstract_
+            && !self.functions.contains_key(identity)
+            && self.class_realized_earlier(selected)
+        {
             return Ok(None);
         }
         let selected = selected_callable_for_header_purpose(
@@ -2051,97 +2072,8 @@ impl<'s> Linker<'_, 's> {
             Some(self.sources.bodies),
         )?
         .expect("a selected bucket holds a callable");
-        let linked = self.value_member(ir, identity, selected, arena, declaration)?;
-        let Callee::Local(function) = linked.callee else {
-            unreachable!("a value class member is a local function");
-        };
-        Ok(Some(LinkedAccessor {
-            target: LinkedAccessorTarget::Local(function),
-            write,
-            receiver: linked.receiver,
-            params: linked.params,
-            ret: linked.ret,
-            context_count: linked.context_count,
-            class_type_parameters: linked.class_type_parameters,
-            callable: None,
-            type_parameters: Vec::new(),
-            type_parameter_bounds: Vec::new(),
-            reified_type_parameters: Vec::new(),
-        }))
-    }
-
-    /// A call of a private member of the value class whose member is being lowered. No provider
-    /// records a private member, and only its class calls it, so it is emitted as the calling
-    /// member is, reading the value through the same field.
-    fn private_class_member(
-        &mut self,
-        ir: &mut IrFile,
-        identity: &KlibDependencyCallable,
-    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
-        // A private member is called only from its own class, whose member's body is active.
-        let Some(active) = self.active_value_class.clone() else {
-            return Ok(None);
-        };
-        if self.sources.callees.get(identity).is_some()
-            || self.sources.externals.contains_key(identity)
-        {
-            return Ok(None);
-        }
-        let Some((_, declaration)) = self.sources.bodies.function(identity) else {
-            return Ok(None);
-        };
-        if declaration.dispatch_receiver.is_none()
-            || crate::metadata::semantic::declaration_visibility(declaration.base.flags)
-                != crate::types::Visibility::Private
-        {
-            return Ok(None);
-        }
-        let (arena, declaration, header) =
-            private_class_member_header(active.contract, identity, self.sources.bodies)?;
-        self.private_members.insert(identity.clone());
-        let function = match self.functions.get(identity) {
-            Some(&function) => function,
-            None => {
-                let class = active.class;
-                let function = self.queue(
-                    ir,
-                    identity,
-                    None,
-                    arena,
-                    declaration,
-                    BodyHeader {
-                        header,
-                        value_member: Some(active),
-                    },
-                )?;
-                // It is a member of its class like any other, one no subclass overrides.
-                ir.set_method_visibility(function, crate::types::Visibility::Private);
-                register_class_method(ir, class, function);
-                function
-            }
-        };
-        let declared = &ir.functions[function as usize];
-        let (Some(receiver), params) = (
-            self.member_receivers.get(identity).copied(),
-            &declared.params,
-        ) else {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "a value class member is emitted without its receiver".to_owned(),
-            ));
-        };
-        Ok(Some(LinkedCallee {
-            callee: Callee::Local(function),
-            receiver: Some(receiver),
-            params: params.to_vec(),
-            ret: declared.ret,
-            context_count: 0,
-            singleton_dispatch: None,
-            type_parameters: Vec::new(),
-            type_parameter_bounds: Some(Vec::new()),
-            class_type_parameters: Vec::new(),
-            parameter_defaults: parameter_defaults(declaration),
-            edge: super::CallEdge::default(),
-        }))
+        self.value_member(ir, identity, selected, arena, declaration)
+            .map(Some)
     }
 
     /// Whether this unit materializes the class declaring the member `candidate`: a value class,
@@ -2198,29 +2130,6 @@ impl<'s> Linker<'_, 's> {
             }
         }
         Ok(!constructors.is_empty())
-    }
-
-    /// Whether an earlier unit of the program materialized the class of the member `candidate`:
-    /// it published the initialization of each of the class's constructors.
-    fn class_realized_earlier(&self, candidate: KlibBodyCallable<'s>) -> bool {
-        let Some(constructors) = candidate.class_contract().and_then(|class| {
-            super::class_initialization::initializing_constructors(class, self.sources.bodies)
-        }) else {
-            return false;
-        };
-        !constructors.is_empty()
-            && constructors.iter().all(|identity| {
-                self.sources
-                    .externals
-                    .get(identity)
-                    .is_some_and(|external| {
-                        matches!(
-                            external.realization,
-                            DependencyExternalRealization::AllocatingConstructor
-                                | DependencyExternalRealization::ConstructorInitializer
-                        )
-                    })
-            })
     }
 
     /// A call of a member of a class this unit does not materialize, through the member's
@@ -2344,6 +2253,23 @@ impl<'s> Linker<'_, 's> {
                     "a member realized outside the unit has no frozen call edge".to_owned(),
                 )
             })
+    }
+
+    /// Whether `identity` is an abstract accessor of a class an earlier unit realized and this
+    /// unit does not declare: a call of it dispatches through the member's frozen declaration.
+    fn is_earlier_abstract_accessor(&self, identity: &KlibDependencyCallable) -> bool {
+        let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(identity) else {
+            return false;
+        };
+        let Some((_, declaration)) = self.sources.bodies.function(identity) else {
+            return false;
+        };
+        declaration.body.is_none()
+            && crate::metadata::semantic::declaration_modality(declaration.base.flags)
+                == crate::metadata::semantic::KotlinModality::Abstract
+            && !self.functions.contains_key(identity)
+            && self.class_realized_earlier(callables[0])
+            && self.sources.callees.reference_target(identity).is_some()
     }
 
     /// A call of the value class member `selected`, which this unit emits as a member of its
@@ -2509,7 +2435,10 @@ impl<'s> Linker<'_, 's> {
         let value_member = match (header.value_receiver(), selected) {
             // A builtin type's member reads its receiver as the value the target carries.
             (Some(_), Some(selected))
-                if is_receiver_member(selected, self.sources.bodies, self.sources.callees) =>
+                if is_receiver_member(selected, self.sources.bodies, self.sources.callees)
+                    || selected.class_contract().is_some_and(
+                        crate::libraries::KlibBodyClassContract::emits_default_members,
+                    ) =>
             {
                 None
             }
@@ -2561,7 +2490,12 @@ impl<'s> Linker<'_, 's> {
     ) -> Result<FunId, KlibBodyDeclineReason> {
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
+        let callee = inline_functions::Candidate::new(declared, function, &header, selected);
+        callee.declare(ir, self.root, identity, &mut |name| self.is_interface(name))?;
         self.functions.insert(identity.clone(), declared);
+        if let Some(formals) = self.private_members.get_mut(identity) {
+            *formals = header.own_formals(function);
+        }
         if let Some(receiver) = header.value_receiver() {
             self.member_receivers.insert(identity.clone(), receiver);
         }
@@ -2610,35 +2544,6 @@ pub(crate) fn is_receiver_member(
             Some(crate::types::SemanticCallableOwner::Classifier(owner))
                 if callees.target_represents(owner)
         )
-}
-
-/// Whether `identity` is a private member of the materialized class `class` with a body, which no
-/// provider records and which a member of the class emitted from KLIB emits with it.
-pub(crate) fn is_private_class_member(
-    bodies: &KlibDeclarationBodies,
-    identity: &KlibDependencyCallable,
-    class: &crate::libraries::KlibBodyClassContract,
-) -> bool {
-    private_class_member_header(class, identity, bodies).is_ok()
-}
-
-/// The header of `identity`, a private member of the value class `class` with a body, proved
-/// against the class's raw header and read at the class's declared formals.
-fn private_class_member_header<'b>(
-    class: &crate::libraries::KlibBodyClassContract,
-    identity: &KlibDependencyCallable,
-    bodies: &'b KlibDeclarationBodies,
-) -> Result<(&'b KlibIrArena, &'b KlibIrFunction, FunctionHeader), KlibBodyDeclineReason> {
-    let member = super::class_headers::authenticate_private_member(class, identity, bodies)?;
-    block_statements(member.function)?;
-    let header = super::function_lowering::raw_function_header_with_class(
-        None,
-        HeaderPurpose::PrivateClassMember(class.classifier),
-        member.arena,
-        member.function,
-        member.types,
-    )?;
-    Ok((member.arena, member.function, header))
 }
 
 /// Record `function` as a method of the materialized `class`, once. A member no class table
@@ -2694,7 +2599,7 @@ fn body_header(
 /// authenticate the call. Declaration-shape conflicts remain ambiguous in `KlibCalleeFacts`.
 #[derive(Clone, Copy)]
 enum SelectedKlibCallables<'callable, 'facts> {
-    One(KlibBodyCallable<'callable>),
+    One(&'facts KlibBodyCallable<'callable>),
     Variants(&'facts [KlibBodyCallable<'callable>]),
 }
 
@@ -2747,7 +2652,7 @@ fn selected_callable_for_header_purpose<'callable>(
         None
     };
     match candidates {
-        SelectedKlibCallables::One(candidate) => {
+        SelectedKlibCallables::One(&candidate) => {
             if let Some(reason) = consider(candidate) {
                 return Err(reason);
             }
@@ -2802,7 +2707,7 @@ impl UnitCheckpoint {
         unit.authenticated_singleton_classifiers
             .retain(|identity, _| functions.contains_key(identity));
         unit.private_members
-            .retain(|identity| functions.contains_key(identity));
+            .retain(|identity, _| functions.contains_key(identity));
         unit.member_receivers
             .retain(|identity, _| functions.contains_key(identity));
         unit.local_classes
@@ -2933,7 +2838,7 @@ impl Linker<'_, '_> {
         let (types, type_parameters, type_parameter_bounds) =
             super::function_lowering::file_private_formals(&identity, arena, declaration)
                 .map_err(callee_declined)?;
-        self.private_members.insert(identity.clone());
+        self.private_members.entry(identity.clone()).or_default();
         let function = match self.functions.get(&identity) {
             Some(function) => *function,
             None => self
@@ -2957,6 +2862,10 @@ impl Linker<'_, '_> {
         })
     }
 }
+
+/// A declaration's own type parameters, each with its declared upper bounds (empty for the
+/// implicit `Any?`), in declaration order.
+type OwnFormals = Vec<(crate::types::TyParamName, Vec<Ty>)>;
 
 /// A primitive reading of a selected declaration's callee facts.
 type PrimitiveSelection = for<'f> fn(

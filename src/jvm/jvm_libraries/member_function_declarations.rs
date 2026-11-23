@@ -294,6 +294,7 @@ impl JvmLibraries {
                                 signature.parameters_with_receiver(m.context_count)
                             }),
                             equality_bound: m.equality_bound,
+                            contract: m.contract.clone(),
                             // Whether the dispatch owner is an interface is the MEMBER's fact here.
                             // For a mapped builtin resolved with no JDK on the classpath the JVM
                             // owner (`java/util/List`) has no class file, so the call site cannot
@@ -313,6 +314,17 @@ impl JvmLibraries {
                             )
                         };
                         let mut callable = callable;
+                        // Kotlin's Java scope reads a Java method that overrides an inherited
+                        // Kotlin property's accessor as that accessor. Its spelling names the
+                        // candidate properties; the hierarchy confirms one.
+                        if !t.is_kotlin && m.physical_name.is_none() {
+                            callable.property_accessor_role =
+                                super::synthetic_properties::java_accessor_role(
+                                    &m.name,
+                                    callable.params.len(),
+                                )
+                                .map(Box::new);
+                        }
                         // `scope_name` is the provider-normalized Kotlin declaration name. A raw
                         // Java method may carry only its physical spelling on `m`; attach the
                         // inherited-call policy here while both views still name the same exact
