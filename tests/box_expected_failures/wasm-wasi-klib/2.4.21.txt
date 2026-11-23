@@ -163,7 +163,6 @@ callableReference/adaptedReferences/extensionPropertyToFun.kt
 callableReference/adaptedReferences/inlineDefault.kt
 callableReference/adaptedReferences/inlineVararg.kt
 callableReference/adaptedReferences/innerConstructorWithVararg.kt
-callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
 callableReference/adaptedReferences/suspendConversion/extensionTypeProperty.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithContextParameterAsAPropertyType.kt
@@ -828,7 +827,6 @@ inference/pcla/builderCallAsReturnTypeInLocalClass.kt
 inference/pcla/callableReferenceAndCoercionToUnit.kt
 inference/pcla/callableReferencesProperCompletion.kt
 inference/pcla/issues/kt42139.kt
-inference/pcla/issues/kt45083.kt
 inference/pcla/issues/kt49887.kt
 inference/pcla/issues/kt54400b.kt
 inference/pcla/issues/kt54767a.kt
