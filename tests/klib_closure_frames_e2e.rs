@@ -5,6 +5,9 @@ use krusty::backend::{Artifact, Backend, CheckedIrFile, CheckedIrUnitKind};
 use krusty::diag::DiagSink;
 use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
 
+#[path = "klib_closure_frames_e2e/companion_private_members.rs"]
+mod companion_private_members;
+
 #[path = "klib_closure_frames_e2e/elvis_blocks.rs"]
 mod elvis_blocks;
 

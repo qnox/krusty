@@ -667,7 +667,7 @@ impl<'u, 's> Linker<'u, 's> {
     /// The class a member of the final ordinary class `header` declares belongs to: the class
     /// the constructors that initialize it materialize, which created every instance the member
     /// is called on.
-    fn materialize_ordinary_member_class(
+    pub(super) fn materialize_ordinary_member_class(
         &mut self,
         ir: &mut IrFile,
         header: &super::super::class_headers::ClassMemberHeader<'s, 's>,
