@@ -53,7 +53,8 @@ impl BodyLowering<'_> {
             }
             KlibIrSignature::Public(_)
             | KlibIrSignature::Accessor(_)
-            | KlibIrSignature::FileLocal { .. } => {
+            | KlibIrSignature::FileLocal { .. }
+            | KlibIrSignature::TypeParameter { .. } => {
                 let linked = match self.object_members.get(signature) {
                     Some(member) => member.linked(),
                     None => self.linker.link_local_function(self.ir, signature)?,
@@ -118,6 +119,11 @@ impl BodyLowering<'_> {
         };
         if operator == BuiltinOperator::CheckNotNull {
             return self.not_null_assertion(access, ty);
+        }
+        if operator == BuiltinOperator::NoWhenBranchMatched {
+            return unsupported(
+                "`noWhenBranchMatchedException` outside an exhaustive `when`'s `else`",
+            );
         }
         if !access.type_arguments.is_empty() {
             return Err(mismatch(
@@ -537,6 +543,7 @@ impl BodyLowering<'_> {
                 | BuiltinOperator::IsNan { .. }
                 | BuiltinOperator::NumericConversion { .. }
                 | BuiltinOperator::CheckNotNull
+                | BuiltinOperator::NoWhenBranchMatched
                 | BuiltinOperator::DataClassArrayMember(_),
                 _,
             ) => {

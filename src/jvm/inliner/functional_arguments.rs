@@ -18,25 +18,50 @@ use crate::jvm::method_node::{Insn, MethodNode, Node};
 
 use super::{ClassRoles, InlineError, Parameters};
 
-/// A value of the inlined body: a plain value, or one of the call's inline lambdas
+/// A value of the inlined body: a plain value, one of the call's inline lambdas, or a function
+/// value the call passes for an inline suspend parameter without inlining it
 /// (`FunctionalArgumentValue`, which keeps the plain value it stands for).
 #[derive(Clone, Debug, PartialEq)]
 enum ArgumentValue {
     Basic(BasicValue),
     Lambda(usize, BasicValue),
+    NonInlineSuspend(BasicValue),
+}
+
+/// What a `FunctionN.invoke` of the inlined body calls (kotlinc's `InvokeCall.functionalArgument`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum InvokeTarget {
+    /// The call's inline lambda with this index, whose body replaces the invoke.
+    Lambda(usize),
+    /// A function value the call passes for an inline suspend parameter without inlining it
+    /// (`NonInlineArgumentForInlineSuspendParameter.OTHER`): the invoke stays and is a suspension
+    /// point of the code it is inlined into.
+    NonInlineSuspend,
+    /// Any other function value.
+    Value,
 }
 
 impl ArgumentValue {
     fn basic(&self) -> &BasicValue {
         match self {
-            ArgumentValue::Basic(value) | ArgumentValue::Lambda(_, value) => value,
+            ArgumentValue::Basic(value)
+            | ArgumentValue::Lambda(_, value)
+            | ArgumentValue::NonInlineSuspend(value) => value,
         }
     }
 
     fn lambda(&self) -> Option<usize> {
         match self {
             ArgumentValue::Lambda(lambda, _) => Some(*lambda),
-            ArgumentValue::Basic(_) => None,
+            ArgumentValue::Basic(_) | ArgumentValue::NonInlineSuspend(_) => None,
+        }
+    }
+
+    fn invoke_target(&self) -> InvokeTarget {
+        match self {
+            ArgumentValue::Lambda(lambda, _) => InvokeTarget::Lambda(*lambda),
+            ArgumentValue::NonInlineSuspend(_) => InvokeTarget::NonInlineSuspend,
+            ArgumentValue::Basic(_) => InvokeTarget::Value,
         }
     }
 }
@@ -82,6 +107,9 @@ impl Interpreter for FunctionalArgumentInterpreter<'_> {
         let value = self.basic.new_parameter_value(slot, ty);
         match self.parameters.lambda_at(slot) {
             Some(lambda) => ArgumentValue::Lambda(lambda, value),
+            None if self.parameters.non_inline_suspend_at(slot) => {
+                ArgumentValue::NonInlineSuspend(value)
+            }
             None => ArgumentValue::Basic(value),
         }
     }
@@ -160,6 +188,9 @@ impl Interpreter for FunctionalArgumentInterpreter<'_> {
     fn merge(&mut self, first: &ArgumentValue, second: &ArgumentValue) -> ArgumentValue {
         match (first, second) {
             (ArgumentValue::Lambda(a, _), ArgumentValue::Lambda(b, _)) if a == b => first.clone(),
+            (ArgumentValue::NonInlineSuspend(_), ArgumentValue::NonInlineSuspend(_)) => {
+                first.clone()
+            }
             _ => ArgumentValue::Basic(self.basic.merge(first.basic(), second.basic())),
         }
     }
@@ -195,13 +226,13 @@ fn top(frame: Option<FrameView<'_, ArgumentValue>>, depth: usize) -> Option<&Arg
 /// `markPlacesForInlineAndRemoveInlinable` for a body whose anonymous objects, SAM wrappers and
 /// reification markers were already handled: analyze it with the call's lambdas in their
 /// parameter slots, delete what only moves a lambda, its `pop`s and the unreachable code, and
-/// return the lambda each `FunctionN.invoke` calls, in order (`None` for any other function value,
-/// whose `invoke` stays a call).
+/// return what each `FunctionN.invoke` calls, in order (any function value but an inline lambda's
+/// `invoke` stays a call).
 pub(super) fn mark_places(
     node: &mut MethodNode,
     parameters: &Parameters,
     retained_by: &[super::object_regeneration::PendingConstructor],
-) -> Result<Vec<Option<usize>>, InlineError> {
+) -> Result<Vec<InvokeTarget>, InlineError> {
     let (frames, consumers) = analyze(node, parameters)?;
     // The route was chosen from [`keeps_lambda_as_value`] before inlining began.
     if keeps_value(node, &consumers, |class| {
@@ -246,7 +277,10 @@ pub(super) fn mark_places(
                 let arguments = descriptors::argument_types(desc)
                     .ok_or_else(|| InlineError::Analysis(format!("malformed descriptor {desc}")))?
                     .len();
-                invokes.push(top(Some(frame), arguments).and_then(ArgumentValue::lambda));
+                invokes.push(
+                    top(Some(frame), arguments)
+                        .map_or(InvokeTarget::Value, ArgumentValue::invoke_target),
+                );
             }
             Node::Insn(Insn::Op(POP))
                 if top(Some(frame), 0)
