@@ -491,7 +491,6 @@ fp/remainderVsModDouble.kt
 fp/remainderVsModFloat.kt
 fullValueClasses/construction.kt
 fullValueClasses/inapplicableTypes.kt
-fullValueClasses/lateinit.kt
 fullValueClasses/nonFinal.kt
 funInterface/equality/localFunctionReferences.kt
 funInterface/funInterfaceInheritance.kt
