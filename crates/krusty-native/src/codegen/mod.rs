@@ -147,8 +147,7 @@ pub struct CodegenModule {
     dependency_symbols:
         krusty::fx_hash::HashMap<krusty::backend::KlibDependencyCallable, DependencyExport>,
     /// Stable imported-interface member numbers, shared by every file in each source module.
-    dependency_interface_numbers:
-        krusty::fx_hash::HashMap<String, krusty::fx_hash::HashMap<Vec<u8>, u32>>,
+    dependency_interface_numbers: krusty::fx_hash::HashMap<String, lower::ModuleInterfaceNumbers>,
     /// The dependency interface members, by cross-module identity, that a class implements with a
     /// library default whose body lowering does not model: a call through one declines with the
     /// reason, rather than reaching an instance nothing implements it on.
