@@ -70,7 +70,7 @@ const VARARG_REFERENCE: &str = "fun <E> countG(vararg xs: E): Int = xs.size\n\
 /// KT-89451: a `null` function value converted to a nullable suspend function type becomes an
 /// adapter, so the callee sees a non-null value.
 const NULL_FUNCTION_VALUE_CONVERSION: &str = "import kotlin.coroutines.*\n\
-    suspend fun observe(f: (suspend () -> String?)?): String = if (f == null) \"null\" else \"adapter\"\n\
+    suspend fun observe(f: (suspend () -> String?)?): String = if (f == null) \"null\" else \"adapter:\" + f()\n\
     suspend fun pass(f: (() -> String?)?) = observe(f)\n\
     fun box(): String {\n\
     \x20   var answer = \"unset\"\n\
@@ -81,7 +81,7 @@ const NULL_FUNCTION_VALUE_CONVERSION: &str = "import kotlin.coroutines.*\n\
 /// A `null` function value held by a type parameter with a nullable function bound, converted to a
 /// nullable suspend function type: the adapter invokes it, so completing the coroutine throws.
 const NULL_TYPE_PARAMETER_FUNCTION_VALUE_CONVERSION: &str = "import kotlin.coroutines.*\n\
-    suspend fun observe(f: (suspend () -> String?)?): String = if (f == null) \"null\" else \"adapter\"\n\
+    suspend fun observe(f: (suspend () -> String?)?): String = if (f == null) \"null\" else \"adapter:\" + f()\n\
     suspend fun <F : (() -> String?)?> pass(f: F) = observe(f)\n\
     fun box(): String {\n\
     \x20   var answer = \"unset\"\n\
@@ -185,7 +185,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             platforms: &[Platform::Jvm],
             fixed_on: &[],
             source: NULL_FUNCTION_VALUE_CONVERSION,
-            with_defect: Outcome::Answer("adapter".to_string()),
+            with_defect: Outcome::Answer("adapter:null".to_string()),
             fixed: Outcome::Answer("null".to_string()),
         }),
         Quirk::NullTypeParameterFunctionValueIsDereferenced => Some(Defect {
