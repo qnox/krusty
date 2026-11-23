@@ -12,7 +12,6 @@ XjdkRelease/jdkRelease6WithJvmTarget8Jdk11.args
 XjdkRelease/jdkRelease6WithJvmTarget8Jdk8.args
 XjdkRelease/jdkRelease6WithJvmTarget9.args
 XjdkRelease/jdkRelease6WithoutExplicitJvmTarget.args
-XjdkRelease/jdkRelease7WithJvmTarget8Jdk11.args
 XjdkRelease/jdkRelease7WithJvmTarget8Jdk8.args
 XjspecifyAnnotation/jspecifyDefault.args
 XjspecifyAnnotation/jspecifyFileRootsProgressive.args
@@ -78,7 +77,6 @@ diagnosticTests/classAndPartClash.args
 diagnosticTests/classAndTraitClash.args
 diagnosticTests/classpath.args
 diagnosticTests/conflictingJvmDeclarationsK2.args
-diagnosticTests/conflictingOverloads.args
 diagnosticTests/conflictingProjection.args
 diagnosticTests/crv/checker.args
 diagnosticTests/crv/checkerLv24.args
@@ -97,11 +95,9 @@ diagnosticTests/forbidKotlinPackageK2.args
 diagnosticTests/inlineCycle.args
 diagnosticTests/instanceAccessBeforeSuperCall.args
 diagnosticTests/javaSealedClass.args
-diagnosticTests/javaSrcWrongPackage.args
 diagnosticTests/kotlinPackage.args
 diagnosticTests/kt19628_13.args
 diagnosticTests/multipleTextRangesInDiagnosticsOrder.args
-diagnosticTests/recordAsSingleFileRoot.args
 diagnosticTests/requireKotlinCompilerVersion.args
 diagnosticTests/returnAsWhenKey.args
 diagnosticTests/sanitized-name.clash.args
@@ -115,15 +111,12 @@ explicitReturnTypesEnabled.args
 expression1.args
 extraArgCommonChecks/extraArgumentEmpty.args
 extraArgCommonChecks/extraArgumentInvalidValue.args
-extraArgCommonChecks/extraArgumentMultiple.args
 extraArgCommonChecks/extraArgumentPassedInObsoleteForm.args
 extraArgCommonChecks/extraBooleanArgOverrideReversed.args
 extraArgCommonChecks/extraBooleanArgumentEqualsFalse.args
 extraCheckers.args
 extraHelp.args
 fastJarFsDisabledAfterK2.args
-firErrorOnLastLine.args
-firErrorOnLastLineNoEol.args
 firFriendlyErrorIfNoJdkOptionIsSet.args
 globalWarningSuppression_correct.args
 globalWarningSuppression_incorrect.args
@@ -169,8 +162,6 @@ localTypeAliasesEnabled.args
 localTypeAliasesError.args
 modulesWithDependencyCycle.args
 multipleBackendThreads.args
-noJdkAvoidFailure.args
-noReflect.args
 noStdlibK2.args
 nonLocalDisabled.args
 nullabilityAnnotations.args
@@ -178,8 +169,6 @@ optIn/experimentalDeprecated.args
 optIn/experimentalDeprecatedWarning.args
 optIn/experimentalIsNotAnnotation.args
 optIn/experimentalIsNotMarker.args
-optIn/optInEmptyMessage.args
-optIn/optInEmptyMessageFir.args
 optIn/optInOverrideMessage.args
 optIn/optInOverrideMessageFir.args
 optIn/useDeclarationThatWasExperimentalWithoutExplicitImport.args
