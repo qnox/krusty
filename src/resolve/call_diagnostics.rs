@@ -773,29 +773,93 @@ impl Checker<'_> {
                 continue;
             }
 
-            let declared = self.file.lambda_param_types.get(&argument.0);
-            let roles = self.file.lambda_parameter_roles.get(&argument.0);
-            let spans = self.file.lambda_param_spans.get(&argument.0);
-            for (index, parameter) in params.iter().enumerate() {
+            self.report_uninferrable_lambda_parameters(argument, true);
+        }
+    }
+
+    /// The written parameters of `lambda` that name no type, by position: the ones a callee must
+    /// give a type to, or that nothing can.
+    pub(super) fn untyped_named_lambda_parameters(&self, lambda: ExprId) -> Vec<bool> {
+        let Expr::Lambda { params, .. } = self.file.expr(lambda) else {
+            return Vec::new();
+        };
+        let declared = self.file.lambda_param_types.get(&lambda.0);
+        let roles = self.file.lambda_parameter_roles.get(&lambda.0);
+        (0..params.len())
+            .map(|index| {
                 let explicitly_typed = declared
                     .and_then(|types| types.get(index))
                     .is_some_and(Option::is_some);
                 let named = roles
                     .and_then(|roles| roles.get(index))
                     .is_none_or(|role| *role == LambdaParameterRole::Named);
-                if explicitly_typed || !named {
-                    continue;
-                }
-                let span = spans
-                    .and_then(|spans| spans.get(index))
-                    .copied()
-                    .unwrap_or_else(|| self.span(argument));
-                self.diags.error(
-                    span,
+                named && !explicitly_typed
+            })
+            .collect()
+    }
+
+    /// Report each written parameter of `lambda` that names no type and has none to infer from:
+    /// as a call argument its callee could not give it a shape; standing alone it never had one.
+    pub(super) fn report_uninferrable_lambda_parameters(
+        &mut self,
+        lambda: ExprId,
+        as_argument: bool,
+    ) {
+        let Expr::Lambda { params, .. } = self.file.expr(lambda) else {
+            return;
+        };
+        let params = params.clone();
+        let uninferrable = self.untyped_named_lambda_parameters(lambda);
+        let spans = self.file.lambda_param_spans.get(&lambda.0);
+        let mut errors = Vec::new();
+        for (index, parameter) in params.iter().enumerate() {
+            if !uninferrable[index] {
+                continue;
+            }
+            let span = spans
+                .and_then(|spans| spans.get(index))
+                .copied()
+                .unwrap_or_else(|| self.span(lambda));
+            errors.push((
+                span,
+                if as_argument {
                     format!(
                         "cannot infer type for value parameter '{parameter}'. Specify it explicitly."
-                    ),
-                );
+                    )
+                } else {
+                    "an explicit type is required on a value parameter.".to_string()
+                },
+            ));
+        }
+        for (span, message) in errors {
+            self.diags.error(span, message);
+        }
+    }
+
+    /// Report the lambdas whose analysis found no function shape for a written parameter and
+    /// which no later recheck under a selected shape replaced: a probe's guess is not a
+    /// diagnostic, so this runs once the whole file is checked.
+    pub(super) fn report_unshaped_lambda_parameters(&mut self) {
+        let mut lambdas = std::mem::take(&mut self.unshaped_lambdas)
+            .into_iter()
+            .collect::<Vec<_>>();
+        lambdas.sort_by_key(|lambda| lambda.0);
+        for lambda in lambdas {
+            let still_unshaped = matches!(
+                self.expr_types[lambda.0 as usize].kind(),
+                TyKind::Fun(signature) if signature.params.iter().any(|parameter| parameter.mentions_error())
+            );
+            if still_unshaped {
+                if let Some((call, formal)) = self.unshaped_lambda_formals.remove(&lambda) {
+                    self.diags.error(
+                        self.call_callee_name_span(call),
+                        format!(
+                            "cannot infer type for type parameter '{formal}'. Specify it explicitly."
+                        ),
+                    );
+                }
+                let as_argument = self.file.is_call_argument(lambda);
+                self.report_uninferrable_lambda_parameters(lambda, as_argument);
             }
         }
     }

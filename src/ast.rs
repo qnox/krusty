@@ -2186,6 +2186,14 @@ impl File {
         &self.expr_arena[id.0 as usize]
     }
 
+    /// Whether `id` is written as an argument of a call. A diagnostic about an expression that
+    /// the call's callee could not shape reads this; it scans the arena, so keep it off hot paths.
+    pub fn is_call_argument(&self, id: ExprId) -> bool {
+        self.expr_arena
+            .iter()
+            .any(|expr| matches!(expr, Expr::Call { args, .. } if args.contains(&id)))
+    }
+
     pub fn stmt(&self, id: StmtId) -> &Stmt {
         &self.stmt_arena[id.0 as usize]
     }
