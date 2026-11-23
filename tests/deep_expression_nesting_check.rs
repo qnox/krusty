@@ -183,7 +183,7 @@ fn beyond_depth_guard_paren_nesting_degrades_on_two_mib_stack() {
         "the guard must diagnose one failed expression, not once per unwinding parser frame; got: {es:?}"
     );
     assert!(
-        !es.iter().any(|m| m.contains("expected ')'")),
+        !es.iter().any(|m| m.contains("Expecting ')'")),
         "balanced recovery must consume the rejected interior while leaving one closer for each enclosing frame; got: {es:?}"
     );
 }
@@ -278,7 +278,7 @@ fn beyond_depth_guard_paren_type_nesting_degrades_on_two_mib_stack() {
         "the guard must diagnose one failed type, not once per unwinding parser frame; got: {es:?}"
     );
     assert!(
-        !es.iter().any(|m| m.contains("expected ')'")),
+        !es.iter().any(|m| m.contains("Expecting ')'")),
         "balanced recovery must consume the rejected interior while leaving one closer for each enclosing frame; got: {es:?}"
     );
 }
@@ -304,7 +304,7 @@ fn beyond_depth_guard_annotation_value_nesting_degrades_on_two_mib_stack() {
         "annotation-value recursion must share the expression guard and diagnose once; got: {es:?}"
     );
     assert!(
-        !es.iter().any(|message| message.contains("expected ']'")),
+        !es.iter().any(|message| message.contains("Expecting ']'")),
         "balanced recovery must leave one ']' for every enclosing annotation array; got: {es:?}"
     );
 }
@@ -343,7 +343,7 @@ fn beyond_depth_guard_generic_type_nesting_degrades_on_two_mib_stack() {
         "the guard must diagnose one failed type, not once per unwinding parser frame; got: {es:?}"
     );
     assert!(
-        !es.iter().any(|m| m.contains("expected '>'")),
+        !es.iter().any(|m| m.contains("Expecting '>'")),
         "angle-aware recovery must leave one '>' for each enclosing type-argument frame; got: {es:?}"
     );
 }
@@ -386,7 +386,7 @@ fn beyond_depth_guard_block_nesting_degrades_on_two_mib_stack() {
         "the guard must diagnose one failed statement, not once per unwinding parser frame; got: {es:?}"
     );
     assert!(
-        !es.iter().any(|m| m.contains("expected '}'")),
+        !es.iter().any(|m| m.contains("Expecting '}'")),
         "balanced recovery must leave one '}}' for each enclosing block frame; got: {es:?}"
     );
 }
@@ -434,7 +434,7 @@ fn beyond_depth_guard_class_nesting_degrades_on_two_mib_stack() {
         "the guard must diagnose one failed declaration, not once per unwinding parser frame; got: {es:?}"
     );
     assert!(
-        !es.iter().any(|m| m.contains("expected '}'")),
+        !es.iter().any(|m| m.contains("Expecting '}'")),
         "balanced recovery must leave one '}}' for each enclosing class-body frame; got: {es:?}"
     );
 }
@@ -463,7 +463,7 @@ fn mixed_statement_and_declaration_nesting_shares_one_guard_on_two_mib_stack() {
         "mixed structural recursion must consume one shared budget and diagnose once; got: {es:?}"
     );
     assert!(
-        !es.iter().any(|message| message.contains("expected '}'")),
+        !es.iter().any(|message| message.contains("Expecting '}'")),
         "shared recovery must preserve every enclosing class/block closer; got: {es:?}"
     );
 }
