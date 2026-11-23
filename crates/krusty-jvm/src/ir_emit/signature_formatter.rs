@@ -494,7 +494,11 @@ impl<'a> JvmSignatureFormatter<'a> {
         if let Some(continuation) = Self::nothing_continuation(result) {
             return Some(continuation.to_string());
         }
-        let wildcard = if self.wildcard_is_redundant(TypeVariance::In, result)? {
+        // Below a supertype's arguments every declaration-site variance is written, redundant or
+        // not: `Function1<Continuation<-Object>;Object>`, the `in` over `Any` kept.
+        let wildcard = if wildcards != Wildcards::Generic
+            && self.wildcard_is_redundant(TypeVariance::In, result)?
+        {
             ""
         } else {
             "-"
