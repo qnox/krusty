@@ -350,6 +350,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
     }
 
+    /// What a cast to `ty` is checked against: a type parameter is only its bound at run time.
+    fn cast_bound(ty: Ty) -> Ty {
+        match ty.non_null().kind() {
+            TyKind::TyParam(_, bound) => bound,
+            _ => ty,
+        }
+    }
+
     /// The descriptor a CAST to `ty` must be checked against, or `None` when the cast is a
     /// representation change rather than a question about an object.
     ///
@@ -364,10 +372,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // run time and exactly what kotlinc checks: `fun <T : CharSequence> f(x: Any?) = x as T`
         // rejects a non-`CharSequence` inside `f`, before the call site's own cast to the argument
         // it was given. An unbounded parameter bounds at `Any?`, where there is nothing to check.
-        let ty = match ty.non_null().kind() {
-            TyKind::TyParam(_, bound) => bound,
-            _ => ty,
-        };
+        let ty = Self::cast_bound(ty);
         let target = ty.non_null();
         if let Some(class) = target
             .obj_internal()
@@ -379,6 +384,31 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         self.file.type_descriptor(target)
+    }
+
+    /// Check the erased `value` against `ty` as a cast to `ty` does, answering the value itself.
+    ///
+    /// A reference-held target the runtime names is a question about the object, so a value of
+    /// another class raises `ClassCastException` before the caller writes it. Any other target is a
+    /// representation change that the caller's own coercion realizes.
+    pub(super) fn check_erased_value(
+        &mut self,
+        value: Value,
+        ty: Ty,
+    ) -> Result<Value, Unsupported> {
+        let Some(descriptor) = self.checked_cast_target(ty)? else {
+            return Ok(value);
+        };
+        // The bound of a type parameter keeps its own nullability: `T : CharSequence?` admits null
+        // although the bare `T` does not say so.
+        let helper = if ty.is_nullable() || Self::cast_bound(ty).is_nullable() {
+            "kt_cast"
+        } else {
+            "kt_cast_non_null"
+        };
+        let descriptor = self.data_address(descriptor);
+        let checked = self.runtime_call(helper, &[any(), any()], any(), &[value, descriptor])?;
+        checked.ok_or_else(|| declined!("a `{helper}` that answers no value"))
     }
 
     /// The descriptor an `is`/`!is` operation asks the runtime about.
