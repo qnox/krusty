@@ -22,6 +22,12 @@ impl TypeOracle for DeclaredHierarchy<'_> {
             return Vec::new();
         };
         let arguments = ty.type_args();
+        // A supertype template names the class's own type parameters by semantic identity, which
+        // the class's generic signature records beside each written name.
+        let formals = self
+            .0
+            .class_signature_name(identity)
+            .map_or(&[][..], |signature| &signature.type_params[..]);
         class
             .supertypes
             .iter()
@@ -29,10 +35,9 @@ impl TypeOracle for DeclaredHierarchy<'_> {
                 ty_subst_supertype_template(
                     *supertype,
                     |name| {
-                        class
-                            .type_params
+                        formals
                             .iter()
-                            .position(|formal| formal == name)
+                            .position(|formal| formal.semantic_name == name)
                             .and_then(|index| arguments.get(index).copied())
                     },
                     |_| false,
