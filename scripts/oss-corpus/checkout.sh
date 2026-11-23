@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Checks one corpus project out at its pinned commit, applies its patch, and rewrites its Kotlin
-# version pin to the newest release in `kotlin-versions`. `run.sh` and `bench.sh` share it.
+# version pins (comma-separated `<file>:<key>`) to the newest release in `kotlin-versions`. `run.sh`
+# and `bench.sh` share it.
 #
 #   checkout.sh <name> <checkout dir>
 #
@@ -41,5 +42,8 @@ if [ -f "$here/patches/$name.patch" ]; then
   git -C "$checkout" apply "$here/patches/$name.patch"
 fi
 if [ "$pin" != - ]; then
-  python3 "$here/pin.py" "$checkout/${pin%%:*}" "${pin#*:}" "$kotlin"
+  IFS=, read -ra pins <<<"$pin"
+  for one in "${pins[@]}"; do
+    python3 "$here/pin.py" "$checkout/${one%%:*}" "${one#*:}" "$kotlin"
+  done
 fi
