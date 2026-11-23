@@ -8582,7 +8582,7 @@ impl<'a> Checker<'a> {
                     .flow_intersection_member_receiver(scope, receiver, &name)
                     .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
                 {
-                    rt = self.set(receiver, projected);
+                    rt = self.project_receiver_view(receiver, projected);
                 }
                 let receiver_callables = if rt != Ty::Error {
                     self.stable_receiver_callables(rt, &name)
@@ -14497,7 +14497,7 @@ impl<'a> Checker<'a> {
             .flow_intersection_property_receiver(scope, receiver, &name, true)
             .or_else(|| self.type_parameter_member_receiver(scope, receiver_ty, &name))
         {
-            receiver_ty = self.set(receiver, projected);
+            receiver_ty = self.project_receiver_view(receiver, projected);
         } else if let Some(projected) =
             self.nominal_intersection_property_receiver(receiver_ty, &name, true)
         {
@@ -43991,7 +43991,7 @@ impl<'a> Checker<'a> {
                 .flow_intersection_property_receiver(scope, receiver, &name, false)
                 .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
             {
-                rt = self.set(receiver, projected);
+                rt = self.project_receiver_view(receiver, projected);
             } else if let Some(projected) =
                 self.nominal_intersection_property_receiver(rt, &name, false)
             {
