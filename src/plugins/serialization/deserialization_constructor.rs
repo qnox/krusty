@@ -1,7 +1,7 @@
 //! Construction of the synthetic constructor used by serialization deserialization.
 
 use super::serial_elements::{SerialElements, SerialParent, WireElement};
-use super::{class_ty, value_class_underlying};
+use super::{class_ty, declare_runtime_call, value_class_underlying};
 use crate::ir::{
     Callee, ClassId, CtorDelegateTarget, DeclarationAnnotations, IrConst, IrExpr, IrFile,
     IrSecondaryConstructorRole, IrSecondaryCtor, IrStatic,
@@ -66,6 +66,8 @@ pub(super) fn add_cached_descriptor(
             dispatch_receiver: Some(receiver),
             args: vec![name, optional],
         }));
+        let added = statements[statements.len() - 1];
+        declare_runtime_call(ir, added, &[Ty::String, Ty::Boolean]);
     }
     let value = ir.add_expr(IrExpr::GetValue(descriptor_value));
     let value = ir.add_expr(IrExpr::TypeOp {
@@ -168,6 +170,15 @@ fn missing_field_check(
             dispatch_receiver: None,
             args: vec![seen_arg, required_arg, descriptor],
         });
+        declare_runtime_call(
+            ir,
+            report,
+            &[
+                Ty::Int,
+                Ty::Int,
+                class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+            ],
+        );
         let reported = ir.add_expr(IrExpr::Block {
             stmts: vec![report],
             value: None,
@@ -247,6 +258,15 @@ fn multi_mask_check(
         dispatch_receiver: None,
         args: vec![seen_array, required_array, descriptor],
     });
+    declare_runtime_call(
+        ir,
+        report,
+        &[
+            array_ty,
+            array_ty,
+            class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+        ],
+    );
     let reported = ir.add_expr(IrExpr::Block {
         stmts: vec![report],
         value: None,

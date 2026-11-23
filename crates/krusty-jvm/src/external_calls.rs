@@ -223,12 +223,27 @@ fn realize_expressions(
                     callable.physical_ret,
                 );
                 // The static construction takes its arguments as the checked constructor declares
-                // them. A construction that omits defaults supplies placeholders for them, which
-                // are not declared-parameter operands.
-                let declared_parameters = defaults
-                    .is_empty()
-                    .then(|| ir.construction_declared_params(expression).map(Box::from))
-                    .flatten();
+                // them.
+                let declared_parameters = ir.construction_declared_params(expression).map(
+                    |declared| -> Box<[krusty::types::Ty]> {
+                        if defaults.is_empty() {
+                            return Box::from(declared);
+                        }
+                        // Supplied operands adapt to their declared types; the placeholders, masks
+                        // and marker already have the stub's physical parameter types.
+                        real_params
+                            .iter()
+                            .enumerate()
+                            .take(args.len())
+                            .map(|(position, physical)| match declared.get(position) {
+                                Some(declared) if !defaults.contains(&(position as u32)) => {
+                                    *declared
+                                }
+                                _ => *physical,
+                            })
+                            .collect()
+                    },
+                );
                 ir.exprs[index] = IrExpr::Call {
                     callee: Box::new(Callee::Static {
                         owner,

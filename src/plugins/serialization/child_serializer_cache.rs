@@ -12,7 +12,7 @@
 //! classes may hold collections of each other — so the cache cannot be built while the loop that
 //! creates those classes is still running.
 use super::{
-    class_ty,
+    class_ty, declare_runtime_call,
     element_serializer::{
         child_cache_element_plan, contextual_property_plan, emit_cached_element_serializer,
         ElementSerializerPlan, UnderivableChildCacheElement,
@@ -345,7 +345,7 @@ pub(super) fn add_child_serializer_cache(
                 name: "PUBLICATION".to_string(),
                 descriptor: "Lkotlin/LazyThreadSafetyMode;".to_string(),
             });
-            elems.push(ir.add_expr(IrExpr::Call {
+            let lazy = ir.add_expr(IrExpr::Call {
                 callee: Box::new(Callee::Static {
                     owner: type_name("kotlin/LazyKt"),
                     name: "lazy".to_string(),
@@ -356,7 +356,16 @@ pub(super) fn add_child_serializer_cache(
                 }),
                 dispatch_receiver: None,
                 args: vec![mode, supplier],
-            }));
+            });
+            declare_runtime_call(
+                ir,
+                lazy,
+                &[
+                    class_ty("kotlin/LazyThreadSafetyMode"),
+                    class_ty("kotlin/jvm/functions/Function0"),
+                ],
+            );
+            elems.push(lazy);
         }
         let arr = ir.add_expr(IrExpr::Vararg {
             array_type: lazy_arr_ty,

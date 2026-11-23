@@ -243,6 +243,9 @@ fn copy_in_frame(
         let read = (frame.read_field)(ir, field as usize)?;
         // The copied node keeps its identity (its parents point at it); it becomes the read.
         ir.exprs[expression as usize] = ir.exprs[read as usize].clone();
+        if let Some(declared) = ir.call_declared_params.get(&read).cloned() {
+            ir.call_declared_params.insert(expression, declared);
+        }
         match frame.read_line {
             Some(line) => ir.set_source_line(expression, line),
             None => {

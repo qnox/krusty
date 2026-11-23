@@ -466,7 +466,8 @@ fn call_generated_serializer(
     // The declaration owns dispatch identity. A generic use owns its already-solved parameter and
     // result types; substituting those is not another overload/owner selection.
     let (params, ret) = instantiated_signature.unwrap_or((declared_params, declared_ret));
-    match receiver {
+    let declared = params.clone();
+    let call = match receiver {
         GeneratedSerializerReceiver::Static => ir.add_expr(IrExpr::Call {
             callee: Box::new(Callee::CrossFile {
                 facade: classifier,
@@ -515,7 +516,9 @@ fn call_generated_serializer(
                 args,
             })
         }
-    }
+    };
+    declare_runtime_call(ir, call, &declared);
+    call
 }
 
 /// Emit the accessor the plugin actually generated. A referenced classifier that has not been
@@ -572,7 +575,8 @@ fn call_external_companion_serializer(
     });
     let params = vec![kserializer_of(class_ty("kotlin/Any")); args.len()];
     let ret = kserializer_of(Ty::obj_name(classifier));
-    Some(ir.add_expr(IrExpr::Call {
+    let declared = params.clone();
+    let call = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::realized_virtual(
             owner,
             "serializer".to_string(),
@@ -582,7 +586,9 @@ fn call_external_companion_serializer(
         )),
         dispatch_receiver: Some(receiver),
         args,
-    }))
+    });
+    declare_runtime_call(ir, call, &declared);
+    Some(call)
 }
 
 /// The serialized type a reified round-trip call names, flattened into the placeholder's name
@@ -719,6 +725,9 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
             let position = ir.position(mid as ExprId);
             ir.settle_positions(first_built..ir.exprs.len(), position);
             ir.exprs[mid] = ir.exprs[realized as usize].clone();
+            if let Some(declared) = ir.call_declared_params.get(&realized).cloned() {
+                ir.call_declared_params.insert(mid as u32, declared);
+            }
             continue;
         }
         // Operand/name layout is fixed by the plugin planner; a malformed node is left untouched
@@ -752,9 +761,27 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
             args: vec![ser, arg],
         };
         match kind {
-            "encodeToString" => ir.exprs[mid] = call(ENCODE_TO_STRING_DESC),
+            "encodeToString" => {
+                ir.exprs[mid] = call(ENCODE_TO_STRING_DESC);
+                declare_runtime_call(
+                    ir,
+                    mid as ExprId,
+                    &[
+                        class_ty("kotlinx/serialization/SerializationStrategy"),
+                        Ty::nullable(class_ty("kotlin/Any")),
+                    ],
+                );
+            }
             "decodeFromString" => {
                 let decoded = ir.add_expr(call(DECODE_FROM_STRING_DESC));
+                declare_runtime_call(
+                    ir,
+                    decoded,
+                    &[
+                        class_ty("kotlinx/serialization/DeserializationStrategy"),
+                        Ty::String,
+                    ],
+                );
                 ir.exprs[mid] = IrExpr::TypeOp {
                     op: IrTypeOp::Cast,
                     arg: decoded,
@@ -812,6 +839,13 @@ fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
     } else {
         return None; // reference/richer types: decodeSerializableElement (future work)
     })
+}
+
+/// Publish the runtime declaration's parameters on a call the plugin generates. The serialization
+/// runtime and the JVM runtime support it targets declare no value-class parameter, so each is the
+/// parameter's own type.
+fn declare_runtime_call(ir: &mut IrFile, call: ExprId, parameters: &[Ty]) {
+    ir.call_declared_params.insert(call, parameters.into());
 }
 
 /// An `invokeinterface` callee on a runtime interface (`Encoder`/`CompositeEncoder`/…).
@@ -881,7 +915,7 @@ fn is_nullable(ty: &Ty) -> bool {
 /// builds the element serializer for a NULLABLE property carrying an explicit serializer — the nullable
 /// descriptor's `serialName` gains the trailing `?`.
 fn wrap_nullable_serializer(ir: &mut IrFile, base: ExprId) -> ExprId {
-    ir.add_expr(IrExpr::Call {
+    let call = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::Static {
             owner: type_name("kotlinx/serialization/builtins/BuiltinSerializersKt"),
             name: "getNullable".to_string(),
@@ -891,7 +925,9 @@ fn wrap_nullable_serializer(ir: &mut IrFile, base: ExprId) -> ExprId {
         }),
         dispatch_receiver: None,
         args: vec![base],
-    })
+    });
+    declare_runtime_call(ir, call, &[class_ty(KSERIALIZER_FQ)]);
+    call
 }
 
 /// The element serializer for property `name` of type `ty` IF it is contextual (`name` ∈ `contextual`):
@@ -942,7 +978,7 @@ fn contextual_kclass(ir: &mut IrFile, classifier: TypeName) -> ExprId {
     let classlit = ir.add_expr(IrExpr::ClassConst {
         internal: Some(classifier),
     });
-    ir.add_expr(IrExpr::Call {
+    let call = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::Static {
             owner: type_name("kotlin/jvm/internal/Reflection"),
             name: "getOrCreateKotlinClass".to_string(),
@@ -951,7 +987,9 @@ fn contextual_kclass(ir: &mut IrFile, classifier: TypeName) -> ExprId {
         }),
         dispatch_receiver: None,
         args: vec![classlit],
-    })
+    });
+    declare_runtime_call(ir, call, &[class_ty("java/lang/Class")]);
+    call
 }
 
 /// `new PolymorphicSerializer(<base>::class)` — the element serializer for a star-projection / erased
@@ -971,6 +1009,7 @@ fn build_polymorphic_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId
         dispatch_receiver: None,
         args: vec![classlit],
     });
+    declare_runtime_call(ir, kclass, &[class_ty("java/lang/Class")]);
     ir.new_external(
         "kotlinx/serialization/PolymorphicSerializer",
         "(Lkotlin/reflect/KClass;)V",
@@ -1095,6 +1134,7 @@ impl SerializationPlugin {
                 dispatch_receiver: None,
                 args: vec![classlit],
             });
+            declare_runtime_call(ir, kclass, &[class_ty("java/lang/Class")]);
             ir.new_external_name(custom, "(Lkotlin/reflect/KClass;)V", vec![kclass])
         };
         let ret = ir.add_expr(IrExpr::Return(Some(inst)));

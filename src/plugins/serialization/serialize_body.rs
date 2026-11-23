@@ -2,8 +2,9 @@
 
 use super::constructed_standard_serializers::constructed_standard_serializer;
 use super::{
-    build_field_serializer_instance, class_ty, contextual_serializer_for, declared_serializer_of,
-    encode_element_method, is_nullable, property_is_contextual, virtual_iface,
+    build_field_serializer_instance, class_ty, contextual_serializer_for, declare_runtime_call,
+    declared_serializer_of, encode_element_method, is_nullable, property_is_contextual,
+    virtual_iface,
 };
 use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile};
 use crate::libraries::InlineKind;
@@ -38,6 +39,28 @@ fn overridable_getter_descriptor(ctx: &PluginContext, property: &str, ty: &Ty) -
     super::ty_descriptor(ctx, ty).unwrap_or_else(|| {
         panic!("the target describes no getter result for overridable serialized property `{property}`")
     })
+}
+
+/// The parameters of a serializable class's `write$Self`: the instance, the composite encoder and
+/// descriptor it writes through, and a serializer for each type parameter.
+fn declare_write_self(
+    ir: &mut IrFile,
+    call: ExprId,
+    class: crate::types::TypeName,
+    type_serializers: usize,
+) {
+    let parameters = [
+        Ty::obj_name(class),
+        class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
+        class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+    ]
+    .into_iter()
+    .chain(std::iter::repeat_n(
+        class_ty("kotlinx/serialization/KSerializer"),
+        type_serializers,
+    ))
+    .collect::<Vec<_>>();
+    declare_runtime_call(ir, call, &parameters);
 }
 
 fn encode_serializable_element(
@@ -286,11 +309,18 @@ impl SerializeBody<'_> {
                     }
                 }
             };
-            stmts.push(ir.add_expr(IrExpr::Call {
+            let write_self = ir.add_expr(IrExpr::Call {
                 callee: Box::new(callee),
                 dispatch_receiver: None,
                 args,
-            }));
+            });
+            declare_write_self(
+                ir,
+                write_self,
+                inherited.owner,
+                inherited.type_arguments.len(),
+            );
+            stmts.push(write_self);
         }
         // Own element `i` is written from backing field `field`; they differ after a transient
         // property. It is element `offset + i` of the wire shape, after the inherited ones.
@@ -416,7 +446,7 @@ impl SerializeBody<'_> {
                     break;
                 }
             } else if let Some((mname, mdesc)) = encode_element_method(ty) {
-                stmts.push(ir.add_expr(IrExpr::Call {
+                let encode = ir.add_expr(IrExpr::Call {
                     callee: Box::new(virtual_iface(
                         "kotlinx/serialization/encoding/CompositeEncoder",
                         mname,
@@ -424,7 +454,17 @@ impl SerializeBody<'_> {
                     )),
                     dispatch_receiver: Some(c),
                     args: vec![d, idx, v],
-                }));
+                });
+                declare_runtime_call(
+                    ir,
+                    encode,
+                    &[
+                        class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                        Ty::Int,
+                        *ty,
+                    ],
+                );
+                stmts.push(encode);
             } else if let Some(inst) = element_serializer(ir, ctx, i, pname, ty) {
                 // A non-null reference element with a builtin/derivable serializer (e.g.
                 // `Uuid`) — encodeSerializableElement(desc, i, <Elem>Serializer, value.getX()).
@@ -466,6 +506,14 @@ impl SerializeBody<'_> {
                     dispatch_receiver: Some(cc),
                     args: vec![cd, ci],
                 });
+                declare_runtime_call(
+                    ir,
+                    should,
+                    &[
+                        class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                        Ty::Int,
+                    ],
+                );
                 // Re-read the property because one IR expression cannot occupy two tree nodes.
                 let cur = read_property(ir, field, ty);
                 let def = match &constant_default {
@@ -618,6 +666,13 @@ impl SerializeBody<'_> {
                 dispatch_receiver: Some(enc),
                 args: vec![dbegin],
             });
+            declare_runtime_call(
+                ir,
+                begin,
+                &[class_ty(
+                    "kotlinx/serialization/descriptors/SerialDescriptor",
+                )],
+            );
             let cvar = ir.add_expr(IrExpr::Variable {
                 index: 4,
                 ty: class_ty("kotlinx/serialization/encoding/CompositeEncoder"),
@@ -628,6 +683,7 @@ impl SerializeBody<'_> {
             let woutput = ir.add_expr(IrExpr::GetValue(4));
             let wdesc = ir.add_expr(IrExpr::GetValue(3));
             let type_serializers = type_parameter_serializers.reads(ir);
+            let type_serializer_count = type_serializers.len();
             let type_serializer_descriptors =
                 "Lkotlinx/serialization/KSerializer;".repeat(type_serializers.len());
             let call_write_self = ir.add_expr(IrExpr::Call {
@@ -645,6 +701,7 @@ impl SerializeBody<'_> {
                     .chain(type_serializers)
                     .collect(),
             });
+            declare_write_self(ir, call_write_self, serialized_name, type_serializer_count);
             let cend = ir.add_expr(IrExpr::GetValue(4));
             let dend = ir.add_expr(IrExpr::GetValue(3));
             let end = ir.add_expr(IrExpr::Call {
@@ -656,6 +713,13 @@ impl SerializeBody<'_> {
                 dispatch_receiver: Some(cend),
                 args: vec![dend],
             });
+            declare_runtime_call(
+                ir,
+                end,
+                &[class_ty(
+                    "kotlinx/serialization/descriptors/SerialDescriptor",
+                )],
+            );
             record_serialize_lines(ir, foo_id, fid, dvar);
             let body = ir.add_expr(IrExpr::Block {
                 stmts: vec![dvar, cvar, call_write_self, end],

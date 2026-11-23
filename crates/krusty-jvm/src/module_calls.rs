@@ -625,6 +625,11 @@ pub(super) fn realize_super_calls(
         else {
             continue;
         };
+        // The selected declaration's checked parameters are the call's declared vector unless
+        // lowering already published one for it.
+        ir.call_declared_params
+            .entry(raw as ExprId)
+            .or_insert_with(|| params.clone().into_boxed_slice());
         // The current-module declaration a realized call keeps as its source. A dependency
         // declaration whose ordinary descriptor is not a legal nonvirtual entry (a legacy
         // interface body) names its holder: realize the selected declaration there, as a
@@ -783,6 +788,9 @@ pub(super) fn realize_super_calls(
                         ));
                     }
                 };
+                // The bridge forwards its own parameters, which are the declaration's.
+                ir.call_declared_params
+                    .insert(invocation, params.clone().into_boxed_slice());
                 let body = if ret == krusty::types::Ty::Unit {
                     let returned = ir.add_expr(IrExpr::Return(None));
                     ir.add_expr(IrExpr::Block {
