@@ -215,15 +215,26 @@ struct AdapterSite {
     own_invoke: bool,
 }
 
+/// The class the first node of a source reference was realized as, with what a copy needs to
+/// instantiate it.
+struct SharedCarrier {
+    adapter: krusty::ir::FunId,
+    class: krusty::ir::ClassId,
+    /// The captures' physical types, before a bound-context array replaces its values.
+    capture_types: Vec<Ty>,
+    bound: bool,
+}
+
+/// The carrier class of each source reference realized so far, by the name the local-class walk
+/// gave it.
+type CarrierClasses = krusty::fx_hash::HashMap<krusty::types::TypeName, SharedCarrier>;
+
 fn realize_adapter_reference(
     ir: &mut IrFile,
     callables: &krusty::backend::CheckedBackendCallables,
     facades: Facades<'_>,
     site: AdapterSite,
-    carriers: &mut krusty::fx_hash::HashMap<
-        krusty::types::TypeName,
-        (krusty::ir::FunId, krusty::ir::ClassId),
-    >,
+    carriers: &mut CarrierClasses,
     reference: krusty::ir::IrCallableReference,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
     let AdapterSite {
@@ -231,6 +242,40 @@ fn realize_adapter_reference(
         adapter_owner,
         own_invoke,
     } = site;
+    // Nodes that carry one source reference's name are copies of it (an inline splice copies the
+    // node and its adapter, and a lambda keeps a template beside its implementation). They are one
+    // class, which each copy instantiates with its own captures. The first copy's own `invoke` may
+    // already have taken the adapter apart, so a copy reads nothing from it.
+    let named = crate::local_class_names::callable_reference_name(ir, expression as u32);
+    let shared = named.and_then(|name| {
+        carriers
+            .get(&name)
+            .filter(|shared| shared.adapter == reference.adapter)
+            .map(|shared| {
+                (
+                    name,
+                    shared.class,
+                    shared.capture_types.clone(),
+                    shared.bound,
+                )
+            })
+    });
+    if let Some((name, class, capture_types, bound)) = shared {
+        let carrier = carrier_expression(
+            ir,
+            CarrierShape {
+                internal: name,
+                class,
+                capture_types,
+                bound,
+                bound_contexts: reference.bound_contexts as usize,
+            },
+            reference.captures,
+            reference.bound_receiver,
+        );
+        install_carrier(ir, expression, carrier, name);
+        return Ok(());
+    }
     let function = ir
         .functions
         .get(reference.adapter as usize)
@@ -470,19 +515,7 @@ fn realize_adapter_reference(
         reflection_parameters.push(continuation);
         reflection_result = Ty::obj("kotlin/Any");
     }
-    // Nodes that carry one source reference's name are copies of it (an inline splice copies the
-    // node and its adapter, and a lambda keeps a template beside its implementation). They are one
-    // class: each copy instantiates it with its own captures.
-    let shared =
-        crate::local_class_names::callable_reference_name(ir, expression as u32).and_then(|name| {
-            carriers
-                .get(&name)
-                .filter(|(adapter, _)| *adapter == reference.adapter)
-                .map(|&(_, class)| (name, class))
-        });
-    let (internal, class) = if let Some(shared) = shared {
-        shared
-    } else {
+    let (internal, class) = {
         let internal = reference_class_name(ir, facades.current, expression, "function");
         let mut class = IrClass::synthetic(internal);
         class.enclosure = reference_enclosure(ir, expression);
@@ -549,15 +582,61 @@ fn realize_adapter_reference(
                 adapter_owner,
             );
         }
-        if crate::local_class_names::callable_reference_name(ir, expression as u32)
-            == Some(internal)
-        {
-            carriers.insert(internal, (reference.adapter, class));
+        if named == Some(internal) {
+            carriers.insert(
+                internal,
+                SharedCarrier {
+                    adapter: reference.adapter,
+                    class,
+                    capture_types: capture_types.clone(),
+                    bound,
+                },
+            );
         }
         (internal, class)
     };
-    let mut constructor_arguments = reference.captures;
-    let mut capture_types = capture_types;
+    let carrier = carrier_expression(
+        ir,
+        CarrierShape {
+            internal,
+            class,
+            capture_types,
+            bound,
+            bound_contexts,
+        },
+        reference.captures,
+        reference.bound_receiver,
+    );
+    install_carrier(ir, expression, carrier, internal);
+    Ok(())
+}
+
+/// What instantiating a reference's carrier class takes.
+struct CarrierShape {
+    internal: krusty::types::TypeName,
+    class: krusty::ir::ClassId,
+    /// The captures' physical types, as the adapter declares them.
+    capture_types: Vec<Ty>,
+    bound: bool,
+    bound_contexts: usize,
+}
+
+/// A reference's value: a new carrier holding its captures and bound receiver, or the class's
+/// shared instance when it holds none.
+fn carrier_expression(
+    ir: &mut IrFile,
+    shape: CarrierShape,
+    captures: Vec<ExprId>,
+    bound_receiver: Option<ExprId>,
+) -> IrExpr {
+    let CarrierShape {
+        internal,
+        class,
+        mut capture_types,
+        bound,
+        bound_contexts,
+    } = shape;
+    let mut constructor_arguments = captures;
     if bound_contexts > 0 {
         // The carrier takes the bound context values as one `Object[]`, each boxed as the array
         // holds it: `new Object[] { c0, c1 }`.
@@ -583,9 +662,9 @@ fn realize_adapter_reference(
         capture_types.drain(..bound_contexts);
         capture_types.insert(0, array_type);
     }
-    constructor_arguments.extend(reference.bound_receiver);
+    constructor_arguments.extend(bound_receiver);
     // The constructor's declared parameters say that a value-class receiver is bound as its box.
-    let carrier = match constructor_arguments.as_slice() {
+    match constructor_arguments.as_slice() {
         arguments if !arguments.is_empty() => {
             let mut constructor_parameters = capture_types;
             if bound {
@@ -608,9 +687,7 @@ fn realize_adapter_reference(
             field: "INSTANCE",
         },
         _ => unreachable!("empty and non-empty capture shapes are exhaustive"),
-    };
-    install_carrier(ir, expression, carrier, internal);
-    Ok(())
+    }
 }
 
 /// Replace the reference expression with its carrier. kotlinc's `FunctionReferenceLowering` hands

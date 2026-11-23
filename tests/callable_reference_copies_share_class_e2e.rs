@@ -45,3 +45,41 @@ fn copies_of_a_source_reference_are_one_class() {
             .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
     }
 }
+
+const LOCAL_PROGRAM: &str =
+    include_str!("box_regressions/localFunctionReferenceInInlineLambdaCopies.kt");
+const LOCAL_STEM: &str = "LocalFunctionReferenceInInlineLambdaCopies";
+
+/// The first copy's own `invoke` takes the shared adapter apart (it becomes an instance method),
+/// so a later copy instantiates the class without reading the adapter again.
+#[test]
+fn a_copy_of_a_local_function_reference_reads_nothing_from_the_adapter() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(LOCAL_PROGRAM, LOCAL_STEM),
+        "OK"
+    );
+    let classes = common::compile_in_process_metadata_cp_module_target(
+        LOCAL_PROGRAM,
+        LOCAL_STEM,
+        &[common::stdlib_jar()],
+        "main",
+        None,
+    )
+    .expect("the program compiles");
+    let mut names = classes
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "LocalFunctionReferenceInInlineLambdaCopiesKt",
+            "LocalFunctionReferenceInInlineLambdaCopiesKt$test$1$1",
+        ]
+    );
+    let class = "LocalFunctionReferenceInInlineLambdaCopiesKt$test$1$1";
+    common::byte_diff_against_kotlinc_cp(LOCAL_STEM, LOCAL_PROGRAM, class, &[common::stdlib_jar()])
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
+}
