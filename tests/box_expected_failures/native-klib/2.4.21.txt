@@ -193,7 +193,6 @@ companionBlocksAndExtensions/multipleBlocks.kt
 companionBlocksAndExtensions/nestedClasses.kt
 companionBlocksAndExtensions/resolutionPriority.kt
 companionBlocksAndExtensions/visibility.kt
-compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
 compileKotlinAgainstKotlin/inlineClasses/funInterface.kt
@@ -499,7 +498,6 @@ coroutines/multiModule/inlineMultiModule.kt
 coroutines/multiModule/inlineMultiModuleOverride.kt
 coroutines/multiModule/inlineMultiModuleWithController.kt
 coroutines/multiModule/inlineMultiModuleWithInnerInlining.kt
-coroutines/multiModule/simple.kt
 coroutines/multipleInvokeCallsInsideInlineLambda2.kt
 coroutines/multipleInvokeCallsInsideInlineLambda3.kt
 coroutines/nestedTryCatch.kt
