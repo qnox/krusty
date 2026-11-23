@@ -18,5 +18,4 @@ contextParameters/callableReferences/contextual/delegation/varProperty.kt
 contextParameters/callableReferences/contextual/generic.kt
 contextParameters/callableReferences/contextual/valueClassContextArg.kt
 contextParameters/contextualCallableReferenceReturnType.kt
-inference/selfBoundedVariableFromFunctionTypeBeforeElvisThrow.kt
 suspendConversion/suspendConversionNullableNpe2.kt

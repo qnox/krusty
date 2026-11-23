@@ -242,6 +242,45 @@ impl ModuleClasses {
             .chain(self.interfaces.iter().map(|(name, _)| *name))
     }
 
+    /// The member of `class`, or of the nearest superclass of the module that has one, that
+    /// realizes the dependency property getter `getter`: the class's own override, or the
+    /// forwarder an interface delegation generates for it. The key is the one the module plan
+    /// numbers that member under, so every file reaches it at the same slot.
+    pub fn dependency_getter_implementation(
+        &self,
+        class: TypeName,
+        getter: crate::fir::ExternalCallableId,
+    ) -> Option<super::module_slots::PlanKey> {
+        let target = ResolvedPropertyOverrideTarget::External(getter);
+        let mut at = Some(class);
+        while let Some(name) = at {
+            let declared = self.classes.get(&name)?;
+            if let Some(edge) = declared
+                .property_overrides
+                .iter()
+                .find(|edge| edge.overridden == target)
+            {
+                return Some(super::module_slots::PlanKey::accessor(
+                    edge.implementation,
+                    false,
+                ));
+            }
+            if let Some(ordinal) = declared.forwarders.iter().position(|forwarder| {
+                forwarder
+                    .realizes
+                    .iter()
+                    .any(|member| matches!(member, ForwardedMember::Getter(property) if *property == target))
+            }) {
+                return Some(super::module_slots::PlanKey::Forwarder {
+                    class: name,
+                    ordinal: u32::try_from(ordinal).expect("too many forwarders"),
+                });
+            }
+            at = declared.superclass;
+        }
+        None
+    }
+
     /// The named classes of the module whose declared superclass is `superclass`.
     pub fn subclasses_of(&self, superclass: TypeName) -> impl Iterator<Item = TypeName> + '_ {
         self.classes

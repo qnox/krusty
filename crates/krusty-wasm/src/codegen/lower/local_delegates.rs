@@ -9,9 +9,7 @@ use krusty::fir::LocalDelegatedPropertyId;
 use krusty::fx_hash::HashMap;
 use krusty::ir::{IrExpr, IrFile, IrLocalDelegateAccess, IrLocalPropertyReference, PropertyId};
 
-use super::super::super::encode::{
-    BlockType, CompositeType, FieldType, Function, Module, StorageType, SubType, ValType,
-};
+use super::super::super::encode::{BlockType, CompositeType, Function, Module, SubType, ValType};
 use super::super::super::runtime::Runtime;
 use super::{carrier, Body, FileContext, Unsupported};
 
@@ -19,6 +17,8 @@ use super::{carrier, Body, FileContext, Unsupported};
 pub(super) struct Prepared {
     helpers: HashMap<(u32, bool), u32>,
     property_type: Option<u32>,
+    /// The table global of the property objects' class, once a use has declared it.
+    property_table: std::cell::Cell<Option<u32>>,
     property_objects: HashMap<LocalDelegatedPropertyId, u32>,
     /// One object per delegated member property, the value `getValue` receives.
     delegated_properties: HashMap<PropertyId, u32>,
@@ -32,11 +32,14 @@ pub(super) fn prepare(ir: &IrFile, module: &mut Module, runtime: &Runtime) -> Pr
     let mut property_struct = |module: &mut Module| {
         *property_type.get_or_insert_with(|| {
             module.subtype(SubType {
-                composite: CompositeType::Struct(vec![FieldType {
-                    storage: StorageType::Val(runtime.string_type()),
-                    mutable: false,
-                }]),
-                supertype: None,
+                composite: CompositeType::Struct(vec![
+                    super::super::super::objects::immutable(ValType::reference(
+                        runtime.objects.any_table,
+                    )),
+                    super::super::super::objects::immutable(ValType::I32),
+                    super::super::super::objects::immutable(runtime.string_type()),
+                ]),
+                supertype: Some(runtime.objects.identified),
                 open: false,
             })
         })
@@ -76,6 +79,7 @@ pub(super) fn prepare(ir: &IrFile, module: &mut Module, runtime: &Runtime) -> Pr
     Prepared {
         helpers,
         property_type,
+        property_table: std::cell::Cell::new(None),
         property_objects,
         delegated_properties,
     }
@@ -195,8 +199,7 @@ impl Body<'_> {
             .delegates
             .property_type
             .ok_or_else(|| "a delegated property reference without its type".to_string())?;
-        self.property_reference_object(name, global, struct_type);
-        Ok(())
+        self.property_reference_object(name, global, struct_type)
     }
 
     pub(super) fn local_property_reference(
@@ -212,16 +215,61 @@ impl Body<'_> {
             .delegates
             .property_type
             .ok_or_else(|| "a local property reference without its type".to_string())?;
-        self.property_reference_object(&reference.name, global, struct_type);
-        Ok(())
+        self.property_reference_object(&reference.name, global, struct_type)
     }
 
-    fn property_reference_object(&mut self, name: &str, global: u32, struct_type: u32) {
+    /// The class of this file's property objects, declared on first use. Its instances are
+    /// `KProperty`s whose `name` is their own field; they compare and hash by identity.
+    fn property_object_table(&mut self, struct_type: u32) -> Result<u32, Unsupported> {
+        if let Some(table) = self.delegates.property_table.get() {
+            return Ok(table);
+        }
+        let objects = &mut self.runtime.objects;
+        let [_, _, to_string_ty] = objects.any_slot_types;
+        let (class, itable) =
+            objects
+                .interfaces
+                .class(self.module, objects.itable, vec![struct_type]);
+        for interface in [
+            krusty::types::type_name("kotlin/reflect/KProperty"),
+            krusty::types::type_name("kotlin/reflect/KCallable"),
+        ] {
+            objects.interfaces.instance_of(class, interface);
+        }
+        let equals = objects.identity_equals;
+        let to_string = objects.trap(self.module, to_string_ty);
+        let hash_code = self.runtime.identity.hash_code;
+        let mut init = super::super::super::encode::Code::default();
+        for function in [equals, hash_code, to_string] {
+            self.module.reference_function(function);
+            init.ref_func(function);
+        }
+        init.global_get(itable);
+        self.runtime.objects.push_type_info(&mut init, None);
+        init.struct_new(self.runtime.objects.any_table);
+        let table = self
+            .module
+            .constant_global(ValType::reference(self.runtime.objects.any_table), init);
+        self.runtime
+            .reference_name_field(self.module, class, struct_type, NAME_FIELD)?;
+        self.delegates.property_table.set(Some(table));
+        Ok(table)
+    }
+
+    fn property_reference_object(
+        &mut self,
+        name: &str,
+        global: u32,
+        struct_type: u32,
+    ) -> Result<(), Unsupported> {
+        let table = self.property_object_table(struct_type)?;
         let units = name.encode_utf16().collect::<Vec<_>>();
         self.code
             .global_get(global)
             .ref_is_null()
-            .if_(BlockType::Empty);
+            .if_(BlockType::Empty)
+            .global_get(table)
+            .call(self.runtime.identity.allocate);
         self.runtime
             .string_constant(self.module, &mut self.code, &units);
         self.code
@@ -229,5 +277,9 @@ impl Body<'_> {
             .global_set(global)
             .end()
             .global_get(global);
+        Ok(())
     }
 }
+
+/// The field of a property object holding its name, after the table and the identity hash.
+const NAME_FIELD: u32 = 2;

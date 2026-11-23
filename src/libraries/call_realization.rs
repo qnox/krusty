@@ -341,6 +341,22 @@ impl<'a> KlibBodyCallable<'a> {
     /// Whether two selected edges describe the same dependency declaration before their
     /// call-site singleton dispatch is applied. A KLIB identity names one declaration, while
     /// inherited object selections may legitimately contribute several receiver variants.
+    /// This edge with its accessor facet as `accessor` numbers its property: every provider
+    /// numbers the properties it declares itself, so one program's support names each property
+    /// in the numbering of the provider it lowers with.
+    pub(crate) fn with_accessor<'b>(
+        self,
+        accessor: &'b super::KlibBodyAccessor,
+    ) -> KlibBodyCallable<'b>
+    where
+        'a: 'b,
+    {
+        KlibBodyCallable {
+            accessor: Some(accessor),
+            ..self
+        }
+    }
+
     pub(crate) fn same_declaration_contract(self, other: Self) -> bool {
         self.accessor == other.accessor
             && self.name == other.name
@@ -587,6 +603,7 @@ impl LibraryCallable {
             nonvirtual_realization: None,
             overridden_call_realizations: Box::new([]),
             declared_ret: None,
+            result_alias: None,
             overridden_results: Box::new([]),
             enhanced_result: crate::libraries::EnhancedResult::NONE,
         }

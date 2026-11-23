@@ -929,6 +929,16 @@ fn compose_library_lambda_parameters_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_lambdas_in_plain_functions_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("lambdasInPlainFunctions");
+}
+
+#[test]
+fn compose_captured_lambdas_in_plain_functions_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("capturedLambdasInPlainFunctions");
+}
+
+#[test]
 fn compose_call_initializers_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("callInitializers");
 }
