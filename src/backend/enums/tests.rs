@@ -989,3 +989,53 @@ fn base_members_are_recognized_by_their_semantic_owner() {
         None
     );
 }
+
+/// Realize `ir` for Kotlin/Wasm and withdraw the entries getters nothing reads.
+fn withdrawn(mut ir: IrFile) -> (IrFile, super::super::DependencyExportSignatures) {
+    let mut exports = super::super::DependencyExportSignatures::default();
+    super::realize(
+        &mut ir,
+        super::Contract::KotlinWasm,
+        Some(super::EntriesFactory::Selected(factory())),
+        &mut exports,
+    )
+    .expect("the enums are realized");
+    super::withdraw_unread_entries(&mut [(&mut ir, &mut exports)]);
+    (ir, exports)
+}
+
+fn publishes_entries(exports: &super::super::DependencyExportSignatures) -> bool {
+    exports.instance_entries().iter().any(|(instance, _)| {
+        matches!(
+            instance,
+            super::super::instance_links::InstanceEntry::EnumMember {
+                member: super::StaticMember::Entries,
+                ..
+            }
+        )
+    })
+}
+
+#[test]
+fn an_entries_getter_nothing_reads_is_withdrawn_so_its_factory_call_is_no_emitted_use() {
+    let mut ir = IrFile::default();
+    shade(&mut ir);
+    declare(&mut ir, "box", Vec::new(), Vec::new());
+    let (ir, exports) = withdrawn(ir);
+
+    assert!(ir.inline_only_fns.contains(&function(&ir, "Shade$entries")));
+    assert!(!publishes_entries(&exports));
+}
+
+#[test]
+fn an_entries_getter_a_body_reads_is_kept_and_published() {
+    let mut ir = IrFile::default();
+    shade(&mut ir);
+    let shade = type_name("Shade");
+    let entries = ir.add_expr(IrExpr::EnumEntries { classifier: shade });
+    declare(&mut ir, "box", Vec::new(), vec![entries]);
+    let (ir, exports) = withdrawn(ir);
+
+    assert!(!ir.inline_only_fns.contains(&function(&ir, "Shade$entries")));
+    assert!(publishes_entries(&exports));
+}

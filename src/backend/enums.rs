@@ -62,7 +62,7 @@ mod tests;
 mod uses;
 
 use crate::fx_hash::HashMap;
-use crate::ir::{ClassId, FunId, IrClass, IrExpr, IrFile};
+use crate::ir::{Callee, ClassId, FunId, IrClass, IrExpr, IrFile};
 use crate::types::TypeName;
 
 /// What one enum class of this file was realized as.
@@ -320,4 +320,49 @@ fn declared_base_member(
 /// its enum instead, so it is not one.
 fn is_enum(class: &IrClass) -> bool {
     class.superclass == crate::types::wk::kotlin_enum()
+}
+
+/// Leave out the `entries` getter of every enum no emitted body of the program reads, when the
+/// getter builds its list by calling the stdlib's `enumEntries` ([`Contract::builds_entries_by_factory`]).
+/// An unread getter is not an emitted body, so the dependency support its call selects is not an
+/// emitted use either: a program that never reads `entries` does not carry the stdlib's list
+/// classes. A read in any file of the program, whether of an enum that file declares or another
+/// file's, keeps the getter; the entry is withdrawn with it.
+pub fn withdraw_unread_entries(
+    files: &mut [(&mut IrFile, &mut super::DependencyExportSignatures)],
+) {
+    let mut read: crate::fx_hash::HashSet<TypeName> = crate::fx_hash::HashSet::default();
+    for (ir, _) in files.iter() {
+        read.extend(ir.exprs.iter().filter_map(|node| match node {
+            IrExpr::EnumEntries { classifier } => Some(*classifier),
+            _ => None,
+        }));
+    }
+    for (ir, exports) in files.iter_mut() {
+        let getters: Vec<(TypeName, FunId)> = exports
+            .instance_entries()
+            .iter()
+            .filter_map(|(instance, getter)| match instance {
+                super::instance_links::InstanceEntry::EnumMember {
+                    classifier,
+                    member: StaticMember::Entries,
+                } => Some((*classifier, *getter)),
+                _ => None,
+            })
+            .collect();
+        for (classifier, getter) in getters {
+            let called = ir.exprs.iter().any(|node| {
+                matches!(node, IrExpr::Call { callee, .. }
+                    if matches!(&**callee, Callee::Local(function) if *function == getter))
+            });
+            if read.contains(&classifier) || called {
+                continue;
+            }
+            ir.inline_only_fns.insert(getter);
+            exports.withdraw_instance_entry(&super::instance_links::InstanceEntry::EnumMember {
+                classifier,
+                member: StaticMember::Entries,
+            });
+        }
+    }
 }
