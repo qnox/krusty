@@ -487,7 +487,6 @@ coroutines/kt46813.kt
 coroutines/kt49168.kt
 coroutines/kt51530.kt
 coroutines/kt51718.kt
-coroutines/kt55494.kt
 coroutines/lastExpressionIsLoop.kt
 coroutines/lastStatementInc.kt
 coroutines/lastStementAssignment.kt
@@ -1105,7 +1104,6 @@ objects/companionObjectAccess/multipleCompanionsWithAccessors/fromAnonymousObjec
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlock.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlockOfNestedClass.kt
 objects/interfaceCompanionObjectReference.kt
-operatorConventions/compareTo/comparable.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
 operatorConventions/plusAssignWithComplexRHS.kt
@@ -1845,7 +1843,6 @@ serialization/serializedCharConstant.kt
 serialization/serializedDefaultArgs.kt
 serialization/serializedEnumOrdinal.kt
 serialization/serializedVararg.kt
-smartCasts/smartcastFromGenericToString.kt
 specialBuiltins/bridgeNotEmptyMap.kt
 specialBuiltins/bridges.kt
 specialBuiltins/emptyList.kt

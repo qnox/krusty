@@ -1286,6 +1286,9 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
                 super::super::ir_builtins::BuiltinOperator::CheckNotNull => {
                     ("CHECK_NOT_NULL", None)
                 }
+                super::super::ir_builtins::BuiltinOperator::NoWhenBranchMatched => {
+                    ("noWhenBranchMatchedException", None)
+                }
                 super::super::ir_builtins::BuiltinOperator::DataClassArrayMember(_) => {
                     // Lowering calls the array's content extension; the prewalk must reach it.
                     let call = arena.expr(expr_id(arena, index));
