@@ -142,7 +142,7 @@ JVM-owned pass, under its dedicated `KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS` 
 `scripts/target-conformance-regressions.sh <native|wasm>` owns the focused target pass and applies its
 `KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS` deadline; it requires the Native distribution or Wasm
 compiler distribution/dependency cache that owns the target KLIBs instead of silently accepting a
-skip. It does not run a JVM oracle or read a JVM stdlib. `scripts/box-lane-run.sh
+skip. The Wasm pass runs its independent tests on up to four threads (the CPU count, capped); the Native pass stays on one. It does not run a JVM oracle or read a JVM stdlib. `scripts/box-lane-run.sh
 <native|wasm-js|wasm-wasi>`
 owns each corpus invocation for the `just` recipes and CI (`scripts/native-conformance-run.sh` is
 its Native shorthand).
