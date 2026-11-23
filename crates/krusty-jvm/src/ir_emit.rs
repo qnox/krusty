@@ -122,6 +122,7 @@ mod inline_scope_frames;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
 mod inherited_default_forwarders;
+mod inherited_member_target;
 mod interface_compatibility;
 mod intrinsic_probes;
 mod lambda_class;
@@ -2979,7 +2980,7 @@ fn emit_interface_class(
             c,
             &mut cw,
             &mut default_impls,
-            env.dependency_callables,
+            env,
             opts,
         );
     }

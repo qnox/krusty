@@ -1,5 +1,6 @@
 //! JVM-default compatibility-holder forwarding.
 
+use super::inherited_member_target::InheritedMemberTarget;
 use super::*;
 
 /// Under `enable`, an interface REPUBLISHES the compatibility surface for every non-abstract,
@@ -17,9 +18,18 @@ pub(super) fn emit_inherited_default_surface(
     c: &krusty::ir::IrClass,
     cw: &mut ClassWriter,
     default_impls: &mut Option<ClassWriter>,
-    callables: &krusty::backend::CheckedBackendCallables,
+    env: &EmitEnv,
     opts: &EmitOptions,
 ) {
+    let callables = env.dependency_callables;
+    let formatter = JvmSignatureFormatter::new(ir, env);
+    // The interface's own type parameters, which its republished members are written in.
+    let interface_type_params = ir
+        .class_signature_name(c.fq_name)
+        .into_iter()
+        .flat_map(|signature| &signature.type_params)
+        .map(|parameter| parameter.semantic_name.clone())
+        .collect::<Vec<_>>();
     let fq_name = c.fq_name();
     let disable =
         crate::declared_jvm_default::of_class(c, opts.jvm_default) == JvmDefaultMode::Disable;
@@ -30,12 +40,15 @@ pub(super) fn emit_inherited_default_surface(
             // default method has no holder to republish under `disable`.
             krusty::fir::InheritedDefaultBody::JavaDefaultMethod => continue,
             krusty::fir::InheritedDefaultBody::DependencyInterfaceMethod(_) if disable => continue,
-            _ => crate::value_classes::forwarded_member_types(ir, callables, default),
+            _ => republished_member_types(ir, callables, default),
         };
+        let declared = crate::value_classes::forwarded_member_types(ir, callables, default);
         let name =
             crate::inherited_default_realization::inherited_member_jvm_name(ir, callables, default);
         let mut param_tys = jvm_tys(&types.physical_params);
         let mut physical_ret = jvm_declared_ty(&types.physical_ret);
+        let mut target_params = jvm_tys(&declared.physical_params);
+        let mut target_ret = jvm_declared_ty(&declared.physical_ret);
         let mut semantic_params = types.semantic_params;
         let mut local_variable_names = crate::parameter_names::resolved_local_variables(
             ir.reference.quirks(),
@@ -56,6 +69,17 @@ pub(super) fn emit_inherited_default_surface(
             &name,
         );
         let mut semantic_ret = types.semantic_ret;
+        // The member as this interface sees it, with the interface's type parameters promoted
+        // ahead of it and its receiver first, as an own member's holder declares itself.
+        let member_signature = super::inherited_default_forwarders::forwarder_signature(
+            &formatter,
+            &interface_type_params,
+            &default.type_parameters,
+            (&semantic_params, semantic_ret),
+            (&param_tys, physical_ret),
+            default.suspend,
+        )
+        .map(|signature| signature.render(None));
         assert_eq!(
             local_variable_names.len(),
             semantic_params.len(),
@@ -74,7 +98,9 @@ pub(super) fn emit_inherited_default_surface(
         // forwarders.
         if default.suspend {
             param_tys.push(Ty::obj("kotlin/coroutines/Continuation"));
+            target_params.push(Ty::obj("kotlin/coroutines/Continuation"));
             physical_ret = Ty::obj("java/lang/Object");
+            target_ret = physical_ret;
             local_variable_names.push(Some("$completion".to_string()));
             method_parameter_names.push(Some("$completion".to_string()));
             assertion_names.push(Some("$completion".to_string()));
@@ -108,8 +134,8 @@ pub(super) fn emit_inherited_default_surface(
             // Under `disable` this module's ancestor keeps the body on its own holder.
             krusty::fir::InheritedDefaultBody::Module if disable => {
                 let mut with_receiver = vec![Ty::obj_name(interface)];
-                with_receiver.extend_from_slice(&param_tys);
-                module_holder_descriptor = method_descriptor(&with_receiver, physical_ret);
+                with_receiver.extend_from_slice(&target_params);
+                module_holder_descriptor = method_descriptor(&with_receiver, target_ret);
                 JdHolderTarget::DependencyHolder {
                     declaring: interface,
                     holder: krusty::types::type_name_nested_child(interface, "DefaultImpls"),
@@ -121,13 +147,19 @@ pub(super) fn emit_inherited_default_surface(
         };
         // A suspend member's trailing continuation, not its vararg array, is the last physical
         // parameter, so only a non-suspend vararg member keeps ACC_VARARGS on this surface.
+        let erased = InheritedMemberTarget {
+            params: &target_params,
+            ret: target_ret,
+            value_class_params: &types.value_class_params,
+            value_class_ret: types.value_class_ret,
+        };
         let varargs = if default.vararg && !default.suspend {
             krusty::jvm::classfile::ACC_VARARGS
         } else {
             0
         };
         if matches!(target, JdHolderTarget::AccessBridge) {
-            access_bridges::emit_jd_access_bridge(
+            access_bridges::emit_specialized_jd_access_bridge(
                 cw,
                 c.fq_name,
                 super::static_accessors::class_declaration_line(c),
@@ -139,6 +171,7 @@ pub(super) fn emit_inherited_default_surface(
                     varargs,
                     suspend: default.suspend,
                 },
+                erased,
             );
         }
         let di = default_impls.get_or_insert_with(|| {
@@ -184,6 +217,13 @@ pub(super) fn emit_inherited_default_surface(
         } else {
             Vec::new()
         };
+        let holder_signature = super::default_impls::holder_method_signature(
+            &formatter,
+            ir,
+            c.fq_name,
+            member_signature.as_deref(),
+            &method_descriptor(&param_tys, physical_ret),
+        );
         emit_holder_forward(
             di,
             HolderForward {
@@ -196,10 +236,8 @@ pub(super) fn emit_inherited_default_surface(
                 guards: &guards,
                 ret: physical_ret,
                 semantic_ret,
-                // The promoted generic signature of an inherited member is not reconstructed here
-                // (the declaring classifier's formals are not this interface's); a generic
-                // inherited surface keeps descriptor-only shape.
-                signature: None,
+                erased,
+                signature: holder_signature.as_deref(),
                 // kotlinc gives an inherited member's holder forwarder no line: it has no source in
                 // this interface.
                 lines: ForwardLines::default(),
@@ -210,6 +248,38 @@ pub(super) fn emit_inherited_default_surface(
             },
         );
     }
+}
+
+/// The shape an interface republishes an inherited member under: the member as the interface's
+/// applied supertype substitutes it (`J$DefaultImpls.foo(J, String)` for `interface J : I<String>`),
+/// which an implementing class's holder forwarder also calls. A `suspend` member keeps its declared
+/// CPS shape.
+pub(super) fn republished_member_types(
+    ir: &IrFile,
+    callables: &krusty::backend::CheckedBackendCallables,
+    default: &krusty::fir::ResolvedInheritedDefault,
+) -> crate::value_classes::ForwardedMemberTypes {
+    if default.suspend {
+        crate::value_classes::forwarded_member_types(ir, callables, default)
+    } else {
+        crate::value_classes::specialized_member_types(ir, callables, default)
+    }
+}
+
+/// The record of the member `default` stands for among those `interface` inherits and republishes.
+pub(super) fn republished_member<'a>(
+    ir: &'a IrFile,
+    interface: krusty::types::TypeName,
+    default: &krusty::fir::ResolvedInheritedDefault,
+) -> Option<&'a krusty::fir::ResolvedInheritedDefault> {
+    ir.inherited_defaults
+        .get(&interface)?
+        .iter()
+        .find(|record| {
+            record.name == default.name
+                && record.function == default.function
+                && record.accessor == default.accessor
+        })
 }
 
 /// Emit the `$DefaultImpls` forward kotlinc keeps under `enable` for the interface's own bodied
@@ -278,6 +348,7 @@ pub(super) fn emit_own_member_forward(
     } else {
         Vec::new()
     };
+    let ret = jvm_declared_ty(&env.override_results.physical_result(ir, fid));
     emit_holder_forward(
         di,
         HolderForward {
@@ -288,8 +359,14 @@ pub(super) fn emit_own_member_forward(
             local_variable_names: &parameter_names,
             reflected: &reflected,
             guards: &guards,
-            ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
+            ret,
             semantic_ret,
+            erased: InheritedMemberTarget {
+                params: &physical_params,
+                ret,
+                value_class_params: &[],
+                value_class_ret: None,
+            },
             signature: signature.as_deref(),
             lines: ForwardLines {
                 // The forward spans the declaration it stands for: kotlinc calls on the
@@ -332,6 +409,9 @@ struct HolderForward<'a> {
     guards: &'a [Option<String>],
     ret: Ty,
     semantic_ret: Ty,
+    /// The member a holder target holds, as it declares itself; an access bridge already takes
+    /// this forward's own shape.
+    erased: InheritedMemberTarget<'a>,
     signature: Option<&'a str>,
     lines: ForwardLines,
     /// The member's own `ACC_VARARGS` when its last physical parameter is the declared vararg.
@@ -368,6 +448,7 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
         guards,
         ret,
         semantic_ret,
+        erased,
         signature,
         lines,
         varargs,
@@ -457,21 +538,24 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
         let declaring_class = cw.class_ref(&declaring.render());
         code.checkcast(declaring_class);
     }
-    let mut slot = 1u16;
-    for ty in param_tys {
-        load(*ty, slot, &mut code);
-        slot += slot_words(*ty);
-    }
     match target {
         JdHolderTarget::AccessBridge => {
+            let mut slot = 1u16;
+            for ty in param_tys {
+                load(*ty, slot, &mut code);
+                slot += slot_words(*ty);
+            }
             let bridge = cw.interface_methodref(&fq, &format!("access${member_name}$jd"), &desc);
             code.invokestatic(bridge, argument_words as i32, slot_words(ret) as i32);
         }
         JdHolderTarget::DependencyHolder {
             holder, descriptor, ..
         } => {
+            erased.load_arguments(cw, &mut code, 1, param_tys);
+            let target_words = 1 + erased.params.iter().map(|ty| slot_words(*ty)).sum::<u16>();
             let target = cw.methodref(&holder.render(), member_name, descriptor);
-            code.invokestatic(target, argument_words as i32, slot_words(ret) as i32);
+            code.invokestatic(target, target_words as i32, slot_words(erased.ret) as i32);
+            erased.cast_result(cw, &mut code, ret);
         }
     }
     if lines.end != 0 {
