@@ -230,16 +230,23 @@ impl ReceiverMro {
         self
     }
 
-    /// Use the applied supertype unless its classpath signature erased every argument.
+    /// Use the applied supertype unless its classpath signature erased every argument. A type
+    /// parameter argument is such an erasure only when the receiver does not itself supply it: the
+    /// `A` of `Iterable<A>` applied from `List<A>` is the receiver's own argument, not a leftover
+    /// formal of the supertype's declaration.
     fn binding_receiver_for(&self, applied: Ty) -> Ty {
         let applied_args = applied.type_args();
         let recv_args = self.recv.type_args();
         if !recv_args.is_empty()
             && (applied_args.is_empty()
                 || (recv_args.len() == applied_args.len()
-                    && applied_args
-                        .iter()
-                        .all(|arg| arg.is_erased_top() || arg.is_ty_param())))
+                    && applied_args.iter().all(|arg| {
+                        if arg.is_ty_param() {
+                            !recv_args.contains(arg)
+                        } else {
+                            arg.is_erased_top()
+                        }
+                    })))
         {
             self.recv
         } else {

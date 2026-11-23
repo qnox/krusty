@@ -8,8 +8,8 @@
 //! recognizes. Formals lexically visible at the call are fixed types of the enclosing declarations
 //! and keep their identity, as do the variables of an active postponed (builder) call.
 
-use super::postponed_calls::collect_type_parameters;
 use super::*;
+use crate::types::collect_type_parameters;
 
 impl ProductionSignatureSemantics<'_> {
     /// The resolver-facing kind for one evaluated signature argument. An integer LITERAL keeps its

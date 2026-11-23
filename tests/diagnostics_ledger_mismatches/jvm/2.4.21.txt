@@ -2034,7 +2034,6 @@ compiler/testData/diagnostics/tests/diagnostics/unusedAnonymLambdaParam.kt
 compiler/testData/diagnostics/tests/diagnostics/upperBoundViolated.kt
 compiler/testData/diagnostics/tests/diagnostics/valOnAnnotationParameter.kt
 compiler/testData/diagnostics/tests/differentNumericTypesFromSmartCast.kt
-compiler/testData/diagnostics/tests/duplicateParameterName.kt
 compiler/testData/diagnostics/tests/duplicateRedundantOpen.kt
 compiler/testData/diagnostics/tests/dynamicTypes/delegationBy.kt
 compiler/testData/diagnostics/tests/dynamicTypes/unsupported.kt
@@ -2938,7 +2937,6 @@ compiler/testData/diagnostics/tests/inference/operators/elvisWithExpectedType.kt
 compiler/testData/diagnostics/tests/inference/operators/elvisWithExpectedTypeComplex.kt
 compiler/testData/diagnostics/tests/inference/overloadResolutionByLambdaArgumentType.kt
 compiler/testData/diagnostics/tests/inference/pcla/additional/BuildeeSupertypeAsTypeVariableSourceInClassifiers.kt
-compiler/testData/diagnostics/tests/inference/pcla/additional/BuildeeSupertypeAsTypeVariableSourceInFunctions.kt
 compiler/testData/diagnostics/tests/inference/pcla/additional/BuildeeSupertypeAsTypeVariableSourceInProperties.kt
 compiler/testData/diagnostics/tests/inference/pcla/additional/BuildeeSupertypeAsTypeVariableSourceInPropertiesOld.kt
 compiler/testData/diagnostics/tests/inference/pcla/assignmentOperatorAmbiguity.kt
@@ -6854,7 +6852,6 @@ compiler/testData/diagnostics/testsWithStdLib/inference/kt36951.kt
 compiler/testData/diagnostics/testsWithStdLib/inference/kt37627.kt
 compiler/testData/diagnostics/testsWithStdLib/inference/performance/kt41741.kt
 compiler/testData/diagnostics/testsWithStdLib/inference/performance/kt42195.kt
-compiler/testData/diagnostics/testsWithStdLib/inference/problems/buildListLazy.kt
 compiler/testData/diagnostics/testsWithStdLib/inference/problems/expectedType.kt
 compiler/testData/diagnostics/testsWithStdLib/inference/subAtomAlreadyInitialized.kt
 compiler/testData/diagnostics/testsWithStdLib/inference/subAtomAlreadyInitialized2.kt

@@ -1753,6 +1753,35 @@ pub fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
     }
 }
 
+/// Every type-parameter or inference-variable name `ty` mentions.
+pub fn collect_type_parameters(ty: Ty, parameters: &mut crate::fx_hash::HashSet<&'static str>) {
+    match ty.kind() {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
+            parameters.insert(name.as_str());
+        }
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner) => collect_type_parameters(inner, parameters),
+        // A star's upper bound is a computed capture fact, not a source occurrence that can
+        // constrain a postponed call's type parameters.
+        TyKind::StarProjection(_) => {}
+        TyKind::Obj(_, arguments) => {
+            for argument in arguments {
+                collect_type_parameters(*argument, parameters);
+            }
+        }
+        TyKind::Fun(signature) => {
+            for parameter in &signature.params {
+                collect_type_parameters(*parameter, parameters);
+            }
+            collect_type_parameters(signature.ret, parameters);
+        }
+        _ => {}
+    }
+}
+
 /// Whether `ty` mentions any of the named type parameters (`T` itself, `List<T>`, `(T) -> T`,
 /// `T?`). A pure `Ty` predicate shared by the checker (generic-shape classification) and lowering
 /// (generic-shape gates).

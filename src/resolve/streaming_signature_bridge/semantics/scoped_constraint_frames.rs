@@ -151,6 +151,14 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Option<(crate::fir::DeclarationId, usize)> {
         let constraints = self.scoped_frames.active.borrow();
         let inputs = self.scoped_frames.inputs.borrow();
+        // A frame solves type variables; the scope's own type parameters are fixed types.
+        let mut fixed = crate::fx_hash::HashSet::default();
+        self.extend_with_declared_type_parameters(declaration, &mut fixed);
+        let mentions_variable = |input: &Ty| {
+            let mut mentioned = crate::fx_hash::HashSet::default();
+            crate::types::collect_type_parameters(*input, &mut mentioned);
+            mentioned.iter().any(|name| !fixed.contains(name))
+        };
         let mut current = Some(declaration);
         while let Some(declaration) = current {
             if let (Some(constraint_stack), Some(input_stack)) =
@@ -163,7 +171,7 @@ impl ProductionSignatureSemantics<'_> {
                         .rev()
                         .find_map(|(index, inputs)| {
                             (constraint_stack.get(index).is_some()
-                                && inputs.iter().any(|input| input.mentions_ty_param()))
+                                && inputs.iter().any(mentions_variable))
                             .then_some(index)
                         })
                 {
@@ -319,7 +327,7 @@ impl ProductionSignatureSemantics<'_> {
             .map(|inputs| {
                 let mut formals = crate::fx_hash::HashSet::default();
                 for input in inputs {
-                    super::super::postponed_calls::collect_type_parameters(*input, &mut formals);
+                    crate::types::collect_type_parameters(*input, &mut formals);
                 }
                 formals
             })
