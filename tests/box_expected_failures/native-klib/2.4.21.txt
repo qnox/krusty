@@ -239,7 +239,6 @@ contextParameters/explicitPassing.kt
 contextParameters/inlineAnonymousParameter.kt
 contextParameters/kt51863.kt
 contextParameters/kt65953.kt
-contextParameters/suspendContextParemetersWithExtension.kt
 contracts/contractForCast.kt
 contracts/isNullString.kt
 contracts/kt39374.kt
@@ -526,7 +525,6 @@ coroutines/kt46813.kt
 coroutines/kt49168.kt
 coroutines/kt51530.kt
 coroutines/kt51718.kt
-coroutines/kt55494.kt
 coroutines/lastExpressionIsLoop.kt
 coroutines/lastStatementInc.kt
 coroutines/lastStementAssignment.kt
