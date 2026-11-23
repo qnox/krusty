@@ -367,13 +367,15 @@ pub fn regenerate(
         .map_err(RegenerationError::Copy)?;
     }
     // kotlinc's `MethodInliner` transforms the constructor first: the objects it constructs are
-    // the copy's first ones, enclosed by the new constructor. What is left of its body reads no
-    // lambda, so only those objects are regenerated.
+    // the copy's first ones, enclosed by the new constructor. What is left of its body reads a
+    // lambda as any method does, from the field the lambda is kept in, so the lambda is inlined
+    // there and the objects it constructs are regenerated.
     let mut nested = Vec::new();
     let mut sam_wrappers = Vec::new();
-    let regenerates_objects = plan.body.instructions().any(|insn| {
-        references_other_regenerated_class(insn, regeneration.classes, old, &continuations)
-    });
+    let regenerates_objects = lambda_inlining::reads_lambda(&plan.body, &lambdas)
+        || plan.body.instructions().any(|insn| {
+            references_other_regenerated_class(insn, regeneration.classes, old, &continuations)
+        });
     let body = if regenerates_objects {
         let mut body = plan.body.clone();
         body.desc.clone_from(&plan.desc);
@@ -392,7 +394,7 @@ pub fn regenerate(
             body,
             new,
             false,
-            &[],
+            &lambdas,
             &mut remapper,
             &mut lines,
             &mut objects,
@@ -809,7 +811,12 @@ fn plan_lambdas<'a>(
         .iter()
         .flat_map(|lambda| lambda.captured.iter().cloned())
         .collect();
-    let fields = plan.inline_lambdas(call_desc, &arguments, &recaptured)?;
+    let fields = plan.inline_lambdas(
+        &regeneration.original.name,
+        call_desc,
+        &arguments,
+        &recaptured,
+    )?;
     for (lambda, field) in lambdas.iter_mut().zip(fields) {
         lambda.field = field;
     }

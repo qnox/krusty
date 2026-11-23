@@ -1149,10 +1149,10 @@ impl IrPlugin for SerializationPlugin {
 
     fn publish_frontend_generated_classifiers(
         &self,
-        ctx: &FrontendClassContext<'_>,
+        header: &crate::plugins::FrontendClassifierHeader<'_>,
         classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
     ) {
-        publish_generated_classifier_facts(ctx, classifiers);
+        publish_generated_classifier_facts(header, classifiers);
     }
 
     fn check_frontend_class(
