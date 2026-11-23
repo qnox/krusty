@@ -431,7 +431,7 @@ impl Checker<'_> {
                 if definite {
                     self.forget_implied_facts(scope, binding.flow_identity);
                 }
-                scope.narrow_local(&name, None);
+                self.record_local_read_fact(scope, &name, None);
             }
         }
     }

@@ -228,7 +228,7 @@ impl Checker<'_> {
                     "join local {} dropped entry {entry_ty:?}; edges disagree",
                     local.name,
                 );
-                scope.narrow_local(&local.name, None);
+                self.record_local_read_fact(scope, &local.name, None);
             }
             // A denotable primary view can equal the declaration while another incomparable
             // common facet is still new information. Publish the complete intersection even when

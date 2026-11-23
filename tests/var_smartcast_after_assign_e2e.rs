@@ -69,3 +69,23 @@ fn string_var_narrows_to_nonnull() {
         }\n";
     assert_eq!(run(SRC).expect("string narrow"), "OK");
 }
+
+#[test]
+fn proof_dies_after_a_branch_that_writes_the_var_joins() {
+    // The `else` edge keeps the guard's proof, but once the edges join, the `then` edge's write
+    // leaves the variable nullable again, as kotlinc reports.
+    const SRC: &str = "class F(val p: F?, var t: String?)\n\
+        fun g(start: F?, c: Boolean): String? {\n\
+        \x20 var f = start\n\
+        \x20 if (f != null) {\n\
+        \x20   if (c) { f = f.p } else { f.t = \"x\" }\n\
+        \x20   return f.t\n\
+        \x20 }\n\
+        \x20 return null\n\
+        }\n";
+    let result = common::compiler_diagnostics(
+        &[("Main.kt", SRC)],
+        &[common::stdlib_jar(), common::jdk_modules()],
+    );
+    common::expect_identical_rejection(&result, "join after a write in one branch");
+}

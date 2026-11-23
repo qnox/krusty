@@ -102,7 +102,29 @@ impl Checker<'_> {
                 }
             }
         }
-        scope.narrow_local(name, narrowed);
+        self.record_local_read_fact(scope, name, narrowed);
+    }
+
+    /// Record the read type a write or a join leaves on `name`, or drop it. Dropping a fact makes
+    /// reads fall back to the nearest lexical binding, and a smart-cast proof shadow still carries
+    /// the narrowed type there: the proof says nothing about a value the edge replaced or about
+    /// edges that disagree. The declared type is then recorded as the flow fact, so the proof
+    /// stays untouched for sibling edges and ends with the frame that lost it.
+    pub(super) fn record_local_read_fact(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        fact: Option<Ty>,
+    ) {
+        scope.narrow_local(name, fact);
+        if fact.is_some() {
+            return;
+        }
+        if let Some(local) = self.lookup(scope, name) {
+            if local.is_var && local.ty != local.declared_ty {
+                scope.record_local_flow_fact(name, local.declared_ty);
+            }
+        }
     }
 
     /// Check a try body and return the bindings it writes, including writes in nested trys.
@@ -131,7 +153,7 @@ impl Checker<'_> {
                 if written.implication_replacements.contains(&identity) {
                     self.forget_implied_facts(scope, local.flow_identity);
                 }
-                scope.narrow_local(&name, None);
+                self.record_local_read_fact(scope, &name, None);
             }
         }
     }
