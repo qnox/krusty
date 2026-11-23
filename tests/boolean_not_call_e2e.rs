@@ -54,3 +54,29 @@ fn boolean_not_callable_reference_is_byte_identical_to_kotlinc() {
         .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
     }
 }
+
+/// A negation of a negation is the operand's own Boolean: kotlinc flips a jump's sense twice
+/// instead of materializing the inner negation and negating that, in a comparison's operand too.
+const DOUBLE_NEGATION: &str = "package store\n\
+                               \n\
+                               val range = 1.0..<3.0\n\
+                               val element = -1F\n\
+                               \n\
+                               fun twice(b: Boolean): Boolean = !(!b)\n\
+                               fun twiceCall(b: Boolean): Boolean = b.not().not()\n\
+                               fun compared(b: Boolean, c: Boolean): Boolean = !(!b) == !(!c)\n\
+                               fun contained() {\n\
+                               \x20   if (!(element !in 1.0..<3.0) != range.contains(element)) throw AssertionError()\n\
+                               }\n";
+
+#[test]
+fn a_negation_of_a_negation_is_byte_identical_to_kotlinc() {
+    common::byte_diff_against_kotlinc_cp(
+        "BooleanDoubleNegation",
+        DOUBLE_NEGATION,
+        "store/BooleanDoubleNegationKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("store/BooleanDoubleNegationKt differs from kotlinc: {diff}"));
+}

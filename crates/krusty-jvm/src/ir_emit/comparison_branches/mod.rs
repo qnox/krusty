@@ -110,6 +110,14 @@ impl Emitter<'_> {
 
     /// A comparison in value position: its Boolean result on the operand stack.
     pub(super) fn emit_comparison(&mut self, expression: ExprId, code: &mut CodeBuilder) {
+        // A negation of a negation is the operand itself: kotlinc's `Not` flips the sense of its
+        // operand's jump, so two of them leave the operand's own Boolean without a materialization.
+        if let Some(inner) = self.ir.negated_operand(expression) {
+            if let Some(operand) = self.ir.negated_operand(inner) {
+                self.emit_value(operand, code);
+                return;
+            }
+        }
         let (op, lhs, rhs, mode) = self.comparison_parts(expression);
         self.at_comparison_line(expression, |this| {
             this.emit_comparison_value(op, lhs, rhs, mode, code)
