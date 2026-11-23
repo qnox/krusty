@@ -30,6 +30,7 @@ use arguments::{
     take_reference_version, unsupported, ParsedSettings,
 };
 pub use arguments::{CLASSPATH_SEPARATOR, FIX_KOTLINC_DEFECTS};
+pub use source_roots::diagnostic_path;
 use source_roots::{duplicate_source_root, SourceRoots};
 pub use warning_policy::{WarningDisposition, WarningLevel, WarningPolicy};
 

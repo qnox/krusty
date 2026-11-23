@@ -538,6 +538,12 @@ impl Checker<'_> {
                 self.check_fun_body(scope, f, stable_declaration);
             }
             self.check_inline_parameter_usages(scope, f);
+            if let Some(declaration) = stable_declaration {
+                self.check_tailrec_calls(
+                    f,
+                    super::tailrec_calls::TailrecTarget::Declaration(declaration),
+                );
+            }
         }
         if (!self.signature_defaults_only || default_owned_method) && f.ret.is_none() {
             if let (Some(declaration), FunBody::Expr(body)) = (stable_declaration, &f.body) {
@@ -1052,6 +1058,12 @@ impl Checker<'_> {
                 self.check_fun_body(scope, f, stable_declaration);
             }
             self.check_inline_parameter_usages(scope, f);
+            if let Some(declaration) = stable_declaration {
+                self.check_tailrec_calls(
+                    f,
+                    super::tailrec_calls::TailrecTarget::Declaration(declaration),
+                );
+            }
         }
         if !self.signature_defaults_only && check_ordinary_body && f.ret.is_none() {
             if let (Some(declaration), FunBody::Expr(body)) = (stable_declaration, &f.body) {

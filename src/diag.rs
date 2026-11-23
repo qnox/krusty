@@ -511,6 +511,7 @@ impl DiagSink {
                 .or_else(|| files.first().copied())
                 .unwrap_or(("<unknown>", ""));
             out.push_str(&render_one(d, path, src, names));
+            out.push_str(&source_excerpt(d.span, src));
         }
         for error in &self.module_errors {
             out.push_str("error: ");
@@ -525,6 +526,30 @@ fn render_one(d: &Diagnostic, path: &str, src: &str, names: DiagnosticNames) -> 
     let (line, col) = line_col(src, d.span.lo);
     let sev = severity_word(d.severity);
     format!("{path}:{line}:{col}: {sev}: {}\n", d.message(names))
+}
+
+/// kotlinc's `PlainTextMessageRenderer` excerpt under a located message: the source line, then a
+/// marker line whose `^` run covers the span, up to the end of the line when the span goes past it
+/// and at least one column wide. Whitespace before the span is kept so tabs line up.
+fn source_excerpt(span: Span, src: &str) -> String {
+    let lo = (span.lo as usize).min(src.len());
+    let line_start = src[..lo].rfind('\n').map_or(0, |at| at + 1);
+    let line_end = src[lo..].find('\n').map_or(src.len(), |at| lo + at);
+    let line = src[line_start..line_end].trim_end_matches('\r');
+    if line.is_empty() {
+        return String::new();
+    }
+    let hi = (span.hi as usize).clamp(lo, line_start + line.len());
+    let mut out = String::new();
+    out.push_str(line);
+    out.push('\n');
+    for c in src[line_start..lo].chars() {
+        out.push(if c.is_whitespace() { c } else { ' ' });
+    }
+    let width = src[lo..hi].chars().count().max(1);
+    out.extend(std::iter::repeat_n('^', width));
+    out.push('\n');
+    out
 }
 
 fn severity_word(severity: Severity) -> &'static str {
@@ -657,8 +682,11 @@ mod tests {
         let r = s.render_all(&files, DiagnosticNames::Hidden);
         assert!(r.contains("A.kt:1:1: error: in A"), "got: {r}");
         assert!(r.contains("B.kt:2:2: error: in B"), "got: {r}");
-        // Exactly two lines — no duplication across files.
-        assert_eq!(r.lines().count(), 2, "got: {r}");
+        // Each diagnostic is followed by its own line and marker; nothing is duplicated.
+        assert_eq!(
+            r,
+            "A.kt:1:1: error: in A\nxyz\n^\nB.kt:2:2: error: in B\ncde\n ^\n"
+        );
     }
 
     #[test]

@@ -228,7 +228,10 @@ fn defect(quirk: Quirk) -> Option<Defect> {
         | Quirk::AnnotationImplCarriesNullability
         | Quirk::KlibLegacyMetadataVersionBelowLanguage23
         | Quirk::NotNullOperatorDropsIntersectionApproximation
-        | Quirk::InvisibleCandidatesKeepScopeLevels => None,
+        | Quirk::InvisibleCandidatesKeepScopeLevels
+        | Quirk::TailrecDotlessCallReportedAtOperator
+        | Quirk::TailrecUnitObjectReturnFollowsCall
+        | Quirk::TailrecElvisLeftOperandIsTail => None,
     }
 }
 

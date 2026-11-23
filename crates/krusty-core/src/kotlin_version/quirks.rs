@@ -220,6 +220,28 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: false,
     }
+    /// A `tailrec` function's recursive infix call or operator expression is reported at the infix
+    /// name or the operator token. From 2.5 the position is the start of the whole expression,
+    /// as wide as the function's name.
+    TailrecDotlessCallReportedAtOperator {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
+    /// In a `tailrec` function a recursive call followed by `return Unit` is not a tail call:
+    /// reading the `Unit` object is an instruction after it. From 2.5 it is not.
+    TailrecUnitObjectReturnFollowsCall {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
+    /// In a `tailrec` function with a non-null result, a recursive call that is the left operand of
+    /// `?:` in tail position is itself a tail call. From 2.5 an elvis operand never is.
+    TailrecElvisLeftOperandIsTail {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// The Kotlin/Native and Kotlin/Wasm standard library's `ArrayList.addAll` makes room for the
     /// new elements before it reads the argument, so a range of the list being appended to is
     /// invalidated first: `list.addAll(list.subList(0, 2))` raises
