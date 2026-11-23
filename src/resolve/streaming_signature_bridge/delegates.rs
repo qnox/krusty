@@ -715,7 +715,6 @@ impl ProductionSignatureSemantics<'_> {
 mod tests {
     use crate::symbol_source::{SymbolNamespace, SymbolSource};
 
-    /// Builtins except `kotlin.reflect.KProperty`, which a convention argument requires.
     struct WithoutPropertyReferences;
 
     impl SymbolSource for WithoutPropertyReferences {
@@ -760,7 +759,6 @@ mod tests {
             .collect()
     }
 
-    /// A missing `KProperty` refuses the convention instead of inventing one.
     #[test]
     fn a_dependency_set_without_kproperty_refuses_the_convention_instead_of_assuming_it() {
         const SOURCE: &str =
