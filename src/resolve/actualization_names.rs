@@ -634,6 +634,17 @@ pub(crate) fn resolve_actualization_classifier_for_test(
     resolver_inputs(headers, &platform, &declarations).resolve(source, spelling)
 }
 
+/// The parameter names a candidate listing spells: the ones a Kotlin declaration carries, or the
+/// ones a Java declaration wrote. A Java method has no named-argument names, so its declared ones
+/// are kept in their own field and read only here.
+fn source_parameter_names(call_sig: &crate::libraries::CallSig) -> Vec<String> {
+    if call_sig.declared_parameter_names.is_empty() {
+        call_sig.param_names.clone()
+    } else {
+        call_sig.declared_parameter_names.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,16 +776,5 @@ mod tests {
         let actualization = crate::fir::actualization(&different, &bindings);
         assert!(actualization.pairs.is_empty());
         assert_eq!(actualization.incompatible.len(), 1);
-    }
-}
-
-/// The parameter names a candidate listing spells: the ones a Kotlin declaration carries, or the
-/// ones a Java declaration wrote. A Java method has no named-argument names, so its declared ones
-/// are kept in their own field and read only here.
-fn source_parameter_names(call_sig: &crate::libraries::CallSig) -> Vec<String> {
-    if call_sig.declared_parameter_names.is_empty() {
-        call_sig.param_names.clone()
-    } else {
-        call_sig.declared_parameter_names.clone()
     }
 }
