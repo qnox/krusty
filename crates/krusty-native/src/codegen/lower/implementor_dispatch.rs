@@ -204,21 +204,39 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
-        let operands: Vec<(Value, Option<Ty>)> = arguments
+        let applied_operands: Vec<(Value, Option<Ty>)> = arguments
             .iter()
             .zip(params)
             .map(|(&value, &param)| (value, Some(param)))
             .collect();
-        self.dispatch_runtime_implementations(&runtime, object, &operands, ret, |body| {
-            body.dispatch_through_stub(
-                object,
-                number,
-                &operands,
-                &declared_member_params,
-                signature.ret,
-                ret,
-            )
-        })
+        // Runtime and linked implementations receive the same declared interface frame.
+        let Some(crossed) =
+            self.dependency_interface_arguments(&applied_operands, &declared_member_params)?
+        else {
+            return Ok(None);
+        };
+        let operands: Vec<(Value, Option<Ty>)> = crossed
+            .iter()
+            .zip(&declared_member_params)
+            .map(|(&value, &param)| (value, Some(param)))
+            .collect();
+        let declared_ret = signature.ret;
+        let produced = self.dispatch_runtime_implementations(
+            &runtime,
+            object,
+            &operands,
+            declared_ret,
+            |body| {
+                body.dispatch_through(
+                    object,
+                    model::Dispatch::Interface(number),
+                    &declared_member_params,
+                    declared_ret,
+                    &crossed,
+                )
+            },
+        )?;
+        self.dependency_interface_result(produced, declared_ret, ret)
     }
 
     /// Call the link stub `number` with `operands`. The stub takes the declaration's own ABI,
@@ -234,13 +252,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         declared_ret: Ty,
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        let mut declared_arguments = Vec::with_capacity(operands.len());
-        for (&(value, applied), &declared) in operands.iter().zip(declared_params) {
-            let Some(converted) = self.convert(value, applied, declared)? else {
-                return Ok(None);
-            };
-            declared_arguments.push(converted);
-        }
+        let Some(declared_arguments) =
+            self.dependency_interface_arguments(operands, declared_params)?
+        else {
+            return Ok(None);
+        };
         let produced = self.dispatch_through(
             object,
             model::Dispatch::Interface(number),
@@ -248,9 +264,38 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             declared_ret,
             &declared_arguments,
         )?;
+        self.dependency_interface_result(produced, declared_ret, ret)
+    }
+
+    /// Cross each applied operand into the interface declaration's frame before dispatch.
+    fn dependency_interface_arguments(
+        &mut self,
+        operands: &[(Value, Option<Ty>)],
+        declared_params: &[Ty],
+    ) -> Result<Option<Vec<Value>>, Unsupported> {
+        let mut declared_arguments = Vec::with_capacity(operands.len());
+        for (&(value, applied), &declared) in operands.iter().zip(declared_params) {
+            let Some(converted) = self.convert(value, applied, declared)? else {
+                return Ok(None);
+            };
+            declared_arguments.push(converted);
+        }
+        Ok(Some(declared_arguments))
+    }
+
+    /// Cross the merged declared result back to the site's applied result, including Unit.
+    fn dependency_interface_result(
+        &mut self,
+        produced: Option<Value>,
+        declared_ret: Ty,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        if self.terminated {
+            return Ok(None);
+        }
         match produced {
-            Some(value) if !self.terminated => self.convert(value, Some(declared_ret), ret),
-            _ => Ok(None),
+            Some(value) => self.convert(value, Some(declared_ret), ret),
+            None => self.unit_where_wanted(ret),
         }
     }
 
@@ -274,8 +319,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         if declared_member_params.len() != params.len() {
             return Err(declined!(
-                "the dependency interface member `{}` is called with another arity than it declares",
-                signature.name
+                "the dependency interface member `{}` is applied to {} parameters but declares {}",
+                signature.name,
+                params.len(),
+                declared_member_params.len()
             ));
         }
         if let Some(reason) = self.file.unimplementable_interface_members.get(&identity) {
