@@ -115,12 +115,9 @@ pub(super) fn extract(
     for at in remove.into_iter().rev() {
         body.nodes.remove(at);
     }
-    // Any other access to a captured field is remapped by kotlinc's field remapper, which this
-    // stage does not port.
-    let accesses_captured = body.instructions().any(|insn| {
-        matches!(insn, Insn::Field { op: GETFIELD | PUTFIELD, name, .. } if is_captured_field_name(name))
-    });
-    if accesses_captured {
+    // What is left may read a captured field from `this`, after the stores: the copy declares the
+    // same field and stores it first. Any other access is refused.
+    if !reads_captured_fields_from_this(&body, owner, declared) {
         return Err(unsupported(
             "a constructor that accesses a captured field other than by storing its parameter",
         ));
@@ -133,6 +130,69 @@ pub(super) fn extract(
         fields: captured,
         body,
     })
+}
+
+/// Whether every access to a captured field in `code` reads one `old` declares, from `this`: the
+/// copy declares the same field, so the read stays as kotlinc's field remapper leaves it.
+pub(super) fn reads_captured_fields_from_this(
+    code: &MethodNode,
+    old: &str,
+    declared: &[DeclaredCapture<'_>],
+) -> bool {
+    let mut previous: Option<&Insn> = None;
+    for entry in &code.nodes {
+        let Node::Insn(insn) = entry else {
+            previous = None;
+            continue;
+        };
+        if let Insn::Field {
+            op,
+            owner,
+            name,
+            desc,
+        } = insn
+        {
+            if (*op == GETFIELD || *op == PUTFIELD) && is_captured_field_name(name) {
+                let direct = *op == GETFIELD
+                    && owner == old
+                    && declared
+                        .iter()
+                        .any(|field| field.name == name && field.desc == desc)
+                    && matches!(previous, Some(Insn::Var { op: ALOAD, slot: 0 }));
+                if !direct {
+                    return false;
+                }
+            }
+        }
+        previous = Some(insn);
+    }
+    true
+}
+
+/// Turn each `aload slot` in `code`, a read of the constructor parameter at `slot`, into the read
+/// `aload 0; getfield owner.field` of the field that holds the same value.
+fn read_parameter_from_field(
+    code: &mut MethodNode,
+    slot: u16,
+    owner: &str,
+    field: &str,
+    desc: &str,
+) {
+    let mut nodes = Vec::with_capacity(code.nodes.len());
+    for node in std::mem::take(&mut code.nodes) {
+        if matches!(node, Node::Insn(Insn::Var { op: ALOAD, slot: loaded }) if loaded == slot) {
+            nodes.push(Node::Insn(Insn::Var { op: ALOAD, slot: 0 }));
+            nodes.push(Node::Insn(Insn::Field {
+                op: GETFIELD,
+                owner: owner.to_string(),
+                name: field.to_string(),
+                desc: desc.to_string(),
+            }));
+        } else {
+            nodes.push(node);
+        }
+    }
+    code.nodes = nodes;
 }
 
 impl Constructor {
@@ -168,9 +228,14 @@ impl Constructor {
     /// and kept in fields of their own. The other arguments close up over the lambdas' slots. The
     /// lambdas' fields, in `lambda_arguments` order.
     ///
-    /// What is left of the original body may not read a lambda's parameter.
+    /// What is left of the original body reads a lambda as a load of the field its constructor
+    /// keeps it in, from `this` of `owner`: a lambda the constructor reads from its parameter, as
+    /// an initializer of the object calling it does, reads the lambda's own field in the new body,
+    /// so the lambda is inlined there as in any other method. A lambda the constructor keeps in no
+    /// field takes the name of one it does not declare, which only this body reads.
     pub(super) fn inline_lambdas(
         &mut self,
+        owner: &str,
         call_desc: &str,
         lambda_arguments: &[usize],
         recaptured: &[(String, String)],
@@ -213,14 +278,12 @@ impl Constructor {
         let mut fields = Vec::new();
         for &argument in lambda_arguments {
             let slot = slots[argument].0;
-            let at = self
-                .fields
-                .iter()
-                .position(|field| field.slot == slot)
-                .ok_or(unsupported(
-                    "a lambda its constructor does not keep in a field",
-                ))?;
-            fields.push(self.fields.remove(at).name);
+            let name = match self.fields.iter().position(|field| field.slot == slot) {
+                Some(at) => self.fields.remove(at).name,
+                None => format!("<constructor lambda {argument}>"),
+            };
+            read_parameter_from_field(&mut self.body, slot, owner, &name, &arguments[argument]);
+            fields.push(name);
         }
         for field in &mut self.fields {
             field.slot = place(field.slot).ok_or(unsupported("a malformed captured store"))?;
@@ -448,7 +511,7 @@ mod tests {
         .expect("extracts");
         let this = ("this$0".to_string(), "LC;".to_string());
         let fields = plan
-            .inline_lambdas(call, &[0, 1], &[this.clone(), this])
+            .inline_lambdas(OWNER, call, &[0, 1], &[this.clone(), this])
             .expect("inlines");
         assert_eq!(fields, ["$a", "$b"]);
         assert_eq!(plan.desc, "(LC;LC;)V");
@@ -496,6 +559,54 @@ mod tests {
                 var(ALOAD, 0),
                 var(ALOAD, 1),
                 put("lib/Other", "$prefix"),
+            ]),
+            Err(RegenerationError::Unsupported(
+                "a constructor that accesses a captured field other than by storing its parameter"
+            ))
+        );
+    }
+
+    /// An initializer that reads the captured value back from `this` keeps the read: the copy
+    /// declares the same field and stores it before the copied body runs.
+    #[test]
+    fn a_captured_field_read_from_this_stays_in_the_body() {
+        let read = [
+            var(ALOAD, 0),
+            Node::Insn(Insn::Field {
+                op: GETFIELD,
+                owner: OWNER.to_string(),
+                name: "$prefix".to_string(),
+                desc: STRING.to_string(),
+            }),
+            Node::Insn(Insn::Op(0x57)),
+        ];
+        let mut stores = vec![var(ALOAD, 0), var(ALOAD, 1), put(OWNER, "$prefix")];
+        stores.extend(read.clone());
+        let plan = extract(
+            &constructor(stores),
+            OWNER,
+            &prefix(),
+            "(Ljava/lang/String;)V",
+        )
+        .expect("extracts");
+        assert_eq!(plan.body.nodes, constructor(read.to_vec()).nodes);
+    }
+
+    #[test]
+    fn a_captured_field_read_from_another_object_declines() {
+        assert_eq!(
+            extracted(vec![
+                var(ALOAD, 0),
+                var(ALOAD, 1),
+                put(OWNER, "$prefix"),
+                var(ALOAD, 1),
+                Node::Insn(Insn::Field {
+                    op: GETFIELD,
+                    owner: OWNER.to_string(),
+                    name: "$prefix".to_string(),
+                    desc: STRING.to_string(),
+                }),
+                Node::Insn(Insn::Op(0x57)),
             ]),
             Err(RegenerationError::Unsupported(
                 "a constructor that accesses a captured field other than by storing its parameter"

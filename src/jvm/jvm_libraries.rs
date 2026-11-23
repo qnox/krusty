@@ -488,6 +488,7 @@ impl JvmLibraries {
                 generic_sig: generic_sig_for_callable.clone().map(Box::new),
                 declared_params,
                 declared_ret,
+                result_alias: meta.ret_alias,
                 reified_type_parameter_ordinals: call_sig
                     .reified_type_parameter_ordinals
                     .clone()
@@ -920,15 +921,18 @@ impl JvmLibraries {
                 context_count: 0,
                 context_param_names: Vec::new(),
                 context_parameter_identities: Vec::new(),
-                getter: accessor(
-                    crate::names::property_getter_name(&property.name),
-                    &getter_sig.name,
-                    &getter_sig.desc,
-                    getter_params,
-                    property_ty,
-                    getter_ret,
-                    getter_inline,
-                ),
+                getter: crate::libraries::LibraryCallable {
+                    result_alias: property.ret_alias,
+                    ..accessor(
+                        crate::names::property_getter_name(&property.name),
+                        &getter_sig.name,
+                        &getter_sig.desc,
+                        getter_params,
+                        property_ty,
+                        getter_ret,
+                        getter_inline,
+                    )
+                },
                 setter: setter.map(Box::new),
                 setter_visibility: property.visibility,
                 setter_parameter_name: None,
@@ -1435,6 +1439,7 @@ impl JvmLibraries {
                     member.set_deprecated_hidden(self.function_hidden_at_api(declaration));
                     member.call_sig = declaration.member_call_sig();
                     member.declared_ret = metadata_declared_nonnull_return(declaration);
+                    member.result_alias = declaration.ret_alias();
                 } else if let Some(declaration) = constructor_declaration {
                     if declaration.params.types.contains(&Ty::Error) {
                         crate::trace_compiler!(
@@ -2773,6 +2778,7 @@ impl JvmLibraries {
                     getter.is_abstract = mp.is_abstract;
                     getter.inline = property_getter_inline(mp.getter_inline, getter_public);
                     attach_interface_holder(&self.cp, cn, &mut getter);
+                    getter.result_alias = mp.ret_alias;
                     getter.semantic_role =
                         crate::libraries::builtin_declaration::semantic_call_role(
                             crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
@@ -2923,6 +2929,7 @@ impl JvmLibraries {
                 getter.is_abstract = mp.is_abstract;
                 getter.inline = property_getter_inline(mp.getter_inline, getter_public);
                 attach_interface_holder(&self.cp, cn, &mut getter);
+                getter.result_alias = mp.ret_alias;
                 let getter_signature = self
                     .member_functions(recv, &getter.name)
                     .overloads

@@ -663,7 +663,7 @@ fn serialized_signatures(
             KlibIrSignature::Accessor(signature) => {
                 accessors.insert(signature.clone());
             }
-            KlibIrSignature::FileLocal { .. } => {}
+            KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => {}
         };
         match member {
             KlibIrMember::Function(function) => {

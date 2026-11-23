@@ -623,6 +623,24 @@ impl<'a> KlibCalleeFacts<'a> {
         }
     }
 
+    /// The continuation interception `identity` is, which body lowering expands to the coroutine
+    /// class's own interception: no declaration of it is emitted or called.
+    pub(crate) fn intercepted_continuation(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<
+        Option<super::intercepted_continuation::InterceptedContinuationCall>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        // Two selected declarations prove no intrinsic; the call's own linking reports them.
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => {
+                super::intercepted_continuation::authenticate(callables[0])
+            }
+            Some(KlibCalleeFact::Ambiguous) | None => Ok(None),
+        }
+    }
+
     /// The range construction `identity` performs, whatever the target lays out. A membership in
     /// a range literal compares against its bounds, as kotlinc folds it, so it builds no range.
     pub(crate) fn range_literal_bounds(

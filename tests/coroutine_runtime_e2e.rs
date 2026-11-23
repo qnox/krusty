@@ -113,6 +113,10 @@ fn handoff(
                         }
                         _ => unreachable!("this probe only visits Native and Wasm targets"),
                     },
+                    property_reference_values: matches!(
+                        self.target,
+                        CompilationTarget::WasmJs | CompilationTarget::WasmWasi
+                    ),
                 })
         }
 
