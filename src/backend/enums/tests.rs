@@ -113,9 +113,11 @@ fn lowered(ir: IrFile) -> IrFile {
 }
 
 fn lowered_for(mut ir: IrFile, contract: super::Contract) -> IrFile {
+    let entries_read = super::entries_read(&ir);
     super::realize(
         &mut ir,
         contract,
+        &entries_read,
         &mut super::super::DependencyExportSignatures::default(),
     );
     ir
@@ -617,7 +619,13 @@ fn an_enum_publishes_its_values_and_value_of() {
     let mut ir = IrFile::default();
     shade(&mut ir);
     let mut exports = super::super::DependencyExportSignatures::default();
-    super::realize(&mut ir, super::Contract::KotlinNative, &mut exports);
+    let entries_read = super::entries_read(&ir);
+    super::realize(
+        &mut ir,
+        super::Contract::KotlinNative,
+        &entries_read,
+        &mut exports,
+    );
 
     let shade = type_name("Shade");
     let published = exports
@@ -690,8 +698,7 @@ fn defaults_reading_a_constant_are_realized() {
     }
 }
 
-/// No use of this file reads `Shade.entries`, and no other file can read this file's slots, so
-/// the list is never built.
+/// No use of the program reads `Shade.entries`, so the list is never built.
 #[test]
 fn entries_no_use_reads_are_not_built() {
     let ir = lowered(colors());
@@ -713,6 +720,33 @@ fn entries_no_use_reads_are_not_built() {
     assert_eq!(lists("Color$initEntries"), (1, 6));
     // Shade: flag and two constants cleared, then the rethrow.
     assert_eq!(lists("Shade$initEntries"), (0, 4));
+}
+
+/// Another file of the program reads `Shade.entries`: the file declaring `Shade` builds its list,
+/// though none of its own uses read it.
+#[test]
+fn entries_another_file_reads_are_built() {
+    let mut ir = colors();
+    let mut entries_read = super::entries_read(&ir);
+    entries_read.insert(type_name("Shade"));
+    super::realize(
+        &mut ir,
+        super::Contract::KotlinNative,
+        &entries_read,
+        &mut super::super::DependencyExportSignatures::default(),
+    );
+    let (build, reset, _) = initializer_parts(&ir, function(&ir, "Shade$initEntries"));
+    let built = build
+        .iter()
+        .filter(|&&statement| {
+            matches!(
+                ir.expr(statement),
+                IrExpr::SetStatic { value, .. }
+                    if matches!(ir.expr(*value), IrExpr::EnumEntriesList { .. })
+            )
+        })
+        .count();
+    assert_eq!((built, reset.len()), (1, 5));
 }
 
 /// A constant's argument is the only read of another enum's `entries`

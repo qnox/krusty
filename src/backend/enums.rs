@@ -157,19 +157,25 @@ impl StaticMember {
     }
 }
 
+/// The enums whose `entries` some use of `ir` reads, the program-wide set a target that holds every
+/// file of its program ([`realize`]) unites over its files.
+pub fn entries_read(ir: &IrFile) -> crate::fx_hash::HashSet<TypeName> {
+    uses::entries_read(ir)
+}
+
 /// Realize every enum class `ir` declares and rewrite every emitted use of one. Every enum's
 /// `values()` and `valueOf` are published as entries, whether its module is a library or the
 /// program, as its constants are ([`publish_constants`]).
 pub fn realize(
     ir: &mut IrFile,
     contract: Contract,
+    entries_read: &crate::fx_hash::HashSet<TypeName>,
     exports: &mut super::DependencyExportSignatures,
 ) {
     let enums: Vec<ClassId> = (0..ir.classes.len())
         .map(|class| ClassId::try_from(class).expect("too many classes"))
         .filter(|&class| is_enum(&ir.classes[class as usize]))
         .collect();
-    let entries_read = uses::entries_read(ir);
     let mut realized: HashMap<TypeName, Realized> = HashMap::default();
     for class in enums {
         let reads_entries = entries_read.contains(&ir.classes[class as usize].fq_name_id());

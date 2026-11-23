@@ -227,12 +227,16 @@ pub(super) fn record_checked_klib_dependency_facts(
 /// before target lowering computes its emission closure. `provider` remains live here, so the
 /// final callable freeze includes calls introduced by common lowering. Dependency-support units
 /// can use this entry point after their checked unit and exact exports have been constructed.
+/// `entries_read` is every enum whose `entries` some file of the program reads: one file's own
+/// reads for a target that lowers files as they are checked, the whole program's for one that
+/// holds them all.
 pub(super) fn prepare_common_ir(
     file: &mut CheckedIrFile<'_>,
     provider: &dyn crate::libraries::SemanticPlatform,
     preparation: crate::backend::CommonIrPreparation,
     coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
     represented: &[crate::types::TypeName],
+    entries_read: &crate::fx_hash::HashSet<crate::types::TypeName>,
 ) -> Result<(), crate::backend::CommonIrPreparationError> {
     // Resolution selected the coroutine runtime declarations once; a unit whose preparation
     // lowers a suspend function records that saved selection.
@@ -247,6 +251,7 @@ pub(super) fn prepare_common_ir(
     crate::backend::enums::realize(
         &mut file.ir,
         preparation.enums,
+        entries_read,
         &mut file.dependency_exports,
     );
     let classifiers = file.classifiers.module();

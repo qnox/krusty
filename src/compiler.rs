@@ -500,23 +500,26 @@ fn emit_analyzed_into<B: Backend>(
         if diags.has_errors() {
             continue;
         }
-        if let Some(preparation) = common_ir_preparation {
-            if let Err(error) = backend_handoff::prepare_common_ir(
-                &mut file,
-                symbols.semantic_platform(),
-                preparation,
-                symbols.coroutine_runtime(),
-                &dispatched_classes,
-            ) {
-                backend.report_common_ir_preparation_error(&error, diags);
-                continue;
-            }
-        }
         // A target emitting library bodies emits each file once the whole program is checked, so
-        // its dependency support closes over every file's uses.
+        // its dependency support closes over every file's uses, and common IR is prepared then,
+        // with every file of the program in hand (`target_emission::emit_program`).
         if backend.emits_dependency_support() {
             retained.retain(raw_source, file);
         } else {
+            if let Some(preparation) = common_ir_preparation {
+                let entries_read = crate::backend::enums::entries_read(&file.ir);
+                if let Err(error) = backend_handoff::prepare_common_ir(
+                    &mut file,
+                    symbols.semantic_platform(),
+                    preparation,
+                    symbols.coroutine_runtime(),
+                    &dispatched_classes,
+                    &entries_read,
+                ) {
+                    backend.report_common_ir_preparation_error(&error, diags);
+                    continue;
+                }
+            }
             target_emission::emit_file(raw_source, file, emission, diags, artifacts);
         }
     }
@@ -531,6 +534,7 @@ fn emit_analyzed_into<B: Backend>(
             symbols,
             backend_module_facts,
             source_map,
+            dispatched_classes,
         )
     })
 }

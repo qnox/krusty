@@ -872,12 +872,14 @@ pub(super) fn emit_dependencies<B: Backend>(
             .extend(statics.iter().cloned());
 
         if let Some(preparation) = backend.common_ir_preparation() {
+            let entries_read = crate::backend::enums::entries_read(&support.ir);
             if let Err(error) = super::backend_handoff::prepare_common_ir(
                 &mut support,
                 platform,
                 preparation,
                 symbols.coroutine_runtime(),
                 &dispatched_classes,
+                &entries_read,
             ) {
                 release_unit_reservations(support_state, &published, &materialized, &statics);
                 backend.report_common_ir_preparation_error(&error, diags);

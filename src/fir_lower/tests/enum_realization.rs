@@ -8,9 +8,11 @@ use crate::types::{type_name, Ty, TypeName};
 
 fn lowered(source: &str) -> IrFile {
     let mut ir = super::lower_single_source_with_jvm_stdlib(source, "Enums");
+    let entries_read = crate::backend::enums::entries_read(&ir);
     crate::backend::enums::realize(
         &mut ir,
         crate::backend::enums::Contract::KotlinNative,
+        &entries_read,
         &mut crate::backend::DependencyExportSignatures::default(),
     );
     ir
@@ -461,9 +463,11 @@ fn an_enum_another_file_declares_keeps_its_use_nodes() {
         panic!("box has a block body");
     };
     stmts.push(elsewhere);
+    let entries_read = crate::backend::enums::entries_read(&ir);
     crate::backend::enums::realize(
         &mut ir,
         crate::backend::enums::Contract::KotlinNative,
+        &entries_read,
         &mut crate::backend::DependencyExportSignatures::default(),
     );
     assert!(matches!(ir.expr(elsewhere), IrExpr::EnumEntry { .. }));
@@ -493,9 +497,11 @@ fn the_enum_entries_intrinsic_reads_the_entries_slot() {
         panic!("box has a block body");
     };
     stmts.push(intrinsic);
+    let entries_read = crate::backend::enums::entries_read(&ir);
     crate::backend::enums::realize(
         &mut ir,
         crate::backend::enums::Contract::KotlinNative,
+        &entries_read,
         &mut crate::backend::DependencyExportSignatures::default(),
     );
 

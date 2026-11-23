@@ -88,9 +88,11 @@ fn a_dependency_enum_constant_read_materializes_its_enum_class() {
 
     // The shared realization builds the constants and leaves no use node behind.
     let mut realized = unit.into_ir();
+    let entries_read = crate::backend::enums::entries_read(&realized);
     crate::backend::enums::realize(
         &mut realized,
         crate::backend::enums::Contract::KotlinNative,
+        &entries_read,
         &mut crate::backend::DependencyExportSignatures::default(),
     );
     assert!(!realized
