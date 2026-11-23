@@ -514,6 +514,14 @@ fn native_dependency_interface_properties_dispatch_their_exact_accessor_roles() 
             include_str!("box_regressions/multimodule/dependencyInterfacePropertyCalls.kt"),
             "dependencyInterfacePropertyCalls",
         ),
+        (
+            include_str!("box_regressions/multimodule/dependencyInterfaceContextProperty.kt"),
+            "dependencyInterfaceContextProperty",
+        ),
+        (
+            include_str!("box_regressions/interfaceContextProperty.kt"),
+            "interfaceContextProperty",
+        ),
     ] {
         super::box_reference_classes::checked_box(source, stem)
             .expect("pinned kotlinc must run the whole interface property module graph");
