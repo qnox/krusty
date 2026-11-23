@@ -457,7 +457,7 @@ pub(super) fn emit_class_overloads(
 ) {
     let owner = primary.owner;
     if class.has_primary_ctor && declared_on(&class.primary_ctor_annotations) {
-        emit_primary_overloads(ir, class, primary, cw, env);
+        emit_primary_overloads(ir, class, primary, Phase::Declarations, cw, env);
     }
     for site in sites {
         match *site {
@@ -469,29 +469,60 @@ pub(super) fn emit_class_overloads(
                 emit_function_overloads(ir, function, slot, owner, cw, env);
             }
             OverloadSite::SecondaryConstructor(ordinal) => {
-                emit_secondary_overloads(ir, class, ordinal, owner, cw, env);
+                emit_secondary_overloads(ir, class, ordinal, owner, Phase::Declarations, cw, env);
             }
         }
     }
+}
+
+/// Emit the `(…, DefaultConstructorMarker)` accessor of every overload whose declaration the JVM
+/// hides behind one: a sealed class's constructors and those taking a value class. kotlinc adds
+/// them after the accessors of the declared constructors, the primary's overloads first.
+pub(super) fn emit_marker_accessors(
+    ir: &IrFile,
+    class: &krusty::ir::IrClass,
+    owner: &str,
+    cw: &mut ClassWriter,
+    env: &EmitEnv,
+) {
+    if class.has_primary_ctor && declared_on(&class.primary_ctor_annotations) {
+        let primary = PrimaryOverloads {
+            access: method_access::primary_constructor_access(
+                ir,
+                class,
+                false,
+                ir.has_value_param_ctor(&class.fq_name()),
+            ),
+            owner,
+        };
+        emit_primary_overloads(ir, class, primary, Phase::MarkerAccessors, cw, env);
+    }
+    for ordinal in 0..class.secondary_ctors.len() {
+        emit_secondary_overloads(ir, class, ordinal, owner, Phase::MarkerAccessors, cw, env);
+    }
+}
+
+/// What a constructor declaration's overloads are emitted as.
+#[derive(Clone, Copy)]
+enum Phase {
+    /// The overload constructors themselves.
+    Declarations,
+    /// The marker accessors of the overloads a hidden constructor has.
+    MarkerAccessors,
 }
 
 fn emit_primary_overloads(
     ir: &IrFile,
     class: &krusty::ir::IrClass,
     primary: PrimaryOverloads<'_>,
+    phase: Phase,
     cw: &mut ClassWriter,
     env: &EmitEnv,
 ) {
     let Some(defaults) = crate::default_wrappers::primary_constructor(ir, class) else {
         return;
     };
-    if ir.has_value_param_ctor(&class.fq_name()) || class.is_sealed {
-        env.run.set_emit_error(format!(
-            "@JvmOverloads on the primary constructor of {}, which the JVM hides behind a marker accessor",
-            class.fq_name()
-        ));
-        return;
-    }
+    let hidden = class.is_sealed || ir.has_value_param_ctor(&class.fq_name());
     let prefix_count = class.constructor_prefix_count as usize;
     let physical = class_ctor_jvm_tys(ir, class);
     let (prefix, source) = physical.split_at(prefix_count);
@@ -535,9 +566,7 @@ fn emit_primary_overloads(
         signature: &signature,
         varargs: false,
     };
-    for kept in kept_parameters(&overloads.has_default) {
-        overloads.emit(&kept, cw);
-    }
+    overloads.emit_all(phase, hidden, cw);
 }
 
 fn emit_secondary_overloads(
@@ -545,6 +574,7 @@ fn emit_secondary_overloads(
     class: &krusty::ir::IrClass,
     ordinal: usize,
     owner: &str,
+    phase: Phase,
     cw: &mut ClassWriter,
     env: &EmitEnv,
 ) {
@@ -555,18 +585,28 @@ fn emit_secondary_overloads(
     let Some(defaults) = crate::default_wrappers::secondary_constructor(constructor) else {
         return;
     };
-    let declaration =
-        secondary_constructor::SecondaryDeclaration::of(ir, class, ordinal, constructor, false);
-    if declaration.semantically_private && declaration.access & 0x0002 == 0 {
-        env.run.set_emit_error(format!(
-            "@JvmOverloads on a secondary constructor of {}, which the JVM hides behind a marker accessor",
-            class.fq_name()
-        ));
-        return;
-    }
-    let prefix = secondary_prefix_jvm_tys(ir, class, constructor);
+    let declaration = secondary_constructor::SecondaryDeclaration::of(
+        ir,
+        class,
+        ordinal,
+        constructor,
+        class.is_enum,
+    );
+    let hidden = constructor_accessors::hides_secondary(ir, class, ordinal)
+        || (constructor.vc_params && !class.is_enum);
+    // An enum's constructors take the constant's name and ordinal first, and so do its overloads.
+    let owner_prefix = if class.is_enum {
+        OwnerConstructorPrefix::enum_class()
+    } else {
+        OwnerConstructorPrefix::none()
+    };
+    let prefix = owner_prefix
+        .types
+        .iter()
+        .copied()
+        .chain(secondary_prefix_jvm_tys(ir, class, constructor))
+        .collect::<Vec<_>>();
     let source = jvm_tys(&constructor.params);
-    let owner_prefix = OwnerConstructorPrefix::none();
     let physical = prefix.iter().chain(&source).copied().collect::<Vec<_>>();
     let method_parameters = if env.java_parameters {
         crate::method_parameters::secondary_constructor(
@@ -581,7 +621,14 @@ fn emit_secondary_overloads(
     };
     let access = declaration.access;
     let signature = |kept: &[usize]| {
-        secondary_constructor::written_signature(ir, env, constructor, Some(kept), &[], access)
+        secondary_constructor::written_signature(
+            ir,
+            env,
+            constructor,
+            Some(kept),
+            &owner_prefix.types,
+            access,
+        )
     };
     let overloads = ConstructorOverloads {
         owner,
@@ -611,9 +658,7 @@ fn emit_secondary_overloads(
         signature: &signature,
         varargs: method_access::secondary_constructor_varargs(constructor) != 0,
     };
-    for kept in kept_parameters(&overloads.has_default) {
-        overloads.emit(&kept, cw);
-    }
+    overloads.emit_all(phase, hidden, cw);
 }
 
 /// EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
@@ -737,6 +782,32 @@ struct ConstructorOverloads<'a> {
 }
 
 impl ConstructorOverloads<'_> {
+    /// Every overload of the declaration, as `phase` asks. `hidden`: the JVM reaches the
+    /// declaration through a marker accessor, so each overload has one too.
+    fn emit_all(&self, phase: Phase, hidden: bool, cw: &mut ClassWriter) {
+        for kept in kept_parameters(&self.has_default) {
+            match phase {
+                Phase::Declarations => self.emit(&kept, cw),
+                Phase::MarkerAccessors if hidden => self.emit_marker_accessor(&kept, cw),
+                Phase::MarkerAccessors => {}
+            }
+        }
+    }
+
+    fn emit_marker_accessor(&self, kept: &[usize], cw: &mut ClassWriter) {
+        let physical = self
+            .prefix
+            .iter()
+            .copied()
+            .chain(kept.iter().map(|&index| self.source[index]))
+            .collect::<Vec<_>>();
+        let identities = (0..self.prefix.len())
+            .chain(kept.iter().map(|&index| self.prefix.len() + index))
+            .map(|position| self.local_names.get(position).cloned().flatten())
+            .collect::<Vec<_>>();
+        constructor_defaults::emit_ctor_marker_accessor(self.owner, &physical, &identities, cw);
+    }
+
     fn emit(&self, kept: &[usize], cw: &mut ClassWriter) {
         let owner = self.owner;
         let kept_tys = kept.iter().map(|&p| self.source[p]).collect::<Vec<_>>();

@@ -3399,11 +3399,14 @@ fn emit_enum_class(
         byte_parity: false,
         owner_prefix: &OwnerConstructorPrefix::enum_class(),
     };
-    for member in source_ordered_members(ir, c, None) {
-        if matches!(member, SourceOrderedMember::Function(function) if !schedule.declared.contains(&function))
-        {
-            continue;
-        }
+    let enum_members = source_ordered_members(ir, c, None)
+        .into_iter()
+        .filter(|member| {
+            !matches!(member, SourceOrderedMember::Function(function) if !schedule.declared.contains(function))
+        })
+        .collect::<Vec<_>>();
+    let overload_sites = jvm_overloads::sites(&enum_members);
+    for member in enum_members {
         emit_scheduled_member(&declared_members, member, &mut cw);
     }
     let emit_members = |cw: &mut ClassWriter, members: &[u32]| {
@@ -3505,7 +3508,6 @@ fn emit_enum_class(
         &synthetic_enum_fields.entries,
         "Lkotlin/enums/EnumEntries;",
     );
-    cw.reserve_method_name("$values");
     // values(): `$VALUES.clone()` cast back to the array type.
     let mut vals = CodeBuilder::new(0);
     let valref = cw.fieldref(&fq, &synthetic_enum_fields.values, &arr_desc);
@@ -3553,6 +3555,19 @@ fn emit_enum_class(
         &gent,
         Some(&format!("()Lkotlin/enums/EnumEntries<L{fq};>;")),
     );
+    // `@JvmOverloads` follows the synthesized members: kotlinc's enum lowering runs before it.
+    jvm_overloads::emit_class_overloads(
+        ir,
+        c,
+        jvm_overloads::PrimaryOverloads {
+            access: 0x0002,
+            owner: &fq,
+        },
+        &overload_sites,
+        &mut cw,
+        env,
+    );
+    cw.reserve_method_name("$values");
     emit_members(&mut cw, &schedule.local_functions);
     // $values(): build the backing array — `new E[n]` filled with each entry constant (kotlinc factors
     // this out of `<clinit>`). Private static final synthetic, returning `E[]`.
