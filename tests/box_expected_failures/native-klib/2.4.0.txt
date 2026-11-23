@@ -577,7 +577,6 @@ coroutines/kt15930.kt
 coroutines/kt21080.kt
 coroutines/kt21605.kt
 coroutines/kt24135.kt
-coroutines/kt25912.kt
 coroutines/kt28844.kt
 coroutines/kt41394.kt
 coroutines/kt42028.kt
@@ -719,7 +718,6 @@ coroutines/unitTypeReturn/suspendNonLocalReturn.kt
 coroutines/unitTypeReturn/suspendReturn.kt
 coroutines/unitTypeReturn/unitSafeCall.kt
 coroutines/unsafeTransform.kt
-coroutines/varCaptuedInCoroutineIntrinsic.kt
 coroutines/varSpilling/fakeInlinerVariables.kt
 coroutines/varSpilling/kt19475.kt
 coroutines/varSpilling/kt38925.kt
