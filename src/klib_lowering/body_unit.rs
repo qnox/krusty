@@ -2099,6 +2099,12 @@ impl<'s> Linker<'_, 's> {
         if class.is_value {
             return Ok(true);
         }
+        if class.kind == crate::libraries::TypeKind::Enum {
+            return Ok(super::enum_classes::materializes(
+                self.sources.bodies,
+                class,
+            ));
+        }
         if class.kind == crate::libraries::TypeKind::Object {
             return Ok(super::class_initialization::object_plan(
                 class,
