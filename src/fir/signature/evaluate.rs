@@ -1777,6 +1777,18 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                             suspend,
                         )
                     }
+                    SigExpr::ImplicitIt {
+                        parameter,
+                        enclosing,
+                    } => match (memo.get(&parameter).copied(), enclosing) {
+                        (Some(ty), _) => Ok(ty),
+                        (None, Some(enclosing)) => evaluate_expression(
+                            semantics, enclosing, graph, demand, memo, computing,
+                        ),
+                        (None, None) => evaluate_expression(
+                            semantics, parameter, graph, demand, memo, computing,
+                        ),
+                    },
                     SigExpr::ContextualParameter(declaration)
                     | SigExpr::ContextualReceiver(declaration) => {
                         Err(semantics.missing_signature_diagnostic(declaration))
