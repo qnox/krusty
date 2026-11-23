@@ -438,6 +438,8 @@ pub(super) fn complete(
             dispatch_receiver: Some(d),
             args: vec![nm, opt],
         }));
+        let added = init_stmts[init_stmts.len() - 1];
+        declare_runtime_call(ir, added, &[Ty::String, Ty::Boolean]);
     }
     let this0 = ir.add_expr(IrExpr::GetValue(0));
     let dval = ir.add_expr(IrExpr::GetValue(desc_local));

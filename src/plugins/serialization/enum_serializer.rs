@@ -1,8 +1,8 @@
 //! Construction of the runtime serializer factory call for an enum declaration.
 
 use super::{
-    class_ty, type_name, Callee, ClassId, ExprId, InlineKind, IrConst, IrExpr, IrFile, IrTypeOp,
-    KtString, Ty, SERIALIZABLE_FQ,
+    class_ty, declare_runtime_call, type_name, Callee, ClassId, ExprId, InlineKind, IrConst,
+    IrExpr, IrFile, IrTypeOp, KtString, Ty, SERIALIZABLE_FQ,
 };
 use crate::plugins::PluginContext;
 use crate::types::TypeName;
@@ -128,7 +128,7 @@ fn factory_call_with_names(
     // `createSimpleEnumSerializer` derives every name from the constant spelling. A serial name
     // selects `createAnnotatedEnumSerializer`, whose null name elements mean “use that spelling”.
     if entry_serial_names.iter().all(Option::is_none) {
-        return ir.add_expr(IrExpr::Call {
+        let call = ir.add_expr(IrExpr::Call {
             callee: Box::new(Callee::Static {
                 owner: type_name("kotlinx/serialization/internal/EnumsKt"),
                 name: "createSimpleEnumSerializer".to_string(),
@@ -140,6 +140,15 @@ fn factory_call_with_names(
             dispatch_receiver: None,
             args: vec![name, enums],
         });
+        declare_runtime_call(
+            ir,
+            call,
+            &[
+                Ty::String,
+                Ty::obj_args("kotlin/Array", &[class_ty("kotlin/Enum")]),
+            ],
+        );
+        return call;
     }
 
     let names: Vec<ExprId> = entry_serial_names
@@ -174,7 +183,7 @@ fn factory_call_with_names(
         elements: entry_annotations,
     });
     let class_annotations = ir.add_expr(IrExpr::Const(IrConst::Null));
-    ir.add_expr(IrExpr::Call {
+    let call = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::Static {
             owner: type_name("kotlinx/serialization/internal/EnumsKt"),
             name: "createAnnotatedEnumSerializer".to_string(),
@@ -189,7 +198,28 @@ fn factory_call_with_names(
             entry_annotations_array,
             class_annotations,
         ],
-    })
+    });
+    declare_runtime_call(
+        ir,
+        call,
+        &[
+            Ty::String,
+            Ty::obj_args("kotlin/Array", &[class_ty("kotlin/Enum")]),
+            Ty::obj_args("kotlin/Array", &[Ty::nullable(class_ty("kotlin/String"))]),
+            Ty::obj_args(
+                "kotlin/Array",
+                &[Ty::nullable(Ty::obj_args(
+                    "kotlin/Array",
+                    &[class_ty("kotlin/Annotation")],
+                ))],
+            ),
+            Ty::nullable(Ty::obj_args(
+                "kotlin/Array",
+                &[class_ty("kotlin/Annotation")],
+            )),
+        ],
+    );
+    call
 }
 
 #[cfg(test)]

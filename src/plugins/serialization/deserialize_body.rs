@@ -2,8 +2,8 @@
 
 use super::element_serializer::unsupported_element_serializer;
 use super::{
-    build_field_serializer_instance, class_ty, contextual_serializer_for, decode_element_method,
-    is_nullable, value_class_underlying, virtual_iface,
+    build_field_serializer_instance, class_ty, contextual_serializer_for, declare_runtime_call,
+    decode_element_method, is_nullable, value_class_underlying, virtual_iface,
 };
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::kt_string::KtString;
@@ -179,7 +179,7 @@ impl ElementDecode<'_> {
             self.decode_serializable(ir, k, [dk, idxc, cdk], inst)
         } else {
             let (mname, mdesc) = decode_element_method(&ty).unwrap();
-            ir.add_expr(IrExpr::Call {
+            let call = ir.add_expr(IrExpr::Call {
                 callee: Box::new(virtual_iface(
                     "kotlinx/serialization/encoding/CompositeDecoder",
                     mname,
@@ -187,7 +187,16 @@ impl ElementDecode<'_> {
                 )),
                 dispatch_receiver: Some(cdk),
                 args: vec![dk, idxc],
-            })
+            });
+            declare_runtime_call(
+                ir,
+                call,
+                &[
+                    class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                    Ty::Int,
+                ],
+            );
+            call
         };
         let setk = ir.add_expr(IrExpr::SetValue {
             var: self.field_locals[k],
@@ -428,6 +437,13 @@ impl DeserializeBody<'_> {
                 dispatch_receiver: Some(dec),
                 args: vec![d0],
             });
+            declare_runtime_call(
+                ir,
+                begin,
+                &[class_ty(
+                    "kotlinx/serialization/descriptors/SerialDescriptor",
+                )],
+            );
             stmts.push(ir.add_expr(IrExpr::Variable {
                 index: composite_local,
                 ty: class_ty("kotlinx/serialization/encoding/CompositeDecoder"),
@@ -467,6 +483,13 @@ impl DeserializeBody<'_> {
                 dispatch_receiver: Some(cdi),
                 args: vec![didx],
             });
+            declare_runtime_call(
+                ir,
+                dei,
+                &[class_ty(
+                    "kotlinx/serialization/descriptors/SerialDescriptor",
+                )],
+            );
             let set_i = ir.add_expr(IrExpr::SetValue {
                 var: index_local,
                 value: dei,
@@ -559,7 +582,7 @@ impl DeserializeBody<'_> {
             // endStructure
             let dend = this_desc(ir);
             let cend = composite(ir);
-            stmts.push(ir.add_expr(IrExpr::Call {
+            let end = ir.add_expr(IrExpr::Call {
                 callee: Box::new(virtual_iface(
                     "kotlinx/serialization/encoding/CompositeDecoder",
                     "endStructure",
@@ -567,7 +590,15 @@ impl DeserializeBody<'_> {
                 )),
                 dispatch_receiver: Some(cend),
                 args: vec![dend],
-            }));
+            });
+            declare_runtime_call(
+                ir,
+                end,
+                &[class_ty(
+                    "kotlinx/serialization/descriptors/SerialDescriptor",
+                )],
+            );
+            stmts.push(end);
             // return Foo(seen..., f0, f1, …, null...) through the exact synthetic
             // deserialization
             // constructor — it is what turns an absent required element into

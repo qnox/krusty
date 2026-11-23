@@ -1,12 +1,12 @@
 //! Frontend planning and common-IR realization for
 //! `ClassSerialDescriptorBuilder.element<T>(...)`.
 
-use crate::ir::{Callee, IrConst, IrExpr, IrFile};
+use crate::ir::{Callee, ExprId, IrConst, IrExpr, IrFile};
 use crate::libraries::InlineKind;
 use crate::plugins::{FrontendExpressionContext, FrontendSelectedCall, PluginExpressionPlan};
 use crate::types::{type_name, Ty};
 
-use super::KSERIALIZER_FQ;
+use super::{class_ty, declare_runtime_call, KSERIALIZER_FQ};
 
 pub(super) const SERIAL_DESCRIPTORS_FQ: &str =
     "kotlinx/serialization/descriptors/SerialDescriptorsKt";
@@ -137,5 +137,15 @@ pub(super) fn specialize(ir: &mut IrFile, index: usize, kind: &str, exprs: &[u32
         dispatch_receiver: Some(receiver),
         args: vec![name, descriptor, annotations, is_optional],
     };
+    declare_runtime_call(
+        ir,
+        index as ExprId,
+        &[
+            Ty::String,
+            class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+            class_ty("java/util/List"),
+            Ty::Boolean,
+        ],
+    );
     true
 }
