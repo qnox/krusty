@@ -420,6 +420,10 @@ impl<'u, 's> Linker<'u, 's> {
         let mut class = IrClass::synthetic(classifier);
         class.is_source_declared = true;
         class.is_object = plan.header.contract.kind == crate::libraries::TypeKind::Object;
+        if class.is_object {
+            class.applied_annotations =
+                super::super::object_instances::instance_annotations(plan.header.class);
+        }
         class.supertypes.clone_from(&plan.supertypes);
         set_materialized_modality(&mut class, plan.header.contract.modality);
         if let Some(call) = &plan.superclass {

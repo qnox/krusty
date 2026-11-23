@@ -34,6 +34,7 @@ mod ir_builtins;
 mod klib_types;
 mod local_values;
 mod lowering_checkpoint;
+mod object_instances;
 mod primitive_calls;
 mod range_membership;
 mod same_library_class;

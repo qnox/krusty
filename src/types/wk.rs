@@ -35,6 +35,7 @@ names! {
     context_function_type_params => "kotlin/ContextFunctionTypeParams",
     jvm_name => "kotlin/jvm/JvmName",
     jvm_record => "kotlin/jvm/JvmRecord",
+    thread_local => "kotlin/native/concurrent/ThreadLocal",
     continuation => "kotlin/coroutines/Continuation",
     function_root => "kotlin/Function",
     any => "kotlin/Any",
