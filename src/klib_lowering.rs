@@ -27,6 +27,7 @@ mod continuation_intrinsics;
 mod decline;
 mod enum_classes;
 mod for_loops;
+mod foreign_type_parameters;
 mod function_lowering;
 mod inline_templates;
 mod intercepted_continuation;
