@@ -139,7 +139,7 @@ impl CompactSelectedResultPublication {
     /// type arguments and a formal only the result names.
     pub(super) fn open_result_signature(&self) -> Option<&GenericSig> {
         self.signature.as_ref().filter(|signature| {
-            !self.explicit_type_arguments
+            self.explicit_type_arguments.is_empty()
                 && crate::symbol_resolver::has_result_only_formal(signature)
         })
     }
