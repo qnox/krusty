@@ -20,7 +20,8 @@ pub(super) fn member_method_group_source_order(
                 0,
                 function,
             ),
-            MemberMethodDeclaration::GeneratedMethod { offset } => (offset, 1, 0),
+            MemberMethodDeclaration::GeneratedMethod { offset }
+            | MemberMethodDeclaration::CompanionAccessorBridge { offset, .. } => (offset, 1, 0),
             MemberMethodDeclaration::InPlaceDelegate {
                 function,
                 source_order,
@@ -186,6 +187,24 @@ pub(super) fn declaration_types(
                 types.push(Ty::Unit);
             } else {
                 types.push(property.ty);
+            }
+            return types;
+        }
+        MemberMethodDeclaration::CompanionAccessorBridge {
+            companion,
+            property,
+            setter,
+            ..
+        } => {
+            let property = &ir.classes[companion].properties[property];
+            let mut types = property
+                .context_params
+                .iter()
+                .map(|(_, _, ty)| *ty)
+                .collect::<Vec<_>>();
+            types.push(property.ty);
+            if setter {
+                types.push(Ty::Unit);
             }
             return types;
         }

@@ -40,6 +40,7 @@ fn module_property(source: SourceFileId) -> IrModuleProperty {
         setter_visibility: crate::types::Visibility::Public,
         setter_parameter: None,
         annotations: Box::new([]),
+        property_annotations: Box::new([]),
         getter_annotations: Box::new([]),
         setter_annotations: Box::new([]),
         flags: Default::default(),
