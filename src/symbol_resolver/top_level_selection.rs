@@ -225,7 +225,7 @@ impl SymbolResolver<'_> {
                     &self.src,
                     gsig,
                     bindings,
-                    UnboundSpecialization::UseUpperBound,
+                    UnboundSpecialization::Preserve,
                 )
             })
             .unwrap_or(*ret);
