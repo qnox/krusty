@@ -191,7 +191,8 @@ fn run_reference(
     args: &[String],
     output: Output,
 ) -> Option<Reference> {
-    invocation::run_reference(target, work, paths, args, matches!(output, Output::Program))
+    // The caller records the outcome itself, so the library is not recorded a second time.
+    invocation::run_live(target, work, paths, args, matches!(output, Output::Program))
         .map(|(run, _)| run)
 }
 
