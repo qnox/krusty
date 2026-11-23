@@ -38,6 +38,115 @@ pub(super) struct SecondaryConstructorEmitter<'a, 'env, 'writer> {
     pub(super) owner_prefix: &'a OwnerConstructorPrefix,
 }
 
+/// What a secondary constructor declares, shared by its own `<init>` and the `@JvmOverloads`
+/// overloads that stand for it.
+pub(super) struct SecondaryDeclaration {
+    /// The access word, synthetic and varargs flags included.
+    pub(super) access: u16,
+    /// Whether the JVM hides the constructor behind a marker accessor or an owner's privacy.
+    pub(super) semantically_private: bool,
+    /// The nullability annotation of each source parameter, empty when none is published.
+    pub(super) nullability: Vec<Option<&'static str>>,
+}
+
+impl SecondaryDeclaration {
+    /// `owner_has_prefix`: the class prepends parameters of its own to every constructor (an enum).
+    pub(super) fn of(
+        ir: &IrFile,
+        class: &IrClass,
+        ordinal: usize,
+        constructor: &IrSecondaryCtor,
+        owner_has_prefix: bool,
+    ) -> Self {
+        let declared_access = match constructor.metadata_visibility {
+            Some(krusty::types::Visibility::Private) => 0x0002,
+            Some(krusty::types::Visibility::Protected) => 0x0004,
+            _ => 0x0001,
+        };
+        let semantically_private =
+            super::constructor_accessors::hides_secondary(ir, class, ordinal)
+                || constructor.vc_params
+                || owner_has_prefix
+                || declared_access == 0x0002;
+        let access = (if semantically_private {
+            0x0002
+        } else {
+            declared_access
+        }) | if constructor.synthetic { 0x1000 } else { 0 }
+            | super::method_access::secondary_constructor_varargs(constructor);
+        let generated = ir.is_generated_secondary_constructor(class.fq_name_id(), ordinal as u32);
+        // A declared constructor a source caller can reach annotates each reference parameter with
+        // its nullability, as a function does.
+        let nullability =
+            if generated || semantically_private || constructor.annotations.deprecated_hidden() {
+                Vec::new()
+            } else {
+                constructor
+                    .named_params
+                    .iter()
+                    .zip(jvm_tys(&constructor.params))
+                    .map(|((_, semantic), physical)| declared_annotation(*semantic, physical))
+                    .collect()
+            };
+        Self {
+            access,
+            semantically_private,
+            nullability,
+        }
+    }
+}
+
+/// The generic `Signature` of a declared secondary constructor keeping the source parameters
+/// `kept` (all of them for `None`), when it writes one.
+pub(super) fn written_signature(
+    ir: &IrFile,
+    env: &EmitEnv<'_>,
+    constructor: &IrSecondaryCtor,
+    kept: Option<&[usize]>,
+    owner_prefix_tys: &[Ty],
+    access: u16,
+) -> Option<String> {
+    let formatter = super::JvmSignatureFormatter::new(ir, env);
+    let source_tys = jvm_tys(&constructor.params);
+    let all = (0..constructor.params.len()).collect::<Vec<_>>();
+    let kept = kept.unwrap_or(&all);
+    let mut signature = String::from("(");
+    for &index in kept {
+        let ((_, semantic), carrier) =
+            (&constructor.named_params[index], &constructor.params[index]);
+        // The JVM represents a value-class parameter by its carrier, which is the type the
+        // signature names; value-class lowering already selected it.
+        let written = if semantic
+            .non_null()
+            .obj_internal()
+            .is_some_and(|name| ir.is_value_class_name(name))
+        {
+            carrier
+        } else {
+            semantic
+        };
+        signature.push_str(&formatter.method_ty(written, super::Wildcards::Declared)?);
+    }
+    signature.push_str(")V");
+    // A `Signature` that spells the descriptor back carries nothing and kotlinc omits it —
+    // which is every constructor whose source types are already erased and whose owner
+    // prepends nothing. A synthetic constructor carries none either. A capture prefix (an
+    // inner class's outer instance, a local class's captured values) is left out of the
+    // signature without forcing one, so the comparison skips it; an owner prefix (an
+    // enum's name and ordinal) still does.
+    let unprefixed = owner_prefix_tys
+        .iter()
+        .copied()
+        .chain(kept.iter().map(|&index| source_tys[index]))
+        .collect::<Vec<_>>();
+    super::method_signatures::written_signature(
+        access,
+        false,
+        &method_descriptor(&unprefixed, Ty::Unit),
+        Some(signature),
+    )
+}
+
 impl SecondaryConstructorEmitter<'_, '_, '_> {
     pub(super) fn emit(self, secondary_ordinal: usize, sc: &IrSecondaryCtor) {
         let ir = self.ir;
@@ -85,36 +194,13 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         } else {
             Vec::new()
         };
-        let declared_access = match sc.metadata_visibility {
-            Some(krusty::types::Visibility::Private) => 0x0002,
-            Some(krusty::types::Visibility::Protected) => 0x0004,
-            _ => 0x0001,
-        };
-        let semantically_private =
-            super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal)
-                || sc.vc_params
-                || !owner_prefix_tys.is_empty()
-                || declared_access == 0x0002;
-        let sc_access = (if semantically_private {
-            0x0002
-        } else {
-            declared_access
-        }) | if sc.synthetic { 0x1000 } else { 0 }
-            | super::method_access::secondary_constructor_varargs(sc);
+        let SecondaryDeclaration {
+            access: sc_access,
+            semantically_private,
+            nullability,
+        } = SecondaryDeclaration::of(ir, c, secondary_ordinal, sc, !owner_prefix_tys.is_empty());
         let generated =
             ir.is_generated_secondary_constructor(c.fq_name_id(), secondary_ordinal as u32);
-        // A declared constructor a source caller can reach annotates each reference parameter with
-        // its nullability, as a function does.
-        let nullability = if generated || semantically_private || sc.annotations.deprecated_hidden()
-        {
-            Vec::new()
-        } else {
-            sc.named_params
-                .iter()
-                .zip(&sc_source_tys)
-                .map(|((_, semantic), physical)| declared_annotation(*semantic, *physical))
-                .collect::<Vec<_>>()
-        };
         let nullability_types = nullability.iter().flatten().copied().collect::<Vec<_>>();
         let sc_desc = method_descriptor(&sc_param_tys, Ty::Unit);
         // A constructor whose OWNER prepends parameters has a descriptor its declaration did not
@@ -130,45 +216,11 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         // accessor does not: the attribute exists for a source or Java caller, and nothing in
         // source can name this constructor to call it. kotlinc declares the serialization
         // plugin's deserialization constructor with its erased descriptor alone.
-        let formatter = super::JvmSignatureFormatter::new(ir, env);
-        let sc_signature = (|| -> Option<String> {
-            if generated {
-                return None;
-            }
-            let mut signature = String::from("(");
-            for ((_, semantic), carrier) in sc.named_params.iter().zip(&sc.params) {
-                // The JVM represents a value-class parameter by its carrier, which is the type the
-                // signature names; value-class lowering already selected it.
-                let written = if semantic
-                    .non_null()
-                    .obj_internal()
-                    .is_some_and(|name| ir.is_value_class_name(name))
-                {
-                    carrier
-                } else {
-                    semantic
-                };
-                signature.push_str(&formatter.method_ty(written, super::Wildcards::Declared)?);
-            }
-            signature.push_str(")V");
-            // A `Signature` that spells the descriptor back carries nothing and kotlinc omits it —
-            // which is every constructor whose source types are already erased and whose owner
-            // prepends nothing. A synthetic constructor carries none either. A capture prefix (an
-            // inner class's outer instance, a local class's captured values) is left out of the
-            // signature without forcing one, so the comparison skips it; an owner prefix (an
-            // enum's name and ordinal) still does.
-            let unprefixed = owner_prefix_tys
-                .iter()
-                .chain(&sc_source_tys)
-                .copied()
-                .collect::<Vec<_>>();
-            super::method_signatures::written_signature(
-                sc_access,
-                false,
-                &method_descriptor(&unprefixed, Ty::Unit),
-                Some(signature),
-            )
-        })();
+        let sc_signature = if generated {
+            None
+        } else {
+            written_signature(ir, env, sc, None, &owner_prefix_tys, sc_access)
+        };
         // Reserve this constructor's header — its declared annotations included — before its body
         // interns anything, matching the order kotlinc's writer produces.
         cw.reserve_method_pool_with_annotations(
