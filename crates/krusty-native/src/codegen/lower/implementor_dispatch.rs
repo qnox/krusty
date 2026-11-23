@@ -714,7 +714,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // No type to test (the same reference on both sides, or `Any`, which every non-null
             // value is): only a `null` the override's type excludes is rejected, as the erased
             // bridge answers it.
-            if boundary.implementation.admits_null() {
+            if boundary.implementation.upper_bound_admits_null() {
                 return Ok(None);
             }
             let absent = self.builder.ins().icmp_imm_u(IntCC::Equal, value, 0);
