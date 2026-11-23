@@ -95,7 +95,6 @@ diagnosticTests/inlineCycle.args
 diagnosticTests/instanceAccessBeforeSuperCall.args
 diagnosticTests/javaSealedClass.args
 diagnosticTests/kotlinPackage.args
-diagnosticTests/kt19628_13.args
 diagnosticTests/multipleTextRangesInDiagnosticsOrder.args
 diagnosticTests/requireKotlinCompilerVersion.args
 diagnosticTests/returnAsWhenKey.args
