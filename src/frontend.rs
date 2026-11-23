@@ -421,7 +421,10 @@ struct ActualizedHeaders {
     /// Matched classifiers and the `expect` members they never implemented.
     unactualized_members: Vec<crate::fir::UnactualizedMembers>,
     /// `actual` members rejected only for spelling their type parameters differently.
-    incompatible_members: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    incompatible_members:
+        crate::fx_hash::HashMap<crate::fir::DeclarationId, crate::fir::DeclarationId>,
+    /// Top-level implementations rejected against an `expect` declaration, with why.
+    incompatible_actuals: Vec<crate::fir::IncompatibleActual>,
 }
 
 fn actualize_headers_and_collect_inherited_defaults(
@@ -435,6 +438,7 @@ fn actualize_headers_and_collect_inherited_defaults(
         incompatible,
         unactualized_members,
         incompatible_members,
+        incompatible_actuals,
     } = actualization;
     let matched = pairs
         .iter()
@@ -587,6 +591,7 @@ fn actualize_headers_and_collect_inherited_defaults(
         incompatible,
         unactualized_members,
         incompatible_members,
+        incompatible_actuals,
     }
 }
 
@@ -1468,6 +1473,11 @@ where
     } else {
         crate::fx_hash::HashMap::default()
     };
+    let expect_members = if multiplatform {
+        no_expect_for_actual::expect_members(&files, &pass1_headers)
+    } else {
+        crate::fx_hash::HashMap::default()
+    };
     let source_classifiers = pass1_headers.source_classifiers();
     let platform_sources = sources
         .iter()
@@ -1541,6 +1551,7 @@ where
         incompatible_expects,
         unactualized_members,
         incompatible_members,
+        incompatible_actuals,
     ) = if multiplatform {
         let bindings =
             crate::resolve::actualization_type_bindings(&pass1_headers, platform.as_ref());
@@ -1557,6 +1568,7 @@ where
             incompatible,
             unactualized_members,
             incompatible_members,
+            incompatible_actuals,
         } = actualize_headers_and_collect_inherited_defaults(
             &mut pass1_headers,
             actualization,
@@ -1614,6 +1626,7 @@ where
             incompatible,
             unactualized_members,
             incompatible_members,
+            incompatible_actuals,
         )
     } else {
         (
@@ -1623,7 +1636,8 @@ where
             (Vec::new(), Vec::new(), Vec::new()),
             crate::fx_hash::HashSet::default(),
             Vec::new(),
-            crate::fx_hash::HashSet::default(),
+            crate::fx_hash::HashMap::default(),
+            Vec::new(),
         )
     };
     let platform = if inferred_count < files.len() {
@@ -1775,10 +1789,16 @@ where
         // this point. The declarations themselves were selected while every file's syntax was
         // still live.
         if !expect_bodies_rejected {
+            let counterparts = no_expect_for_actual::Counterparts {
+                incompatible_members: &incompatible_members,
+                rejected: &incompatible_actuals,
+                written: &expected_members,
+                expect_members: &expect_members,
+            };
             no_expect_for_actual::report(
                 &unmatched_actuals,
                 &actualized_targets,
-                &incompatible_members,
+                &counterparts,
                 &symbols,
                 &pass1_headers,
                 project_features.reference(),
@@ -1787,7 +1807,7 @@ where
             no_expect_for_actual::report_unactualized_members(
                 &unactualized_members,
                 &unmatched_actuals,
-                &expected_members,
+                &counterparts,
                 &symbols,
                 &pass1_headers,
                 project_features.reference(),

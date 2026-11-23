@@ -25,9 +25,6 @@ struct Args<'a> {
     /// of its own: `expect`/`actual` outside one is rejected at the modifier by both compilers,
     /// and this check must not pile a second sentence on top of that.
     multiplatform: bool,
-    /// Compare each message with the listing under its first line. The sentences kotlinc lists
-    /// there are asserted only by the tests that ask for them.
-    full_messages: bool,
 }
 
 /// Run both compilers over the files already written into `dir` and return both complete ledgers.
@@ -86,11 +83,7 @@ fn both_reports(
         "the compilers disagree on whether this source is rejected\nreference:\n{reference}\nkrusty:\n{krusty}"
     );
 
-    if args.full_messages {
-        (complete(&reference), complete(&krusty))
-    } else {
-        (common::reported(&reference), common::reported(&krusty))
-    }
+    (complete(&reference), complete(&krusty))
 }
 
 /// The ledger of `report` with each message in full. `common::reported` keeps only an error's
@@ -148,7 +141,6 @@ fn both(source: &str, stem: &str) -> (Vec<Reported>, Vec<Reported>) {
             sources: std::slice::from_ref(&file),
             reference: &[],
             multiplatform: true,
-            full_messages: false,
         },
     )
 }
@@ -164,23 +156,13 @@ fn both_split(
     common: &[(&str, &str)],
     platform: &[(&str, &str)],
 ) -> (Vec<Reported>, Vec<Reported>) {
-    split_reports(stem, common, platform, false)
-}
-
-/// `both_split`, comparing every message together with the listing under its first line.
-fn both_split_full(
-    stem: &str,
-    common: &[(&str, &str)],
-    platform: &[(&str, &str)],
-) -> (Vec<Reported>, Vec<Reported>) {
-    split_reports(stem, common, platform, true)
+    split_reports(stem, common, platform)
 }
 
 fn split_reports(
     stem: &str,
     common: &[(&str, &str)],
     platform: &[(&str, &str)],
-    full_messages: bool,
 ) -> (Vec<Reported>, Vec<Reported>) {
     let dir = common::scratch_dir().expect("scratch dir");
     let write = |files: &[(&str, &str)]| {
@@ -211,7 +193,6 @@ fn split_reports(
             sources: &sources,
             reference: &["-Xexpect-actual-classes", &common_sources],
             multiplatform: true,
-            full_messages,
         },
     )
 }
@@ -547,7 +528,6 @@ fn the_check_needs_the_multiplatform_feature() {
             sources: std::slice::from_ref(&file),
             reference: &[],
             multiplatform: false,
-            full_messages: false,
         },
     );
     assert_eq!(krusty, reference, "the complete ledgers must agree");
@@ -1689,6 +1669,37 @@ fn an_expect_constructor_pairs_only_with_its_own_parameter_count_otherwise() {
     );
 }
 
+/// A class that declares secondary constructors lists each of them beneath the `expect`
+/// constructor it owes, in source order, the `actual` one keeping its keyword; and the `actual`
+/// secondary constructor lists the `expect` constructor it was rejected against.
+#[test]
+fn secondary_constructors_are_listed_as_candidates_in_source_order() {
+    let (reference, krusty) = both_split(
+        "ConstructorCandidates",
+        &[(
+            "ConstructorCandidatesCommon.kt",
+            "package plib\n\
+             \n\
+             expect class D()\n",
+        )],
+        &[(
+            "ConstructorCandidatesPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class D {\n\
+             \x20   actual constructor(x: Int)\n\
+             \x20   constructor(y: String, z: Int) {}\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert_recorded_reference(
+        reference.iter().map(ToString::to_string).collect(),
+        2,
+        "the class and its actual constructor are each reported once",
+    );
+}
+
 /// An explicit classifier import is a higher-priority root than a classifier nested in the
 /// enclosing class. Both common and platform member headers therefore bind `E.Missing` to the
 /// imported `other.E`, without consulting their respective nested `Holder.E` declarations.
@@ -2024,7 +2035,7 @@ public class Target {
     }
 }
 ";
-    let (reference, krusty) = both_split_full(
+    let (reference, krusty) = both_split(
         "alias_dependency_candidate_count",
         &[(
             "Common.kt",
@@ -2042,7 +2053,7 @@ public class Target {
 /// An `expect` function answered by a property of the target.
 #[test]
 fn an_actual_typealias_lists_a_property_that_answers_an_expect_function() {
-    let (reference, krusty) = both_split_full(
+    let (reference, krusty) = both_split(
         "alias_dependency_candidate_property",
         &[(
             "Common.kt",
@@ -2086,7 +2097,7 @@ public class Target {
     }
 }
 ";
-    let (reference, krusty) = both_split_full(
+    let (reference, krusty) = both_split(
         "alias_dependency_candidates",
         &[("Common.kt", common_source)],
         &[
@@ -2113,7 +2124,7 @@ public class Target {
     }
 }
 ";
-    let (reference, krusty) = both_split_full(
+    let (reference, krusty) = both_split(
         "alias_java_primitive_members",
         &[(
             "Common.kt",

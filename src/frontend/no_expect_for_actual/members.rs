@@ -68,7 +68,8 @@ struct ConstructorParameter {
     has_default: bool,
 }
 
-/// Every member of `class` that wrote `actual`, in SOURCE order.
+/// Every member of `class` that wrote `actual` in
+/// SOURCE order.
 ///
 /// A classifier keeps its methods, its body properties, its constructor properties and its
 /// secondary constructors in four separate lists, so walking them in turn yields all of one kind
@@ -206,7 +207,7 @@ pub(super) fn actual_members(
 /// Kotlin's modality for a member, as the reference compiler renders it: an interface member is
 /// `abstract` with no body and `open` with one, an `override` of an `open` member is `open`, and
 /// everything else is `final` unless it says otherwise.
-fn member_modality(
+pub(super) fn member_modality(
     is_abstract: bool,
     is_open: bool,
     interface: bool,
@@ -230,7 +231,7 @@ fn member_modality(
 pub(super) fn report_members(
     members: &[Member],
     actualized: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
-    incompatible: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    counterparts: &super::Counterparts<'_>,
     declarations: &ResolvedDeclarations<'_>,
     owner: Option<crate::fir::DeclarationId>,
     reference: crate::features::ReferenceProfile,
@@ -253,19 +254,66 @@ pub(super) fn report_members(
             member,
             member.declaration,
             actualized,
-            incompatible,
+            counterparts.incompatible_members,
             class,
             declarations,
         ) {
             Ok(Rendered::Actualized) => {}
-            Ok(Rendered::Incompatible) => diags.error(
-                member.name,
-                "the 'expect' and the 'actual' declarations are incompatible.".to_string(),
-            ),
-            Ok(Rendered::Unmatched(rendered)) => diags.error(
-                member.name,
-                crate::diagnostic_wording::actual_without_expect(reference, &rendered),
-            ),
+            Ok(Rendered::Incompatible(expect)) => {
+                let actual = match render_member(
+                    member,
+                    member.declaration,
+                    &crate::fx_hash::HashSet::default(),
+                    &crate::fx_hash::HashMap::default(),
+                    class,
+                    declarations,
+                ) {
+                    Ok(Rendered::Unmatched(rendered)) => Ok(rendered),
+                    Ok(_) => Err("has no rendering"),
+                    Err(unreachable) => Err(unreachable),
+                };
+                let rendered = counterparts
+                    .expect_members
+                    .get(&expect)
+                    .cloned()
+                    .ok_or("has an expect counterpart whose syntax was not read")
+                    .and_then(|expect| actual.map(|actual| (expect, actual)));
+                match rendered {
+                    Ok((expect, actual)) => diags.error(
+                        member.name,
+                        format!(
+                            "the 'expect' and the 'actual' declarations are incompatible.\n  \
+                             expect: {expect}\n  actual: {actual}\n  \
+                             reason: the names of type parameters are different"
+                        ),
+                    ),
+                    Err(unreachable) => diags.error(
+                        member.name,
+                        format!("internal error: actual '{}' {unreachable}", member.text),
+                    ),
+                }
+            }
+            Ok(Rendered::Unmatched(rendered)) => {
+                let listing = member.declaration.map_or(Ok(String::new()), |stable| {
+                    super::candidates::expect_listing(
+                        stable,
+                        counterparts.rejected,
+                        counterparts.written,
+                    )
+                });
+                match listing {
+                    Ok(listing) => diags.error(
+                        member.name,
+                        crate::diagnostic_wording::actual_without_expect(
+                            reference, &rendered, &listing,
+                        ),
+                    ),
+                    Err(unreachable) => diags.error(
+                        member.name,
+                        format!("internal error: actual '{}' {unreachable}", member.text),
+                    ),
+                }
+            }
             Err(unreachable) => diags.error(
                 member.name,
                 format!("internal error: actual '{}' {unreachable}", member.text),
@@ -282,8 +330,8 @@ enum Rendered {
     /// Its `expect` counterpart was found and the two disagree — on the names they gave their
     /// type parameters. The reference compiler reports that BETWEEN two declarations it already
     /// considers a pair, so the member is not rendered: saying it answered for nothing would name
-    /// the wrong fault.
-    Incompatible,
+    /// the wrong fault. Carries the `expect` declaration it was found to disagree with.
+    Incompatible(crate::fir::DeclarationId),
 }
 
 /// Render `member`, or say what about it could not be reached.
@@ -294,7 +342,7 @@ fn render_member(
     member: &Member,
     stable: Option<crate::fir::DeclarationId>,
     actualized: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
-    incompatible: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    incompatible: &crate::fx_hash::HashMap<crate::fir::DeclarationId, crate::fir::DeclarationId>,
     class: &crate::resolve::ClassSig,
     declarations: &ResolvedDeclarations<'_>,
 ) -> Result<Rendered, &'static str> {
@@ -302,8 +350,8 @@ fn render_member(
     if actualized.contains(&stable) {
         return Ok(Rendered::Actualized);
     }
-    if incompatible.contains(&stable) {
-        return Ok(Rendered::Incompatible);
+    if let Some(expect) = incompatible.get(&stable) {
+        return Ok(Rendered::Incompatible(*expect));
     }
     match &member.kind {
         MemberKind::Function {
@@ -321,6 +369,7 @@ fn render_member(
                 type_parameters,
                 &member.text,
                 parameters,
+                "actual",
             )
             .map(Rendered::Unmatched)
             .ok_or("has a resolved signature that did not resolve to concrete types")

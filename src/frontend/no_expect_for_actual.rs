@@ -45,6 +45,22 @@ use crate::types::{Ty, Visibility};
 use members::{actual_members, report_members, Member};
 use resolved::{Resolved, ResolvedDeclarations};
 
+/// What actualization recorded about counterparts that did not pair, and the text each of them is
+/// listed with. The report reads all of it together, beneath whichever declaration it is about.
+pub(in crate::frontend) struct Counterparts<'a> {
+    /// `actual` members rejected only for naming their type parameters differently, each with the
+    /// `expect` member it disagrees with.
+    pub(in crate::frontend) incompatible_members:
+        &'a crate::fx_hash::HashMap<crate::fir::DeclarationId, crate::fir::DeclarationId>,
+    /// Every rejected comparison of a same-keyed `actual` with an `expect` declaration.
+    pub(in crate::frontend) rejected: &'a [crate::fir::IncompatibleActual],
+    /// Each declaration a listing can name, as the source wrote it.
+    pub(in crate::frontend) written: &'a crate::fx_hash::HashMap<crate::fir::DeclarationId, String>,
+    /// Each `expect` member as the declaration renderer shows it.
+    pub(in crate::frontend) expect_members:
+        &'a crate::fx_hash::HashMap<crate::fir::DeclarationId, String>,
+}
+
 /// One top-level `actual` declaration that actualizes nothing: where its diagnostic is reported —
 /// the declaration's NAME, which is where the reference compiler points — plus the syntactic half
 /// of its rendering.
@@ -173,7 +189,7 @@ pub(super) fn report_unmarked_implementations(
     }
 }
 
-/// Every `expect` classifier's members, rendered as the source wrote them and keyed by the
+/// Every `expect` classifier's members and top-level `expect` callable, rendered as the source wrote them and keyed by the
 /// identity actualization pairs them under.
 ///
 /// The check otherwise walks `actual` declarations only. A classifier that implements none of its
@@ -193,15 +209,105 @@ pub(in crate::frontend) fn expected_members(
             .enumerate()
             .map(|(slot, declaration)| (*declaration, slot))
             .collect::<crate::fx_hash::HashMap<_, _>>();
-        for expectation in &file.expect_decls {
-            let Decl::Class(class) = file.decl(expectation.declaration) else {
+        // The members an `actual` classifier wrote are what a rejected comparison lists as its
+        // candidates, in the form they were written.
+        for (slot, declaration) in file.decls.iter().enumerate() {
+            let Decl::Class(class) = file.decl(*declaration) else {
                 continue;
             };
+            let Some(owner) = identities.get(slot).copied() else {
+                continue;
+            };
+            let identity = |range, kind, sibling: usize| {
+                headers.declaration_at(crate::fir::DeclarationAnchor {
+                    source,
+                    range,
+                    owner: Some(owner),
+                    kind,
+                    sibling: u32::try_from(sibling).ok()?,
+                })
+            };
+            let owner_name = simple_name(&class.name);
+            if class.primary_ctor_annotations.is_some() && !class.is_interface() {
+                // The reference compiler marks the primary constructor of an actual ANNOTATION
+                // class `actual` and no other primary one; that is what was measured.
+                let prefix = if class.kind == crate::ast::ClassKind::Annotation {
+                    "actual "
+                } else {
+                    ""
+                };
+                if let Some(stable) =
+                    identity(class.span, crate::fir::DeclarationKind::Constructor, 0)
+                {
+                    expected.insert(
+                        stable,
+                        expected::written_primary_constructor(class, prefix, owner_name),
+                    );
+                }
+            }
+            for (index, constructor) in class.secondary_ctors.iter().enumerate() {
+                if let Some(stable) = identity(
+                    constructor.span,
+                    crate::fir::DeclarationKind::Constructor,
+                    index + 1,
+                ) {
+                    expected.insert(
+                        stable,
+                        expected::written_secondary_constructor(
+                            &constructor.params,
+                            if constructor.is_actual { "actual " } else { "" },
+                            owner_name,
+                        ),
+                    );
+                }
+            }
+            for (sibling, function) in class.methods.iter().enumerate() {
+                if let (true, Some(stable)) = (
+                    function.is_actual(),
+                    identity(
+                        function.span,
+                        crate::fir::DeclarationKind::Function,
+                        sibling,
+                    ),
+                ) {
+                    expected.insert(stable, expected::written_function(function, "actual"));
+                }
+            }
+            for (sibling, property) in class.body_props.iter().enumerate() {
+                if let (true, Some(stable), Some(rendered)) = (
+                    property.is_actual,
+                    identity(
+                        property.span,
+                        crate::fir::DeclarationKind::Property,
+                        sibling,
+                    ),
+                    expected::written_property(property, "actual"),
+                ) {
+                    expected.insert(stable, rendered);
+                }
+            }
+        }
+        for expectation in &file.expect_decls {
             let Some(owner) = slots
                 .get(&expectation.declaration)
                 .and_then(|slot| identities.get(*slot).copied())
             else {
                 continue;
+            };
+            // A top-level `expect` function or property is listed beneath the implementation
+            // that was written for it and did not match.
+            let class = match file.decl(expectation.declaration) {
+                Decl::Class(class) => class,
+                Decl::Fun(function) => {
+                    expected.insert(owner, expected::written_function(function, "expect"));
+                    continue;
+                }
+                Decl::Property(property) => {
+                    if let Some(rendered) = expected::written_property(property, "expect") {
+                        expected.insert(owner, rendered);
+                    }
+                    continue;
+                }
             };
             // The inventory interns a member under its owner, its range, its kind and its position
             // in the list the classifier keeps it in — the same anchor the `actual` side is read
@@ -215,6 +321,35 @@ pub(in crate::frontend) fn expected_members(
                     sibling: u32::try_from(sibling).ok()?,
                 })
             };
+            // Its constructors are owed too: the primary one when the header wrote one, and each
+            // secondary, behind the `expect` modifier.
+            let owner_name = simple_name(&class.name);
+            if class.primary_ctor_annotations.is_some() && !class.is_interface() {
+                if let Some(stable) =
+                    identity(class.span, crate::fir::DeclarationKind::Constructor, 0)
+                {
+                    expected.insert(
+                        stable,
+                        expected::written_primary_constructor(class, "expect ", owner_name),
+                    );
+                }
+            }
+            for (index, constructor) in class.secondary_ctors.iter().enumerate() {
+                if let Some(stable) = identity(
+                    constructor.span,
+                    crate::fir::DeclarationKind::Constructor,
+                    index + 1,
+                ) {
+                    expected.insert(
+                        stable,
+                        expected::written_secondary_constructor(
+                            &constructor.params,
+                            "expect ",
+                            owner_name,
+                        ),
+                    );
+                }
+            }
             // Methods and body properties are the whole of what an `expect` classifier can owe:
             // the reference compiler rejects a property parameter on an expected class's
             // constructor outright, so `class.props` is empty for any source that reached here.
@@ -224,7 +359,7 @@ pub(in crate::frontend) fn expected_members(
                     crate::fir::DeclarationKind::Function,
                     sibling,
                 ) {
-                    expected.insert(stable, expected::written_function(function));
+                    expected.insert(stable, expected::written_function(function, "expect"));
                 }
             }
             for (sibling, property) in class.body_props.iter().enumerate() {
@@ -234,7 +369,7 @@ pub(in crate::frontend) fn expected_members(
                         crate::fir::DeclarationKind::Property,
                         sibling,
                     ),
-                    expected::written_property(property),
+                    expected::written_property(property, "expect"),
                 ) {
                     expected.insert(stable, rendered);
                 }
@@ -242,6 +377,92 @@ pub(in crate::frontend) fn expected_members(
         }
     }
     expected
+}
+
+/// Every member of every `expect` classifier as the reference compiler's declaration renderer
+/// shows it, keyed by the identity actualization pairs it under. An incompatibility between two
+/// counterparts renders both sides; an `expect` subtree has no resolved signature, so its side is
+/// the written declaration behind the visibility and modality slots the renderer adds.
+pub(in crate::frontend) fn expect_members(
+    files: &[File],
+    headers: &crate::fir::StreamedHeaderModule,
+) -> crate::fx_hash::HashMap<crate::fir::DeclarationId, String> {
+    let mut rendered = crate::fx_hash::HashMap::default();
+    for (index, file) in files.iter().enumerate() {
+        let source = crate::fir::SourceFileId::from_raw(index as u32);
+        let identities = headers.source_declarations(source);
+        for expectation in &file.expect_decls {
+            let Decl::Class(class) = file.decl(expectation.declaration) else {
+                continue;
+            };
+            let Some(owner) = file
+                .decls
+                .iter()
+                .position(|declaration| *declaration == expectation.declaration)
+                .and_then(|slot| identities.get(slot).copied())
+            else {
+                continue;
+            };
+            let interface =
+                class.kind == crate::ast::ClassKind::Interface || class.is_fun_interface;
+            let identity = |range, kind, sibling: usize| {
+                headers.declaration_at(crate::fir::DeclarationAnchor {
+                    source,
+                    range,
+                    owner: Some(owner),
+                    kind,
+                    sibling: u32::try_from(sibling).ok()?,
+                })
+            };
+            for (sibling, function) in class.methods.iter().enumerate() {
+                if let Some(stable) = identity(
+                    function.span,
+                    crate::fir::DeclarationKind::Function,
+                    sibling,
+                ) {
+                    rendered.insert(
+                        stable,
+                        format!(
+                            "{} {} {}",
+                            visibility(function.visibility),
+                            members::member_modality(
+                                function.is_abstract(),
+                                function.is_open(),
+                                interface,
+                                !matches!(function.body, crate::ast::FunBody::None),
+                            ),
+                            expected::written_function(function, "expect"),
+                        ),
+                    );
+                }
+            }
+            for (sibling, property) in class.body_props.iter().enumerate() {
+                if let (Some(stable), Some(written)) = (
+                    identity(
+                        property.span,
+                        crate::fir::DeclarationKind::Property,
+                        sibling,
+                    ),
+                    expected::written_property(property, "expect"),
+                ) {
+                    rendered.insert(
+                        stable,
+                        format!(
+                            "{} {} {written}",
+                            visibility(property.visibility),
+                            members::member_modality(
+                                property.is_abstract,
+                                property.is_open,
+                                interface,
+                                property.init.is_some() || property.getter.is_some(),
+                            ),
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    rendered
 }
 
 pub(super) fn collect(
@@ -392,7 +613,7 @@ pub(super) fn collect(
 pub(super) fn report_unactualized_members(
     owed: &[crate::fir::UnactualizedMembers],
     unmatched: &[UnmatchedActual],
-    expected: &crate::fx_hash::HashMap<crate::fir::DeclarationId, String>,
+    counterparts: &Counterparts<'_>,
     symbols: &SymbolTable,
     headers: &crate::fir::StreamedHeaderModule,
     reference: crate::features::ReferenceProfile,
@@ -432,13 +653,22 @@ pub(super) fn report_unactualized_members(
         let mut listing = String::new();
         let mut unlisted = None;
         for member in &owed.expected {
-            let Some(written) = expected.get(&member.declaration) else {
+            let Some(written) = counterparts.written.get(&member.declaration) else {
                 continue;
             };
             listing.push_str("\n\n    ");
             listing.push_str(written);
             if matches!(actual.target, Target::TypeAlias { .. }) {
                 match candidates::listing(&member.candidates) {
+                    Ok(candidates) => listing.push_str(&candidates),
+                    Err(reason) => unlisted = Some(reason),
+                }
+            } else {
+                match candidates::actual_listing(
+                    member.declaration,
+                    counterparts.rejected,
+                    counterparts.written,
+                ) {
                     Ok(candidates) => listing.push_str(&candidates),
                     Err(reason) => unlisted = Some(reason),
                 }
@@ -464,7 +694,7 @@ pub(super) fn report_unactualized_members(
 pub(super) fn report(
     unmatched: &[UnmatchedActual],
     actualized: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
-    incompatible_members: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+    counterparts: &Counterparts<'_>,
     symbols: &SymbolTable,
     headers: &crate::fir::StreamedHeaderModule,
     reference: crate::features::ReferenceProfile,
@@ -502,10 +732,23 @@ pub(super) fn report(
                 }
             }) {
             Ok(None) => {}
-            Ok(Some(rendered)) => diags.error(
-                actual.name,
-                crate::diagnostic_wording::actual_without_expect(reference, &rendered),
-            ),
+            Ok(Some(rendered)) => {
+                let listing = stable.map_or(Ok(String::new()), |stable| {
+                    candidates::expect_listing(stable, counterparts.rejected, counterparts.written)
+                });
+                match listing {
+                    Ok(listing) => diags.error(
+                        actual.name,
+                        crate::diagnostic_wording::actual_without_expect(
+                            reference, &rendered, &listing,
+                        ),
+                    ),
+                    Err(unreachable) => diags.error(
+                        actual.name,
+                        format!("internal error: this actual declaration {unreachable}"),
+                    ),
+                }
+            }
             Err(unreachable) => diags.error(
                 actual.name,
                 format!("internal error: this actual declaration {unreachable}"),
@@ -520,7 +763,7 @@ pub(super) fn report(
             report_members(
                 members,
                 actualized,
-                incompatible_members,
+                counterparts,
                 &declarations,
                 stable,
                 reference,
@@ -669,8 +912,10 @@ fn render_function(
             .unwrap_or(&[]),
     )?;
     // A top-level declaration is always `final`.
-    let rendered = render_callable(signature, "final", modifiers, formals, name, parameters)
-        .ok_or("has a resolved signature that did not resolve to concrete types")?;
+    let rendered = render_callable(
+        signature, "final", modifiers, formals, name, parameters, "actual",
+    )
+    .ok_or("has a resolved signature that did not resolve to concrete types")?;
     Ok(format!("{context}{rendered}"))
 }
 
@@ -682,6 +927,7 @@ fn render_callable(
     formals: &[String],
     name: &str,
     parameters: &[String],
+    keyword: &str,
 ) -> Option<String> {
     // A generic callable's `params`/`ret` are ERASED (`fun <T> id(t: T): T` keys as `Any`); its
     // declared shape lives on the generic signature, which is what the source spells and what the
@@ -737,7 +983,7 @@ fn render_callable(
         .join(", ");
     let formals = type_parameters(formals, &|index| declared_formal_bound(signature, index));
     Some(format!(
-        "{} {modality} actual {modifiers}fun {formals}{receiver}{name}({rendered}): {}",
+        "{} {modality} {keyword} {modifiers}fun {formals}{receiver}{name}({rendered}): {}",
         visibility(signature.visibility),
         result.source_name()
     ))
