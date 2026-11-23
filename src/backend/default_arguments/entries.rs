@@ -357,6 +357,23 @@ fn build(
         dispatch_receiver: None,
         param_checks: Vec::new(),
     });
+    // A parameter the declaration receives as a shared cell is received as the same cell here,
+    // and forwarded to it as one.
+    let cells = ir
+        .shared_capture_parameters
+        .iter()
+        .filter(|((function, _), _)| *function == declaration)
+        .map(|((_, parameter), ty)| (*parameter, *ty))
+        .collect::<Vec<_>>();
+    for (parameter, ty) in cells {
+        ir.shared_capture_parameters.insert(
+            (
+                entry,
+                parameter + u32::try_from(first).expect("too many parameters"),
+            ),
+            ty,
+        );
+    }
     // Compiler-generated: no source declaration of its own, and no public name.
     ir.synthetic_methods.insert(entry);
     ir.default_entries.insert(declaration, entry);
