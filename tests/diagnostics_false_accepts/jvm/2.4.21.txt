@@ -570,7 +570,6 @@ compiler/testData/diagnostics/tests/inference/nothingType/returnAsLastStatementI
 compiler/testData/diagnostics/tests/inference/nullableVsDnnVariationsDisabled.kt
 compiler/testData/diagnostics/tests/inference/pcla/assignmentOperatorAmbiguity.kt
 compiler/testData/diagnostics/tests/inference/pcla/bothReceiverAndValueParameterNotFixed.kt
-compiler/testData/diagnostics/tests/inference/pcla/doubleSquareBracketsInBuilderArgument.kt
 compiler/testData/diagnostics/tests/inference/pcla/fixationOnDemand/scopeNavigation/concreteScopeOwner/AnyReceiverFunctionCall.kt
 compiler/testData/diagnostics/tests/inference/pcla/fixationOnDemand/scopeNavigation/concreteScopeOwner/GenericPropertyAccess.kt
 compiler/testData/diagnostics/tests/inference/pcla/fixationOnDemand/scopeNavigation/concreteScopeOwner/GenericPropertyAssignment.kt
@@ -580,11 +579,6 @@ compiler/testData/diagnostics/tests/inference/pcla/fixationOnDemand/scopeNavigat
 compiler/testData/diagnostics/tests/inference/pcla/fixationOnDemand/syntaxForms/TypeCastExpression.kt
 compiler/testData/diagnostics/tests/inference/pcla/fixingTVForLambadaWithShallowDependencyToOuter2.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt43710b.kt
-compiler/testData/diagnostics/tests/inference/pcla/issues/kt47986Default.kt
-compiler/testData/diagnostics/tests/inference/pcla/issues/kt47986Disabled.kt
-compiler/testData/diagnostics/tests/inference/pcla/issues/kt47986Enabled.kt
-compiler/testData/diagnostics/tests/inference/pcla/issues/kt47986_2.kt
-compiler/testData/diagnostics/tests/inference/pcla/issues/kt47986_3.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt49263.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt51464.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt53422.kt

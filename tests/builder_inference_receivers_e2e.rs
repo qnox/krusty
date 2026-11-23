@@ -383,3 +383,23 @@ fn a_builder_call_in_an_if_without_else_infers_the_builder_variable() {
         "BuilderIfWithoutElse",
     );
 }
+
+/// A builder variable that no statement of the receiver lambda constrains is uninferred, exactly
+/// as one nothing constrains in a lambda with a value parameter.
+#[test]
+fn an_unconstrained_builder_variable_cannot_be_inferred() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "Use.kt",
+            "interface Base<K>\n\
+             interface Controller<T> : Base<T>\n\
+             fun <S> generate(g: Controller<S>.() -> Unit): S = TODO()\n\
+             fun Base<*>.starBase() {}\n\
+             val untouched = generate { }\n\
+             val star = generate { starBase() }\n",
+        )],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr).len(), 2);
+    common::expect_identical_rejection(&result, "unconstrained builder variable");
+}
