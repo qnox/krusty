@@ -30,6 +30,8 @@ names! {
     intrinsic_const_evaluation => "kotlin/internal/IntrinsicConstEvaluation",
     platform_dependent => "kotlin/internal/PlatformDependent",
     published_api => "kotlin/PublishedApi",
+    must_use_return_values => "kotlin/MustUseReturnValues",
+    ignorable_return_value => "kotlin/IgnorableReturnValue",
     dsl_marker => "kotlin/DslMarker",
     extension_function_type => "kotlin/ExtensionFunctionType",
     context_function_type_params => "kotlin/ContextFunctionTypeParams",

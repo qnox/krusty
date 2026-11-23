@@ -573,6 +573,7 @@ impl Checker<'_> {
                 }
                 FoldedApplication::Arguments(internal, applied) => (internal, applied),
             };
+        self.check_ignorability_annotation(annotation, internal);
         // Argument failures precede host-contract failures, while a property contract precedes
         // the target diagnostic for the same annotation (kotlinc's diagnostic ledger order).
         let contract_valid = self.validate_property_annotation_contract(annotation, internal, host);

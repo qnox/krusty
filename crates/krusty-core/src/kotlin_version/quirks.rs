@@ -96,6 +96,13 @@ macro_rules! quirks {
 }
 
 quirks! {
+    /// `-Xreturn-value-checker` takes only `disable`, `check` and `full`; from 2.5 it also takes
+    /// `default`, which leaves the mode to the language version.
+    ReturnValueCheckerHasNoDefaultMode {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_5_0),
+        defect: false,
+    }
     /// A `null` function value suspend-converted to a nullable suspend function type converts to an
     /// adapter whose `invoke` yields `null`, instead of staying `null` (KT-89451).
     NullFunctionValueConvertsToAdapter {
@@ -117,7 +124,7 @@ quirks! {
     /// element (KT-90169). A concrete or array-shaped input still takes the whole array.
     VarargReferenceTakesTypeVariableInputAsElement {
         since: None,
-        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        fixed_in: Some(KotlinVersion::V2_5_0),
         defect: true,
     }
     /// An explicit context argument of a contextual extension call is evaluated before the
@@ -125,7 +132,7 @@ quirks! {
     /// From 2.5 kotlinc evaluates operands in the order they are written.
     ContextArgumentEvaluatedBeforeExtensionReceiver {
         since: None,
-        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        fixed_in: Some(KotlinVersion::V2_5_0),
         defect: true,
     }
     /// A not-null operator (`!!`, the left of `?:`, the receiver of `?.`) applied to a nullable
@@ -134,7 +141,7 @@ quirks! {
     /// approximates to the bound; a smart cast (`if (x != null) x`) still publishes `Any`.
     NotNullOperatorDropsIntersectionApproximation {
         since: None,
-        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        fixed_in: Some(KotlinVersion::V2_5_0),
         defect: false,
     }
     /// A `tailrec` function's recursive infix call or operator expression is reported at the infix
@@ -142,21 +149,21 @@ quirks! {
     /// as wide as the function's name.
     TailrecDotlessCallReportedAtOperator {
         since: None,
-        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        fixed_in: Some(KotlinVersion::V2_5_0),
         defect: false,
     }
     /// In a `tailrec` function a recursive call followed by `return Unit` is not a tail call:
     /// reading the `Unit` object is an instruction after it. From 2.5 it is not.
     TailrecUnitObjectReturnFollowsCall {
         since: None,
-        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        fixed_in: Some(KotlinVersion::V2_5_0),
         defect: false,
     }
     /// In a `tailrec` function with a non-null result, a recursive call that is the left operand of
     /// `?:` in tail position is itself a tail call. From 2.5 an elvis operand never is.
     TailrecElvisLeftOperandIsTail {
         since: None,
-        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        fixed_in: Some(KotlinVersion::V2_5_0),
         defect: false,
     }
     /// The Kotlin/Native and Kotlin/Wasm standard library's `ArrayList.addAll` makes room for the

@@ -251,6 +251,7 @@ mod function_value_conversions;
 mod generic_argument_bounds;
 mod generic_call_bindings;
 mod if_expression;
+mod ignorability_annotations;
 mod implicit_receiver_calls;
 mod implicit_rungs;
 mod imported_singleton_members;

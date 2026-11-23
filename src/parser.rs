@@ -633,6 +633,8 @@ struct Parser<'a> {
     diags: &'a mut DiagSink,
     /// `NameBasedDestructuring` language feature: allow square-bracket destructuring (`[a, b]`).
     name_based_destructuring: bool,
+    /// `UnnamedLocalVariables`: a local `val _ = …` is a language feature of 2.5.
+    unnamed_local_variables: bool,
     explicit_backing_fields: bool,
     /// `+EnableNameBasedDestructuringShortForm`: a plain paren entry `(a, b)` binds each variable to
     /// the RECEIVER PROPERTY of the same name (not `componentN`). An explicit `(a = prop)` still
@@ -823,6 +825,7 @@ impl<'a> Parser<'a> {
             file,
             diags,
             name_based_destructuring: features.has("NameBasedDestructuring"),
+            unnamed_local_variables: features.has("UnnamedLocalVariables"),
             short_form_destructuring: features.has("EnableNameBasedDestructuringShortForm"),
             multi_dollar_interpolation: features.has("MultiDollarInterpolation"),
             explicit_backing_fields: features.has("ExplicitBackingFields"),

@@ -221,7 +221,8 @@ fn defect(quirk: Quirk) -> Option<Defect> {
         Quirk::NotNullOperatorDropsIntersectionApproximation
         | Quirk::TailrecDotlessCallReportedAtOperator
         | Quirk::TailrecUnitObjectReturnFollowsCall
-        | Quirk::TailrecElvisLeftOperandIsTail => None,
+        | Quirk::TailrecElvisLeftOperandIsTail
+        | Quirk::ReturnValueCheckerHasNoDefaultMode => None,
     }
 }
 

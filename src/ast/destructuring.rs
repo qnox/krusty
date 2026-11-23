@@ -48,6 +48,9 @@ pub struct DestructuringSyntax {
     /// `EnableNameBasedDestructuringShortForm` is disabled. The entry stays positional. The
     /// experimental diagnostic is reported after module admission, on this operator.
     pub ungated_short_form_spans: Vec<Span>,
+    /// Names of local `val _ = …` declarations parsed while `UnnamedLocalVariables` is disabled.
+    /// kotlinc reports the feature on each of them.
+    pub ungated_unnamed_locals: Vec<Span>,
     /// Explicit type annotations on destructured bindings, parallel to the statement's entries.
     pub entry_types: HashMap<u32, Vec<Option<TypeRef>>>,
 }

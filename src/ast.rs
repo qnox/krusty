@@ -2018,6 +2018,12 @@ pub struct File {
     /// `+IntrinsicConstEvaluation`: a constant context (an annotation argument, a `const val`)
     /// also evaluates the intrinsic-const reads it otherwise rejects, such as an entry's `name`.
     pub intrinsic_const_evaluation: bool,
+    /// The return value checker mode in effect (`-Xreturn-value-checker`, else the language
+    /// version's default).
+    pub return_value_checker: crate::features::ReturnValueCheckerMode,
+    /// `+ReturnValueCheckerIsStable`: the ignorability annotations are accepted whatever the
+    /// checker mode, as the checker is no longer experimental.
+    pub return_value_checker_is_stable: bool,
     /// `+CustomEqualsInValueClasses`: permit the typed `equals(Self)` convention in a value class
     /// whose selected representation is inline rather than full/boxed.
     pub custom_equals_in_value_classes: bool,

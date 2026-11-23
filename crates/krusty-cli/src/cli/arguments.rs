@@ -353,6 +353,21 @@ pub(super) fn apply(
                 ));
             }
         }
+        // `-Xreturn-value-checker=<mode>` selects which unused return values are reported. Like
+        // the explicit API mode it selects diagnostics, and `default` (the version's choice, from
+        // 2.5) is a mode of its own rather than the absence of one.
+        "-Xreturn-value-checker" => {
+            let has_default = !krusty::kotlin_version::Quirks::of_release(reference_version)
+                .has(krusty::kotlin_version::Quirk::ReturnValueCheckerHasNoDefaultMode);
+            if matches!(text, "check" | "full" | "disable") || (has_default && text == "default") {
+                opts.return_value_checker = Some(text.to_string());
+            } else {
+                opts.errors.push(format!(
+                    "unknown value for parameter -Xreturn-value-checker: '{text}'. Value should \
+                     be one of {{disable, check, full}}"
+                ));
+            }
+        }
         // `-XXexplicit-return-types=<mode>` is the return-type half of `-Xexplicit-api`.
         "-XXexplicit-return-types" => {
             if matches!(text, "strict" | "warning" | "disable") {
