@@ -236,8 +236,7 @@ use lexical_value_invoke::{DeferredInvokePeers, DeferredLexicalInvoke, LexicalIn
 mod lambda_call_shapes;
 mod property_read_selection;
 use lambda_call_shapes::{
-    projected_function_shape, ExplicitTypeArgumentBounds, ExplicitTypeArgumentProbe,
-    UntypedLambdaCall,
+    ExplicitTypeArgumentBounds, ExplicitTypeArgumentProbe, UntypedLambdaCall,
 };
 use lexical_policies::LexicalPolicy;
 use library_constructor_failure::LibraryConstructorFailure;
@@ -315,6 +314,7 @@ use receiver_flow::ReceiverNarrowing;
 mod receiver_function_values;
 use receiver_function_values::ImplicitReceiverFunctionInvoke;
 pub use receiver_function_values::ReceiverFunctionPropertyCallee;
+mod dsl_markers;
 mod package_qualifier_forms;
 mod package_qualifier_type_arguments;
 mod receiver_tower;
@@ -11284,6 +11284,7 @@ impl<'a> Checker<'a> {
                         class_receiver: false,
                         current: false,
                         receiver_depth: 0,
+                        dsl_shadowed: false,
                     },
                     declared_name,
                     singleton,
@@ -18210,12 +18211,7 @@ impl<'a> Checker<'a> {
                     };
                     let receiver = implicit_receiver.ty;
                     let mut receiver_extension = None;
-                    if receiver == Ty::String
-                        || matches!(
-                            receiver.kind(),
-                            TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Var(..)
-                        )
-                    {
+                    if implicit_rungs::receiver_has_member_scope(receiver) {
                         match self.record_member_call_with_slots(
                             scope,
                             call,
@@ -18257,9 +18253,7 @@ impl<'a> Checker<'a> {
                             Some(CallableCandidateSelection::Selected(selected))
                             | Some(CallableCandidateSelection::MissingContext(selected)) => {
                                 selected.scope_rung.is_import()
-                                    && !selected.callable.annotations.contains(
-                                        &crate::types::type_name("kotlin/internal/HidesMembers"),
-                                    )
+                                    && !crate::symbol_resolver::hides_members(&selected.callable)
                             }
                             Some(CallableCandidateSelection::Ambiguous(tied, _)) => tied
                                 .iter()
@@ -29855,6 +29849,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         postponed_diagnostics: PostponedDiagnostics::default(),
         eager_eliminated_members: HashMap::default(),
         implicit_receiver_selections: HashMap::default(),
+        dsl_scope_violations: HashSet::default(),
         implicit_receiver_identities: HashMap::default(),
         constructor_receiver_frames: Vec::new(),
         read_flow_roots: HashMap::default(),
@@ -31856,6 +31851,9 @@ pub(crate) struct ImplicitReceiver {
     class_receiver: bool,
     current: bool,
     receiver_depth: usize,
+    /// A nearer receiver in the tower shares a `@DslMarker` with this one, so binding it
+    /// implicitly is a DSL scope violation.
+    dsl_shadowed: bool,
 }
 
 /// Stable identity for a semantic receiver supplied by the checker's `this`-label stack rather
@@ -32407,6 +32405,8 @@ struct Checker<'a> {
     /// state, so this decision must cross the frontend/backend boundary rather than being guessed from
     /// JVM slot names.
     implicit_receiver_selections: HashMap<ExprId, ImplicitReceiverSelection>,
+    /// Expressions already rejected for binding a `@DslMarker`-shadowed implicit receiver.
+    dsl_scope_violations: HashSet<ExprId>,
     /// Receiver-tower coordinate of each implicit receiver selected above; checker-only, it keys
     /// the smart-cast paths of member reads through that receiver.
     implicit_receiver_identities: HashMap<ExprId, (usize, usize)>,
@@ -35486,6 +35486,7 @@ impl<'a> Checker<'a> {
                 receiver_depth,
             },
         );
+        self.record_dsl_scope_use(expression, receiver);
         self.mark_extension_receiver_used(expression, receiver);
     }
 
@@ -35544,26 +35545,6 @@ impl<'a> Checker<'a> {
 
     fn implicit_receiver_identity_use_count(&self, identity: (usize, usize)) -> usize {
         self.implicit_receiver_identity_uses.count(identity)
-    }
-
-    fn mark_context_extension_receiver_used(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        sources: &[ResolvedContextArgument],
-    ) {
-        for source in sources {
-            let ResolvedContextArgument::ImplicitReceiver(selected) = source else {
-                continue;
-            };
-            if let Some(receiver) = self
-                .implicit_receivers(scope)
-                .into_iter()
-                .find(|receiver| receiver.ty == selected.ty && receiver.current == selected.current)
-            {
-                self.mark_extension_receiver_used(call, receiver);
-            }
-        }
     }
 
     /// Specialize a selected generic property from its implicit context arguments. Context values
@@ -38250,6 +38231,7 @@ impl<'a> Checker<'a> {
             class_receiver: false,
             current: false,
             receiver_depth: 0,
+            dsl_shadowed: false,
         };
         let ty = self.read_implicit_receiver_name(scope, expression, name, receiver)?;
         self.mark_implicit_receiver_selection(expression, receiver);
@@ -40135,7 +40117,7 @@ impl<'a> Checker<'a> {
         // declaration applications below belong to the passes that retain their arguments.
         if !self.fragment.is_type_use_annotations() {
             self.check_classifier_own_annotations(scope, cl, current_owner);
-            self.check_supertype_usage(cl, current_owner);
+            self.check_supertype_usage(scope, cl, current_owner);
             // Member annotations see the classifier's own static rungs (nested classifiers and
             // its companion), which the class body scope below has not opened yet.
             let member_rung = self.enter_annotation_class_rung(current_owner);
@@ -40355,7 +40337,7 @@ impl<'a> Checker<'a> {
             self.record_finalized_superclass_type(span, superclass);
         }
         if let Some(declaration) = stable_classifier_header {
-            if !self.check_finalized_supertype_bounds(cl, declaration)
+            if !self.check_finalized_supertype_bounds(scope, cl, declaration)
                 && finalized_local_classifier_header
             {
                 self.failed_local_declaration_bindings.insert(declaration);
@@ -44752,10 +44734,7 @@ impl<'a> Checker<'a> {
         // from the surrounding lexical declaration is universally quantified. Both use the same
         // semantic `TyParam` representation, so decide ownership from the active scope rather than
         // treating every generic argument as fixed or every erased upper bound as constructible.
-        if expected.non_null().is_ty_param()
-            && !actual.mentions_ty_param()
-            && scope.is_some_and(|scope| Self::type_is_lexically_fixed(scope, expected))
-        {
+        if scope.is_some_and(|scope| self.lexical_type_parameter_rejects(scope, expected, actual)) {
             self.report_assignability_error(expected, actual, span, "argument");
             return;
         }
@@ -45669,7 +45648,7 @@ impl<'a> Checker<'a> {
         // already been admitted by the ordinary nullability relation above.
         if !matches!(ctx, "argument" | "generic argument")
             && expected.non_null().is_ty_param()
-            && !actual.mentions_ty_param()
+            && (!actual.mentions_ty_param() || !self.receiver_is_assignable(actual, expected))
         {
             self.report_assignability_error(declared_expected, declared_actual, span, ctx);
             return;
@@ -46209,27 +46188,6 @@ impl<'a> Checker<'a> {
             .zip(params)
             .map(|(&a, param)| self.expr_result(scope, a, Some(param), true))
             .collect()
-    }
-
-    /// Project an explicitly declared Kotlin function classifier (`FunctionN<P..., R>`) onto the
-    /// exact callable shape published by its semantic provider. Callable objects remain nominal:
-    /// only classifiers whose declaration says they represent a function type are normalized.
-    fn declared_function_semantic_type(&self, ty: Ty) -> Ty {
-        let Some(internal) = ty.non_null().kotlin_class_internal() else {
-            return ty;
-        };
-        let source = self.fed_source();
-        if !source
-            .classifier(internal)
-            .is_some_and(|classifier| classifier.represents_function_type())
-        {
-            return ty;
-        }
-        self.stable_classifier_callable_signatures(ty)
-            .into_iter()
-            .next()
-            .map(|function| ty.rewrap_nullability(projected_function_shape(function)))
-            .unwrap_or(ty)
     }
 
     /// Exact function signature of a value expression. Callable references retain this separately
@@ -47676,6 +47634,7 @@ impl<'a> Checker<'a> {
                                 class_receiver: self.this_labels[idx].2,
                                 current: idx == top,
                                 receiver_depth: label_depth,
+                                dsl_shadowed: false,
                             },
                         };
                         let ty = self

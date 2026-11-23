@@ -364,7 +364,7 @@ impl BodyLowering<'_, '_, '_> {
             implementors.extend(
                 declared
                     .iter()
-                    .filter_map(|&class| self.external_property_getter_slot(class, getter, ret)),
+                    .filter_map(|&class| self.external_property_getter_slot(class, getter)),
             );
             // Every instantiable implementor of the module is a class of this file, and each must
             // be an arm: one reached only through a supertype has no override this names.

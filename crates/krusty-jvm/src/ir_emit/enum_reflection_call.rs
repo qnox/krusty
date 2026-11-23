@@ -8,6 +8,40 @@ use super::*;
 use krusty::types::TyKind;
 
 impl Emitter<'_> {
+    /// Kotlin's mode-5 reified marker for the enum operation that follows it. Call-site
+    /// specialization replaces the erased placeholder after it with the enum's own member.
+    fn emit_reified_enum_marker(&mut self, identity: &str, code: &mut CodeBuilder) {
+        code.push_int(5, self.cw);
+        code.push_string(krusty::types::type_parameter_source_name(identity), self.cw);
+        let marker = self.cw.methodref(
+            "kotlin/jvm/internal/Intrinsics",
+            "reifiedOperationMarker",
+            "(ILjava/lang/String;)V",
+        );
+        code.invokestatic(marker, 2, 0);
+    }
+
+    /// `enumValues<E>()`: the enum's own `values()`, or, for a reified parameter of an inline
+    /// template, the marker and the empty erased array kotlinc writes in its place.
+    pub(super) fn emit_enum_values(&mut self, classifier: Ty, code: &mut CodeBuilder) {
+        let classifier = classifier.non_null();
+        match classifier.kind() {
+            TyKind::Obj(classifier, _) => {
+                let owner = classifier.render();
+                let descriptor = format!("()[L{owner};");
+                let method = self.cw.methodref(&owner, "values", &descriptor);
+                code.invokestatic(method, 0, 1);
+            }
+            TyKind::TyParam(identity, _) => {
+                self.emit_reified_enum_marker(identity.as_str(), code);
+                code.push_int(0, self.cw);
+                let class = self.cw.class_ref("java/lang/Enum");
+                code.anewarray(class);
+            }
+            _ => unreachable!("checked enumValues classifier is enum or reified: {classifier:?}"),
+        }
+    }
+
     pub(super) fn emit_enum_entries(&mut self, classifier: Ty, code: &mut CodeBuilder) {
         {
             let classifier = classifier.non_null();
@@ -20,17 +54,7 @@ impl Emitter<'_> {
                     code.invokestatic(method, 0, 1);
                 }
                 TyKind::TyParam(identity, _) => {
-                    code.push_int(5, self.cw);
-                    code.push_string(
-                        krusty::types::type_parameter_source_name(identity.as_str()),
-                        self.cw,
-                    );
-                    let marker = self.cw.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "reifiedOperationMarker",
-                        "(ILjava/lang/String;)V",
-                    );
-                    code.invokestatic(marker, 2, 0);
+                    self.emit_reified_enum_marker(identity.as_str(), code);
                     code.aconst_null();
                     let class = self.cw.class_ref("kotlin/enums/EnumEntries");
                     code.checkcast(class);
@@ -70,17 +94,7 @@ impl Emitter<'_> {
                     // Kotlin's public inline template keeps the reified classifier as the standard
                     // mode-5 marker plus a null Class placeholder. A consuming compiler replaces that
                     // placeholder at the call site.
-                    code.push_int(5, self.cw);
-                    code.push_string(
-                        krusty::types::type_parameter_source_name(identity.as_str()),
-                        self.cw,
-                    );
-                    let marker = self.cw.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "reifiedOperationMarker",
-                        "(ILjava/lang/String;)V",
-                    );
-                    code.invokestatic(marker, 2, 0);
+                    self.emit_reified_enum_marker(identity.as_str(), code);
                     code.aconst_null();
                     load(Ty::String, name, code);
                     self.release_temporary(lease);

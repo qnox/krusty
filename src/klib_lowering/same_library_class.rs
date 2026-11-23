@@ -33,9 +33,9 @@ use crate::klib_libraries::{KlibDeclarationBodies, LocatedClass, LocatedMember};
 use crate::libraries::{KlibBodyClassParameters, KlibDependencyCallable, TypeKind};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
-    KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction,
-    KlibIrMember, KlibIrMemberAccess, KlibIrStatement, KlibIrType, KlibIrTypeParameter,
-    KlibIrVariance,
+    KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprId, KlibIrExprKind,
+    KlibIrFunction, KlibIrMember, KlibIrMemberAccess, KlibIrStatement, KlibIrType,
+    KlibIrTypeParameter, KlibIrVariance,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::metadata::semantic::{
@@ -98,6 +98,8 @@ pub(super) struct LocalInitialize<'a> {
     pub(super) fields: Vec<LocalStoredField<'a>>,
     pub(super) steps: Vec<InitializationStep<'a>>,
     pub(super) outer: Option<OuterInstance<'a>>,
+    /// The arguments the constructor passes its superclass's constructor.
+    pub(super) superclass_arguments: Vec<KlibIrExprId>,
 }
 
 /// The field frame of one member of a file-local class.
@@ -144,8 +146,6 @@ pub(super) struct PreparedMember<'a> {
     /// Interface members this function overrides, authenticated against the admitted supertypes.
     pub(super) overrides: Vec<MemberOverride>,
     pub(super) visibility: Visibility,
-    /// Whether the function is its property's setter.
-    pub(super) setter: bool,
     /// The function's own type parameters and their declared bounds, which a call binds.
     pub(super) formals: Vec<(crate::types::TyParamName, Vec<Ty>)>,
 }
@@ -435,11 +435,11 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) object: bool,
 }
 
-/// A same-library superclass constructor a class's constructor delegates to, and the slot of the
-/// class constructor's parameter each of its arguments passes.
+/// A same-library superclass constructor a class's constructor delegates to, and the serialized
+/// argument it passes for each of its parameters.
 pub(super) struct LocalSuperclass<'a> {
     pub(super) constructor: SuperclassConstructor<'a>,
-    pub(super) operands: Vec<u32>,
+    pub(super) arguments: Vec<KlibIrExprId>,
 }
 
 /// The constructor a same-library class's constructor delegates to.
@@ -510,51 +510,88 @@ pub(super) fn classifier(
     }
 }
 
-/// Whether a same-library class materialized in `classes` makes `sub` a subtype of `sup`.
-/// A class from another library is absent here, so it stays outside this relation.
-pub(super) fn is_subtype(
-    classes: &HashMap<LocalIdentity, MaterializedLocalClass>,
-    sub: Ty,
-    sup: Ty,
-    public_subtype: &dyn Fn(Ty, Ty) -> bool,
-) -> bool {
-    public_subtype(sub, sup) || proves_local(classes, sub, sup, public_subtype, 0)
+/// The calling compilation's class model `public`, extended with the same-library classes
+/// materialized in `classes`: the direct supertypes of a materialized class are the ones written on
+/// it, so every subtype rule, function-type variance included, reads it as any other class. A class
+/// from another library is absent here, so it stays outside this relation. Without the calling
+/// compilation's model, only the materialized classes have a hierarchy.
+pub(super) struct MaterializedClassModel<'a> {
+    pub(super) classes: &'a HashMap<LocalIdentity, MaterializedLocalClass>,
+    pub(super) public: Option<&'a dyn crate::assignable::TypeOracle>,
 }
 
-fn proves_local(
-    classes: &HashMap<LocalIdentity, MaterializedLocalClass>,
-    sub: Ty,
-    sup: Ty,
-    public_subtype: &dyn Fn(Ty, Ty) -> bool,
-    depth: u8,
-) -> bool {
-    if depth == 8 {
-        return false;
+impl MaterializedClassModel<'_> {
+    /// Whether `sub` is a subtype of `sup`. Without the calling compilation's model, only a
+    /// relation rooted at a materialized class is proven, from the supertypes written on it.
+    pub(super) fn is_subtype(&self, parameters: &KlibTypeParameters, sub: Ty, sup: Ty) -> bool {
+        let model: &dyn crate::assignable::TypeOracle = self;
+        let known = self.public.is_some() || self.names_materialized(sub);
+        super::type_evidence::ordinary_subtype(known.then_some(model), parameters, sub, sup)
     }
-    if let TyKind::Nullable(inner) = sub.kind() {
-        return match sup.kind() {
-            TyKind::Nullable(target) => {
-                proves_local(classes, inner, sup, public_subtype, depth + 1)
-                    || proves_local(classes, inner, target, public_subtype, depth + 1)
-            }
+
+    fn names_materialized(&self, ty: Ty) -> bool {
+        match ty.kind() {
+            TyKind::Nullable(inner) => self.names_materialized(inner),
+            TyKind::Obj(name, _) => self.materialized(name).is_some(),
             _ => false,
-        };
-    }
-    let Some(supertypes) = applied_local_supertypes(classes, sub) else {
-        return false;
-    };
-    for applied in supertypes {
-        if applied == sub {
-            continue;
-        }
-        if applied == sup
-            || public_subtype(applied, sup)
-            || proves_local(classes, applied, sup, public_subtype, depth + 1)
-        {
-            return true;
         }
     }
-    false
+
+    fn materialized(&self, classifier: TypeName) -> Option<&MaterializedLocalClass> {
+        self.classes
+            .values()
+            .find(|class| class.classifier == classifier)
+    }
+}
+
+impl crate::assignable::TypeOracle for MaterializedClassModel<'_> {
+    fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
+        applied_local_supertypes(self.classes, ty).unwrap_or_else(|| {
+            self.public
+                .map_or_else(Vec::new, |public| public.direct_supertypes(ty))
+        })
+    }
+
+    fn same_class_name(&self, left: TypeName, right: TypeName) -> bool {
+        self.public
+            .map_or(left == right, |public| public.same_class_name(left, right))
+    }
+
+    fn type_param_variance(&self, owner: TypeName, index: usize) -> TypeVariance {
+        // A materialized class records no declaration-site variance, so its arguments are only
+        // ever proven invariant.
+        match self.materialized(owner) {
+            Some(_) => TypeVariance::Invariant,
+            None => self.public.map_or(TypeVariance::Invariant, |public| {
+                public.type_param_variance(owner, index)
+            }),
+        }
+    }
+
+    fn type_param_upper_bounds(&self, owner: TypeName, index: usize) -> Vec<Ty> {
+        match self.materialized(owner) {
+            Some(class) => class
+                .formals
+                .get(index)
+                .and_then(|formal| formal.ty_param_bound())
+                .into_iter()
+                .collect(),
+            None => self.public.map_or_else(
+                || vec![Ty::nullable(Ty::obj("kotlin/Any"))],
+                |public| public.type_param_upper_bounds(owner, index),
+            ),
+        }
+    }
+
+    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+        self.public
+            .map_or(lower, |public| public.platform_flexible_upper_bound(lower))
+    }
+
+    fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
+        self.public
+            .map_or_else(Vec::new, |public| public.type_variable_bounds(name))
+    }
 }
 
 /// The supertypes the materialized class `sub` names declares, at the type arguments `sub`
@@ -848,24 +885,11 @@ fn abstract_members<'a>(
                 if function.constructor {
                     return Err(mismatch("an interface declares a constructor"));
                 }
-                members.push(prepare_abstract_member(arena, function, scope, false)?);
+                members.push(prepare_abstract_member(arena, function, scope)?);
             }
             KlibIrMember::Property(property) => {
-                if let Some(id) = property.getter {
-                    members.push(prepare_abstract_member(
-                        arena,
-                        arena.function(id),
-                        scope,
-                        false,
-                    )?);
-                }
-                if let Some(id) = property.setter {
-                    members.push(prepare_abstract_member(
-                        arena,
-                        arena.function(id),
-                        scope,
-                        true,
-                    )?);
+                for id in [property.getter, property.setter].into_iter().flatten() {
+                    members.push(prepare_abstract_member(arena, arena.function(id), scope)?);
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {
@@ -886,7 +910,6 @@ fn prepare_abstract_member<'a>(
     arena: &'a KlibIrArena,
     function: &'a KlibIrFunction,
     scope: &MemberScope<'_>,
-    setter: bool,
 ) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
     if function.body.is_some() {
         return Err(unsupported(
@@ -902,7 +925,6 @@ fn prepare_abstract_member<'a>(
         header,
         overrides: member_overrides(function, scope)?,
         visibility: declaration_visibility(function.base.flags),
-        setter,
     })
 }
 
@@ -1157,11 +1179,8 @@ fn prepare_class<'a>(
     let superclass = local_superclass(
         source,
         LocalDelegation {
-            arena,
-            function,
             delegation,
             superclass,
-            outer: outer_instance,
         },
     )?;
     let class_type_parameters = formals
@@ -1171,8 +1190,15 @@ fn prepare_class<'a>(
             _ => Err(mismatch("a non-public class type parameter has no symbol")),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let init_header =
-        local_initializer_header(function, receiver, self_type, arena, &types, &resolve)?;
+    let init_header = local_initializer_header(
+        function,
+        receiver,
+        self_type,
+        outer_instance.map(|_| params[0]),
+        arena,
+        &types,
+        &resolve,
+    )?;
     let class_type_parameter_bounds = bounds.clone();
     Ok(PreparedLocalClass {
         key,
@@ -1242,27 +1268,21 @@ fn file_private_naming(
 
 /// A class's constructor delegation to the constructor of its same-library superclass, and what
 /// it checks that delegation against.
-struct LocalDelegation<'a, 'o> {
-    arena: &'a KlibIrArena,
-    function: &'a KlibIrFunction,
+struct LocalDelegation<'a> {
     delegation: Option<&'a KlibIrMemberAccess>,
     superclass: Option<TypeName>,
-    outer: Option<OuterInstance<'o>>,
 }
 
-/// The same-library superclass a class's constructor delegates to, with the constructor slot of
-/// each argument it passes. The delegation passes the constructor's own parameters, an inner
-/// class its outer instance among them; any other argument keeps the class unsupported.
+/// The same-library superclass a class's constructor delegates to, with the serialized argument
+/// it passes for each of that constructor's parameters. The class's initializer evaluates them in
+/// the constructor's frame, as it evaluates the rest of the constructor's body.
 fn local_superclass<'a>(
     source: LocalClassSource<'a, '_>,
-    delegation: LocalDelegation<'a, '_>,
+    delegation: LocalDelegation<'a>,
 ) -> Result<Option<LocalSuperclass<'a>>, KlibBodyDeclineReason> {
     let LocalDelegation {
-        arena,
-        function,
         delegation,
         superclass,
-        outer,
     } = delegation;
     let (access, superclass) = match (delegation, superclass) {
         (None, None) => return Ok(None),
@@ -1299,20 +1319,6 @@ fn local_superclass<'a>(
             }
         },
     };
-    let prefix = u32::from(outer.is_some());
-    let slot = |symbol: &KlibIrSymbol| -> Option<u32> {
-        if let Some(outer) = outer {
-            let receiver = function.dispatch_receiver.as_ref();
-            if symbol == outer.symbol || receiver.is_some_and(|r| &r.base.symbol == symbol) {
-                return Some(1);
-            }
-        }
-        function
-            .regular_parameters
-            .iter()
-            .position(|parameter| &parameter.base.symbol == symbol)
-            .map(|index| 1 + prefix + u32::try_from(index).expect("a parameter index fits u32"))
-    };
     let arguments = match &access.arguments {
         KlibIrArguments::Flat(values) => values.clone(),
         KlibIrArguments::Split {
@@ -1330,25 +1336,17 @@ fn local_superclass<'a>(
             ))
         }
     };
-    let operands = arguments
+    let arguments = arguments
         .into_iter()
         .map(|argument| {
-            let argument = argument.ok_or(unsupported(
+            argument.ok_or(unsupported(
                 "a superclass delegation leaving a parameter to its default",
-            ))?;
-            match &arena.expr(argument).kind {
-                KlibIrExprKind::GetValue { symbol, .. } => slot(symbol).ok_or(unsupported(
-                    "a superclass constructor argument other than a constructor parameter",
-                )),
-                _ => Err(unsupported(
-                    "a superclass constructor argument other than a constructor parameter",
-                )),
-            }
+            ))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(LocalSuperclass {
         constructor,
-        operands,
+        arguments,
     }))
 }
 
@@ -1484,15 +1482,12 @@ fn members_and_storage<'a>(
             KlibIrMember::Function(id) => {
                 let function = arena.function(*id);
                 if !function.constructor {
-                    members.push(prepare_member(arena, function, scope, false)?);
+                    members.push(prepare_member(arena, function, scope)?);
                 }
             }
             KlibIrMember::Property(property) => {
-                if let Some(id) = property.getter {
-                    members.push(prepare_member(arena, arena.function(id), scope, false)?);
-                }
-                if let Some(id) = property.setter {
-                    members.push(prepare_member(arena, arena.function(id), scope, true)?);
+                for id in [property.getter, property.setter].into_iter().flatten() {
+                    members.push(prepare_member(arena, arena.function(id), scope)?);
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {}
@@ -1517,7 +1512,6 @@ fn prepare_member<'a>(
     arena: &'a KlibIrArena,
     function: &'a KlibIrFunction,
     scope: &MemberScope<'_>,
-    setter: bool,
 ) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
     let statements = match &function.body {
         Some(KlibIrBody::Block(statements)) => statements.as_slice(),
@@ -1535,7 +1529,6 @@ fn prepare_member<'a>(
         header,
         overrides: member_overrides(function, scope)?,
         visibility: declaration_visibility(function.base.flags),
-        setter,
     })
 }
 

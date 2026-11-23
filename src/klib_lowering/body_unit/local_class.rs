@@ -60,30 +60,20 @@ impl<'s> Linker<'_, 's> {
                     }
                 };
                 let params = declaration.declared_parameters().to_vec();
-                if params.len() != superclass.operands.len() {
+                if params.len() != superclass.arguments.len() {
                     return Err(KlibBodyDeclineReason::SignatureMismatch(
                         "a superclass delegation passes another number of arguments".to_owned(),
                     ));
                 }
-                let args = superclass
-                    .operands
-                    .iter()
-                    .zip(&params)
-                    .map(|(&slot, &ty)| {
-                        let value = ir.add_expr(IrExpr::GetValue(slot));
-                        ir.set_logical_type(value, ty);
-                        value
-                    })
-                    .collect::<Vec<_>>();
-                Some((declaration.classifier, params, args))
+                Some((declaration.classifier, params))
             }
             None => None,
         };
         let mut class = super::super::same_library_class::installed_class(&prepared);
-        if let Some((name, params, args)) = superclass {
+        // The initializer lowers the arguments the constructor passes, as its body reads them.
+        if let Some((name, params)) = superclass {
             class.superclass = name;
             class.super_ctor_params = params;
-            class.super_args = args;
         }
         let class_id = ir.add_class(class);
         if let Some(naming) = prepared.naming.clone() {
@@ -96,8 +86,8 @@ impl<'s> Linker<'_, 's> {
         ir.note_class_method(class_id, init);
         let receiver = ir.add_expr(IrExpr::GetValue(0));
         ir.set_logical_type(receiver, prepared.self_type);
-        // The initialization takes the constructor's value parameters, after an outer instance.
-        let prefix = usize::from(prepared.outer.is_some());
+        // The initialization takes the constructor's parameters, an outer instance among them,
+        // at the slots the constructor numbers them.
         let args = prepared
             .init_header
             .params()
@@ -105,7 +95,7 @@ impl<'s> Linker<'_, 's> {
             .enumerate()
             .map(|(index, ty)| {
                 let value = ir.add_expr(IrExpr::GetValue(
-                    u32::try_from(index + 1 + prefix).expect("a value index fits u32"),
+                    u32::try_from(index + 1).expect("a value index fits u32"),
                 ));
                 ir.set_logical_type(value, *ty);
                 Some(value)
@@ -139,6 +129,10 @@ impl<'s> Linker<'_, 's> {
                     fields: prepared.stored.clone(),
                     steps: prepared.steps,
                     outer: prepared.outer,
+                    superclass_arguments: prepared
+                        .superclass
+                        .map(|superclass| superclass.arguments)
+                        .unwrap_or_default(),
                 },
             )),
             static_initialization: None,
@@ -204,7 +198,6 @@ impl<'s> Linker<'_, 's> {
                 LocalFunction {
                     function,
                     class: prepared.key.clone(),
-                    setter: member.setter,
                     formals: member.formals.clone(),
                 },
             );
@@ -364,7 +357,6 @@ impl<'s> Linker<'_, 's> {
                 LocalFunction {
                     function,
                     class: prepared.key.clone(),
-                    setter: member.setter,
                     formals: member.formals.clone(),
                 },
             );
@@ -661,24 +653,76 @@ fn class_constructor(
     ))
 }
 
-impl Linker<'_, '_> {
+impl<'s> Linker<'_, 's> {
+    /// Whether an earlier unit of the program materialized the class of the member `candidate`:
+    /// it published the initialization of each of the class's constructors.
+    pub(super) fn class_realized_earlier(&self, candidate: KlibBodyCallable<'s>) -> bool {
+        let Some(constructors) = candidate.class_contract().and_then(|class| {
+            super::super::class_initialization::initializing_constructors(
+                class,
+                self.sources.bodies,
+            )
+        }) else {
+            return false;
+        };
+        !constructors.is_empty()
+            && constructors.iter().all(|identity| {
+                self.sources
+                    .externals
+                    .get(identity)
+                    .is_some_and(|external| {
+                        matches!(
+                            external.realization,
+                            DependencyExternalRealization::AllocatingConstructor
+                                | DependencyExternalRealization::ConstructorInitializer
+                        )
+                    })
+            })
+    }
+
+    /// Whether `declaration` is a member with a dispatch receiver of a non-public class of the
+    /// same library, which no provider records. An earlier unit installed the class with all its
+    /// members and published each under its identity, so a call of one retains the dispatch
+    /// operand of its serialized declaration, as a call of any member emitted as part of its
+    /// class does.
+    pub(super) fn is_published_member(
+        &self,
+        identity: &KlibDependencyCallable,
+        arena: &KlibIrArena,
+        declaration: &KlibIrFunction,
+        unselected: bool,
+    ) -> bool {
+        let KlibDeclarationSignature::Public(signature) = &identity.declaration else {
+            return false;
+        };
+        unselected
+            && declaration.dispatch_receiver.is_some()
+            && self
+                .sources
+                .bodies
+                .module_class_declaring(
+                    &identity.module,
+                    &crate::metadata::klib_ir::KlibIrSignature::Public(signature.clone()),
+                )
+                .is_some_and(|(class_arena, class)| {
+                    std::ptr::eq(arena, class_arena)
+                        && crate::metadata::semantic::declaration_visibility(class.base.flags)
+                            != crate::types::Visibility::Public
+                })
+    }
+
     /// The member `identity` of a public class this unit installed, which every call in the
     /// unit reaches directly: the class is final, so no override can replace it.
     pub(super) fn installed_member(
         &self,
         ir: &IrFile,
         identity: &KlibDependencyCallable,
-    ) -> Result<Option<(LinkedCallee, bool)>, KlibBodyDeclineReason> {
+    ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
         let key = installed_identity(identity);
-        let Some(setter) = self
-            .local_functions
-            .get(&key)
-            .map(|function| function.setter)
-        else {
+        if !self.local_functions.contains_key(&key) {
             return Ok(None);
-        };
-        self.linked_installed_member(ir, &key)
-            .map(|linked| Some((linked, setter)))
+        }
+        self.linked_installed_member(ir, &key).map(Some)
     }
 }
 
