@@ -724,7 +724,6 @@ delegatedProperty/delegateToAnother/mutable.kt
 delegatedProperty/delegateToAnother/openProperty.kt
 delegatedProperty/delegateToAnother/simple.kt
 delegatedProperty/delegateToAnother/withSideEffects.kt
-delegatedProperty/delegateToAnother/withSideEffectsFromFileClass.kt
 delegatedProperty/delegateToCastReceiver.kt
 delegatedProperty/delegateToConstVal.kt
 delegatedProperty/delegateToConstructorParameter.kt
@@ -840,7 +839,6 @@ evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
 evaluate/intrinsicConst/kCallableNameWithSideEffect.kt
 evaluate/intrinsicConst/lowerAndUpperCase.kt
-evaluate/serialization/typeAnnotation.kt
 evaluate/ubyteOperations.kt
 evaluate/uintOperations.kt
 evaluate/ulongOperations.kt
@@ -1133,7 +1131,6 @@ inlineClasses/callableReferences/inlineClassPrivatePrimaryValGeneric.kt
 inlineClasses/castInsideWhenExpression.kt
 inlineClasses/castInsideWhenExpressionGeneric.kt
 inlineClasses/constructorCallableReference.kt
-inlineClasses/constructorCallableReferenceGeneric.kt
 inlineClasses/contextsAndAccessors/accessPrivateInlineClassConstructorFromLambda.kt
 inlineClasses/contextsAndAccessors/accessPrivateInlineClassConstructorFromLambdaGeneric.kt
 inlineClasses/contextsAndAccessors/kt27513.kt
