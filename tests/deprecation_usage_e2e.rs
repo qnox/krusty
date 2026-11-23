@@ -467,6 +467,37 @@ annotation class Arguments(
     );
 }
 
+/// A deprecated use inside a parameter's default value is reported once, wherever the default is
+/// declared, as kotlinc does.
+#[test]
+fn deprecated_use_in_a_default_value_is_reported_once() {
+    assert_matches_kotlinc(
+        r#"@Deprecated("old")
+class Old
+
+fun top(value: Any? = Old()) {}
+
+class Holder(val primary: Any? = Old()) {
+    constructor(secondary: Int, value: Any? = Old()) : this()
+
+    fun member(value: Any? = Old()) {}
+}
+
+fun outer() {
+    fun local(value: Any? = Old()) {}
+}
+"#,
+        &[],
+        &[
+            "4:23: 'constructor(): Old' is deprecated. old.",
+            "6:34: 'constructor(): Old' is deprecated. old.",
+            "7:47: 'constructor(): Old' is deprecated. old.",
+            "9:30: 'constructor(): Old' is deprecated. old.",
+            "13:29: 'constructor(): Old' is deprecated. old.",
+        ],
+    );
+}
+
 #[test]
 fn hidden_constructor_is_not_a_candidate() {
     assert_matches_kotlinc(
