@@ -288,17 +288,43 @@ fn allowing_expect_actual_classes_compiles_as_kotlinc_does() {
     let _ = std::fs::remove_dir_all(work);
 }
 
-/// kotlinc refuses to run on a JVM older than 17 unless this argument is given. The reference
-/// kotlinc runs on a newer JVM, so its check never fires: both compilers compile silently with and
-/// without the argument, and their classes are identical.
+/// kotlinc refuses to run on a JVM older than 17 unless this argument is given. From 2.5 the
+/// argument exists and lifts that check, which krusty does not make. Earlier releases do not know
+/// it and only warn that it is unsupported. Either way krusty's diagnostics and classes equal
+/// kotlinc's for the reference release under test.
 #[test]
 fn allowing_a_pre_17_runtime_jdk_compiles_as_kotlinc_does() {
     const ARGUMENT: &str = "-Xallow-pre-17-runtime-jdk";
-    let source = "package a\nfun box(): String = \"OK\"\n";
-    let (code, stderr) = assert_inert_for_source(ARGUMENT, "Runtime.kt", source);
+    let work = common::scratch_dir().expect("allocate a scratch directory");
+    let path = |name: &str| -> PathBuf { work.join(name) };
+    let text = |path: &Path| path.to_string_lossy().into_owned();
+    std::fs::write(
+        path("Runtime.kt"),
+        "package a\nfun box(): String = \"OK\"\n",
+    )
+    .expect("write the source");
+    let compile = |output: &str| {
+        vec![
+            text(&path("Runtime.kt")),
+            "-d".into(),
+            text(&path(output)),
+            ARGUMENT.to_string(),
+        ]
+    };
+    let (code, expected_stderr) = kotlinc(&compile("kotlinc"));
+    assert_eq!(code, 0, "kotlinc {ARGUMENT}: {expected_stderr}");
+    let result = std::process::Command::new(common::krusty_binary())
+        .args(compile("krusty"))
+        .output()
+        .expect("run krusty");
+    assert_eq!(result.status.code(), Some(0), "krusty {ARGUMENT}");
     assert_eq!(
-        (code, stderr.as_str()),
-        (0, ""),
-        "kotlinc without {ARGUMENT} on a JVM of at least 17"
+        String::from_utf8_lossy(&result.stderr),
+        expected_stderr,
+        "krusty {ARGUMENT}"
     );
+    let expected = classes(&path("kotlinc"));
+    assert!(!expected.is_empty(), "kotlinc emitted no classes");
+    assert_eq!(classes(&path("krusty")), expected, "{ARGUMENT}");
+    let _ = std::fs::remove_dir_all(work);
 }
