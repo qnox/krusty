@@ -249,10 +249,12 @@ pub(super) fn discriminate_generics<T: Copy>(
 /// `minus(elements: Iterable<T>)` the same shape. kotlinc decides such a tie on the declarations,
 /// with each side's type parameters open, so the declaration whose own parameters the other's accept
 /// wins. Candidates are compared only within a group of mutually equivalent instantiated shapes;
-/// every other pair is left to the argument-driven specificity that follows.
+/// every other pair is left to the argument-driven specificity that follows. Only the parameters
+/// the supplied arguments map to are compared: a parameter left to its default takes no part.
 pub(super) fn retain_declaration_specific_among_equivalent<'a>(
     src: &dyn SymbolSource,
     candidates: &[(&'a crate::libraries::FunctionInfo, Vec<Ty>)],
+    args: &[super::CallArgKind],
     equivalent: impl Fn(Ty, Ty) -> bool,
 ) -> Vec<(&'a crate::libraries::FunctionInfo, Vec<Ty>)> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
@@ -288,7 +290,12 @@ pub(super) fn retain_declaration_specific_among_equivalent<'a>(
                 (
                     index,
                     receiver.flatten(),
-                    super::overload_selection::declaration_specificity_params(candidate),
+                    super::overload_selection::declaration_specificity_params(candidate)
+                        .into_iter()
+                        .zip(args)
+                        .filter(|(_, argument)| !argument.is_omitted_default())
+                        .map(|(parameter, _)| parameter)
+                        .collect::<Vec<_>>(),
                     generic,
                 )
             })

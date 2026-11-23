@@ -1719,6 +1719,7 @@ fn best_by_args_at_priority_with_ties<'a>(
         declaration_specificity::retain_declaration_specific_among_equivalent(
             src,
             cands,
+            args,
             |left, right| {
                 parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
             },
