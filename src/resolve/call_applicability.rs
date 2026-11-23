@@ -270,10 +270,12 @@ pub(super) fn score_with_declaration(
         {
             return None;
         }
-        // A result-only producer scores as an ordinary fit only for a parameter its result can
-        // actually bind: `emptyList()` never fits a function-typed parameter.
-        (contextual_call_result && checker.argument_uses_context_only_result(scope, argument))
-            .then_some(1)
+        // A result-only producer is an ordinary fit for a parameter its result can bind. For any
+        // other parameter (`emptyList()` against a function type) it stays a candidate, so a lone
+        // one still reports the argument mismatch, but it ranks below every candidate that binds.
+        checker
+            .argument_uses_context_only_result(scope, argument)
+            .then_some(usize::from(contextual_call_result))
             .or_else(|| checker.member_argument_score(expected, semantic_actual))
             // A nested call re-solved to the parameter's own classifier is an ordinary fit; one
             // whose result only an expected-type binding could reshape ranks below it.
