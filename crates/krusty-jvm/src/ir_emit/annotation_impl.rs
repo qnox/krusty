@@ -107,6 +107,7 @@ pub(super) fn emit_annotation_impl_class(
         .iter()
         .map(|(_, ty)| crate::annotation_kclass::annotation_member_jvm_type(*ty))
         .collect();
+    let hides_constructor = ir.has_value_param_ctor_of(c.fq_name_id());
     let mut cw = new_writer(&fq, "java/lang/Object", opts);
     cw.set_access(0x0001 | 0x0010 | 0x0020 | 0x1000); // PUBLIC | FINAL | SUPER | SYNTHETIC
     cw.add_interface(iface);
@@ -216,7 +217,13 @@ pub(super) fn emit_annotation_impl_class(
         } else {
             1 + params_words
         };
-        finish_code::<0x0001>(&mut cw, "<init>", &desc, &mut ctor, ctor_locals);
+        // A member typed as a value class hides the constructor like any other constructor taking
+        // one: private here, with the `DefaultConstructorMarker` overload emitted after the members.
+        if hides_constructor {
+            finish_code::<0x0002>(&mut cw, "<init>", &desc, &mut ctor, ctor_locals);
+        } else {
+            finish_code::<0x0001>(&mut cw, "<init>", &desc, &mut ctor, ctor_locals);
+        }
         let mut locals = vec![("this".to_string(), format!("L{fq};"), 0)];
         let mut debug_slot = 1u16;
         for (name, jt) in &members {
@@ -299,6 +306,12 @@ pub(super) fn emit_annotation_impl_class(
             None,
             &[("this".to_string(), format!("L{fq};"), 0)],
         );
+    }
+    if hides_constructor {
+        let parameters: Vec<Ty> = members.iter().map(|(_, ty)| *ty).collect();
+        let identities: Vec<Option<String>> =
+            members.iter().map(|(name, _)| Some(name.clone())).collect();
+        constructor_defaults::emit_ctor_marker_accessor(&fq, &parameters, &identities, &mut cw);
     }
     env.inner_classes.register(&mut cw);
     // Part of the public ABI when created in a public inline function's body.
