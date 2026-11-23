@@ -39974,6 +39974,12 @@ impl<'a> Checker<'a> {
         argument: ExprId,
         ty: Ty,
     ) -> CallArgKind {
+        if self.file.collection_literal_calls.contains(&argument.0) {
+            return CallArgKind::CollectionLiteral {
+                provisional: ty,
+                factory_classifiers: std::sync::Arc::from([]),
+            };
+        }
         if let Some(function) = self.expression_function_type(scope, argument, ty) {
             if function != ty {
                 return CallArgKind::CallableReference {
