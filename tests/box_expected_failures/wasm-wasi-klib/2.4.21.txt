@@ -2177,7 +2177,6 @@ serialization/serializedDefaultArgs.kt
 serialization/serializedEnumOrdinal.kt
 serialization/serializedVararg.kt
 size/helloWorld.kt
-smartCasts/smartcastFromGenericToString.kt
 specialBuiltins/bridges.kt
 specialBuiltins/emptyList.kt
 specialBuiltins/enumAsOrdinaled.kt
