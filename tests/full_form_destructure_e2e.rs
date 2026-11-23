@@ -26,7 +26,11 @@ fn full_form_destructure_reports_the_language_version() {
         rendered,
         "\
 Full.kt:4:2: error: the feature \"name based destructuring\" is only available since language version 2.5
+(val a, val b) = Pair2(1, 2)
+ ^^^
 Full.kt:4:9: error: the feature \"name based destructuring\" is only available since language version 2.5
+(val a, val b) = Pair2(1, 2)
+        ^^^
 "
     );
     common::assert_errors_match_kotlinc(&[("Full.kt", SOURCE)], &[]);

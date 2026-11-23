@@ -521,7 +521,6 @@ impl DiagSink {
                 .or_else(|| files.first().copied())
                 .unwrap_or(("<unknown>", ""));
             out.push_str(&render_one(d, path, src, names));
-            out.push_str(&source_excerpt(d.span, src));
         }
         for error in &self.module_errors {
             out.push_str("error: ");
@@ -535,36 +534,36 @@ impl DiagSink {
 fn render_one(d: &Diagnostic, path: &str, src: &str, names: DiagnosticNames) -> String {
     let (line, col) = line_col(src, d.span.lo);
     let sev = severity_word(d.severity);
-    format!("{path}:{line}:{col}: {sev}: {}\n", d.message(names))
+    let mut out = format!("{path}:{line}:{col}: {sev}: {}\n", d.message(names));
+    out.push_str(&source_excerpt(src, d.span));
+    out
 }
 
-/// kotlinc's `PlainTextMessageRenderer` excerpt under a located message: the source line, then a
-/// marker line whose `^` run covers the span, up to the end of the line when the span goes past it
-/// and at least one column wide. Whitespace before the span is kept so tabs line up.
-fn source_excerpt(span: Span, src: &str) -> String {
+/// kotlinc's plain renderer prints the line a diagnostic starts on beneath its message, then a
+/// run of carets under its range: one caret per UTF-16 unit of a range that ends on that line, a
+/// single caret for an empty range or one that continues onto later lines. Columns count UTF-16
+/// units, as they do for the `line:column` prefix, and the indent is spaces even under a tab. A
+/// diagnostic on an empty line has no excerpt.
+fn source_excerpt(src: &str, span: Span) -> String {
     let lo = char_boundary_at_or_before(src, span.lo as usize);
-    let line_start = src[..lo].rfind('\n').map_or(0, |at| at + 1);
-    let line_end = src[lo..].find('\n').map_or(src.len(), |at| lo + at);
-    let line = src[line_start..line_end].trim_end_matches('\r');
-    if line.is_empty() {
+    let start = src[..lo].rfind('\n').map_or(0, |at| at + 1);
+    let end = src[lo..].find(['\n', '\r']).map_or(src.len(), |at| lo + at);
+    if start == end {
         return String::new();
     }
-    let hi = char_boundary_at_or_before(src, (span.hi as usize).clamp(lo, line_start + line.len()));
-    let mut out = String::new();
-    out.push_str(line);
-    out.push('\n');
-    for c in src[line_start..lo].chars() {
-        out.push(if c.is_whitespace() { c } else { ' ' });
-    }
-    // A range that runs past its first line is marked by one caret.
-    let width = if (span.hi as usize) > line_end {
-        1
+    let units = |text: &str| text.chars().map(char::len_utf16).sum::<usize>();
+    let hi = span.hi as usize;
+    let width = if hi <= end {
+        units(&src[lo..char_boundary_at_or_before(src, hi).max(lo)]).max(1)
     } else {
-        src[lo..hi].chars().count().max(1)
+        1
     };
-    out.extend(std::iter::repeat_n('^', width));
-    out.push('\n');
-    out
+    format!(
+        "{}\n{}{}\n",
+        &src[start..end],
+        " ".repeat(units(&src[start..lo])),
+        "^".repeat(width)
+    )
 }
 
 /// A byte offset into `src` moved back onto a character boundary. A span synthesized from a name's
@@ -596,8 +595,10 @@ pub fn line_col(src: &str, offset: u32) -> (usize, usize) {
         if b == b'\n' {
             line += 1;
             col = 1;
-        } else {
-            col += 1;
+        } else if b & 0xC0 != 0x80 {
+            // One column per UTF-16 unit: a continuation byte adds none, and a four-byte
+            // sequence (its lead byte is `0xF0..`) is a surrogate pair.
+            col += if b >= 0xF0 { 2 } else { 1 };
         }
     }
     (line, col)
@@ -714,6 +715,60 @@ mod tests {
         assert_eq!(
             r,
             "A.kt:1:1: error: in A\nxyz\n^\nB.kt:2:2: error: in B\ncde\n ^\n"
+        );
+    }
+
+    fn rendered(src: &str, lo: u32, hi: u32) -> String {
+        let mut sink = DiagSink::new();
+        sink.error(Span::new(lo, hi), "boom");
+        sink.render_all(&[("F.kt", src)], DiagnosticNames::Hidden)
+    }
+
+    #[test]
+    fn underlines_a_range_on_one_line_with_a_caret_per_unit() {
+        assert_eq!(
+            rendered("val x = foo\n", 8, 11),
+            "F.kt:1:9: error: boom\nval x = foo\n        ^^^\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_range_and_one_that_spans_lines_get_a_single_caret() {
+        assert_eq!(
+            rendered("fun a() {\n", 9, 9),
+            "F.kt:1:10: error: boom\nfun a() {\n         ^\n"
+        );
+        assert_eq!(
+            rendered("val f = {\n  1\n}\n", 8, 17),
+            "F.kt:1:9: error: boom\nval f = {\n        ^\n"
+        );
+    }
+
+    #[test]
+    fn columns_count_utf16_units_and_a_tab_indents_with_a_space() {
+        // `é` is one unit and `😀` two, so `+` is column 14 although it is byte 17.
+        let src = "val é = \"😀\" + 2\n";
+        let at = src.find('+').unwrap() as u32;
+        assert_eq!(
+            rendered(src, at, at + 1),
+            "F.kt:1:14: error: boom\nval é = \"😀\" + 2\n             ^\n"
+        );
+        assert_eq!(
+            rendered("\tval x = 1\n", 9, 10),
+            "F.kt:1:10: error: boom\n\tval x = 1\n         ^\n"
+        );
+    }
+
+    #[test]
+    fn a_diagnostic_on_an_empty_line_has_no_excerpt() {
+        assert_eq!(rendered("\n", 0, 0), "F.kt:1:1: error: boom\n");
+    }
+
+    #[test]
+    fn a_line_ending_is_not_part_of_the_excerpt() {
+        assert_eq!(
+            rendered("fun b() = zzz\r\nfun c()\r\n", 10, 13),
+            "F.kt:1:11: error: boom\nfun b() = zzz\n          ^^^\n"
         );
     }
 
