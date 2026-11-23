@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use krusty::compilation_target::CompilationTarget;
 use krusty::fx_hash::{HashMap, HashSet};
@@ -203,9 +205,12 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         } else {
             command.args(["-produce", "library", "-output"]).arg(&klib);
         }
-        let output = command
-            .output()
-            .expect("run kotlinc-native module compiler");
+        let output = output_within_deadline(
+            &mut command,
+            work,
+            &format!("kotlinc-native module {}", unit.name),
+            subprocess_deadline(),
+        );
         assert!(
             output.status.success(),
             "kotlinc-native rejected module {} (status {}):\n{}",
@@ -231,9 +236,12 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
     }
 
     let executable = work.join("program.kexe");
-    let run = Command::new(&executable)
-        .output()
-        .expect("run the kotlinc-native multimodule program");
+    let run = output_within_deadline(
+        &mut Command::new(&executable),
+        work,
+        "the kotlinc-native multimodule program",
+        subprocess_deadline(),
+    );
     assert!(
         run.status.success(),
         "the kotlinc-native multimodule program exited with {}:\n{}",
@@ -241,6 +249,64 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         String::from_utf8_lossy(&run.stderr)
     );
     Some(BTreeMap::from([("stdout".to_string(), run.stdout)]))
+}
+
+/// Seconds one kotlinc-native invocation, or the program it links, may run:
+/// `KRUSTY_REFERENCE_SUBPROCESS_TIMEOUT_SECONDS`, five minutes by default.
+fn subprocess_deadline() -> Duration {
+    let name = "KRUSTY_REFERENCE_SUBPROCESS_TIMEOUT_SECONDS";
+    let seconds =
+        crate::common::timeout_ms_from(name, std::env::var(name).ok().as_deref(), 300_000);
+    Duration::from_secs(seconds)
+}
+
+/// Run `command` to completion inside its own process group and kill the whole group when the
+/// deadline passes. kotlinc-native starts a JVM and a native linker; one that hangs must fail its
+/// own case with a message naming it, not hold the lane until the runner kills every test.
+/// Output goes to files in `work`, so a chatty child cannot block on a full pipe.
+fn output_within_deadline(
+    command: &mut Command,
+    work: &Path,
+    what: &str,
+    deadline: Duration,
+) -> std::process::Output {
+    use std::os::unix::process::CommandExt;
+    static CAPTURES: AtomicU64 = AtomicU64::new(0);
+    let id = CAPTURES.fetch_add(1, Ordering::Relaxed);
+    let stdout_path = work.join(format!("capture-{id}.stdout"));
+    let stderr_path = work.join(format!("capture-{id}.stderr"));
+    let mut child = command
+        .process_group(0)
+        .stdout(Stdio::from(
+            std::fs::File::create(&stdout_path).expect("create the captured stdout"),
+        ))
+        .stderr(Stdio::from(
+            std::fs::File::create(&stderr_path).expect("create the captured stderr"),
+        ))
+        .spawn()
+        .unwrap_or_else(|error| panic!("start {what}: {error}"));
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll the reference subprocess") {
+            break status;
+        }
+        if started.elapsed() >= deadline {
+            let group = i32::try_from(child.id()).expect("a process id fits a pid_t");
+            // SAFETY: killing the process group this call created; no memory is involved.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+            child.wait().expect("reap the killed reference subprocess");
+            panic!(
+                "{what} did not finish within {}s and was killed",
+                deadline.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    std::process::Output {
+        status,
+        stdout: std::fs::read(&stdout_path).expect("read the captured stdout"),
+        stderr: std::fs::read(&stderr_path).expect("read the captured stderr"),
+    }
 }
 
 fn order_libraries_for_native_linker(
@@ -480,6 +546,42 @@ mod tests {
             .expect("the pinned feature table")
             .language_argument("+CompanionBlocksAndExtensions");
         assert_eq!(arguments, vec![flag]);
+    }
+
+    #[test]
+    fn a_hung_subprocess_and_its_children_are_killed_at_the_deadline() {
+        let root = super::super::common::scratch_dir().expect("private runner test directory");
+        let marker = root.join("child-survived");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!("(sleep 3; touch {}) & sleep 30", marker.display()));
+        let started = Instant::now();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            output_within_deadline(&mut command, &root, "hung tool", Duration::from_millis(300))
+        }));
+        let message = *caught
+            .expect_err("a subprocess past its deadline fails its case")
+            .downcast::<String>()
+            .expect("the failure carries a message");
+        assert_eq!(message, "hung tool did not finish within 0s and was killed");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        std::thread::sleep(Duration::from_secs(4));
+        assert!(
+            !marker.exists(),
+            "the killed group's child must not outlive it"
+        );
+    }
+
+    #[test]
+    fn a_finished_subprocess_returns_its_status_and_both_streams() {
+        let root = super::super::common::scratch_dir().expect("private runner test directory");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("echo out; echo err >&2; exit 3");
+        let output = output_within_deadline(&mut command, &root, "tool", Duration::from_secs(30));
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.stdout, b"out\n");
+        assert_eq!(output.stderr, b"err\n");
     }
 
     #[test]

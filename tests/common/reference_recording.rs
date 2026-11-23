@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 use krusty::compilation_target::CompilationTarget;
 
@@ -21,7 +22,13 @@ pub(crate) fn recorded(
         return Some(files);
     }
     let work = super::common::scratch_dir().expect("cannot allocate a reference-compiler fixture");
-    let answer = live(&work);
+    let answer = {
+        // A live reference compile is a whole JVM or native toolchain run. Test threads outnumber
+        // the cores they may use, so without a bound a cold cache starts one per thread and the
+        // runner runs out of memory.
+        let _permit = LIVE_REFERENCES.acquire(super::common::server_pool::server_pool_cap());
+        live(&work)
+    };
     let _ = std::fs::remove_dir_all(&work);
     let answer = answer?;
     byte_dump::store_shared_files(&slot, fingerprint, &answer);
@@ -51,6 +58,46 @@ fn fingerprint(
     fingerprint_parts(&[&blob])
 }
 
+/// Counting gate over the live reference compiles in flight.
+struct LiveReferences {
+    running: Mutex<usize>,
+    freed: Condvar,
+}
+
+struct Permit(&'static LiveReferences);
+
+static LIVE_REFERENCES: LiveReferences = LiveReferences {
+    running: Mutex::new(0),
+    freed: Condvar::new(),
+};
+
+fn counted(mutex: &Mutex<usize>) -> MutexGuard<'_, usize> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl LiveReferences {
+    fn acquire(&'static self, cap: usize) -> Permit {
+        let mut running = counted(&self.running);
+        while *running >= cap {
+            running = self
+                .freed
+                .wait(running)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *running += 1;
+        Permit(self)
+    }
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        *counted(&self.0.running) -= 1;
+        self.0.freed.notify_one();
+    }
+}
+
 /// The Kotlin/Native distribution root, when provisioned.
 pub(crate) fn kotlin_native_root() -> Option<PathBuf> {
     let root = std::env::var_os("KRUSTY_KOTLIN_NATIVE")
@@ -60,4 +107,35 @@ pub(crate) fn kotlin_native_root() -> Option<PathBuf> {
         panic!("KRUSTY_REQUIRE_KOTLIN_NATIVE is set but KRUSTY_KOTLIN_NATIVE is not");
     }
     root
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn live_references_never_exceed_the_cap() {
+        static GATE: LiveReferences = LiveReferences {
+            running: Mutex::new(0),
+            freed: Condvar::new(),
+        };
+        static PEAK: AtomicUsize = AtomicUsize::new(0);
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let _permit = GATE.acquire(2);
+                    PEAK.fetch_max(*counted(&GATE.running), Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(50));
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+        assert_eq!(PEAK.load(Ordering::SeqCst), 2);
+        assert_eq!(*counted(&GATE.running), 0);
+    }
 }
