@@ -42361,6 +42361,15 @@ impl<'a> Checker<'a> {
                 // is, so reaching the selector proves the base non-null too. Without it,
                 // `parent?.let { explicit.name }` reads `explicit` as still nullable.
                 self.apply_safe_call_origin_narrowing(&selector_scope, &path, self.span(receiver));
+            } else {
+                // A receiver that is itself a safe-call chain (`a?.f()?.g(a)`) is no access path,
+                // but reaching this selector proves it non-null, which is the `chain != null`
+                // proof: every link held, so the chain's stable root is non-null here too.
+                let mut proven = Vec::new();
+                self.null_check_narrowings(scope, receiver, &mut proven, &mut Vec::new());
+                for (path, ty) in proven {
+                    self.apply_narrowing_unchecked(&selector_scope, &path, ty);
+                }
             }
             let scope = &selector_scope;
             // Diagnostic checkpoint for the "nothing resolved, nothing reported" report below. Taken
