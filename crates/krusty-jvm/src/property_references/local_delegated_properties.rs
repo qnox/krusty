@@ -20,7 +20,10 @@ pub(crate) struct LocalDelegatedProperties {
 impl LocalDelegatedProperties {
     /// The local delegated properties `ir` references, by the class or facade declaring them, or
     /// `None` when a top-level one's source has no facade among `facades`.
-    pub(crate) fn collect(ir: &IrFile, facades: &[String]) -> Option<Self> {
+    pub(crate) fn collect(
+        ir: &IrFile,
+        facades: &[crate::file_facades::FacadeClass],
+    ) -> Option<Self> {
         let mut numbered: HashMap<
             TypeName,
             HashMap<LocalDelegatedPropertyId, (u32, LocalPropertyMeta)>,

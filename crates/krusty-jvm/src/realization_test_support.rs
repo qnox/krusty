@@ -24,7 +24,11 @@ pub(crate) fn realize_calls(
 ) {
     let facades = stems
         .iter()
-        .map(|stem| krusty::names::file_part_short_name(stem))
+        .map(|stem| {
+            super::file_facades::FacadeClass::in_source_package(
+                krusty::names::file_part_short_name(stem),
+            )
+        })
         .collect::<Vec<_>>();
     let mut property_realizations = super::property_realizations::PropertyRealizations::default();
     super::local_properties::realize(ir, &mut property_realizations)
@@ -36,7 +40,6 @@ pub(crate) fn realize_calls(
         .expect("an empty module classifier snapshot is valid");
     let classifiers = krusty::backend::CheckedBackendClassifiers::new(&module, dependencies);
     let file_classes = super::file_facades::FileClasses {
-        multifile_facades: vec![None; facades.len()].into(),
         containers: facades.into(),
     };
     super::module_calls::realize(

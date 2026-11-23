@@ -1342,6 +1342,12 @@ fn emit_pass(
     // empty one is an ABI divergence (spurious extra class). A facade static is owner-less.
     let facade_has_static = ir.statics.iter().any(|s| s.is_facade_owned());
     if facade_has_method || facade_has_static || metadata.is_some() {
+        if let Some(package) = crate::file_facades::relocated_package_name(
+            facade,
+            ir.package.as_deref().unwrap_or_default(),
+        ) {
+            cw.set_metadata_package_name(&package);
+        }
         if let Some(multifile_facade) = env.multifile_facade {
             multifile_facades::write_part_header(&mut cw, ir, metadata, multifile_facade);
         } else {

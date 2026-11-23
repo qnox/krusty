@@ -67,7 +67,7 @@ impl HelperAccess {
 pub(crate) fn realize(
     ir: &mut IrFile,
     current_source: IrModuleSource,
-    facades: &[String],
+    facades: &[crate::file_facades::FacadeClass],
     classifiers: &krusty::backend::CheckedBackendClassifiers<'_>,
 ) -> Result<HelperAccess, ()> {
     let closure_plans = super::local_delegate_closures::bind(ir)?;
