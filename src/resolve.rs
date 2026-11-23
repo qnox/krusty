@@ -18253,9 +18253,7 @@ impl<'a> Checker<'a> {
                             Some(CallableCandidateSelection::Selected(selected))
                             | Some(CallableCandidateSelection::MissingContext(selected)) => {
                                 selected.scope_rung.is_import()
-                                    && !selected.callable.annotations.contains(
-                                        &crate::types::type_name("kotlin/internal/HidesMembers"),
-                                    )
+                                    && !crate::symbol_resolver::hides_members(&selected.callable)
                             }
                             Some(CallableCandidateSelection::Ambiguous(tied, _)) => tied
                                 .iter()

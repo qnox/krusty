@@ -1377,9 +1377,10 @@ impl Checker<'_> {
         // members above ordinary extensions, and skip a rung whose only candidates lack context.
         // Later rules share one rung. Argument score there is type fit and omitted defaults;
         // a vararg loses only after element specificity, as a tie-break among equal shapes.
-        let hides_members = crate::types::type_name("kotlin/internal/HidesMembers");
         let tower_rank = |candidate: &SelectedCallable| {
-            if candidate.is_extension() && candidate.callable.annotations.contains(&hides_members) {
+            if candidate.is_extension()
+                && crate::symbol_resolver::hides_members(&candidate.callable)
+            {
                 (0_u8, (0_u8, 0_u32), candidate.receiver_rank)
             } else if candidate.kind == crate::libraries::FnKind::Member {
                 (1_u8, (0_u8, 0_u32), candidate.receiver_rank)
