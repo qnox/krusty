@@ -126,6 +126,9 @@ pub(super) enum Memoization {
     /// It captures values: `rememberComposableLambda` keeps it in the composition of `caller`,
     /// whose group creates it, and updates the block it calls.
     Remembered { caller: FunId },
+    /// It captures values in a function that is not composable, which has no composition to keep
+    /// it in: `composableLambdaInstance` wraps it where `caller` passes it.
+    Instance { caller: FunId },
 }
 
 /// One value parameter of a restartable function.
@@ -604,6 +607,7 @@ refusal: true,
                 caller: declaration.function,
                 direct: &passing,
                 arguments: &lambda_arguments,
+                composable: true,
             },
             &mut direct_calls,
             rejections,
@@ -760,23 +764,6 @@ refusal: true,
             package: &package,
             file_name: source.file_name,
         };
-        // Only a lambda that captures nothing needs no composition to remember it in.
-        let (captures, singletons): (Vec<_>, Vec<_>) = lambda_arguments
-            .into_iter()
-            .partition(|argument| argument.captures);
-        rejections.extend(captures.iter().map(|argument| {
-            PluginRejection {
-            refusal: true,
-            span: source
-                .expression_span(ir, argument.lambda)
-                .unwrap_or(crate::diag::Span::new(0, 0)),
-            message: unsupported(
-                "a composable lambda that captures a value, passed from a function that is not \
-                 composable",
-            ),
-        }
-        }));
-        include_lambda_calls(ir, &captures, &calls, &mut direct_calls);
         scope.register_lambdas(
             ir,
             LambdaOwner {
@@ -784,7 +771,8 @@ refusal: true,
                 qualified: &qualified,
                 caller: declaration.function,
                 direct: &direct,
-                arguments: &singletons,
+                arguments: &lambda_arguments,
+                composable: false,
             },
             &mut direct_calls,
             rejections,
@@ -1755,6 +1743,8 @@ struct LambdaOwner<'a> {
     direct: &'a [ExprId],
     /// The lambdas those calls pass to composable lambda parameters.
     arguments: &'a [LambdaArgument],
+    /// Whether the body is composable, which gives a capturing lambda a composition to be kept in.
+    composable: bool,
 }
 
 struct BodyScope<'a> {
@@ -1796,12 +1786,14 @@ impl BodyScope<'_> {
                 sibling,
                 argument.parameter,
             );
-            let memoization = if argument.captures {
-                Memoization::Remembered {
+            let memoization = match (argument.captures, owner.composable) {
+                (false, _) => Memoization::Singleton,
+                (true, true) => Memoization::Remembered {
                     caller: owner.caller,
-                }
-            } else {
-                Memoization::Singleton
+                },
+                (true, false) => Memoization::Instance {
+                    caller: owner.caller,
+                },
             };
             if let Some(lambda) = self.composable_lambda(
                 ir,
@@ -2028,9 +2020,10 @@ impl BodyScope<'_> {
             .iter()
             .map(
                 |&capture| match (&ir.exprs[capture as usize], memoization) {
-                    (&IrExpr::GetValue(index), Memoization::Remembered { caller }) => {
-                        index as usize >= ir.functions[caller as usize].params.len()
-                    }
+                    (
+                        &IrExpr::GetValue(index),
+                        Memoization::Remembered { caller } | Memoization::Instance { caller },
+                    ) => index as usize >= ir.functions[caller as usize].params.len(),
                     _ => false,
                 },
             )
@@ -2142,7 +2135,9 @@ impl BodyScope<'_> {
         // kotlinc names a singleton after its property, and a remembered lambda after its caller.
         let owner = match memoization {
             Memoization::Singleton => format!("{}.lambda${key}", self.singletons),
-            Memoization::Remembered { .. } => qualified_caller.to_string(),
+            Memoization::Remembered { .. } | Memoization::Instance { .. } => {
+                qualified_caller.to_string()
+            }
         };
         Some(ComposableLambda {
             lambda: argument.lambda,
