@@ -51,7 +51,6 @@ abiStabilityIncorrectValue.args
 annotatedParameterWithoutName.args
 annotationDefaultTargetFirstOnly.args
 annotationDefaultTargetFirstOnlyWarn.args
-annotationDefaultTargetParamProperty.args
 annotationDefaultTargetWithOptInFirstOnly.args
 annotationDefaultTargetWithOptInParamProperty.args
 annotationDefaultTargetWithSuppressedOptInFirstOnly.args
@@ -220,7 +219,6 @@ syntaxError.args
 syntheticAccessorForPropertiesSignatureClash.args
 syntheticAccessorPropertyAndFunSignatureClash.args
 syntheticAccessorSignatureClash.args
-tailrec.args
 twoDiagnosticsOnSingleElement.args
 unknownReleaseVersion.args
 valhallaValueClassesIllegalConfiguration.args

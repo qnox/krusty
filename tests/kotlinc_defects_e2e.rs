@@ -144,7 +144,10 @@ fn defect(quirk: Quirk) -> Option<Defect> {
         | Quirk::AnonymousContextOrdinalAfterHash
         | Quirk::SyntheticClassXiOmitsVisibility
         | Quirk::AnnotationImplCarriesNullability
-        | Quirk::KlibLegacyMetadataVersionBelowLanguage23 => None,
+        | Quirk::KlibLegacyMetadataVersionBelowLanguage23
+        | Quirk::TailrecDotlessCallReportedAtOperator
+        | Quirk::TailrecUnitObjectReturnFollowsCall
+        | Quirk::TailrecElvisLeftOperandIsTail => None,
     }
 }
 

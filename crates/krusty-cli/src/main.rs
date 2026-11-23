@@ -773,8 +773,12 @@ pub fn compile(opts: &cli::Options) -> Result<usize, CompileError> {
 
     // Render each diagnostic against ITS OWN source file (by `Diagnostic::file`), once — not the
     // whole list against every file, which mis-attributed multi-file errors to the wrong source.
-    let rendered: Vec<(&str, &str)> = opts
+    let display_paths: Vec<String> = opts
         .sources
+        .iter()
+        .map(|path| cli::diagnostic_path(path))
+        .collect();
+    let rendered: Vec<(&str, &str)> = display_paths
         .iter()
         .zip(&sources)
         .map(|(p, s)| (p.as_str(), s.as_str()))

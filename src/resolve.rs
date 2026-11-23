@@ -250,6 +250,7 @@ mod inner_constructor_calls;
 mod member_call_bindings;
 mod member_slot_calls;
 mod nested_producer_bindings;
+mod tailrec_calls;
 mod try_expression;
 use inner_constructor_calls::BoundInnerConstruction;
 mod import_diagnostics;
@@ -18076,6 +18077,7 @@ impl<'a> Checker<'a> {
                 }
                 FunBody::None => {}
             }
+            c.check_tailrec_calls(f, tailrec_calls::TailrecTarget::Local(stmt_id));
             if semantic_receiver.is_some() {
                 c.extension_receiver_labels.pop();
                 c.this_labels.pop();
