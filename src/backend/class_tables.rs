@@ -281,11 +281,12 @@ pub fn build_numbered(
     representation: &dyn Representation,
     ir: &IrFile,
     plan: &module_slots::ModuleSlotPlan,
+    extended: &mut module_interfaces::ExtendedNumbers,
     laid_out: &dyn Fn(TypeName) -> Option<LaidOutSuperclass>,
 ) -> Result<NumberedClassTables, Unsupported> {
     let superclasses = laid_out_superclasses(ir, laid_out);
     let (mut tables, order, interfaces) = class_tables(representation, ir, plan, &superclasses)?;
-    let numbers = plan.interfaces().with_installed(ir)?;
+    let numbers = plan.interfaces().with_installed(ir, extended)?;
     let interface_tables = planned_itable::interface_tables(
         representation,
         ir,
