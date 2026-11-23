@@ -46,4 +46,28 @@ impl Linker<'_, '_> {
         self.enum_classes.insert(class.constructor, id);
         Ok(())
     }
+
+    /// The enum class `header` declares a member of, materialized as its constants read it.
+    pub(super) fn materialize_member_enum(
+        &mut self,
+        ir: &mut IrFile,
+        header: &super::super::class_headers::ClassMemberHeader<'_, '_>,
+    ) -> Result<crate::ir::ClassId, KlibBodyDeclineReason> {
+        let class = super::super::enum_classes::authenticate(
+            self.sources.bodies,
+            &crate::klib_libraries::KlibEnumEntryClass {
+                module: &header.contract.module,
+                arena: header.arena,
+                class: header.class,
+            },
+        )?;
+        if self.realized_classes.contains(&class.classifier) {
+            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                "a member of an enum class an earlier unit materialized",
+            ));
+        }
+        let constructor = class.constructor.clone();
+        self.materialize_enum_class(ir, class)?;
+        Ok(self.enum_classes[&constructor])
+    }
 }
