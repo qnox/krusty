@@ -129,8 +129,12 @@ fn forwarded_declaration(
     }
     let applied_interface =
         applied_owner_type(source, delegate, interface.kotlin_class_internal()?)?;
-    let declared =
-        crate::symbol_resolver::members_in_hierarchy(source, applied_interface, &forwarded.name);
+    // A HIDDEN-deprecated declaration is still a member the delegate forwards.
+    let declared = crate::symbol_resolver::member_declarations_in_hierarchy(
+        source,
+        applied_interface,
+        &forwarded.name,
+    );
     let function = declared.functions().iter().find(|function| {
         override_plans::function_target(index, function) == Some(declaration.target)
     })?;
@@ -155,7 +159,8 @@ fn delegate_function_call(
         return Some(unchanged(&forwarded.call));
     }
     let declaration = forwarded_declaration(source, index, interface, delegate, forwarded)?;
-    let available = crate::symbol_resolver::members_in_hierarchy(source, delegate, &forwarded.name);
+    let available =
+        crate::symbol_resolver::member_declarations_in_hierarchy(source, delegate, &forwarded.name);
     let candidates = available.functions().iter().filter(|function| {
         function.kind == FnKind::Member
             && crate::symbol_resolver::function_override_input_slots_match(
@@ -186,7 +191,8 @@ fn delegate_property_calls(
     if forwarded.getter.extension_receiver_parameter.is_some() {
         return Some(unchanged_property(forwarded));
     }
-    let available = crate::symbol_resolver::members_in_hierarchy(source, delegate, &forwarded.name);
+    let available =
+        crate::symbol_resolver::member_declarations_in_hierarchy(source, delegate, &forwarded.name);
     let candidates = available
         .properties()
         .iter()

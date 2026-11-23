@@ -260,8 +260,10 @@ pub(super) fn is_polymorphic_base(class: &crate::ir::IrClass) -> bool {
 
 /// [`is_polymorphic_base`] for the frontend's view of a source class, which decides whether a
 /// `$serializer` classifier is published at all. A sealed class publishes none either way.
-pub(super) fn frontend_is_polymorphic_base(ctx: &crate::plugins::FrontendClassContext<'_>) -> bool {
-    ctx.is_abstract && !ctx.is_sealed && ctx.kind == crate::libraries::TypeKind::Class
+pub(super) fn frontend_is_polymorphic_base(
+    header: &crate::plugins::FrontendClassifierHeader<'_>,
+) -> bool {
+    header.is_abstract && !header.is_sealed && header.kind == crate::libraries::TypeKind::Class
 }
 
 /// `Reflection.getOrCreateKotlinClass(<classifier>.class)`: the `KClass` literal kotlinc passes to
