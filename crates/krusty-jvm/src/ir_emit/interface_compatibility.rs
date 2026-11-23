@@ -591,12 +591,14 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
 
 /// `@NotNull`/`@Nullable` for one semantic type in the `-jvm-default` compatibility surface, the
 /// same selection the implementing-class forwarders use: reference types only, and never a bare
-/// type variable (kotlinc leaves `T`-typed positions unannotated).
+/// type variable (kotlinc leaves `T`-typed positions unannotated, but a `T?` one `@Nullable`).
 fn jd_nullability_annotation(ty: &Ty) -> Option<&'static str> {
-    if ty.non_null().is_ty_param() || !ir_ty_to_jvm(ty).is_reference() {
+    if !ir_ty_to_jvm(ty).is_reference() {
         None
     } else if ty.is_nullable() {
         Some("Lorg/jetbrains/annotations/Nullable;")
+    } else if ty.is_ty_param() {
+        None
     } else {
         Some("Lorg/jetbrains/annotations/NotNull;")
     }
