@@ -235,8 +235,9 @@ pub struct FileInput<'a> {
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     pub dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
-    /// Stable dependency-member numbers shared by every file in the source module.
-    pub dependency_interface_numbers: &'a mut HashMap<Vec<u8>, u32>,
+    /// The interface member numbers beyond the module's own, shared by every file in the source
+    /// module: installed interfaces' members and the dependency members its files call.
+    pub dependency_interface_numbers: &'a mut ModuleInterfaceNumbers,
     /// Dependency interface members a library default implements without a lowered body, with
     /// the reason; shared by the whole emission session.
     pub unimplementable_interface_members: &'a mut HashMap<Vec<u8>, String>,
@@ -287,7 +288,13 @@ pub fn lower_file(
         module_facts,
         laid_out,
     } = input;
-    let class_model = model::build(ir, value_classes, slot_plan, laid_out)?;
+    let class_model = model::build(
+        ir,
+        value_classes,
+        slot_plan,
+        &mut dependency_interface_numbers.extended,
+        laid_out,
+    )?;
     let extended = extended_elsewhere(
         ir,
         unit_kind,
@@ -669,10 +676,10 @@ struct FileLowering<'a> {
     /// Dependency interface members this file calls, numbered after the module's own interfaces.
     /// The identity bytes are what a dependent implementation records itself under.
     dependency_interface_calls: Vec<(u32, Vec<u8>)>,
-    /// Module-wide numbers for imported interface identities. The local vector above is only
-    /// this file's emitted identity records; the shared map prevents a second file from reusing
-    /// one stub number for another dependency member.
-    dependency_interface_numbers: &'a mut krusty::fx_hash::HashMap<Vec<u8>, u32>,
+    /// Module-wide numbers for imported interface identities and installed interfaces' members.
+    /// The local vector above is only this file's emitted identity records; the shared numbering
+    /// prevents a second file from reusing one stub number for another member.
+    dependency_interface_numbers: &'a mut ModuleInterfaceNumbers,
     /// See [`FileInput::unimplementable_interface_members`].
     unimplementable_interface_members: &'a mut krusty::fx_hash::HashMap<Vec<u8>, String>,
     /// The exported entry answering each object instance and enum constant another file
@@ -2958,4 +2965,14 @@ mod tests {
         assert!(!isa_for(target, false).unwrap().flags().enable_verifier());
         assert!(isa_for(target, true).unwrap().flags().enable_verifier());
     }
+}
+
+/// The interface member numbers one source module's files take beyond the module's own, shared
+/// by every file of it: what keeps one stub number naming one member module-wide.
+#[derive(Debug, Default)]
+pub(crate) struct ModuleInterfaceNumbers {
+    /// The numbers installed interfaces' members and dependency members draw from.
+    pub(crate) extended: krusty::backend::class_tables::module_interfaces::ExtendedNumbers,
+    /// The number of each dependency interface member a file calls, by its interface identity.
+    pub(crate) dependency: HashMap<Vec<u8>, u32>,
 }

@@ -56,12 +56,19 @@ impl Checker<'_> {
 
     /// Check the supertypes class `class` lists, as their types were published with the class
     /// header in Pass 1.
-    pub(super) fn check_supertype_usage(&mut self, class: &ClassDecl, owner: Option<TypeName>) {
+    pub(super) fn check_supertype_usage(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        class: &ClassDecl,
+        owner: Option<TypeName>,
+    ) {
         if self.discover_anonymous_captures {
             return;
         }
         for (reference, supertype) in self.declared_supertype_references(class, owner) {
+            let policy_depth = self.push_type_use_policies(scope, reference.span.lo);
             self.check_finalized_type_reference_usage(&reference, supertype);
+            self.active_lexical_policies.truncate(policy_depth);
         }
     }
 
