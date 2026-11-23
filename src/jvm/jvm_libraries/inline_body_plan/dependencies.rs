@@ -206,6 +206,7 @@ impl JvmLibraries {
             suspend: facts.suspend,
             source_receiver: (!receiver.is_ty_param()).then_some(receiver),
             declared_ret: facts.declared_ret,
+            result_alias: facts.ret_alias,
             context_count: facts.context_count,
             contract: facts.contract,
             reified_type_parameter_ordinals,
