@@ -476,7 +476,7 @@ use capture_analysis::{
 use capture_storage::{
     anonymous_descendant_writes_name, local_class_capture_expressions, AnonymousSuperReadProvenance,
 };
-use collection_literals::{default_factory, standard_factory};
+use collection_literals::{default_factory, standard_factory, LiteralBound};
 use constant_evaluation::source_literal_constant;
 pub(crate) use constant_evaluation::{checked_constant_expression, CheckedConstantExpression};
 pub(crate) use context_capture::{selected_context_values, SelectedContextSources};
@@ -6984,6 +6984,11 @@ impl<'a> Checker<'a> {
         let expected = expected
             .filter(|expected| *expected != Ty::Error)
             .map(Ty::non_null);
+        let expected = match self.collection_literal_bound(call, span) {
+            LiteralBound::Ambiguous => return Ty::Error,
+            LiteralBound::Single(bound) => Some(bound.non_null()),
+            LiteralBound::Unbounded => expected,
+        };
 
         // Array literals are compiler-provided constructions, selected from the expected array
         // classifier rather than from the provisional parser spelling. Primitive and unsigned
@@ -12658,6 +12663,7 @@ impl<'a> Checker<'a> {
                             bindings,
                             intersection_bindings: HashMap::default(),
                             candidate_index: None,
+                            ambiguous_literals: Vec::new(),
                         }))
                     })
                     .or(competing_function)
@@ -23673,6 +23679,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_ext_fun_rets: HashMap::default(),
         inferred_method_rets: HashMap::default(),
         operator_of_overloads: Vec::new(),
+        collection_literal_ambiguities: std::cell::RefCell::default(),
+        reported_ambiguous_literals: Default::default(),
         inferred_source_member_rets: HashMap::default(),
         inferred_stable_declaration_rets: HashMap::default(),
         inferred_declaration_publications: Default::default(),
@@ -24711,6 +24719,8 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         inferred_ext_fun_rets,
         inferred_method_rets,
         operator_of_overloads: _,
+        collection_literal_ambiguities: _,
+        reported_ambiguous_literals: _,
         inferred_source_member_rets,
         inferred_stable_declaration_rets,
         inferred_declaration_publications,
@@ -25234,6 +25244,9 @@ struct SelectedCallable {
     /// Position in the exact family passed to `select_callable_candidate`. A postponed call can
     /// therefore finish against the same declaration instead of selecting the overload again.
     candidate_index: Option<usize>,
+    /// Collection-literal arguments (by argument position) passed for a type variable, with the
+    /// bounds of that variable, in bound order, one per classifier that constructs literals.
+    ambiguous_literals: Vec<(usize, Vec<Ty>)>,
 }
 
 impl std::ops::Deref for SelectedCallable {
@@ -25718,6 +25731,10 @@ struct Checker<'a> {
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
     operator_of_overloads: Vec<operator_of_declarations::OperatorOfOverload>,
+    /// Collection literals passed for a type variable, with the literal-constructing bounds of
+    /// that variable, published by the selection that won their call.
+    collection_literal_ambiguities: std::cell::RefCell<HashMap<ExprId, Vec<Ty>>>,
+    reported_ambiguous_literals: crate::fx_hash::HashSet<ExprId>,
     inferred_source_member_rets: HashMap<crate::libraries::SourceMember, Ty>,
     inferred_stable_declaration_rets: HashMap<crate::fir::DeclarationId, Ty>,
     inferred_declaration_publications: declaration_publication::InferredDeclarationPublications,

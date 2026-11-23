@@ -6,11 +6,20 @@
 //! overload selection, generic inference, and call commitment remain in the ordinary resolver.
 
 use crate::ast::ExprId;
+use crate::diag::Span;
 use crate::libraries::FunctionInfo;
 use crate::symbol_resolver::CallArgKind;
 use crate::types::{type_name, Ty, TypeName};
 
 use super::Checker;
+
+/// See [`Checker::collection_literal_bound`].
+pub(super) enum LiteralBound {
+    /// The literal was not passed for a type variable, or nothing else bounds it.
+    Unbounded,
+    Single(Ty),
+    Ambiguous,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct StandardCollectionFactory {
@@ -95,6 +104,82 @@ impl Checker<'_> {
             })
     }
 
+    /// The bounds of a type variable that a literal passed for it could be built as, in bound
+    /// order: its lower bounds, then its expected upper bound, one per classifier that constructs
+    /// literals.
+    pub(super) fn literal_bound_classifiers(&self, lowers: &[Ty], upper: Option<Ty>) -> Vec<Ty> {
+        let mut bounds: Vec<Ty> = Vec::new();
+        for bound in lowers.iter().copied().chain(upper) {
+            let Some(classifier) = bound.non_null().kotlin_class_internal() else {
+                continue;
+            };
+            if bounds
+                .iter()
+                .all(|known| known.non_null().kotlin_class_internal() != Some(classifier))
+                && self.classifier_constructs_collection_literals(classifier)
+            {
+                bounds.push(bound);
+            }
+        }
+        bounds
+    }
+
+    /// What the bounds of the type variable a literal was passed for say about its type. An
+    /// ambiguity is decided when the literal's call selection wins; it is reported once, here.
+    pub(super) fn collection_literal_bound(&mut self, call: ExprId, span: Span) -> LiteralBound {
+        let Some(bounds) = self
+            .collection_literal_ambiguities
+            .borrow()
+            .get(&call)
+            .cloned()
+        else {
+            return LiteralBound::Unbounded;
+        };
+        let [bound] = bounds[..] else {
+            if self.reported_ambiguous_literals.insert(call) {
+                let mut message = "type of collection literal is ambiguous. Multiple candidates \
+                                   declare operator 'of':"
+                    .to_string();
+                for bound in bounds {
+                    message.push('\n');
+                    message.push_str(
+                        &self.literal_candidate_declaration(
+                            bound
+                                .non_null()
+                                .kotlin_class_internal()
+                                .expect("a literal bound names a classifier"),
+                        ),
+                    );
+                }
+                self.diags.error_named(
+                    span,
+                    crate::diag::names::AMBIGUOUS_COLLECTION_LITERAL,
+                    message,
+                );
+            }
+            return LiteralBound::Ambiguous;
+        };
+        LiteralBound::Single(bound)
+    }
+
+    /// The classifier the way kotlinc's declaration renderer prints a candidate: its keyword,
+    /// name, type parameters and direct supertypes, with no visibility or modality.
+    fn literal_candidate_declaration(&self, classifier: TypeName) -> String {
+        let Some(library) = self.resolver().classifier(classifier) else {
+            return format!(
+                "internal error: candidate classifier '{}' is unresolved",
+                classifier.render()
+            );
+        };
+        match render_candidate_classifier(&library, classifier) {
+            Ok(rendered) => rendered,
+            Err(reason) => format!(
+                "internal error: candidate classifier '{}' {reason}",
+                classifier.render()
+            ),
+        }
+    }
+
     /// Argument kinds for selecting among `candidates` with each collection literal postponed.
     ///
     /// An expectation-free literal reads as `List<T>`, which is not evidence against a candidate
@@ -141,6 +226,67 @@ impl Checker<'_> {
             })
             .collect()
     }
+}
+
+/// A classifier the way kotlinc lists it as a candidate: `class B<X> : A<X>`,
+/// `data class E : D`, `interface Set<out E> : Collection<E>`. Only the shapes measured against
+/// kotlinc are rendered; any other is an explicit error, never a guessed sentence.
+fn render_candidate_classifier(
+    library: &crate::libraries::LibraryType,
+    classifier: TypeName,
+) -> Result<String, &'static str> {
+    use crate::libraries::TypeKind;
+    use crate::types::TypeVariance;
+    let keyword = match library.kind {
+        TypeKind::Class if library.is_data => "data class",
+        TypeKind::Class => "class",
+        TypeKind::Interface if !library.is_fun_interface() => "interface",
+        _ => return Err("has a kind whose candidate rendering was not measured"),
+    };
+    let default_bound = [Ty::nullable(Ty::obj("kotlin/Any"))];
+    if library
+        .type_param_bounds()
+        .iter()
+        .any(|bounds| !bounds.is_empty() && bounds[..] != default_bound)
+    {
+        return Err("has bounded type parameters, whose candidate rendering was not measured");
+    }
+    let parameters = library
+        .type_params()
+        .iter()
+        .zip(library.type_param_variances())
+        .map(|(name, variance)| {
+            let prefix = match variance {
+                TypeVariance::Invariant => "",
+                TypeVariance::In => "in ",
+                TypeVariance::Out => "out ",
+            };
+            format!("{prefix}{}", crate::types::type_parameter_source_name(name))
+        })
+        .collect::<Vec<_>>();
+    let parameters = if parameters.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", parameters.join(", "))
+    };
+    let mut supertypes = library
+        .supertype_templates
+        .iter()
+        .filter(|supertype| {
+            !supertype
+                .kotlin_class_internal()
+                .is_some_and(|class| class.matches("kotlin/Any"))
+        })
+        .map(|supertype| supertype.source_name())
+        .collect::<Vec<_>>();
+    if supertypes.is_empty() {
+        supertypes.push("Any".to_string());
+    }
+    let name = classifier.segment();
+    Ok(format!(
+        "{keyword} {name}{parameters} : {}",
+        supertypes.join(", ")
+    ))
 }
 
 #[cfg(test)]

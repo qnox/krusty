@@ -208,7 +208,6 @@ compiler/testData/diagnostics/tests/collectionLiterals/collectionLiteralsDisable
 compiler/testData/diagnostics/tests/collectionLiterals/collectionLiteralsDisabled/resolveToFunctionFromBuiltIns.kt
 compiler/testData/diagnostics/tests/collectionLiterals/deprecatedCompanionObject.kt
 compiler/testData/diagnostics/tests/collectionLiterals/emptyArrayAsSpreadInAnnotation.kt
-compiler/testData/diagnostics/tests/collectionLiterals/kt81777/clAmbiguityWithLambdasInside.kt
 compiler/testData/diagnostics/tests/collectionLiterals/kt81777/withEnabledCL.kt
 compiler/testData/diagnostics/tests/collectionLiterals/kt82964.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/companionExtension.kt
