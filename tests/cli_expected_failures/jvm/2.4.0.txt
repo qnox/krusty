@@ -10,7 +10,6 @@ XjdkRelease/jdkRelease6WithJvmTarget8Jdk11.args
 XjdkRelease/jdkRelease6WithJvmTarget8Jdk8.args
 XjdkRelease/jdkRelease6WithJvmTarget9.args
 XjdkRelease/jdkRelease6WithoutExplicitJvmTarget.args
-XjdkRelease/jdkRelease7WithJvmTarget8Jdk11.args
 XjdkRelease/jdkRelease7WithJvmTarget8Jdk8.args
 XjspecifyAnnotation/jspecifyDefault.args
 XjspecifyAnnotation/jspecifyFileRootsProgressive.args
@@ -76,7 +75,6 @@ diagnosticTests/classAndOtherFileClassClash.args
 diagnosticTests/classAndPartClash.args
 diagnosticTests/classAndTraitClash.args
 diagnosticTests/conflictingJvmDeclarationsK2.args
-diagnosticTests/conflictingOverloads.args
 diagnosticTests/conflictingProjection.args
 diagnosticTests/crv/checker.args
 diagnosticTests/crv/contracts.args
@@ -96,7 +94,6 @@ diagnosticTests/javaSealedClass.args
 diagnosticTests/javaSrcWrongPackage.args
 diagnosticTests/kotlinPackage.args
 diagnosticTests/multipleTextRangesInDiagnosticsOrder.args
-diagnosticTests/recordAsSingleFileRoot.args
 diagnosticTests/requireKotlinCompilerVersion.args
 diagnosticTests/returnAsWhenKey.args
 diagnosticTests/sanitized-name.clash.args
@@ -110,7 +107,6 @@ explicitContextArguments.args
 expression1.args
 extraArgCommonChecks/extraArgumentEmpty.args
 extraArgCommonChecks/extraArgumentInvalidValue.args
-extraArgCommonChecks/extraArgumentMultiple.args
 extraArgCommonChecks/extraArgumentPassedInObsoleteForm.args
 extraArgCommonChecks/extraBooleanArgOverrideReversed.args
 extraArgCommonChecks/extraBooleanArgumentEqualsFalse.args
@@ -131,11 +127,9 @@ hmpp/scriptInCommonFragment.args
 hmpp/successfulCompilation.args
 hmpp/successfulCompilation2.args
 hmpp/successfulCompilationWithScript.args
-internalArgCommonChecks/internalArgDisableLanguageFeature.args
 internalArgCommonChecks/internalArgEmptyFeatureName.args
 internalArgCommonChecks/internalArgEnableLanguageFeature.args
 internalArgCommonChecks/internalArgMissingModificator.args
-internalArgCommonChecks/internalArgOverrideOffLanguageFeature.args
 internalArgCommonChecks/internalArgPassValue.args
 internalArgCommonChecks/internalArgUnrecognizedFeature.args
 internalArgCommonChecks/internalArgWrongPrefix.args
@@ -167,8 +161,6 @@ localTypeAliasesError.args
 modulesWithDependencyCycle.args
 multipleBackendThreads.args
 nameBasedDestructuringWithoutCompilerArgument.args
-noJdkAvoidFailure.args
-noReflect.args
 noStdlibK2.args
 nonLocalDisabled.args
 nullabilityAnnotations.args
@@ -176,8 +168,6 @@ optIn/experimentalDeprecated.args
 optIn/experimentalDeprecatedWarning.args
 optIn/experimentalIsNotAnnotation.args
 optIn/experimentalIsNotMarker.args
-optIn/optInEmptyMessage.args
-optIn/optInEmptyMessageFir.args
 optIn/optInOverrideMessage.args
 optIn/optInOverrideMessageFir.args
 plugins/emptyPlugin.args
