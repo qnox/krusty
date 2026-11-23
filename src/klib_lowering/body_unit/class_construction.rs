@@ -682,7 +682,7 @@ impl<'u, 's> Linker<'u, 's> {
             // The class's one owner is an earlier unit: this unit adds a final member of it, so
             // it declares only the facts that member reads.
             self.declare_earlier_unit_class(ir, header)?
-       } else if contract.kind == crate::libraries::TypeKind::Object {
+        } else if contract.kind == crate::libraries::TypeKind::Object {
             // An object's instance is the one its own private constructor created.
             let primary = contract.primary_constructor.as_ref().ok_or(
                 KlibBodyDeclineReason::UnsupportedDeclaration(
