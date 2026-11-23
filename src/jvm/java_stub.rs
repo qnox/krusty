@@ -896,6 +896,7 @@ impl Resolver<'_> {
             name: "<init>".into(),
             tparams: Vec::new(),
             params: Vec::new(),
+            param_names: Vec::new(),
             ret: None,
             throws: Vec::new(),
             access: ACC_PUBLIC,
@@ -905,6 +906,7 @@ impl Resolver<'_> {
             name: "<init>".into(),
             tparams: Vec::new(),
             params: Vec::new(),
+            param_names: Vec::new(),
             ret: None,
             throws: Vec::new(),
             access: ACC_PRIVATE,
@@ -914,6 +916,7 @@ impl Resolver<'_> {
             name: "<init>".into(),
             tparams: Vec::new(),
             params: d.record_components.iter().map(|(_, t)| t.clone()).collect(),
+            param_names: d.record_components.iter().map(|(n, _)| n.clone()).collect(),
             ret: None,
             throws: Vec::new(),
             access: ACC_PUBLIC
@@ -959,6 +962,7 @@ impl Resolver<'_> {
                         name: name.clone(),
                         tparams: Vec::new(),
                         params: Vec::new(),
+                        param_names: Vec::new(),
                         ret: Some(ty.clone()),
                         throws: Vec::new(),
                         access: ACC_PUBLIC,
@@ -1052,6 +1056,18 @@ impl Resolver<'_> {
             code.aconst_null();
             code.athrow();
             w.add_method_sig(acc, &m.name, &desc, &code, sig.as_deref());
+        }
+        // The declared names, as `javac -parameters` writes them: one entry per physical
+        // parameter, an enum constructor's leading name and ordinal unnamed and synthetic.
+        if m.param_names.len() == m.params.len() && !m.params.is_empty() {
+            let synthetic =
+                std::iter::repeat_n((None, 0x1000), if enum_constructor { 2 } else { 0 });
+            let declared = m.param_names.iter().map(|name| (Some(name.clone()), 0));
+            w.set_method_parameters(
+                &m.name,
+                &desc,
+                &synthetic.chain(declared).collect::<Vec<_>>(),
+            );
         }
         if m.has_annotation_default {
             w.mark_unevaluated_annotation_default(&m.name, &desc);
@@ -1815,6 +1831,48 @@ mod tests {
         assert!(reg.is_vararg(), "method varargs flag");
         let ctor = ci.method("<init>", "([I)V").expect("varargs ctor");
         assert!(ctor.is_vararg(), "constructor varargs flag");
+    }
+
+    #[test]
+    fn declared_parameter_names_are_recorded_for_methods_constructors_and_records() {
+        let out = stubs(
+            "public class Holder {\n\
+             \u{20} public Holder(int count, String label) {}\n\
+             \u{20} public long add(long amount, int[] more, Object... rest) { return 0; }\n\
+             \u{20} public void none() {}\n\
+             }\n\
+             record Pair(String first, int second) {}",
+            &["java/lang/Object", "java/lang/String", "java/lang/Record"],
+        )
+        .expect("stubs");
+        let names = |class: &str, name: &str, descriptor: &str| {
+            let bytes = &out.iter().find(|(stub, _)| stub == class).expect(class).1;
+            parse_class(bytes)
+                .expect("parse")
+                .method(name, descriptor)
+                .expect(name)
+                .parameter_names
+                .clone()
+        };
+        let some = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| Some((*name).to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names("Holder", "<init>", "(ILjava/lang/String;)V"),
+            some(&["count", "label"])
+        );
+        assert_eq!(
+            names("Holder", "add", "(J[I[Ljava/lang/Object;)J"),
+            some(&["amount", "more", "rest"])
+        );
+        assert_eq!(names("Holder", "none", "()V"), Vec::<Option<String>>::new());
+        assert_eq!(
+            names("Pair", "<init>", "(Ljava/lang/String;I)V"),
+            some(&["first", "second"])
+        );
     }
 
     #[test]

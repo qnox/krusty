@@ -12,6 +12,11 @@ impl CallSig {
             only_input_type_formals: self.only_input_type_formals.clone(),
             reified_type_parameter_ordinals: self.reified_type_parameter_ordinals.clone(),
             param_names: self.param_names[start..].to_vec(),
+            declared_parameter_names: self
+                .declared_parameter_names
+                .get(start..)
+                .unwrap_or_default()
+                .to_vec(),
             parameter_identities: self
                 .parameter_identities
                 .get(start..)
@@ -86,6 +91,7 @@ impl CallSig {
             only_input_type_formals: self.only_input_type_formals.clone(),
             reified_type_parameter_ordinals: self.reified_type_parameter_ordinals.clone(),
             param_names: selected(&self.param_names, parameters),
+            declared_parameter_names: selected(&self.declared_parameter_names, parameters),
             parameter_identities: selected(&self.parameter_identities, parameters),
             exact_params: selected(&self.exact_params, parameters).into(),
             no_infer_params: selected(&self.no_infer_params, parameters).into(),

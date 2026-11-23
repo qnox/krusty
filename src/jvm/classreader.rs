@@ -47,6 +47,9 @@ pub struct MethodSig {
     pub signature: Option<String>,
     /// JVM reference-parameter nullability in descriptor order.
     pub parameter_nullability: Vec<Option<JavaNullability>>,
+    /// The `MethodParameters` names in descriptor order; empty when the class file states none.
+    /// Names a compiler synthesized for a mandated or synthetic parameter are `None`.
+    pub parameter_names: Vec<Option<String>>,
     /// Return nullability annotation. An absent annotation on a Java reference denotes `T!`.
     pub return_nullability: Option<JavaNullability>,
     /// `@kotlin.Deprecated(level = DeprecationLevel.HIDDEN)` on the declaration. A hidden
@@ -201,6 +204,8 @@ struct MemberAttributes {
     parameter_nullability: Vec<Option<JavaNullability>>,
     declaration_nullability: Option<JavaNullability>,
     parameter_access: Vec<u16>,
+    /// `MethodParameters` names in physical descriptor order; `None` for an unnamed entry.
+    parameter_names: Vec<Option<String>>,
     deprecated_hidden: bool,
     type_use_nullability: TypeUseNullability,
     deprecated_hidden_since: Option<LanguageVersion>,
@@ -1183,6 +1188,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             descriptor: member.descriptor,
             signature: member.attributes.signature,
             parameter_nullability: member.attributes.parameter_nullability,
+            parameter_names: member.attributes.parameter_names,
             return_nullability: member.attributes.declaration_nullability,
             deprecated_hidden: member.attributes.deprecated_hidden,
             deprecated_hidden_since: member.attributes.deprecated_hidden_since,
@@ -1763,7 +1769,15 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
                 let parameter_count = body.u1()? as usize;
                 attributes.parameter_access.reserve(parameter_count);
                 for _ in 0..parameter_count {
-                    body.u2()?;
+                    let name = body.u2()?;
+                    attributes.parameter_names.push(
+                        (name != 0)
+                            .then(|| {
+                                utf8_value(cp, name)
+                                    .and_then(|name| name.as_str().map(str::to_owned))
+                            })
+                            .flatten(),
+                    );
                     attributes.parameter_access.push(body.u2()?);
                 }
             }

@@ -1640,6 +1640,13 @@ impl JvmLibraries {
                         },
                     );
                 }
+                if !has_kotlin_metadata && declaration.is_none() {
+                    member.call_sig.declared_parameter_names = declared_parameter_names(
+                        &m.parameter_names,
+                        constructor_enclosing_prefix,
+                        member.params.len(),
+                    );
+                }
                 if let Some(java_nullable) = platform_nullable_params {
                     member.call_sig.platform_nullable_params = java_nullable.into();
                     member.call_sig.result_enhancement =
@@ -5227,5 +5234,26 @@ mod tests {
             ),
             "each nesting level recovers its declared mutability under the same guard",
         );
+    }
+}
+
+/// The names a Java class file's `MethodParameters` gives the logical parameters: those after the
+/// enclosing-instance prefix, provided every one is named and they are as many as the parameters.
+/// Anything less is a declaration whose names are unknown, not a partly known one.
+fn declared_parameter_names(
+    physical: &[Option<String>],
+    enclosing_prefix: usize,
+    logical_count: usize,
+) -> Vec<String> {
+    let names = physical
+        .iter()
+        .skip(enclosing_prefix)
+        .cloned()
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    if names.len() == logical_count {
+        names
+    } else {
+        Vec::new()
     }
 }
