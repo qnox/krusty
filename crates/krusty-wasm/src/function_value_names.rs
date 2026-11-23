@@ -51,8 +51,7 @@ pub(super) fn named_shape(expression: &IrExpr, instance: Option<Ty>) -> Option<N
     })
 }
 
-/// Whether `reference` is a `KProperty` value, which prints its property rather than a class name.
-pub(super) fn is_reflective_property_reference(reference: &IrCallableReference) -> bool {
+fn is_reflective_property_reference(reference: &IrCallableReference) -> bool {
     matches!(&reference.target, IrCallableReferenceTarget::Property(property) if property.reflective)
 }
 

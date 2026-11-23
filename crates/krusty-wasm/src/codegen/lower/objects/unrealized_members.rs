@@ -18,13 +18,14 @@
 //! module to weigh against the other files.
 
 use krusty::backend::class_tables::AnyMember;
+use krusty::backend::CheckedBackendCallables;
 use krusty::ir::{ClassId, IrExpr, IrFile};
 use krusty::types::{Ty, TyKind};
 
 use super::super::super::super::boxes::is_boxed_scalar;
 use super::super::super::super::encode::ValType;
 use super::super::super::super::function_value_names::{
-    is_reflective_property_reference, named_shape, sam_class_name,
+    named_shape, property_reference_text, sam_class_name,
 };
 use super::super::super::any_member_reach::Receiver;
 use super::{carrier, Body, Unsupported};
@@ -153,7 +154,7 @@ impl Body<'_> {
                     // A function value converted to a `fun interface` is an instance of it too.
                     self.record_call(member, ty, Receiver::Erased);
                     let unprinted = (member == AnyMember::ToString)
-                        .then(|| first_unprinted_value(self.ir))
+                        .then(|| first_unprinted_value(self.ir, self.callables))
                         .flatten();
                     if let Some(expression) = unprinted {
                         return Ok(Some(UnrealizedMember::FunctionValue(expression)));
@@ -185,7 +186,9 @@ impl Body<'_> {
                 return Ok(None);
             }
             self.record_call(member, ty, Receiver::Erased);
-            return Ok(first_unprinted_value(self.ir).map(UnrealizedMember::FunctionValue));
+            return Ok(
+                first_unprinted_value(self.ir, self.callables).map(UnrealizedMember::FunctionValue)
+            );
         }
         if !matches!(carrier(value)?, Some(ValType::Ref { .. })) {
             return Ok(None);
@@ -201,7 +204,7 @@ impl Body<'_> {
         self.record_call(member, ty, Receiver::Erased);
         let class_elsewhere = self.classifier_declared_elsewhere(value);
         let unprinted = (member == AnyMember::ToString && class_elsewhere.is_none())
-            .then(|| first_unprinted_value(self.ir))
+            .then(|| first_unprinted_value(self.ir, self.callables))
             .flatten();
         if let Some(expression) = unprinted {
             return Ok(Some(UnrealizedMember::FunctionValue(expression)));
@@ -320,11 +323,14 @@ fn converts_function_values(ir: &IrFile) -> bool {
 /// Whether a reference of `ir` can hold a runtime object whose `toString` has no body: a function
 /// value kotlinc-wasm does not name for its shape or its `fun interface`, which only a lambda or a callable reference the
 /// file emits creates.
-pub(in super::super) fn holds_unprinted_values(ir: &IrFile) -> bool {
-    first_unprinted_value(ir).is_some()
+pub(in super::super) fn holds_unprinted_values(
+    ir: &IrFile,
+    callables: &CheckedBackendCallables,
+) -> bool {
+    first_unprinted_value(ir, callables).is_some()
 }
 
-fn first_unprinted_value(ir: &IrFile) -> Option<u32> {
+fn first_unprinted_value(ir: &IrFile, callables: &CheckedBackendCallables) -> Option<u32> {
     krusty::ir::emitted_body_roots(ir)
         .into_iter()
         .flat_map(|root| krusty::ir::value_namespace_expressions(ir, root))
@@ -332,7 +338,7 @@ fn first_unprinted_value(ir: &IrFile) -> Option<u32> {
             let node = ir.expr(expression);
             matches!(node, IrExpr::Lambda { .. } | IrExpr::CallableReference(_))
                 && !matches!(node, IrExpr::CallableReference(reference)
-                    if is_reflective_property_reference(reference))
+                    if property_reference_text(ir, callables, reference).is_some())
                 && named_shape(node, ir.checked_type(expression)).is_none()
                 && sam_class_name(ir, expression).is_none()
         })
