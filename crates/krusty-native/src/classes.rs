@@ -506,6 +506,8 @@ pub(super) struct ClassModel {
     /// The methods of a dependency class its table does not dispatch, called directly
     /// ([`class_tables::ClassTable::direct_methods`]).
     direct_methods: HashSet<FunId>,
+    /// The module's interface numbers, extended with the interfaces this file installed.
+    numbers: ModuleInterfaces,
 }
 
 /// Which table a member dispatches through, and at which index.
@@ -522,6 +524,12 @@ impl ClassModel {
     /// directly.
     pub(super) fn is_direct(&self, function: FunId) -> bool {
         self.direct_methods.contains(&function)
+    }
+
+    /// The interface numbers of this file: the module's, then those of the interfaces the file
+    /// installed.
+    pub(super) fn numbers(&self) -> &ModuleInterfaces {
+        &self.numbers
     }
 
     pub(super) fn layout(&self, class: ClassId) -> &ClassLayout {
@@ -550,7 +558,12 @@ impl ClassModel {
             return Some(Dispatch::Class(slot));
         }
         let plan_key = match key {
-            SlotKey::Function(fid) => PlanKey::Callable(*self.callables.get(fid)?),
+            SlotKey::Function(fid) => match self.callables.get(fid) {
+                Some(&callable) => PlanKey::Callable(callable),
+                // An interface a KLIB unit installed has no checked callable: its numbers are
+                // the file's own.
+                None => PlanKey::Installed(*fid),
+            },
             SlotKey::Getter(ResolvedPropertyOverrideTarget::Module(property)) => {
                 PlanKey::Getter(*property)
             }
@@ -586,15 +599,19 @@ pub(super) fn build(
     ir: &IrFile,
     values: &ValueClassInventory,
     plan: &ModuleSlotPlan,
+    extended: &mut class_tables::module_interfaces::ExtendedNumbers,
     laid_out: &LaidOutClasses,
 ) -> Result<ClassModel, Unsupported> {
     for class in &ir.classes {
         check_supported(class)?;
     }
-    let numbered =
-        class_tables::build_numbered(&NativeRepresentation(values), ir, plan, &|superclass| {
-            laid_out.get(superclass).map(|record| record.table.clone())
-        })?;
+    let numbered = class_tables::build_numbered(
+        &NativeRepresentation(values),
+        ir,
+        plan,
+        extended,
+        &|superclass| laid_out.get(superclass).map(|record| record.table.clone()),
+    )?;
     let mut layouts: Vec<Option<ClassLayout>> = vec![None; ir.classes.len()];
     for &id in &numbered.order {
         let table = &numbered.tables[id as usize];
@@ -665,6 +682,7 @@ pub(super) fn build(
         order: numbered.order,
         interfaces: numbered.interfaces,
         implemented: numbered.interface_tables.implemented,
+        numbers: numbered.numbers,
         callables: ir
             .checked_callable_functions
             .iter()
@@ -776,6 +794,7 @@ mod tests {
             ir,
             &ValueClassInventory::default(),
             &ModuleSlotPlan::empty(),
+            &mut Default::default(),
             &LaidOutClasses::default(),
         )
     }
@@ -1207,6 +1226,7 @@ mod tests {
             &ir,
             &ValueClassInventory::default(),
             &ModuleSlotPlan::empty(),
+            &mut Default::default(),
             &LaidOutClasses::default(),
         )
         .expect("layout");
