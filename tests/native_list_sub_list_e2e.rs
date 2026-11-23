@@ -22,55 +22,28 @@ fn every_backend_agrees_with_kotlinc(stem: &str, source: &str) {
 /// A range of a growable list, read through the `List` face, reads the list as it is now.
 #[test]
 fn a_range_of_a_growable_list_reads_the_list_it_was_made_from() {
-    let source = "fun box(): String {\n\
-         \x20   val growable = mutableListOf(1, 2, 3, 4)\n\
-         \x20   val readable: List<Int> = growable\n\
-         \x20   val range = readable.subList(1, 3)\n\
-         \x20   if (range.size != 2 || range[0] != 2 || range[1] != 3) return \"fail initial $range\"\n\
-         \x20   growable[1] = 20\n\
-         \x20   if (range[0] != 20) return \"fail write through ${range[0]}\"\n\
-         \x20   if (range != listOf(20, 3)) return \"fail equals $range\"\n\
-         \x20   growable.add(5)\n\
-         \x20   try {\n\
-         \x20       range.size\n\
-         \x20       return \"fail stale size\"\n\
-         \x20   } catch (e: ConcurrentModificationException) {\n\
-         \x20   }\n\
-         \x20   try {\n\
-         \x20       range[0]\n\
-         \x20       return \"fail stale get\"\n\
-         \x20   } catch (e: ConcurrentModificationException) {\n\
-         \x20   }\n\
-         \x20   return \"OK\"\n\
-         }\n";
-    every_backend_agrees_with_kotlinc("GrowableListRange", source);
+    every_backend_agrees_with_kotlinc(
+        "GrowableListRange",
+        include_str!("box_regressions/listSubListGrowableView.kt"),
+    );
 }
 
 /// A range of a growable list writes through to the list, and the list's shape follows.
 #[test]
 fn a_range_that_writes_through_changes_the_list() {
-    let source = "fun box(): String {\n\
-         \x20   val growable = mutableListOf(1, 2, 3, 4, 5)\n\
-         \x20   val range = growable.subList(1, 4)\n\
-         \x20   range[0] = 20\n\
-         \x20   if (growable != listOf(1, 20, 3, 4, 5)) return \"fail set $growable\"\n\
-         \x20   range.add(9)\n\
-         \x20   if (growable != listOf(1, 20, 3, 4, 9, 5) || range.size != 4) return \"fail add $growable $range\"\n\
-         \x20   range.add(1, 7)\n\
-         \x20   if (growable != listOf(1, 20, 7, 3, 4, 9, 5)) return \"fail add at $growable\"\n\
-         \x20   if (range.removeAt(0) != 20 || range.remove(9) != true) return \"fail remove\"\n\
-         \x20   if (growable != listOf(1, 7, 3, 4, 5) || range != listOf(7, 3, 4)) return \"fail removed $growable $range\"\n\
-         \x20   range.clear()\n\
-         \x20   if (growable != listOf(1, 5) || range.size != 0) return \"fail clear $growable\"\n\
-         \x20   val inner = growable.subList(0, 2).subList(1, 2)\n\
-         \x20   inner.add(8)\n\
-         \x20   if (growable != listOf(1, 5, 8)) return \"fail nested $growable\"\n\
-         \x20   return \"OK\"\n\
-         }\n";
-    every_backend_agrees_with_kotlinc("WritingRange", source);
+    every_backend_agrees_with_kotlinc(
+        "WritingRange",
+        include_str!("box_regressions/listSubListWritingRange.kt"),
+    );
 }
 
 /// A range of a read-only list refuses a write, as the list does.
+///
+/// PLATFORM-SPECIFIC: the program casts `listOf(1, 2, 3)` to `MutableList`, which succeeds only
+/// where the list is a `java.util.List` (the JVM's `Arrays.asList`) and which the Native runtime
+/// answers the same way. A Kotlin/Wasm `listOf` is not a `MutableList`, so the cast throws
+/// `ClassCastException` there with kotlinc's own KLIB stdlib too, and no read-only list reaches a
+/// `MutableList` view on Wasm to be refused.
 #[test]
 fn a_range_of_a_read_only_list_refuses_a_write() {
     let source = "fun box(): String {\n\
@@ -89,105 +62,53 @@ fn a_range_of_a_read_only_list_refuses_a_write() {
 /// shape, as a growable list's own do.
 #[test]
 fn a_write_through_a_range_invalidates_its_walks_and_its_ranges() {
-    let source = "fun box(): String {\n\
-         \x20   val growable = mutableListOf(1, 2, 3, 4, 5)\n\
-         \x20   val outer = growable.subList(0, 4)\n\
-         \x20   val walk = outer.iterator()\n\
-         \x20   walk.next()\n\
-         \x20   outer.add(0, 9)\n\
-         \x20   try {\n\
-         \x20       walk.next()\n\
-         \x20       return \"fail walk\"\n\
-         \x20   } catch (e: ConcurrentModificationException) {\n\
-         \x20   }\n\
-         \x20   val inner = outer.subList(1, 3)\n\
-         \x20   outer.add(0, 8)\n\
-         \x20   try {\n\
-         \x20       inner[0]\n\
-         \x20       return \"fail inner\"\n\
-         \x20   } catch (e: ConcurrentModificationException) {\n\
-         \x20   }\n\
-         \x20   return \"OK\"\n\
-         }\n";
-    every_backend_agrees_with_kotlinc("InvalidatedByWrite", source);
+    every_backend_agrees_with_kotlinc(
+        "InvalidatedByWrite",
+        include_str!("box_regressions/listSubListInvalidatedByWrite.kt"),
+    );
+}
+
+/// A walk of a list that changed raises `ConcurrentModificationException` at either end of the
+/// list, before it asks whether the walk is at an end, while a valid exhausted walk still raises
+/// `NoSuchElementException`.
+#[test]
+fn a_stale_walk_at_an_end_raises_before_its_end_guard() {
+    every_backend_agrees_with_kotlinc(
+        "WalkStaleBeforeEnd",
+        include_str!("box_regressions/listSubListWalkStaleBeforeEnd.kt"),
+    );
 }
 
 /// An empty range still answers to its list: clearing one after the list changed raises, as the
 /// JVM's `AbstractList.clear` does by reading the range's size.
 #[test]
 fn clearing_an_empty_range_of_a_changed_list_raises() {
-    let source = r#"fun box(): String {
-    val root = mutableListOf(1)
-    val empty = root.subList(0, 0)
-    root.add(2)
-    try {
-        empty.clear()
-        return "missing concurrent modification"
-    } catch (e: ConcurrentModificationException) {
-        return "OK"
-    }
-}
-"#;
-    every_backend_agrees_with_kotlinc("EmptyRangeClear", source);
+    every_backend_agrees_with_kotlinc(
+        "EmptyRangeClear",
+        include_str!("box_regressions/listSubListEmptyRangeClear.kt"),
+    );
 }
 
 /// A change of the list at the root ends every walk and every range taken from it, nested ones
 /// too.
 #[test]
 fn a_change_of_the_root_list_invalidates_every_range_and_walk() {
-    let source = r#"fun box(): String {
-    val growable = mutableListOf(1, 2, 3, 4)
-    val readable: List<Int> = growable
-    val outer = readable.subList(0, 3)
-    val inner = outer.subList(1, 2)
-    val walk = outer.iterator()
-    growable.add(5)
-    try {
-        walk.next()
-        return "walk"
-    } catch (e: ConcurrentModificationException) {
-    }
-    try {
-        outer.size
-        return "outer"
-    } catch (e: ConcurrentModificationException) {
-    }
-    try {
-        inner.size
-        return "inner size"
-    } catch (e: ConcurrentModificationException) {
-    }
-    try {
-        inner[0]
-        return "inner get"
-    } catch (e: ConcurrentModificationException) {
-    }
-    return "OK"
-}
-"#;
-    every_backend_agrees_with_kotlinc("RootChange", source);
+    every_backend_agrees_with_kotlinc(
+        "RootChange",
+        include_str!("box_regressions/listSubListRootChange.kt"),
+    );
 }
 
-/// Appending a range of the list to the list itself reads the range before the first append.
+/// A list appends itself, and a range of another list, as the elements they hold before the append.
+///
+/// A list appending a range of itself differs by platform: kotlinc-native's library grows the list
+/// before reading the range and raises `ConcurrentModificationException`. That program is the
+/// `ArrayListAddAllGrowsBeforeReadingItsArgument` entry of `tests/kotlinc_defects_e2e.rs`, which
+/// pins each platform's kotlinc and krusty's fix mode.
 #[test]
-fn a_list_takes_a_range_of_itself_before_it_appends() {
-    let source = r#"fun box(): String {
-    val root = ArrayList<Int>()
-    root.add(1)
-    root.add(2)
-    root.add(3)
-    val view = (root as List<Int>).subList(0, 2)
-    root.addAll(view)
-    if (root != listOf(1, 2, 3, 1, 2)) return "aliased"
-    val self = ArrayList<Int>()
-    self.add(7)
-    self.addAll(self)
-    if (self != listOf(7, 7)) return "self"
-    val other = ArrayList<Int>()
-    other.addAll(listOf(4, 5).subList(0, 2))
-    if (other != listOf(4, 5)) return "disjoint"
-    return "OK"
-}
-"#;
-    every_backend_agrees_with_kotlinc("AddAllOfView", source);
+fn a_list_appends_itself_and_a_range_of_another_list() {
+    every_backend_agrees_with_kotlinc(
+        "AddAllOfView",
+        include_str!("box_regressions/listSubListAddAllOfView.kt"),
+    );
 }

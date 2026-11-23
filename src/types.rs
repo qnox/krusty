@@ -539,6 +539,16 @@ impl Ty {
         }
     }
 
+    /// The type a value must have to be written through a use-site projection: a contravariant
+    /// projection admits its bound, while a covariant or star projection admits only `Nothing`.
+    pub fn projection_write_ty(self) -> Ty {
+        match self.kind() {
+            TyKind::InProjection(inner) => inner,
+            TyKind::OutProjection(_) | TyKind::StarProjection(_) => Ty::Nothing,
+            _ => self,
+        }
+    }
+
     /// Whether this type is nullable (`T?`).
     pub fn is_nullable(self) -> bool {
         matches!(self.kind(), TyKind::Nullable(_))
@@ -611,6 +621,16 @@ impl Ty {
         }
     }
 
+    /// The intersection `T & Any` of a type parameter whose bound admits null, as a KLIB
+    /// serializes a definitely-non-null type. Any other type is already as non-null as it can be.
+    pub fn marked_definitely_not_null(self) -> Ty {
+        if self.is_ty_param() && self.upper_bound_admits_null() {
+            Ty::from(TyKind::DefinitelyNotNull(self))
+        } else {
+            self
+        }
+    }
+
     /// The constraint a nullable formal position contributes.
     ///
     /// Concrete types contribute their non-null form. A type parameter whose bound admits null
@@ -660,6 +680,19 @@ impl Ty {
         self.non_null()
             .kotlin_class_internal()
             .is_some_and(|n| same(n, wk::any()) || same(n, wk::java_object()))
+    }
+
+    /// Whether this is Kotlin's top type itself, `Any`/`Any?` or a physical JVM `Object` spelling.
+    /// Unlike [`Self::is_erased_top`], a type parameter whose bound is `Any?` is not the top type:
+    /// it erases to `Object`, but only values of that parameter are its subtypes.
+    pub fn is_semantic_top(self) -> bool {
+        match self.kind() {
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => inner.is_semantic_top(),
+            TyKind::Obj(n, _) => same(n, wk::any()) || same(n, wk::java_object()),
+            _ => false,
+        }
     }
 
     /// The canonical **extension-receiver key**: the `Ty` two receivers must share for an extension

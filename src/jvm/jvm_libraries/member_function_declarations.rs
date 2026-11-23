@@ -290,6 +290,7 @@ impl JvmLibraries {
                             // rebuilding a callable without the fact makes a later specialized
                             // `Object` return indistinguishable from a genuinely boxed generic slot.
                             declared_ret: m.declared_ret,
+                            result_alias: m.result_alias,
                             declared_params: m.generic_sig.as_ref().map(|signature| {
                                 signature.parameters_with_receiver(m.context_count)
                             }),
@@ -314,6 +315,17 @@ impl JvmLibraries {
                             )
                         };
                         let mut callable = callable;
+                        // Kotlin's Java scope reads a Java method that overrides an inherited
+                        // Kotlin property's accessor as that accessor. Its spelling names the
+                        // candidate properties; the hierarchy confirms one.
+                        if !t.is_kotlin && m.physical_name.is_none() {
+                            callable.property_accessor_role =
+                                super::synthetic_properties::java_accessor_role(
+                                    &m.name,
+                                    callable.params.len(),
+                                )
+                                .map(Box::new);
+                        }
                         // `scope_name` is the provider-normalized Kotlin declaration name. A raw
                         // Java method may carry only its physical spelling on `m`; attach the
                         // inherited-call policy here while both views still name the same exact

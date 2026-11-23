@@ -7,7 +7,7 @@
 # An installed home is found where the CLI corpus test looks (kotlin_cli_jvm_conformance:
 # `KRUSTY_JDK_<n>_HOME`, `JAVA_HOME_<n>_X64`/`_ARM64`, `JAVA_HOME`, `/usr/lib/jvm`), by the
 # `release` file each home carries. A download is checked against the sha256 Adoptium publishes for
-# it; a missing or mismatching one fails.
+# it, and its size must match the one Adoptium publishes; a missing or mismatching one fails.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,10 +46,15 @@ download() { # <n> <dest>
   meta="$(curl -fsSL "https://api.adoptium.net/v3/assets/latest/$n/hotspot?architecture=$arch&image_type=jdk&os=$os&vendor=eclipse")"
   link="$(python3 -I -c 'import json,sys; b=json.load(sys.stdin)[0]["binary"]["package"]; print(b["link"])' <<<"$meta")"
   sum="$(python3 -I -c 'import json,sys; b=json.load(sys.stdin)[0]["binary"]["package"]; print(b["checksum"])' <<<"$meta")"
-  [ -n "$link" ] && [ -n "$sum" ] || { echo "provision-jdks: no Temurin $n build for $os/$arch" >&2; return 1; }
+  size="$(python3 -I -c 'import json,sys; b=json.load(sys.stdin)[0]["binary"]["package"]; print(b["size"])' <<<"$meta")"
+  [ -n "$link" ] && [ -n "$sum" ] && [ -n "$size" ] || { echo "provision-jdks: no Temurin $n build for $os/$arch" >&2; return 1; }
   work="$(mktemp -d "$cache.XXXXXX")"
   echo "provision-jdks: downloading Temurin $n" >&2
   curl -fsSL "$link" -o "$work/jdk.tar.gz"
+  # A proxy or CDN can answer 200 with a small error document; name it before the checksum does.
+  got="$(wc -c < "$work/jdk.tar.gz" | tr -d ' ')"
+  [ "$got" = "$size" ] \
+    || { echo "provision-jdks: Temurin $n download is $got bytes, expected $size (begins: $(head -c 60 "$work/jdk.tar.gz" | tr -c '[:print:]' ' '))" >&2; rm -rf "$work"; return 1; }
   [ "$( (sha256sum "$work/jdk.tar.gz" 2>/dev/null || shasum -a 256 "$work/jdk.tar.gz") | cut -d' ' -f1)" = "$sum" ] \
     || { echo "provision-jdks: checksum mismatch for Temurin $n" >&2; rm -rf "$work"; return 1; }
   mkdir "$work/home"

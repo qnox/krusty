@@ -147,8 +147,11 @@ pub struct CodegenModule {
     dependency_symbols:
         krusty::fx_hash::HashMap<krusty::backend::KlibDependencyCallable, DependencyExport>,
     /// Stable imported-interface member numbers, shared by every file in each source module.
-    dependency_interface_numbers:
-        krusty::fx_hash::HashMap<String, krusty::fx_hash::HashMap<Vec<u8>, u32>>,
+    dependency_interface_numbers: krusty::fx_hash::HashMap<String, lower::ModuleInterfaceNumbers>,
+    /// The dependency interface members, by cross-module identity, that a class implements with a
+    /// library default whose body lowering does not model: a call through one declines with the
+    /// reason, rather than reaching an instance nothing implements it on.
+    unimplementable_interface_members: krusty::fx_hash::HashMap<Vec<u8>, String>,
     /// The exported entry answering each object instance and enum constant another file reads,
     /// linked by the instance (see `krusty::backend::instance_links`).
     instances: krusty::backend::module_links::ModuleLinks<
@@ -226,6 +229,7 @@ impl Backend for CraneliftBackend {
         Some(krusty::backend::CommonIrPreparation {
             counted_loops: COUNTED_LOOPS,
             enums: krusty::backend::enums::Contract::KotlinNative,
+            property_reference_values: false,
         })
     }
 
@@ -573,6 +577,7 @@ impl Backend for CraneliftBackend {
                 dependency_symbols: &state.dependency_symbols,
                 dependency_instances: &instance_reads,
                 dependency_interface_numbers: &mut dependency_interface_numbers,
+                unimplementable_interface_members: &mut state.unimplementable_interface_members,
                 laid_out: &state.laid_out,
                 #[cfg(feature = "test-support")]
                 driver_entries: self
@@ -690,6 +695,12 @@ impl Backend for CraneliftBackend {
                 }
                 krusty::backend::instance_links::InstanceEntry::ConstructorDefaults { .. } => {
                     "a constructor's default-argument entry".to_owned()
+                }
+                krusty::backend::instance_links::InstanceEntry::TypeTest(classifier) => {
+                    format!(
+                        "a type test against `{}`",
+                        classifier.render().replace('/', ".")
+                    )
                 }
                 krusty::backend::instance_links::InstanceEntry::EnumMember {
                     classifier,

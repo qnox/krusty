@@ -23,10 +23,7 @@ impl ProductionSignatureSemantics<'_> {
         receiver: crate::fir::ResolvedTy,
         unbound: bool,
         expected: &'static crate::types::FnSig,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         candidates.retain(|candidate| candidate.kind == crate::libraries::FnKind::Extension);
         for candidate in &mut candidates {
@@ -83,10 +80,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         candidates: Vec<crate::libraries::FunctionInfo>,
         expected: &'static crate::types::FnSig,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let selected =
             self.applicable_receiverless_reference_types(scope, candidates, expected, demand)?;
@@ -103,10 +97,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         candidates: Vec<crate::libraries::FunctionInfo>,
         expected: &'static crate::types::FnSig,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Vec<Ty>, crate::fir::DiagnosticId> {
         let mut candidates_with_finalized_signatures = Vec::with_capacity(candidates.len());
         for mut candidate in candidates {
@@ -310,10 +301,8 @@ impl ProductionSignatureSemantics<'_> {
         } else {
             Some(alias.explicit_arguments.clone().into_boxed_slice())
         };
-        let abbreviation = arguments.map(|arguments| crate::fir::ResolvedTypeAbbreviation {
-            alias: alias.identity,
-            arguments,
-            argument_path: Box::new([]),
+        let abbreviation = arguments.map(|arguments| {
+            crate::fir::ResolvedTypeAbbreviation::root(alias.identity, arguments, false)
         });
         Some((result, abbreviation))
     }

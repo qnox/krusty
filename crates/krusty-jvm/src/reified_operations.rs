@@ -562,6 +562,7 @@ fn expression_reified_parameters(
             operation:
                 krusty::ir::IrIntrinsic::TypeOf { ty: classifier }
                 | krusty::ir::IrIntrinsic::EnumValueOf { classifier }
+                | krusty::ir::IrIntrinsic::EnumValues { classifier }
                 | krusty::ir::IrIntrinsic::EnumEntries { classifier },
             ..
         } = &**call_callee =>
@@ -682,6 +683,11 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
         }
         let roots = class_marker_roots(ir, declaration);
         let mut used_parameters = HashSet::default();
+        // A supertype naming a reified parameter (`object : Inv<X>()`) puts it in the class's
+        // generic signature, which code inlining the body specializes as kotlinc does.
+        for &supertype in &declaration.supertypes {
+            collect_type_reified_parameters(supertype, &parameters, &mut used_parameters);
+        }
         for root in roots {
             used_parameters.extend(realize_expression_dag(
                 ir,

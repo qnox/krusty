@@ -130,6 +130,13 @@ typedef struct KType {
        typed virtual thunks, for the map entry points below to answer for an object they did not
        make. NULL for every other type. */
     const struct KMapMembers *map_members;
+    /* On a CALLABLE REFERENCE's descriptor: the byte offsets of the fields holding the values it
+       bound for the declaration's context parameters, `reference_context_count` of them, in
+       parameter order. Equality and `hashCode` read them as they read the bound receiver, so two
+       references to one declaration with different contexts are different. NULL, and a count of
+       0, for a reference binding none. */
+    const uint32_t *reference_context_offsets;
+    uint32_t reference_context_count;
 } KType;
 
 /* The read-only members of `Map` a program class answers, each a thunk with the fixed signature
@@ -152,7 +159,9 @@ _Static_assert(offsetof(KType, class_names) == 148, "KType.class_names moved");
 _Static_assert(offsetof(KType, collection_size) == 152, "KType.collection_size moved");
 _Static_assert(offsetof(KType, itable) == 160, "KType.itable moved");
 _Static_assert(offsetof(KType, map_members) == 168, "KType.map_members moved");
-_Static_assert(sizeof(KType) == 176, "KType changed size");
+_Static_assert(offsetof(KType, reference_context_offsets) == 176, "KType.reference_context_offsets moved");
+_Static_assert(offsetof(KType, reference_context_count) == 184, "KType.reference_context_count moved");
+_Static_assert(sizeof(KType) == 192, "KType changed size");
 _Static_assert(offsetof(KMapMembers, entries) == 56, "KMapMembers.entries moved");
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.
@@ -421,6 +430,7 @@ extern const KType kt_type_kmutable_property2;
    `KType.interfaces` requires) and a class of the program that implements one names it too. None
    has instances of its own; each lists its own bases. */
 extern const KType kt_type_iterator_interface;
+extern const KType kt_type_list_iterator_interface;
 extern const KType kt_type_iterable_interface;
 extern const KType kt_type_mutable_iterable_interface;
 extern const KType kt_type_collection_interface;
@@ -483,6 +493,7 @@ kt_boolean kt_mutable_collection_add(KRef self, KRef value);
 kt_boolean kt_mutable_collection_remove(KRef self, KRef value);
 void kt_mutable_collection_clear(KRef self);
 kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements);
+kt_boolean kt_mutable_collection_add_all_reading_first(KRef self, KRef elements);
 KRef kt_list_get(KRef list, kt_int index);
 KRef kt_list_sub_list(KRef list, kt_int from, kt_int to);
 /* `first()` / `last()`; both raise `NoSuchElementException` on an empty list, as Kotlin does. */
@@ -492,6 +503,8 @@ kt_int kt_list_index_of(KRef list, KRef value);
 kt_int kt_list_last_index_of(KRef list, KRef value);
 kt_boolean kt_list_contains(KRef list, KRef value);
 KRef kt_list_iterator(KRef list);
+KRef kt_list_list_iterator(KRef list, kt_int index);
+KRef kt_list_list_iterator_from_start(KRef list);
 
 /* ---- a growable list -------------------------------------------------------------------------
 
@@ -520,6 +533,7 @@ void kt_mutable_list_clear(KRef self);
    answers `Unit`. */
 void kt_mutable_list_plus_assign(KRef self, KRef value);
 void kt_mutable_list_add_all(KRef self, KRef elements);
+void kt_mutable_list_add_all_reading_first(KRef self, KRef elements);
 kt_boolean kt_list_iterator_has_next(KRef iterator);
 KRef kt_list_iterator_next(KRef iterator);
 /* `ListIterator`'s members over a list's iterator. `kt_list_iterator_at` is `listIterator(index)`. */

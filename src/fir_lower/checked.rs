@@ -448,6 +448,7 @@ impl BodyLowering<'_> {
                                 source_ty,
                                 signature_parameters[parameter as usize],
                             ),
+                            context: Default::default(),
                         }
                     }
                     crate::fir::FirAdaptedReferenceArgument::Context => {
@@ -457,6 +458,7 @@ impl BodyLowering<'_> {
                         IrCheckedArgument::Expression {
                             parameter,
                             value: self.ir.add_expr(IrExpr::GetValue(slot)),
+                            context: Default::default(),
                         }
                     }
                     crate::fir::FirAdaptedReferenceArgument::Default => {
@@ -512,6 +514,7 @@ impl BodyLowering<'_> {
                             source_type,
                             signature_parameters[parameter],
                         ),
+                        context: Default::default(),
                     },
                 )
                 .collect::<Vec<_>>()
@@ -536,7 +539,9 @@ impl BodyLowering<'_> {
         let Some(call) = call.transpose()? else {
             return Ok(None);
         };
-        let body = self.callable_reference_adapter_body(call, signature_result, reference.ret);
+        let body = self
+            .ir
+            .callable_reference_adapter_body(call, signature_result, reference.ret);
         let mut parameters = capture_types;
         parameters.extend(reference.params.iter().copied());
         let adapter_name = format!(
@@ -660,6 +665,7 @@ impl BodyLowering<'_> {
                 mutable: reference.mutable,
                 substitutions: lower_substitutions(reference.substitutions),
                 adaptation: reference.adaptation.cloned().map(Box::new),
+                function_type: Some(reference.reference_ty),
             },
         ))))
     }
@@ -766,6 +772,7 @@ impl BodyLowering<'_> {
                 kind,
                 name,
                 parameters,
+                declared_parameters,
                 result,
                 interface,
                 realization,
@@ -837,6 +844,13 @@ impl BodyLowering<'_> {
                     dispatch_receiver: Some(dispatch_receiver),
                     args: arguments,
                 });
+                // The selected declaration's own parameters, not the call site's substituted ones,
+                // are the representation boundary of every argument: a generic `T` slot takes a
+                // box even where the call applies it to a value class.
+                if let Some(declared) = declared_parameters {
+                    let declared = declared.iter().map(|parameter| parameter.get()).collect();
+                    self.ir.call_declared_params.insert(call, declared);
+                }
                 // A suspend super call keeps its checked suspension on the concrete expression, as
                 // any other selected suspend call does; JVM coroutine lowering appends the
                 // continuation and must not infer suspendness from the realized descriptor.
@@ -1079,7 +1093,9 @@ impl BodyLowering<'_> {
         if reordered {
             for argument in &mut arguments {
                 match argument {
-                    IrCheckedArgument::Expression { parameter, value } => {
+                    IrCheckedArgument::Expression {
+                        parameter, value, ..
+                    } => {
                         if super::constructors::is_forwarded_super_argument(self.ir, *value)
                             || self.passes_reordered_operand_in_place(*value)
                         {
@@ -1461,10 +1477,21 @@ impl BodyLowering<'_> {
                     parameter,
                     value,
                     conversion,
-                } => Ok(IrCheckedArgument::Expression {
-                    parameter: *parameter,
-                    value: self.expression_with_conversion(*value, *conversion)?,
-                }),
+                } => {
+                    let lowered = self.expression_with_conversion(*value, *conversion)?;
+                    let context = if self.body.is_implicit_context_argument(*value) {
+                        crate::ir::IrContextArgumentRole::Implicit
+                    } else if self.body.is_receiver_ordered_context_argument(*value) {
+                        crate::ir::IrContextArgumentRole::AfterReceiver
+                    } else {
+                        crate::ir::IrContextArgumentRole::Ordinary
+                    };
+                    Ok(IrCheckedArgument::Expression {
+                        parameter: *parameter,
+                        value: lowered,
+                        context,
+                    })
+                }
                 FirCallArgument::Default { parameter, .. } => Ok(IrCheckedArgument::Default {
                     parameter: *parameter,
                 }),
@@ -1542,5 +1569,8 @@ pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate
                 element: element.get(),
             }
         }
+        crate::fir::FirIntrinsic::EnumValues { classifier } => crate::ir::IrIntrinsic::EnumValues {
+            classifier: classifier.get(),
+        },
     }
 }

@@ -942,6 +942,73 @@ impl BodyLowering<'_, '_, '_> {
         )
     }
 
+    /// A checked read of a range member whose interface a class of this file may implement.
+    ///
+    /// The runtime reads a bound from the range object it built, so the object behind a
+    /// `ClosedRange<Int>` that the file also puts a class behind is told apart first: each such
+    /// class is dispatched to through its own getter, and only what remains reaches the runtime,
+    /// as a `KType` member is. A class of another file has no override this file can name, so a
+    /// read in a module whose other files implement the interface declines.
+    pub(super) fn range_property_through_implementors(
+        &mut self,
+        target: krusty::fir::ExternalPropertyId,
+        owner: super::super::super::intrinsics::DeclarationOwner,
+        name: &str,
+        receiver: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let runtime = |body: &mut Self| {
+            body.range_property_member(owner, name, receiver, ret)
+                .unwrap_or_else(|| {
+                    Err(declined!("`{name}` of a range the runtime does not answer"))
+                })
+        };
+        let Some(internal) = self
+            .checked_type(receiver)
+            .and_then(|ty| ty.non_null().obj_internal())
+            .filter(|&internal| self.file.implements_dependency(internal))
+        else {
+            return runtime(self);
+        };
+        let module_implementors = self.file.module_facts.dependency_implementors(internal);
+        if module_implementors
+            .iter()
+            .any(|implementor| implementor.file != self.file.source)
+        {
+            return Err(declined!(
+                "the member `{name}` of a range type another file implements"
+            ));
+        }
+        let getter = self
+            .file
+            .callables
+            .property(target)
+            .ok_or("a range member without its property")?
+            .getter;
+        let arms = self.file.implementors_of(internal);
+        let implementors: Vec<_> = arms
+            .iter()
+            .filter_map(|&class| self.external_property_getter_slot(class, getter))
+            .collect();
+        // Every class of the module that can be an instance must be answered by an arm that has
+        // a getter to enter: an arm also answers the classes below it.
+        if implementors.len() != arms.len()
+            || self.file.classes_answered_by(&arms) != module_implementors.len()
+        {
+            return Err(declined!(
+                "the member `{name}` of a range type this file implements with a class whose \
+                 override cannot be dispatched to"
+            ));
+        }
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.dispatch_by_implementor_with(&implementors, object, &[], ret, false, |body, _| {
+            runtime(body)
+        })
+    }
+
     /// The owner, name and result of a dependency getter naming a member of a range type.
     ///
     /// `range.first` reaches the generator as a checked read of a dependency property rather than as

@@ -156,7 +156,7 @@ pub use bridges::{
     Bridge, BridgeAccessorRole, BridgeKind, BridgeParameter, BridgePropertyImplementation,
     CollectionBarrierCheck, CollectionBarrierParameter, CollectionBarrierPlan,
 };
-pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget};
+pub use callee::{Callee, IrSuperCallKind, IrVirtualTarget, ValueClassAdapter};
 pub use catches::IrCatch;
 pub use companion_blocks::{IrCompanionBlockProperty, IrCompanionBlocks, IrStaticPlacement};
 pub use constants::IrConst;
@@ -220,6 +220,21 @@ pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
 use type_reflection::TypeReflectionFacts;
 
+/// What checking decided about a context argument's evaluation, recorded with the argument so a copy
+/// of the call keeps it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IrContextArgumentRole {
+    /// A value argument, or a context argument written as an ordinary source argument.
+    #[default]
+    Ordinary,
+    /// A context parameter or implicit receiver the scope supplied. It is no source argument, so it
+    /// never reorders a call's written operands.
+    Implicit,
+    /// An explicit context argument evaluated after the extension receiver, as it is written,
+    /// although it is passed before it.
+    AfterReceiver,
+}
+
 /// One checker-selected argument after source-order evaluation has been preserved. Parameter
 /// ordinals and omitted/default/vararg decisions are semantic facts; no later phase remaps them.
 #[derive(Clone, Debug, PartialEq)]
@@ -227,6 +242,8 @@ pub enum IrCheckedArgument {
     Expression {
         parameter: u32,
         value: ExprId,
+        /// Whether checking selected this argument from the scope or ordered it after the receiver.
+        context: IrContextArgumentRole,
     },
     Default {
         parameter: u32,
@@ -955,6 +972,14 @@ pub enum IrEnclosure {
     Classifier(ClassId),
 }
 
+/// A method of a class overriding an abstract member of an interface a KLIB lowering unit
+/// installed in the same file ([`IrClass::installed_interface_overrides`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrInstalledOverride {
+    pub implementation: FunId,
+    pub overridden: FunId,
+}
+
 /// A class/interface/object declaration (`IrClass`). Instance fields come from the primary
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
@@ -1067,6 +1092,9 @@ pub struct IrClass {
     pub explicit_param_stores: bool,
     /// Instance methods — `FunId`s into `IrFile.functions` (each with `dispatch_receiver = Some`).
     pub methods: Vec<FunId>,
+    /// The members of interfaces a KLIB lowering unit installed that methods of this class
+    /// override. Neither end has a declaration identity, so the edge names both functions.
+    pub installed_interface_overrides: Vec<IrInstalledOverride>,
     pub is_interface: bool,
     /// `true` for a source `fun interface`. This is a language-level classifier fact carried through
     /// IR so emitted Kotlin metadata preserves SAM eligibility for dependent modules.
@@ -2908,7 +2936,9 @@ pub use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
 pub use debug_locals::{IrCatchBinding, IrCatchName, IrLambdaForm, IrLambdaOrigin};
 pub use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
-pub use generated_members::{IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember};
+pub use generated_members::{
+    IrGeneratedClassRole, IrGeneratedFunctionRole, IrMemberPlacement, IrValueClassAnyMember,
+};
 pub use generated_members::{
     IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,

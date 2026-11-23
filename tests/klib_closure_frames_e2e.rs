@@ -5,8 +5,20 @@ use krusty::backend::{Artifact, Backend, CheckedIrFile, CheckedIrUnitKind};
 use krusty::diag::DiagSink;
 use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
 
+#[path = "klib_closure_frames_e2e/companion_private_members.rs"]
+mod companion_private_members;
+
 #[path = "klib_closure_frames_e2e/elvis_blocks.rs"]
 mod elvis_blocks;
+
+#[path = "klib_closure_frames_e2e/library_enums.rs"]
+mod library_enums;
+
+#[path = "klib_closure_frames_e2e/file_private_function_receivers.rs"]
+mod file_private_function_receivers;
+
+#[path = "klib_closure_frames_e2e/local_superclass_arguments.rs"]
+mod local_superclass_arguments;
 
 #[path = "klib_closure_frames_e2e/top_level_properties.rs"]
 mod top_level_properties;

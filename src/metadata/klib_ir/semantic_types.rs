@@ -196,12 +196,8 @@ pub(crate) fn semantic_type_in<E: From<KlibTypeError>>(
         // A class type the serializer marks definitely non-null is its ordinary non-null type; on
         // a type parameter whose bound admits null the mark is the intersection `T & Any`. A
         // parameter bounded by a non-null type is already non-null, and `T & Any` is `T` itself.
-        KlibIrNullability::DefinitelyNotNull
-            if semantic.is_ty_param() && semantic.upper_bound_admits_null() =>
-        {
-            Ty::from(TyKind::DefinitelyNotNull(semantic))
-        }
-        KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull => semantic,
+        KlibIrNullability::DefinitelyNotNull => semantic.marked_definitely_not_null(),
+        KlibIrNullability::NotSpecified => semantic,
     })
 }
 

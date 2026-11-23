@@ -33,6 +33,15 @@ const I32_GE_U: u8 = 0x4f;
 /// A function's wasm parameters (the receiver first) and results.
 type Signature = (Vec<ValType>, Vec<ValType>);
 
+/// The library member a call goes through, as its checked declaration gives it: its name, its
+/// declared parameters (the receiver's excluded), and the builtin classes implementing it.
+#[derive(Clone, Copy)]
+pub(super) struct LibraryMemberDeclaration<'a> {
+    pub(super) name: &'a str,
+    pub(super) params: &'a [Ty],
+    pub(super) implementations: &'a [BuiltinImplementation],
+}
+
 /// The library members a call has gone through whose builtin implementations are recorded.
 #[derive(Default)]
 pub(super) struct BuiltinMembers {
@@ -153,7 +162,7 @@ enum BuilderMember {
 }
 
 impl Runtime {
-    /// Record the builtin implementations of `member`, a library member named `name` carried as
+    /// Record the builtin implementations of `member`, the library member `declared` carried as
     /// `signature` (the receiver first), which a call goes through: a string's and the runtime
     /// builder's and list's now, and each box's now or when the box is declared. Declines when a builtin class
     /// runs something this generator cannot write for it.
@@ -162,10 +171,14 @@ impl Runtime {
         module: &mut Module,
         classifiers: &dyn BackendClassifierSource,
         member: MemberRef,
-        name: &str,
+        declared: LibraryMemberDeclaration<'_>,
         signature: &Signature,
-        implementations: &[BuiltinImplementation],
     ) -> Result<(), String> {
+        let LibraryMemberDeclaration {
+            name,
+            implementations,
+            ..
+        } = declared;
         if self
             .builtin_members
             .members
@@ -215,7 +228,7 @@ impl Runtime {
                 }
                 Representation::ArrayList => {
                     list = Some(
-                        self.list_operation(name, implementation, signature)
+                        self.list_operation(declared, implementation, signature)
                             .and_then(|(function, arity, bound)| {
                                 let bound = match bound {
                                     Some(bound) => Some((
@@ -328,20 +341,25 @@ impl Runtime {
         }
     }
 
-    /// What the runtime list runs for the member `name` carried as `signature`, from `ArrayList`'s
-    /// override of it: the function a direct call of that override runs, when it takes and
-    /// answers the member's carriers, with its arity and the bound its index argument is checked
-    /// against.
+    /// What the runtime list runs for the member `declared` carried as `signature`: the function
+    /// a direct call of `ArrayList`'s member runs, when it takes and answers the member's carriers,
+    /// with its arity and the bound its index argument is checked against. The runtime list lays
+    /// out `ArrayList` whole, so a member `ArrayList` inherits (`AbstractCollection.containsAll`)
+    /// is the runtime's operation for it, as a direct call on an `ArrayList` receiver is
+    /// (`crate::codegen` `realized_array_list_member`); an override is matched by its own
+    /// declared parameters.
     fn list_operation(
         &self,
-        name: &str,
+        declared: LibraryMemberDeclaration<'_>,
         implementation: &BuiltinImplementation,
         (params, results): &Signature,
     ) -> Result<(u32, u32, Option<IndexBound>), String> {
-        let Some(declaration) = &implementation.declaration else {
-            return Err(format!("a library member `{name}` an `ArrayList` inherits"));
-        };
-        let operation = super::array_lists::list_operation(name, &declaration.params)?;
+        let name = declared.name;
+        let declared_params = implementation
+            .declaration
+            .as_ref()
+            .map_or(declared.params, |declaration| &declaration.params);
+        let operation = super::array_lists::list_operation(name, declared_params)?;
         let realized = self.array_lists.member(operation)?;
         if realized.params != *params || realized.results != *results {
             return Err(format!(
