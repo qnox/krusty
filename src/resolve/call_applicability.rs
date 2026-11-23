@@ -270,8 +270,9 @@ pub(super) fn score_with_declaration(
         {
             return None;
         }
-        checker
-            .argument_uses_context_only_result(scope, argument)
+        // A result-only producer scores as an ordinary fit only for a parameter its result can
+        // actually bind: `emptyList()` never fits a function-typed parameter.
+        (contextual_call_result && checker.argument_uses_context_only_result(scope, argument))
             .then_some(1)
             .or_else(|| checker.member_argument_score(expected, semantic_actual))
             // A nested call re-solved to the parameter's own classifier is an ordinary fit; one
