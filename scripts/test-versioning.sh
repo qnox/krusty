@@ -14,7 +14,7 @@ fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
 mkdir -p "$fixture/scripts"
 cp "$repo/justfile" "$repo/push.just" "$fixture/"
-cp "$repo/scripts/order-kotlin-versions.sh" "$fixture/scripts/"
+cp "$repo/scripts/sort-kotlin-versions.sh" "$fixture/scripts/"
 
 export GIT_AUTHOR_NAME='Version Fixture'
 export GIT_AUTHOR_EMAIL='version@example.invalid'
@@ -70,7 +70,7 @@ printf '%s refs/tags/unrelated-version-baseline\n' "$reference" >"$fixture/kotli
 expect_rejected build-number "$reference"
 expect_rejected version
 
-ordered=$(printf '%s\n' 2.5.0 2.4.21 2.5.0-RC2 2.5.0-Beta2 2.5.0-RC 2.5.0-Beta1 | "$repo/scripts/order-kotlin-versions.sh")
+ordered=$(printf '%s\n' 2.5.0 2.4.21 2.5.0-RC2 2.5.0-Beta2 2.5.0-RC 2.5.0-Beta1 | "$repo/scripts/sort-kotlin-versions.sh")
 expected=$'2.4.21\n2.5.0-Beta1\n2.5.0-Beta2\n2.5.0-RC\n2.5.0-RC2\n2.5.0'
 if [[ $ordered != "$expected" ]]; then
     echo "FAIL: version order: expected '$expected', got '$ordered'" >&2

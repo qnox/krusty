@@ -4,7 +4,8 @@
 //! A `companion { … }` block property is stored with its class, and Kotlin runs its initializer
 //! as part of initializing that class: the first construction of the class, the first call of one
 //! of its block functions or accessors, or the first read or write of the storage itself, whichever
-//! comes first. A superclass, and its companion, is initialized before its subclass. A file's
+//! comes first. A superclass, and its companion, is initialized before its subclass, and so is
+//! each superinterface with statics and a non-abstract member (JLS 12.4.2). A file's
 //! other statics run when the file is first touched; a class owes no such promise, so an
 //! initializer that could observe the difference waits for its class.
 //!
@@ -28,7 +29,7 @@ pub struct ClassStatics {
 }
 
 /// A class owns a static whose initialization this plan cannot order with the rest of the class:
-/// an enum, an object, a value class, or a class with a companion object.
+/// an enum, an object, or a value class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnorderedClassStatic {
     pub owner: TypeName,
@@ -41,6 +42,9 @@ pub struct ClassStaticPlan {
     classes: Vec<ClassStatics>,
     /// The class each waiting static belongs to.
     owners: HashMap<u32, ClassId>,
+    /// The superinterfaces with statics that initializing a class initializes first, in
+    /// initialization order. Only classes that have any are listed.
+    superinterfaces: HashMap<ClassId, Box<[ClassId]>>,
 }
 
 impl ClassStaticPlan {
@@ -59,11 +63,10 @@ impl ClassStaticPlan {
             let declaration = &ir.classes[class as usize];
             // An interface has no superclass chain and no constructor, so what initializes it is
             // exactly the access to its storage or the call of one of its block functions: the
-            // same activation points a class has. Its companion object is initialized by the
-            // activation step that follows its statics.
+            // same activation points a class has. A class's or an interface's companion object is
+            // initialized by the activation step that follows its statics.
             if declaration.is_object
                 || declaration.is_value
-                || (declaration.companion_class.is_some() && !declaration.is_interface)
                 || declaration.superclass == wk::kotlin_enum()
             {
                 return Err(unordered);
@@ -79,7 +82,60 @@ impl ClassStaticPlan {
             })
             .collect();
         classes.sort_unstable_by_key(|group| group.class);
-        Ok(Self { classes, owners })
+        let mut plan = Self {
+            classes,
+            owners,
+            superinterfaces: HashMap::new(),
+        };
+        plan.superinterfaces = (0..ir.classes.len())
+            .filter_map(|class| {
+                let class = ClassId::try_from(class).expect("class ids fit in u32");
+                if ir.classes[class as usize].is_interface {
+                    return None;
+                }
+                let mut order = Vec::new();
+                for &interface in &plan.direct_superinterfaces(ir, class) {
+                    plan.enumerate_superinterface(ir, interface, &mut order);
+                }
+                (!order.is_empty()).then(|| (class, order.into_boxed_slice()))
+            })
+            .collect();
+        Ok(plan)
+    }
+
+    /// The superinterfaces `class` names that this file declares, in declaration order.
+    fn direct_superinterfaces(&self, ir: &IrFile, class: ClassId) -> Vec<ClassId> {
+        ir.classes[class as usize]
+            .interfaces
+            .iter()
+            .filter_map(|name| ir.class_id_by_name(name))
+            .filter(|&interface| ir.classes[interface as usize].is_interface)
+            .collect()
+    }
+
+    /// JLS 12.4.2's recursive enumeration: `interface`'s own superinterfaces first, then
+    /// `interface` itself when it has statics of its own and declares a non-abstract member.
+    fn enumerate_superinterface(&self, ir: &IrFile, interface: ClassId, order: &mut Vec<ClassId>) {
+        if order.contains(&interface) {
+            return;
+        }
+        for parent in self.direct_superinterfaces(ir, interface) {
+            self.enumerate_superinterface(ir, parent, order);
+        }
+        let declares_non_abstract_member =
+            ir.classes[interface as usize]
+                .methods
+                .iter()
+                .any(|&method| {
+                    let function = &ir.functions[method as usize];
+                    function.body.is_some() && !function.is_static
+                });
+        if self.has_statics(interface)
+            && declares_non_abstract_member
+            && !order.contains(&interface)
+        {
+            order.push(interface);
+        }
     }
 
     /// Every class with statics of its own, by class id.
@@ -117,14 +173,24 @@ impl ClassStaticPlan {
         self.has_statics(class).then_some(class)
     }
 
-    /// What activating one class of a superclass chain initializes, in order: its own statics,
-    /// then its companion object. The chain itself is walked root first.
-    pub fn activation_steps(&self, class: ClassId) -> impl Iterator<Item = ClassActivationStep> {
-        let own = self
-            .has_statics(class)
-            .then_some(ClassActivationStep::OwnStatics(class));
-        own.into_iter()
-            .chain([ClassActivationStep::Companion(class)])
+    /// What activating one class of a superclass chain initializes, in order: the superinterfaces
+    /// it initializes first (each one's statics, then its companion), its own statics, then its
+    /// companion object. The chain itself is walked root first.
+    pub fn activation_steps(&self, class: ClassId) -> std::vec::IntoIter<ClassActivationStep> {
+        self.superinterfaces
+            .get(&class)
+            .into_iter()
+            .flat_map(|interfaces| interfaces.iter().copied())
+            .chain([class])
+            .flat_map(|owner| {
+                let own = self
+                    .has_statics(owner)
+                    .then_some(ClassActivationStep::OwnStatics(owner));
+                own.into_iter()
+                    .chain([ClassActivationStep::Companion(owner)])
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 }
 
