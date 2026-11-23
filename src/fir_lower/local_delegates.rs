@@ -144,6 +144,9 @@ impl BodyLowering<'_> {
         let declaration = DeclarationId::from_raw(self.body.owner().raw());
         let mut body =
             self.local_delegate_call(declaration, call, delegate, dispatch, arguments, line)?;
+        // An expanded inline convention is a value block with no checked type of its own; the
+        // accessor's body is the convention call, whose checked result is the call's.
+        self.ir.set_logical_type_if_absent(body, call.result.get());
         if result != Ty::Unit && call.result.get() != result {
             body = self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
