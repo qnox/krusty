@@ -1249,7 +1249,7 @@ fn java_accessor_collisions_and_setter_pairing_match_kotlinc() {
         Vec::<String>::new()
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
     assert_eq!(
@@ -1291,7 +1291,7 @@ fn java_accessor_write_collisions_match_kotlinc() {
         Vec::<String>::new()
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
     assert_eq!(
@@ -1325,7 +1325,7 @@ fn java_smart_decapitalization_collision_has_stable_candidate_order() {
         Vec::<String>::new()
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
     assert_eq!(

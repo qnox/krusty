@@ -70,7 +70,7 @@ fn assert_diagnostics_match_kotlinc(file: &str, source: &str, expected: &[&[&str
         errors(&result.krusty_stderr),
         errors(&result.reference_stderr)
     );
-    let krusty = diagnostic_blocks(&result.krusty_stderr, false);
+    let krusty = diagnostic_blocks(&result.krusty_stderr, true);
     assert_eq!(krusty, diagnostic_blocks(&result.reference_stderr, true));
     assert_eq!(
         krusty,

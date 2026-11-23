@@ -556,7 +556,12 @@ fn source_excerpt(span: Span, src: &str) -> String {
     for c in src[line_start..lo].chars() {
         out.push(if c.is_whitespace() { c } else { ' ' });
     }
-    let width = src[lo..hi].chars().count().max(1);
+    // A range that runs past its first line is marked by one caret.
+    let width = if (span.hi as usize) > line_end {
+        1
+    } else {
+        src[lo..hi].chars().count().max(1)
+    };
     out.extend(std::iter::repeat_n('^', width));
     out.push('\n');
     out

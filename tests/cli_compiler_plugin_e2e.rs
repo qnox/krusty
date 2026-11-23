@@ -121,6 +121,17 @@ impl Probe {
         Probe { source, dir }
     }
 
+    /// How a diagnostic names the probe source: relative to the working directory, as kotlinc
+    /// renders a file under it.
+    fn shown(&self) -> String {
+        let working = std::env::current_dir().expect("the working directory");
+        self.source
+            .strip_prefix(working)
+            .unwrap_or(&self.source)
+            .display()
+            .to_string()
+    }
+
     fn krusty(&self, classpath: &[PathBuf], switches: &[String]) -> Compiled {
         let out = self.dir.join("krusty");
         let _ = std::fs::remove_dir_all(&out);
@@ -594,6 +605,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "3:13: error: krusty's Compose compiler plugin does not support a composable function \
          with a default argument that is not a constant yet",
+        42,
     );
     assert_compose_rejects(
         "compose-function-type-with-result",
@@ -601,6 +613,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "1:1: error: krusty's Compose compiler plugin does not support the composable function \
          type in `keep` yet",
+        1,
     );
     assert_compose_rejects(
         "compose-ten-argument-function-type",
@@ -608,6 +621,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "1:1: error: krusty's Compose compiler plugin does not support the composable function \
          type in `keep` yet",
+        1,
     );
     assert_compose_rejects(
         "compose-ten-input-receiver-function-type",
@@ -615,6 +629,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "1:1: error: krusty's Compose compiler plugin does not support the composable function \
          type in `keep` yet",
+        1,
     );
     assert_compose_rejects(
         "compose-suspend-function-type",
@@ -622,6 +637,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "1:1: error: krusty's Compose compiler plugin does not support the composable function \
          type in `keep` yet",
+        1,
     );
     assert_compose_rejects(
         "compose-local-argument",
@@ -629,6 +645,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "6:1: error: krusty's Compose compiler plugin does not support a composable call argument \
          that is not a constant, a parameter, or computed from a parameter yet",
+        10,
     );
     assert_compose_rejects(
         "compose-computed-argument-of-runtime-stability",
@@ -636,6 +653,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "5:1: error: krusty's Compose compiler plugin does not support a call argument whose type's \
          stability is decided when it runs yet",
+        15,
     );
     assert_compose_rejects(
         "compose-lambda-value",
@@ -644,6 +662,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "3:13: error: krusty's Compose compiler plugin does not support a composable lambda \
          parameter used other than by calling it or passing it to a composable lambda parameter \
          yet",
+        45,
     );
     assert_compose_rejects(
         "compose-plain-lambda-value",
@@ -652,6 +671,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "3:1: error: krusty's Compose compiler plugin does not support a composable lambda \
          parameter used other than by calling it or passing it to a composable lambda parameter \
          yet",
+        41,
     );
     assert_compose_rejects(
         "compose-plain-lambda-to-plain-parameter",
@@ -660,6 +680,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "3:1: error: krusty's Compose compiler plugin does not support a composable lambda \
          parameter used other than by calling it or passing it to a composable lambda parameter \
          yet",
+        41,
     );
     assert_compose_rejects(
         "compose-plain-branch-lambda",
@@ -667,6 +688,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "5:13: error: krusty's Compose compiler plugin does not support a composable lambda passed other \
          than by a statement of a function body yet",
+        2,
     );
     assert_compose_rejects(
         "compose-plain-expression-body-lambda",
@@ -674,6 +696,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "4:16: error: krusty's Compose compiler plugin does not support a composable lambda passed other \
          than by a statement of a function body yet",
+        2,
     );
     assert_compose_rejects(
         "compose-plain-method-lambda",
@@ -681,6 +704,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "6:6: error: krusty's Compose compiler plugin does not support a composable lambda passed other \
          than by a statement of a function body yet",
+        2,
     );
     assert_compose_rejects(
         "compose-plain-nested-lambda-with-call",
@@ -688,6 +712,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "6:12: error: krusty's Compose compiler plugin does not support a composable lambda passed other \
          than by a statement of a function body yet",
+        10,
     );
     assert_compose_rejects(
         "compose-capturing-lambda-to-plain-function",
@@ -696,6 +721,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "6:6: error: krusty's Compose compiler plugin does not support a capturing composable \
          lambda passed from a composable body to a function that is not composable yet",
+        14,
     );
     assert_compose_rejects(
         "compose-recursive-lambda",
@@ -703,6 +729,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "3:13: error: krusty's Compose compiler plugin does not support a recursive composable \
          function whose lambda parameters' applier kotlinc infers yet",
+        45,
     );
     let frame = "@Composable fun Frame(content: @Composable () -> Unit) {\ncontent()\n}\n";
     assert_compose_rejects(
@@ -713,6 +740,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "9:9: error: krusty's Compose compiler plugin does not support a composable call argument \
          that is not a constant, a parameter, or computed from a parameter yet",
+        11,
     );
     assert_compose_rejects(
         "compose-lambda-capturing-lambda-parameter",
@@ -722,6 +750,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "6:13: error: krusty's Compose compiler plugin does not support a composable lambda that \
          captures a composable lambda parameter yet",
+        43,
     );
     assert_compose_rejects(
         "compose-nested-lambda",
@@ -731,6 +760,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "8:7: error: krusty's Compose compiler plugin does not support a lambda in a composable \
          function yet",
+        21,
     );
     assert_compose_rejects(
         "compose-singleton-lambda-remembering-lambda",
@@ -738,6 +768,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "8:6: error: krusty's Compose compiler plugin does not support a composable lambda that \
          captures nothing passing a capturing composable lambda yet",
+        1,
     );
     assert_compose_rejects(
         "compose-empty-lambda",
@@ -745,6 +776,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "7:7: error: krusty's Compose compiler plugin does not support an empty composable lambda \
          yet",
+        3,
     );
     assert_compose_rejects(
         "compose-non-skippable",
@@ -752,6 +784,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "3:62: error: krusty's Compose compiler plugin does not support a \
          `@NonSkippableComposable` function yet",
+        14,
     );
     assert_compose_rejects(
         "compose-cross-file-defaults",
@@ -762,6 +795,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         )],
         "4:1: error: krusty's Compose compiler plugin does not support a call to a composable \
          function of another file with default arguments yet",
+        7,
     );
     assert_compose_rejects(
         "compose-library-call-result",
@@ -769,6 +803,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "4:1: error: krusty's Compose compiler plugin does not support a call to a library \
          composable function with a result yet",
+        53,
     );
     assert_compose_rejects(
         "compose-library-call-function-parameter",
@@ -777,6 +812,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "5:1: error: krusty's Compose compiler plugin does not support a call to a library \
          composable function with a function-typed parameter that is not a composable function \
          type yet",
+        43,
     );
     assert_compose_library_call_rejects(
         "compose-library-call-forwarded-lambda",
@@ -784,6 +820,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "import lib.Frame\n@Composable fun Wrapper(content: @Composable () -> Unit) {\nFrame(content)\n}\n",
         "5:1: error: krusty's Compose compiler plugin does not support a composable lambda \
          parameter passed to a library composable yet",
+        14,
     );
     assert_compose_library_call_rejects(
         "compose-plain-library-forwarded-lambda",
@@ -792,6 +829,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "5:1: error: krusty's Compose compiler plugin does not support a composable lambda \
          parameter of a function that is not composable passed to a function of another file or \
          a library yet",
+        19,
     );
     assert_compose_rejects(
         "compose-generic-value-class-field",
@@ -799,6 +837,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "4:1: error: krusty's Compose compiler plugin does not support a class with a field of a \
          generic value class yet",
+        1,
     );
     assert_compose_rejects(
         "compose-reflection-function-field",
@@ -806,6 +845,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "3:1: error: krusty's Compose compiler plugin does not support a class with a field of a \
          numbered reflection function type yet",
+        1,
     );
     assert_compose_rejects(
         "compose-other-file-inner-class-field",
@@ -816,6 +856,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         )],
         "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
          depends on another file's class without `$stable` yet",
+        1,
     );
 }
 
@@ -832,6 +873,7 @@ fn a_read_of_a_composable_property_resolves_and_the_compose_pass_refuses_it() {
         &[],
         "4:38: error: krusty's Compose compiler plugin does not support a read of a composable \
          property yet",
+        17,
     );
     assert_compose_rejects(
         "compose-top-level-property-read",
@@ -840,6 +882,7 @@ fn a_read_of_a_composable_property_resolves_and_the_compose_pass_refuses_it() {
         &[],
         "4:30: error: krusty's Compose compiler plugin does not support a read of a composable \
          property yet",
+        23,
     );
     assert_compose_rejects(
         "compose-extension-property-read",
@@ -849,6 +892,7 @@ fn a_read_of_a_composable_property_resolves_and_the_compose_pass_refuses_it() {
         &[],
         "5:42: error: krusty's Compose compiler plugin does not support a read of a composable \
          property yet",
+        24,
     );
 }
 
@@ -878,8 +922,12 @@ fn a_library_composable_default_is_unavailable_without_the_compose_plugin() {
         compiled.stderr,
         format!(
             "{}:3:15: error: default-argument realization is unavailable for 'Sized'.\n\
+             fun plain() {{ Sized() }}\n\
+             {}{}\n\
              krusty: 1 error(s)\n",
-            probe.source.display()
+            probe.shown(),
+            " ".repeat(14),
+            "^".repeat(5)
         )
     );
     assert_eq!(compiled.code, Some(1));
@@ -980,40 +1028,67 @@ fn the_atomicfu_pass_rejects_what_it_does_not_cover() {
         "atomicfu-boolean",
         "class Flag { private val set = atomic(false) }\n",
         "3:22: error: krusty's atomicfu compiler plugin does not support an AtomicBoolean yet",
+        23,
     );
     assert_atomicfu_rejects(
         "atomicfu-top-level",
         "private val top = atomic(0)\nfun next() = top.incrementAndGet()\n",
         "3:9: error: krusty's atomicfu compiler plugin does not support a top-level atomic \
          property yet",
+        19,
     );
     assert_atomicfu_rejects(
         "atomicfu-update",
         "class Counter {\nprivate val hits = atomic(0)\nfun next() = hits.updateAndGet { it + 1 }\n}\n",
         "5:14: error: krusty's atomicfu compiler plugin does not support the atomic operation \
          `updateAndGet` yet",
+        28,
     );
     assert_atomicfu_rejects(
         "atomicfu-value",
         "class Counter {\nprivate val hits = atomic(0)\nfun wrapper(): Any = hits\n}\n",
         "5:22: error: krusty's atomicfu compiler plugin does not support an atomic property used \
          as a value yet",
+        4,
     );
     assert_atomicfu_rejects(
         "atomicfu-var",
         "class Counter {\nprivate var hits = atomic(0)\nfun reset() { hits = atomic(1) }\n}\n",
         "4:9: error: krusty's atomicfu compiler plugin does not support a mutable atomic property \
          yet",
+        20,
     );
     assert_atomicfu_rejects(
         "atomicfu-inner",
         "class Counter {\nprivate val hits = atomic(0)\ninner class Probe { fun next() = hits.incrementAndGet() }\n}\n",
         "5:34: error: krusty's atomicfu compiler plugin does not support an atomic operation \
          outside a member function of the atomic's class yet",
+        22,
     );
 }
 
-fn assert_atomicfu_rejects(name: &str, declarations: &str, error: &str) {
+/// The line an error names, and a run of `width` carets under it, as kotlinc's renderer prints a
+/// diagnostic's source. `error` starts with the `line:column` the diagnostic is reported at.
+fn refusal_excerpt(source: &str, error: &str, width: usize) -> String {
+    let mut position = error.split(':');
+    let line: usize = position.next().unwrap().parse().expect("the error's line");
+    let column: usize = position
+        .next()
+        .unwrap()
+        .parse()
+        .expect("the error's column");
+    format!(
+        "{}\n{}{}",
+        source
+            .lines()
+            .nth(line - 1)
+            .expect("the error's line exists"),
+        " ".repeat(column - 1),
+        "^".repeat(width)
+    )
+}
+
+fn assert_atomicfu_rejects(name: &str, declarations: &str, error: &str, width: usize) {
     let plugin = krusty::toolchain::atomicfu_compiler_plugin_jar()
         .expect("the atomicfu compiler plugin is provisioned");
     let source = format!("package probe\nimport kotlinx.atomicfu.*\n{declarations}");
@@ -1030,8 +1105,9 @@ fn assert_atomicfu_rejects(name: &str, declarations: &str, error: &str) {
     assert_eq!(
         compiled.stderr,
         format!(
-            "info: {partial}\n{}:{error}; compile this module with kotlinc\nkrusty: 1 error(s)\n",
-            probe.source.display()
+            "info: {partial}\n{}:{error}; compile this module with kotlinc\n{}\nkrusty: 1 error(s)\n",
+            probe.shown(),
+            refusal_excerpt(&source, error, width)
         )
     );
     assert_eq!(compiled.code, Some(3));
@@ -1042,7 +1118,13 @@ fn assert_atomicfu_rejects(name: &str, declarations: &str, error: &str) {
 /// files with the Compose plugin, and assert the one error `Probe.kt:<error>` krusty reports.
 /// Like [`assert_compose_rejects`], with a call into `library`, a module krusty compiles first
 /// with the Compose plugin in package `lib`.
-fn assert_compose_library_call_rejects(name: &str, library: &str, declarations: &str, error: &str) {
+fn assert_compose_library_call_rejects(
+    name: &str,
+    library: &str,
+    declarations: &str,
+    error: &str,
+    width: usize,
+) {
     let compose = reference_plugin_jar("compose-compiler-plugin.jar");
     let switches = vec![format!("-Xplugin={}", compose.display())];
     let mut classpath =
@@ -1055,10 +1137,9 @@ fn assert_compose_library_call_rejects(name: &str, library: &str, declarations: 
     let built = library.krusty(&classpath, &switches);
     assert_eq!(built.code, Some(0), "{}", built.stderr);
     classpath.push(library.dir.join("krusty"));
-    let probe = Probe::new(
-        name,
-        &format!("package probe\nimport androidx.compose.runtime.Composable\n{declarations}"),
-    );
+    let source =
+        format!("package probe\nimport androidx.compose.runtime.Composable\n{declarations}");
+    let probe = Probe::new(name, &source);
     let compiled = probe.krusty(&classpath, &switches);
     let partial = PluginDiagnostic::PartialSubstitution {
         plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
@@ -1067,8 +1148,9 @@ fn assert_compose_library_call_rejects(name: &str, library: &str, declarations: 
     assert_eq!(
         compiled.stderr,
         format!(
-            "info: {partial}\n{}:{error}; compile this module with kotlinc\nkrusty: 1 error(s)\n",
-            probe.source.display()
+            "info: {partial}\n{}:{error}; compile this module with kotlinc\n{}\nkrusty: 1 error(s)\n",
+            probe.shown(),
+            refusal_excerpt(&source, error, width)
         )
     );
     assert_eq!(compiled.code, Some(3));
@@ -1094,16 +1176,23 @@ fn a_library_composable_lambda_parameter_aligns_with_its_method() {
         plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
     }
     .message();
-    let file = probe.source.display();
+    let file = probe.shown();
     assert_eq!(
         compiled.stderr,
         format!(
             "info: {partial}\n\
              {file}:4:13: error: krusty's Compose compiler plugin does not support a lambda in a \
              composable function yet; compile this module with kotlinc\n\
+             @Composable fun Greeting() {{\n\
+             {}{}\n\
              {file}:5:1: error: krusty's Compose compiler plugin does not support a composable call \
              outside the statements of a composable body yet; compile this module with kotlinc\n\
-             krusty: 2 error(s)\n"
+             ReusableContent(1) {{ }}\n\
+             {}\n\
+             krusty: 2 error(s)\n",
+            " ".repeat(12),
+            "^".repeat(14),
+            "^".repeat(22)
         )
     );
     assert_eq!(compiled.code, Some(3));
@@ -1141,8 +1230,9 @@ fn forwarding_a_composable_lambda_parameter_to_a_producer_library_is_declined() 
         format!(
             "info: {partial}\n{}:5:1: error: krusty's Compose compiler plugin does not support a \
              composable lambda parameter passed to a library composable yet; compile this module \
-             with kotlinc\nkrusty: 1 error(s)\n",
-            probe.source.display()
+             with kotlinc\nFrame(content)\n{}\nkrusty: 1 error(s)\n",
+            probe.shown(),
+            "^".repeat(14)
         )
     );
     assert_eq!(compiled.code, Some(3));
@@ -1236,7 +1326,13 @@ fn a_function_parameter_aligns_by_the_erasure_its_producer_emitted() {
     assert_eq!(compiled.code, Some(0));
 }
 
-fn assert_compose_rejects(name: &str, declarations: &str, others: &[(&str, &str)], error: &str) {
+fn assert_compose_rejects(
+    name: &str,
+    declarations: &str,
+    others: &[(&str, &str)],
+    error: &str,
+    width: usize,
+) {
     let compose = reference_plugin_jar("compose-compiler-plugin.jar");
     let source =
         format!("package probe\nimport androidx.compose.runtime.Composable\n{declarations}");
@@ -1258,8 +1354,9 @@ fn assert_compose_rejects(name: &str, declarations: &str, others: &[(&str, &str)
     assert_eq!(
         compiled.stderr,
         format!(
-            "info: {partial}\n{}:{error}; compile this module with kotlinc\nkrusty: 1 error(s)\n",
-            probe.source.display()
+            "info: {partial}\n{}:{error}; compile this module with kotlinc\n{}\nkrusty: 1 error(s)\n",
+            probe.shown(),
+            refusal_excerpt(&source, error, width)
         )
     );
     assert_eq!(compiled.code, Some(3));

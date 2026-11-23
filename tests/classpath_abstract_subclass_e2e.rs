@@ -174,7 +174,7 @@ fn assert_diagnostics(
     );
     assert_eq!(result.krusty_stdout, "", "{name}");
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected_block(krusty),
         "{name}"
     );

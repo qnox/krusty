@@ -382,7 +382,7 @@ fn sanitized_local_function_names_clash_like_kotlinc() {
     );
     common::expect_identical_rejection(&result, "sanitized local-function clash");
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         common::rendered_error_blocks(&result.reference_stderr, true)
     );
 }

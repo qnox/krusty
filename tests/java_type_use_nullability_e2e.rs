@@ -153,7 +153,7 @@ fn assert_rejected_like_kotlinc(
     );
     assert_eq!(result.krusty_stdout, "", "{tag}");
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         krusty_errors,
         "{tag}"
     );
