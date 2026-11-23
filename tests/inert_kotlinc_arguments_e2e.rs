@@ -287,3 +287,18 @@ fn allowing_expect_actual_classes_compiles_as_kotlinc_does() {
     assert_eq!(classes(&path("krusty")), expected, "{ARGUMENT}");
     let _ = std::fs::remove_dir_all(work);
 }
+
+/// kotlinc refuses to run on a JVM older than 17 unless this argument is given. The reference
+/// kotlinc runs on a newer JVM, so its check never fires: both compilers compile silently with and
+/// without the argument, and their classes are identical.
+#[test]
+fn allowing_a_pre_17_runtime_jdk_compiles_as_kotlinc_does() {
+    const ARGUMENT: &str = "-Xallow-pre-17-runtime-jdk";
+    let source = "package a\nfun box(): String = \"OK\"\n";
+    let (code, stderr) = assert_inert_for_source(ARGUMENT, "Runtime.kt", source);
+    assert_eq!(
+        (code, stderr.as_str()),
+        (0, ""),
+        "kotlinc without {ARGUMENT} on a JVM of at least 17"
+    );
+}

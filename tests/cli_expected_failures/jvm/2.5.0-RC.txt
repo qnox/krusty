@@ -34,7 +34,6 @@ Xjsr305/jsr305MigrationWarn.args
 Xjsr305/jsr305NoFlag.args
 Xjsr305/jsr305Strict.args
 Xjsr305/jsr305Warn.args
-XminimumRuntimeJdk/minimumRuntimeJdkMinAllowed.args
 XsupressWarnings/multipleWarningSuppression.args
 XsupressWarnings/suppressAllWarningsJvm.args
 XsupressWarnings/warningLevelAndNowarn.args
