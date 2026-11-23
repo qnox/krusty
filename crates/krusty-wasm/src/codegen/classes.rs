@@ -931,6 +931,7 @@ pub(super) fn declare(
         &WasmRepresentation { classifiers },
         ir,
         plan,
+        &mut module_tables.extended,
         &|superclass| {
             laid_out
                 .get(superclass)

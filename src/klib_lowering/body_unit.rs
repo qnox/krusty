@@ -1618,7 +1618,9 @@ impl<'s> CallLinker for Linker<'_, 's> {
             KlibIrSignature::Accessor(accessor) => {
                 KlibDeclarationSignature::Accessor(accessor.clone())
             }
-            KlibIrSignature::FileLocal { .. } => return Ok(None),
+            KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => {
+                return Ok(None)
+            }
         };
         // The overridden symbol is the declaration itself, which this body's producer graph
         // resolves exactly as it resolves a call of it.
@@ -1657,12 +1659,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
-        let record = self.sources.declarations.classifier(name);
-        record.map(|record| record.is_interface()).ok_or_else(|| {
-            KlibBodyDeclineReason::SignatureMismatch(format!(
-                "an object literal's supertype {name:?} is not a selected classifier"
-            ))
-        })
+        inline_functions::is_interface(self, name)
     }
 
     fn link_accessor(
