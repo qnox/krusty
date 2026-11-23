@@ -331,6 +331,7 @@ impl Filler<'_> {
             | PlanKey::DependencySetter(_) => {
                 Err("a dependency member numbered as a member of a module interface".to_owned())
             }
+            PlanKey::Installed(fid) => Ok(method(fid)),
             PlanKey::Getter(property) | PlanKey::Setter(property) => {
                 let setter = matches!(declaration.member, PlanKey::Setter(_));
                 let accessor = match ir.local_property_layouts.get(&property) {
@@ -547,6 +548,29 @@ impl Filler<'_> {
                         } else {
                             found.entry(to).or_insert(entry);
                         }
+                    }
+                }
+                // A member of an interface a KLIB unit installed is implemented by the method
+                // that the class declaring it records, at that method's slot.
+                if own {
+                    for edge in &ir.classes[class as usize].installed_interface_overrides {
+                        let key = PlanKey::Installed(edge.overridden);
+                        if self.numbers.number(key).is_none() {
+                            return Err(format!(
+                                "an override of an installed interface member with no number \
+                                 (`{}`)",
+                                ir.classes[id as usize].fq_name()
+                            ));
+                        }
+                        let slot_key = function_key(ir, class, edge.implementation);
+                        let Some(&slot) = table.slots.get(&slot_key) else {
+                            return Err(format!(
+                                "an installed interface member implemented by a method with no \
+                                 slot (`{}`)",
+                                ir.classes[id as usize].fq_name()
+                            ));
+                        };
+                        found.insert(key, Implementation::Slot(slot));
                     }
                 }
             }

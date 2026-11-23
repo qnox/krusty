@@ -2178,7 +2178,6 @@ serialization/serializedVararg.kt
 size/add.kt
 size/helloWorld.kt
 size/helloWorldPromise.kt
-smartCasts/smartcastFromGenericToString.kt
 specialBuiltins/bridges.kt
 specialBuiltins/emptyList.kt
 specialBuiltins/enumAsOrdinaled.kt
