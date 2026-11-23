@@ -266,7 +266,7 @@ fn a_member_extension_does_not_implement_an_ordinary_java_method() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }
@@ -327,7 +327,7 @@ fn legacy_context_receivers_from_classpath_match_kotlinc() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
     let _ = std::fs::remove_dir_all(classpath);
@@ -354,7 +354,7 @@ fn generic_abstract_property_bounds_from_classpath_match_kotlinc() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }
@@ -432,7 +432,7 @@ fn unsigned_abstract_overloads_from_classpath_are_all_reported() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }
@@ -459,7 +459,7 @@ fn generic_shape_abstract_overloads_from_classpath_are_all_reported() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }
@@ -487,7 +487,7 @@ fn nested_generic_classifier_segments_match_kotlinc() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }
@@ -532,7 +532,7 @@ fn reordered_generic_property_bounds_form_one_obligation() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }
@@ -558,7 +558,7 @@ fn covariant_abstract_property_reports_most_specific_result() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }
@@ -623,7 +623,7 @@ fn mutable_abstract_property_wins_over_an_equally_specific_val() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }
@@ -649,7 +649,7 @@ fn alpha_renamed_generic_property_results_form_one_obligation() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }
@@ -676,7 +676,7 @@ fn bounded_generic_property_result_retains_subtype_proof() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }
@@ -703,7 +703,7 @@ fn secondary_generic_property_bound_retains_subtype_proof() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }
@@ -729,7 +729,7 @@ fn transitive_generic_property_bound_retains_subtype_proof() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }
@@ -757,7 +757,7 @@ fn implicit_generic_property_bound_matches_across_providers() {
         [] as [&str; 0]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         [] as [&str; 0]
     );
 }
@@ -780,7 +780,7 @@ fn generic_property_bound_uses_the_applied_owner_argument() {
         [] as [&str; 0]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         [] as [&str; 0]
     );
 }

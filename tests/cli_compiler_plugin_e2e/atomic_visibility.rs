@@ -64,7 +64,7 @@ fun localOwner() {
         Vec::<String>::new()
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }

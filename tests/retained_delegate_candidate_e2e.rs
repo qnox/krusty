@@ -104,7 +104,7 @@ fn a_class_name_containing_a_dollar_is_not_mangled_in_the_ambiguity() {
     );
     assert_ne!(result.reference_code, 0, "kotlinc accepted the delegate");
     assert_ne!(result.krusty_code, 0, "krusty accepted the delegate");
-    let observed = complete_errors(&result.krusty_stderr, false);
+    let observed = complete_errors(&result.krusty_stderr, true);
     let expected = complete_errors(&result.reference_stderr, true);
     assert!(
         !expected.is_empty(),
@@ -141,7 +141,7 @@ fn a_nested_class_whose_name_contains_a_dollar_keeps_that_dollar() {
     );
     assert_ne!(result.reference_code, 0, "kotlinc accepted the delegate");
     assert_ne!(result.krusty_code, 0, "krusty accepted the delegate");
-    let observed = complete_errors(&result.krusty_stderr, false);
+    let observed = complete_errors(&result.krusty_stderr, true);
     let expected = complete_errors(&result.reference_stderr, true);
     assert!(
         !expected.is_empty(),
@@ -164,7 +164,7 @@ fn an_ambiguous_getvalue_on_an_unannotated_property_matches_kotlinc() {
     );
     assert_ne!(result.reference_code, 0, "kotlinc accepted the delegate");
     assert_ne!(result.krusty_code, 0, "krusty accepted the delegate");
-    let observed = complete_errors(&result.krusty_stderr, false);
+    let observed = complete_errors(&result.krusty_stderr, true);
     let expected = complete_errors(&result.reference_stderr, true);
     assert!(
         !expected.is_empty(),

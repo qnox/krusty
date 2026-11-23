@@ -267,7 +267,7 @@ fn hidden_abstract_member_must_be_implemented() {
     ];
     assert_eq!((result.krusty_code, result.reference_code), (1, 1));
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
     assert_eq!(

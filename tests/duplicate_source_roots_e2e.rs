@@ -156,8 +156,11 @@ fn a_symlinked_spelling_is_a_second_source_like_kotlinc() {
     // krusty reports the same two conflicts in its own rendering, one per spelling.
     let krusty_conflict = |root: &Path| {
         format!(
-            "{}:1:1: error: conflicting overloads:\nfun g(): Int\n",
-            root.join("G.kt").display()
+            "{}:1:1: error: conflicting overloads:\nfun g(): Int\nfun g() = 1\n^^^^^^^\n",
+            root.join("G.kt")
+                .strip_prefix(&working)
+                .expect("the scratch directory is under the working directory")
+                .display()
         )
     };
     let krusty_expected = format!(

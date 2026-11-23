@@ -220,7 +220,7 @@ fn assert_conflicting_classifier_imports(
     assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);
     assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
     assert_eq!(

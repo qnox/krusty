@@ -108,7 +108,6 @@ diagnosticTests/wrongAnnotationArgumentInCtor.args
 errorSuppressionWarning.args
 experimentalCheckers.args
 explicitContextArguments.args
-explicitReturnTypesEnabled.args
 expression1.args
 extraArgCommonChecks/extraArgumentEmpty.args
 extraArgCommonChecks/extraArgumentInvalidValue.args
