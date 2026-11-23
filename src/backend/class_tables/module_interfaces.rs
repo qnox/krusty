@@ -96,6 +96,7 @@ impl ModuleInterfaces {
                     callable,
                     parameters,
                     result,
+                    ..
                 } = member
                 {
                     numbering
@@ -124,12 +125,17 @@ impl ModuleInterfaces {
                         callable,
                         parameters,
                         result: returned,
+                        suspend,
                     } => {
+                        // A call and an implementation carry a suspend member in its
+                        // continuation-passing form.
+                        let (parameters, returned) =
+                            super::module_slots::carried(parameters, *returned, *suspend);
                         result.carriers.insert(
                             PlanKey::Callable(*callable),
                             Carriers::Function {
-                                parameters: parameters.clone(),
-                                result: *returned,
+                                parameters,
+                                result: returned,
                             },
                         );
                     }
@@ -400,6 +406,7 @@ impl Numbering<'_> {
                 callable,
                 parameters,
                 result,
+                ..
             } => {
                 let edges = interface
                     .function_overrides
