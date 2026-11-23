@@ -13465,6 +13465,9 @@ impl<'a> Checker<'a> {
                     self.apply_condition_exclusions(scope, cond, true);
                     self.check_loop_body(scope, body, &label);
                 }
+                // A write in the body reaches every exit, and the condition's own proof sits in
+                // the enclosing scope, so the continuation loses what the loop writes.
+                self.clear_narrowings_a_loop_invalidates(scope, &[cond, body]);
             }
             Stmt::DoWhile { body, cond, label } => {
                 self.clear_narrowings_a_do_while_invalidates(scope, body, cond);
@@ -13495,6 +13498,7 @@ impl<'a> Checker<'a> {
                 if label.is_some() {
                     self.loop_labels.pop();
                 }
+                self.clear_narrowings_a_do_while_invalidates(scope, body, cond);
             }
             Stmt::For {
                 name,
@@ -13504,6 +13508,7 @@ impl<'a> Checker<'a> {
             } => {
                 self.clear_narrowings_a_loop_invalidates(scope, &[body]);
                 self.stmt_for(scope, s, name, range, body, label);
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
             }
             Stmt::ForEach {
                 name,
@@ -13513,6 +13518,7 @@ impl<'a> Checker<'a> {
             } => {
                 self.clear_narrowings_a_loop_invalidates(scope, &[body]);
                 self.stmt_for_each(scope, s, name, iterable, body, label);
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
             }
             Stmt::Expr(e) => {
                 // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
