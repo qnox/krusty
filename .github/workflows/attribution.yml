@@ -10,7 +10,8 @@ on:
     types: [opened, edited, reopened]
 
 # Writing pull requests lets the check remove the footer an integration appends to the body. A fork's
-# pull request gets a read-only token whatever this asks for.
+# pull request gets a read-only token whatever this asks for; attribution-cleanup.yml removes the
+# footer there, and on a pull request whose base still has an older copy of this workflow.
 permissions:
   contents: read
   pull-requests: write
