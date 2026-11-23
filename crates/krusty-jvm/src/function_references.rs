@@ -207,15 +207,30 @@ pub(super) struct Facades<'a> {
     pub(super) facades: &'a [String],
 }
 
+/// Where a reference sits and what its adapter allows: the node, the class that owns the adapter
+/// (when one does) and whether the adapter becomes the carrier's own `invoke`.
+struct AdapterSite {
+    expression: usize,
+    adapter_owner: Option<krusty::types::TypeName>,
+    own_invoke: bool,
+}
+
 fn realize_adapter_reference(
     ir: &mut IrFile,
     callables: &krusty::backend::CheckedBackendCallables,
     facades: Facades<'_>,
-    expression: usize,
-    adapter_owner: Option<krusty::types::TypeName>,
-    own_invoke: bool,
+    site: AdapterSite,
+    carriers: &mut krusty::fx_hash::HashMap<
+        krusty::types::TypeName,
+        (krusty::ir::FunId, krusty::ir::ClassId),
+    >,
     reference: krusty::ir::IrCallableReference,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
+    let AdapterSite {
+        expression,
+        adapter_owner,
+        own_invoke,
+    } = site;
     let function = ir
         .functions
         .get(reference.adapter as usize)
@@ -455,72 +470,92 @@ fn realize_adapter_reference(
         reflection_parameters.push(continuation);
         reflection_result = Ty::obj("kotlin/Any");
     }
-    let internal = reference_class_name(ir, facades.current, expression, "function");
-    let mut class = IrClass::synthetic(internal);
-    class.enclosure = reference_enclosure(ir, expression);
-    class.superclass = type_name(if fun_interface_constructor {
-        "kotlin/jvm/internal/FunInterfaceConstructorReference"
-    } else if adapted {
-        "kotlin/jvm/internal/AdaptedFunctionReference"
+    // Nodes that carry one source reference's name are copies of it (an inline splice copies the
+    // node and its adapter, and a lambda keeps a template beside its implementation). They are one
+    // class: each copy instantiates it with its own captures.
+    let shared =
+        crate::local_class_names::callable_reference_name(ir, expression as u32).and_then(|name| {
+            carriers
+                .get(&name)
+                .filter(|(adapter, _)| *adapter == reference.adapter)
+                .map(|&(_, class)| (name, class))
+        });
+    let (internal, class) = if let Some(shared) = shared {
+        shared
     } else {
-        "kotlin/jvm/internal/FunctionReferenceImpl"
-    });
-    class.func_ref = Some(FuncRef {
-        adapted,
-        fun_interface_constructor,
-        bound,
-        bound_contexts: reference.bound_contexts,
-        field_capture_count: u32::try_from(reference.captures.len())
-            .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?,
-        capture_fields,
-        arity,
-        is_suspend: function_type.suspend,
-        declaration_suspend: reference.declaration_suspend,
-        module_target: None,
-        local_target: Some(reference.adapter),
-        owner_class,
-        fn_name: name,
-        flags: i32::from(top_level) | (adaptation_flags << 1),
-        dispatch: if bound {
-            FrDispatch::StaticBound
+        let internal = reference_class_name(ir, facades.current, expression, "function");
+        let mut class = IrClass::synthetic(internal);
+        class.enclosure = reference_enclosure(ir, expression);
+        class.superclass = type_name(if fun_interface_constructor {
+            "kotlin/jvm/internal/FunInterfaceConstructorReference"
+        } else if adapted {
+            "kotlin/jvm/internal/AdaptedFunctionReference"
         } else {
-            FrDispatch::Static
-        },
-        call_owner: adapter_owner,
-        call_name: function.name,
-        reflection_name: None,
-        reflection_receiver_parameter: false,
-        reflection_target_ret_ty: Some(reflection_result),
-        reflection_target_param_tys: Some(reflection_parameters),
-        call_interface: false,
-        param_tys: invoke_parameters,
-        ret_ty: invoke_result,
-        target_param_tys: target_parameters,
-        target_ret_ty: target_result,
-        unbox_params: vec![None; function_type.params.len()],
-        unbox_param_nullable: vec![false; function_type.params.len()],
-        box_ret: None,
-        staticbound_recv_unbox: None,
-        bound_context_unbox: Vec::new(),
-        invoke: None,
-        function_type: reference.function_type.non_null(),
-        reflection_signature,
-        reflected,
-        reflected_function,
-        invoke_renamed: false,
-    });
-    let class = ir.add_class(class);
-    if own_invoke {
-        realize_own_invoke(
-            ir,
-            expression,
-            class,
-            reference.adapter,
+            "kotlin/jvm/internal/FunctionReferenceImpl"
+        });
+        class.func_ref = Some(FuncRef {
+            adapted,
+            fun_interface_constructor,
             bound,
-            function_type,
-            adapter_owner,
-        );
-    }
+            bound_contexts: reference.bound_contexts,
+            field_capture_count: u32::try_from(reference.captures.len())
+                .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?,
+            capture_fields,
+            arity,
+            is_suspend: function_type.suspend,
+            declaration_suspend: reference.declaration_suspend,
+            module_target: None,
+            local_target: Some(reference.adapter),
+            owner_class,
+            fn_name: name,
+            flags: i32::from(top_level) | (adaptation_flags << 1),
+            dispatch: if bound {
+                FrDispatch::StaticBound
+            } else {
+                FrDispatch::Static
+            },
+            call_owner: adapter_owner,
+            call_name: function.name,
+            reflection_name: None,
+            reflection_receiver_parameter: false,
+            reflection_target_ret_ty: Some(reflection_result),
+            reflection_target_param_tys: Some(reflection_parameters),
+            call_interface: false,
+            param_tys: invoke_parameters,
+            ret_ty: invoke_result,
+            target_param_tys: target_parameters,
+            target_ret_ty: target_result,
+            unbox_params: vec![None; function_type.params.len()],
+            unbox_param_nullable: vec![false; function_type.params.len()],
+            box_ret: None,
+            staticbound_recv_unbox: None,
+            bound_context_unbox: Vec::new(),
+            invoke: None,
+            function_type: reference.function_type.non_null(),
+            reflection_signature,
+            reflected,
+            reflected_function,
+            invoke_renamed: false,
+        });
+        let class = ir.add_class(class);
+        if own_invoke {
+            realize_own_invoke(
+                ir,
+                expression,
+                class,
+                reference.adapter,
+                bound,
+                function_type,
+                adapter_owner,
+            );
+        }
+        if crate::local_class_names::callable_reference_name(ir, expression as u32)
+            == Some(internal)
+        {
+            carriers.insert(internal, (reference.adapter, class));
+        }
+        (internal, class)
+    };
     let mut constructor_arguments = reference.captures;
     let mut capture_types = capture_types;
     if bound_contexts > 0 {
@@ -972,12 +1007,24 @@ pub(super) fn realize(
                 .map(|function| (function, class.fq_name_id()))
         })
         .collect::<krusty::fx_hash::HashMap<_, _>>();
-    // An adapter several reference nodes share (an inline splice copies the node, not its
-    // adapter) stays one static method every carrier calls; only a sole reference owns it.
-    let mut adapter_uses = krusty::fx_hash::HashMap::<krusty::ir::FunId, usize>::default();
-    for expression in &ir.exprs {
+    // An adapter several references share stays one static method every carrier calls; only a
+    // sole reference owns it. Nodes the source naming walk gave one name are one reference: an
+    // inline splice copies the node and its adapter, and a lambda keeps a template beside its
+    // implementation, yet kotlinc compiles the source reference to one class.
+    let mut adapter_uses = krusty::fx_hash::HashMap::<
+        krusty::ir::FunId,
+        krusty::fx_hash::HashSet<Result<krusty::types::TypeName, usize>>,
+    >::default();
+    for (raw, expression) in ir.exprs.iter().enumerate() {
         if let IrExpr::CallableReference(reference) = expression {
-            *adapter_uses.entry(reference.adapter).or_default() += 1;
+            let identity = u32::try_from(raw)
+                .ok()
+                .and_then(|raw| crate::local_class_names::callable_reference_name(ir, raw))
+                .ok_or(raw);
+            adapter_uses
+                .entry(reference.adapter)
+                .or_default()
+                .insert(identity);
         }
     }
     let expression_count = ir.exprs.len();
@@ -1006,6 +1053,7 @@ pub(super) fn realize(
         }
     }
     let mut spliced_getters = super::property_references::SplicedGetters::default();
+    let mut carriers = krusty::fx_hash::HashMap::default();
     for raw in 0..expression_count {
         let IrExpr::CallableReference(reference) = ir.exprs[raw].clone() else {
             continue;
@@ -1014,7 +1062,9 @@ pub(super) fn realize(
         // reference class nor the adapter, and names the inline marker after the class the
         // reference would have been. A use that still evaluates the reference keeps the carrier,
         // and with it the adapter.
-        let sole = adapter_uses.get(&reference.adapter) == Some(&1);
+        let sole = adapter_uses
+            .get(&reference.adapter)
+            .is_some_and(|uses| uses.len() == 1);
         if ir
             .inline_callable_reference_arguments
             .contains(&(raw as u32))
@@ -1058,9 +1108,12 @@ pub(super) fn realize(
             ir,
             callables,
             facades,
-            raw,
-            adapter_owner,
-            own_invoke,
+            AdapterSite {
+                expression: raw,
+                adapter_owner,
+                own_invoke,
+            },
+            &mut carriers,
             *reference,
         )?;
     }
