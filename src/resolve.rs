@@ -40734,8 +40734,8 @@ impl<'a> Checker<'a> {
                                     Some(declaration) => {
                                         let Some(signature) = index.signature(declaration) else {
                                             return Some(
-                                                source_constructors::unpublished_constructor_shapes(
-                                                    cl,
+                                                source_constructors::unpublished_primary_shapes(
+                                                    index, owner, cl,
                                                 ),
                                             );
                                         };
