@@ -155,6 +155,19 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         receivers: Vec<ImplicitReceiver>,
     ) -> Vec<super::implicit_rungs::ImplicitRung<ImplicitReceiver>> {
+        // A receiver narrowed by a proof (`this is Cancellable`) is a rung of its narrowed type and
+        // then of the declared type it still is: a member only the declared class has (a private
+        // `_cancelled`, a function the proven interface lacks) is reached on the second one.
+        let receivers = receivers
+            .into_iter()
+            .flat_map(|receiver| {
+                let declared = (receiver.ty != receiver.declared_ty).then_some(ImplicitReceiver {
+                    ty: receiver.declared_ty,
+                    ..receiver
+                });
+                std::iter::once(receiver).chain(declared)
+            })
+            .collect::<Vec<_>>();
         super::implicit_rungs::implicit_rungs(
             receivers,
             self.static_scope_classifiers(scope),

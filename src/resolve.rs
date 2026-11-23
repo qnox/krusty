@@ -14368,7 +14368,7 @@ impl<'a> Checker<'a> {
                     .flow_intersection_member_receiver(scope, receiver, &name)
                     .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
                 {
-                    rt = self.set(receiver, projected);
+                    rt = self.project_receiver_view(receiver, projected);
                 }
                 let receiver_callables = if rt != Ty::Error {
                     self.stable_receiver_callables(rt, &name)
@@ -20288,7 +20288,7 @@ impl<'a> Checker<'a> {
             .flow_intersection_property_receiver(scope, receiver, &name, true)
             .or_else(|| self.type_parameter_member_receiver(scope, receiver_ty, &name))
         {
-            receiver_ty = self.set(receiver, projected);
+            receiver_ty = self.project_receiver_view(receiver, projected);
         } else if let Some(projected) =
             self.nominal_intersection_property_receiver(receiver_ty, &name, true)
         {
@@ -35701,6 +35701,20 @@ impl<'a> Checker<'a> {
         Some(ty)
     }
 
+    /// Commit the constituent of a flow intersection that owns a selected member as the receiver's
+    /// view. A receiver whose value already carries a recorded smart-cast conversion (`this` after
+    /// `this is B`) converts to the projected constituent, not to the narrowed type it was read at.
+    fn project_receiver_view(&mut self, receiver: ExprId, projected: Ty) -> Ty {
+        if let Some(conversion) = self.selected_value_smartcasts.get_mut(&receiver) {
+            *conversion = projected;
+        }
+        // The implicit `this` the expression denotes is read at that same view.
+        if let Some(selection) = self.implicit_receiver_selections.get_mut(&receiver) {
+            selection.ty = projected;
+        }
+        self.set(receiver, projected)
+    }
+
     fn set(&mut self, e: ExprId, t: Ty) -> Ty {
         let previous = self.expr_types[e.0 as usize];
         if previous != t && previous != Ty::Error {
@@ -50772,7 +50786,7 @@ impl<'a> Checker<'a> {
                 .flow_intersection_property_receiver(scope, receiver, &name, false)
                 .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
             {
-                rt = self.set(receiver, projected);
+                rt = self.project_receiver_view(receiver, projected);
             } else if let Some(projected) =
                 self.nominal_intersection_property_receiver(rt, &name, false)
             {
