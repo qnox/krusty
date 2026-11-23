@@ -242,6 +242,17 @@ impl<'a> BodyLowering<'a, '_, '_> {
                     }
                     self.primitive_hash_code(operand)
                 }
+                DependencyOperation::ScalarEquality => {
+                    let (None, [left, right], None) =
+                        (receiver, args, extension_receiver_parameter)
+                    else {
+                        return Some(Err("a malformed scalar equality".into()));
+                    };
+                    if ret != Ty::Boolean {
+                        return Some(Err("a scalar equality with a non-Boolean result".into()));
+                    }
+                    self.binary(site, IrBinOp::Eq, *left, *right)
+                }
                 // The iteration protocol's own member: the member path realizes it through the
                 // receiver's runtime descriptor, exactly as it realizes a source call of it.
                 DependencyOperation::PrimitiveIteratorNext => return None,
