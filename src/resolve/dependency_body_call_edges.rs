@@ -43,7 +43,7 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         if !visited.insert(identity.clone()) {
             continue;
         }
-        let emitted = bodies.emitted_body(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
+        let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
         classifier_roots.extend(bodies.type_classifiers_in_body(&identity));
         classifier_roots.extend(emitted.hierarchy_roots);
         for (signature, name) in emitted.sam_classifiers {
@@ -102,6 +102,11 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         let Some(selected) = realization.klib_body_callable() else {
             continue;
         };
+        // A continuation interception's call expands to its coroutine class's own interception.
+        match crate::klib_lowering::expansion_member(selected, bodies) {
+            Ok(member) => pending.extend(member),
+            Err(_) => return Err(external),
+        }
         semantic_types.extend(selected.params().iter().copied());
         semantic_types.push(selected.ret());
         semantic_types.extend(selected.type_parameters().iter().copied());
@@ -151,10 +156,11 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         // Every instance a member of a materialized ordinary class is called on was created by
         // that class's primary constructor, so emission materializes the class with the member
         // and closes its initialization and dispatched members. The walk reaches them the same way.
-        if let Some(class) = selected
-            .class_contract()
-            .filter(|class| !class.is_value && class.emits_members())
-        {
+        if let Some(class) = selected.class_contract().filter(|class| {
+            !class.is_value
+                && class.kind != crate::libraries::TypeKind::Enum
+                && class.emits_members()
+        }) {
             if let Some(primary) = class.primary_constructor.clone() {
                 pending.push(crate::libraries::KlibDependencyCallable {
                     module: class.module.clone(),

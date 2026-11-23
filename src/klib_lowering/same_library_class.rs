@@ -33,9 +33,9 @@ use crate::klib_libraries::{KlibDeclarationBodies, LocatedClass, LocatedMember};
 use crate::libraries::{KlibBodyClassParameters, KlibDependencyCallable, TypeKind};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::klib_ir::tree::{
-    KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprKind, KlibIrFunction,
-    KlibIrMember, KlibIrMemberAccess, KlibIrStatement, KlibIrType, KlibIrTypeParameter,
-    KlibIrVariance,
+    KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrClass, KlibIrExprId, KlibIrExprKind,
+    KlibIrFunction, KlibIrMember, KlibIrMemberAccess, KlibIrStatement, KlibIrType,
+    KlibIrTypeParameter, KlibIrVariance,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::metadata::semantic::{
@@ -98,6 +98,8 @@ pub(super) struct LocalInitialize<'a> {
     pub(super) fields: Vec<LocalStoredField<'a>>,
     pub(super) steps: Vec<InitializationStep<'a>>,
     pub(super) outer: Option<OuterInstance<'a>>,
+    /// The arguments the constructor passes its superclass's constructor.
+    pub(super) superclass_arguments: Vec<KlibIrExprId>,
 }
 
 /// The field frame of one member of a file-local class.
@@ -143,9 +145,10 @@ pub(super) struct PreparedMember<'a> {
     pub(super) header: FunctionHeader,
     /// Interface members this function overrides, authenticated against the admitted supertypes.
     pub(super) overrides: Vec<MemberOverride>,
+    /// Members of the class's non-public interfaces this function overrides, by their file-local
+    /// signatures in the class's module. The linker installs those interfaces before the class.
+    pub(super) installed_overrides: Vec<KlibIrSignature>,
     pub(super) visibility: Visibility,
-    /// Whether the function is its property's setter.
-    pub(super) setter: bool,
     /// The function's own type parameters and their declared bounds, which a call binds.
     pub(super) formals: Vec<(crate::types::TyParamName, Vec<Ty>)>,
 }
@@ -389,6 +392,9 @@ struct AdmittedInterface {
 struct AuthenticatedSupertypes {
     supertypes: Vec<Ty>,
     interfaces: Vec<AdmittedInterface>,
+    /// The non-public interfaces of the same library among [`Self::supertypes`], by signature,
+    /// each with its classifier.
+    local_interfaces: Vec<(KlibIrSignature, TypeName)>,
     superclass: Option<TypeName>,
     library_superclass: Option<AdmittedInterface>,
 }
@@ -405,6 +411,9 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) self_type: Ty,
     pub(super) supertypes: Vec<Ty>,
     pub(super) interfaces: Vec<TypeName>,
+    /// The non-public interfaces of the same library among [`Self::interfaces`], by signature,
+    /// which the linker installs before the class.
+    pub(super) local_interfaces: Vec<KlibIrSignature>,
     pub(super) fields: Vec<IrField>,
     pub(super) stored: Vec<LocalStoredField<'a>>,
     pub(super) ctor_args: Vec<IrCtorArg>,
@@ -435,11 +444,11 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) object: bool,
 }
 
-/// A same-library superclass constructor a class's constructor delegates to, and the slot of the
-/// class constructor's parameter each of its arguments passes.
+/// A same-library superclass constructor a class's constructor delegates to, and the serialized
+/// argument it passes for each of its parameters.
 pub(super) struct LocalSuperclass<'a> {
     pub(super) constructor: SuperclassConstructor<'a>,
-    pub(super) operands: Vec<u32>,
+    pub(super) arguments: Vec<KlibIrExprId>,
 }
 
 /// The constructor a same-library class's constructor delegates to.
@@ -471,7 +480,7 @@ pub(super) fn classifier_name(module: &str, signature: &KlibIrSignature) -> Opti
         KlibIrSignature::Public(public) => {
             return super::klib_types::classifier_name(public).ok();
         }
-        KlibIrSignature::Accessor(_) => return None,
+        KlibIrSignature::Accessor(_) | KlibIrSignature::TypeParameter { .. } => return None,
     };
     Some(
         TypeName::ROOT
@@ -816,6 +825,7 @@ fn prepare_interface<'a>(
     let AuthenticatedSupertypes {
         supertypes,
         interfaces,
+        local_interfaces,
         superclass,
         library_superclass,
     } = authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
@@ -823,6 +833,13 @@ fn prepare_interface<'a>(
     // declaration this installation did not authenticate.
     if superclass.is_some() || library_superclass.is_some() {
         return Err(mismatch("an interface lists a superclass"));
+    }
+    // An installed interface's members take numbers of their own, which one extending it would
+    // have to share.
+    if !local_interfaces.is_empty() {
+        return Err(unsupported(
+            "a non-public interface extending a non-public interface",
+        ));
     }
     let self_type = Ty::obj_args_name(classifier_name, &formals);
     let Some(receiver) = &class.this_receiver else {
@@ -842,6 +859,7 @@ fn prepare_interface<'a>(
         classes: source.classes,
         module: source.module,
         interfaces: &interfaces,
+        local_interfaces: &[],
         library_superclass: None,
     };
     let members = abstract_members(arena, class, &scope)?;
@@ -885,24 +903,11 @@ fn abstract_members<'a>(
                 if function.constructor {
                     return Err(mismatch("an interface declares a constructor"));
                 }
-                members.push(prepare_abstract_member(arena, function, scope, false)?);
+                members.push(prepare_abstract_member(arena, function, scope)?);
             }
             KlibIrMember::Property(property) => {
-                if let Some(id) = property.getter {
-                    members.push(prepare_abstract_member(
-                        arena,
-                        arena.function(id),
-                        scope,
-                        false,
-                    )?);
-                }
-                if let Some(id) = property.setter {
-                    members.push(prepare_abstract_member(
-                        arena,
-                        arena.function(id),
-                        scope,
-                        true,
-                    )?);
+                for id in [property.getter, property.setter].into_iter().flatten() {
+                    members.push(prepare_abstract_member(arena, arena.function(id), scope)?);
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {
@@ -923,7 +928,6 @@ fn prepare_abstract_member<'a>(
     arena: &'a KlibIrArena,
     function: &'a KlibIrFunction,
     scope: &MemberScope<'_>,
-    setter: bool,
 ) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
     if function.body.is_some() {
         return Err(unsupported(
@@ -931,15 +935,19 @@ fn prepare_abstract_member<'a>(
         ));
     }
     let header = local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?;
+    let MemberOverrides {
+        published: overrides,
+        installed: installed_overrides,
+    } = member_overrides(function, scope)?;
     Ok(PreparedMember {
         signature: function.base.symbol.signature.clone(),
         symbol: &function.base.symbol,
         statements: &[],
         formals: header.own_formals(function),
         header,
-        overrides: member_overrides(function, scope)?,
+        overrides,
+        installed_overrides,
         visibility: declaration_visibility(function.base.flags),
-        setter,
     })
 }
 
@@ -963,7 +971,9 @@ fn constructor_class(
         KlibIrSignature::FileLocal { .. } | KlibIrSignature::Public(_) => {
             Ok(classifier.signature.clone())
         }
-        KlibIrSignature::Accessor(_) => Err(non_public_type()),
+        KlibIrSignature::Accessor(_) | KlibIrSignature::TypeParameter { .. } => {
+            Err(non_public_type())
+        }
     }
 }
 
@@ -1105,9 +1115,12 @@ fn prepare_class<'a>(
     let AuthenticatedSupertypes {
         supertypes,
         interfaces,
+        local_interfaces,
         superclass,
         library_superclass,
     } = authenticate_supertypes(source.bodies, source.module, arena, class, &types, &resolve)?;
+    let (local_interfaces, local_interface_names): (Vec<_>, Vec<_>) =
+        local_interfaces.into_iter().unzip();
     let self_type = Ty::obj_args_name(class_name, &formals);
     let result = semantic_type_in(arena, &types, function.return_type, &resolve)?;
     if result != self_type {
@@ -1132,6 +1145,7 @@ fn prepare_class<'a>(
         classes: source.classes,
         module: source.module,
         interfaces: &interfaces,
+        local_interfaces: &local_interfaces,
         library_superclass: library_superclass.as_ref(),
     };
     let StoredMembers {
@@ -1194,11 +1208,8 @@ fn prepare_class<'a>(
     let superclass = local_superclass(
         source,
         LocalDelegation {
-            arena,
-            function,
             delegation,
             superclass,
-            outer: outer_instance,
         },
     )?;
     let class_type_parameters = formals
@@ -1208,15 +1219,27 @@ fn prepare_class<'a>(
             _ => Err(mismatch("a non-public class type parameter has no symbol")),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let init_header =
-        local_initializer_header(function, receiver, self_type, arena, &types, &resolve)?;
+    let init_header = local_initializer_header(
+        function,
+        receiver,
+        self_type,
+        outer_instance.map(|_| params[0]),
+        arena,
+        &types,
+        &resolve,
+    )?;
     let class_type_parameter_bounds = bounds.clone();
     Ok(PreparedLocalClass {
         key,
         classifier: class_name,
         self_type,
         supertypes,
-        interfaces: interfaces.iter().map(|interface| interface.name).collect(),
+        interfaces: interfaces
+            .iter()
+            .map(|interface| interface.name)
+            .chain(local_interface_names)
+            .collect(),
+        local_interfaces,
         fields,
         stored,
         ctor_args,
@@ -1279,27 +1302,21 @@ fn file_private_naming(
 
 /// A class's constructor delegation to the constructor of its same-library superclass, and what
 /// it checks that delegation against.
-struct LocalDelegation<'a, 'o> {
-    arena: &'a KlibIrArena,
-    function: &'a KlibIrFunction,
+struct LocalDelegation<'a> {
     delegation: Option<&'a KlibIrMemberAccess>,
     superclass: Option<TypeName>,
-    outer: Option<OuterInstance<'o>>,
 }
 
-/// The same-library superclass a class's constructor delegates to, with the constructor slot of
-/// each argument it passes. The delegation passes the constructor's own parameters, an inner
-/// class its outer instance among them; any other argument keeps the class unsupported.
+/// The same-library superclass a class's constructor delegates to, with the serialized argument
+/// it passes for each of that constructor's parameters. The class's initializer evaluates them in
+/// the constructor's frame, as it evaluates the rest of the constructor's body.
 fn local_superclass<'a>(
     source: LocalClassSource<'a, '_>,
-    delegation: LocalDelegation<'a, '_>,
+    delegation: LocalDelegation<'a>,
 ) -> Result<Option<LocalSuperclass<'a>>, KlibBodyDeclineReason> {
     let LocalDelegation {
-        arena,
-        function,
         delegation,
         superclass,
-        outer,
     } = delegation;
     let (access, superclass) = match (delegation, superclass) {
         (None, None) => return Ok(None),
@@ -1336,20 +1353,6 @@ fn local_superclass<'a>(
             }
         },
     };
-    let prefix = u32::from(outer.is_some());
-    let slot = |symbol: &KlibIrSymbol| -> Option<u32> {
-        if let Some(outer) = outer {
-            let receiver = function.dispatch_receiver.as_ref();
-            if symbol == outer.symbol || receiver.is_some_and(|r| &r.base.symbol == symbol) {
-                return Some(1);
-            }
-        }
-        function
-            .regular_parameters
-            .iter()
-            .position(|parameter| &parameter.base.symbol == symbol)
-            .map(|index| 1 + prefix + u32::try_from(index).expect("a parameter index fits u32"))
-    };
     let arguments = match &access.arguments {
         KlibIrArguments::Flat(values) => values.clone(),
         KlibIrArguments::Split {
@@ -1367,25 +1370,17 @@ fn local_superclass<'a>(
             ))
         }
     };
-    let operands = arguments
+    let arguments = arguments
         .into_iter()
         .map(|argument| {
-            let argument = argument.ok_or(unsupported(
+            argument.ok_or(unsupported(
                 "a superclass delegation leaving a parameter to its default",
-            ))?;
-            match &arena.expr(argument).kind {
-                KlibIrExprKind::GetValue { symbol, .. } => slot(symbol).ok_or(unsupported(
-                    "a superclass constructor argument other than a constructor parameter",
-                )),
-                _ => Err(unsupported(
-                    "a superclass constructor argument other than a constructor parameter",
-                )),
-            }
+            ))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(LocalSuperclass {
         constructor,
-        operands,
+        arguments,
     }))
 }
 
@@ -1399,6 +1394,7 @@ fn authenticate_supertypes(
 ) -> Result<AuthenticatedSupertypes, KlibBodyDeclineReason> {
     let mut supertypes = Vec::new();
     let mut interfaces = Vec::new();
+    let mut local_interfaces = Vec::new();
     let mut superclass = None;
     let mut library_superclass = None;
     for supertype in &class.supertypes {
@@ -1410,8 +1406,17 @@ fn authenticate_supertypes(
         let KlibIrType::Simple { classifier, .. } = arena.ty(*supertype) else {
             return Err(unsupported("a superclass other than Any"));
         };
-        // A same-library class is the superclass, which the class's constructor delegates to.
+        // A same-library interface is installed with the class that implements it; a same-library
+        // class is the superclass, which the class's constructor delegates to.
         if let Some(local) = resolve(&classifier.signature)? {
+            let is_interface = bodies
+                .module_local_class(module, &classifier.signature)
+                .is_some_and(|(_, local)| class_kind(local.base.flags) == TypeKind::Interface);
+            if is_interface {
+                local_interfaces.push((classifier.signature.clone(), local));
+                supertypes.push(ty);
+                continue;
+            }
             if superclass.replace(local).is_some() {
                 return Err(mismatch("a class lists two superclasses"));
             }
@@ -1462,6 +1467,7 @@ fn authenticate_supertypes(
     Ok(AuthenticatedSupertypes {
         supertypes,
         interfaces,
+        local_interfaces,
         superclass,
         library_superclass,
     })
@@ -1483,6 +1489,8 @@ struct MemberScope<'a> {
     classes: Option<&'a dyn crate::assignable::TypeOracle>,
     module: &'a str,
     interfaces: &'a [AdmittedInterface],
+    /// The non-public interfaces of the class's own library it implements, by signature.
+    local_interfaces: &'a [KlibIrSignature],
     library_superclass: Option<&'a AdmittedInterface>,
 }
 
@@ -1521,15 +1529,12 @@ fn members_and_storage<'a>(
             KlibIrMember::Function(id) => {
                 let function = arena.function(*id);
                 if !function.constructor {
-                    members.push(prepare_member(arena, function, scope, false)?);
+                    members.push(prepare_member(arena, function, scope)?);
                 }
             }
             KlibIrMember::Property(property) => {
-                if let Some(id) = property.getter {
-                    members.push(prepare_member(arena, arena.function(id), scope, false)?);
-                }
-                if let Some(id) = property.setter {
-                    members.push(prepare_member(arena, arena.function(id), scope, true)?);
+                for id in [property.getter, property.setter].into_iter().flatten() {
+                    members.push(prepare_member(arena, arena.function(id), scope)?);
                 }
             }
             KlibIrMember::Field(_) | KlibIrMember::AnonymousInitializer { .. } => {}
@@ -1554,7 +1559,6 @@ fn prepare_member<'a>(
     arena: &'a KlibIrArena,
     function: &'a KlibIrFunction,
     scope: &MemberScope<'_>,
-    setter: bool,
 ) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
     let statements = match &function.body {
         Some(KlibIrBody::Block(statements)) => statements.as_slice(),
@@ -1564,31 +1568,59 @@ fn prepare_member<'a>(
         None => return Err(unsupported("a member of a non-public class without a body")),
     };
     let header = local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?;
+    let MemberOverrides {
+        published: overrides,
+        installed: installed_overrides,
+    } = member_overrides(function, scope)?;
     Ok(PreparedMember {
         signature: function.base.symbol.signature.clone(),
         symbol: &function.base.symbol,
         statements,
         formals: header.own_formals(function),
         header,
-        overrides: member_overrides(function, scope)?,
+        overrides,
+        installed_overrides,
         visibility: declaration_visibility(function.base.flags),
-        setter,
     })
+}
+
+/// What one member overrides: published declarations by their dependency identity, and members
+/// of the class's non-public interfaces by their file-local signatures.
+struct MemberOverrides {
+    published: Vec<MemberOverride>,
+    installed: Vec<KlibIrSignature>,
 }
 
 fn member_overrides(
     function: &KlibIrFunction,
     scope: &MemberScope<'_>,
-) -> Result<Vec<MemberOverride>, KlibBodyDeclineReason> {
+) -> Result<MemberOverrides, KlibBodyDeclineReason> {
     // An override overrides every declaration the ones it names override in turn:
     // `ArrayAsCollection.iterator` overrides `Collection.iterator` and, through it,
     // `Iterable.iterator`, which interface dispatch keys by.
     let mut identities = Vec::<KlibDependencyCallable>::new();
+    let mut installed = Vec::new();
     for symbol in &function.overridden {
         if symbol.kind != KlibIrSymbolKind::Function {
             return Err(unsupported(
                 "an override of a declaration other than a function",
             ));
+        }
+        // A member of a non-public interface the class implements is no published declaration:
+        // it is the member the installed interface declares. A non-public interface extends no
+        // other, so nothing further is overridden through it.
+        if let KlibIrSignature::FileLocal { .. } = symbol.signature {
+            let declaring = scope
+                .bodies
+                .module_class_declaring(scope.module, &symbol.signature)
+                .map(|(_, class)| &class.base.symbol.signature);
+            if !declaring.is_some_and(|interface| scope.local_interfaces.contains(interface)) {
+                return Err(unsupported("an override of a non-public declaration"));
+            }
+            if !installed.contains(&symbol.signature) {
+                installed.push(symbol.signature.clone());
+            }
+            continue;
         }
         // A property accessor overrides the interface's accessor by its accessor signature, as a
         // function overrides by its public one; `function_owner` locates either.
@@ -1750,7 +1782,10 @@ fn member_overrides(
             is_interface,
         });
     }
-    Ok(overrides)
+    Ok(MemberOverrides {
+        published: overrides,
+        installed,
+    })
 }
 
 /// Every supertype from a class's written interfaces and its library superclass up, at the

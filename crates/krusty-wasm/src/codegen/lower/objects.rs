@@ -201,7 +201,7 @@ impl Body<'_> {
             if let Some(element) = element {
                 self.pass_shared_capture(*arg, element)?;
             } else {
-                self.value(*arg, param)?;
+                self.argument(*arg, param)?;
             }
         }
         self.code.call(constructor).local_get(object);
@@ -242,7 +242,7 @@ impl Body<'_> {
                 ));
             }
             for (argument, parameter) in args.iter().zip(parameters.iter()) {
-                self.value(*argument, *parameter)?;
+                self.argument(*argument, *parameter)?;
             }
             self.code.call(function);
             Ok(())
@@ -516,7 +516,7 @@ impl Body<'_> {
         for (parameter, (&arg, &param)) in args.iter().zip(params).enumerate() {
             match function {
                 Some(function) => self.function_argument(function, parameter as u32, arg)?,
-                None => self.value(arg, param)?,
+                None => self.argument(arg, param)?,
             }
         }
         self.code.local_get(this);
@@ -564,7 +564,7 @@ impl Body<'_> {
         self.value(receiver, Ty::obj_name(owner))?;
         self.code.local_tee(this);
         for (&arg, &param) in args.iter().zip(params) {
-            self.value(arg, param)?;
+            self.argument(arg, param)?;
         }
         self.code.local_get(this);
         self.table_of_object();
@@ -714,7 +714,7 @@ impl Body<'_> {
             .null_receiver_throws(self.module, self.classifiers)?;
         self.value(receiver, any())?;
         for (arg, param) in args.iter().zip(&call.params) {
-            self.value(*arg, *param)?;
+            self.argument(*arg, *param)?;
         }
         let stub = self
             .runtime
@@ -746,7 +746,7 @@ impl Body<'_> {
         self.value(receiver, any())?;
         self.code.local_tee(this);
         for (arg, param) in args.iter().zip(&params) {
-            self.value(*arg, *param)?;
+            self.argument(*arg, *param)?;
         }
         self.code.local_get(this);
         self.table_of_object();
@@ -788,6 +788,21 @@ impl Body<'_> {
                 && tables.slot(class, &key).is_some()
             {
                 return self.dispatch_function(class, function, receiver, args);
+            }
+            // An abstract member of an interface a KLIB lowering unit installed has no class
+            // slot and no source callable: it is numbered after the module's members, and a call
+            // through it goes to the stub of that number.
+            if self.ir.classes[class as usize].is_interface {
+                let installed = PlanKey::Installed(function);
+                let numbers = &tables.numbers;
+                if let Some(number) = numbers.number(installed) {
+                    let (params, result) = numbers
+                        .function_carriers(installed)
+                        .ok_or("an installed interface member with no carriers")?;
+                    let (params, result) = (params.to_vec(), result);
+                    let call = self.numbered_member(number, params, result)?;
+                    return self.interface_call(call, receiver, args);
+                }
             }
         }
         self.direct_member_call(function, receiver, args)
@@ -842,7 +857,7 @@ impl Body<'_> {
             .ok_or("a `super` call to a function of no function type")?;
         let mut expected = vec![REFERENCE];
         for param in params {
-            expected.push(super::parameter_carrier_of(*param)?.ok_or("a `Unit` parameter")?);
+            expected.push(super::parameter_carrier_of(*param)?);
         }
         if params.len() != args.len()
             || carried != expected
@@ -854,7 +869,7 @@ impl Body<'_> {
         }
         self.value(receiver, any())?;
         for (&arg, param) in args.iter().zip(params) {
-            self.value(arg, *param)?;
+            self.argument(arg, *param)?;
         }
         self.code.call(function);
         Ok(())
@@ -2155,7 +2170,7 @@ impl Body<'_> {
                 .local_get(u32::try_from(parameter).expect("too many parameters"));
         }
         for (arg, param) in args.iter().zip(&params[forwarded..]) {
-            self.value(*arg, *param)?;
+            self.argument(*arg, *param)?;
         }
         self.code.call(constructor);
         Ok(())
