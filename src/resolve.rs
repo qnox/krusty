@@ -366,6 +366,8 @@ mod receiver_uses;
 mod reflection_locals;
 mod reified_type_arguments;
 mod resolved_type_occurrences;
+mod return_value_status;
+mod return_value_usage;
 mod safe_call_flow;
 mod safe_index;
 mod sam_argument_fit;
@@ -39113,6 +39115,10 @@ impl<'a> Checker<'a> {
             self.expr_inner(scope, e, expected, value_required)
         });
         expression_finalization::finalize(self, scope, e, t);
+        // Under the policies the expression's own annotations opened.
+        if self.discarded_exprs.contains(&e) {
+            self.check_unused_return_value(e, t);
+        }
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
         self.expr_depth -= 1;

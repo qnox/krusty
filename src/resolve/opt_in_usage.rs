@@ -229,7 +229,7 @@ impl Checker<'_> {
         }
     }
 
-    fn callee_name_span(&self, callee: ExprId) -> Span {
+    pub(super) fn callee_name_span(&self, callee: ExprId) -> Span {
         match self.file.expr(callee) {
             Expr::Member { name, .. } => self.member_name_span(callee, name),
             _ => self.span(callee),

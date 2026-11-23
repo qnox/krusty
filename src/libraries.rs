@@ -1003,6 +1003,9 @@ pub struct LibraryCallable {
     /// The deprecation in effect for this dependency declaration, with the SYMBOL rendering a use's
     /// diagnostic names. A source declaration leaves it unset: its checked annotations state it.
     pub deprecation: Option<std::sync::Arc<crate::types::DeprecatedDeclaration>>,
+    /// The return value status this dependency declaration records; `None` for a Java or
+    /// current-module declaration, whose status the checker resolves from annotations.
+    pub return_value_status: Option<crate::types::ReturnValueStatus>,
     /// The callee's DECLARED (un-erased, pre-substitution) parameter types in physical source order:
     /// leading contexts, then an extension receiver when present, then value parameters. An ordinary
     /// member's dispatch receiver is not included. This is the parameter analogue of

@@ -226,9 +226,12 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `private_setter_records_value_parameter_before_the_property_name`.
 
 - `ReturnValueStatus` lives in `Function.flags` bits 16-17 and `Property.flags` bits 17-18
-  (Unspecified 0, MustUse 1, ExplicitlyIgnorable 2). With the return-value checker disabled, the
-  default of kotlinc 2.4.0-2.4.20 (`FirMustUseReturnValueStatusComponent`), a declaration takes the
-  status of the first declaration it overrides that records one, else Unspecified. The stdlib records
+  (Unspecified 0, MustUse 1, ExplicitlyIgnorable 2). `FirMustUseReturnValueStatusComponent` resolves
+  it: a declaration's `@IgnorableReturnValue` gives ExplicitlyIgnorable, `@MustUseReturnValues` on it
+  or an enclosing class or file (or `-Xreturn-value-checker=full`) gives MustUse, and otherwise it
+  takes the status of the first declaration it overrides that records one, else Unspecified. The
+  checker defaults to `check` from 2.5 and to disabled before, where only the inherited status
+  applies. The stdlib records
   MustUse on most API (`Any.toString`, `Continuation.resumeWith`, `List.get`) and ExplicitlyIgnorable
   on members such as `MutableCollection.add`; a Java declaration records none and is skipped, so an
   override of `java.util.ArrayList.add` records 2. The same status resolution gives an override the

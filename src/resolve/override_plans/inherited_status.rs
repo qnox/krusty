@@ -1,11 +1,14 @@
 //! Declaration status a current-module override inherits, derived from frozen override edges.
 //!
 //! kotlinc resolves a declaration's `ReturnValueStatus` in `FirMustUseReturnValueStatusComponent`.
-//! With the return-value checker disabled, the default of every supported kotlinc, a declaration
-//! takes the status of the first declaration it directly overrides and is `Unspecified` otherwise,
-//! whatever it is annotated with. A Java declaration records no status of its own, so the search
-//! continues past it to the next overridden declaration; that is how an override of
-//! `java.util.ArrayList.add` inherits Kotlin's `MutableCollection.add` status.
+//! A declaration the module declares takes `@IgnorableReturnValue`'s `ExplicitlyIgnorable`, or
+//! `MustUse` from `@MustUseReturnValues` on itself or an enclosing class or file, or from the `full`
+//! checker mode; otherwise the status of the first declaration it directly overrides, and
+//! `Unspecified` when it overrides none. With the checker disabled, the default before the release
+//! that made it stable, only the inherited status applies, whatever the declaration is annotated
+//! with. A Java declaration records no status of its own, so the search continues past it to the
+//! next overridden declaration; that is how an override of `java.util.ArrayList.add` inherits
+//! Kotlin's `MutableCollection.add` status. See [`ReturnValueResolution`].
 //!
 //! Status resolution also carries the `operator` and `infix` modifiers down an override chain: a
 //! function overriding one that has either modifier has it too, whatever it declares, and so does
@@ -21,13 +24,16 @@
 use crate::fx_hash::HashMap;
 use std::hash::Hash;
 
+use crate::features::ReturnValueCheckerMode;
 use crate::fir::{
     CallableId, DeclarationFlags, DeclarationId, DeclarationKind, InheritedCallableStatus,
-    ResolvedDelegatedFunctionDeclaration, ResolvedDelegatedPropertyDeclaration,
+    PropertyId, ResolvedDelegatedFunctionDeclaration, ResolvedDelegatedPropertyDeclaration,
     ResolvedFunctionOverride, ResolvedFunctionOverrideTarget, ResolvedModuleIndex,
     ResolvedPropertyOverride, ResolvedPropertyOverrideTarget,
 };
 use crate::types::{ReturnValueStatus, Visibility};
+
+use super::super::return_value_status::DeclaredReturnValue;
 
 /// A resolved declaration status and what one override edge says about its overridden declaration.
 trait Status: Copy + Default {
@@ -42,16 +48,48 @@ trait Status: Copy + Default {
     fn inherit(own: Self, overridden: &[Self::Edge]) -> Self;
 }
 
-impl Status for ReturnValueStatus {
+/// A callable's return value status with the declared facts it resolves from, so an override
+/// derives it from the declarations it overrides under kotlinc's rules.
+#[derive(Clone, Copy, Default)]
+struct ReturnValueResolution {
+    status: ReturnValueStatus,
+    declared: DeclaredReturnValue,
+    mode: ReturnValueCheckerMode,
+}
+
+impl ReturnValueResolution {
+    /// The status a declaration with `declared` facts has when it overrides nothing.
+    fn declared(
+        index: &ResolvedModuleIndex,
+        declaration: Option<DeclarationId>,
+        status: ReturnValueStatus,
+    ) -> Self {
+        let mode = index.return_value_checker_mode();
+        ReturnValueResolution {
+            status,
+            declared: declaration
+                .map(|declaration| DeclaredReturnValue::of(index, declaration))
+                .unwrap_or_default(),
+            mode,
+        }
+    }
+}
+
+impl Status for ReturnValueResolution {
     /// `None` for a Java declaration, which records no status.
     type Edge = Option<ReturnValueStatus>;
 
     fn as_edge(self) -> Self::Edge {
-        Some(self)
+        Some(self.status)
     }
 
-    fn inherit(_own: Self, overridden: &[Self::Edge]) -> Self {
-        overridden.iter().find_map(|edge| *edge).unwrap_or_default()
+    fn inherit(own: Self, overridden: &[Self::Edge]) -> Self {
+        ReturnValueResolution {
+            status: own
+                .declared
+                .resolve(own.mode, overridden.iter().find_map(|edge| *edge)),
+            ..own
+        }
     }
 }
 
@@ -63,27 +101,41 @@ struct OverriddenFunction {
     semantic_role: Option<crate::types::SemanticCallRole>,
 }
 
-impl Status for InheritedCallableStatus {
+/// A function's inherited status with the facts its return value status resolves from.
+#[derive(Clone, Copy, Default)]
+struct FunctionStatus {
+    inherited: InheritedCallableStatus,
+    return_value: ReturnValueResolution,
+}
+
+impl Status for FunctionStatus {
     type Edge = OverriddenFunction;
 
     fn as_edge(self) -> Self::Edge {
         OverriddenFunction {
-            return_value: Some(self.return_value),
-            operator: self.operator,
-            infix: self.infix,
-            semantic_role: self.semantic_role,
+            return_value: Some(self.inherited.return_value),
+            operator: self.inherited.operator,
+            infix: self.inherited.infix,
+            semantic_role: self.inherited.semantic_role,
         }
     }
 
     fn inherit(own: Self, overridden: &[Self::Edge]) -> Self {
-        InheritedCallableStatus {
-            return_value: overridden
+        let return_value = ReturnValueResolution::inherit(
+            own.return_value,
+            &overridden
                 .iter()
-                .find_map(|edge| edge.return_value)
-                .unwrap_or_default(),
-            operator: own.operator || overridden.iter().any(|edge| edge.operator),
-            infix: own.infix || overridden.iter().any(|edge| edge.infix),
-            semantic_role: overridden.iter().find_map(|edge| edge.semantic_role),
+                .map(|edge| edge.return_value)
+                .collect::<Vec<_>>(),
+        );
+        FunctionStatus {
+            inherited: InheritedCallableStatus {
+                return_value: return_value.status,
+                operator: own.inherited.operator || overridden.iter().any(|edge| edge.operator),
+                infix: own.inherited.infix || overridden.iter().any(|edge| edge.infix),
+                semantic_role: overridden.iter().find_map(|edge| edge.semantic_role),
+            },
+            return_value,
         }
     }
 }
@@ -203,6 +255,30 @@ pub(super) fn publish_inherited_statuses(
         },
         |edge| edge.depth,
     );
+    let overriding_functions = functions
+        .iter()
+        .map(|(callable, _)| *callable)
+        .collect::<crate::fx_hash::HashSet<_>>();
+    let overriding_properties = properties
+        .iter()
+        .map(|(property, _)| *property)
+        .collect::<crate::fx_hash::HashSet<_>>();
+    // Bases that override nothing are published first: an override inherits from them.
+    let members = classifiers
+        .iter()
+        .flat_map(|classifier| {
+            index
+                .owned_declarations(classifier.classifier)
+                .iter()
+                .copied()
+        })
+        .collect::<Vec<_>>();
+    publish_declared_statuses(
+        index,
+        members,
+        &overriding_functions,
+        &overriding_properties,
+    );
     let functions = derive(
         &functions,
         |callable| index.own_function_status(callable),
@@ -210,44 +286,74 @@ pub(super) fn publish_inherited_statuses(
     );
     let properties = derive(
         &properties,
-        |_| ReturnValueStatus::Unspecified,
-        |property| index.property_return_value_status(property),
+        |property| index.own_property_status(property),
+        |property| index.module_property_status(property),
     );
     for (callable, status) in functions {
-        index.publish_callable_inherited_status(callable, status);
+        index.publish_callable_inherited_status(callable, status.inherited);
     }
     for (property, status) in properties {
-        index.publish_property_return_value_status(property, status);
+        index.publish_property_return_value_status(property, status.status);
     }
     publish_inherited_visibilities(index, classifiers)
 }
 
 impl ResolvedModuleIndex {
-    /// A module function's own declared facts: its `operator` and `infix` modifiers, with no
-    /// return-value status or role of its own.
-    fn own_function_status(&self, callable: CallableId) -> InheritedCallableStatus {
-        let flags = self
-            .callable(callable)
+    /// A module function's own declared facts: its `operator` and `infix` modifiers and what its
+    /// return value status resolves from, with no inherited status or role of its own.
+    fn own_function_status(&self, callable: CallableId) -> FunctionStatus {
+        let header = self.callable(callable);
+        let flags = header
             .and_then(|header| self.declaration_header(header.declaration))
             .map(|header| header.flags);
-        InheritedCallableStatus {
-            return_value: ReturnValueStatus::Unspecified,
-            operator: flags.is_some_and(|flags| flags.has(DeclarationFlags::OPERATOR)),
-            infix: flags.is_some_and(|flags| flags.has(DeclarationFlags::INFIX)),
-            semantic_role: None,
+        FunctionStatus {
+            inherited: InheritedCallableStatus {
+                return_value: ReturnValueStatus::Unspecified,
+                operator: flags.is_some_and(|flags| flags.has(DeclarationFlags::OPERATOR)),
+                infix: flags.is_some_and(|flags| flags.has(DeclarationFlags::INFIX)),
+                semantic_role: None,
+            },
+            return_value: ReturnValueResolution::declared(
+                self,
+                header.map(|header| header.declaration),
+                ReturnValueStatus::Unspecified,
+            ),
         }
     }
 
     /// The status a module function contributes to a declaration overriding it: its published
     /// inherited status together with its own modifiers. A declaration that overrides nothing has
     /// no published status, so its own `operator`/`infix` are all it contributes.
-    fn module_function_status(&self, callable: CallableId) -> InheritedCallableStatus {
+    fn module_function_status(&self, callable: CallableId) -> FunctionStatus {
         let own = self.own_function_status(callable);
         let published = self.callable_inherited_status(callable);
-        InheritedCallableStatus {
-            operator: own.operator || published.operator,
-            infix: own.infix || published.infix,
-            ..published
+        FunctionStatus {
+            inherited: InheritedCallableStatus {
+                operator: own.inherited.operator || published.operator,
+                infix: own.inherited.infix || published.infix,
+                ..published
+            },
+            return_value: ReturnValueResolution {
+                status: published.return_value,
+                ..own.return_value
+            },
+        }
+    }
+
+    /// What a module property's return value status resolves from when it overrides nothing.
+    fn own_property_status(&self, property: PropertyId) -> ReturnValueResolution {
+        ReturnValueResolution::declared(
+            self,
+            self.property(property).map(|header| header.declaration),
+            ReturnValueStatus::Unspecified,
+        )
+    }
+
+    /// The status a module property contributes to a declaration overriding it.
+    fn module_property_status(&self, property: PropertyId) -> ReturnValueResolution {
+        ReturnValueResolution {
+            status: self.property_return_value_status(property),
+            ..self.own_property_status(property)
         }
     }
 
@@ -272,7 +378,7 @@ impl ResolvedModuleIndex {
                 },
             })
             .collect::<Vec<_>>();
-        InheritedCallableStatus::inherit(InheritedCallableStatus::default(), &edges)
+        FunctionStatus::inherit(FunctionStatus::default(), &edges).inherited
     }
 
     /// The return-value status an `interface by` property forwarder has, as for
@@ -285,13 +391,91 @@ impl ResolvedModuleIndex {
             .iter()
             .map(|declaration| match declaration.target {
                 ResolvedPropertyOverrideTarget::Module(property) => {
-                    self.property_return_value_status(property).as_edge()
+                    self.module_property_status(property).as_edge()
                 }
                 ResolvedPropertyOverrideTarget::External(_) => declaration.return_value_status,
             })
             .collect::<Vec<_>>();
-        ReturnValueStatus::inherit(ReturnValueStatus::default(), &edges)
+        ReturnValueResolution::inherit(ReturnValueResolution::default(), &edges).status
     }
+}
+
+/// Publish the return value status of each of `declarations`, the members of the batch's
+/// classifiers, that overrides nothing: the status its own annotations, its enclosing scopes and
+/// the checker mode give it. With the checker disabled that is `Unspecified`, which is not recorded.
+fn publish_declared_statuses(
+    index: &mut ResolvedModuleIndex,
+    declarations: Vec<DeclarationId>,
+    overriding_functions: &crate::fx_hash::HashSet<crate::fir::CallableId>,
+    overriding_properties: &crate::fx_hash::HashSet<crate::fir::PropertyId>,
+) {
+    let mode = index.return_value_checker_mode();
+    if mode == ReturnValueCheckerMode::Disabled {
+        return;
+    }
+    for declaration in declarations {
+        let Some(kind) = index
+            .declaration_header(declaration)
+            .map(|header| header.kind)
+        else {
+            continue;
+        };
+        let status = || DeclaredReturnValue::of(index, declaration).resolve(mode, None);
+        match kind {
+            DeclarationKind::Function => {
+                let Some(callable) = index
+                    .callable_for_declaration(declaration)
+                    .map(|header| header.id)
+                    .filter(|callable| !overriding_functions.contains(callable))
+                else {
+                    continue;
+                };
+                let return_value = status();
+                index.publish_callable_inherited_status(
+                    callable,
+                    InheritedCallableStatus {
+                        return_value,
+                        ..Default::default()
+                    },
+                );
+            }
+            DeclarationKind::Property => {
+                let Some(property) = index
+                    .property_for_declaration(declaration)
+                    .filter(|property| !overriding_properties.contains(property))
+                else {
+                    continue;
+                };
+                let return_value = status();
+                index.publish_property_return_value_status(property, return_value);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Publish the return value status of every top-level callable and property of the module.
+pub(super) fn publish_top_level_statuses(index: &mut ResolvedModuleIndex) {
+    let top_level = index
+        .callable_headers()
+        .map(|callable| callable.declaration)
+        .chain(
+            index
+                .property_headers()
+                .map(|property| property.declaration),
+        )
+        .filter(|declaration| {
+            index
+                .declaration_anchor(*declaration)
+                .is_some_and(|anchor| anchor.owner.is_none())
+        })
+        .collect::<Vec<_>>();
+    publish_declared_statuses(
+        index,
+        top_level,
+        &crate::fx_hash::HashSet::default(),
+        &crate::fx_hash::HashSet::default(),
+    );
 }
 
 /// Resolve every override's effective visibility and restrict the headers of modifier-less

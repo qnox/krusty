@@ -395,6 +395,18 @@ impl ResolvedModuleIndex {
             .filter_map(|(&callable, status)| status.semantic_role.map(|role| (callable, role)))
     }
 
+    /// The return value checker mode the module's callable statuses were resolved under.
+    pub fn return_value_checker_mode(&self) -> crate::features::ReturnValueCheckerMode {
+        self.return_value_checker
+    }
+
+    pub(crate) fn publish_return_value_checker_mode(
+        &mut self,
+        mode: crate::features::ReturnValueCheckerMode,
+    ) {
+        self.return_value_checker = mode;
+    }
+
     pub fn property_return_value_status(
         &self,
         property: PropertyId,

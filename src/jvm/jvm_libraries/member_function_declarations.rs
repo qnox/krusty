@@ -300,6 +300,7 @@ impl JvmLibraries {
                             &m.descriptor,
                         );
                         let callable = LibraryCallable {
+                            return_value_status: m.return_value_status,
                             annotations: m.annotations.clone(),
                             deprecation: m.deprecation.clone(),
                             reflection_name: Some(m.name.clone()),

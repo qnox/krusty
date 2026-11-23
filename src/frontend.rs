@@ -1822,6 +1822,7 @@ where
             &symbols,
             diags,
         );
+        index.publish_return_value_checker_mode(project_features.return_value_checker_mode());
         crate::resolve::publish_override_plans(&mut index, &mut symbols);
         crate::resolve::operator_override_relations::publish_module(&mut index, &symbols);
         crate::resolve::function_type_parameters::publish_function_type_parameters(

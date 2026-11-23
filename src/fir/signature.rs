@@ -1479,6 +1479,8 @@ pub struct ResolvedModuleIndex {
     /// Non-default return-value statuses of module declarations, derived from the frozen edges.
     pub(super) callable_inherited_statuses: HashMap<CallableId, super::InheritedCallableStatus>,
     pub(super) property_return_value_statuses: HashMap<PropertyId, crate::types::ReturnValueStatus>,
+    /// The return value checker mode this compilation's statuses were resolved under.
+    pub(super) return_value_checker: crate::features::ReturnValueCheckerMode,
     /// Callables with a function-typed value parameter or extension receiver (checker-classified).
     pub(super) function_typed_parameter_callables: crate::fx_hash::HashSet<CallableId>,
     type_aliases: HashMap<DeclarationId, ResolvedTypeAliasHeader>,
@@ -2740,6 +2742,11 @@ impl ResolvedModuleIndex {
 
     pub fn property(&self, property: PropertyId) -> Option<ResolvedPropertyHeader> {
         self.properties.get(&property).copied()
+    }
+
+    /// Every published property, in no particular order.
+    pub(crate) fn property_headers(&self) -> impl Iterator<Item = ResolvedPropertyHeader> + '_ {
+        self.properties.values().copied()
     }
 
     pub fn property_for_declaration(&self, declaration: DeclarationId) -> Option<PropertyId> {
