@@ -877,12 +877,8 @@ pub fn compile(opts: &cli::Options) -> Result<usize, CompileError> {
                 .module_diagnostics
                 .retain(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error);
         }
-        let errors = diags.error_count();
         return Err(CompileError {
-            report: format!(
-                "{}krusty: {errors} error(s)\n",
-                diags.render_all(&rendered, opts.diagnostic_names)
-            ),
+            report: diags.render_all(&rendered, opts.diagnostic_names),
             plugin_refusal,
         });
     }

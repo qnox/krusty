@@ -322,8 +322,7 @@ fn unsupported_parcelized_classes_are_refused() {
          support a parcelized object, enum, interface or value class yet; compile this module \
          with kotlinc\n\
          object Single : Parcelable\n\
-         ^\n\
-         krusty: 2 error(s)\n"
+         ^\n"
     );
 }
 
@@ -357,7 +356,6 @@ fn a_runtime_type_annotation_is_refused_at_its_property() {
          support a property type with a Parcelize annotation yet; compile this module with \
          kotlinc\n\
          \x20   val tag: @RawValue String,\n\
-         \x20   ^^^^^^^^^^^^^^^^^^^^^^^^^\n\
-         krusty: 1 error(s)\n"
+         \x20   ^^^^^^^^^^^^^^^^^^^^^^^^^\n"
     );
 }

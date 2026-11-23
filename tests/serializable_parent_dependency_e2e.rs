@@ -141,8 +141,7 @@ fn a_parent_compiled_without_the_plugin_declines() {
         diagnostics,
         "<fixture>/main/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
          import kotlinx.serialization.Serializable\n\
-         ^\n\
-         krusty: 1 error(s)\n"
+         ^\n"
     );
 }
 
@@ -303,8 +302,7 @@ fn a_parent_overriding_an_inherited_element_declines() {
         fixture.krusty_rejects("main-krusty", &sources, &krusty_cp, &switches),
         "<fixture>/main-krusty/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
          import kotlinx.serialization.Serializable\n\
-         ^\n\
-         krusty: 1 error(s)\n"
+         ^\n"
     );
 }
 
@@ -593,15 +591,13 @@ fn assert_parent_declines(name: &str, library: &[(&str, &str)], main: &str) {
         fixture.krusty_rejects("main", &sources, &krusty_cp, &switches),
         "<fixture>/main/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
          import kotlinx.serialization.Serializable\n\
-         ^\n\
-         krusty: 1 error(s)\n"
+         ^\n"
     );
     assert_eq!(
         fixture.krusty_rejects("main-on-kotlinc-lib", &sources, &reference_cp, &switches),
         "<fixture>/main-on-kotlinc-lib/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
          import kotlinx.serialization.Serializable\n\
-         ^\n\
-         krusty: 1 error(s)\n"
+         ^\n"
     );
 }
 

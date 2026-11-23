@@ -504,14 +504,10 @@ fn krusty_cli_diagnostics_in_process(
         diags
             .module_diagnostics
             .retain(|diagnostic| diagnostic.severity == Severity::Error);
-        let count = diags.error_count();
         return (
             1,
             String::new(),
-            format!(
-                "{}krusty: {count} error(s)\n",
-                diags.render_all(&rendered_files, krusty::diag::DiagnosticNames::Hidden)
-            ),
+            diags.render_all(&rendered_files, krusty::diag::DiagnosticNames::Hidden),
         );
     }
     let emitted = outputs
