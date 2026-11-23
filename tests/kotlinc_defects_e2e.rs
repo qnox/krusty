@@ -231,7 +231,8 @@ fn defect(quirk: Quirk) -> Option<Defect> {
         | Quirk::InvisibleCandidatesKeepScopeLevels
         | Quirk::TailrecDotlessCallReportedAtOperator
         | Quirk::TailrecUnitObjectReturnFollowsCall
-        | Quirk::TailrecElvisLeftOperandIsTail => None,
+        | Quirk::TailrecElvisLeftOperandIsTail
+        | Quirk::UnresolvedClassLiteralReceiverIsNotConstant => None,
     }
 }
 

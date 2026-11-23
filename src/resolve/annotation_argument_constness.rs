@@ -168,7 +168,15 @@ impl Checker<'_> {
             if name == "class" {
                 if !self.class_literal_targets.contains_key(&leaf) {
                     let kind = if self.expr_types[receiver.0 as usize] == Ty::Error {
-                        NonConstantArgument::NotConst
+                        // The receiver's own error is the argument's only diagnostic once
+                        // kotlinc stops adding a constness one to it.
+                        if self.file.reference.quirks()
+                            .has(crate::kotlin_version::Quirk::UnresolvedClassLiteralReceiverIsNotConstant)
+                        {
+                            NonConstantArgument::NotConst
+                        } else {
+                            return Some(NonConstantArgument::ResolutionError);
+                        }
                     } else {
                         NonConstantArgument::NotKClassLiteral
                     };

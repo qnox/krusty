@@ -15,6 +15,26 @@ fun value(o: Any) { @C(o::class) val y = 1 }
     common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
 }
 
+/// The same unresolved class literal under a use-site target, as kotlinc's `kt19628_13` writes it:
+/// on a constructor property and on a body property.
+#[test]
+fn an_unresolved_class_literal_under_a_use_site_target_is_reported_on_the_argument() {
+    let src = "import kotlin.reflect.KClass
+
+@Target(AnnotationTarget.PROPERTY_GETTER)
+annotation class Anno(val value: KClass<*>)
+
+class Data(
+    @get:Anno(CollapsedStringAdapter::class)
+    var value: String?
+) {
+    @get:Anno(CollapsedStringAdapter::class)
+    private val b: String = \"\"
+}
+";
+    common::assert_errors_match_kotlinc(&[("main.kt", src)], &[]);
+}
+
 /// A property whose semantic result is an enum or `KClass` is diagnosed by that type before its
 /// declaration flags: the property is neither an enum entry nor a class literal.
 #[test]
