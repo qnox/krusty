@@ -288,11 +288,20 @@ fn declared_properties(
         .1
         .overloads
         .into_iter()
-        .filter(|property| {
-            property.kind == kind
-                && property.context_count == 0
-                && property.visibility != Visibility::Private
-        })
+        .filter(|property| property.kind == kind && property.visibility != Visibility::Private)
+        .collect()
+}
+
+/// [`declared_properties`] without context parameters: an inherited interface implementation is
+/// matched by its property type alone, so it never pairs declarations that take a context.
+fn declared_contextless_properties(
+    source: &dyn crate::symbol_source::SymbolSource,
+    owner: Ty,
+    name: &str,
+) -> Vec<PropertyInfo> {
+    declared_properties(source, owner, name, false)
+        .into_iter()
+        .filter(|property| property.context_count == 0)
         .collect()
 }
 
@@ -631,19 +640,14 @@ fn publish_inherited_interface_function_plans(
                                 .is_some_and(|target| target != overridden)
                     })
                     .filter(|candidate| {
-                        let parameters = applied_parameters_with_receiver(candidate);
-                        parameters.len() == applied_parameters.len()
-                            && parameters.iter().zip(applied_parameters.iter()).all(
-                                |(&implementation, &base)| equivalent(source, implementation, base),
-                            )
-                            && crate::symbol_resolver::resolution_subtype(
-                                source,
-                                candidate
-                                    .ret
-                                    .apply(candidate.callable.ret)
-                                    .canonical_semantic(),
-                                applied_result,
-                            )
+                        // One override slot with a refining result, by the shared rules: a
+                        // generic member such as `CoroutineContext.Element.fold` overrides
+                        // `CoroutineContext.fold` under its own type parameters.
+                        crate::symbol_resolver::function_override_input_slots_match(
+                            source, &applied, candidate,
+                        ) && crate::symbol_resolver::function_result_refines(
+                            source, candidate, &applied,
+                        )
                     })
                     .cloned()
                     .collect::<Vec<_>>();
@@ -748,10 +752,10 @@ fn publish_inherited_interface_property_plans(
         };
         for name in &interface.declared_callable_order {
             let raw = declarations_by_target(
-                declared_properties(source, Ty::obj_name(supertype.classifier), name, false),
+                declared_contextless_properties(source, Ty::obj_name(supertype.classifier), name),
                 |property| target(index, property),
             );
-            for applied in declared_properties(source, supertype.applied.get(), name, false) {
+            for applied in declared_contextless_properties(source, supertype.applied.get(), name) {
                 let Some(overridden) = target(index, &applied) else {
                     continue;
                 };
@@ -801,7 +805,11 @@ fn publish_inherited_interface_property_plans(
                     continue;
                 };
                 let implementation_declarations = declarations_by_target(
-                    declared_properties(source, Ty::obj_name(implementation.owner), name, false),
+                    declared_contextless_properties(
+                        source,
+                        Ty::obj_name(implementation.owner),
+                        name,
+                    ),
                     |property| target(index, property),
                 );
                 let Some(implementation_declared) =

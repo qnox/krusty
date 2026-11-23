@@ -23,7 +23,9 @@ pub const APPLIED: &[&str] = &[
     "-Werror",
     "-X",
     "-XXLanguage",
+    "-Xallow-no-source-files",
     "-Xcompiler-plugin",
+    "-Xcompiler-plugin-order",
     "-Xconsistent-data-class-copy-visibility",
     "-Xassertions",
     "-Xcontext-parameters",
@@ -105,7 +107,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-Xallow-condition-implies-returns-contracts",
     "-Xallow-contracts-on-more-functions",
     "-Xallow-holdsin-contract",
-    "-Xallow-no-source-files",
     // This flag only lifts kotlinc's check that its own JVM is at least 17. krusty does not
     // run that check, so the flag is inert. It stays refused: the inert-argument harness needs
     // kotlinc to reject a compilation that omits the flag, and a JDK that is already 17 or newer
@@ -125,7 +126,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-Xcommon-sources",
     "-Xcompanion-blocks",
     "-Xcompanion-blocks-and-extensions",
-    "-Xcompiler-plugin-order",
     "-Xcontext-receivers",
     "-Xcontext-sensitive-resolution",
     "-Xdata-flow-based-exhaustiveness",

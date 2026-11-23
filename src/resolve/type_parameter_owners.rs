@@ -165,9 +165,14 @@ pub(super) fn mentioned_type_parameters(ty: Ty, mentioned: &mut Vec<&'static str
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::DefinitelyNotNull(inner) => mentioned_type_parameters(inner, mentioned),
-        TyKind::Obj(_, arguments) | TyKind::Intersection(arguments) => {
+        TyKind::Obj(_, arguments) => {
             for argument in arguments {
                 mentioned_type_parameters(*argument, mentioned);
+            }
+        }
+        TyKind::Intersection(parts) => {
+            for part in parts {
+                mentioned_type_parameters(*part, mentioned);
             }
         }
         TyKind::Fun(signature) => {

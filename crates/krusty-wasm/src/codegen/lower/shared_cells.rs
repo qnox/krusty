@@ -36,14 +36,14 @@ pub(in crate::codegen) fn parameter_carrier(
     ir: &IrFile,
     function: FunId,
     parameter: u32,
-) -> Result<Option<ValType>, Unsupported> {
+) -> Result<ValType, Unsupported> {
     let declared = ir
         .functions
         .get(function as usize)
         .and_then(|function| function.params.get(parameter as usize))
         .ok_or("a shared capture parameter outside its function")?;
     match ir.shared_capture_parameters.get(&(function, parameter)) {
-        Some(&elem) => Ok(Some(ValType::nullable(cell_type(module, elem)?))),
+        Some(&elem) => Ok(ValType::nullable(cell_type(module, elem)?)),
         None => parameter_carrier_of(*declared),
     }
 }
@@ -88,7 +88,7 @@ impl Body<'_> {
             .get(&(function, parameter))
         {
             Some(&elem) => self.cell_holder(argument, elem).map(|_| ()),
-            None => self.value(argument, declared),
+            None => self.argument(argument, declared),
         }
     }
 
@@ -287,7 +287,7 @@ mod tests {
         let properties = krusty::backend::local_properties::realize(&mut ir)
             .expect("the body declares no local delegated property");
         super::super::lower_alone(&ir, &properties, &mut started).expect("the cell body lowers");
-        started.module.encode()
+        started.encode()
     }
 
     /// Whether `bytes` holds `struct.set <any type> 0` directly followed by `tail`.

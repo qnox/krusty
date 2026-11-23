@@ -124,6 +124,9 @@ pub(crate) enum DependencyImplementation {
     Interface(u32),
     /// A function no table of the class holds: a dependency interface's default.
     Function(ObjectFunction),
+    /// A function this file declares that no table of the class holds: a default the class's
+    /// interface publishes and the class does not override.
+    Declared(cranelift_module::FuncId),
     /// The member at this vtable slot, carried differently from how the interface declares it
     /// (`next(): Int` implementing `Iterator<T>.next(): T`): a bridge converting between the
     /// member's parameter and result types, `declared`, and the override's, `implemented`, and
@@ -514,7 +517,9 @@ fn plan_key_identity(
             .and_then(|declaration| {
                 property_member_identity(declaration, matches!(key, PlanKey::DependencySetter(_)))
             }),
-        PlanKey::Forwarder { .. } => None,
+        // Only the file that installed the interface numbers it, so no other file reads
+        // this identity.
+        PlanKey::Forwarder { .. } | PlanKey::Installed(_) => None,
     }
 }
 

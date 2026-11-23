@@ -1034,6 +1034,7 @@ fn fn_info(
         reflection_name: Some(name.to_string()),
         compiler_intrinsic: None,
         semantic_role: None,
+        property_accessor_role: None,
         overridden_declarations: Box::new([]),
         collection_barrier: None,
         inline_body_plan: None,
@@ -1058,6 +1059,7 @@ fn fn_info(
         inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
         default_call: false,
         defaults_from_declaration: false,
+        transformed_entry_tail: None,
         vararg_elem: None,
         vararg_index: None,
         signature: None,
@@ -1082,6 +1084,7 @@ fn fn_info(
         // erased, so there is no carrier-vs-box question for the value-class pass to answer here — it
         // sees the declaration itself. The fact exists for callables read back from a class file.
         declared_ret: None,
+        result_alias: None,
         overridden_results: Box::new([]),
         enhanced_result: crate::libraries::EnhancedResult::NONE,
     };
@@ -1168,6 +1171,7 @@ fn source_callable(
         physical_name: None,
         compiler_intrinsic: None,
         semantic_role: None,
+        property_accessor_role: None,
         overridden_declarations: Box::new([]),
         collection_barrier: None,
         inline_body_plan: None,
@@ -1188,6 +1192,7 @@ fn source_callable(
         inline: InlineKind::None,
         default_call: false,
         defaults_from_declaration: false,
+        transformed_entry_tail: None,
         vararg_elem: None,
         vararg_index: None,
         signature: None,
@@ -1206,6 +1211,7 @@ fn source_callable(
         overridden_call_realizations: Box::new([]),
         // See the note in the builder above: a source callable carries its declaration un-erased.
         declared_ret: None,
+        result_alias: None,
         enhanced_result: crate::libraries::EnhancedResult::NONE,
         overridden_results: Box::new([]),
     }

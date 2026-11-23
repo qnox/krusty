@@ -20,6 +20,7 @@ mod elvis_blocks;
 mod enum_entries;
 mod for_loop_bindings;
 mod generic_receiver_hierarchy;
+mod inline_calls;
 mod inline_templates;
 mod object_literal_overrides;
 mod object_literals;
@@ -28,6 +29,8 @@ mod primitive_calls;
 mod range_membership_producers;
 mod returnable_blocks;
 mod safe_calls;
+mod sam_conversions;
+mod sam_dispatch;
 mod same_library_class;
 mod support;
 mod target_calls;
@@ -62,7 +65,7 @@ use crate::metadata::semantic::{KotlinFunctionTypeShape, KotlinType};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{type_name, Ty, TyKind, TypeName, Visibility};
 
-use support::checked_template_hierarchy;
+use support::checked_template_facts;
 
 /// The fact the backend handoff freezes for the one function of `package` named `name` with this
 /// receiver and these value parameters.
@@ -2064,7 +2067,9 @@ fn wasm_numbers_bodies_link_their_internal_wasm_op_by_exact_intrinsic_identity()
             .filter(|symbol| {
                 let facts = libraries.intrinsic_facts();
                 match &symbol.signature {
-                    KlibIrSignature::FileLocal { .. } => false,
+                    KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => {
+                        false
+                    }
                     KlibIrSignature::Public(signature) => {
                         let intrinsic = facts.get(&KlibDependencyCallable {
                             module: callable.identity().module.clone(),

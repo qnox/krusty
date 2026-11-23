@@ -54,6 +54,65 @@ pub(super) fn emitted_dependency_targets(
     Ok(targets)
 }
 
+/// The exact external callables `source` emits a use of, its property reads and writes through
+/// their selected accessors.
+fn emitted_file_targets(
+    source: &CheckedIrFile<'_>,
+) -> Result<Vec<(crate::ir::ExprId, crate::fir::ExternalCallableId, bool)>, String> {
+    emitted_dependency_targets(&source.ir, |property, setter| {
+        let property = source
+            .callables
+            .property(property)
+            .ok_or("an emitted dependency property has no frozen fact")?;
+        if setter {
+            property
+                .setter
+                .map(Some)
+                .ok_or("an emitted dependency property write has no selected setter".to_owned())
+        } else {
+            Ok(Some(property.getter))
+        }
+    })
+}
+
+/// The dependency declarations `source` emits a use of.
+pub(super) fn emitted_dependency_callables(
+    source: &CheckedIrFile<'_>,
+) -> Result<HashSet<KlibDependencyCallable>, String> {
+    Ok(emitted_file_targets(source)?
+        .into_iter()
+        .filter_map(|(_, target, _)| {
+            source
+                .callables
+                .callable(target)
+                .and_then(|callable| callable.dependency_callable.clone())
+        })
+        .collect())
+}
+
+/// The dependency interface members the classes of `ir` inherit with a body and do not override.
+/// A target that dispatches through interface records calls each of them from its class's record,
+/// so they are emitted uses even though no expression of the file calls them.
+pub(super) fn emitted_inherited_default_targets(
+    ir: &IrFile,
+) -> impl Iterator<Item = crate::fir::ExternalCallableId> + '_ {
+    ir.classes
+        .iter()
+        .filter(|class| !class.is_interface)
+        .flat_map(|class| {
+            ir.inherited_defaults
+                .get(&class.fq_name_id())
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|default| match default.body {
+            crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration)
+            | crate::fir::InheritedDefaultBody::DependencyHolder(declaration) => Some(declaration),
+            crate::fir::InheritedDefaultBody::Module
+            | crate::fir::InheritedDefaultBody::JavaDefaultMethod => None,
+        })
+}
+
 /// The declarations a unit's closure freezes.
 pub(super) struct FrozenClosure {
     pub(super) declarations: Vec<(crate::fir::ExternalCallableId, ExternalCallableRealization)>,
@@ -64,6 +123,9 @@ pub(super) struct FrozenClosure {
         HashMap<KlibDependencyCallable, crate::klib_lowering::CallEdge>,
     /// The library objects whose values the closure's bodies read, which the unit materializes.
     pub(super) read_objects: Vec<crate::libraries::KlibBodyClassContract>,
+    /// Members of a materialized class or object that dispatch reaches, whose bodies the unit
+    /// emits although no walked body calls them directly.
+    pub(super) dispatched: Vec<KlibDependencyCallable>,
 }
 
 /// Where a unit's closure starts: the callables the emitted source selects, and the library
@@ -100,6 +162,17 @@ pub(super) fn declarations(
         objects: HashSet::default(),
         read_objects: root_objects.to_vec(),
         dispatched: HashSet::default(),
+        emitted_defaults: roots
+            .callables
+            .iter()
+            .filter(|root| {
+                root.kind() == ExternalCallableKind::Member
+                    && root
+                        .class_contract()
+                        .is_some_and(crate::libraries::KlibBodyClassContract::emits_default_members)
+            })
+            .map(|root| root.identity().clone())
+            .collect(),
         capabilities,
     };
     // An object the emitted source reads as a value is materialized as one a body reads.
@@ -116,24 +189,37 @@ pub(super) fn declarations(
         if !visited.insert(identity.clone()) {
             continue;
         }
+        // `values()` and `valueOf` of a library enum are the common enum operation, which the
+        // backend realizes for the enum's class as for a source enum; no body or provider links
+        // them. Lowering the call makes the same decision.
+        if bodies.enum_static_member(&identity).is_some() {
+            continue;
+        }
         // A private member of a materialized class has no provider declaration; the member calling it
         // authenticates its class, and it is emitted as that member is.
-        if let Some(class) = member_class.filter(|class| {
-            platform
-                .external_callable_by_dependency(&identity)
-                .is_none()
-                && !externals.contains_key(&identity)
-                && crate::klib_lowering::is_private_class_member(bodies, &identity, class)
-        }) {
+        if let Some(class) = member_class
+            .filter(|_| {
+                platform
+                    .external_callable_by_dependency(&identity)
+                    .is_none()
+                    && !externals.contains_key(&identity)
+            })
+            .and_then(|caller| private_member_class(platform, bodies, &identity, caller))
+        {
+            let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
             state.pending.extend(
-                bodies
-                    .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+                emitted
+                    .callables
                     .into_iter()
                     .map(|callee| (callee, Some(class.clone()))),
             );
-            let objects =
-                bodies.emitted_body_objects(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
-            read_values(platform, bodies, capabilities.callees, &objects, &mut state)?;
+            read_values(
+                platform,
+                bodies,
+                capabilities.callees,
+                &emitted.objects,
+                &mut state,
+            )?;
             continue;
         }
         // A top-level function private to its file, or a member of a class private to its
@@ -141,15 +227,17 @@ pub(super) fn declarations(
         // it is emitted with that body. One an earlier unit already emitted is that unit's export
         // instead, an exact external edge which keeps its declaration authentication below.
         if bodies.is_library_private(&identity) && !externals.contains_key(&identity) {
-            state.pending.extend(
-                bodies
-                    .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
-                    .into_iter()
-                    .map(|callee| (callee, None)),
-            );
-            let objects =
-                bodies.emitted_body_objects(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
-            read_values(platform, bodies, capabilities.callees, &objects, &mut state)?;
+            let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
+            state
+                .pending
+                .extend(emitted.callables.into_iter().map(|callee| (callee, None)));
+            read_values(
+                platform,
+                bodies,
+                capabilities.callees,
+                &emitted.objects,
+                &mut state,
+            )?;
             continue;
         }
         // Positive common-lowering capability, never a missing-provider fallback. Earlier emitted
@@ -172,28 +260,29 @@ pub(super) fn declarations(
             .callees
             .target_intrinsic(&identity, bodies, capabilities.target_realizes_intrinsic)
             .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?;
-        let (declaration_target, realization) = match platform
-            .external_callable_by_dependency(&identity)
-        {
-            Some(declaration) => declaration,
-            None if raw_header_capability && known_target.is_none() => {
-                state.pending.extend(
-                    bodies
-                        .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
-                        .into_iter()
-                        .map(|callee| (callee, None)),
-                );
-                let objects = bodies
-                    .emitted_body_objects(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
-                read_values(platform, bodies, capabilities.callees, &objects, &mut state)?;
-                continue;
-            }
-            None => {
-                return Err(format!(
+        let (declaration_target, realization) =
+            match platform.external_callable_by_dependency(&identity) {
+                Some(declaration) => declaration,
+                None if raw_header_capability && known_target.is_none() => {
+                    let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
+                    state
+                        .pending
+                        .extend(emitted.callables.into_iter().map(|callee| (callee, None)));
+                    read_values(
+                        platform,
+                        bodies,
+                        capabilities.callees,
+                        &emitted.objects,
+                        &mut state,
+                    )?;
+                    continue;
+                }
+                None => {
+                    return Err(format!(
                     "a KLIB dependency has no required exact provider declaration: {identity:?}"
                 ))
-            }
-        };
+                }
+            };
         if realization.dependency_callable.as_ref() != Some(&identity) {
             return Err("an ordinary KLIB body provider changed its exact identity".to_owned());
         }
@@ -205,6 +294,16 @@ pub(super) fn declarations(
             capabilities.callees.with_declaration(selected),
             &superclasses,
         );
+        // A continuation interception expands to its coroutine class's own interception, which
+        // the expansion calls in its stead: the closure reaches that member, never the
+        // intrinsic's excluded body. The intrinsic's declaration is what selects the expansion.
+        if let Some(member) = crate::klib_lowering::expansion_member(selected, bodies)
+            .map_err(|reason| format!("an invalid continuation interception: {reason:?}"))?
+        {
+            state.pending.push_back((member, None));
+            state.declarations.push((declaration_target, realization));
+            continue;
+        }
         let retained = externals
             .get(&identity)
             .and_then(|external| external.constructor_initializer_target());
@@ -247,11 +346,21 @@ pub(super) fn declarations(
                     .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?;
                 read_values(platform, bodies, &facts, &objects, &mut state)?;
             }
-            state.dispatched.extend(
-                facts
-                    .constructor_dispatched_members(&identity, bodies)
-                    .map_err(|reason| format!("an invalid class member: {reason:?}"))?,
+            let dispatched = facts
+                .constructor_dispatched_members(&identity, bodies)
+                .map_err(|reason| format!("an invalid class member: {reason:?}"))?;
+            // Each is emitted with the class: a member the class inherits implements interface
+            // declarations only dispatch reaches, and no body calls it.
+            let member_class = selected
+                .class_contract()
+                .filter(|class| class.emits_members())
+                .cloned();
+            state.pending.extend(
+                dispatched
+                    .iter()
+                    .map(|member| (member.clone(), member_class.clone())),
             );
+            state.dispatched.extend(dispatched);
             // The declarations the class's initialization names without emitting them.
             for declaration in facts
                 .constructor_declaration_evidence(&identity, bodies)
@@ -301,7 +410,10 @@ pub(super) fn declarations(
         // source call. A target which realizes no other declaration outside its emitted bodies
         // has no other such leaf: body lowering declines a call of one, as it declines any
         // unmodelled form.
-        let outside_edge = if member || is_outside_units(platform, bodies, &facts, selected)? {
+        let emitted_default = state.emitted_defaults.contains(&identity);
+        let outside_edge = if member
+            || (!emitted_default && is_outside_units(platform, bodies, &facts, selected)?)
+        {
             Some(member_edge(&facts, selected)?)
         } else {
             None
@@ -332,7 +444,9 @@ pub(super) fn declarations(
                     | ExternalCallableKind::Member
             ) || !realization
                 .klib_body_declaration_modifiers
-                .is_some_and(|modifiers| modifiers.permits_ordinary_body()))
+                .is_some_and(|modifiers| {
+                    modifiers.permits_ordinary_body() || modifiers.permits_expanded_body()
+                }))
         {
             return Err(format!("a transitive KLIB body has no supported ordinary declaration contract: {identity:?}"));
         }
@@ -365,16 +479,15 @@ pub(super) fn declarations(
             if let Some(class) = member_object(platform, &identity) {
                 walk_object(platform, bodies, &facts, class, &mut state)?;
             }
-            let objects =
-                bodies.emitted_body_objects(&identity, crate::klib_lowering::EMITTED_CALL_FORMS);
-            read_values(platform, bodies, &facts, &objects, &mut state)?;
+            let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
+            read_values(platform, bodies, &facts, &emitted.objects, &mut state)?;
             let member_class = selected
                 .class_contract()
                 .filter(|class| class.emits_members())
                 .cloned();
             state.pending.extend(
-                bodies
-                    .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS)
+                emitted
+                    .callables
                     .into_iter()
                     .map(|callee| (callee, member_class.clone())),
             );
@@ -385,6 +498,7 @@ pub(super) fn declarations(
         declarations: state.declarations,
         authorized_member_edges,
         read_objects: state.read_objects,
+        dispatched: state.dispatched.into_iter().collect(),
     })
 }
 
@@ -412,6 +526,9 @@ struct ClosureState<'c, 'u> {
     /// Members of a materialized class that dispatch reaches: their bodies are emitted even where
     /// a call of one folds to a common operation, as a virtual call runs the body.
     dispatched: HashSet<KlibDependencyCallable>,
+    /// Interface default bodies a class of the file inherits, emitted for its dispatch record
+    /// though no support unit materializes the interface.
+    emitted_defaults: HashSet<KlibDependencyCallable>,
     capabilities: &'c super::DependencyLeafCapabilities<'u>,
 }
 
@@ -461,6 +578,40 @@ fn read_values(
 
 /// Walk the initialization of the object `class` once: the object is materialized with every
 /// member dispatch reaches, and the declarations its members override are named.
+/// The materialized class declaring `identity`, a private member called from a member of `caller`.
+/// Kotlin makes a private member visible anywhere inside its declaring class, and a private member
+/// of a companion object anywhere inside the class containing that companion, so the caller may be
+/// the declaring class, a class nested in it, or the class whose companion declares the member.
+fn private_member_class(
+    platform: &dyn SemanticPlatform,
+    bodies: &KlibDeclarationBodies,
+    identity: &KlibDependencyCallable,
+    caller: crate::libraries::KlibBodyClassContract,
+) -> Option<crate::libraries::KlibBodyClassContract> {
+    if crate::klib_lowering::is_private_class_member(bodies, identity, &caller) {
+        return Some(caller);
+    }
+    let crate::klib_libraries::LocatedMember::One { class, .. } = bodies.member_owner(identity)
+    else {
+        return None;
+    };
+    let crate::metadata::klib_ir::KlibIrSignature::Public(signature) = &class.base.symbol.signature
+    else {
+        return None;
+    };
+    let declaring = crate::klib_lowering::object_classifier(signature)?;
+    let scope = if crate::metadata::semantic::class_is_companion(class.base.flags) {
+        declaring.nested_owner()?
+    } else {
+        declaring
+    };
+    std::iter::successors(Some(caller.classifier), |class| class.nested_owner())
+        .any(|class| class == scope)
+        .then(|| platform.klib_body_class_contract(declaring))
+        .flatten()
+        .filter(|class| crate::klib_lowering::is_private_class_member(bodies, identity, class))
+}
+
 fn walk_object(
     platform: &dyn SemanticPlatform,
     bodies: &KlibDeclarationBodies,
@@ -556,22 +707,7 @@ pub(super) fn ordinary_roots<'a>(
     let target_represents_classifier = capabilities.represents_classifier;
     let mut roots = Vec::new();
     let mut seen = HashSet::default();
-    for (expression, target, construction) in
-        emitted_dependency_targets(&source.ir, |property, setter| {
-            let property = source
-                .callables
-                .property(property)
-                .ok_or("an emitted dependency property has no frozen fact")?;
-            if setter {
-                property
-                    .setter
-                    .map(Some)
-                    .ok_or("an emitted dependency property write has no selected setter".to_owned())
-            } else {
-                Ok(Some(property.getter))
-            }
-        })?
-    {
+    for (expression, target, construction) in emitted_file_targets(source)? {
         let callable = source
             .callables
             .callable(target)
@@ -714,6 +850,28 @@ pub(super) fn ordinary_roots<'a>(
             roots.push(selected);
         }
     }
+    // A class of this file inherits a dependency interface's default and does not override it, so
+    // its dispatch record calls that default's body. The body is an emitted use of the class, not
+    // of an expression, and dispatches statically from the record.
+    let mut defaults = emitted_inherited_default_targets(&source.ir).collect::<Vec<_>>();
+    defaults.sort_unstable_by_key(|target| target.raw());
+    defaults.dedup();
+    for target in defaults {
+        let Some(selected) = source
+            .callables
+            .callable(target)
+            .ok_or("an inherited dependency default has no frozen fact")?
+            .klib_body_callable()
+        else {
+            continue;
+        };
+        if intrinsics.get(selected.identity()).is_none()
+            && bodies.function_has_body(selected.identity()) == Some(true)
+            && seen.insert(selected.identity())
+        {
+            roots.push(selected);
+        }
+    }
     Ok(roots)
 }
 
@@ -743,6 +901,9 @@ fn is_materialized_class_member(
     };
     if class.is_value {
         return Ok(true);
+    }
+    if class.kind == crate::libraries::TypeKind::Enum {
+        return Ok(crate::klib_lowering::materializes_enum_class(bodies, class));
     }
     if class.kind == crate::libraries::TypeKind::Object {
         return Ok(object_initialization(platform, bodies, callees, class)?.is_some());
@@ -921,7 +1082,7 @@ fn with_realized_declarations<'a>(
         .iter()
         .filter_map(crate::libraries::ExternalCallableRealization::klib_body_callable)
     {
-        facts = facts.with_declaration(selected);
+        facts.add_declaration(selected);
     }
     facts
 }
@@ -943,6 +1104,7 @@ pub(super) fn member_class_constructors(
     match selected.class_contract() {
         Some(class)
             if !class.is_value
+                && class.kind != crate::libraries::TypeKind::Enum
                 && class.emits_members()
                 && selected.kind() == ExternalCallableKind::Member =>
         {

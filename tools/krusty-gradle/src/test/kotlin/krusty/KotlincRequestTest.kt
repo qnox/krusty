@@ -93,6 +93,8 @@ class KotlincRequestTest {
                 "freeCompilerArg '-Xcompiler-plugin=forbidden.jar' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
             listOf("-Xkotlin-reference-version=2.4.0") to
                 "freeCompilerArg '-Xkotlin-reference-version=2.4.0' conflicts with the Kotlin Gradle plugin version; configure the structured Gradle input instead",
+            listOf("-Xfix-kotlinc-defects") to
+                "freeCompilerArg '-Xfix-kotlinc-defects' conflicts with the krusty.fixKotlincDefects Gradle property; configure the structured Gradle input instead",
             listOf("-no-stdlib=false") to
                 "freeCompilerArg '-no-stdlib=false' conflicts with the plugin-owned dependency policy; configure the structured Gradle input instead",
         )) {
@@ -109,6 +111,9 @@ class KotlincRequestTest {
             "-jvm-default=disable",
             "-opt-in=krusty.fixture.ExperimentalFirstApi",
             "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
+            // Metro's Gradle plugin orders its compiler plugin before Compose's this way. It orders
+            // the plugins the task loads and reaches none of them, so krusty applies it as kotlinc does.
+            "-Xcompiler-plugin-order=dev.zacsweers.metro.compiler>androidx.compose.compiler.plugins.kotlin",
         )) {
             assertArguments(withFree(free), structured + slice.freeCompilerArgs + free)
         }

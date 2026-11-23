@@ -356,6 +356,40 @@ pub(crate) fn project_finalized_signatures(index: &ResolvedModuleIndex, table: &
     table.finish_module_mutation();
 }
 
+/// Publish the source spellings of every declaration whose semantic header Pass 1 published.
+///
+/// Pass 2 checks a finalized declaration type against its recorded spelling (the alias it was
+/// written through, its written arguments). A declaration whose signature failed has no header and
+/// no spelling; every finalized one has both, whether or not the module as a whole finalized, so
+/// diagnostic recovery checks the same facts as a successful compilation.
+pub(crate) fn publish_declared_spellings(index: &mut ResolvedModuleIndex, table: &SymbolTable) {
+    let mut spellings = table
+        .stable_declared_spellings
+        .iter()
+        .filter(|(&declaration, _)| index.declaration_header(declaration).is_some())
+        .map(|(&declaration, spellings)| (declaration, spellings.clone()))
+        .collect::<crate::fx_hash::HashMap<_, _>>();
+    for (declaration, abbreviation) in index.result_abbreviations() {
+        if index.declaration_header(declaration).is_none() {
+            continue;
+        }
+        let record = spellings.entry(declaration).or_default();
+        // A declared result keeps its own spelling; only an inferred one takes the abbreviation
+        // its type was reached through.
+        if record.ret.is_none() {
+            let result = index
+                .signature(declaration)
+                .expect("an abbreviation belongs to a published signature")
+                .result
+                .get();
+            record.ret = abbreviation_spelling(table, result, abbreviation);
+        }
+    }
+    for (declaration, spellings) in spellings {
+        index.publish_declaration_spellings(declaration, spellings);
+    }
+}
+
 /// Seal serialization-only declaration facts into the stable Pass-1 product.
 ///
 /// The legacy symbol table still owns source-spelling collection and bounded constant evaluation
@@ -386,26 +420,7 @@ pub(crate) fn publish_stable_declaration_metadata(
     for (declaration, hierarchy) in classifier_hierarchies {
         index.publish_classifier_hierarchy(declaration, hierarchy);
     }
-    let mut spellings = table.stable_declared_spellings.clone();
-    for (declaration, abbreviation) in index.result_abbreviations() {
-        if index.declaration_header(declaration).is_none() {
-            continue;
-        }
-        let record = spellings.entry(declaration).or_default();
-        // A declared result keeps its own spelling; only an inferred one takes the abbreviation
-        // its type was reached through.
-        if record.ret.is_none() {
-            let result = index
-                .signature(declaration)
-                .expect("an abbreviation belongs to a published signature")
-                .result
-                .get();
-            record.ret = abbreviation_spelling(table, result, abbreviation);
-        }
-    }
-    for (declaration, spellings) in spellings {
-        index.publish_declaration_spellings(declaration, spellings);
-    }
+    publish_declared_spellings(index, table);
     for class in table.classes.values() {
         if let Some(declaration) = class.stable_declaration {
             index.publish_declaration_applied_annotations(
@@ -534,6 +549,8 @@ fn abbreviation_spelling(
         alias: Some(abbreviation.alias),
         args: super::type_spellings::expansion_arg_spellings(template, &alias_args),
         alias_args,
+        alias_absorbs_nullability: !abbreviation.marked_nullable
+            && template.is_some_and(|(_, _, expansion)| expansion.is_nullable()),
         unsafe_variance: template.is_some_and(|(rhs, _, _)| rhs.unsafe_variance),
         ..Spelled::default()
     };

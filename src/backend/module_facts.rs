@@ -57,6 +57,29 @@ pub trait BackendClassifierSource {
         is_subclassifier(self, classifier, ancestor)
     }
 
+    /// Every interface `classifier` is a proper subclassifier of, through the supertypes its facts
+    /// publish, transitively: the interfaces an instance of `classifier` is an instance of.
+    fn inherited_interfaces(&self, classifier: TypeName) -> Vec<TypeName> {
+        let mut interfaces = Vec::new();
+        let mut pending = self
+            .classifier(classifier)
+            .map(|fact| fact.supertypes.to_vec())
+            .unwrap_or_default();
+        let mut seen = crate::fx_hash::HashSet::default();
+        while let Some(next) = pending.pop() {
+            if !seen.insert(next) {
+                continue;
+            }
+            if let Some(fact) = self.classifier(next) {
+                if fact.is_interface() {
+                    interfaces.push(next);
+                }
+                pending.extend(fact.supertypes.iter().copied());
+            }
+        }
+        interfaces
+    }
+
     /// Every builtin class (`String`, a primitive, an unsigned integer) whose classifier is a
     /// proper subtype of `classifier`, through the supertypes the classifier facts publish: the
     /// builtin values a target carrying them in representations of its own must count as
@@ -255,9 +278,9 @@ pub struct BackendModuleFacts {
     /// declares it: exactly the classifiers of [`Self::classifiers`].
     source_class_members: HashMap<TypeName, super::source_class_members::SourceClassMembers>,
     source_member_annotations: super::source_class_members::SourceMemberAnnotations,
-    /// Each dependency classifier the module's own classes stand behind, with the file of every
-    /// source class that can be an instance of it, body-local ones included.
-    dependency_implementors: HashMap<TypeName, Box<[crate::fir::SourceFileId]>>,
+    /// Each dependency classifier the module's own classes stand behind, with every source class
+    /// that can be an instance of it, body-local ones included.
+    dependency_implementors: HashMap<TypeName, Box<[DependencyImplementor]>>,
     /// The constants of every enum class this module declares, in declaration order. Another file
     /// of the module reads one through the entry its declaring file publishes, and links that read
     /// by this fact before the declaring file is lowered (see `super::module_links`).
@@ -680,6 +703,14 @@ impl BackendModuleFacts {
             | super::instance_links::InstanceEntry::ConstructorDefaults { declaration, .. } => {
                 self.source_constructors.contains(declaration)
             }
+            super::instance_links::InstanceEntry::TypeTest(classifier) => {
+                self.classifiers.get(classifier).is_some_and(|fact| {
+                    fact.source
+                        && !fact.is_interface()
+                        && !fact.is_enum()
+                        && fact.kind != crate::libraries::TypeKind::Object
+                })
+            }
         }
     }
 
@@ -755,12 +786,24 @@ impl BackendModuleFacts {
         self.inherited_defaults.get(&classifier).map(Box::as_ref)
     }
 
-    /// The declaring file of each source class of the module, whichever file declares it, that
-    /// can be an instance of the dependency classifier `dependency`.
-    pub fn dependency_implementors(&self, dependency: TypeName) -> &[crate::fir::SourceFileId] {
+    /// Each instantiable source class of the module, whichever file declares it, that can be an
+    /// instance of the dependency classifier `dependency` by a supertype written in the module.
+    pub fn dependency_implementors(&self, dependency: TypeName) -> &[DependencyImplementor] {
         self.dependency_implementors
             .get(&dependency)
             .map_or(&[], |implementors| &implementors[..])
+    }
+
+    /// Every dependency classifier a supertype written in the module names, with the source
+    /// classes that stand behind it. A dependency classifier those name only through another
+    /// dependency classifier is not a key of its own; a caller asking about it walks the
+    /// dependency hierarchy from these keys.
+    pub fn dependency_implementor_roots(
+        &self,
+    ) -> impl Iterator<Item = (TypeName, &[DependencyImplementor])> {
+        self.dependency_implementors
+            .iter()
+            .map(|(dependency, implementors)| (*dependency, &implementors[..]))
     }
 
     /// `source`'s checked file-annotation applications, empty when it declares none.
@@ -774,12 +817,19 @@ impl BackendModuleFacts {
     }
 }
 
+/// An instantiable source class that stands behind a dependency classifier, and its file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DependencyImplementor {
+    pub file: crate::fir::SourceFileId,
+    pub class: TypeName,
+}
+
 /// For each dependency classifier a source class reaches through its own and its source
-/// supertypes' declarations, the file of each instantiable source class that reaches it.
+/// supertypes' declarations, each instantiable source class that reaches it.
 fn dependency_implementors(
     source_supertypes: &HashMap<TypeName, (Option<crate::fir::SourceFileId>, Box<[TypeName]>)>,
-) -> HashMap<TypeName, Box<[crate::fir::SourceFileId]>> {
-    let mut implementors: HashMap<TypeName, Vec<crate::fir::SourceFileId>> = HashMap::default();
+) -> HashMap<TypeName, Box<[DependencyImplementor]>> {
+    let mut implementors: HashMap<TypeName, Vec<DependencyImplementor>> = HashMap::default();
     for (&class, (instantiable, _)) in source_supertypes {
         let Some(file) = *instantiable else {
             continue;
@@ -792,7 +842,10 @@ fn dependency_implementors(
             }
             match source_supertypes.get(&current) {
                 Some((_, supertypes)) => pending.extend(supertypes.iter().copied()),
-                None => implementors.entry(current).or_default().push(file),
+                None => implementors
+                    .entry(current)
+                    .or_default()
+                    .push(DependencyImplementor { file, class }),
             }
         }
     }
@@ -1360,6 +1413,36 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn inherited_interfaces_follow_published_supertypes_through_superclasses() {
+        let facts = classifier_name_snapshot(
+            "package ownership.inherited\n\
+             interface Root\n\
+             interface Middle : Root\n\
+             interface Side\n\
+             abstract class Base : Middle\n\
+             open class Leaf : Base(), Side\n\
+             class Plain\n",
+        );
+        let name = |name| {
+            crate::types::type_name_child(crate::types::type_name("ownership/inherited"), name)
+        };
+        let classifiers =
+            CheckedBackendClassifiers::new(&facts, &crate::libraries::EmptySymbolSource);
+        let interfaces = |classifier| {
+            let mut found = classifiers.inherited_interfaces(name(classifier));
+            found.sort_by_key(|interface| interface.render());
+            found
+        };
+        assert_eq!(
+            interfaces("Leaf"),
+            [name("Middle"), name("Root"), name("Side")]
+        );
+        assert_eq!(interfaces("Base"), [name("Middle"), name("Root")]);
+        assert_eq!(interfaces("Middle"), [name("Root")]);
+        assert_eq!(interfaces("Plain"), Vec::<crate::types::TypeName>::new());
     }
 
     #[test]

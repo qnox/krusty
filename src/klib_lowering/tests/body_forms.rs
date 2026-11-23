@@ -679,6 +679,36 @@ fn an_equality_the_checker_would_classify_otherwise_declines() {
 }
 
 #[test]
+fn a_not_in_of_a_membership_call_negates_the_call() {
+    const SHAPES: [Shape; 2] = [("has", &[T::Int], T::Boolean), ("f", &[T::Int], T::Boolean)];
+    let lowered = |origin: Option<&'static str>| {
+        let demo = demo(&SHAPES, move |name, body| {
+            let a = body.param(0);
+            let value = match name {
+                "f" => {
+                    let signature = body.signatures["has"].clone();
+                    let has = body.call_signature(signature, vec![a], origin, T::Boolean);
+                    body.builtin(not(), vec![has], origin)
+                }
+                _ => body.boolean(true),
+            };
+            Some(vec![body.ret(value)])
+        });
+        let mut unit = DependencyBodyUnit::default();
+        let f = demo.lower(&mut unit, "f", &["f", "has"]).expect("lowers");
+        validated(unit.ir());
+        lowered_body(&unit, f)
+    };
+    // `x !in c` is `!c.contains(x)`, as the bare negation of the same call lowers.
+    assert_eq!(lowered(Some("NOT_IN")), lowered(None));
+    assert_eq!(
+        lowered(Some("NOT_IN")),
+        "scope {scope {return@Some(0) negation Eq(call has(v0!: Int): Boolean, \
+         Boolean(false)): Boolean: Nothing}: Nothing}"
+    );
+}
+
+#[test]
 fn a_negation_of_another_source_form_declines() {
     let not_in = demo(&[("f", &[T::Boolean], T::Boolean)], |_, body| {
         let a = body.param(0);
@@ -687,7 +717,8 @@ fn a_negation_of_another_source_form_declines() {
     });
     assert_eq!(
         not_in.declined("f", &[]),
-        "the KLIB body of `demo.f` (it uses a `!in` of another form than a membership in a range literal)"
+        "the KLIB body of `demo.f` (its serialized declaration disagrees with the selected one: \
+         a `!in` negates no membership call)"
     );
     let bare = demo(&[("f", &[T::Boolean], T::Boolean)], |_, body| {
         let a = body.param(0);
@@ -1254,6 +1285,9 @@ fn stdlib_built_in_calls_have_the_signed_operands() {
                 super::super::ir_builtins::BuiltinOperator::Identical => ("EQEQEQ", None),
                 super::super::ir_builtins::BuiltinOperator::CheckNotNull => {
                     ("CHECK_NOT_NULL", None)
+                }
+                super::super::ir_builtins::BuiltinOperator::NoWhenBranchMatched => {
+                    ("noWhenBranchMatchedException", None)
                 }
                 super::super::ir_builtins::BuiltinOperator::DataClassArrayMember(_) => {
                     // Lowering calls the array's content extension; the prewalk must reach it.

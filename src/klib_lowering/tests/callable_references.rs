@@ -112,9 +112,7 @@ fn reference_declarations(
             continue;
         }
         pending.extend(
-            libraries
-                .declaration_bodies()
-                .emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
+            crate::klib_lowering::emitted_body(libraries.declaration_bodies(), &identity).callables,
         );
         if let Some(declaration) = libraries.external_callable_by_dependency(&identity) {
             declarations.push(declaration);
@@ -231,7 +229,7 @@ fn assert_raw_and_prepared(
         assert_reference(unit.ir(), expected);
         if name == "inlineMakeReference" {
             let mut prepared = IrFile::default();
-            let hierarchy = checked_template_hierarchy(libraries, &declaration);
+            let hierarchy = checked_template_facts(libraries, &declaration);
             lower_inline_template(
                 &mut prepared,
                 &declaration,
@@ -240,7 +238,7 @@ fn assert_raw_and_prepared(
                     declarations: libraries.declaration_bodies(),
                     references: libraries.reference_bindings(),
                     source: libraries,
-                    type_hierarchy: &hierarchy,
+                    dependency_facts: &hierarchy,
                 },
             )
             .unwrap()

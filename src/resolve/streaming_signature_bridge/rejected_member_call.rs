@@ -32,10 +32,7 @@ impl ProductionSignatureSemantics<'_> {
         type_arguments: &[Ty],
         trailing_lambda: bool,
         expected: Option<Ty>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
         let level = self.with_resolver(scope, |resolver| {
             Some(
@@ -298,10 +295,7 @@ impl ProductionSignatureSemantics<'_> {
         candidate_source: Option<&super::receiver_member_level::ReceiverCandidateSource>,
         type_arguments: &[Ty],
         expected: Option<Ty>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::libraries::FunctionInfo, crate::fir::DiagnosticId> {
         // `candidate` is the exact declaration shape already chosen from the available or
         // unavailable-context family. Do not project the source declaration through the receiver

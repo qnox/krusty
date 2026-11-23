@@ -607,6 +607,9 @@ impl FileLowering<'_> {
                     .and_then(|(_, itable)| itable.get(*number as usize))
                     .map(|function| self.object_function(*function)),
                 DependencyImplementation::Function(function) => Some(function.clone()),
+                DependencyImplementation::Declared(function) => {
+                    Some(self.object_function(*function))
+                }
                 DependencyImplementation::Bridge { .. } => self
                     .published_dependency_bridges
                     .get(&(class, identity.clone()))
@@ -674,7 +677,9 @@ impl FileLowering<'_> {
                 let declaration = self.callables.declaration_identity(getter)?;
                 property_member_identity(declaration, matches!(key, PlanKey::DependencySetter(_)))
             }
-            PlanKey::Forwarder { .. } => None,
+            // Only the file that installed the interface numbers it, so no other file reads
+            // this identity.
+            PlanKey::Forwarder { .. } | PlanKey::Installed(_) => None,
         }
     }
 }

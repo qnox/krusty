@@ -6,7 +6,8 @@
 //! records. Which builtin classes are below an interface comes from the frontend's supertype
 //! traversal (`krusty::backend::BackendClassifierSource::builtin_subtypes`); here each of their
 //! representations is recorded an instance of the interface: a string's struct, which has no
-//! interface table, and each box's class.
+//! interface table, and each box's class. The runtime lays out `StringBuilder` too, so its class
+//! is recorded an instance of each such interface its classifier is below (`CharSequence`).
 //!
 //! An interface's builtin instances are recorded the first time something tests for it, and a box
 //! the first time a value of its type is boxed; whichever comes second records the box.
@@ -22,10 +23,25 @@ pub(super) struct BuiltinInstances {
     interfaces: Vec<(TypeName, Vec<Ty>)>,
 }
 
+/// Which of the runtime's own classes are below a tested interface.
+#[derive(Clone, Copy)]
+pub(super) struct RuntimeLayouts {
+    pub(super) string_builder: bool,
+    pub(super) array_list: bool,
+    /// The runtime's iterator over a list, which `iterator()` and `listIterator()` answer.
+    pub(super) array_list_iterator: bool,
+}
+
 impl Runtime {
     /// Record that the builtin values of `subtypes` are instances of `interface`, which something
-    /// tests for: a string's now, and each box's now or when the box is declared.
-    pub(super) fn builtin_instances(&mut self, interface: TypeName, subtypes: Vec<Ty>) {
+    /// tests for: a string's now, and each box's now or when the box is declared. Each of
+    /// `laid_out`, the runtime's own classes below `interface`, is one too.
+    pub(super) fn builtin_instances(
+        &mut self,
+        interface: TypeName,
+        subtypes: Vec<Ty>,
+        laid_out: RuntimeLayouts,
+    ) {
         if self
             .builtin_instance_tests
             .interfaces
@@ -38,6 +54,23 @@ impl Runtime {
             self.objects
                 .interfaces
                 .representation_instance_of(self.string, interface);
+        }
+        if laid_out.string_builder {
+            self.objects
+                .interfaces
+                .instance_of(self.string_builders.class, interface);
+        }
+        // The list is an instance by its struct, as a string is, so the interface's members are
+        // not obligations of the list: its class implements only the members the runtime realizes.
+        if laid_out.array_list {
+            self.objects
+                .interfaces
+                .representation_instance_of(self.array_lists.list, interface);
+        }
+        if laid_out.array_list_iterator {
+            self.objects
+                .interfaces
+                .representation_instance_of(self.array_lists.iterator, interface);
         }
         for form in self.box_forms() {
             if subtypes.contains(&form.boxed) {

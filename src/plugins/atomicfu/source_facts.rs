@@ -248,10 +248,10 @@ pub(super) fn record(
     if updaters.is_empty() {
         return;
     }
-    ir.atomicfu = Some(Box::new(AtomicfuFileFacts {
+    ir.plugin_facts.record(AtomicfuFileFacts {
         updaters,
         operations,
-    }));
+    });
 }
 
 struct Recorder<'a, 'b> {
@@ -290,6 +290,7 @@ impl Recorder<'_, '_> {
 
     fn reject(&mut self, span: Option<Span>, what: &str) {
         self.rejections.push(PluginRejection {
+            refusal: true,
             span: span.unwrap_or(Span::new(0, 0)),
             message: unsupported(what),
         });
@@ -339,6 +340,7 @@ impl Recorder<'_, '_> {
             .get(source.declaration.lo as usize..source.declaration.hi as usize)
             .expect("checked declaration coordinates belong to the handoff source");
         self.rejections.push(PluginRejection {
+            refusal: false,
             span: source.visibility_modifier.unwrap_or(source.name),
             message: publication_error(declaration, self.release),
         });
@@ -353,6 +355,7 @@ impl Recorder<'_, '_> {
                 "Consider"
             };
             self.rejections.push(PluginRejection {
+refusal: false,
                 span: source.keyword,
                 message: format!(
                     "{consider} declaring `'{declaration}'` as a private val or internal val.\n\
@@ -542,6 +545,7 @@ impl Recorder<'_, '_> {
             }
             Err(error) => {
                 self.rejections.push(PluginRejection {
+                    refusal: true,
                     span: span.unwrap_or(Span::new(0, 0)),
                     message: format!("atomicfu cannot call `{}`: {error}", function.described()),
                 });

@@ -328,6 +328,7 @@ pub(super) fn build_continuation_class(
         pre_super_param_fields,
         explicit_param_stores: false,
         methods: vec![inv_fid],
+        installed_interface_overrides: Vec::new(),
         is_interface: false,
         is_fun_interface: false,
         is_annotation: false,

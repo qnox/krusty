@@ -919,6 +919,21 @@ fn realize_expressions(
         // `$composer` and `$changed`); its generated calls pass them after the declared ones, and
         // the compiled method takes them last.
         let appended = callables.plugin_runtime_appended(target);
+        // An extension's receiver is a call operand of its own, not one of `args`: it takes the
+        // parameter ordinal after the context parameters, which the arguments leave out.
+        let physical_arity = source_arity + appended.len();
+        let receiver_ordinal = (kind == ExternalCallableKind::Extension
+            && supplied + 1 == physical_arity)
+            .then(|| u32::try_from(callable.context_count))
+            .transpose()
+            .map_err(|_| ExternalRealizationError::Arguments {
+                target: target.into(),
+                detail: format!(
+                    "call {expression} ({kind:?} {}.{}) extension receiver does not fit a parameter ordinal",
+                    callable.physical_owner.render(),
+                    physical_name
+                ),
+            })?;
         if !appended.is_empty() {
             let physical = appended_physical_parameters(&source_parameters, appended, &descriptor)
                 .map_err(|detail| ExternalRealizationError::Arguments {
@@ -945,7 +960,7 @@ fn realize_expressions(
                 physical,
                 Some(&plan),
                 supplied,
-                &[],
+                receiver_ordinal.as_slice(),
             )
             .map_err(|detail| ExternalRealizationError::Arguments {
                 target: target.into(),
@@ -1023,6 +1038,11 @@ fn realize_expressions(
                     classifier: semantic_ret,
                 })
             }
+            Some(krusty::libraries::CompilerIntrinsic::EnumValues) => {
+                unreachable!(
+                    "the frontend selects `enumValues` of a reified parameter as an operation"
+                )
+            }
             Some(krusty::libraries::CompilerIntrinsic::EnumEntries) => {
                 let classifier = substitutions.iter().find_map(|substitution| {
                     matches!(
@@ -1063,6 +1083,9 @@ fn realize_expressions(
             ) => {
                 unreachable!("a Native continuation intrinsic cannot reach JVM call realization")
             }
+            Some(krusty::libraries::CompilerIntrinsic::InterceptedContinuation) => {
+                unreachable!("a Wasm continuation intrinsic cannot reach JVM call realization")
+            }
             Some(
                 krusty::libraries::CompilerIntrinsic::UnsignedDivide { .. }
                 | krusty::libraries::CompilerIntrinsic::UnsignedRemainder { .. }
@@ -1090,6 +1113,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::RadixToString { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayStorageCopy
                 | krusty::libraries::CompilerIntrinsic::StringRangeEquals
+                | krusty::libraries::CompilerIntrinsic::StringIndexOf { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayCopy { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayGet
                 | krusty::libraries::CompilerIntrinsic::ArraySet
@@ -1105,7 +1129,6 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::CoroutineContext
                 | krusty::libraries::CompilerIntrinsic::CoroutineSuspended
                 | krusty::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
-                | krusty::libraries::CompilerIntrinsic::EnumValues
                 | krusty::libraries::CompilerIntrinsic::EnumName
                 | krusty::libraries::CompilerIntrinsic::IsEmpty
                 | krusty::libraries::CompilerIntrinsic::IsNotEmpty

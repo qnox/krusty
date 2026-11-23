@@ -12,6 +12,7 @@ mod call_sig;
 mod callable_scope_rung;
 mod class_identity;
 mod class_name_property;
+mod classifier_application;
 mod classifier_callables;
 mod classifier_declaration;
 mod classifier_kind;
@@ -21,6 +22,7 @@ mod core_builtins;
 mod core_identities;
 mod declaration_header;
 mod declared_members;
+mod declared_result_alias;
 mod default_value;
 mod dependency_access_policy;
 mod dependency_body_contract;
@@ -44,6 +46,7 @@ mod property_producer;
 mod provider_override;
 mod result_nullability;
 mod runtime_exception;
+mod sam_application;
 mod scalar_instruction;
 mod singleton_dispatch;
 mod source_inputs;
@@ -65,6 +68,9 @@ pub use call_realization::{
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub use class_identity::KlibClassIdentity;
+pub(crate) use classifier_application::{
+    application_arguments_with_star_bounds, classifier_bindings, classifier_type_parameter_bounds,
+};
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
     ConstructorCallConstraints,
@@ -82,6 +88,7 @@ pub use declared_members::{
     DeclaredConstructor, DeclaredFunction, DeclaredMembers, DeclaredParameter, DeclaredProperty,
     KotlinModality,
 };
+pub use declared_result_alias::DeclaredResultAlias;
 pub use default_value::DefaultValue;
 pub use dependency_access_policy::DependencyAccessPolicy;
 pub use dependency_body_contract::DependencyBodyFacts;
@@ -103,6 +110,7 @@ pub use property_producer::PropertyProducer;
 pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
 pub use runtime_exception::{RuntimeExceptionKind, RuntimeExceptionLayout};
+pub(crate) use sam_application::{sam_application_bindings, sam_substitute};
 pub use singleton_dispatch::SingletonDispatch;
 pub(crate) use source_inputs::{ReceiverInputBounds, SourceInputDeclaration};
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
@@ -348,6 +356,8 @@ pub struct LibraryMember {
     /// value-class pass reads this to decide the result's representation. `None` when the provider
     /// records no metadata return classifier.
     pub declared_ret: Option<Ty>,
+    /// See [`LibraryCallable::result_alias`].
+    pub result_alias: Option<DeclaredResultAlias>,
     /// See [`LibraryCallable::overridden_results`].
     pub overridden_results: Box<[Ty]>,
     /// See [`LibraryCallable::enhanced_result`].
@@ -800,6 +810,7 @@ impl LibraryMember {
             default_realization: None,
             nonvirtual_realization: None,
             declared_ret: None,
+            result_alias: None,
             overridden_results: Box::new([]),
             enhanced_result: EnhancedResult::NONE,
             implicit_classifier_callable: None,
@@ -932,6 +943,21 @@ pub enum Origin {
 
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
+/// The properties whose getter or setter a platform method is named as: a Java `getA()` is the
+/// getter of `a`, and `setOpen(v)` the setter of `open` or `isOpen`. Each candidate names the
+/// methods that would be the same property's other accessor (`setA` for `getA`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PropertyAccessorRole {
+    pub candidates: Box<[PropertyAccessorCandidate]>,
+    pub setter: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PropertyAccessorCandidate {
+    pub property: String,
+    pub counterparts: Box<[String]>,
+}
+
 #[derive(Clone, Debug)]
 pub struct LibraryCallable {
     /// Stable provider-owned declaration identity. Current-module declarations use FIR's
@@ -968,6 +994,10 @@ pub struct LibraryCallable {
     /// Exact language-level role of this declaration, when target realization needs more than its
     /// stable callable identity. Providers assign it at the declaration boundary.
     pub semantic_role: Option<SemanticCallRole>,
+    /// The property accessor a Java method is, when it overrides an inherited Kotlin property's
+    /// accessor. The Java provider derives the candidate properties from the method's platform
+    /// spelling; the hierarchy confirms one with a Kotlin property declaration.
+    pub property_accessor_role: Option<Box<PropertyAccessorRole>>,
     /// Exact identities of the declarations this callable overrides, as the core member hierarchy
     /// proved them while normalizing the selected family; empty for a declaration that overrides
     /// nothing or was not reached through a hierarchy walk.
@@ -1032,6 +1062,11 @@ pub struct LibraryCallable {
     /// default to such a declaration keeps the declaration's identity, with
     /// [`Self::default_call`] set; no platform `$default` symbol is named.
     pub defaults_from_declaration: bool,
+    /// [`Self::defaults_from_declaration`] holds because the declaration's compiled entry takes
+    /// the mask of omitted arguments after these synthetic parameters, which a compiler plugin's
+    /// transformation appended. The provider only reports the tail; whether it is a calling
+    /// convention the call can pass is for an enabled plugin to authenticate.
+    pub transformed_entry_tail: Option<Box<[Ty]>>,
     /// For a generic `vararg` callable resolved with a bound element type (`listOf<Long>(…)` →
     /// `Long`): the *logical* element type the trailing arguments adapt to. `None` for a non-vararg
     /// call or when the element type is not recovered. The backend uses it to coerce each packed
@@ -1090,6 +1125,8 @@ pub struct LibraryCallable {
     /// a BOX out of the generic slot `E` and `create` the erased carrier. Only non-null declared
     /// returns are recorded; a nullable value class really is boxed.
     pub declared_ret: Option<Ty>,
+    /// The typealias the declared return type was spelled through (`fun f(): Names`).
+    pub result_alias: Option<DeclaredResultAlias>,
     /// The declared results of the declarations this suspend callable overrides, as the core member
     /// hierarchy found them, nearest first; empty for a non-suspend one. A backend decides from them
     /// how the callable's own result crosses its continuation boundary.
@@ -1180,6 +1217,10 @@ pub struct CallSig {
     /// argument is checked for applicability after inference but contributes no type-variable
     /// constraint itself.
     pub no_infer_params: ParamFlags,
+    /// Per logical parameter: the declared type carries the Compose runtime's `@Composable` type
+    /// annotation, so a function value passed for it is compiled with the composer and `$changed`
+    /// parameters after its own.
+    pub composable_params: ParamFlags,
     /// Per logical parameter, the resolved declaration carries
     /// `kotlin.internal.ImplicitIntegerCoercion`.
     pub implicit_integer_coercion: ParamFlags,
@@ -1766,6 +1807,7 @@ impl FunctionInfo {
         // declarations say the former hands back an unboxed carrier. Without them every consumer,
         // the operator-invoke path included, would unbox a real carrier as though it were a box.
         member.declared_ret = self.callable.declared_ret;
+        member.result_alias = self.callable.result_alias;
         member.overridden_results = self.callable.overridden_results.clone();
         member.enhanced_result = self.callable.enhanced_result.clone();
         member.signature = self.callable.signature.clone();
@@ -2072,6 +2114,16 @@ pub struct PropertyInfo {
 }
 
 impl PropertyInfo {
+    /// The getter's selected parameters in the coordinates of its generic signature: the
+    /// extension receiver removed, the context prefix kept.
+    pub fn semantic_getter_params(&self) -> Cow<'_, [Ty]> {
+        drop_extension_receiver(
+            &self.getter.params,
+            self.kind == PropKind::Extension,
+            self.context_count,
+        )
+    }
+
     /// Whether this declaration participates in property-read selection.
     pub fn readable(&self) -> bool {
         !self.deprecated_hidden && self.accessor_availability.getter

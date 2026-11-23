@@ -11,7 +11,20 @@ use super::*;
 /// The line facts of the parsed expression at `span`, keyed the way checked FIR carries it.
 fn expression_lines(file: &crate::ast::File, span: Span) -> Option<FirExpressionDebugLines> {
     let raw = file.expression_at_span(span)? as usize;
+    // A qualified call is the selector's call in kotlinc: its own syntax starts at the name.
+    let selector_offset = match file.expr(crate::ast::ExprId(raw as u32)) {
+        crate::ast::Expr::Call { callee, .. } => match file.expr(*callee) {
+            crate::ast::Expr::Member { name, .. } => Some(file.member_name_span(*callee, name).lo),
+            _ => None,
+        },
+        crate::ast::Expr::SafeCall { name, .. } => Some(
+            file.member_name_span(crate::ast::ExprId(raw as u32), name)
+                .lo,
+        ),
+        _ => None,
+    };
     Some(FirExpressionDebugLines {
+        selector_offset,
         start: file.expr_lines.get(raw).copied().unwrap_or(0),
         source: file.expr_source_lines.get(raw).copied().unwrap_or(0),
         end: file.expr_end_lines.get(raw).copied().unwrap_or(0),
@@ -43,6 +56,9 @@ pub struct FirExpressionDebugLines {
     /// Where the expression's source text starts in its file, kotlinc's `startOffset`: compared
     /// only with another expression of the same file.
     pub start_offset: u32,
+    /// Where a qualified call's selector name starts, which kotlinc's call offsets begin at:
+    /// `Sized(2)` in `lib.Sized(2)`. `None` for every other expression.
+    pub selector_offset: Option<u32>,
     /// kotlinc builds this expression without source offsets, so no line may begin at it: an
     /// implicit context argument, whose call's line is marked only at its dispatch.
     pub positionless: bool,

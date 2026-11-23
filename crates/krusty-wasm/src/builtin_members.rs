@@ -15,18 +15,32 @@
 //! is materialized. An actual representation declines when its override cannot be emitted, so no
 //! stub reaches a builtin value without its implementation.
 
-use krusty::backend::{BackendCompilerIntrinsic, BuiltinImplementation};
+use krusty::backend::{BackendClassifierSource, BackendCompilerIntrinsic, BuiltinImplementation};
+use krusty::libraries::RuntimeExceptionKind;
 use krusty::types::{Ty, TypeName};
 
+use super::array_lists::IndexBound;
 use super::boxes::BoxForm;
 use super::builtin_order;
-use super::encode::{Code, Function, HeapType, Module, ValType};
+use super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::interface_dispatch::MemberRef;
 use super::numeric_conversions;
 use super::runtime::Runtime;
 
+/// `i32.ge_u`.
+const I32_GE_U: u8 = 0x4f;
+
 /// A function's wasm parameters (the receiver first) and results.
 type Signature = (Vec<ValType>, Vec<ValType>);
+
+/// The library member a call goes through, as its checked declaration gives it: its name, its
+/// declared parameters (the receiver's excluded), and the builtin classes implementing it.
+#[derive(Clone, Copy)]
+pub(super) struct LibraryMemberDeclaration<'a> {
+    pub(super) name: &'a str,
+    pub(super) params: &'a [Ty],
+    pub(super) implementations: &'a [BuiltinImplementation],
+}
 
 /// The library members a call has gone through whose builtin implementations are recorded.
 #[derive(Default)]
@@ -42,6 +56,13 @@ pub(super) struct BuiltinMembers {
 struct BuilderMembers {
     constructed: bool,
     unanswered: Vec<(MemberRef, String)>,
+}
+
+/// A class the runtime lays out and implements library members on.
+#[derive(Clone, Copy)]
+enum RuntimeClass {
+    StringBuilder,
+    ArrayList,
 }
 
 struct Member {
@@ -77,6 +98,8 @@ enum Representation {
     Box(Ty),
     /// The runtime's `StringBuilder`.
     StringBuilder,
+    /// The runtime's `ArrayList`.
+    ArrayList,
 }
 
 impl Representation {
@@ -86,6 +109,7 @@ impl Representation {
             Self::String => "a `String`".to_string(),
             Self::Box(boxed) => format!("a boxed `{boxed:?}`"),
             Self::StringBuilder => "a `StringBuilder`".to_string(),
+            Self::ArrayList => "an `ArrayList`".to_string(),
         }
     }
 }
@@ -106,6 +130,15 @@ enum Operation {
     Compare,
     /// A builder member the runtime realizes (`StringBuilder.append(Char)`).
     Builder(BuilderMember),
+    /// A call of the runtime function realizing a list member (`ArrayList.add(E)`), which takes
+    /// the member's parameters, this many with the receiver, as they are carried. With `bound`,
+    /// the index the member takes first must stay within it, or the runtime
+    /// `IndexOutOfBoundsException` whose struct is given is thrown.
+    List {
+        function: u32,
+        arity: u32,
+        bound: Option<(IndexBound, u32)>,
+    },
 }
 
 /// A `StringBuilder` override the runtime realizes, as a direct call of it does
@@ -118,23 +151,29 @@ enum BuilderMember {
     AppendChar,
     /// `length`.
     Length,
-    /// `get(Int)`.
-    Get,
+    /// `get(Int)`, which throws the runtime `IndexOutOfBoundsException` whose struct is
+    /// `index_out_of_bounds` for an index outside the units in use.
+    Get { index_out_of_bounds: u32 },
 }
 
 impl Runtime {
-    /// Record the builtin implementations of `member`, a library member named `name` carried as
+    /// Record the builtin implementations of `member`, the library member `declared` carried as
     /// `signature` (the receiver first), which a call goes through: a string's and the runtime
-    /// builder's now, and each box's now or when the box is declared. Declines when a builtin class
+    /// builder's and list's now, and each box's now or when the box is declared. Declines when a builtin class
     /// runs something this generator cannot write for it.
     pub(super) fn builtin_member(
         &mut self,
         module: &mut Module,
+        classifiers: &dyn BackendClassifierSource,
         member: MemberRef,
-        name: &str,
+        declared: LibraryMemberDeclaration<'_>,
         signature: &Signature,
-        implementations: &[BuiltinImplementation],
     ) -> Result<(), String> {
+        let LibraryMemberDeclaration {
+            name,
+            implementations,
+            ..
+        } = declared;
         if self
             .builtin_members
             .members
@@ -146,6 +185,7 @@ impl Runtime {
         let mut boxes = Vec::new();
         let mut string = None;
         let mut builder = None;
+        let mut list = None;
         for implementation in implementations {
             let receiver = implementation.receiver;
             let representation = if receiver == Ty::String {
@@ -155,6 +195,11 @@ impl Runtime {
                 .is_some_and(super::string_builders::lays_out)
             {
                 Representation::StringBuilder
+            } else if receiver
+                .obj_internal()
+                .is_some_and(super::array_lists::lays_out)
+            {
+                Representation::ArrayList
             } else {
                 Representation::Box(receiver)
             };
@@ -163,7 +208,41 @@ impl Runtime {
                     string = Some(operation(representation, implementation, signature)?);
                 }
                 Representation::StringBuilder => {
-                    builder = Some(builder_operation(name, implementation, signature));
+                    builder = Some(builder_operation(
+                        name,
+                        implementation,
+                        signature,
+                        &mut || {
+                            self.exception_class(
+                                module,
+                                classifiers,
+                                RuntimeExceptionKind::IndexOutOfBounds.classifier(),
+                            )
+                        },
+                    ));
+                }
+                Representation::ArrayList => {
+                    list = Some(
+                        self.list_operation(declared, implementation, signature)
+                            .and_then(|(function, arity, bound)| {
+                                let bound = match bound {
+                                    Some(bound) => Some((
+                                        bound,
+                                        self.exception_class(
+                                            module,
+                                            classifiers,
+                                            RuntimeExceptionKind::IndexOutOfBounds.classifier(),
+                                        )?,
+                                    )),
+                                    None => None,
+                                };
+                                Ok(Operation::List {
+                                    function,
+                                    arity,
+                                    bound,
+                                })
+                            }),
+                    );
                 }
                 Representation::Box(boxed) => {
                     let identity = boxed
@@ -180,16 +259,30 @@ impl Runtime {
                 .interfaces
                 .implement_representation(member, self.string, function)?;
         }
-        match builder {
-            Some(Ok(operation)) => {
-                let function =
-                    self.define_implementation(module, member, Receiver::StringBuilder, operation)?;
-                self.objects
-                    .interfaces
-                    .implement(self.string_builders.class, member, function)?;
+        for (class, operation) in [
+            (RuntimeClass::StringBuilder, builder),
+            (RuntimeClass::ArrayList, list),
+        ] {
+            match operation {
+                Some(Ok(operation)) => {
+                    let function =
+                        self.define_implementation(module, member, Receiver::Runtime, operation)?;
+                    let class = match class {
+                        RuntimeClass::StringBuilder => self.string_builders.class,
+                        RuntimeClass::ArrayList => self.array_lists.class,
+                    };
+                    self.objects.interfaces.implement(class, member, function)?;
+                }
+                Some(Err(reason)) => match class {
+                    RuntimeClass::StringBuilder => self.unanswered_builder_member(member, reason),
+                    // A list member the runtime does not realize keeps the empty slot it had
+                    // before the list answered any interface member. Declining it would decline
+                    // every program constructing a list and reaching, say, `MutableList.set`
+                    // through a class of its own.
+                    RuntimeClass::ArrayList => {}
+                },
+                None => {}
             }
-            Some(Err(reason)) => self.unanswered_builder_member(member, reason),
-            None => {}
         }
         let index = self.builtin_members.members.len();
         self.builtin_members.members.push(Member {
@@ -225,6 +318,38 @@ impl Runtime {
         } else {
             builders.unanswered.push((member, reason));
         }
+    }
+
+    /// What the runtime list runs for the member `declared` carried as `signature`: the function
+    /// a direct call of `ArrayList`'s member runs, when it takes and answers the member's carriers,
+    /// with its arity and the bound its index argument is checked against. The runtime list lays
+    /// out `ArrayList` whole, so a member `ArrayList` inherits (`AbstractCollection.containsAll`)
+    /// is the runtime's operation for it, as a direct call on an `ArrayList` receiver is
+    /// (`crate::codegen` `realized_array_list_member`); an override is matched by its own
+    /// declared parameters.
+    fn list_operation(
+        &self,
+        declared: LibraryMemberDeclaration<'_>,
+        implementation: &BuiltinImplementation,
+        (params, results): &Signature,
+    ) -> Result<(u32, u32, Option<IndexBound>), String> {
+        let name = declared.name;
+        let declared_params = implementation
+            .declaration
+            .as_ref()
+            .map_or(declared.params, |declaration| &declaration.params);
+        let operation = super::array_lists::list_operation(name, declared_params)?;
+        let realized = self.array_lists.member(operation)?;
+        if realized.params != *params || realized.results != *results {
+            return Err(format!(
+                "the `ArrayList` override of `{name}`, carried otherwise than the member"
+            ));
+        }
+        Ok((
+            realized.function,
+            params.len() as u32,
+            operation.index_bound(),
+        ))
     }
 
     /// Write the implementation of every recorded member by the new box `form`.
@@ -307,18 +432,67 @@ impl Runtime {
                     .local_get(1)
                     .array_get_u(self.chars);
             }
-            (Receiver::StringBuilder, Operation::Builder(BuilderMember::AppendCharSequence)) => {
-                let append = self.append_char_sequence(module)?;
-                code.local_get(1).call(append);
+            (
+                Receiver::Runtime,
+                Operation::List {
+                    function,
+                    arity,
+                    bound,
+                },
+            ) => {
+                if let Some((bound, index_out_of_bounds)) = bound {
+                    // Unsigned, a negative index is outside the bound too.
+                    code.local_get(1).local_get(0).call(self.array_lists.size);
+                    if bound == IndexBound::AtMostSize {
+                        code.i32_const(1).op(super::runtime::ADD32);
+                    }
+                    code.op(I32_GE_U).if_(BlockType::Empty);
+                    self.exceptions.construct_class(
+                        &mut code,
+                        index_out_of_bounds,
+                        None,
+                        self.string,
+                    )?;
+                    code.throw(self.exceptions.tag).end();
+                }
+                for parameter in 1..arity {
+                    code.local_get(parameter);
+                }
+                code.call(function);
             }
-            (Receiver::StringBuilder, Operation::Builder(BuilderMember::AppendChar)) => {
-                code.local_get(1).call(self.string_builders.append_char);
-            }
-            (Receiver::StringBuilder, Operation::Builder(BuilderMember::Length)) => {
-                code.call(self.string_builders.length);
-            }
-            (Receiver::StringBuilder, Operation::Builder(BuilderMember::Get)) => {
-                code.local_get(1).call(self.string_builders.get);
+            (Receiver::Runtime, Operation::Builder(builder)) => {
+                let builders = &self.string_builders;
+                match builder {
+                    BuilderMember::AppendCharSequence => {
+                        let append = self.append_char_sequence(module)?;
+                        code.local_get(1).call(append);
+                    }
+                    BuilderMember::AppendChar => {
+                        code.local_get(1).call(builders.append_char);
+                    }
+                    BuilderMember::Length => {
+                        code.call(builders.length);
+                    }
+                    BuilderMember::Get {
+                        index_out_of_bounds,
+                    } => {
+                        // `StringBuilder.get` throws for an index outside the units in use, as a
+                        // direct call of it does. Unsigned, a negative index is outside too.
+                        code.local_get(1)
+                            .local_get(0)
+                            .call(builders.length)
+                            .op(I32_GE_U)
+                            .if_(BlockType::Empty);
+                        self.exceptions.construct_class(
+                            &mut code,
+                            index_out_of_bounds,
+                            None,
+                            self.string,
+                        )?;
+                        code.throw(self.exceptions.tag).end();
+                        code.local_get(1).call(builders.get);
+                    }
+                }
             }
             _ => return Err("a builtin implementation of another representation".to_string()),
         }
@@ -339,8 +513,8 @@ impl Runtime {
 #[derive(Clone, Copy)]
 enum Receiver {
     String,
-    /// The runtime's `StringBuilder`, which its functions take as a reference.
-    StringBuilder,
+    /// An instance of a class the runtime lays out, which its functions take as a reference.
+    Runtime,
     /// The box of a builtin classifier.
     Box(BoxForm),
 }
@@ -352,6 +526,7 @@ fn builder_operation(
     name: &str,
     implementation: &BuiltinImplementation,
     (params, results): &Signature,
+    index_out_of_bounds: &mut dyn FnMut() -> Result<u32, String>,
 ) -> Result<Operation, String> {
     let Some(declaration) = &implementation.declaration else {
         return Err(format!(
@@ -370,7 +545,9 @@ fn builder_operation(
             Some(BuilderMember::Length)
         }
         ("get", [Ty::Int]) if declaration.ret == Ty::Char && params[1..] == [ValType::I32] => {
-            Some(BuilderMember::Get)
+            Some(BuilderMember::Get {
+                index_out_of_bounds: index_out_of_bounds()?,
+            })
         }
         _ => None,
     };
