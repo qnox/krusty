@@ -50,7 +50,7 @@ fn serialized(archive: &KlibArchive) -> Signatures {
                     "{signature:?} twice"
                 );
             }
-            KlibIrSignature::FileLocal { .. } => {}
+            KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => {}
         };
         match member {
             KlibIrMember::Function(function) => {
