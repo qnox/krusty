@@ -677,7 +677,9 @@ impl FileLowering<'_> {
                 let declaration = self.callables.declaration_identity(getter)?;
                 property_member_identity(declaration, matches!(key, PlanKey::DependencySetter(_)))
             }
-            PlanKey::Forwarder { .. } => None,
+            // Only the file that installed the interface numbers it, so no other file reads
+            // this identity.
+            PlanKey::Forwarder { .. } | PlanKey::Installed(_) => None,
         }
     }
 }

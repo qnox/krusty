@@ -156,10 +156,11 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         // Every instance a member of a materialized ordinary class is called on was created by
         // that class's primary constructor, so emission materializes the class with the member
         // and closes its initialization and dispatched members. The walk reaches them the same way.
-        if let Some(class) = selected
-            .class_contract()
-            .filter(|class| !class.is_value && class.emits_members())
-        {
+        if let Some(class) = selected.class_contract().filter(|class| {
+            !class.is_value
+                && class.kind != crate::libraries::TypeKind::Enum
+                && class.emits_members()
+        }) {
             if let Some(primary) = class.primary_constructor.clone() {
                 pending.push(crate::libraries::KlibDependencyCallable {
                     module: class.module.clone(),

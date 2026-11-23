@@ -65,8 +65,8 @@ fn android_compose_app_is_compiled_by_krusty_with_a_handoff_for_what_it_refuses(
     let expected = [
         ("27:1", "a lambda in a composable lambda"),
         (
-            "22:22",
-            "a composable call outside the statements of a composable body",
+            "22:20",
+            "a composable lambda passed other than by a statement of a function body",
         ),
     ]
     .map(|(at, what)| {
