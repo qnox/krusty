@@ -1150,7 +1150,6 @@ objects/companionObjectAccess/multipleCompanionsWithAccessors/fromAnonymousObjec
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlock.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlockOfNestedClass.kt
 objects/interfaceCompanionObjectReference.kt
-operatorConventions/compareTo/comparable.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
 operatorConventions/plusAssignWithComplexRHS.kt
