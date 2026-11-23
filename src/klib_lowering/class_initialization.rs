@@ -75,8 +75,9 @@ pub(super) struct ClassInitialization<'a, 'b> {
 /// The delegation of a constructor to its superclass's constructor.
 pub(super) struct SuperclassCall {
     pub(super) constructor: KlibDependencyCallable,
-    /// The delegation's arguments, in the superclass constructor's parameter order.
-    pub(super) arguments: Vec<KlibIrExprId>,
+    /// The delegation's arguments, in the superclass constructor's parameter order; none for
+    /// each parameter it leaves to its default.
+    pub(super) arguments: Vec<Option<KlibIrExprId>>,
     /// The superclass, and the parameters its selected constructor declares.
     pub(super) owner: crate::types::TypeName,
     pub(super) params: Vec<Ty>,
@@ -212,9 +213,11 @@ fn admit<'a, 'b>(
     // constructors delegates to it (`own_delegation`). Without one, the selected secondary
     // constructor initializes the class.
     if !constructors.contains(&&header.function.base.symbol)
-        || header.function.regular_parameters.iter().any(|parameter| {
-            parameter.default_value.is_some() || parameter.vararg_element_type.is_some()
-        })
+        || header
+            .function
+            .regular_parameters
+            .iter()
+            .any(|parameter| parameter.vararg_element_type.is_some())
     {
         return Ok(None);
     }
@@ -334,9 +337,6 @@ fn admit<'a, 'b>(
         else {
             return Ok(None);
         };
-        let Some(arguments) = arguments.into_iter().collect::<Option<Vec<_>>>() else {
-            return Ok(None);
-        };
         let Some(crate::types::SemanticCallableOwner::Classifier(owner)) =
             selected[0].declaration_owner()
         else {
@@ -348,13 +348,26 @@ fn admit<'a, 'b>(
                 "a superclass constructor's authenticated class disagrees with its owner",
             ));
         }
+        if arguments.len() != constructor.declared_parameters().len()
+            || arguments.iter().enumerate().any(|(ordinal, argument)| {
+                argument.is_none() && !constructor.default_allowed(ordinal)
+            })
+        {
+            return Err(mismatch(
+                "a superclass constructor delegation omits a parameter without a declared default",
+            ));
+        }
         let applied_params =
             constructor.instantiate(&type_arguments, applied(owner), |argument, bound| {
                 callees.constructor_bound(&header.types, argument, bound)
             })?;
         if callees.target_represents(owner) {
             // The target lays the superclass out itself and builds it from the delegation's
-            // arguments, as it does for a source class extending it.
+            // arguments, as it does for a source class extending it. Its defaults are the
+            // target's, so a delegation leaving one out keeps the boundary.
+            if arguments.iter().any(Option::is_none) {
+                return Ok(None);
+            }
             (
                 Some(SuperclassCall {
                     constructor: constructor_identity,
@@ -426,8 +439,9 @@ pub(super) struct OwnDelegation<'a, 'b> {
     /// The constructor of the class it delegates to, and the declaration selected for it.
     pub(super) target: KlibDependencyCallable,
     pub(super) target_selected: KlibBodyCallable<'a>,
-    /// The delegation's arguments, in the target constructor's parameter order.
-    pub(super) arguments: Vec<KlibIrExprId>,
+    /// The delegation's arguments, in the target constructor's parameter order; none for each
+    /// parameter it leaves to its default.
+    pub(super) arguments: Vec<Option<KlibIrExprId>>,
     /// The statements the constructor runs after the delegation.
     pub(super) statements: &'b [KlibIrStatement],
 }
@@ -465,9 +479,11 @@ fn own_delegation_from<'a, 'b>(
         declaration: KlibDeclarationSignature::Public(primary_signature.clone()),
     };
     if selected.identity() == &primary
-        || header.function.regular_parameters.iter().any(|parameter| {
-            parameter.default_value.is_some() || parameter.vararg_element_type.is_some()
-        })
+        || header
+            .function
+            .regular_parameters
+            .iter()
+            .any(|parameter| parameter.vararg_element_type.is_some())
     {
         return Ok(None);
     }
@@ -524,15 +540,24 @@ fn own_delegation_from<'a, 'b>(
             return Err(mismatch("a delegation within the class passes a receiver"))
         }
     };
-    // A delegation leaving a defaulted argument out keeps the boundary.
-    let Some(arguments) = arguments.into_iter().collect::<Option<Vec<_>>>() else {
-        return Ok(None);
-    };
     let Some(super::callee_facts::KlibCalleeFact::Selected(target_selected)) = callees.get(&target)
     else {
         return Ok(None);
     };
     let target_selected = target_selected[0];
+    let defaults = target_selected.parameter_defaults().ok_or_else(|| {
+        mismatch("a delegation within the class reaches a constructor without declared defaults")
+    })?;
+    if arguments.len() != defaults.len()
+        || arguments
+            .iter()
+            .zip(defaults.iter())
+            .any(|(argument, default)| argument.is_none() && !default)
+    {
+        return Err(mismatch(
+            "a delegation within the class omits a parameter without a declared default",
+        ));
+    }
     let admitted = if target == primary {
         plan(target_selected, bodies, callees)?.is_some()
     } else {
@@ -593,12 +618,13 @@ pub(super) fn object_initialization_callees(
     Ok(object_plan(class, bodies, callees)?.map(|plan| initialization_callees(&plan, bodies)))
 }
 
-/// The expressions an initialization evaluates: the superclass constructor's arguments, then each
-/// field initializer and initializer block.
+/// The expressions an initialization evaluates: the constructor's parameter defaults, which its
+/// default-argument entry runs, the superclass constructor's arguments, then each field
+/// initializer and initializer block.
 fn initialization_roots(plan: &ClassInitialization<'_, '_>) -> Vec<KlibIrExprId> {
-    let mut roots = Vec::new();
+    let mut roots = parameter_defaults(plan.header.function);
     if let Some(superclass) = &plan.superclass {
-        roots.extend(superclass.arguments.iter().copied());
+        roots.extend(superclass.arguments.iter().flatten().copied());
     }
     for step in &plan.steps {
         match step {
@@ -609,6 +635,15 @@ fn initialization_roots(plan: &ClassInitialization<'_, '_>) -> Vec<KlibIrExprId>
         }
     }
     roots
+}
+
+/// The defaults of a constructor's parameters, which its default-argument entry evaluates.
+fn parameter_defaults(constructor: &KlibIrFunction) -> Vec<KlibIrExprId> {
+    constructor
+        .regular_parameters
+        .iter()
+        .filter_map(|parameter| parameter.default_value)
+        .collect()
 }
 
 /// The library objects an initialization reads as values. A dispatched member's body is walked
@@ -683,10 +718,9 @@ fn own_delegation_callees(
         return Ok(None);
     };
     let arena = delegation.header.arena;
-    let roots = delegation
-        .arguments
-        .iter()
-        .copied()
+    let roots = parameter_defaults(delegation.header.function)
+        .into_iter()
+        .chain(delegation.arguments.iter().flatten().copied())
         .chain(arena.statement_expression_roots(delegation.statements))
         .collect();
     Ok(Some(

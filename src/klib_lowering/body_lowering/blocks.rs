@@ -70,8 +70,28 @@ pub(in super::super) fn publish_parameter_defaults(
     ir: &mut IrFile,
     linker: &mut dyn CallLinker,
 ) -> Lowered<()> {
+    if let Some(defaults) = lower_parameter_defaults(arena, function, header, builtins, ir, linker)?
+    {
+        ir.fn_params
+            .get_mut(&function.function)
+            .expect("a declared function publishes its parameters")
+            .defaults = Some(defaults);
+    }
+    Ok(())
+}
+
+/// The serialized parameter defaults of `function`, each lowered in the function's own frame,
+/// one slot per parameter; none when the declaration declares no default at all.
+pub(in super::super) fn lower_parameter_defaults(
+    arena: &KlibIrArena,
+    function: LoweredFunction<'_>,
+    header: &FunctionHeader,
+    builtins: &IrBuiltinOperators,
+    ir: &mut IrFile,
+    linker: &mut dyn CallLinker,
+) -> Lowered<Option<Vec<Option<ExprId>>>> {
     if header.defaults().iter().all(Option::is_none) {
-        return Ok(());
+        return Ok(None);
     }
     let mut defaults = Vec::with_capacity(header.params().len());
     for (default, &declared) in header.defaults().iter().zip(header.params()) {
@@ -83,11 +103,7 @@ pub(in super::super) fn publish_parameter_defaults(
             None => None,
         });
     }
-    ir.fn_params
-        .get_mut(&function.function)
-        .expect("a declared function publishes its parameters")
-        .defaults = Some(defaults);
-    Ok(())
+    Ok(Some(defaults))
 }
 
 impl BodyLowering<'_> {

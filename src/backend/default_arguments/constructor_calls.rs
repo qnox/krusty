@@ -27,7 +27,7 @@ pub(super) fn rewrite(ir: &mut IrFile, entries: &mut Entries, site: ExprId) {
         internal,
         args,
         ctor_desc: None,
-        external_target: None,
+        external_target,
         defaults,
         default_prefix_count,
         declared_params,
@@ -40,9 +40,14 @@ pub(super) fn rewrite(ir: &mut IrFile, entries: &mut Entries, site: ExprId) {
         return;
     }
     let has_declared_params = declared_params.is_some();
+    let dependency = external_target.is_some();
     let (internal, default_prefix_count) = (*internal, *default_prefix_count);
+    // A dependency's constructor is called through its own entry, unless this file materialized
+    // its class: then the class's constructors, the entry among them, are this file's.
     let Some(class) = ir.class_id_by_name(internal) else {
-        module_construction(ir, site);
+        if !dependency {
+            module_construction(ir, site);
+        }
         return;
     };
     let Some(&target) = ir.construction_targets.get(&site) else {
