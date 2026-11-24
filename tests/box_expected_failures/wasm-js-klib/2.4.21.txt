@@ -240,11 +240,9 @@ companionBlocksAndExtensions/initializersBlocksAndEnumTriggeredByBlock.kt
 companionBlocksAndExtensions/initializersBlocksAndObject.kt
 companionBlocksAndExtensions/initializersEnumImplementingInterface.kt
 companionBlocksAndExtensions/initializersEnumImplementingInterfaceWithDefaultMember.kt
-companionBlocksAndExtensions/initializersInParentInAnotherModule.kt
 companionBlocksAndExtensions/initializersInheritanceMixedWithObject.kt
 companionBlocksAndExtensions/initializersTriggeredByObject.kt
 companionBlocksAndExtensions/lateinit.kt
-companionBlocksAndExtensions/multiModule.kt
 constants/comparisonFalse.kt
 constants/divisionByZero.kt
 constants/float.kt
@@ -1219,7 +1217,6 @@ multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/defaultArguments/withTypeParameter.kt
-multiplatform/k2/expectStatic.kt
 multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt

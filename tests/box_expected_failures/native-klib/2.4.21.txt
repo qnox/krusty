@@ -178,9 +178,7 @@ companionBlocksAndExtensions/callableReferences_extensions.kt
 companionBlocksAndExtensions/initializersBlocksAndEnum.kt
 companionBlocksAndExtensions/initializersBlocksAndEnumTriggeredByBlock.kt
 companionBlocksAndExtensions/initializersEnumImplementingInterface.kt
-companionBlocksAndExtensions/initializersInParentInAnotherModule.kt
 companionBlocksAndExtensions/lateinit.kt
-companionBlocksAndExtensions/multiModule.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
 compileKotlinAgainstKotlin/inlineClasses/funInterface.kt
@@ -1057,7 +1055,6 @@ multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/defaultArguments/withTypeParameter.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
-multiplatform/k2/expectStatic.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
