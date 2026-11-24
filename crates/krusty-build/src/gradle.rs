@@ -1243,7 +1243,9 @@ tasks.register<JavaExec>("runJvm") {
             .iter()
             .position(|line| *line == header)
             .unwrap_or_else(|| panic!("{header}\n{output}"));
-        assert_eq!(lines[at + 1], format!("  {REFUSAL}"), "{output}");
+        // The plugin reports the proxy's relative path from the project it ran in as an absolute one.
+        let refusal = format!("{}/model/{REFUSAL}", root.display());
+        assert_eq!(lines[at + 1], format!("  {refusal}"), "{output}");
         let text = read_invocation_log(log).expect("invocation log");
         assert_eq!(invocations(&text).len(), 1, "{text}");
         assert!(root

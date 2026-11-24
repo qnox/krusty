@@ -542,14 +542,14 @@ fn render_one(d: &Diagnostic, path: &str, src: &str, names: DiagnosticNames) -> 
 /// marker line whose `^` run covers the span, up to the end of the line when the span goes past it
 /// and at least one column wide. Whitespace before the span is kept so tabs line up.
 fn source_excerpt(span: Span, src: &str) -> String {
-    let lo = (span.lo as usize).min(src.len());
+    let lo = char_boundary_at_or_before(src, span.lo as usize);
     let line_start = src[..lo].rfind('\n').map_or(0, |at| at + 1);
     let line_end = src[lo..].find('\n').map_or(src.len(), |at| lo + at);
     let line = src[line_start..line_end].trim_end_matches('\r');
     if line.is_empty() {
         return String::new();
     }
-    let hi = (span.hi as usize).clamp(lo, line_start + line.len());
+    let hi = char_boundary_at_or_before(src, (span.hi as usize).clamp(lo, line_start + line.len()));
     let mut out = String::new();
     out.push_str(line);
     out.push('\n');
@@ -565,6 +565,16 @@ fn source_excerpt(span: Span, src: &str) -> String {
     out.extend(std::iter::repeat_n('^', width));
     out.push('\n');
     out
+}
+
+/// A byte offset into `src` moved back onto a character boundary. A span synthesized from a name's
+/// length rather than from source text can end inside a multi-byte character.
+fn char_boundary_at_or_before(src: &str, offset: usize) -> usize {
+    let mut at = offset.min(src.len());
+    while !src.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }
 
 fn severity_word(severity: Severity) -> &'static str {
@@ -705,6 +715,15 @@ mod tests {
             r,
             "A.kt:1:1: error: in A\nxyz\n^\nB.kt:2:2: error: in B\ncde\n ^\n"
         );
+    }
+
+    #[test]
+    fn an_excerpt_span_ending_inside_a_multibyte_character_stays_on_its_boundary() {
+        // `é` is two bytes: a span synthesized as one byte wide ends inside it.
+        let mut s = DiagSink::new();
+        s.warning(Span::new(0, 1), "wide");
+        let r = s.render_all(&[("A.kt", "é f n")], DiagnosticNames::Hidden);
+        assert_eq!(r, "A.kt:1:1: warning: wide\né f n\n^\n");
     }
 
     #[test]

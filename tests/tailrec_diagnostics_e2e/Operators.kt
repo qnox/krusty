@@ -8,3 +8,13 @@ class Operand(val x: Int) {
 tailrec fun twoCalls(n: Int): Int = 1 + twoCalls(n)  +   twoCalls(n)
 tailrec fun lineBreak(n: Int): Int = 2 + lineBreak (
     n)
+class Negation {
+    tailrec operator fun unaryMinus(): Negation = -this
+    tailrec operator fun unaryPlus(): Negation {
+        return +this
+    }
+    tailrec operator fun not(): Negation {
+        !this
+        return this
+    }
+}
