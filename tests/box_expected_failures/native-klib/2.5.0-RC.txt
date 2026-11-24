@@ -402,7 +402,6 @@ coroutines/crossInlineWithCapturedOuterReceiver.kt
 coroutines/deepRecursiveFunction.kt
 coroutines/defaultParameterLambdaInSuspend.kt
 coroutines/defaultParametersInSuspend.kt
-coroutines/defaultSuspendLambdaWithCallSiteInAnotherFile.kt
 coroutines/degenerate1.kt
 coroutines/degenerate2.kt
 coroutines/delegatedSuspendMember.kt
@@ -548,7 +547,6 @@ coroutines/inlineClasses/resume/overrideSuspendFun_Any_this.kt
 coroutines/inlineClasses/resume/overrideSuspendFun_Int.kt
 coroutines/inlineClasses/resume/returnResult.kt
 coroutines/inlineClasses/resume/syntheticAccessor.kt
-coroutines/inlineClasses/resumeWithException/boxReturnValueOfSuspendLambda.kt
 coroutines/inlineClasses/resumeWithException/boxTypeParameterOfSuperType.kt
 coroutines/inlineClasses/resumeWithException/boxTypeParameterOfSuperTypeResult.kt
 coroutines/inlineClasses/resumeWithException/boxUnboxInsideCoroutine.kt
