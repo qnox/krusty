@@ -1093,6 +1093,9 @@ fn record_class_property_exports(
             }
             (None, getter, setter, false)
         };
+        // A block property's accessors are receiver-less statics even when an interface declares
+        // it, so the interface's rules for member accessors do not apply to it.
+        let block_property = matches!(origin, PropertyOrigin::CompanionBlock(_));
         let accessor = |accessor| {
             package_property_accessor_signature(container, declaration, accessor)
                 .map(|signature| crate::libraries::KlibDependencyCallable {
@@ -1149,7 +1152,7 @@ fn record_class_property_exports(
                         exports.record_member_receiver(function, receiver);
                     }
                 }
-            } else if !source.is_interface
+            } else if (!source.is_interface || block_property)
                 && modifiers.is_default
                 && !modifiers.modality.is_abstract()
                 && !modifiers.is_external
@@ -1176,7 +1179,7 @@ fn record_class_property_exports(
                 };
                 exports.record_property_accessor(operation, accessor(role)?);
             } else if property.is_some()
-                && !source.is_interface
+                && (!source.is_interface || block_property)
                 && !modifiers.modality.is_abstract()
                 && !modifiers.is_external
                 && !declaration.is_external
