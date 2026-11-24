@@ -1179,6 +1179,7 @@ pub(super) fn realize(
         if let krusty::ir::IrCallableReferenceTarget::Property(property) = &reference.target {
             let operation = property.checked_operation(
                 reference.bound_receiver,
+                reference.captures.clone(),
                 reference.adaptation.clone(),
                 reference.function_type,
             );
