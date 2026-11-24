@@ -3,7 +3,7 @@
 //! value-index). If the emitter allocates a fresh slot per declaration, the loop-top restore
 //! populates a different slot than the frame at a `?: continue` target expects, leaving that slot
 //! `top` on the fresh (first-entry) edge — a StackMapTable VerifyError. This is the shape of
-//! `ResourceAggregationService.getAllResources`/`getResourceById`: an outer SUSPENDING loop with a
+//! a service's lookup methods: an outer SUSPENDING loop with a
 //! `?: continue`, a local declared AFTER the continue that is live across a later suspension, and a
 //! nested structural loop. Needs the JVM toolchain + kotlin-stdlib + coroutines + real kotlinc.
 use super::common;

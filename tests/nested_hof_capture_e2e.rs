@@ -3,8 +3,8 @@
 //! 1. A collection HOF nested inside another HOF's BLOCK body, where the inner lambda captures an
 //!    enclosing name (`users.mapNotNull { u -> val rs = bindings[u]?.mapNotNull { b -> roles[b] } … }`).
 //!    The deep capture scan must descend into a lambda that lives inside a `val` statement, so the
-//!    outer (inline-splice) lambda captures `roles` and the nested closure can resolve it. This is the
-//!    shape of `UserListService.listMembers`.
+//!    outer (inline-splice) lambda captures `roles` and the nested closure can resolve it. This is a
+//!    common service-method shape.
 //! 2. A mutable `var` captured+mutated by a closure is `Ref`-boxed; its `boxed_elem` entry must NOT
 //!    leak into a later same-named plain local in another function (a stale entry made an ordinary
 //!    `var x` read as a `Ref` → VerifyError, corpus `regressions/kt344.kt`).

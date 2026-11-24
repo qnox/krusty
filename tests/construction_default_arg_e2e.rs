@@ -1,10 +1,10 @@
 //! A default PARAMETER whose default VALUE is an object construction (`fun list(f: F = F(), n: Int = 2)`),
 //! CALLED omitting that argument. Before, the `foo$default` synthetic was declined for any default
 //! containing a `new`/construction — so a caller omitting such a default ("unresolved"/`call list` bail),
-//! and any file defining it (a suspend service `list(filters = AuditFilters(), …)`), was skipped. The
+//! and any file defining it (a suspend service `list(filters = Filters(), …)`), was skipped. The
 //! stub re-emits a plain construction like any other value, so `toplevel_default_stub_safe` now allows it
 //! (a lambda / `RefNew` / `invoke` default — which reaches captured/spilled state the static stub can't —
-//! stays rejected). Same-file runnable; the suspend service shape (AuditService) is compile-asserted since
+//! stays rejected). Same-file runnable; the suspend service shape is compile-asserted since
 //! running a coroutine needs a driver.
 use super::common;
 use std::path::PathBuf;
@@ -30,7 +30,7 @@ fn construction_valued_default_omitted() {
 
 #[test]
 fn suspend_service_with_construction_default_compiles() {
-    // The AuditService shape: a suspend function with a construction-valued default parameter and two
+    // The suspend service shape: a suspend function with a construction-valued default parameter and two
     // suspend reads, called omitting the default — must LOWER (was skipped for the construction default).
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
