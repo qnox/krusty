@@ -584,9 +584,12 @@ jobs:
             krusty
             krusty-build-tests
           if-no-files-found: error
-      # Every conformance row and the e2e job restore these libraries with fail-on-cache-miss. They
-      # are provisioned here, in the job those rows already wait for, rather than in a job of their
-      # own that held the rows for another runner. A hit is only looked up, never downloaded.
+      # The extra libraries the conformance rows and e2e read (the atomicfu compiler plugin of each
+      # Kotlin release and the pinned atomicfu runtimes), downloaded once, serially and with retries,
+      # in the job those rows already wait for; they restore the entry with fail-on-cache-miss. A row
+      # that downloaded them itself failed on a refused or missing answer from Central (Native 2.4.20
+      # on master). It saves on a queue branch too: the rows are in the same run, so they see an
+      # entry their own branch saved. A hit is only looked up, never downloaded.
       - name: look up the extra conformance libraries
         id: deps
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -774,11 +777,6 @@ jobs:
           path: test-failures/
           if-no-files-found: ignore
 
-  # Downloads the extra libraries the conformance rows read (the atomicfu compiler plugin of each
-  # Kotlin release and the pinned atomicfu runtimes) once, serially and with retries, and saves them
-  # for the rows that follow. A row whose own cache entry was missing used to download them itself,
-  # and a refused or missing answer from Central failed that row (Native 2.4.20 on master). It saves
-  # on a queue branch too: the rows are in the same run, so they see an entry their own branch saved.
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
     needs: [build-tool-bins]
