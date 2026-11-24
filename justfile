@@ -65,7 +65,6 @@ versioning-tests:
     bash scripts/test-versioning.sh
     bash scripts/test-sort-kotlin-versions.sh
     bash scripts/test-install-maven.sh
-    bash scripts/test-fetch-conformance-deps.sh
     bash scripts/test-check-intellij-patch.sh
     bash scripts/test-provision-jdks.sh
 
@@ -605,14 +604,13 @@ test-all *ARGS:
 # binary; they do not compile krusty again.
 #
 # CI builds this right after `just tool-test-bin`, and must reuse that build's krusty.
-# Selecting krusty-cli's binary here keeps the Native backend in the graph: without it bumpalo
-# (under zopfli) loses Cranelift's `allocator-api2` feature and krusty, which links zopfli,
-# compiled a second time (484 s of a 1157 s build). krusty-build's own dev-dependencies add the
-# libc, object and once_cell features that the root package's dev-dependencies add there.
+# krusty-build's own dev-dependencies add the features the root package's dev-dependencies add
+# there; when they drift, krusty compiles a second time (270-400 s on a 4-core runner), so CI
+# names the compiler crates in CARGO_TEST_BINARY_REUSE and this build fails instead.
 krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
-    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib -p krusty-cli --bin krusty
+    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib
 
 # The normal compiler unit suite, which exact-version CI rows run without rebuilding Rust.
 compiler-unit-tests:

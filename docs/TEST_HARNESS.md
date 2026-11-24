@@ -612,7 +612,9 @@ and Java drivers use persistent `BoxRunner` and `JavaRunner` JVMs; `javac` runs 
 source to compile that helper, then in-process. The conformance box runner is a separate persistent
 JVM per test thread, also compiled once. `BoxRunner` gives one `box()` call
 `KRUSTY_BOX_TIMEOUT_MS` (10s by default), and the conformance box runner gives one case
-`KRUSTY_BOX_CASE_TIMEOUT_MS` (2s by default).
+`KRUSTY_BOX_CASE_TIMEOUT_MS` (2s by default). A live kotlinc-native oracle compile also runs in a
+persistent compiler JVM per Native distribution, under the same pool cap; one compile gets
+`KRUSTY_NATIVE_COMPILE_TIMEOUT_MS` (five minutes by default) before its server is replaced.
 
 The `bytecode_parity_e2e` batch compares normalized disassembly for its named fixtures. Each
 fixture receives its own package on both compiler inputs, so independent declarations such as
