@@ -975,6 +975,9 @@ fn specialized_lambda_function(
             *impl_fn = done;
         }
     }
+    // A nested lambda's `inline_body` is a copy of its implementation, so the copy of the closure
+    // it declares is a second node naming the declaration. It takes the same specialization.
+    retarget_lambdas(ir, cloned_body, state.replacements);
     remap_implementation_provenance(ir, cloned_body, state.replacements);
     Some(specialized)
 }

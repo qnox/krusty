@@ -29,6 +29,8 @@ use krusty::types::{Ty, TyKind, TypeName};
 
 #[cfg(test)]
 mod constructor_prefix_tests;
+#[cfg(test)]
+mod specialization_root_tests;
 
 const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 
@@ -671,6 +673,21 @@ fn builds_unrealized_suspend_lambda(ir: &IrFile, body: ExprId) -> bool {
 /// it, private static methods of its class, as kotlinc lifts them out of the `invokeSuspend` the
 /// body became (`invokeSuspend$lambda$0`, `invokeSuspend$local`). One whose body an inline call
 /// splices has no standalone method, there as anywhere.
+/// The outermost copy a specialized function is nested in, or the function itself when it is the
+/// outermost copy. `None` for a function no inline expansion copied.
+fn specialization_root(ir: &IrFile, function: u32) -> Option<u32> {
+    let mut root = None;
+    let mut current = function;
+    while let Some(specialized) = ir.specialized_functions.get(&current) {
+        root = Some(current);
+        match specialized.parent {
+            Some(parent) if parent != current => current = parent,
+            _ => break,
+        }
+    }
+    root
+}
+
 fn adopt_lifted_callables(ir: &mut IrFile, fid: u32, class: ClassId) {
     let Some((sequence, site)) = ir.lifted_functions.get(&fid) else {
         unreachable!("a suspend lambda has its lifting site");
@@ -689,11 +706,16 @@ fn adopt_lifted_callables(ir: &mut IrFile, fid: u32, class: ClassId) {
         })
         .map(|(&position, _)| position)
         .collect::<HashSet<_>>();
+    // Copies of one source callable share its lifting sequence and positions, so the sequence alone
+    // cannot tell whose helper a lifted function is. A copy made for an inline expansion belongs to
+    // the suspend lambda of that same expansion, which its specialization chain names.
+    let expansion = specialization_root(ir, fid);
     let declared = ir
         .lifted_functions
         .iter()
-        .filter(|(_, (other, site))| {
+        .filter(|(&function, (other, site))| {
             other == sequence
+                && specialization_root(ir, function) == expansion
                 && site.lifted
                 && site.path[..site.path.len() - 1]
                     .iter()
