@@ -180,12 +180,19 @@ pub(crate) fn collect_signatures_with_cp_headers(
     })
 }
 
+/// What the compact-header entry reads of Pass 1: the streamed headers and the lexical classifier
+/// contexts extracted from the same sources.
+#[derive(Clone, Copy)]
+pub(crate) struct PassOneHeaders<'a> {
+    pub(crate) headers: &'a crate::fir::StreamedHeaderModule,
+    pub(crate) local_contexts: &'a [PassOneLocalClassContext],
+}
+
 /// Production compact-header entry with body-derived lexical classifier context extracted while
 /// each source was the active Pass-1 parse. The context owns no expression or statement identity.
 pub(crate) fn collect_signatures_with_cp_headers_and_local_contexts(
     files: &[File],
-    headers: &crate::fir::StreamedHeaderModule,
-    local_contexts: &[PassOneLocalClassContext],
+    pass_one: PassOneHeaders<'_>,
     libraries: Box<dyn SemanticPlatform>,
     native_plugins: NativePlugins,
     reference: crate::kotlin_version::ReferenceProfile,
@@ -200,8 +207,8 @@ pub(crate) fn collect_signatures_with_cp_headers_and_local_contexts(
             libraries,
             &host,
             diags,
-            Some(headers),
-            Some(local_contexts),
+            Some(pass_one.headers),
+            Some(pass_one.local_contexts),
             target,
         );
         table.native_plugins = native_plugins;

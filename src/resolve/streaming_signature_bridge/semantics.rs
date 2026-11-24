@@ -2871,8 +2871,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             let oracle = crate::symbol_resolver::SourceOracle(&source);
             let context = crate::assignable::TyCtx::new();
             let selected = reference_selection::select_adapted_instance_candidate(
-                &source,
-                self.table.reference.quirks(),
+                reference_selection::ReferenceSource::new(&source, self.table.reference),
                 &members,
                 self.headers.scopes.binds_reference_contexts(scope.source),
                 unbound.then(|| receiver.get()),

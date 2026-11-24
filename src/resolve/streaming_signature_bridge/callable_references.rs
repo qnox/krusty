@@ -136,8 +136,7 @@ impl ProductionSignatureSemantics<'_> {
             .filter_map(|mut candidate| {
                 let bound_contexts = candidate.context_count * usize::from(binds_contexts);
                 let specialized = reference_selection::specialize_candidate(
-                    &source,
-                    self.table.reference.quirks(),
+                    reference_selection::ReferenceSource::new(&source, self.table.reference),
                     &mut candidate,
                     bound_contexts,
                     None,

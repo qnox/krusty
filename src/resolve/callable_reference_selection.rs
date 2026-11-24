@@ -311,6 +311,25 @@ pub(super) struct ReferenceExpectation<'a> {
     pub(super) quirks: crate::kotlin_version::Quirks,
 }
 
+/// The symbols a reference is selected among and the reproduced kotlinc profile it is selected under.
+#[derive(Clone, Copy)]
+pub(super) struct ReferenceSource<'a> {
+    pub(super) source: &'a dyn SymbolSource,
+    pub(super) quirks: crate::kotlin_version::Quirks,
+}
+
+impl<'a> ReferenceSource<'a> {
+    pub(super) fn new(
+        source: &'a dyn SymbolSource,
+        reference: crate::kotlin_version::ReferenceProfile,
+    ) -> Self {
+        Self {
+            source,
+            quirks: reference.quirks(),
+        }
+    }
+}
+
 /// The inputs of an expected function type that the call passing the reference declares as one of
 /// its own type variables (`f: (T) -> Int`), by position in `params`. A concrete input, one built
 /// from a type variable (`(Array<T>) -> Int`), and an input a receiver already substituted
@@ -564,8 +583,7 @@ pub(super) fn specialize_candidate_with_type_arguments(
 }
 
 pub(super) fn specialize_candidate(
-    source: &dyn SymbolSource,
-    quirks: crate::kotlin_version::Quirks,
+    reference: ReferenceSource<'_>,
     function: &mut FunctionInfo,
     bound_contexts: usize,
     extension_receiver: Option<Ty>,
@@ -574,7 +592,7 @@ pub(super) fn specialize_candidate(
     is_assignable: impl FnMut(Ty, Ty) -> bool,
 ) -> CallableRefSpecialization {
     specialize_candidate_with_type_arguments(
-        source,
+        reference.source,
         function,
         extension_receiver,
         ReferenceExpectation {
@@ -582,7 +600,7 @@ pub(super) fn specialize_candidate(
             ret: expected_ret,
             bound_contexts,
             type_variable_inputs: TypeVariableInputs::NONE,
-            quirks,
+            quirks: reference.quirks,
         },
         is_assignable,
     )
@@ -1054,8 +1072,7 @@ fn select_adapted_bound_instance_candidate(
 /// returned argument plan owns only declaration value parameters. Bound and unbound callers share
 /// this entry point so they cannot drift into different specialization or overload-selection rules.
 pub(super) fn select_adapted_instance_candidate(
-    source: &dyn SymbolSource,
-    quirks: crate::kotlin_version::Quirks,
+    reference: ReferenceSource<'_>,
     overloads: &[FunctionInfo],
     bind_contexts: bool,
     unbound_receiver: Option<Ty>,
@@ -1092,8 +1109,8 @@ pub(super) fn select_adapted_instance_candidate(
         None => expected,
     };
     let (selected, mut plan, type_arguments) = select_adapted_bound_instance_candidate(
-        source,
-        quirks,
+        reference.source,
+        reference.quirks,
         overloads,
         bind_contexts,
         InstanceReferenceExpectation {

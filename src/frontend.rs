@@ -1656,8 +1656,10 @@ where
     }
     let mut symbols = crate::resolve::collect_signatures_with_cp_headers_and_local_contexts(
         &files[..inferred_end],
-        &pass1_headers,
-        &local_class_contexts[..inferred_end],
+        crate::resolve::PassOneHeaders {
+            headers: &pass1_headers,
+            local_contexts: &local_class_contexts[..inferred_end],
+        },
         platform,
         native_plugins,
         project_features.reference(),
