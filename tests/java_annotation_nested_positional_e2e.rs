@@ -34,7 +34,7 @@ fn library() -> std::path::PathBuf {
         .expect("javac must build the Java annotation fixture")
 }
 
-/// Krusty's and kotlinc's complete `(line, column, message)` reports: errors, then warnings.
+/// Krusty's and kotlinc's complete `file:line:column: message` reports: errors, then warnings.
 fn reports(source: &str, args: &[&str]) -> [(Vec<String>, Vec<String>); 2] {
     let args = args
         .iter()
@@ -48,8 +48,8 @@ fn reports(source: &str, args: &[&str]) -> [(Vec<String>, Vec<String>); 2] {
             .iter()
             .map(|diagnostic| {
                 format!(
-                    "{}:{}: {}",
-                    diagnostic.line, diagnostic.column, diagnostic.message
+                    "{}:{}:{}: {}",
+                    diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.message
                 )
             })
             .collect::<Vec<_>>()
@@ -81,10 +81,10 @@ fn a_positional_argument_of_a_nested_java_annotation_warns_before_the_feature() 
         assert_eq!(
             kotlinc_warnings,
             [
-                "4:22: only named arguments are available for Java annotations. This will become \
+                "Use.kt:4:22: only named arguments are available for Java annotations. This will become \
                  an error in language version 2.6. See: \
                  https://youtrack.jetbrains.com/issue/KTLC-418",
-                "4:40: only named arguments are available for Java annotations. This will become \
+                "Use.kt:4:40: only named arguments are available for Java annotations. This will become \
                  an error in language version 2.6. See: \
                  https://youtrack.jetbrains.com/issue/KTLC-418",
             ]
@@ -112,8 +112,8 @@ fn the_enforcing_feature_rejects_a_positional_argument_of_a_nested_java_annotati
     assert_eq!(
         kotlinc_errors,
         [
-            "4:22: only named arguments are available for Java annotations.",
-            "4:40: only named arguments are available for Java annotations.",
+            "Use.kt:4:22: only named arguments are available for Java annotations.",
+            "Use.kt:4:40: only named arguments are available for Java annotations.",
         ]
     );
 }
@@ -124,6 +124,6 @@ fn a_positional_argument_of_a_top_level_java_annotation_is_an_error_without_the_
     assert_eq!(krusty_errors, kotlinc_errors);
     assert_eq!(
         kotlinc_errors,
-        ["3:8: only named arguments are available for Java annotations."]
+        ["Use.kt:3:8: only named arguments are available for Java annotations."]
     );
 }
