@@ -598,21 +598,44 @@ fn wasm_scalar_instruction(operation: &str) -> Option<(ScalarInstruction, Scalar
 }
 
 /// Whether the serialized function `function` is bound to a Kotlin/Native runtime entry by its
-/// `@GCUnsafeCall("callee")`: it has no body, and the one annotation names its symbol. This is the
-/// serialized-IR view of the declaration [`super::direct_c_calls::runtime_entry`] authenticates
-/// from metadata.
+/// The runtime symbol a bodyless serialized function is bound to by `@GCUnsafeCall("callee")`.
+/// This is the serialized-IR view of the declaration [`super::direct_c_calls::runtime_entry`]
+/// authenticates from metadata.
+pub(crate) fn runtime_entry_symbol<'a>(
+    arena: &'a KlibIrArena,
+    function: &'a crate::metadata::klib_ir::tree::KlibIrFunction,
+) -> Option<&'a str> {
+    if function.body.is_some() {
+        return None;
+    }
+    ir_string_annotation(
+        arena,
+        &function.base.annotations,
+        &["kotlin", "native", "internal"],
+        &["GCUnsafeCall", "<init>"],
+    )
+}
+
+/// The symbol the runtime calls back through, named by `@ExportForCppRuntime("name")` on a
+/// serialized function that has a body.
+pub(crate) fn runtime_export_symbol<'a>(
+    arena: &'a KlibIrArena,
+    function: &'a crate::metadata::klib_ir::tree::KlibIrFunction,
+) -> Option<&'a str> {
+    function.body.as_ref()?;
+    ir_string_annotation(
+        arena,
+        &function.base.annotations,
+        &["kotlin", "native", "internal"],
+        &["ExportForCppRuntime", "<init>"],
+    )
+}
+
 pub(crate) fn is_runtime_entry_ir(
     arena: &KlibIrArena,
     function: &crate::metadata::klib_ir::tree::KlibIrFunction,
 ) -> bool {
-    function.body.is_none()
-        && ir_string_annotation(
-            arena,
-            &function.base.annotations,
-            &["kotlin", "native", "internal"],
-            &["GCUnsafeCall", "<init>"],
-        )
-        .is_some()
+    runtime_entry_symbol(arena, function).is_some()
 }
 
 fn ir_string_annotation<'a>(

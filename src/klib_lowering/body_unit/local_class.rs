@@ -206,26 +206,35 @@ impl<'s> Linker<'_, 's> {
                     formals: member.formals.clone(),
                 },
             );
-            self.pending.push_back(PendingBody {
-                identity: identity.clone(),
-                arena: prepared.arena,
-                symbol: member.symbol,
-                statements: member.statements,
-                header: member.header,
-                function,
-                initialization: None,
-                value_member: None,
-                local_body: Some(super::super::same_library_class::LocalBody::Member(
-                    super::super::same_library_class::LocalMemberFields {
-                        class: class_id,
-                        declaring: prepared.declaring,
-                        receiver: prepared.self_type,
-                        fields: prepared.stored.clone(),
-                        outer: prepared.outer,
-                    },
-                )),
-                static_initialization: None,
-            });
+            if let Some(binding) = &member.runtime_binding {
+                ir.runtime_bindings.insert(function, binding.clone());
+            }
+            let bodyless = matches!(
+                member.runtime_binding,
+                Some(crate::ir::RuntimeBinding::Entry(_))
+            );
+            if !bodyless {
+                self.pending.push_back(PendingBody {
+                    identity: identity.clone(),
+                    arena: prepared.arena,
+                    symbol: member.symbol,
+                    statements: member.statements,
+                    header: member.header,
+                    function,
+                    initialization: None,
+                    value_member: None,
+                    local_body: Some(super::super::same_library_class::LocalBody::Member(
+                        super::super::same_library_class::LocalMemberFields {
+                            class: class_id,
+                            declaring: prepared.declaring,
+                            receiver: prepared.self_type,
+                            fields: prepared.stored.clone(),
+                            outer: prepared.outer,
+                        },
+                    )),
+                    static_initialization: None,
+                });
+            }
             publish_overrides(
                 ir,
                 prepared.classifier,

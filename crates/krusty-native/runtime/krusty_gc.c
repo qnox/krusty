@@ -436,6 +436,28 @@ static size_t kt_sweep(void) {
 
 static bool kt_collecting;
 
+/* What the last collection measured, which `GC.lastGCInfo` reports. A collection here is one
+   stop-the-world pass on the calling thread, so its pauses span the whole of it. */
+struct KCollectionStats {
+    int64_t epoch;
+    int64_t start_ns;
+    int64_t end_ns;
+    int64_t marked;
+    int64_t swept;
+    int64_t bytes_before;
+    int64_t bytes_after;
+    int64_t globals;
+};
+static struct KCollectionStats kt_last_collection;
+
+int clock_gettime(int clock, void *time);
+
+static int64_t kt_monotonic_ns(void) {
+    long now[2];
+    clock_gettime(1 /* CLOCK_MONOTONIC */, now);
+    return (int64_t)now[0] * 1000000000 + (int64_t)now[1];
+}
+
 void kt_gc_collect(void) {
     /* Without the stack bottom there are no roots, and "no roots" would free everything the
        program holds. That is a bug in whoever produced the entry point, and it must not look
@@ -453,6 +475,9 @@ void kt_gc_collect(void) {
         KT_SYS_FAIL("krusty: a collection started during a collection\n");
     }
     kt_collecting = true;
+    int64_t started = kt_monotonic_ns();
+    int64_t bytes_before = (int64_t)kt_gc_live_bytes();
+    size_t objects_before = kt_gc_live_objects();
     for (size_t i = 0; i < kt_global_count; i++) {
         uintptr_t value = kt_load_word(kt_globals[i]);
         if (value != 0) {
@@ -465,6 +490,15 @@ void kt_gc_collect(void) {
     kt_threads_scan_released();
     kt_trace();
     size_t live_bytes = kt_sweep();
+    size_t objects_after = kt_gc_live_objects();
+    kt_last_collection.epoch++;
+    kt_last_collection.start_ns = started;
+    kt_last_collection.end_ns = kt_monotonic_ns();
+    kt_last_collection.marked = (int64_t)objects_after;
+    kt_last_collection.swept = (int64_t)(objects_before - objects_after);
+    kt_last_collection.bytes_before = bytes_before;
+    kt_last_collection.bytes_after = (int64_t)live_bytes;
+    kt_last_collection.globals = (int64_t)kt_global_count;
     for (uint32_t i = 0; i < KT_CLASS_COUNT; i++) {
         kt_class_cursor[i] = kt_class_chunks[i];
     }
@@ -609,4 +643,45 @@ size_t kt_gc_live_bytes(void) {
         bytes += (size_t)chunk->live * chunk->object_size;
     }
     return bytes;
+}
+
+/* ---- `GC.lastGCInfo` -------------------------------------------------------------------------- */
+
+/* The standard library's `GCInfoBuilder` declares `fill` `external` with
+   `@GCUnsafeCall("Kotlin_Internal_GC_GCInfoBuilder_Fill")`, and each setter below
+   `@ExportForCppRuntime` under the name used here. A setter is weak: a program that never builds a
+   `GCInfoBuilder` does not carry them, and then nothing calls `fill`. */
+#define KT_GC_INFO_SETTER(name, ...) __attribute__((weak)) void Kotlin_Internal_GC_GCInfoBuilder_##name(void *builder, __VA_ARGS__)
+
+KT_GC_INFO_SETTER(setEpoch, int64_t value);
+KT_GC_INFO_SETTER(setStartTime, int64_t value);
+KT_GC_INFO_SETTER(setEndTime, int64_t value);
+KT_GC_INFO_SETTER(setFirstPauseRequestTime, int64_t value);
+KT_GC_INFO_SETTER(setFirstPauseStartTime, int64_t value);
+KT_GC_INFO_SETTER(setFirstPauseEndTime, int64_t value);
+KT_GC_INFO_SETTER(setPostGcCleanupTime, int64_t value);
+KT_GC_INFO_SETTER(setRootSet, int64_t thread_local, int64_t stack, int64_t global, int64_t stable);
+KT_GC_INFO_SETTER(setMarkStats, int64_t marked);
+KT_GC_INFO_SETTER(setSweepStats, const char *pool, int64_t kept, int64_t swept);
+KT_GC_INFO_SETTER(setMemoryUsageBefore, const char *pool, int64_t bytes);
+KT_GC_INFO_SETTER(setMemoryUsageAfter, const char *pool, int64_t bytes);
+
+void Kotlin_Internal_GC_GCInfoBuilder_Fill(void *builder, int32_t id) {
+    /* Only the last collection is kept, and until one has run there is none to report. */
+    if (id != 0 || kt_last_collection.epoch == 0) {
+        return;
+    }
+    const struct KCollectionStats *last = &kt_last_collection;
+    Kotlin_Internal_GC_GCInfoBuilder_setEpoch(builder, last->epoch);
+    Kotlin_Internal_GC_GCInfoBuilder_setStartTime(builder, last->start_ns);
+    Kotlin_Internal_GC_GCInfoBuilder_setEndTime(builder, last->end_ns);
+    Kotlin_Internal_GC_GCInfoBuilder_setFirstPauseRequestTime(builder, last->start_ns);
+    Kotlin_Internal_GC_GCInfoBuilder_setFirstPauseStartTime(builder, last->start_ns);
+    Kotlin_Internal_GC_GCInfoBuilder_setFirstPauseEndTime(builder, last->end_ns);
+    Kotlin_Internal_GC_GCInfoBuilder_setPostGcCleanupTime(builder, last->end_ns);
+    Kotlin_Internal_GC_GCInfoBuilder_setRootSet(builder, 0, 0, last->globals, 0);
+    Kotlin_Internal_GC_GCInfoBuilder_setMarkStats(builder, last->marked);
+    Kotlin_Internal_GC_GCInfoBuilder_setSweepStats(builder, "heap", last->marked, last->swept);
+    Kotlin_Internal_GC_GCInfoBuilder_setMemoryUsageBefore(builder, "heap", last->bytes_before);
+    Kotlin_Internal_GC_GCInfoBuilder_setMemoryUsageAfter(builder, "heap", last->bytes_after);
 }

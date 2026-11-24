@@ -222,12 +222,29 @@ impl BodyLowering<'_> {
                         .linker
                         .is_subtype(parameters, target, Self::star_projected(actual))
             })
+            || (Self::is_erased_instance(actual)
+                && self.linker.is_subtype(
+                    parameters,
+                    Self::star_projected(actual),
+                    Self::star_projected(target),
+                ))
             || self.local_class(actual).is_some_and(|class| {
                 class
                     .supertypes
                     .iter()
                     .any(|supertype| self.narrows(*supertype, target))
             })
+    }
+
+    /// An instance a prepared copy of an inline function typed with the erasure of its type
+    /// parameters: a generic class applied to nothing but `Any?` (`HashMap<Any?, Any?>` for the
+    /// `LinkedHashMap()` of `mutableMapOf<K, V>()`). The call's result casts it back to the
+    /// supertype the declaration names, whose arguments the erasure lost.
+    fn is_erased_instance(ty: Ty) -> bool {
+        let TyKind::Obj(_, arguments) = ty.non_null().kind() else {
+            return false;
+        };
+        !arguments.is_empty() && arguments.iter().all(|argument| *argument == Ty::nullable(Ty::obj("kotlin/Any")))
     }
 
     /// `ty`'s classifier with every type argument a star projection.

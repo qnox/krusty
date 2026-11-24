@@ -151,6 +151,8 @@ pub(super) struct PreparedMember<'a> {
     pub(super) visibility: Visibility,
     /// The function's own type parameters and their declared bounds, which a call binds.
     pub(super) formals: Vec<(crate::types::TyParamName, Vec<Ty>)>,
+    /// The runtime symbol the library binds this member to, when it declares one.
+    pub(super) runtime_binding: Option<crate::ir::RuntimeBinding>,
 }
 
 /// An overridden member, joined by its checked dependency identity.
@@ -948,6 +950,7 @@ fn prepare_abstract_member<'a>(
         overrides,
         installed_overrides,
         visibility: declaration_visibility(function.base.flags),
+        runtime_binding: None,
     })
 }
 
@@ -1560,12 +1563,22 @@ fn prepare_member<'a>(
     function: &'a KlibIrFunction,
     scope: &MemberScope<'_>,
 ) -> Result<PreparedMember<'a>, KlibBodyDeclineReason> {
-    let statements = match &function.body {
-        Some(KlibIrBody::Block(statements)) => statements.as_slice(),
+    let (statements, runtime_binding) = match &function.body {
+        Some(KlibIrBody::Block(statements)) => (
+            statements.as_slice(),
+            crate::klib_libraries::runtime_export_symbol(arena, function)
+                .map(|symbol| crate::ir::RuntimeBinding::Export(symbol.to_owned())),
+        ),
         Some(KlibIrBody::Synthetic(_)) => {
             return Err(unsupported("a synthetic member of a non-public class"))
         }
-        None => return Err(unsupported("a member of a non-public class without a body")),
+        None => match crate::klib_libraries::runtime_entry_symbol(arena, function) {
+            Some(symbol) => (
+                &[][..],
+                Some(crate::ir::RuntimeBinding::Entry(symbol.to_owned())),
+            ),
+            None => return Err(unsupported("a member of a non-public class without a body")),
+        },
     };
     let header = local_member_header(function, arena, scope.types, scope.self_type, scope.resolve)?;
     let MemberOverrides {
@@ -1581,6 +1594,7 @@ fn prepare_member<'a>(
         overrides,
         installed_overrides,
         visibility: declaration_visibility(function.base.flags),
+        runtime_binding,
     })
 }
 
