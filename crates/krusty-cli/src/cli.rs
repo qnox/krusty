@@ -159,6 +159,10 @@ pub struct Options {
     /// `-jvm-target <v>`: the emitted class-file major version (kotlinc maps `1.8`→52, `9`→53, …,
     /// `25`→69). `None` keeps krusty's default (Java 8 / major 52), which runs on the test JDK.
     pub jvm_target_major: Option<u16>,
+    /// `-Xjvm-enable-preview`: every class file is marked as compiled with preview features (minor
+    /// version 65535), which no release JVM loads, and from JVM target 28 carries the identity flag
+    /// on its non-interface `InnerClasses` entries.
+    pub jvm_enable_preview: bool,
     /// `-Xjdk-release=<v>`: the JDK release whose API the sources compile against. kotlinc also
     /// derives the JVM target from it. A release other than the selected JDK's own is read from
     /// that release's signatures in the JDK's `lib/ct.sym` (see [`Options::compilation_inputs`]).
@@ -242,6 +246,7 @@ impl Default for Options {
             no_reflect: false,
             no_jdk: false,
             jvm_target_major: None,
+            jvm_enable_preview: false,
             jdk_release: None,
             kotlin_reference_version: None,
             kotlinc_defects: krusty::kotlin_version::KotlincDefects::Reproduce,
@@ -611,6 +616,7 @@ impl Options {
             .unwrap_or_else(|| self.language_settings.language_version.metadata_version());
         JvmBackend::new(classpath)
             .with_class_major(self.jvm_target_major)
+            .with_enable_preview(self.jvm_enable_preview)
             .with_jvm_default(self.jvm_default)
             .with_java_parameters(self.java_parameters)
             .with_lambda_modes(self.lambda_modes)

@@ -20,6 +20,8 @@ pub(crate) use read::ClassReadError;
 #[derive(Clone, Debug)]
 pub struct ClassNode {
     pub major: u16,
+    /// The class file carries the preview minor version (`-Xjvm-enable-preview`).
+    pub preview: bool,
     pub access: u16,
     pub name: String,
     pub signature: Option<String>,

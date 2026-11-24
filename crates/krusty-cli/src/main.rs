@@ -694,6 +694,10 @@ pub fn compile(opts: &cli::Options) -> Result<usize, CompileError> {
     for note in &plugins.notes {
         eprintln!("info: {note}");
     }
+    // kotlinc announces the argument before it compiles anything.
+    if opts.jvm_enable_preview {
+        eprintln!("info: using preview Java language features");
+    }
     if !plugins.errors.is_empty() {
         return Err(plugins
             .errors
