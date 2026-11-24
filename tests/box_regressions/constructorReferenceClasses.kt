@@ -8,5 +8,6 @@ fun box(): String {
     val plain: (String) -> Plain = ::Plain
     val inner: Foo.(String) -> Foo.Bar = Foo::Bar
     val bound: (String) -> Foo.Bar = Foo()::Bar
-    return plain("O").value + Foo().inner("K").value + bound("!").value.take(0)
+    if (bound("x").value != "x") return "fail"
+    return plain("O").value + Foo().inner("K").value
 }
