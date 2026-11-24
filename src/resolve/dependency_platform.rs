@@ -389,6 +389,12 @@ impl SymbolSource for DependencyPlatform {
             .or_else(|| self.platform.serializable_class_elements(classifier))
     }
 
+    fn enum_entries(&self, classifier: TypeName) -> Option<Vec<crate::types::EnumEntryFacts>> {
+        self.source()
+            .enum_entries(classifier)
+            .or_else(|| self.platform.enum_entries(classifier))
+    }
+
     fn annotation_conventions(&self) -> &crate::symbol_source::AnnotationConventions {
         &self.symbols.annotation_conventions
     }

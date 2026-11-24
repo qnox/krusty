@@ -250,6 +250,12 @@ pub trait SymbolSource {
         None
     }
 
+    /// The entries of the enum `classifier` with the annotations each declaration states; see
+    /// [`crate::types::ClassifierFactSource::enum_entries`].
+    fn enum_entries(&self, _classifier: TypeName) -> Option<Vec<crate::types::EnumEntryFacts>> {
+        None
+    }
+
     /// The annotation-configured call conventions the compilation's frontend plugins select. A
     /// compilation fact, published by the current-module provider.
     fn annotation_conventions(&self) -> &AnnotationConventions {
@@ -356,6 +362,12 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .find_map(|child| child.serializable_class_elements(classifier))
+    }
+
+    fn enum_entries(&self, classifier: TypeName) -> Option<Vec<crate::types::EnumEntryFacts>> {
+        self.children
+            .iter()
+            .find_map(|child| child.enum_entries(classifier))
     }
 
     fn annotation_conventions(&self) -> &AnnotationConventions {
@@ -636,6 +648,10 @@ impl SymbolSource for CachedCompositeSource<'_> {
         classifier: TypeName,
     ) -> Option<crate::types::SerializableClassElements> {
         self.source.serializable_class_elements(classifier)
+    }
+
+    fn enum_entries(&self, classifier: TypeName) -> Option<Vec<crate::types::EnumEntryFacts>> {
+        self.source.enum_entries(classifier)
     }
 
     fn annotation_conventions(&self) -> &AnnotationConventions {

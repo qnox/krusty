@@ -195,6 +195,8 @@ struct SourceDeclaration {
     serialization_companion_accessor: Option<(Box<str>, TypeName, usize)>,
     /// The serial elements the serialization plugin committed to for the class.
     serializable_elements: Option<crate::types::SerializableClassElements>,
+    /// The entries of an enum with the annotations each entry declaration states.
+    enum_entries: Option<Vec<crate::types::EnumEntryFacts>>,
 }
 
 impl BackendClassifierFact {
@@ -575,6 +577,25 @@ impl BackendModuleFacts {
                         .serialization_companion_accessor(declaration)
                         .map(|(field, companion, arity)| (Box::from(field), companion, arity)),
                     serializable_elements: index.serializable_class_elements(declaration).cloned(),
+                    enum_entries: (kind == crate::libraries::TypeKind::Enum).then(|| {
+                        index
+                            .owned_declarations(declaration)
+                            .iter()
+                            .filter(|&&child| {
+                                index.declaration_header(child).is_some_and(|header| {
+                                    header.kind == crate::fir::DeclarationKind::EnumEntry
+                                })
+                            })
+                            .filter_map(|&child| {
+                                Some(crate::types::EnumEntryFacts {
+                                    name: index.declaration_name(child)?.to_string(),
+                                    annotations: index
+                                        .declaration_applied_annotations(child)
+                                        .to_vec(),
+                                })
+                            })
+                            .collect()
+                    }),
                 },
             );
             if let Some(underlying) = value_underlying {
@@ -1037,6 +1058,16 @@ impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
         self.dependencies.serializable_class_elements(classifier)
     }
 
+    fn enum_entries(&self, classifier: TypeName) -> Option<Vec<crate::types::EnumEntryFacts>> {
+        if let Some(source) = self.module.source_declarations.get(&classifier) {
+            return source.enum_entries.clone();
+        }
+        if self.module.classifier(classifier).is_some() || self.module.is_body_local(classifier) {
+            return None;
+        }
+        self.dependencies.enum_entries(classifier)
+    }
+
     fn has_serialization_serializer_accessor(
         &self,
         companion: TypeName,
@@ -1376,6 +1407,7 @@ fn constructible_from_another_file(
 mod tests {
     use super::*;
     use crate::symbol_source::SymbolSource;
+    use crate::types::ClassifierFactSource;
 
     fn classifier_name_snapshot(source: &str) -> BackendModuleFacts {
         let mut diagnostics = crate::diag::DiagSink::new();
@@ -1404,6 +1436,42 @@ mod tests {
             assert_eq!(class.declaration_name, fact.declaration_name);
         }
         facts
+    }
+
+    #[test]
+    fn a_source_enum_publishes_each_entry_with_its_declared_annotations() {
+        let facts = classifier_name_snapshot(
+            "package ownership.entries\n\
+             annotation class Mark\n\
+             enum class Mode { @Mark First, Second }\n\
+             class Plain\n",
+        );
+        let classifiers =
+            CheckedBackendClassifiers::new(&facts, &crate::libraries::EmptySymbolSource);
+        let name = |name| {
+            crate::types::type_name_child(crate::types::type_name("ownership/entries"), name)
+        };
+        let entries = classifiers
+            .enum_entries(name("Mode"))
+            .expect("enum entries");
+        let described: Vec<_> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name.as_str(),
+                    entry
+                        .annotations
+                        .iter()
+                        .map(|annotation| annotation.annotation)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            described,
+            [("First", vec![name("Mark")]), ("Second", Vec::new())]
+        );
+        assert!(classifiers.enum_entries(name("Plain")).is_none());
     }
 
     #[test]

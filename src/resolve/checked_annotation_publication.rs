@@ -349,7 +349,7 @@ impl PendingConstructorPropertyAnnotations {
 }
 
 /// Publish the checked annotations of the members `class` declares under their stable identities
-/// owned by `owner`: methods, body properties with their accessors, and constructors.
+/// owned by `owner`: enum entries, methods, body properties with their accessors, and constructors.
 fn publish_classifier_member_annotations(
     index: &mut crate::fir::ResolvedModuleIndex,
     owner: crate::fir::DeclarationId,
@@ -358,6 +358,17 @@ fn publish_classifier_member_annotations(
     default_target_mode: crate::types::PropertyAnnotationDefaultTargetMode,
     constructor_properties: &mut Vec<PendingConstructorPropertyAnnotations>,
 ) {
+    for (ordinal, entry) in class.enum_entries.iter().enumerate() {
+        let Some(declaration) = u32::try_from(ordinal).ok().and_then(|ordinal| {
+            index.owned_declaration(owner, DeclarationKind::EnumEntry, ordinal)
+        }) else {
+            continue;
+        };
+        index.publish_declaration_applied_annotations(
+            declaration,
+            checked_applications(info, &entry.annotations),
+        );
+    }
     for (method_index, method) in class.methods.iter().enumerate() {
         let Some(declaration) = u32::try_from(method_index)
             .ok()
@@ -718,6 +729,10 @@ fn classifier_has_resolved_annotations(
     };
     class.annotations.iter().any(resolved)
         || class
+            .enum_entries
+            .iter()
+            .any(|entry| entry.annotations.iter().any(resolved))
+        || class
             .methods
             .iter()
             .any(|method| function_annotations(method).any(resolved))
@@ -830,6 +845,14 @@ impl Checker<'_> {
         let member_rung = self.enter_annotation_class_rung(owner);
         if let Some(owner) = owner.filter(|_| class.is_annotation()) {
             self.fold_annotation_element_defaults(scope, class, owner);
+        }
+        for entry in &class.enum_entries {
+            self.check_non_property_annotation_applications_in_declaration_scope(
+                scope,
+                &entry.annotations,
+                &entry.annotation_args,
+                "enum entry",
+            );
         }
         for method in &class.methods {
             if function_annotations(method).any(|annotation| self.has_bound_annotation(annotation))
