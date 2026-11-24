@@ -328,6 +328,20 @@ impl CallableRegistry {
                     }
                     continue;
                 }
+                // A lambda converted to a `fun interface` is an instance of it, so the bodies of
+                // the interface's inherited defaults of this module are the object's members.
+                IrExpr::Lambda {
+                    sam: Some(target), ..
+                } => {
+                    for frame in &target.default_methods {
+                        if let Some(krusty::ir::IrSamMethod::Module(callable)) = frame.method {
+                            targets
+                                .module
+                                .insert(callable, self.module_index(callable, wasm));
+                        }
+                    }
+                    continue;
+                }
                 IrExpr::Checked(operation) => {
                     let Some(access) = callables.dependency_accessor(operation) else {
                         continue;
