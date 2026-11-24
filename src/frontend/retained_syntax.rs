@@ -476,6 +476,12 @@ fn declaration_annotation_arguments(declaration: &Decl) -> impl Iterator<Item = 
     let classifier = classifier
         .into_iter()
         .flat_map(|class| class.annotation_args.iter().flatten().copied());
+    let entries = constructors.into_iter().flat_map(|class| {
+        class
+            .enum_entries
+            .iter()
+            .flat_map(|entry| entry.annotation_args.iter().flatten().copied())
+    });
     let functions = functions.iter().flat_map(|function| {
         function.annotation_args.iter().flatten().copied().chain(
             function
@@ -507,6 +513,7 @@ fn declaration_annotation_arguments(declaration: &Decl) -> impl Iterator<Item = 
             )
     });
     classifier
+        .chain(entries)
         .chain(functions)
         .chain(properties)
         .chain(constructors)
