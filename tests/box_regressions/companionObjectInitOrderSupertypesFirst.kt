@@ -1,6 +1,3 @@
-// TARGET_BACKEND: JVM_IR, NATIVE
-// Wasm does not yet initialize a class's supertypes first (its upstream counterpart is an expected
-// failure), so the program is shared by the backends that do.
 // KOTLINC_VERSION: [2.5.0,)
 // LANGUAGE: +CompanionBlocks
 var log = ""
