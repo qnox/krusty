@@ -678,8 +678,6 @@ fp/atan2ZeroGuadrantsDouble.kt
 fp/powDouble.kt
 fp/powFloat.kt
 fullValueClasses/construction.kt
-fullValueClasses/multiModuleAbstractValueBaseDispatch.kt
-fullValueClasses/multiModuleRegularFromAbstractValue.kt
 fullValueClasses/smartCastOnPropertyFromOtherModule.kt
 funInterface/basicFunInterfaceConversionClash.kt
 funInterface/funInterfaceWithSuspendMethod.kt
