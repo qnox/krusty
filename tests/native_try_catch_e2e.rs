@@ -307,7 +307,8 @@ fn reading_a_lateinit_property_before_it_is_set_throws() {
     // The guard is at the READ, which is where kotlinc puts it: the field being null is the only
     // evidence there is, and it is why `lateinit` is confined to types that have a null.
     expect_native_box(
-        "class Holder {\n\
+        "@file:Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n\
+         class Holder {\n\
          \x20   lateinit var text: String\n\
          \x20   fun read(): String = text\n\
          }\n\
@@ -378,7 +379,8 @@ fn a_lateinit_property_that_overrides_one_is_guarded_too() {
     // reaches the synthesized getter rather than the field directly. The guard has to be on what
     // that getter reads, not on the shape of the read.
     expect_native_box(
-        "interface Named { val label: String }\n\
+        "@file:Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n\
+         interface Named { val label: String }\n\
          class Tagged : Named {\n\
          \x20   override lateinit var label: String\n\
          \x20   fun read(): String = label\n\
