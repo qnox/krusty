@@ -2325,6 +2325,7 @@ regressions/sizedArrayAllocation.kt
 regressions/sourceExceptionSubclasses.kt
 regressions/sourceKCallableNameAcrossFiles.kt
 regressions/sourceKPropertyName.kt
+regressions/suspendCoroutineResultInTypedLocal.kt
 regressions/suspendLambdaLabeledReturn.kt
 regressions/suspendLambdaRetainedInlineObject.kt
 regressions/suspendLambdaRetainedInlineObjectCaptures.kt
