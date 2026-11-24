@@ -929,6 +929,12 @@ pub fn kotlinc_source_result(tag: &str, source: &str) -> (i32, String) {
     kotlinc_source_result_with_args(tag, source, &[])
 }
 
+/// Require the native backend's answer for `source` to be the one kotlinc's own run of it gives.
+pub fn expect_native_box_as_kotlinc(source: &str, stem: &str) {
+    let expected = kotlinc_box_result(source);
+    common::expect_native_box(source, stem, &expected);
+}
+
 /// Run the same `box()` fixture with kotlinc and krusty and require the exact same successful
 /// result. The explicit `OK` assertion prevents an identically wrong failure string from making a
 /// differential test pass.

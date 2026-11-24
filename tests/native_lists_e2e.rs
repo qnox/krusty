@@ -341,14 +341,11 @@ fn a_range_joins_the_same_way_a_list_does() {
 }
 
 #[test]
-fn joining_with_an_argument_still_declines() {
-    // Every parameter of `joinToString` is defaulted and this backend has no `$default` synthetic
-    // of a dependency to call, so a call that passes one has nothing to route to. Declining keeps
-    // the argument in sight rather than dropping it.
-    super::common::expect_native_decline(
+fn joining_with_a_separator_argument_uses_it() {
+    // Every parameter of `joinToString` is defaulted; the call passes one of them.
+    super::common::expect_native_box_as_kotlinc(
         "fun box(): String = listOf(1, 2, 3).joinToString(\"-\")\n",
         "JoinToStringWithSeparator",
-        "joinToString",
     );
 }
 

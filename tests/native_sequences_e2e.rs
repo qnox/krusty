@@ -13,7 +13,7 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_box_as_kotlinc};
 
 /// A sequence over each iterable this runtime has, walked and indexed.
 #[test]
@@ -64,11 +64,10 @@ fn a_sequence_is_indexed_lazily() {
     expect_native_box(source, "SequenceIndexed", "OK");
 }
 
-/// An EAGER walk over a sequence declines. Answering it would run the transform for every element
-/// where Kotlin runs it per element consumed — a different program, not a slower one.
+/// An eager walk over a sequence runs the transform per element consumed, as Kotlin does.
 #[test]
-fn an_eager_walk_over_a_sequence_declines() {
-    expect_native_decline(
+fn an_eager_walk_over_a_sequence_transforms_per_element() {
+    expect_native_box_as_kotlinc(
         "fun box(): String {\n\
          \x20   val mapped = listOf(1, 2).asSequence().map { it * 2 }\n\
          \x20   var total = 0\n\
@@ -76,7 +75,6 @@ fn an_eager_walk_over_a_sequence_declines() {
          \x20   return if (total == 6) \"OK\" else \"fail\"\n\
          }\n",
         "EagerOverSequence",
-        "map",
     );
 }
 
@@ -124,11 +122,10 @@ fn a_declared_sequence_answers_the_lazy_members_through_the_interface() {
     expect_native_box(source, "DeclaredSequenceIndexed", "OK");
 }
 
-/// The EAGER members keep declining through that receiver, for the reason they always did: the
-/// transform would run for every element where Kotlin runs it per element consumed.
+/// The eager members are lazy through that receiver too: the transform runs per element consumed.
 #[test]
-fn a_declared_sequence_still_declines_the_members_it_endangers() {
-    expect_native_decline(
+fn a_declared_sequence_is_mapped_lazily() {
+    expect_native_box_as_kotlinc(
         "class Counting<out T>(private val source: Sequence<T>) : Sequence<T> {\n\
          \x20   override fun iterator() = source.iterator()\n\
          }\n\
@@ -138,6 +135,5 @@ fn a_declared_sequence_still_declines_the_members_it_endangers() {
          \x20   return if (mapped === xs) \"same\" else \"OK\"\n\
          }\n",
         "DeclaredSequenceMapped",
-        "map",
     );
 }

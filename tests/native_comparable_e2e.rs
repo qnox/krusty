@@ -15,7 +15,10 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
+use super::common::{
+    expect_box_ok_with_stdlib, expect_native_box, expect_native_box_as_kotlinc,
+    expect_native_decline,
+};
 
 /// A boxed primitive and a string, compared through the type that says nothing more.
 #[test]
@@ -76,10 +79,10 @@ fn a_comparable_type_parameter_is_ordered_the_same_way() {
     expect_native_box(source, "ComparableBound", "OK");
 }
 
-/// A file declaring its own `Comparable` declines — the runtime has no order for its object.
+/// A file declaring its own `Comparable` is ordered by its own `compareTo`.
 #[test]
-fn a_file_that_declares_its_own_comparable_declines() {
-    expect_native_decline(
+fn a_file_that_declares_its_own_comparable_orders_through_its_compare_to() {
+    expect_native_box_as_kotlinc(
         "interface A : Comparable<A>\n\
          class B(val x: Int) : A {\n\
          \x20   override fun compareTo(other: A) = x.compareTo((other as B).x)\n\
@@ -87,7 +90,6 @@ fn a_file_that_declares_its_own_comparable_declines() {
          fun less(x: A, y: A) = x < y\n\
          fun box(): String = if (less(B(0), B(1))) \"OK\" else \"fail\"\n",
         "DeclaredComparable",
-        "Comparable.compareTo",
     );
 }
 
