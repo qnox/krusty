@@ -1,4 +1,4 @@
-// DONT_TARGET_EXACT_BACKEND: NATIVE
+// TARGET_BACKEND: JVM_IR, WASM
 // PLATFORM-SPECIFIC: without CompanionBlocks Native initializes a class's companion before its
 // superclass's, as `nativeCompanionInitOrderLegacy` pins; the shared program with the feature
 // enabled is companionBeforeSuperclassConstructorWithCompanionBlocks.
