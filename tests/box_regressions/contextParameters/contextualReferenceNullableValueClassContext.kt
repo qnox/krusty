@@ -6,10 +6,10 @@ import kotlin.jvm.JvmInline
 // reference, so its copies share one adapter. A non-null value reaches the declaration unboxed and
 // `null` stays `null`; a nullable value class over a scalar stays boxed.
 
-@JvmInline
+OPTIONAL_JVM_INLINE_ANNOTATION
 value class Z(val value: String)
 
-@JvmInline
+OPTIONAL_JVM_INLINE_ANNOTATION
 value class N(val value: Int)
 
 context(z: Z?)
