@@ -1334,7 +1334,11 @@ fn companion_accessor_bodies(ir: &IrFile, property: &crate::ir::IrCompanionBlock
                 && (!property.is_var || property.setter.is_some())
                 && declared_accessors_have_bodies()
         }
-        Some(_) => declared_accessors_have_bodies(),
+        // A delegated property's storage is its delegate, whose accessors have no exported
+        // layout of their own yet.
+        Some(storage) => {
+            !ir.statics[storage as usize].property_delegate && declared_accessors_have_bodies()
+        }
     }
 }
 
