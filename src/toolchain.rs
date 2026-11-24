@@ -787,8 +787,8 @@ pub fn compose_runtime_jars() -> Option<Vec<PathBuf>> {
     crate::conformance::plugin_corpus::named("compose").runtime_jars()
 }
 
-/// The atomicfu runtime version, for callers that name it as a constant (the conformance-deps
-/// fetch script). The atomicfu corpus descriptor is the producer;
+/// The atomicfu runtime version, for callers that name it as a constant. The atomicfu corpus
+/// descriptor is the producer;
 /// `plugin_runtime_version_constants_match_descriptors` pins this to it.
 pub const ATOMICFU_RUNTIME_VERSION: &str = "0.32.1";
 
@@ -834,6 +834,15 @@ fn atomicfu_klib_unavailable(
     format!(
         "box directive `// WITH_ATOMICFU` needs the atomicfu runtime KLIB for {target:?}: {reason}"
     )
+}
+
+/// The prebuilt static caches a Kotlin/Native distribution rooted at `native_root` ships for debug
+/// binaries of this host (`klib/cache/linux_x64-gSTATIC-system`), the caches Gradle's debug
+/// binaries and Kotlin's own Native box tests link against. `None` on a host Kotlin/Native does
+/// not target.
+pub fn kotlin_native_debug_static_caches(native_root: &Path) -> Option<PathBuf> {
+    let konan = crate::native_target::NativeTarget::host()?.konan_name()?;
+    Some(native_root.join(format!("klib/cache/{konan}-gSTATIC-system")))
 }
 
 /// The atomicfu runtime KLIB for `target`, pinned to the version of the atomicfu corpus's runtime; `Ok(None)` for
@@ -986,6 +995,21 @@ mod tests {
         assert!(kotlinc_distribution_complete(&whole));
         let _ = std::fs::remove_dir_all(partial);
         let _ = std::fs::remove_dir_all(whole);
+    }
+
+    #[test]
+    fn debug_static_caches_are_the_host_targets_gstatic_system_directory() {
+        let konan = crate::native_target::NativeTarget::host().and_then(|host| host.konan_name());
+        assert_eq!(
+            kotlin_native_debug_static_caches(Path::new("/dist")),
+            konan.map(|konan| PathBuf::from(format!("/dist/klib/cache/{konan}-gSTATIC-system")))
+        );
+        if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
+            assert_eq!(
+                kotlin_native_debug_static_caches(Path::new("/dist")),
+                Some(PathBuf::from("/dist/klib/cache/linux_x64-gSTATIC-system"))
+            );
+        }
     }
 
     #[test]
