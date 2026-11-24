@@ -1721,11 +1721,18 @@ pub(super) fn define_class_functions(
                 body.activate_class(owner, Some(owner))?;
             }
             body.activate_superclasses(id, owner)?;
+            // Initializing them may have reached this getter and built the instance; that one
+            // stands, so it is neither replaced nor constructed twice.
+            body.code
+                .global_get(singleton.global)
+                .ref_is_null()
+                .if_(BlockType::Empty);
             body.allocate(id)?;
             body.code
                 .global_set(singleton.global)
                 .global_get(singleton.global)
                 .call(constructor)
+                .end()
                 .end()
                 .global_get(singleton.global);
             let (code, locals) = body.finish();
