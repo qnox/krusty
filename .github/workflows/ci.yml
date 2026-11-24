@@ -1488,10 +1488,6 @@ jobs:
       matrix:
         kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['build-tools'][matrix.kotlin] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
-    permissions:
-      contents: read
-      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
-      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1519,7 +1515,8 @@ jobs:
           key: ${{ needs.build-tools-deps.outputs.gradle-key }}
           fail-on-cache-miss: true
       - *setup-gradle
-      - *package-cache
+      # No package-cache step: this job runs offline, and its TestKit build gets a clean
+      # environment, where the cache's init script would find no token.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
