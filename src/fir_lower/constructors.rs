@@ -471,6 +471,11 @@ pub(super) fn finalize_constructors(
         };
         let primary = primary_constructor_declaration(index, classifier);
         ir.classes[class as usize].has_primary_ctor = primary.is_some();
+        let primary_status = index.constructor_return_value_status(primary.unwrap_or(classifier));
+        if primary_status != crate::types::ReturnValueStatus::Unspecified {
+            ir.ctor_return_value_statuses
+                .insert(ir.classes[class as usize].fq_name, primary_status);
+        }
         if let Some(visibility) = primary
             .and_then(|declaration| index.declaration_header(declaration))
             .map(|header| header.visibility)
@@ -950,6 +955,7 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
                 declared_spellings: Default::default(),
                 named_params: Vec::new(),
                 metadata_visibility: Some(crate::types::Visibility::Public),
+                return_value_status: Default::default(),
                 generated_debug:
                     crate::ir::IrGeneratedDeclarationDebug::declaration_line_with_fallthrough(
                         declaration_line,
@@ -1085,6 +1091,7 @@ fn push_secondary_constructor(
                     .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
                     .visibility,
             ),
+            return_value_status: index.constructor_return_value_status(declaration),
             generated_debug: crate::ir::IrGeneratedDeclarationDebug::None,
             vararg_index,
             defaults,

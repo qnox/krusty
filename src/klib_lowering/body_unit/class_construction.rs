@@ -1439,6 +1439,7 @@ fn materialized_secondary(
             .map(|(parameter, ty)| (parameter.name.clone(), *ty))
             .collect(),
         metadata_visibility: None,
+        return_value_status: Default::default(),
         generated_debug: crate::ir::IrGeneratedDeclarationDebug::None,
         vararg_index: None,
         defaults: vec![None; params.len()],

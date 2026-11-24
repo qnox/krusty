@@ -49,6 +49,11 @@ pub fn package_function(ir: &IrFile, declaration: &crate::ir::IrPackageFunction)
         operator: declaration.operator,
         infix: declaration.infix,
         tailrec: declaration.tailrec,
+        return_value_status: ir
+            .fn_return_value_statuses
+            .get(&declaration.function)
+            .copied()
+            .unwrap_or_default(),
         companion: declaration.companion,
         contract: declaration
             .contract

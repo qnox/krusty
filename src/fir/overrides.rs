@@ -432,6 +432,33 @@ impl ResolvedModuleIndex {
         }
     }
 
+    /// The status of a constructor, named by its declaration, or by its classifier for an
+    /// implicit primary constructor.
+    pub fn constructor_return_value_status(
+        &self,
+        constructor: DeclarationId,
+    ) -> crate::types::ReturnValueStatus {
+        self.constructor_return_value_statuses
+            .get(&constructor)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn publish_constructor_return_value_status(
+        &mut self,
+        constructor: DeclarationId,
+        status: crate::types::ReturnValueStatus,
+    ) {
+        if status != crate::types::ReturnValueStatus::Unspecified {
+            assert!(
+                self.constructor_return_value_statuses
+                    .insert(constructor, status)
+                    .is_none(),
+                "a constructor may publish its return-value status only once"
+            );
+        }
+    }
+
     pub(crate) fn publish_property_return_value_status(
         &mut self,
         property: PropertyId,

@@ -454,6 +454,51 @@ fn publish_declared_statuses(
     }
 }
 
+/// Publish the return value status of every source constructor: what its own annotations, its
+/// class, the enclosing scopes and the checker mode give it. An implicit primary constructor has no
+/// declaration of its own, so its status is published under its classifier.
+pub(super) fn publish_constructor_statuses(index: &mut ResolvedModuleIndex) {
+    let mode = index.return_value_checker_mode();
+    if mode == ReturnValueCheckerMode::Disabled {
+        return;
+    }
+    let mut published = Vec::new();
+    for raw in 0..index.declaration_count() {
+        let declaration = DeclarationId::from_raw(raw as u32);
+        let Some(anchor) = index.declaration_anchor(declaration) else {
+            continue;
+        };
+        if anchor.kind != DeclarationKind::Classifier {
+            continue;
+        }
+        let owned = index.owned_declarations(declaration).to_vec();
+        let constructors = owned.into_iter().filter(|owned| {
+            index
+                .declaration_anchor(*owned)
+                .is_some_and(|anchor| anchor.kind == DeclarationKind::Constructor)
+        });
+        let mut has_primary = false;
+        for constructor in constructors {
+            has_primary |= index
+                .declaration_anchor(constructor)
+                .is_some_and(|anchor| anchor.sibling == 0);
+            published.push((
+                constructor,
+                DeclaredReturnValue::of(index, constructor).resolve(mode, None),
+            ));
+        }
+        if !has_primary {
+            published.push((
+                declaration,
+                DeclaredReturnValue::of(index, declaration).resolve(mode, None),
+            ));
+        }
+    }
+    for (constructor, status) in published {
+        index.publish_constructor_return_value_status(constructor, status);
+    }
+}
+
 /// Publish the return value status of every top-level callable and property of the module.
 pub(super) fn publish_top_level_statuses(index: &mut ResolvedModuleIndex) {
     let top_level = index

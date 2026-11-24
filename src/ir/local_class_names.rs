@@ -1714,6 +1714,7 @@ impl super::IrFile {
         remap_keyed(&mut self.ctor_close_lines, names);
         remap_keyed(&mut self.ctor_open_lines, names);
         remap_keyed(&mut self.ctor_visibilities, names);
+        remap_keyed(&mut self.ctor_return_value_statuses, names);
         remap_keyed(&mut self.declared_class_statics, names);
         remap_keyed(&mut self.super_constructor_default_arguments, names);
         remap_keyed(&mut self.external_super_constructors, names);

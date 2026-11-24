@@ -1479,6 +1479,10 @@ pub struct ResolvedModuleIndex {
     /// Non-default return-value statuses of module declarations, derived from the frozen edges.
     pub(super) callable_inherited_statuses: HashMap<CallableId, super::InheritedCallableStatus>,
     pub(super) property_return_value_statuses: HashMap<PropertyId, crate::types::ReturnValueStatus>,
+    /// The return-value status of each source constructor, keyed by its declaration, or by its
+    /// classifier for an implicit primary constructor.
+    pub(super) constructor_return_value_statuses:
+        HashMap<DeclarationId, crate::types::ReturnValueStatus>,
     /// The return value checker mode this compilation's statuses were resolved under.
     pub(super) return_value_checker: crate::features::ReturnValueCheckerMode,
     /// Callables with a function-typed value parameter or extension receiver (checker-classified).
@@ -2510,6 +2514,7 @@ impl ResolvedModuleIndex {
             && self.override_relations.is_empty()
             && self.dependency_superclasses.is_empty()
             && self.property_return_value_statuses.is_empty()
+            && self.constructor_return_value_statuses.is_empty()
             && self.function_typed_parameter_callables.is_empty()
             && self.properties.is_empty()
             && self.declaration_type_parameter_counts.is_empty()

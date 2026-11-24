@@ -2183,6 +2183,7 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mu
     }
     let inherited = publish_inherited_statuses(index, &plans);
     inherited_status::publish_top_level_statuses(index);
+    inherited_status::publish_constructor_statuses(index);
     publish_inherited_visibilities_to_symbols(table, &inherited);
     for (classifier, properties, functions) in plans {
         index.publish_property_overrides(classifier, properties);

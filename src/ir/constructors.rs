@@ -83,6 +83,9 @@ pub struct IrSecondaryCtor {
     /// means the constructor is a target/compiler realization with no Kotlin declaration record,
     /// independently of its parameter names, arity, descriptor, or [`Self::synthetic`] flag.
     pub metadata_visibility: Option<crate::types::Visibility>,
+    /// Whether a caller must use the constructed value, as the checker resolved it; written to the
+    /// `Constructor` metadata record.
+    pub return_value_status: crate::types::ReturnValueStatus,
     /// Debug representation for a compiler-generated constructor. Source constructors derive their
     /// own tables from source declarations and leave this as `None`.
     pub generated_debug: IrGeneratedDeclarationDebug,
