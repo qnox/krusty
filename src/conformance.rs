@@ -522,6 +522,21 @@ pub fn backend_muted(src: &str, names: &[&str]) -> bool {
         .any(|l| mentions(l.split_once(':').map(|x| x.1).unwrap_or("").trim(), names))
 }
 
+/// Whether kotlinc's own Wasm test run mutes this case in its multi-module mode:
+/// `// WASM_IGNORE_FOR: mode=multi-module`. The directive is a known kotlinc defect marker (the
+/// case carries the upstream issue), so a case that krusty also builds as several modules is not a
+/// krusty failure. A `runner=` or `vm=` qualifier names a different test generator or engine than
+/// krusty's lane, and a case built as one module is outside the mode, so neither is muted here.
+pub fn wasm_ignored_for_multi_module(src: &str) -> bool {
+    let muted = src.lines().any(|line| {
+        directive_payload(line, "WASM_IGNORE_FOR").is_some_and(|payload| {
+            let mut tokens = payload.split_whitespace().peekable();
+            tokens.peek().is_some() && tokens.all(|token| token == "mode=multi-module")
+        })
+    });
+    muted && split_modules(src).is_some()
+}
+
 /// Whether the test applies to krusty's backend (the common case of [`backend_applicable`]).
 pub fn applies(src: &str) -> bool {
     backend_applicable(src, BACKENDS) && !needs_unmodeled_compiler_flag(src)

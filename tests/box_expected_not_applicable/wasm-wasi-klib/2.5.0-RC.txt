@@ -252,6 +252,7 @@ package/jsExportNameClashIntermodule.kt
 primitiveTypes/crossTypeEquals.kt
 primitiveTypes/kt684.kt
 primitiveTypes/kt935.kt
+properties/eagerInitializationGlobal4.kt
 properties/eagerInitializationWithSimpleObject.kt
 properties/kt1159.kt
 properties/kt1714.kt
@@ -291,6 +292,7 @@ sam/constructors/sameWrapperClass.kt
 sam/kt17765.kt
 sameFileInSourceAndDependencies/classDeclaration.kt
 sameFileInSourceAndDependencies/differingNumberOfGenericTypeParameters.kt
+sameFileInSourceAndDependencies/functionDeclaration.kt
 sameFileInSourceAndDependencies/lateinitMemberPropertyDeclaration.kt
 sameFileInSourceAndDependencies/memberFunctionDeclaration.kt
 sameFileInSourceAndDependencies/memberFunctionWithDefaultArgumentsDeclaration.kt
@@ -337,6 +339,10 @@ volatile/volatileInt.kt
 volatile/volatileLong.kt
 volatile/volatileShort.kt
 volatile/volatileString.kt
+when/NoWhenBranchMatchedException.kt
+when/NoWhenBranchMatchedExceptionAfter.kt
+when/NoWhenBranchMatchedExceptionAfterNullable.kt
+when/NoWhenBranchMatchedExceptionAfterQualified.kt
 when/NoWhenBranchMatchedExceptionAfterQualifiedJs.kt
 when/exhaustiveCheckException.kt
 when/integralWhenWithNoInlinedConstants.kt

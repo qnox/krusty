@@ -101,6 +101,17 @@ pub enum AssertionMode {
     AlwaysDisabled,
 }
 
+/// How `assert(...)` compiles: kotlinc's `-Xassertions` mode, or a platform's default.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssertionCompilation {
+    /// kotlinc's JVM default (`-Xassertions=legacy`): `assert` is no compiler operation. The call
+    /// stays an ordinary call of the library's inline function, whose body evaluates the condition
+    /// and then reads `kotlin._Assertions.ENABLED`.
+    Legacy,
+    /// The checked compiler operation, under this mode.
+    Checked(AssertionMode),
+}
+
 /// Semantic shape of one compiler-provided Kotlin array factory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArrayFactoryKind {
