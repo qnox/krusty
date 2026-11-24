@@ -392,7 +392,6 @@ coroutines/controlFlow/breakFinally.kt
 coroutines/controlFlow/breakStatement.kt
 coroutines/controlFlow/doWhileStatement.kt
 coroutines/controlFlow/doWhileWithInline.kt
-coroutines/controlFlow/doubleBreak.kt
 coroutines/controlFlow/forContinue.kt
 coroutines/controlFlow/forStatement.kt
 coroutines/controlFlow/forWithStep.kt
@@ -467,7 +466,6 @@ coroutines/functionReference_eqeq_name.kt
 coroutines/functionReference_invokeAsFunction.kt
 coroutines/functionReference_simple.kt
 coroutines/handleException.kt
-coroutines/handleResultCallEmptyBody.kt
 coroutines/handleResultNonUnitExpression.kt
 coroutines/indirectInlineUsedAsNonInline.kt
 coroutines/infiniteLoopInNextMeaningful.kt
@@ -661,7 +659,6 @@ coroutines/suspendConversion.kt
 coroutines/suspendConversion/intersectionTypeToSubtypeConversion.kt
 coroutines/suspendConversion/subtypeOfFunctionalTypeToSuspendConversion.kt
 coroutines/suspendConversion/suspendConversionBetweenFunInterfaces.kt
-coroutines/suspendCoroutineFromStateMachine.kt
 coroutines/suspendDefaultImpl.kt
 coroutines/suspendFunImportedFromObject.kt
 coroutines/suspendFunctionAsCoroutine/handleException.kt
@@ -977,7 +974,6 @@ inference/pcla/issues/kt54767a.kt
 inference/pcla/issues/kt54767b.kt
 inference/pcla/issues/kt64066.kt
 inference/pcla/issues/kt64069.kt
-inference/pcla/issues/kt66229.kt
 inference/pcla/issues/kt74819e.kt
 inference/pcla/issues/kt76171.kt
 inference/pcla/memberScope.kt
