@@ -586,17 +586,21 @@ abstract class KrustyCompileTask @Inject constructor(
         if (sources.isEmpty()) return
 
         val executable = binary.get().asFile.absolutePath
+        val projectDir = File(projectDirectory.get())
         val errors = ByteArrayOutputStream()
         val result = execOperations.exec {
             this.executable = executable
             args(arguments)
+            workingDir = projectDir
             errorOutput = TeeOutputStream(System.err, errors)
             isIgnoreExitValue = true
         }
         when (result.exitValue) {
             0 -> return
             PLUGIN_REFUSAL_EXIT_STATUS -> {
-                val refused = errors.toString(Charsets.UTF_8).lines().filter { ": error: " in it }
+                val refused = errors.toString(Charsets.UTF_8).lines()
+                    .filter { ": error: " in it }
+                    .map { absoluteDiagnostic(it, projectDir) }
                 logger.warn(
                     "krusty: task '{}' is handed to kotlinc: a krusty compiler plugin does not implement " +
                         "everything the module uses\n{}",
@@ -609,6 +613,19 @@ abstract class KrustyCompileTask @Inject constructor(
         }
     }
 }
+
+/**
+ * krusty prints a path under its working directory relative to it, as kotlinc does; the build
+ * output and the handoff keep the absolute path, as kotlinc's Gradle report does.
+ */
+private fun absoluteDiagnostic(line: String, workingDir: File): String {
+    val located = LOCATED_DIAGNOSTIC.find(line) ?: return line
+    val path = located.groupValues[1]
+    if (File(path).isAbsolute) return line
+    return File(workingDir, path).path + line.substring(path.length)
+}
+
+private val LOCATED_DIAGNOSTIC = Regex("^(.+?):\\d+:\\d+: error: ")
 
 /** krusty's exit status for a compile that failed only on a native plugin pass's refusals. */
 private const val PLUGIN_REFUSAL_EXIT_STATUS = 3
