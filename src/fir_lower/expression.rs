@@ -522,6 +522,7 @@ impl BodyLowering<'_> {
                 binding,
                 dispatch_receiver,
                 extension_receiver,
+                context_arguments,
                 mutable,
                 substitutions,
                 adaptation,
@@ -534,8 +535,11 @@ impl BodyLowering<'_> {
                     adaptation: adaptation.as_deref(),
                     reference_ty: function_type.get(),
                 },
-                *dispatch_receiver,
-                *extension_receiver,
+                super::checked::CheckedPropertyReceivers {
+                    dispatch_receiver: *dispatch_receiver,
+                    extension_receiver: *extension_receiver,
+                    context_arguments,
+                },
                 *reflective,
             )?,
             FirExprKind::TypeOperation {

@@ -45,12 +45,14 @@ pub fn realize(ir: &mut IrFile) {
             extension_receiver,
             mutable,
             substitutions,
+            context_arguments,
             adaptation: None,
             function_type: Some(function_type),
         } = &**checked
         else {
             continue;
         };
+        let contexts = context_arguments.clone();
         let bound = match (dispatch_receiver, extension_receiver) {
             (None, None) => None,
             (Some(receiver), None) => Some((*receiver, false)),
@@ -62,6 +64,7 @@ pub fn realize(ir: &mut IrFile) {
             binding: *binding,
             bound,
             mutable: *mutable,
+            contexts,
             substitutions: substitutions.clone(),
             function_type: *function_type,
         };
@@ -78,6 +81,9 @@ struct Reference {
     /// The bound receiver, and whether it is the property's extension receiver.
     bound: Option<(ExprId, bool)>,
     mutable: bool,
+    /// The context values the reference site binds, in declaration order. The adapters take them
+    /// as their leading captured parameters.
+    contexts: Vec<ExprId>,
     substitutions: Vec<IrCheckedSubstitution>,
     function_type: Ty,
 }
@@ -86,6 +92,8 @@ struct Reference {
 struct ReadShape {
     /// The receiver the reference supplies, at the reference's own type.
     receiver: Option<Ty>,
+    /// The declaration's leading context parameters, which the reference site binds.
+    contexts: Vec<Ty>,
     extension: bool,
     ty: Ty,
     /// The extension receiver and property type the declaration's accessors are compiled
@@ -99,7 +107,10 @@ fn function_value(ir: &mut IrFile, reference: Reference) -> Option<IrExpr> {
     let TyKind::Fun(signature) = reference.function_type.non_null().kind() else {
         return None;
     };
-    let shape = read_shape(ir, &reference.target)?;
+    let shape = read_shape(ir, &reference.target, &reference.substitutions)?;
+    if shape.contexts.len() != reference.contexts.len() {
+        return None;
+    }
     // The reference carries one receiver: bound, it is the adapter's capture; unbound, the
     // adapter's one parameter. A receiverless property takes neither.
     let captured = match (reference.binding, shape.receiver, reference.bound) {
@@ -117,14 +128,16 @@ fn function_value(ir: &mut IrFile, reference: Reference) -> Option<IrExpr> {
         _ => return None,
     };
     let receivers = receivers(ir, &shape);
-    let read = read(ir, &reference, &shape, receivers)?;
+    let contexts = context_reads(ir, &shape);
+    let read = read(ir, &reference, &shape, receivers, contexts)?;
     let body = ir.callable_reference_adapter_body(read, shape.ty, signature.ret);
-    let mut params = Vec::new();
+    let mut params = shape.contexts.clone();
     if captured {
         params.extend(shape.receiver);
     }
     params.extend(signature.params.iter().copied());
-    let adapter = add_adapter(ir, params, signature.ret, body, captured);
+    let own_from = shape.contexts.len() as u32 + u32::from(captured);
+    let adapter = add_adapter(ir, params, signature.ret, body, own_from);
     let writer = reference
         .mutable
         .then(|| writer(ir, &reference, &shape, captured))
@@ -140,9 +153,10 @@ fn function_value(ir: &mut IrFile, reference: Reference) -> Option<IrExpr> {
             substitutions: reference.substitutions,
         })),
         adapter,
-        captures: Vec::new(),
+        captures: reference.contexts.clone(),
         bound_receiver: reference.bound.map(|(receiver, _)| receiver),
-        bound_contexts: 0,
+        bound_contexts: u32::try_from(reference.contexts.len())
+            .expect("too many bound context arguments"),
         function_type: reference.function_type,
         declaration_parameters: shape
             .extension
@@ -157,14 +171,14 @@ fn function_value(ir: &mut IrFile, reference: Reference) -> Option<IrExpr> {
     })))
 }
 
-/// A private static adapter taking `params` and answering `ret` with `body`, whose leading
-/// parameter is the reference's capture when `captured`.
+/// A private static adapter taking `params` and answering `ret` with `body`, whose first
+/// `own_from` parameters are the reference's captures.
 fn add_adapter(
     ir: &mut IrFile,
     params: Vec<Ty>,
     ret: Ty,
     body: ExprId,
-    captured: bool,
+    own_from: u32,
 ) -> crate::ir::FunId {
     let adapter = ir.add_fun(IrFunction {
         name: format!("$property_ref_{}", ir.functions.len()),
@@ -176,8 +190,7 @@ fn add_adapter(
         param_checks: Vec::new(),
     });
     ir.set_method_visibility(adapter, crate::types::Visibility::Private);
-    ir.lambda_own_params_from
-        .insert(adapter, u32::from(captured));
+    ir.lambda_own_params_from.insert(adapter, own_from);
     adapter
 }
 
@@ -196,7 +209,8 @@ fn writer(
         _ => Vec::new(),
     };
     let receivers = receivers(ir, shape);
-    let slot = u32::from(shape.receiver.is_some());
+    let contexts = context_reads(ir, shape);
+    let slot = (shape.contexts.len() + usize::from(shape.receiver.is_some())) as u32;
     let mut value = ir.add_expr(IrExpr::GetValue(slot));
     // The reference is called through the erased `KMutableProperty.set(Any?)`, so the written value
     // reaches this adapter unchecked. Kotlin/Wasm's own bridge casts it to the declared parameter
@@ -221,7 +235,7 @@ fn writer(
             target: property,
             dispatch_receiver: receivers.dispatch,
             extension_receiver: receivers.extension,
-            context_arguments: Vec::new(),
+            context_arguments: contexts,
             value,
             substitutions,
         },
@@ -229,14 +243,50 @@ fn writer(
     // As a read does, the write records the type a source write's producer does.
     ir.set_logical_type(write, Ty::Unit);
     let body = ir.callable_reference_adapter_body(write, Ty::Unit, Ty::Unit);
-    let params = shape.receiver.into_iter().chain([shape.ty]).collect();
-    Some(add_adapter(ir, params, Ty::Unit, body, captured))
+    let params = shape
+        .contexts
+        .iter()
+        .copied()
+        .chain(shape.receiver)
+        .chain([shape.ty])
+        .collect();
+    let own_from = shape.contexts.len() as u32 + u32::from(captured);
+    Some(add_adapter(ir, params, Ty::Unit, body, own_from))
 }
 
-/// The adapter's receiver operand, its first parameter, in the slot an access takes it in.
+/// The declared context parameter types of a specialized property, which a reference without
+/// type arguments binds as they are declared. A substituted context type is not realized.
+fn specialized_contexts(
+    ir: &IrFile,
+    property: crate::ir::PropertyId,
+    substitutions: &[IrCheckedSubstitution],
+) -> Option<Vec<Ty>> {
+    let declared = match ir.local_property_layouts.get(&property) {
+        Some(
+            IrLocalPropertyLayout::TopLevelAccessor {
+                context_parameters, ..
+            }
+            | IrLocalPropertyLayout::Member {
+                context_parameters, ..
+            },
+        ) => context_parameters.clone(),
+        _ => Vec::new(),
+    };
+    (declared.is_empty() || substitutions.is_empty()).then_some(declared)
+}
+
+/// The adapter's context operands: its leading captured parameters, in declaration order.
+fn context_reads(ir: &mut IrFile, shape: &ReadShape) -> Vec<ExprId> {
+    (0..shape.contexts.len() as u32)
+        .map(|slot| ir.add_expr(IrExpr::GetValue(slot)))
+        .collect()
+}
+
+/// The adapter's receiver operand, the parameter after the contexts, in the slot an access takes
+/// it in.
 fn receivers(ir: &mut IrFile, shape: &ReadShape) -> Receivers {
     let operand = shape.receiver.map(|receiver| {
-        let value = ir.add_expr(IrExpr::GetValue(0));
+        let value = ir.add_expr(IrExpr::GetValue(shape.contexts.len() as u32));
         match shape.declared {
             Some((Some(declared), _)) if shape.extension && declared != receiver => {
                 ir.add_expr(IrExpr::TypeOp {
@@ -263,34 +313,44 @@ fn receivers(ir: &mut IrFile, shape: &ReadShape) -> Receivers {
 
 /// The receiver a read of `target` takes, and the property's type. `None` for a property whose
 /// read wants another operand than one receiver, or whose getter each read splices.
-fn read_shape(ir: &IrFile, target: &FirPropertyReferenceTarget) -> Option<ReadShape> {
+fn read_shape(
+    ir: &IrFile,
+    target: &FirPropertyReferenceTarget,
+    substitutions: &[IrCheckedSubstitution],
+) -> Option<ReadShape> {
     match target {
         FirPropertyReferenceTarget::Module(property) => {
             let ty = ir.checked_properties.get(property)?.ty;
-            let (receiver, extension) = match ir.local_property_layouts.get(property)? {
+            let (receiver, extension, contexts) = match ir.local_property_layouts.get(property)? {
                 IrLocalPropertyLayout::TopLevelStorage {
                     qualifier: None, ..
-                } => (None, false),
+                } => (None, false, Vec::new()),
                 IrLocalPropertyLayout::TopLevelAccessor {
                     receiver,
                     context_parameters,
                     ..
-                } if context_parameters.is_empty() => (*receiver, receiver.is_some()),
+                } => (*receiver, receiver.is_some(), context_parameters.clone()),
                 IrLocalPropertyLayout::Member {
                     owner,
                     context_parameters,
                     ..
-                } if context_parameters.is_empty() => (Some(Ty::obj_name(*owner)), false),
+                } => (
+                    Some(Ty::obj_name(*owner)),
+                    false,
+                    context_parameters.clone(),
+                ),
                 _ => return None,
             };
             Some(ReadShape {
                 receiver,
+                contexts,
                 extension,
                 ty,
                 declared: None,
             })
         }
         FirPropertyReferenceTarget::SpecializedModule {
+            property,
             receiver,
             extension_receiver,
             property_type,
@@ -300,6 +360,7 @@ fn read_shape(ir: &IrFile, target: &FirPropertyReferenceTarget) -> Option<ReadSh
             ..
         } => Some(ReadShape {
             receiver: receiver.map(|receiver| receiver.get()),
+            contexts: specialized_contexts(ir, *property, substitutions)?,
             extension: *extension_receiver,
             ty: property_type.get(),
             declared: Some((
@@ -324,6 +385,7 @@ fn read_shape(ir: &IrFile, target: &FirPropertyReferenceTarget) -> Option<ReadSh
             };
             parameters.is_empty().then(|| ReadShape {
                 receiver: receiver.map(|receiver| receiver.get()),
+                contexts: Vec::new(),
                 extension: *extension_receiver,
                 ty: property_type.get(),
                 declared: None,
@@ -347,6 +409,7 @@ fn read(
     reference: &Reference,
     shape: &ReadShape,
     receivers: Receivers,
+    contexts: Vec<ExprId>,
 ) -> Option<ExprId> {
     let module = match &reference.target {
         FirPropertyReferenceTarget::Module(property) => Some((*property, Vec::new())),
@@ -361,7 +424,7 @@ fn read(
                 target: property,
                 dispatch_receiver: receivers.dispatch,
                 extension_receiver: receivers.extension,
-                context_arguments: Vec::new(),
+                context_arguments: contexts,
                 substitutions,
             },
         )));

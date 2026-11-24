@@ -117,11 +117,13 @@ impl FirExprKind {
             }
             FirExprKind::PropertyReference {
                 target,
+                context_arguments,
                 substitutions,
                 adaptation,
                 ..
             } => {
                 target.storage_payload_bytes()
+                    + context_arguments.len() * std::mem::size_of::<FirReceiver>()
                     + substitutions.len() * std::mem::size_of::<FirTypeSubstitution>()
                     + adaptation.as_deref().map_or(0, |adaptation| {
                         std::mem::size_of::<FirReferenceAdaptation>()
