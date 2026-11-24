@@ -436,6 +436,33 @@ jobs:
       - name: count the restored Maven artifacts
         id: maven-deps-restored
         run: echo "files=$(find target/cache/krusty-deps -type f 2> /dev/null | wc -l)" >> "$GITHUB_OUTPUT"
+      # The tests read this KLIB from KRUSTY_DEPS_CACHE, and a download that fails inside a test
+      # surfaces only as "the exact target stdlib must be provisioned". Maven Central answers 429
+      # to a client that asks for several artifacts in a row, and extends the block for every
+      # request made during it, so fetch one release at a time with a pause between requests and a
+      # growing wait after a refusal. A refusal that outlasts the waits fails this step with the
+      # URL and the status.
+      - name: provision the exact wasm stdlib of every release
+        env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+        run: |
+          set -euo pipefail
+          mkdir -p "$KRUSTY_DEPS_CACHE"
+          for version in $(just kotlin-versions); do
+            file="$KRUSTY_DEPS_CACHE/kotlin-stdlib-wasm-wasi-$version.klib"
+            [ -f "$file" ] && continue
+            url="https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-wasm-wasi/$version/kotlin-stdlib-wasm-wasi-$version.klib"
+            for wait in 0 30 90 180; do
+              sleep "$wait"
+              status=$(curl -sSL -o "$file.part" -w '%{http_code}' "$url" || echo "curl failed")
+              [ "$status" = 200 ] && break
+              echo "$url answered $status"
+              rm -f "$file.part"
+            done
+            [ "$status" = 200 ] || { echo "::error::$url was not downloaded: $status"; exit 1; }
+            mv "$file.part" "$file"
+            sleep 5
+          done
       - name: provision Native for the normal test suites
         run: |
           root=$(just kotlin-native "$(just max-version)")
