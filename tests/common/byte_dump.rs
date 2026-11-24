@@ -59,9 +59,9 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -1020,10 +1020,48 @@ fn flush_archive(root: &Path) {
 
 fn ensure_flush_at_exit() {
     static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| unsafe {
-        let registered = libc::atexit(flush_at_exit);
+    ONCE.call_once(|| {
+        // SAFETY: registers a `extern "C"` function with no captured state.
+        let registered = unsafe { libc::atexit(flush_at_exit) };
         assert_eq!(registered, 0, "register class-dump exit flush");
+        // A run killed at its deadline never reaches the exit hook, so every recording it made
+        // was lost and the next cold run started over: a lane too slow for its deadline could not
+        // warm its own cache. Publish what has been recorded while the process is still running.
+        let interval = flush_interval();
+        std::thread::Builder::new()
+            .name("class-dump-flush".into())
+            .spawn(move || {
+                run_every(interval, &AtomicBool::new(false), || {
+                    let _ = std::panic::catch_unwind(flush_recorded_class_dumps);
+                });
+            })
+            .expect("start the class-dump flush thread");
     });
+}
+
+/// Seconds between publications of the recordings made so far: `KRUSTY_CLASS_DUMP_FLUSH_SECONDS`,
+/// five minutes by default. Publishing compresses the archive under the cache lock, so a short
+/// interval stalls the test threads that read it.
+fn flush_interval() -> Duration {
+    let name = "KRUSTY_CLASS_DUMP_FLUSH_SECONDS";
+    let seconds = std::env::var(name).ok().map_or(300, |raw| {
+        raw.trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|&seconds| seconds > 0)
+            .unwrap_or_else(|| panic!("{name} must be a positive whole number, got {raw:?}"))
+    });
+    Duration::from_secs(seconds)
+}
+
+/// Call `tick` once per `interval` until `stop` is set.
+fn run_every(interval: Duration, stop: &AtomicBool, mut tick: impl FnMut()) {
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(interval);
+        if !stop.load(Ordering::Relaxed) {
+            tick();
+        }
+    }
 }
 
 extern "C" fn flush_at_exit() {

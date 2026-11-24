@@ -2177,3 +2177,23 @@ fn a_live_kotlinc_line_names_the_test_sources_and_fingerprint() {
     assert_eq!(classify_live_kotlinc(true, false), "cache-miss");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn the_flush_loop_ticks_every_interval_until_it_is_stopped() {
+    let stop = AtomicBool::new(false);
+    let mut ticks = 0;
+    run_every(Duration::from_millis(5), &stop, || {
+        ticks += 1;
+        if ticks == 3 {
+            stop.store(true, Ordering::Relaxed);
+        }
+    });
+    assert_eq!(ticks, 3);
+}
+
+#[test]
+fn the_flush_interval_defaults_to_five_minutes() {
+    if std::env::var_os("KRUSTY_CLASS_DUMP_FLUSH_SECONDS").is_none() {
+        assert_eq!(flush_interval(), Duration::from_secs(300));
+    }
+}
