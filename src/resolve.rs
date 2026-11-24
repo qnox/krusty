@@ -11950,7 +11950,7 @@ impl<'a> Checker<'a> {
                                     identity,
                                     extension_declaration,
                                     receiver.class_receiver.then_some(receiver.ty),
-                                )),
+                                )?),
                                 receiver_capture: self.implicit_receiver_capture_id(
                                     receiver.class_receiver,
                                     receiver.receiver_role,
@@ -40732,7 +40732,13 @@ impl<'a> Checker<'a> {
                                 );
                                 let (primary, source_primary) = match primary_declaration {
                                     Some(declaration) => {
-                                        let signature = index.signature(declaration)?;
+                                        let Some(signature) = index.signature(declaration) else {
+                                            return Some(
+                                                source_constructors::unpublished_primary_shapes(
+                                                    index, owner, cl,
+                                                ),
+                                            );
+                                        };
                                         let callable =
                                             index.callable_for_declaration(declaration)?;
                                         let context_count =
@@ -40907,14 +40913,7 @@ impl<'a> Checker<'a> {
                             cl.span,
                             "internal error: Pass-2 class has no finalized constructor signatures",
                         );
-                        (
-                            vec![Ty::Error; cl.props.len()],
-                            vec![Ty::Error; cl.props.len()],
-                            cl.secondary_ctors
-                                .iter()
-                                .map(|constructor| vec![Ty::Error; constructor.params.len()])
-                                .collect(),
-                        )
+                        source_constructors::unpublished_constructor_shapes(cl)
                     }
                 }
             } else if let Some(class_signature) = collected {
@@ -41069,14 +41068,7 @@ impl<'a> Checker<'a> {
                     std::mem::replace(&mut self.static_companion_this, static_this);
                 self.with_this_unavailable(|c| match &sc.delegation {
                     CtorDelegation::This(delegation) => {
-                        for &argument in &delegation.args {
-                            // A delegation lambda is contextual: leave its initial `Error`
-                            // placeholder until the shared constructor selector maps it to a
-                            // parameter slot, just like a primary class-header base argument.
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
-                                c.expr(delegation_scope, argument);
-                            }
-                        }
+                        c.type_delegation_arguments(delegation_scope, &delegation.args);
                         let candidates = c.this_ctor_delegation_candidates(
                             delegation_scope,
                             cl,
@@ -41114,11 +41106,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                     CtorDelegation::Super(delegation) => {
-                        for &argument in &delegation.args {
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
-                                c.expr(delegation_scope, argument);
-                            }
-                        }
+                        c.type_delegation_arguments(delegation_scope, &delegation.args);
                         let candidates = c.super_ctor_delegation_candidates(current_owner);
                         c.select_ctor_delegation(
                             delegation_scope,
