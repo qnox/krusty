@@ -362,7 +362,7 @@ fn assert_progressive_refuses(work: &Path, release: &str, library: &Path, stdlib
     let feature = before
         .table()
         .progressive()
-        .find(|feature| !before.has(&feature.name) && !LangFeatures::models(&feature.name))
+        .find(|feature| !before.has(&feature.name) && !before.models_enabled(&feature.name))
         .expect("progressive selects a feature krusty does not model");
     let expected = format!(
         "krusty does not implement the language feature '{}' selected by '-progressive'",
