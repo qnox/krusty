@@ -1,7 +1,10 @@
 // LANGUAGE: +MultiPlatformProjects
 // TARGET_BACKEND: JVM, JVM_IR
-// kotlinc-native crashes actualizing a platform class over a class of a library the common
-// fragment depends on (KT-89466), so Native is pinned by tests/kotlinc_defects_e2e.rs instead.
+// PLATFORM-SPECIFIC: kotlinc-native crashes actualizing a platform class over a class of a
+// library the common fragment depends on (KT-89466), so it has no answer to compare krusty's
+// Native result with. That is a kotlinc defect, not a language rule: Native's outcome is the
+// subject of tests/kotlinc_defects_e2e.rs, which pins the crash. Wasm shares this program once
+// its link table accepts a redeclaration.
 
 // MODULE: lib-common
 class Some(val origin: String = "common")
