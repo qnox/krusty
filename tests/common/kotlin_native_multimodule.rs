@@ -1,6 +1,7 @@
 //! A kotlinc-native oracle for an exact multimodule KLIB graph.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -165,6 +166,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
             krusty::kotlin_version::target(),
         );
 
+        // Only the arguments are used: the persistent server runs the compiler.
         let mut command = Command::new(&compiler);
         command.args(&compiler_arguments);
         command.args(&source_paths);
@@ -206,15 +208,14 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         } else {
             command.args(["-produce", "library", "-output"]).arg(&klib);
         }
-        let output = command
-            .output()
-            .expect("run kotlinc-native module compiler");
+        let arguments = command.get_args().map(OsString::from).collect::<Vec<_>>();
+        let output = super::common::kotlin_native_server::kotlinc_native(&native_root, &arguments);
         assert!(
-            output.status.success(),
+            output.status == 0,
             "kotlinc-native rejected module {} (status {}):\n{}",
             unit.name,
             output.status,
-            String::from_utf8_lossy(&output.stderr)
+            output.stderr
         );
         if !final_unit {
             assert!(

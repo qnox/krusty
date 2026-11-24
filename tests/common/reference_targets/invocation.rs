@@ -1,6 +1,7 @@
 //! The existing non-JVM reference compiler invocation, shared by recorded outcomes and imports.
 
 use krusty::compilation_target::CompilationTarget;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -23,18 +24,27 @@ pub fn run_reference(
         }
         CompilationTarget::Native => {
             let root = crate::reference_recording_support::kotlin_native_root()?;
-            let mut command = Command::new(root.join("bin/kotlinc-native"));
+            let mut arguments: Vec<OsString> = Vec::new();
             if program {
-                command
-                    .args(
-                        crate::reference_recording_support::kotlin_native_program_arguments(&root),
-                    )
-                    .args(["-p", "program", "-o"])
-                    .arg(work.join("program"));
+                arguments.extend(
+                    crate::reference_recording_support::kotlin_native_program_arguments(&root),
+                );
+                arguments.extend(["-p", "program", "-o"].map(OsString::from));
+                arguments.push(work.join("program").into());
             } else {
-                command.args(["-p", "library", "-o"]).arg(&out);
+                arguments.extend(["-p", "library", "-o"].map(OsString::from));
+                arguments.push(out.clone().into());
             }
-            command
+            arguments.extend(args.iter().map(OsString::from));
+            arguments.extend(paths.iter().map(OsString::from));
+            let compile = crate::common::kotlin_native_server::kotlinc_native(&root, &arguments);
+            return Some((
+                Reference {
+                    status: compile.status,
+                    stderr: compile.stderr,
+                },
+                out,
+            ));
         }
         CompilationTarget::Js | CompilationTarget::WasmJs | CompilationTarget::WasmWasi => {
             assert!(
