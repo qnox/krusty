@@ -213,6 +213,10 @@ const FAILURES: &[(i32, &str)] = &[
         47,
         "the runtime reported a collection other than the last one",
     ),
+    (
+        48,
+        "a collection during the report mixed two collections' statistics into it",
+    ),
 ];
 
 /// Compile `source` and link it against the prebuilt runtime through krusty's linker, as every
@@ -867,7 +871,18 @@ static int64_t marked, kept, swept, before, after, globals;
 static int calls, pools;
 static const char *pool_name;
 
-void Kotlin_Internal_GC_GCInfoBuilder_setEpoch(void *b, int64_t v) { (void)b; calls++; epoch = v; }
+static int collect_in_setter;
+void Kotlin_Internal_GC_GCInfoBuilder_setEpoch(void *b, int64_t v) {
+    (void)b;
+    calls++;
+    epoch = v;
+    if (collect_in_setter) {
+        /* A setter that allocates may collect; the rest of the report must still describe the
+           collection that was being reported. */
+        collect_in_setter = 0;
+        kt_gc_collect();
+    }
+}
 void Kotlin_Internal_GC_GCInfoBuilder_setStartTime(void *b, int64_t v) { (void)b; start_ns = v; }
 void Kotlin_Internal_GC_GCInfoBuilder_setEndTime(void *b, int64_t v) { (void)b; end_ns = v; }
 void Kotlin_Internal_GC_GCInfoBuilder_setFirstPauseRequestTime(void *b, int64_t v) { (void)b; request_ns = v; }
@@ -939,6 +954,13 @@ void kt_program_entry(void) {
     Kotlin_Internal_GC_GCInfoBuilder_Fill((void *)1, 0);
     if (epoch != 2) {
         kt_exit(46);
+    }
+    int64_t second_start = start_ns;
+    int64_t second_end = end_ns;
+    collect_in_setter = 1;
+    Kotlin_Internal_GC_GCInfoBuilder_Fill((void *)1, 0);
+    if (epoch != 2 || start_ns != second_start || end_ns != second_end) {
+        kt_exit(48);
     }
     int before_other = calls;
     Kotlin_Internal_GC_GCInfoBuilder_Fill((void *)1, 1);
