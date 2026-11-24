@@ -421,6 +421,22 @@ fn an_indexed_value_is_a_data_class() {
 }
 
 #[test]
+fn a_written_indexed_value_constructor_builds_the_walks_carrier() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val made = IndexedValue(2, \"b\")\n\
+         \x20   if (made.index != 2 || made.value != \"b\") return \"fail members\"\n\
+         \x20   val walked = listOf(\"x\", \"y\", \"b\").withIndex().last()\n\
+         \x20   if (made != walked) return \"fail equal\"\n\
+         \x20   if (\"$made\" != \"IndexedValue(index=2, value=b)\") return \"fail render: $made\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "WrittenIndexedValue",
+        "OK",
+    );
+}
+
+#[test]
 fn an_array_is_walked_at_its_elements_own_width() {
     // Neither an array nor a `CharSequence` is a `kotlin.collections.Iterable`, and Kotlin still
     // lets a program reach every `Iterable` member on one. What decides how an element is read is
