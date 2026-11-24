@@ -333,6 +333,15 @@ impl SymbolSource for DependencyPlatform {
         self.platform.api_withheld_callable(owner, name)
     }
 
+    fn companion_protected_member_exposure(
+        &self,
+        annotations: &[TypeName],
+        is_const: bool,
+    ) -> Option<bool> {
+        self.platform
+            .companion_protected_member_exposure(annotations, is_const)
+    }
+
     /// The compiled platform assigns every dependency identity this federation hands out.
     fn external_callable(
         &self,

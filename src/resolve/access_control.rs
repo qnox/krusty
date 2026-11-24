@@ -81,10 +81,27 @@ pub(super) fn site_callable_accessible(
                     || (vis == Visibility::Protected
                         && (site.is_subtype(enclosing, owner)
                             || companion
-                                .is_some_and(|companion| site.is_subtype(companion, owner))))
+                                .is_some_and(|companion| site.is_subtype(companion, owner))
+                            || companion_of_extended_superclass(site, owner)))
             })
         }
     }
+}
+
+/// Whether `owner` is the companion object of a class a class enclosing the site extends. kotlinc
+/// sees a protected member of such a companion from the subclass, then reports the platforms that
+/// cannot compile the use (`SUBCLASS_CANT_CALL_COMPANION_PROTECTED_NON_STATIC`).
+pub(super) fn companion_of_extended_superclass(
+    site: &impl SourceMemberSite,
+    owner: TypeName,
+) -> bool {
+    owner.nested_owner().is_some_and(|outer| {
+        site.companion_of(outer) == Some(owner)
+            && site
+                .access_classes()
+                .into_iter()
+                .any(|enclosing| enclosing != outer && site.is_subtype(enclosing, outer))
+    })
 }
 
 /// [`site_callable_accessible`], plus the protected-receiver constraint.
@@ -99,6 +116,8 @@ pub(super) fn site_receiver_callable_accessible(
         return false;
     }
     vis != Visibility::Protected
+        || (companion_of_extended_superclass(site, owner)
+            && site.receiver_assignable(receiver, owner))
         || site
             .protected_classes()
             .into_iter()
@@ -427,52 +446,87 @@ impl<'a> Checker<'a> {
         site_receiver_callable_accessible(self, vis, owner, receiver, callable)
     }
 
-    /// Property-only visibility exception controlled by Kotlin's
-    /// `AllowAccessToProtectedFieldFromSuperCompanion` language feature. Despite that historical
-    /// feature name, this is a semantic property access: FIR records the resolved property and the
-    /// target backend alone decides whether it becomes a field load or an accessor call.
-    pub(super) fn receiver_property_accessible(
-        &self,
+    /// kotlinc's `SUBCLASS_CANT_CALL_COMPANION_PROTECTED_NON_STATIC`: a class extending another
+    /// class uses a protected member of that superclass's companion object, which the platform
+    /// compiles only when the member is also a static member of the superclass. A generic
+    /// superclass is reported once `ReportSubclassCantCallCompanionProtectedNonStaticWithGenerics`
+    /// is on. Returns whether the use was reported.
+    pub(super) fn report_companion_protected_subclass_use(
+        &mut self,
         visibility: Visibility,
         owner: TypeName,
-        receiver: Ty,
-        callable: Option<crate::fir::ExternalCallableId>,
+        declaration: Option<crate::fir::DeclarationId>,
+        is_const: bool,
+        span: Span,
     ) -> bool {
-        if self.visibility_access_suppressed() {
-            return true;
+        if visibility != Visibility::Protected || self.visibility_access_suppressed() {
+            return false;
         }
-        if self.receiver_callable_accessible(visibility, owner, receiver, callable) {
-            return true;
-        }
-        if visibility != Visibility::Protected
-            || !self
-                .file
-                .language
-                .allow_protected_super_companion_property_access
-            || receiver.non_null().obj_internal() != Some(owner)
+        let Some(outer) = owner.nested_owner() else {
+            return false;
+        };
+        if !companion_of_extended_superclass(self, owner)
+            || self
+                .access_classes()
+                .into_iter()
+                .any(|enclosing| enclosing == outer || enclosing.nested_owner() == Some(outer))
         {
             return false;
         }
-        let Some(superclass) = owner.nested_owner() else {
-            return false;
+        let annotations: &[TypeName] = match (declaration, self.resolved_index) {
+            (Some(declaration), Some(index)) => index.declaration_annotations(declaration),
+            (Some(_), None) => return false,
+            (None, _) => &[],
         };
-        let declared_companion = self
+        if self
+            .libraries
+            .companion_protected_member_exposure(annotations, is_const)
+            != Some(false)
+        {
+            return false;
+        }
+        let generic = self
             .resolver()
-            .classifier(superclass)
-            .and_then(|class| {
-                class
-                    .companion_object
-                    .as_ref()
-                    .map(|(_, companion)| *companion)
-            })
-            .is_some_and(|companion| companion == owner);
-        declared_companion
-            && self
-                .lexical_source_class_names()
-                .into_iter()
-                .any(|enclosing| {
-                    enclosing != superclass && self.obj_name_is_subtype(enclosing, superclass)
-                })
+            .classifier(outer)
+            .is_some_and(|class| !class.type_params.is_empty());
+        if generic
+            && !self
+                .file
+                .language
+                .report_subclass_cant_call_companion_protected_with_generics
+        {
+            return false;
+        }
+        if self.suppresses_diagnostic("SUBCLASS_CANT_CALL_COMPANION_PROTECTED_NON_STATIC") {
+            return true;
+        }
+        self.diags.error_named(
+            span,
+            crate::diag::names::SUBCLASS_CANT_CALL_COMPANION_PROTECTED_NON_STATIC,
+            "using protected members that are not '@JvmStatic' in the superclass companion is not \
+             yet supported."
+                .to_string(),
+        );
+        true
+    }
+
+    /// [`Self::report_companion_protected_subclass_use`] for a reference to a member function.
+    pub(super) fn report_companion_protected_member_reference(
+        &mut self,
+        expression: ExprId,
+        member: &crate::libraries::LibraryMember,
+    ) {
+        let Some(owner) = member.owner else {
+            return;
+        };
+        let span = self.member_name_span(expression, &member.name);
+        self.report_companion_protected_subclass_use(
+            member.visibility,
+            owner,
+            member.stable_declaration,
+            false,
+            span,
+        );
     }
 
     /// Emit kotlinc's access diagnostic when a member of `owner` with visibility `vis` is not
@@ -536,7 +590,13 @@ impl<'a> Checker<'a> {
             selected.member.external_identity,
         ) || self.suppresses_diagnostic("INVISIBLE_REFERENCE")
         {
-            return false;
+            return self.report_companion_protected_subclass_use(
+                selected.member.visibility,
+                owner,
+                selected.member.stable_declaration,
+                false,
+                span,
+            );
         }
         let visibility = match selected.member.visibility {
             Visibility::Private => "private",
@@ -569,7 +629,13 @@ impl<'a> Checker<'a> {
             function.callable.external_identity,
         ) || self.suppresses_diagnostic("INVISIBLE_REFERENCE")
         {
-            return false;
+            return self.report_companion_protected_subclass_use(
+                function.visibility,
+                owner,
+                function.stable_declaration,
+                false,
+                span,
+            );
         }
         let visibility = match function.visibility {
             Visibility::Private => "private",

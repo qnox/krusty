@@ -284,7 +284,7 @@ impl Checker<'_> {
                     property.visibility
                 };
                 (property.context_count == 0).then_some((
-                    self.receiver_property_accessible(
+                    self.receiver_callable_accessible(
                         visibility,
                         property.owner,
                         access_receiver,
@@ -323,7 +323,7 @@ impl Checker<'_> {
             } else {
                 selected.visibility
             };
-            if !self.receiver_property_accessible(
+            if !self.receiver_callable_accessible(
                 access_visibility,
                 selected.owner,
                 access_receiver,

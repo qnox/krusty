@@ -144,6 +144,18 @@ pub trait SymbolSource {
         false
     }
 
+    /// How this platform treats a subclass's use of a protected member of its superclass's
+    /// companion object, given the member's resolved declaration annotations and constness.
+    /// `None` means the platform places no restriction on it; `Some(exposed)` says whether the
+    /// member is also a static member of the superclass, the only form the platform supports.
+    fn companion_protected_member_exposure(
+        &self,
+        _annotations: &[TypeName],
+        _is_const: bool,
+    ) -> Option<bool> {
+        None
+    }
+
     /// Whether the source this provider resolves for sees a callable it published. A refined
     /// common fragment does not see what only a platform fragment refining it declares, members of
     /// an `actual` class included; every other provider sees all it publishes.
@@ -323,6 +335,16 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .any(|child| child.api_withheld_callable(owner, name))
+    }
+
+    fn companion_protected_member_exposure(
+        &self,
+        annotations: &[TypeName],
+        is_const: bool,
+    ) -> Option<bool> {
+        self.children
+            .iter()
+            .find_map(|child| child.companion_protected_member_exposure(annotations, is_const))
     }
 
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
@@ -564,6 +586,15 @@ impl SymbolSource for CachedCompositeSource<'_> {
 
     fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
         self.source.api_withheld_callable(owner, name)
+    }
+
+    fn companion_protected_member_exposure(
+        &self,
+        annotations: &[TypeName],
+        is_const: bool,
+    ) -> Option<bool> {
+        self.source
+            .companion_protected_member_exposure(annotations, is_const)
     }
 
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {

@@ -232,6 +232,7 @@ const MODELED_FEATURES: &[&str] = &[
     "ReportDeprecationsOfClassifiersInImplicitInvokes",
     "ReportDeprecationsOfOuterImportedClasses",
     "ReportReificationProblemsInDnnAndFlexible",
+    "ReportSubclassCantCallCompanionProtectedNonStaticWithGenerics",
     "ReportTypeVarianceConflictsInDnnAndFlexible",
     "UnitConversionsOnArbitraryExpressions",
     "WhenGuards",
