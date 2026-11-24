@@ -204,6 +204,43 @@ class Summary(unittest.TestCase):
             '',
         ])
 
+    def test_the_job_summary_drops_the_largest_error_listings_to_fit_its_size_limit(self):
+        def verified(task, count):
+            r = row(task, False, 1, 0, error='not run: a task it depends on failed')
+            r['verify'] = dict(status='failed', errors=[f"{task}/F{n}.kt:1:1: error: unresolved reference 'x{n}'."
+                                                        for n in range(count)])
+            return r
+
+        def compiled(task):
+            return dict(row(task, True, 1, 1), verify=dict(status='compiled', errors=[]))
+        with tempfile.TemporaryDirectory() as work:
+            reports = []
+            for name, count in (('big', 400), ('small', 2)):
+                p = dict(project(name, [verified(':compileKotlin', count), compiled(':other:compileKotlin')]), verify_exit=1)
+                path = os.path.join(work, name + '.json')
+                with open(path, 'w') as f:
+                    json.dump(p, f)
+                reports.append(path)
+            command = [sys.executable, os.path.join(HERE, 'summarize.py'), '--step-summary', f'{work}/job.md']
+            full = subprocess.run([*command, *reports], check=True, capture_output=True, text=True).stdout
+            with open(f'{work}/job.md') as f:
+                unlimited = f.read()
+            os.remove(f'{work}/job.md')
+            subprocess.run([*command, '--step-summary-limit', '6000', *reports], check=True,
+                           capture_output=True, text=True)
+            with open(f'{work}/job.md') as f:
+                trimmed = f.read()
+        self.assertEqual(unlimited, full)
+        self.assertGreater(len(full.encode()), 6000)
+        self.assertLessEqual(len(trimmed.encode()), 6000)
+        lines = trimmed.splitlines()
+        self.assertIn('<details><summary><b>small</b>: 2 errors in 1 compilation, 1 cause; '
+                      '2 of 2 compilations verified (verify build exit 1)</summary>', lines)
+        self.assertEqual([line for line in lines if line.startswith('- **big**: ')], [
+            '- **big**: 400 errors in 1 compilation, 1 cause; 2 of 2 compilations verified (verify build exit 1); '
+            'listed in summary.md of the summary artifact'])
+        self.assertEqual(trimmed.count('<details>'), trimmed.count('</details>'))
+
     def test_verify_errors_are_listed_per_project_and_grouped_by_cause(self):
         def verified(task, *errors, status='failed'):
             r = row(task, False, 1, 0, error='not run: a task it depends on failed')

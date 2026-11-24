@@ -1929,6 +1929,9 @@ pub struct File {
     pub type_alias_declaration_starts: crate::fx_hash::HashSet<u32>,
     /// The language-feature policy this file is compiled under.
     pub language: FileLanguagePolicy,
+    /// The `assert(...)` mode `-Xassertions` / `// ASSERTIONS_MODE:` selects, or `None` for the
+    /// platform's default (kotlinc's JVM default is `legacy`: an ordinary inline call).
+    pub assertions: Option<crate::types::AssertionCompilation>,
 }
 
 impl File {

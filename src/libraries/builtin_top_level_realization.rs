@@ -336,7 +336,11 @@ fn kotlin_function(
                 && !facts.is_operator
                 && facts.ret == Ty::Unit =>
         {
-            Some(CompilerIntrinsic::Assert)
+            Some(CompilerIntrinsic::Assert {
+                platform_default: crate::types::AssertionCompilation::Checked(
+                    crate::types::AssertionMode::Runtime,
+                ),
+            })
         }
         ("assert", FnKind::TopLevel, None, [Ty::Boolean, message])
             if facts.type_parameter_count == 0
@@ -346,7 +350,11 @@ fn kotlin_function(
                 && function_shape(*message, 0, false)
                 && message.fun_ret() == Some(Ty::obj("kotlin/Any")) =>
         {
-            Some(CompilerIntrinsic::Assert)
+            Some(CompilerIntrinsic::Assert {
+                platform_default: crate::types::AssertionCompilation::Checked(
+                    crate::types::AssertionMode::Runtime,
+                ),
+            })
         }
         ("enumValues", FnKind::TopLevel, None, [])
             if facts.type_parameter_count == 1
