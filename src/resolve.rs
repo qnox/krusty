@@ -11954,7 +11954,7 @@ impl<'a> Checker<'a> {
                                     identity,
                                     extension_declaration,
                                     receiver.class_receiver.then_some(receiver.ty),
-                                )),
+                                )?),
                                 receiver_capture: self.implicit_receiver_capture_id(
                                     receiver.class_receiver,
                                     receiver.receiver_role,
