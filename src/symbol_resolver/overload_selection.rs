@@ -1550,58 +1550,22 @@ fn fewest_omitted_defaults_per_supplied_shape<'a>(
 }
 
 /// Applicable candidates whose instantiated shapes do not order are still ordered by their
-/// declarations, as kotlinc ranks them: a declaration is less specific when it accepts the other's
-/// receiver and parameters over its own type variables and the other does not accept its. `l.h(l)`
-/// reads `Collection<Int>?` against the vararg element `Any` once both are instantiated, but
-/// `C.h(vararg e: T)` accepts `C.h(e: Collection<T>?)` with `T := Collection<T>?`, so the
-/// collection overload is the more specific. A vararg standing for several arguments keeps the tie.
+/// declarations, as kotlinc ranks them (see [`super::declaration_dominance_maxima`]): `l.h(l)` reads
+/// `Collection<Int>?` against the vararg element `Int` once both are instantiated, but the
+/// declarations order. A vararg standing for several arguments keeps the tie.
 fn by_declaration_specificity<'a>(
     src: &dyn SymbolSource,
     tied: Vec<&'a FunctionInfo>,
     arguments: usize,
 ) -> CandidateSelectionWithTies<&'a FunctionInfo> {
-    let declared = tied
+    let Some(shapes) = tied
         .iter()
-        .map(|candidate| {
-            // The declared parameters with the declaration's own type parameters, which the
-            // comparison solves; a vararg stands for its element.
-            let mut signature = candidate.semantic_signature().into_owned();
-            signature
-                .params
-                .drain(..candidate.context_count.min(signature.params.len()));
-            let vararg = candidate
-                .call_sig
-                .vararg_index
-                .and_then(|index| index.checked_sub(candidate.context_count));
-            if let Some(parameter) = vararg.and_then(|index| signature.params.get_mut(index)) {
-                *parameter = parameter.array_read_elem().unwrap_or(*parameter);
-            }
-            signature
-        })
-        .collect::<Vec<_>>();
-    if declared
-        .iter()
-        .any(|signature| signature.params.len() != arguments)
-    {
+        .map(|candidate| super::declared_call_shape(candidate, arguments).map(Some))
+        .collect::<Option<Vec<_>>>()
+    else {
         return CandidateSelectionWithTies::Ambiguous(tied);
-    }
-    let accepts = |general: &GenericSig, specific: &GenericSig| {
-        super::generic_declaration_accepts_parameters_of(src, general, specific)
     };
-    let maximal = (0..declared.len())
-        .filter(|&index| {
-            !(0..declared.len()).any(|other| {
-                other != index
-                    && accepts(&declared[index], &declared[other])
-                    && !accepts(&declared[other], &declared[index])
-            })
-        })
-        .collect::<Vec<_>>();
-    crate::trace_compiler!(
-        "resolve",
-        "declaration specificity declared={declared:?} maximal={maximal:?}"
-    );
-    match maximal.as_slice() {
+    match super::declaration_dominance_maxima(src, &shapes).as_slice() {
         [selected] => CandidateSelectionWithTies::Selected(tied[*selected]),
         _ => CandidateSelectionWithTies::Ambiguous(tied),
     }

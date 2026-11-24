@@ -83,7 +83,8 @@ pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
 };
 pub(crate) use declaration_specificity::{
-    declarations_equally_specific, retain_most_specific_declarations,
+    declaration_dominance_maxima, declarations_equally_specific, declarations_incomparable,
+    declared_call_shape, retain_most_specific_declarations,
 };
 use extension_specialization::{
     bind_defaulted_ext_ret, bind_defaulted_ext_ret_slots, bind_ext_ret, bind_ext_ret_tracking,

@@ -18,11 +18,5 @@ fn non_generic_collection_and_vararg_overloads_stay_ambiguous_like_kotlinc() {
                   \x20   fun h(vararg e: Any): Int = 1\n\
                   }\n\
                   fun inferred(k: K, l: List<Int>) = k.h(l)\n";
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(source),
-        vec!["overload resolution ambiguity between candidates:\n\
-             fun h(e: Collection<Int>?): Int\n\
-             fun h(vararg e: Any): Int"
-            .to_string()],
-    );
+    common::assert_error_blocks_match_kotlinc(&[("main.kt", source)], &[]);
 }
