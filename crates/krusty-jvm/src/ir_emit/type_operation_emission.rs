@@ -610,7 +610,8 @@ impl Emitter<'_> {
             let restored_line = matches!(self.ir.expr(arg), IrExpr::Block { .. })
                 .then(|| self.ir.source_line(arg))
                 .flatten()
-                .filter(|_| crate::line_numbers::inlined_call_marks_where_it_starts(self.ir, arg));
+                .filter(|_| crate::line_numbers::inlined_call_marks_where_it_starts(self.ir, arg))
+                .map(|line| self.mapped_expression_line(arg, line));
             if restored_line.is_some() {
                 self.inline_coercions.note_call_line_restored();
             }
