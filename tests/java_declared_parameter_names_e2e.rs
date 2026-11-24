@@ -17,8 +17,11 @@ fn a_java_methods_declared_parameter_name_is_not_a_named_argument() {
     )
     .expect("write Java source");
     let kotlin = dir.join("Use.kt");
-    std::fs::write(&kotlin, "fun use(target: Target): Long = target.add(amount = 1L)\n")
-        .expect("write Kotlin source");
+    std::fs::write(
+        &kotlin,
+        "fun use(target: Target): Long = target.add(amount = 1L)\n",
+    )
+    .expect("write Kotlin source");
     let stdlib = common::stdlib_jar().to_string_lossy().into_owned();
 
     let reference_out = dir.join("reference");
