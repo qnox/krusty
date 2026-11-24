@@ -36,7 +36,9 @@ pub(super) fn rejected_name(
     expression: ExprId,
     name: &str,
 ) -> Ty {
-    if !receiver_tower::reject_unavailable_member(checker, scope, expression, name) {
+    if !receiver_tower::reject_unavailable_member(checker, scope, expression, name)
+        && !receiver_tower::reject_unsafe_implicit_receiver_member(checker, scope, expression, name)
+    {
         let _ = checker.demand_name.and_then(|demand| demand(name));
         checker.diags.error(
             checker.span(expression),
@@ -52,7 +54,9 @@ pub(super) fn unresolved_name(
     expression: ExprId,
     name: &str,
 ) -> Option<Ty> {
-    if receiver_tower::reject_unavailable_member(checker, scope, expression, name) {
+    if receiver_tower::reject_unavailable_member(checker, scope, expression, name)
+        || receiver_tower::reject_unsafe_implicit_receiver_member(checker, scope, expression, name)
+    {
         Some(Ty::Error)
     } else {
         checker.demand_name.and_then(|demand| demand(name))
