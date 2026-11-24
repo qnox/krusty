@@ -201,7 +201,14 @@ pub(super) fn authenticate_private_member<'a, 'b>(
         ));
     }
     authenticate_receiver(class, member.arena, member.function)?;
-    let (types, formals) = bind_class_parameters(class, bodies, member.arena, member.class)?;
+    let (mut types, formals) = bind_class_parameters(class, bodies, member.arena, member.class)?;
+    super::private_signature_classes::bind(
+        &mut types,
+        bodies,
+        &class.module,
+        member.arena,
+        member.function,
+    )?;
     Ok(ClassMemberHeader {
         contract: class,
         arena: member.arena,

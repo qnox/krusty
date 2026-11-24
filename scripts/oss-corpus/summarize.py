@@ -566,6 +566,30 @@ def report(projects, stars, surveys, title, previous=None, not_measured=()):
     return '\n'.join(out) + '\n'
 
 
+DETAILS = re.compile(r'<details><summary><b>(.*?)</b>: (.*?)</summary>.*?</details>', re.S)
+LISTED_IN_ARTIFACT = 'listed in summary.md of the summary artifact'
+
+
+def fit_to_limit(markdown, limit):
+    """The job summary page refuses more than its size limit, so the per-project listings, largest
+    first, give way to one line each that points at the complete report; whatever still does not fit
+    is cut at a section boundary."""
+    while len(markdown.encode()) > limit:
+        listings = list(DETAILS.finditer(markdown))
+        if not listings:
+            break
+        biggest = max(listings, key=lambda m: len(m.group(0).encode()))
+        line = f'- **{biggest.group(1)}**: {biggest.group(2)}; {LISTED_IN_ARTIFACT}'
+        markdown = markdown[:biggest.start()] + line + markdown[biggest.end():]
+    note = '\n\nThe rest of the report is cut here to fit the page; the complete report is in summary.md of the summary artifact.\n'
+    while len(markdown.encode()) > limit:
+        cut = markdown.rfind('\n## ', 0, len(markdown) - 1)
+        if cut < 0:
+            break
+        markdown = markdown[:cut].rstrip('\n') + note
+    return markdown
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--stars')
@@ -575,6 +599,9 @@ def main():
     parser.add_argument('--json')
     parser.add_argument('--title')
     parser.add_argument('--previous', help="the previous run's summary.json")
+    parser.add_argument('--step-summary', help="also append the report, cut to fit the job summary page's size limit, to this file")
+    parser.add_argument('--step-summary-limit', type=int, default=1_000_000,
+                        help='the most bytes --step-summary receives (the page accepts 1,048,576)')
     parser.add_argument('reports', nargs='+')
     args = parser.parse_args()
     projects = []
@@ -589,7 +616,11 @@ def main():
         with open(args.previous) as f:
             previous = json.load(f)['projects']
     missing = not_measured(read_names(args.expected), projects, args.results or '')
-    print(report(projects, stars, surveys, args.title, previous, missing), end='')
+    text = report(projects, stars, surveys, args.title, previous, missing)
+    print(text, end='')
+    if args.step_summary:
+        with open(args.step_summary, 'a') as f:
+            f.write(fit_to_limit(text, args.step_summary_limit))
     if args.json:
         with open(args.json, 'w') as f:
             json.dump(dict(not_measured=missing, projects=[dict(p, stars=stars.get(p['name']), misses=misses(p),
