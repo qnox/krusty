@@ -948,10 +948,12 @@ class shapes/Registry Object Final Public nested=false : kotlin/Any
   val count(): kotlin/Int abstract=false const=None annotations=["shapes/Marker"]
 "#;
 
-/// Whether a module of plain functions that return a literal or their own parameter writes its
-/// ordinary IR, with the bodies read back through the KLIB IR decoder.
-fn written_ordinary_ir_constants(function_bodies: bool) -> Option<Vec<String>> {
-    use krusty::metadata::klib_ir::tree::{KlibIrBody, KlibIrExprKind, KlibIrMember, KlibIrStatement};
+/// What a module of plain functions that return a literal or their own parameter writes as its
+/// ordinary IR, read back through the KLIB IR decoder.
+fn written_ordinary_ir_constants() -> Option<Vec<String>> {
+    use krusty::metadata::klib_ir::tree::{
+        KlibIrBody, KlibIrExprKind, KlibIrMember, KlibIrStatement,
+    };
     use krusty::metadata::klib_ir::{read_declaration_trees, KlibIrConstant};
 
     let source = "package bodies\nfun answer(): Int { return 42 }\nfun keep(value: String): String { return value }\n";
@@ -963,8 +965,7 @@ fn written_ordinary_ir_constants(function_bodies: bool) -> Option<Vec<String>> {
             krusty::kotlin_version::KotlinVersion::V2_4_20,
             krusty::language_version::LanguageVersion::V2_4,
         ),
-    )
-    .with_function_bodies(function_bodies);
+    );
     let entries = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "lib", &mut diags);
     assert_eq!(
         diags
@@ -983,7 +984,10 @@ fn written_ordinary_ir_constants(function_bodies: bool) -> Option<Vec<String>> {
     }
     let archive = KlibArchive::open(&root).expect("open the written library");
     let mut returned = Vec::new();
-    if entries.iter().any(|(entry, _)| entry.starts_with("default/ir/")) {
+    if entries
+        .iter()
+        .any(|(entry, _)| entry.starts_with("default/ir/"))
+    {
         let trees = read_declaration_trees(&archive).expect("decode the ordinary IR");
         for tree in trees.trees() {
             let arena = &tree.arena;
@@ -1013,13 +1017,9 @@ fn written_ordinary_ir_constants(function_bodies: bool) -> Option<Vec<String>> {
 }
 
 #[test]
-fn ordinary_function_bodies_are_written_only_when_asked() {
-    let Some(with_bodies) = written_ordinary_ir_constants(true) else {
+fn ordinary_function_bodies_are_written_into_the_library() {
+    let Some(returned) = written_ordinary_ir_constants() else {
         return;
     };
-    assert_eq!(with_bodies, ["int 42", "parameter"]);
-    assert_eq!(
-        written_ordinary_ir_constants(false).expect("the toolchain was available"),
-        Vec::<String>::new()
-    );
+    assert_eq!(returned, ["int 42", "parameter"]);
 }

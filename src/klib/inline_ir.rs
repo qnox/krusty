@@ -107,13 +107,12 @@ struct ReifiedTypeTest {
 /// Serialize every exact supported inline template from one checked file.
 ///
 /// Unsupported inline bodies remain metadata-only. The returned functions are later combined into
-/// matching ordinary and prepared-inline components. With `function_bodies`, ordinary functions
-/// whose body is a supported shape are serialized as well.
+/// matching ordinary and prepared-inline components. Ordinary functions whose body is a supported
+/// shape are serialized as well, as kotlinc does.
 pub(super) fn collect(
     ir: &IrFile,
     file_name: &str,
     declarations: &DeclarationSignatures,
-    function_bodies: bool,
 ) -> Vec<PreparedFunction> {
     let mut functions = Vec::new();
     let mut ids = ir
@@ -129,7 +128,7 @@ pub(super) fn collect(
         functions.push(prepared);
     }
     for package_function in &ir.package_functions {
-        if !function_bodies || package_function.inline {
+        if package_function.inline {
             continue;
         }
         if let Some(prepared) = prepared_function(
