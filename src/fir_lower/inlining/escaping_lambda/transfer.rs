@@ -1801,11 +1801,19 @@ fn lambda_implementations(ir: &crate::ir::IrFile, root: ExprId) -> Vec<(ExprId, 
         if !seen.insert(expression) {
             continue;
         }
-        if let IrExpr::Lambda { impl_fn, .. } = ir.expr(expression) {
+        if let IrExpr::Lambda {
+            impl_fn, captures, ..
+        } = ir.expr(expression)
+        {
             implementations.push((expression, *impl_fn));
+            // A lambda's inline body is a copy of the lambda's own implementation body. The
+            // closures nested in it belong to that lambda, which plans them from its own body, so
+            // naming them here would claim them for the enclosing function as well.
+            pending.extend(captures.iter().copied());
+        } else {
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
         }
         enqueue_local_delegate_plan_bodies(ir, expression, &mut pending, &mut plans);
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
     implementations
 }
