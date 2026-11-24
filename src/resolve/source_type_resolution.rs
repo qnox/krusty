@@ -26,6 +26,16 @@ pub(crate) fn classifier_over_default(name: &str, resolved: Option<TypeName>) ->
     (default_classifier_internal(name) != Some(resolved)).then_some(resolved)
 }
 
+/// The classifier identity a written name denotes, including a builtin such as `Array` or
+/// `kotlin.Array`. Argument lists are not part of that identity: a missing argument does not make
+/// the classifier itself unresolved, and a bare builtin is not rejected for having no arguments.
+pub(super) fn parameterized_classifier_identity(
+    name: &str,
+    resolved: Option<TypeName>,
+) -> Option<TypeName> {
+    resolved.or_else(|| default_classifier_internal(name))
+}
+
 /// A parameterized type is always represented by its classifier plus type arguments, including a
 /// default-imported classifier such as `Array<T>`. Bare builtin spellings still fall through to
 /// their canonical `Ty` leaf (`Int`, `String`, ...).
@@ -36,7 +46,7 @@ pub(super) fn typeref_classifier(
     if reference.targs.is_empty() {
         classifier_over_default(&reference.name, resolved)
     } else {
-        resolved.or_else(|| default_classifier_internal(&reference.name))
+        parameterized_classifier_identity(&reference.name, resolved)
     }
 }
 

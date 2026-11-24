@@ -1316,7 +1316,7 @@ mod tests {
                 .map(|(_, bytes)| bytes.as_slice())
                 .expect("component has requested raw entry")
         };
-        let (ordinary_type_parameter_slot, ordinary_owner) = exact_owned_type_parameter_signature(
+        let (_, ordinary_owner) = exact_owned_type_parameter_signature(
             raw_entry("default/ir/signatures.knt"),
             raw_entry("default/ir/strings.knt"),
             false,
@@ -1354,11 +1354,13 @@ mod tests {
         let [ordinary_type_parameter] = ordinary.type_parameters.as_slice() else {
             panic!("fixture has one ordinary type parameter")
         };
+        // The ordinary declaration's own `Composite(Public, Local(<TP>, 0))` is its owner and
+        // index, wherever the table stores it.
         assert_eq!(
             ordinary_type_parameter.base.symbol.signature,
-            KlibIrSignature::FileLocal {
-                file: 0,
-                slot: ordinary_type_parameter_slot,
+            KlibIrSignature::TypeParameter {
+                owner: signature.clone(),
+                index: 0,
             }
         );
         let trees = read_inlinable_declaration_trees(&archive).expect("decode prepared IR");

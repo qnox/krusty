@@ -741,8 +741,8 @@ impl<'a> FileLowering<'a> {
             .copied()
             .collect();
         let inherited_default = self
-            .slot_plan
-            .interfaces()
+            .model
+            .numbers()
             .numbers_of(&implemented)
             .into_iter()
             .any(|other| {

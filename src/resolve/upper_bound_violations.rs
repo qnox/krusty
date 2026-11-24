@@ -648,6 +648,7 @@ impl<'a> Checker<'a> {
     /// Check the supertypes of `class`, which Pass 1 finalized in the header of `declaration`.
     pub(super) fn check_finalized_supertype_bounds(
         &mut self,
+        scope: &CheckerScope<'_>,
         class: &crate::ast::ClassDecl,
         declaration: crate::fir::DeclarationId,
     ) -> bool {
@@ -671,11 +672,13 @@ impl<'a> Checker<'a> {
                 .zip(header.interfaces.iter())
                 .enumerate()
             {
+                let policy_depth = self.push_type_use_policies(scope, reference.span.lo);
                 self.record_finalized_declaration_type(
                     reference,
                     resolved.get(),
                     spellings.supertype(index),
                 );
+                self.active_lexical_policies.truncate(policy_depth);
             }
             let Some(superclass) = header.superclass else {
                 return false;
@@ -692,11 +695,13 @@ impl<'a> Checker<'a> {
                 fun_context_count: 0,
                 qualifier_arguments: Default::default(),
             };
+            let policy_depth = self.push_type_use_policies(scope, span.lo);
             self.record_finalized_declaration_type(
                 &reference,
                 superclass.get(),
                 &spellings.superclass,
             );
+            self.active_lexical_policies.truncate(policy_depth);
         } else {
             let resolved = header.declared_supertypes().collect::<Vec<_>>();
             if resolved.len() != class.supertypes.len() {
@@ -704,11 +709,13 @@ impl<'a> Checker<'a> {
             }
             for (index, (reference, resolved)) in class.supertypes.iter().zip(resolved).enumerate()
             {
+                let policy_depth = self.push_type_use_policies(scope, reference.span.lo);
                 self.record_finalized_declaration_type(
                     reference,
                     resolved.get(),
                     spellings.supertype(index),
                 );
+                self.active_lexical_policies.truncate(policy_depth);
             }
         }
         true
@@ -858,6 +865,12 @@ impl<'a> Checker<'a> {
             function.reified_type_params.contains(name)
         });
         let owned = self.publish_function_type_parameter_owner(&method_scope, function);
+        // The declaration's own `@Suppress` covers the types written in its signature.
+        let policy_depth = self.push_declaration_policies(
+            &method_scope,
+            &function.annotations,
+            &function.annotation_args,
+        );
         if finalized_local_header {
             if let Some(declaration) = declaration {
                 if !self.record_finalized_type_parameter_bounds(
@@ -882,6 +895,7 @@ impl<'a> Checker<'a> {
             if let Some(result) = function.ret.as_ref() {
                 self.check_declaration_type(&method_scope, result);
             }
+            self.active_lexical_policies.truncate(policy_depth);
             self.restore_type_parameter_owners(owned);
             return;
         }
@@ -902,6 +916,7 @@ impl<'a> Checker<'a> {
                 self.failed_local_declaration_bindings.insert(declaration);
             }
         }
+        self.active_lexical_policies.truncate(policy_depth);
         self.restore_type_parameter_owners(owned);
     }
 
@@ -970,6 +985,12 @@ impl<'a> Checker<'a> {
         };
         property_scope.declare_property_tparams(property, &parameters);
         let owned = self.publish_property_type_parameter_owner(&property_scope, property);
+        // The declaration's own `@Suppress` covers the types written in its signature.
+        let policy_depth = self.push_property_declaration_policies(
+            &property_scope,
+            &property.annotations,
+            &property.annotation_args,
+        );
         if finalized_local_header {
             if let Some(declaration) = declaration {
                 if !self.record_finalized_type_parameter_bounds(
@@ -1018,6 +1039,7 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
+            self.active_lexical_policies.truncate(policy_depth);
             self.restore_type_parameter_owners(owned);
             return;
         }
@@ -1038,6 +1060,7 @@ impl<'a> Checker<'a> {
                 self.failed_local_declaration_bindings.insert(declaration);
             }
         }
+        self.active_lexical_policies.truncate(policy_depth);
         self.restore_type_parameter_owners(owned);
     }
 

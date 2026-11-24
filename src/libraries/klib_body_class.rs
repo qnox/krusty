@@ -92,12 +92,13 @@ impl KlibBodyClassContract {
             return false;
         }
         self.is_value
-            || (matches!(self.kind, super::TypeKind::Class | super::TypeKind::Object)
-                && matches!(
-                    self.modality,
-                    KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
-                )
-                && !self.is_inner
+            || (matches!(
+                self.kind,
+                super::TypeKind::Class | super::TypeKind::Object | super::TypeKind::Enum
+            ) && matches!(
+                self.modality,
+                KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
+            ) && !self.is_inner
                 && !self.is_expect)
     }
 

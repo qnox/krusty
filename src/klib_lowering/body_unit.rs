@@ -1585,7 +1585,9 @@ impl<'s> CallLinker for Linker<'_, 's> {
             KlibIrSignature::Accessor(accessor) => {
                 KlibDeclarationSignature::Accessor(accessor.clone())
             }
-            KlibIrSignature::FileLocal { .. } => return Ok(None),
+            KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => {
+                return Ok(None)
+            }
         };
         // The overridden symbol is the declaration itself, which this body's producer graph
         // resolves exactly as it resolves a call of it.
@@ -1624,12 +1626,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn is_interface(&self, name: TypeName) -> Result<bool, KlibBodyDeclineReason> {
-        let record = self.sources.declarations.classifier(name);
-        record.map(|record| record.is_interface()).ok_or_else(|| {
-            KlibBodyDeclineReason::SignatureMismatch(format!(
-                "an object literal's supertype {name:?} is not a selected classifier"
-            ))
-        })
+        inline_functions::is_interface(self, name)
     }
 
     fn link_accessor(
@@ -2098,6 +2095,12 @@ impl<'s> Linker<'_, 's> {
         };
         if class.is_value {
             return Ok(true);
+        }
+        if class.kind == crate::libraries::TypeKind::Enum {
+            return Ok(super::enum_classes::materializes(
+                self.sources.bodies,
+                class,
+            ));
         }
         if class.kind == crate::libraries::TypeKind::Object {
             return Ok(super::class_initialization::object_plan(
@@ -2835,9 +2838,17 @@ impl Linker<'_, '_> {
             .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
         // A generic one binds the formals its own identity mints, as a provider's record binds a
         // published declaration's.
-        let (types, type_parameters, type_parameter_bounds) =
+        let (mut types, type_parameters, type_parameter_bounds) =
             super::function_lowering::file_private_formals(&identity, arena, declaration)
                 .map_err(callee_declined)?;
+        super::private_signature_classes::bind(
+            &mut types,
+            self.sources.bodies,
+            &identity.module,
+            arena,
+            declaration,
+        )
+        .map_err(callee_declined)?;
         self.private_members.entry(identity.clone()).or_default();
         let function = match self.functions.get(&identity) {
             Some(function) => *function,
