@@ -349,6 +349,7 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::StringGet
         | IrIntrinsic::StringLength
         | IrIntrinsic::EnumOrdinal
+        | IrIntrinsic::EnumName
         | IrIntrinsic::NullableAnyToString
         | IrIntrinsic::CoroutineContext => {}
     }

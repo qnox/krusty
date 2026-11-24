@@ -11,6 +11,9 @@ mod companion_private_members;
 #[path = "klib_closure_frames_e2e/elvis_blocks.rs"]
 mod elvis_blocks;
 
+#[path = "klib_closure_frames_e2e/private_member_signatures.rs"]
+mod private_member_signatures;
+
 #[path = "klib_closure_frames_e2e/library_enums.rs"]
 mod library_enums;
 
