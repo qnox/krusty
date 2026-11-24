@@ -79,8 +79,10 @@ fn run_interface_block_program(src: &str, interface: &str) -> String {
         assert_eq!(
             answer.as_deref(),
             Some(
-                format!("ERROR:ClassFormatError:Illegal field modifiers in class {interface}: 0x1A")
-                    .as_str()
+                format!(
+                    "ERROR:ClassFormatError:Illegal field modifiers in class {interface}: 0x1A"
+                )
+                .as_str()
             )
         );
         return "OK".to_string();
