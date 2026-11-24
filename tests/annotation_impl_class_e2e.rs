@@ -880,3 +880,57 @@ fn the_implementation_nullability_matches_kotlinc() {
         Some("x"),
     );
 }
+
+const VALUE_CLASS_MEMBERS: &str = r#"@file:OptIn(ExperimentalUnsignedTypes::class)
+annotation class Scalar(val u: UInt, val b: UByte, val n: Int)
+annotation class Mixed(val u: UInt, val a: UIntArray, val s: String)
+annotation class Arrays(val bytes: UByteArray, val longs: ULongArray)
+fun box(): String {
+    val scalar = Scalar(1u, 2u, 3)
+    val mixed = Mixed(1u, uintArrayOf(4u), "x")
+    val arrays = Arrays(ubyteArrayOf(5u), ulongArrayOf(6u))
+    if (scalar != Scalar(1u, 2u, 3)) return "scalar"
+    if (mixed != Mixed(1u, uintArrayOf(4u), "x")) return "mixed"
+    if (arrays != Arrays(ubyteArrayOf(5u), ulongArrayOf(6u))) return "arrays"
+    return if (scalar.u == 1u && mixed.a[0] == 4u && arrays.longs[0] == 6uL) "OK" else "read"
+}
+"#;
+
+fn method_table(bytes: &[u8]) -> Vec<(String, u16, String)> {
+    krusty::jvm::classreader::parse_class(bytes)
+        .expect("parse annotation implementation")
+        .methods
+        .into_iter()
+        .map(|method| (method.name, method.access, method.descriptor))
+        .collect()
+}
+
+/// An annotation member typed as a value class (`UInt`, an unsigned array) hides the
+/// implementation's constructor like any other constructor taking a value class: it is private,
+/// the synthetic `DefaultConstructorMarker` overload follows the members, and the construction
+/// calls that overload. The method tables, in order, must match kotlinc's.
+#[test]
+fn annotation_implementation_with_value_class_members_has_kotlincs_method_table() {
+    let classes =
+        common::classes_against_kotlinc_module(&[("ValueClassMembers.kt", VALUE_CLASS_MEMBERS)]);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>(),
+        "the complete emitted class inventory must match"
+    );
+    for (name, reference) in &classes.reference {
+        if !name.contains("$annotationImpl$") {
+            continue;
+        }
+        assert_eq!(
+            method_table(&classes.krusty[name]),
+            method_table(reference),
+            "{name}: method table diverges from kotlinc"
+        );
+    }
+}
+
+#[test]
+fn annotation_implementation_with_value_class_members_runs_like_kotlin() {
+    common::expect_box_same_as_kotlinc(VALUE_CLASS_MEMBERS, "ValueClassMembers");
+}

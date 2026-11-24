@@ -154,6 +154,12 @@ impl BodyLowering<'_, '_, '_> {
                 };
                 self.enum_member(krusty::backend::enums::BaseMember::Ordinal, receiver)
             }
+            IrIntrinsic::EnumName => {
+                let (Some(receiver), []) = (receiver, args) else {
+                    return Err("a malformed `Enum.name` read".into());
+                };
+                self.enum_member(krusty::backend::enums::BaseMember::Name, receiver)
+            }
             IrIntrinsic::NullableAnyToString => {
                 let Some(receiver) = receiver else {
                     return Err("a malformed `toString`".into());

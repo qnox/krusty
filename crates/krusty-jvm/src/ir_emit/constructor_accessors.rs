@@ -23,9 +23,6 @@ use krusty::ir::{
 use krusty::types::TypeName;
 
 /// Whether this construction goes through the value-class `DefaultConstructorMarker` accessor.
-///
-/// An annotation implementation stores each member as its carrier. Its `<init>` does not take
-/// that marker, even when a member is an unsigned array.
 pub(super) fn uses_value_class_marker_accessor(
     ir: &IrFile,
     expression: krusty::ir::ExprId,
@@ -35,12 +32,6 @@ pub(super) fn uses_value_class_marker_accessor(
     parameters_come_from_class: bool,
 ) -> bool {
     if !defaults_empty {
-        return false;
-    }
-    if ir
-        .class_id_by_name(owner)
-        .is_some_and(|class| ir.classes[class as usize].annotation_impl_of.is_some())
-    {
         return false;
     }
     (parameters_come_from_class && ir.has_value_param_ctor(owner_spelling))
