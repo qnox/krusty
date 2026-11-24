@@ -47,6 +47,32 @@ pub enum BehaviorAfterSinceVersion {
     CanStillBeDisabledForNow,
 }
 
+/// The compiler platform whose code consults a language feature, read from the package of each
+/// kotlinc class that names it. `Web` is the code Kotlin/JS and Kotlin/Wasm share.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConsumerPlatform {
+    Common,
+    Jvm,
+    Native,
+    Js,
+    Wasm,
+    Web,
+}
+
+impl ConsumerPlatform {
+    fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "common" => Ok(Self::Common),
+            "jvm" => Ok(Self::Jvm),
+            "native" => Ok(Self::Native),
+            "js" => Ok(Self::Js),
+            "wasm" => Ok(Self::Wasm),
+            "web" => Ok(Self::Web),
+            other => Err(format!("unknown consumer platform '{other}'")),
+        }
+    }
+}
+
 /// One `LanguageFeature` entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LanguageFeature {
@@ -71,15 +97,26 @@ pub struct LanguageFeature {
     pub flag: Option<String>,
     /// The YouTrack issue kotlinc's deprecation warnings cite for the feature (`KT-11914`).
     pub issue: Option<String>,
+    /// The platforms whose compiler code consults the feature; empty when no class names it.
+    pub consumers: Vec<ConsumerPlatform>,
 }
 
 impl LanguageFeature {
+    /// Whether only another platform's checkers consult the feature, so a JVM compilation behaves
+    /// the same with it on or off.
+    pub fn is_consumed_only_off_jvm(&self) -> bool {
+        !self.consumers.is_empty()
+            && self.consumers.iter().all(|platform| {
+                !matches!(platform, ConsumerPlatform::Common | ConsumerPlatform::Jvm)
+            })
+    }
+
     fn parse_row(row: &str) -> Result<Self, String> {
         let columns: Vec<&str> = row.split('\t').collect();
-        let [name, since, since_api, progressive, pre_release, pre_release_before, test_only, behavior, hint_url, flag, issue, presentable_name] =
+        let [name, since, since_api, progressive, pre_release, pre_release_before, test_only, behavior, hint_url, flag, issue, consumers, presentable_name] =
             columns[..]
         else {
-            return Err(format!("expected 12 columns: {row:?}"));
+            return Err(format!("expected 13 columns: {row:?}"));
         };
         let optional_text = |text: &str| (!text.is_empty()).then(|| text.to_string());
         let version = |text: &str| {
@@ -112,6 +149,12 @@ impl LanguageFeature {
             hint_url: optional_text(hint_url),
             flag: optional_text(flag),
             issue: optional_text(issue),
+            consumers: consumers
+                .split(',')
+                .filter(|platform| !platform.is_empty())
+                .map(ConsumerPlatform::parse)
+                .collect::<Result<_, _>>()
+                .map_err(|error| format!("{name}: {error}"))?,
         })
     }
 
@@ -316,6 +359,17 @@ mod tests {
             unissued.deprecation_warning_message("message."),
             "message. This will become an error in language version 1.1."
         );
+    }
+
+    /// A feature only another platform's checkers consult is inert on the JVM.
+    #[test]
+    fn a_feature_consulted_only_by_other_platforms_is_inert_on_the_jvm() {
+        let table = FeatureTable::for_version(KotlinVersion::V2_4_20).unwrap();
+        let inert = |name: &str| table.get(name).unwrap().is_consumed_only_off_jvm();
+        assert!(inert("JsAllowValueClassesInExternals"));
+        assert!(inert("JsAllowInvalidCharsIdentifiersEscaping"));
+        assert!(!inert("InlineConstVals"));
+        assert!(!inert("TypeAliases"));
     }
 
     /// `EnumEntries` is a language 1.9 feature that also needs API 1.8.
