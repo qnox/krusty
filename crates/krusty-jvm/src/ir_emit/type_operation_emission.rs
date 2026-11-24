@@ -607,10 +607,19 @@ impl Emitter<'_> {
             emit_num_conv(physical_arg, target, code);
         } else {
             let cast_at = code.bytes.len();
+            let restored_line = matches!(self.ir.expr(arg), IrExpr::Block { .. })
+                .then(|| self.ir.source_line(arg))
+                .flatten()
+                .filter(|_| crate::line_numbers::inlined_call_marks_where_it_starts(self.ir, arg))
+                .map(|line| self.mapped_expression_line(arg, line));
+            if restored_line.is_some() {
+                self.inline_coercions.note_call_line_restored();
+            }
             implicit_reference_coercion::emit(
                 self.ir.expr(arg),
                 physical_arg,
                 target,
+                restored_line,
                 self.cw,
                 code,
             );

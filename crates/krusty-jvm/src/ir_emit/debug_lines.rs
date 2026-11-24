@@ -269,7 +269,7 @@ impl Emitter<'_> {
         }
     }
 
-    fn mapped_expression_line(&mut self, expression: ExprId, line: u32) -> u32 {
+    pub(super) fn mapped_expression_line(&mut self, expression: ExprId, line: u32) -> u32 {
         // A line of an external inline declaration's own body maps through the class's SMAP under
         // the call that expanded it (kotlinc's `mapLineNumber` for the inline interval).
         if let Some(frame) = self.ir.external_frame_lines.get(&expression).cloned() {

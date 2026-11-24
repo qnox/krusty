@@ -1296,6 +1296,19 @@ impl Emitter<'_> {
     /// at the invocation the lambda replaced. The local-end label sits on the `nop`, and the next
     /// debug point (the inline-function frame's end, or the consumer) keeps it.
     fn close_spliced_lambda_frame(&mut self, block: u32, brace: bool, code: &mut CodeBuilder) {
+        self.close_spliced_lambda_frame_with(block, brace, true, code);
+    }
+
+    /// [`Self::close_spliced_lambda_frame`], where `marks_line` is false when the coercion of the
+    /// frame's result already wrote the call's line back (see `restored_call_line`): the closing
+    /// mark would repeat that entry.
+    fn close_spliced_lambda_frame_with(
+        &mut self,
+        block: u32,
+        brace: bool,
+        marks_line: bool,
+        code: &mut CodeBuilder,
+    ) {
         let IrExpr::Block { stmts, .. } = self.ir.expr(block) else {
             return;
         };
@@ -1318,7 +1331,7 @@ impl Emitter<'_> {
                 code.forget_line();
                 self.mark_expression_line(block, line, code);
             }
-        } else if let Some(line) = self.ir.source_line(block) {
+        } else if let Some(line) = self.ir.source_line(block).filter(|_| marks_line) {
             // The spliced body ran under its own lines: kotlinc resets the line in effect after an
             // inlined body, so the frame's closing mark is written even when it names that line.
             code.forget_line();
@@ -1657,7 +1670,12 @@ impl Emitter<'_> {
             // effect (`markLineNumberAfterInlineIfNeeded`). Deferring the close past that reset
             // must not spend it: the next mark of the frame's line is still written.
             let reset = code.line_forgotten();
-            self.close_spliced_lambda_frame(pending.block, false, code);
+            self.close_spliced_lambda_frame_with(
+                pending.block,
+                false,
+                !pending.restored_call_line,
+                code,
+            );
             if reset {
                 code.forget_line();
             }
@@ -2092,6 +2110,12 @@ impl InlineCoercionState {
         )
     }
 
+    pub(super) fn note_call_line_restored(&mut self) {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.restored_call_line = true;
+        }
+    }
+
     pub(super) fn restore_pending(&mut self, pending: Option<PendingInlineStackCoercion>) {
         self.pending = pending;
     }
@@ -2115,6 +2139,9 @@ pub(super) struct PendingInlineStackCoercion {
     saved: Option<i32>,
     reserved: Option<Vec<TempSlot>>,
     closes_spliced_frame: bool,
+    /// The coercion wrote the call's line back ahead of its cast, which is the entry the frame's
+    /// closing mark would otherwise add.
+    restored_call_line: bool,
 }
 
 impl PendingInlineStackCoercion {
@@ -2129,6 +2156,7 @@ impl PendingInlineStackCoercion {
             saved: None,
             reserved: None,
             closes_spliced_frame: false,
+            restored_call_line: false,
         }
     }
 
