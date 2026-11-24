@@ -416,6 +416,27 @@ jobs:
         with:
           path: target/cache/kotlin-native/${{ steps.max-version.outputs.version }}
           key: kotlin-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.max-version.outputs.version }}
+      # The Wasm unit tests and the KLIB coverage ratchet read each release's exact wasm-wasi stdlib
+      # KLIB from the dependency cache. Left to the tests it is downloaded from Maven Central in the
+      # middle of the run, by whichever test needs it first, and a refused download surfaces only as
+      # "the exact target stdlib must be provisioned". Restore what the conformance-deps job holds
+      # (same key) and fetch what is missing before any test starts, so a refusal fails this step
+      # naming the URL.
+      - name: restore the extra conformance libraries
+        id: conformance-deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: conformance-deps-v1-${{ hashFiles('scripts/fetch-conformance-deps.sh', 'kotlin-versions', 'src/toolchain.rs') }}
+      - name: provision the libraries of every Kotlin release
+        if: steps.conformance-deps.outputs.cache-hit != 'true'
+        env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+        run: |
+          set -euo pipefail
+          while read -r kotlin; do
+            scripts/fetch-conformance-deps.sh "$kotlin"
+          done < <(just kotlin-versions)
       - name: provision Native for the normal test suites
         run: |
           root=$(just kotlin-native "$(just max-version)")
@@ -453,6 +474,7 @@ jobs:
           KRUSTY_TOOLCHAIN_RUN_MISSING: 1
           KRUSTY_REQUIRE_KLIB: "1"
           KRUSTY_REQUIRE_KOTLIN_NATIVE: "1"
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: scripts/own-tests.sh
       # Holds every release's exact Native and Wasm stdlib to its implementation backlog with the
       # compiler unit binary the step above built and ran.
