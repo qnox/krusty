@@ -117,7 +117,7 @@ pub(super) fn append(
     let (symtab_name, strtab_name, shstrtab_name) = (1u32, 9u32, 17u32);
 
     let mut place = |bytes: &[u8]| {
-        while image.len() % 8 != 0 {
+        while !image.len().is_multiple_of(8) {
             image.push(0);
         }
         let offset = image.len() as u64;
@@ -127,7 +127,7 @@ pub(super) fn append(
     let symtab_at = place(&symbols);
     let strtab_at = place(&strings);
     let shstrtab_at = place(section_names);
-    while image.len() % 8 != 0 {
+    while !image.len().is_multiple_of(8) {
         image.push(0);
     }
     let headers_at = image.len() as u64;
