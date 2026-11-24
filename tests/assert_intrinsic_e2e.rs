@@ -1,11 +1,12 @@
-//! The `kotlin.assert` codegen intrinsic. kotlinc does NOT inline the stdlib body; it guards on the
-//! per-class JVM assertion flag (`Class.desiredAssertionStatus()`) and, when disabled, does not even
-//! evaluate the condition. krusty lowers `assert(cond)` / `assert(cond) { msg }` to that guarded form
-//! (or unguarded under `// ASSERTIONS_MODE: always-enable`, elided under `always-disable`).
+//! Kotlin's `assert` under each `-Xassertions` mode.
 //!
-//! `compile_and_run_box` launches `java` WITHOUT `-ea`, so assertions are DISABLED at runtime — exactly
-//! kotlinc's default. A failing `assert` therefore must NOT throw (the guard skips it), and the
-//! condition's side effects must NOT run.
+//! kotlinc's JVM default is `legacy`: `assert` is the stdlib's ordinary inline function. Its body
+//! evaluates the condition and then reads `kotlin._Assertions.ENABLED`, so a disabled assertion
+//! still runs the condition's side effects. The other modes make it a compiler operation: `jvm`
+//! guards on the class's assertion status and evaluates nothing when disabled,
+//! `always-enable` checks unguarded, and `always-disable` elides it.
+//!
+//! `compile_and_run_box` launches `java` WITHOUT `-ea`, so assertions are DISABLED at runtime.
 
 use super::common;
 
@@ -21,9 +22,10 @@ fn assert_true_compiles_and_runs() {
 
 #[test]
 fn assert_false_skipped_when_disabled() {
-    // Assertions disabled at runtime (no `-ea`): a false `assert` must be skipped (no throw), and its
-    // condition must NOT be evaluated — `side` stays false.
-    const SRC: &str = "fun box(): String {\n\
+    // Assertions disabled at runtime (no `-ea`): under `jvm` a false `assert` must be skipped (no
+    // throw), and its condition must NOT be evaluated — `side` stays false.
+    const SRC: &str = "// ASSERTIONS_MODE: jvm\n\
+fun box(): String {\n\
     var side = false\n\
     assert(run { side = true; false })\n\
     return if (!side) \"OK\" else \"FAIL: condition evaluated\"\n\
@@ -37,7 +39,8 @@ fn fully_qualified_assert_uses_the_same_intrinsic() {
     // imported or fully qualified. This condition side effect is the discriminating behavior: a
     // normal static call would evaluate `run` before entering stdlib, while the JVM-assert intrinsic
     // guards the entire condition evaluation when assertions are disabled.
-    const SRC: &str = "fun box(): String {\n\
+    const SRC: &str = "// ASSERTIONS_MODE: jvm\n\
+fun box(): String {\n\
     var side = false\n\
     kotlin.assert(run { side = true; false })\n\
     return if (!side) \"OK\" else \"FAIL: condition evaluated\"\n\
@@ -61,4 +64,42 @@ fun box(): String {\n\
     try { assert(no()); return \"FAIL: no throw\" } catch (e: AssertionError) { return \"OK\" }\n\
 }\n";
     assert_eq!(run(SRC), "OK");
+}
+
+/// kotlinc's default `legacy` mode inlines the stdlib body: the condition runs even though the
+/// assertion is disabled, and a false one does not throw.
+#[test]
+fn a_default_assert_evaluates_its_condition_like_kotlinc() {
+    const SRC: &str = "var side = 0\n\
+fun box(): String {\n\
+    assert(run { side++; false })\n\
+    assert(run { side++; false }) { \"never\" }\n\
+    kotlin.assert(run { side++; true })\n\
+    return if (side == 3) \"OK\" else \"FAIL: side=$side\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "Main");
+}
+
+/// The default `assert` is the stdlib's inline body, byte for byte: the condition is stored, then
+/// `_Assertions.ENABLED` guards the check and the lazily built message.
+#[test]
+fn a_default_assert_compiles_like_kotlinc() {
+    const SRC: &str = "fun check(x: Int, name: String) {\n\
+    assert(x > 0)\n\
+    assert(x > 1) { \"too small: $name\" }\n\
+    kotlin.assert(name.isNotEmpty())\n\
+}\n";
+    let classes = common::classes_against_kotlinc_module(&[("Check.kt", SRC)]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+/// Naming kotlinc's default mode explicitly selects the same inline body.
+#[test]
+fn an_explicit_legacy_assert_compiles_like_kotlinc() {
+    const SRC: &str = "// ASSERTIONS_MODE: legacy\n\
+fun check(x: Int) {\n\
+    assert(x > 0) { \"x=$x\" }\n\
+}\n";
+    let classes = common::classes_against_kotlinc_module(&[("Check.kt", SRC)]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
 }
