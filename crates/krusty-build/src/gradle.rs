@@ -817,27 +817,15 @@ mod tests {
             1,
             "{output}"
         );
-        // Gradle 7's kotlin-dsl compiles plugins blocks with its own task type; from Gradle 8 on,
-        // `compilePluginsBlocks` is a KotlinJvmCompile without a source set.
-        let gradle = std::env::var("KRUSTY_GRADLE_VERSION").unwrap_or_else(|_| "8.14.3".into());
-        let sourceless_compiles = usize::from(!gradle.starts_with("7."));
-        for (expected, count) in [
-            (
-                "krusty: task ':buildSrc:compileKotlin' is left to kotlinc: its project applies kotlin-dsl",
-                1,
-            ),
-            (
-                "krusty: task ':buildSrc:compileTestKotlin' is left to kotlinc: its project applies kotlin-dsl",
-                1,
-            ),
-            (
-                "krusty: task ':buildSrc:compilePluginsBlocks' is left to kotlinc: it belongs to no source set",
-                sourceless_compiles,
-            ),
+        // kotlin-dsl's `compilePluginsBlocks` is a KotlinJvmCompile without a source set.
+        for expected in [
+            "krusty: task ':buildSrc:compileKotlin' is left to kotlinc: its project applies kotlin-dsl",
+            "krusty: task ':buildSrc:compileTestKotlin' is left to kotlinc: its project applies kotlin-dsl",
+            "krusty: task ':buildSrc:compilePluginsBlocks' is left to kotlinc: it belongs to no source set",
         ] {
             assert_eq!(
                 output.lines().filter(|line| line.trim() == expected).count(),
-                count,
+                1,
                 "{expected}\n{output}"
             );
         }
@@ -1611,7 +1599,6 @@ fun main() {
     /// plugin classpath, which declares no compiler-plugin registrar, and no options. krusty then
     /// compiles the Kotlin and Java sources the processor generated, exactly as kotlinc would, and
     /// the application runs. A compiler plugin krusty cannot run still fails the task beside KSP.
-    /// KSP's Gradle plugin does not load on Gradle 7.6, so CI runs this on the Gradle 8+ lanes.
     #[test]
     #[ignore = "downloads Gradle, the Kotlin Gradle plugin and KSP"]
     fn ksp2_generated_sources_compile_through_krusty() {
@@ -2046,8 +2033,7 @@ fun main() {
     /// named by `KRUSTY_GRADLE_TEST_BIN`.
     /// Gradle integration builds share one Gradle user home, which each fixture installs through
     /// the process-wide `GRADLE_USER_HOME`. libtest runs tests on parallel threads, so concurrent
-    /// fixtures race on that variable and on the shared daemon registry: under Gradle 7.6.3 the
-    /// daemons time out connecting. One fixture runs at a time, so its builds reuse one daemon
+    /// fixtures race on that variable and on the shared daemon registry. One fixture runs at a time, so its builds reuse one daemon
     /// that the previous fixture left idle instead of starting a JVM per build.
     static GRADLE_INTEGRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

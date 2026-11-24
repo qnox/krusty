@@ -81,7 +81,7 @@ private const val UNSUPPORTED_REFERENCE_INPUT = "krusty.unsupported-reference:"
 internal fun reportUnsupported(report: TaskProvider<Task>, kotlinTask: KotlinJvmCompile, reason: String) {
     report.configure {
         inputs.property(UNSUPPORTED_INPUT + kotlinTask.path, reason)
-        // The location alone, not the task output's value: Gradle 7 refuses to read that before the
+        // The location alone, not the task output's value: Gradle refuses to read that before the
         // task has run, and dependsOn orders the two.
         inputs.property(
             UNSUPPORTED_REFERENCE_INPUT + kotlinTask.path,
@@ -158,7 +158,7 @@ internal fun registerVerifyCompile(
         configure()
     }
     report.configure {
-        // The path alone, not the verify task's output: Gradle 7 refuses to read a task output's
+        // The path alone, not the verify task's output: Gradle refuses to read a task output's
         // value before that task has run, and dependsOn orders the two.
         inputs.property(RECORD_INPUT + kotlinTask.path, recordFile.map { it.asFile.absolutePath })
         dependsOn(verify)
