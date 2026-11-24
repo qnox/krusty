@@ -180,16 +180,10 @@ fn a_generated_equals_bound_narrows_the_other_operand() {
     let source = generated_bound_narrows();
     let reference_args = common::language_directives::kotlinc_args(&source);
     if generated_equals_is_bound() {
-        common::assert_sources_accepted_like_kotlinc(
-            &[("main.kt", &source)],
-            &reference_args,
-        );
+        common::assert_sources_accepted_like_kotlinc(&[("main.kt", &source)], &reference_args);
         assert_ok("GeneratedBoundNarrows", &source);
     } else {
-        common::assert_errors_match_kotlinc(
-            &[("main.kt", &source)],
-            &reference_args,
-        );
+        common::assert_errors_match_kotlinc(&[("main.kt", &source)], &reference_args);
     }
 }
 
