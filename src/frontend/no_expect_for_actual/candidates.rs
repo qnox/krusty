@@ -85,6 +85,7 @@ pub(super) fn actual_listing(
     expect: DeclarationId,
     rejected: &[IncompatibleActual],
     written: &crate::fx_hash::HashMap<DeclarationId, String>,
+    inferred_return: &dyn Fn(DeclarationId) -> Result<Option<String>, &'static str>,
 ) -> Result<String, &'static str> {
     let own = rejected
         .iter()
@@ -111,6 +112,9 @@ pub(super) fn actual_listing(
         };
         rendered.push_str("\n        ");
         rendered.push_str(text);
+        if let Some(result) = inferred_return(entry.actual)? {
+            rendered.push_str(&result);
+        }
     }
     Ok(rendered)
 }

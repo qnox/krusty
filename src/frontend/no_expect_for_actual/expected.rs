@@ -6,7 +6,7 @@
 //! either way — the reference compiler shows `List<*>` and `(Int) -> String` as written, not as
 //! identities — so it is rendered from the declaration syntax while that syntax is still live.
 
-use crate::ast::{ClassDecl, FunDecl, Param, PropDecl, TypeRef};
+use crate::ast::{ClassDecl, FunBody, FunDecl, Param, PropDecl, TypeRef};
 
 use super::{callable_modifiers, property_modifiers};
 
@@ -110,9 +110,27 @@ fn written_parameter(parameter: &Param) -> String {
     )
 }
 
+/// Whether the function's result is inferred from an expression body, so that it has no written
+/// form and resolution alone can say what it is.
+pub(super) fn awaits_inferred_return(function: &FunDecl) -> bool {
+    function.ret.is_none() && matches!(function.body, FunBody::Expr(_))
+}
+
+/// A declaration's leading keyword and the space after it; a member that wrote none has neither.
+fn keyword_prefix(keyword: &str) -> String {
+    if keyword.is_empty() {
+        String::new()
+    } else {
+        format!("{keyword} ")
+    }
+}
+
+/// The function as written. One whose result is inferred ends at the colon: the type is resolved
+/// later and joined where it is listed.
 pub(super) fn written_function(function: &FunDecl, keyword: &str) -> String {
     format!(
-        "{keyword} {}fun {}{}{}({}): {}",
+        "{}{}fun {}{}{}({}): {}",
+        keyword_prefix(keyword),
         callable_modifiers(function),
         written_formals(&function.type_params, &function.type_param_bounds),
         written_receiver(function.receiver.as_ref()),
@@ -124,10 +142,16 @@ pub(super) fn written_function(function: &FunDecl, keyword: &str) -> String {
             .map(written_parameter)
             .collect::<Vec<_>>()
             .join(", "),
-        function
-            .ret
-            .as_ref()
-            .map_or_else(|| "Unit".to_string(), written_type),
+        function.ret.as_ref().map_or_else(
+            || {
+                if awaits_inferred_return(function) {
+                    String::new()
+                } else {
+                    "Unit".to_string()
+                }
+            },
+            written_type
+        ),
     )
 }
 
@@ -135,7 +159,8 @@ pub(super) fn written_function(function: &FunDecl, keyword: &str) -> String {
 /// property without one is not rendered rather than guessed at.
 pub(super) fn written_property(property: &PropDecl, keyword: &str) -> Option<String> {
     Some(format!(
-        "{keyword} {}{} {}{}{}: {}",
+        "{}{}{} {}{}{}: {}",
+        keyword_prefix(keyword),
         property_modifiers(property),
         if property.is_var { "var" } else { "val" },
         written_formals(&property.type_params, &property.type_param_bounds),

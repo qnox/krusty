@@ -2112,6 +2112,44 @@ public class Target {
     );
     assert_eq!(krusty, reference);
 }
+
+/// An implementation whose return type is inferred is listed with the type it inferred.
+#[test]
+fn an_incompatible_actual_with_an_inferred_return_type_lists_that_type() {
+    let (reference, krusty) = both_split(
+        "inferred_actual_return",
+        &[(
+            "Common.kt",
+            "expect class Holder {\n    fun f(x: Int): String\n}\n",
+        )],
+        &[(
+            "Platform.kt",
+            "actual class Holder {\n    actual fun f(x: String) = \"OK\"\n}\n",
+        )],
+    );
+    assert!(!reference.is_empty(), "{reference:#?}");
+    assert_eq!(krusty, reference);
+}
+
+/// A member an actual class inherits from an ordinary class is a candidate for the expectation it
+/// does not satisfy, though it never wrote `actual`.
+#[test]
+fn an_incompatible_member_inherited_from_a_source_class_is_listed() {
+    let (reference, krusty) = both_split(
+        "inherited_actual_candidate",
+        &[(
+            "Common.kt",
+            "expect class Holder {\n    fun f(x: Int)\n}\n",
+        )],
+        &[(
+            "Platform.kt",
+            "open class Base {\n    fun f(x: String) {}\n}\n\nactual class Holder : Base()\n",
+        )],
+    );
+    assert!(!reference.is_empty(), "{reference:#?}");
+    assert_eq!(krusty, reference);
+}
+
 /// Java primitives discharge the `expect` members they implement: an alias to a JDK class or to a
 /// Java source class whose methods take and return `int` answers `Int` members, and the reference
 /// compiler reports nothing.

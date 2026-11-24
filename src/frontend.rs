@@ -1468,10 +1468,10 @@ where
     // Read in the same breath and for the same reason: a classifier that implements none of its
     // expectation's members lists what it owes, and those are `expect` declarations whose syntax
     // is live only here.
-    let expected_members = if multiplatform {
+    let (expected_members, inferred_returns) = if multiplatform {
         no_expect_for_actual::expected_members(&files, &pass1_headers)
     } else {
-        crate::fx_hash::HashMap::default()
+        Default::default()
     };
     let expect_members = if multiplatform {
         no_expect_for_actual::expect_members(&files, &pass1_headers)
@@ -1793,6 +1793,7 @@ where
                 incompatible_members: &incompatible_members,
                 rejected: &incompatible_actuals,
                 written: &expected_members,
+                inferred_returns: &inferred_returns,
                 expect_members: &expect_members,
             };
             no_expect_for_actual::report(

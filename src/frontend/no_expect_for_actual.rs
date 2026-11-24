@@ -56,6 +56,10 @@ pub(in crate::frontend) struct Counterparts<'a> {
     pub(in crate::frontend) rejected: &'a [crate::fir::IncompatibleActual],
     /// Each declaration a listing can name, as the source wrote it.
     pub(in crate::frontend) written: &'a crate::fx_hash::HashMap<crate::fir::DeclarationId, String>,
+    /// The members of `written` whose result type is inferred, so that their text stops at the
+    /// colon.
+    pub(in crate::frontend) inferred_returns:
+        &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     /// Each `expect` member as the declaration renderer shows it.
     pub(in crate::frontend) expect_members:
         &'a crate::fx_hash::HashMap<crate::fir::DeclarationId, String>,
@@ -195,11 +199,18 @@ pub(super) fn report_unmarked_implementations(
 /// The check otherwise walks `actual` declarations only. A classifier that implements none of its
 /// expectation's members has to name what it owes, and those are `expect` declarations — read here
 /// from the same syntax, with the same identities, while that syntax is still live.
+///
+/// The second map's keys are the members whose text stops at the colon because their result is
+/// inferred; a listing joins the resolved type to them.
 pub(in crate::frontend) fn expected_members(
     files: &[File],
     headers: &crate::fir::StreamedHeaderModule,
-) -> crate::fx_hash::HashMap<crate::fir::DeclarationId, String> {
+) -> (
+    crate::fx_hash::HashMap<crate::fir::DeclarationId, String>,
+    crate::fx_hash::HashSet<crate::fir::DeclarationId>,
+) {
     let mut expected = crate::fx_hash::HashMap::default();
+    let mut inferred_returns = crate::fx_hash::HashSet::default();
     for (index, file) in files.iter().enumerate() {
         let source = crate::fir::SourceFileId::from_raw(index as u32);
         let identities = headers.source_declarations(source);
@@ -261,27 +272,33 @@ pub(in crate::frontend) fn expected_members(
                     );
                 }
             }
+            // Every member of an implementing class can be a rejected candidate, one it inherited
+            // from an ordinary class included, and is listed as it was written: `actual` only
+            // where it wrote the modifier.
             for (sibling, function) in class.methods.iter().enumerate() {
-                if let (true, Some(stable)) = (
-                    function.is_actual(),
-                    identity(
-                        function.span,
-                        crate::fir::DeclarationKind::Function,
-                        sibling,
-                    ),
+                if let Some(stable) = identity(
+                    function.span,
+                    crate::fir::DeclarationKind::Function,
+                    sibling,
                 ) {
-                    expected.insert(stable, expected::written_function(function, "actual"));
+                    let keyword = if function.is_actual() { "actual" } else { "" };
+                    expected.insert(stable, expected::written_function(function, keyword));
+                    if expected::awaits_inferred_return(function) {
+                        inferred_returns.insert(stable);
+                    }
                 }
             }
             for (sibling, property) in class.body_props.iter().enumerate() {
-                if let (true, Some(stable), Some(rendered)) = (
-                    property.is_actual,
+                if let (Some(stable), Some(rendered)) = (
                     identity(
                         property.span,
                         crate::fir::DeclarationKind::Property,
                         sibling,
                     ),
-                    expected::written_property(property, "actual"),
+                    expected::written_property(
+                        property,
+                        if property.is_actual { "actual" } else { "" },
+                    ),
                 ) {
                     expected.insert(stable, rendered);
                 }
@@ -376,7 +393,7 @@ pub(in crate::frontend) fn expected_members(
             }
         }
     }
-    expected
+    (expected, inferred_returns)
 }
 
 /// Every member of every `expect` classifier as the reference compiler's declaration renderer
@@ -623,6 +640,22 @@ pub(super) fn report_unactualized_members(
         return;
     }
     let declarations = ResolvedDeclarations::publish(symbols, headers);
+    let inferred_return = |declaration| -> Result<Option<String>, &'static str> {
+        if !counterparts.inferred_returns.contains(&declaration) {
+            return Ok(None);
+        }
+        match declarations.get(declaration) {
+            Some(Resolved::Function(signature)) => {
+                let result = callable_result(signature);
+                if result.mentions_pending() {
+                    Err("has an inferred return type that did not resolve")
+                } else {
+                    Ok(Some(result.source_name().to_string()))
+                }
+            }
+            _ => Err("has no resolved signature for its inferred return type"),
+        }
+    };
     for owed in owed {
         // The classifier's coordinate comes from the same collection every other diagnostic in
         // this pass is positioned by, keyed by the one identity a declaration has.
@@ -668,6 +701,7 @@ pub(super) fn report_unactualized_members(
                     member.declaration,
                     counterparts.rejected,
                     counterparts.written,
+                    &inferred_return,
                 ) {
                     Ok(candidates) => listing.push_str(&candidates),
                     Err(reason) => unlisted = Some(reason),
@@ -919,6 +953,15 @@ fn render_function(
     Ok(format!("{context}{rendered}"))
 }
 
+/// The result a callable's source declared: the generic signature's where it has one, because the
+/// plain `ret` is erased.
+fn callable_result(signature: &Signature) -> Ty {
+    signature
+        .generic_sig
+        .as_ref()
+        .map_or(signature.ret, |generic| generic.ret)
+}
+
 /// Render one callable — top-level or member — from its resolved signature and the syntax it wrote.
 fn render_callable(
     signature: &Signature,
@@ -935,7 +978,7 @@ fn render_callable(
     let generic = signature.generic_sig.as_ref();
     let declared_types: &[Ty] =
         generic.map_or(&signature.params[..], |generic| &generic.params[..]);
-    let result = generic.map_or(signature.ret, |generic| generic.ret);
+    let result = callable_result(signature);
     if result.mentions_pending() {
         return None;
     }
