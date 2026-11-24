@@ -39,6 +39,7 @@ mod pool_noting;
 mod source_map_annotation;
 mod stack_maps;
 mod utf8_pool;
+mod version;
 
 pub use annotation_values::split_declaration_annotations;
 use annotation_values::{NOT_NULL, NULLABLE};
@@ -60,7 +61,6 @@ pub const ACC_STATIC: u16 = 0x0008;
 pub const ACC_FINAL: u16 = 0x0010;
 pub const ACC_SUPER: u16 = 0x0020;
 pub const ACC_SYNCHRONIZED: u16 = 0x0020;
-pub const ACC_IDENTITY: u16 = 0x0020;
 pub const ACC_BRIDGE: u16 = 0x0040;
 pub const ACC_VARARGS: u16 = 0x0080;
 pub const ACC_INTERFACE: u16 = 0x0200;
@@ -69,23 +69,7 @@ pub const ACC_STRICT: u16 = 0x0800;
 pub const ACC_SYNTHETIC: u16 = 0x1000;
 pub const ACC_ANNOTATION: u16 = 0x2000;
 pub const ACC_ENUM: u16 = 0x4000;
-/// The class-file minor version that marks a class as compiled with preview features
-/// (`-Xjvm-enable-preview`).
-pub const PREVIEW_MINOR_VERSION: u16 = 0xFFFF;
-/// The class-file version a writer targets: the `-jvm-target` major version and whether
-/// `-Xjvm-enable-preview` marks the class as compiled with preview features.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ClassFileVersion {
-    pub major: u16,
-    pub preview: bool,
-}
-
-/// The first class-file major version (JDK 28) whose `InnerClasses` flags carry `ACC_IDENTITY`
-/// under `-Xjvm-enable-preview`.
-const IDENTITY_FLAG_MAJOR_VERSION: u16 = 72;
-
-// Major 52 = Java 8, matching kotlinc's default JVM target.
-pub const MAJOR_JAVA8: u16 = 52;
+pub use version::{ClassFileVersion, ACC_IDENTITY, MAJOR_JAVA8, PREVIEW_MINOR_VERSION};
 
 /// JVM verification type for StackMapTable entries (JVMS §4.7.4).
 #[derive(Clone, PartialEq)]
@@ -544,11 +528,9 @@ pub struct ClassWriter {
     annotation_class_refs: crate::fx_hash::HashSet<String>,
     /// Entries for the `PermittedSubclasses` attribute.
     permitted_subclasses: Vec<String>,
-    /// Class-file major version to emit (default v52; set via [`ClassWriter::set_major`]).
-    major: u16,
-    /// Mark the class file as compiled with preview features (minor version `0xFFFF`), as
-    /// `-Xjvm-enable-preview` does for every class (set via [`ClassWriter::set_preview`]).
-    preview: bool,
+    /// Class-file version to emit (default v52, no preview marking; set via
+    /// [`ClassWriter::set_major`] and [`ClassWriter::set_preview`]).
+    version: ClassFileVersion,
     /// Source-file simple name for the `SourceFile` attribute (set via [`ClassWriter::set_source_file`]).
     source_file: Option<String>,
     /// The JSR-045 source map for a class that contains inlined code, accumulated as each inline
@@ -610,8 +592,7 @@ impl ClassWriter {
             value_classes: Rc::default(),
             annotation_class_refs: crate::fx_hash::HashSet::default(),
             permitted_subclasses: Vec::new(),
-            major: MAJOR_JAVA8,
-            preview: false,
+            version: ClassFileVersion::default(),
             source_file: None,
             source_map: crate::jvm::source_map::SourceMap::default(),
             method_source_map: crate::jvm::source_map::SourceMap::default(),
@@ -623,40 +604,25 @@ impl ClassWriter {
 
     /// Set the class-file major version to emit (kotlinc maps `-jvm-target 25` ⇒ v69). Default v52.
     pub fn set_major(&mut self, major: u16) {
-        self.major = major;
+        self.version.major = major;
     }
-    /// An `InnerClasses` entry's flags as written: under preview from JDK 28 on, kotlinc gives every
-    /// non-interface class (an annotation is an interface) the identity flag, whichever class file
-    /// declared it.
-    fn inner_class_access(&self, access: u16) -> u16 {
-        if self.preview && self.major >= IDENTITY_FLAG_MAJOR_VERSION && access & ACC_INTERFACE == 0
-        {
-            access | ACC_IDENTITY
-        } else {
-            access
-        }
-    }
-    /// Mark the class file as compiled with preview features: minor version `0xFFFF`, and from
-    /// major 72 (JDK 28) an identity flag on every non-interface `InnerClasses` entry, as kotlinc
-    /// writes under `-Xjvm-enable-preview`.
+    /// Mark the class file as compiled with preview features, as `-Xjvm-enable-preview` does for
+    /// every class ([`ClassFileVersion`]).
     pub fn set_preview(&mut self, preview: bool) {
-        self.preview = preview;
+        self.version.preview = preview;
     }
     /// The class file is marked as compiled with preview features ([`ClassWriter::set_preview`]).
     pub fn is_preview(&self) -> bool {
-        self.preview
+        self.version.preview
     }
     /// The version this writer targets.
     pub fn version(&self) -> ClassFileVersion {
-        ClassFileVersion {
-            major: self.major,
-            preview: self.preview,
-        }
+        self.version
     }
     /// The class-file major version (52 = Java 8, 53 = Java 9, …). Codegen that is gated on the target
     /// — e.g. `invokedynamic` string concatenation, which kotlinc emits only for Java 9+ — reads it.
     pub fn major(&self) -> u16 {
-        self.major
+        self.version.major
     }
 
     /// The class's own source file, for a synthesized class that belongs to it.
@@ -1565,7 +1531,7 @@ impl ClassWriter {
                     u2(&mut body, inner_idx);
                     u2(&mut body, outer_idx);
                     u2(&mut body, name_idx);
-                    u2(&mut body, self.inner_class_access(s.access));
+                    u2(&mut body, self.version.inner_class_access(s.access));
                 }
                 (name, body)
             })
@@ -1669,15 +1635,8 @@ impl ClassWriter {
         });
         let mut out = Vec::new();
         u4(&mut out, 0xCAFEBABE);
-        u2(
-            &mut out,
-            if self.preview {
-                PREVIEW_MINOR_VERSION
-            } else {
-                0
-            },
-        );
-        u2(&mut out, self.major);
+        u2(&mut out, self.version.minor());
+        u2(&mut out, self.version.major);
         self.cp.serialize(&mut out);
         u2(&mut out, self.access);
         u2(&mut out, self.this_class);
@@ -2845,62 +2804,6 @@ mod tests {
         cw.set_major(69); // -jvm-target 25
         let bytes = cw.finish();
         assert_eq!(u16::from_be_bytes([bytes[6], bytes[7]]), 69);
-    }
-
-    /// One class referencing the nested classes `A$Concrete` (flags 0x19) and `A$Face` (an
-    /// interface), written under `major` with or without the preview marking: its minor version
-    /// and the flags of its `InnerClasses` rows.
-    fn preview_class(major: u16, preview: bool) -> (u16, Vec<(String, u16)>) {
-        let mut cw = ClassWriter::new("Use", "java/lang/Object");
-        cw.set_major(major);
-        cw.set_preview(preview);
-        for (inner, name, access) in [
-            (
-                "A$Concrete",
-                "Concrete",
-                ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
-            ),
-            (
-                "A$Face",
-                "Face",
-                ACC_PUBLIC | ACC_STATIC | ACC_INTERFACE | ACC_ABSTRACT,
-            ),
-        ] {
-            cw.add_inner_class(InnerClassSpec {
-                inner: inner.to_string(),
-                outer: Some("A".to_string()),
-                name: Some(name.to_string()),
-                access,
-            });
-            cw.add_field(ACC_PUBLIC, name, &format!("LA${name};"));
-        }
-        let bytes = cw.finish();
-        let minor = u16::from_be_bytes([bytes[4], bytes[5]]);
-        let info = crate::jvm::classreader::parse_class(&bytes).expect("parse class");
-        let rows = info
-            .inner_classes
-            .iter()
-            .map(|row| (row.inner.clone(), row.access))
-            .collect();
-        (minor, rows)
-    }
-
-    #[test]
-    fn preview_marks_the_minor_version_and_from_major_72_the_non_interface_inner_class_rows() {
-        let concrete = ACC_PUBLIC | ACC_STATIC | ACC_FINAL;
-        let face = ACC_PUBLIC | ACC_STATIC | ACC_INTERFACE | ACC_ABSTRACT;
-        let rows = |concrete: u16| {
-            vec![
-                ("A$Concrete".to_string(), concrete),
-                ("A$Face".to_string(), face),
-            ]
-        };
-        assert_eq!(
-            preview_class(72, true),
-            (0xFFFF, rows(concrete | ACC_IDENTITY))
-        );
-        assert_eq!(preview_class(71, true), (0xFFFF, rows(concrete)));
-        assert_eq!(preview_class(72, false), (0, rows(concrete)));
     }
 
     #[test]
