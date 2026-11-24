@@ -230,10 +230,11 @@ jobs:
             exit 1
           fi
           # A project of this run whose job left no comparison is reported as not measured, with why,
-          # instead of vanishing from the tables.
+          # instead of vanishing from the tables. The job summary page refuses more than 1 MiB, so
+          # it gets the report cut to fit; summary.md, uploaded below, is complete.
           python3 scripts/oss-corpus/summarize.py --stars stars.tsv --expected expected.tsv --results results \
-            --plugins results --json summary.json "${previous[@]}" "${reports[@]}" \
-            | tee summary.md >> "$GITHUB_STEP_SUMMARY"
+            --plugins results --json summary.json --step-summary "$GITHUB_STEP_SUMMARY" \
+            "${previous[@]}" "${reports[@]}" > summary.md
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: summary
