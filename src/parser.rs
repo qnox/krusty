@@ -991,7 +991,7 @@ impl<'a> Parser<'a> {
             let at = match self.kind() {
                 TokenKind::Eof | TokenKind::LBrace | TokenKind::RBrace => {
                     self.i.checked_sub(1).map(|previous| {
-                        let end = self.t[previous].span.hi;
+                        let end = self.syntactic_ident_span(self.t[previous]).hi;
                         Span::new(end, end)
                     })
                 }
@@ -6402,6 +6402,19 @@ typealias Box<@Marker T> = List<T>
         assert_eq!(
             parse_messages("fun f() { g(1 }"),
             [("syntax error: Expecting ')'.".to_string(), 13, 13)]
+        );
+    }
+
+    #[test]
+    fn a_missing_brace_after_an_escaped_identifier_is_reported_after_its_closing_backtick() {
+        // `x` occupies bytes 10..13 including both backticks; the empty error sits at 13.
+        assert_eq!(
+            parse_messages("fun f() { `x`"),
+            [("syntax error: Expecting '}'.".to_string(), 13, 13)]
+        );
+        assert_eq!(
+            parse_messages("fun f() { g(`x` }"),
+            [("syntax error: Expecting ')'.".to_string(), 15, 15)]
         );
     }
 
