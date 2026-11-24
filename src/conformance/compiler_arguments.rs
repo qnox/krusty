@@ -190,6 +190,7 @@ fn case_cli_arguments(
     if directive(src, "ALLOW_KOTLIN_PACKAGE") || declares_reserved_kotlin_package(src) {
         arguments.push("-Xallow-kotlin-package".to_string());
     }
+    arguments.extend(return_value_checker_argument(src)?);
     if target == super::TestTarget::Native {
         arguments.extend(
             values(src, "FREE_COMPILER_ARGS")
@@ -221,15 +222,7 @@ fn case_cli_arguments(
     Ok(arguments)
 }
 
-/// The kotlinc arguments only the reference compile of a case receives: `// RETURN_VALUE_CHECKER_MODE:
-/// FULL|CHECKER|DISABLED` selects `-Xreturn-value-checker=full|check|disable`, so kotlinc accepts the
-/// case's `@MustUseReturnValues`/`@IgnorableReturnValue` annotations.
-///
-/// krusty does not model the return-value checker and refuses the argument, yet the checker only
-/// reports unused results and never changes the case's runtime `box()`. Keeping the argument off
-/// krusty's command line keeps such a case applicable; it moves to [`case_kotlinc_arguments`] once
-/// krusty applies the argument. An unknown mode fails closed rather than reference-compiling under
-/// a guessed default.
+/// The kotlinc arguments only the reference compile of a case receives.
 ///
 /// `// USE_INLINE_SCOPES_NUMBERS` selects `-Xuse-inline-scopes-numbers`, which krusty's compile
 /// receives as [`UnitCompilerConfiguration::inline_scopes_numbers`] instead.
@@ -246,8 +239,15 @@ pub fn reference_only_kotlinc_arguments_for_target(
     if target == super::TestTarget::Jvm && super::directive(src, "USE_INLINE_SCOPES_NUMBERS") {
         arguments.push("-Xuse-inline-scopes-numbers".to_string());
     }
+    Ok(arguments)
+}
+
+/// `// RETURN_VALUE_CHECKER_MODE: FULL|CHECKER|DISABLED` selects `-Xreturn-value-checker=full|check|
+/// disable`, which both compilers receive. An unknown mode fails closed rather than compiling under
+/// a guessed default.
+fn return_value_checker_argument(src: &str) -> Result<Option<String>, String> {
     let Some(mode) = last_value(src, "RETURN_VALUE_CHECKER_MODE") else {
-        return Ok(arguments);
+        return Ok(None);
     };
     // The directive spells kotlinc's `ReturnValueCheckerMode` enum constants.
     let value = match mode {
@@ -260,8 +260,7 @@ pub fn reference_only_kotlinc_arguments_for_target(
             ))
         }
     };
-    arguments.push(format!("-Xreturn-value-checker={value}"));
-    Ok(arguments)
+    Ok(Some(format!("-Xreturn-value-checker={value}")))
 }
 
 /// The trimmed payload of every `// <name>:` directive line, in source order.
@@ -388,10 +387,14 @@ mod tests {
             let arguments = if target == super::super::TestTarget::Native {
                 vec![
                     "-opt-in=demo.Marker".into(),
+                    "-Xreturn-value-checker=full".into(),
                     "-Xbinary=genericSafeCasts=true".into(),
                 ]
             } else {
-                vec!["-opt-in=demo.Marker".into()]
+                vec![
+                    "-opt-in=demo.Marker".into(),
+                    "-Xreturn-value-checker=full".into(),
+                ]
             };
             assert_eq!(
                 platform_compiler_configuration(source, target),
@@ -404,7 +407,7 @@ mod tests {
             );
             assert_eq!(
                 reference_only_kotlinc_arguments_for_target(source, target),
-                Ok(vec!["-Xreturn-value-checker=full".into()])
+                Ok(Vec::new())
             );
         }
     }
@@ -441,6 +444,7 @@ mod tests {
                 "-opt-in=kotlin.contracts.ExperimentalContracts",
                 "-Xexplicit-api=strict",
                 "-Xallow-kotlin-package",
+                "-Xreturn-value-checker=check",
                 "-jvm-target",
                 "1.8",
                 "-Xjvm-enable-preview",
@@ -452,25 +456,17 @@ mod tests {
     }
 
     #[test]
-    fn the_return_value_checker_mode_reaches_only_the_reference_compile() {
-        let src = "// RETURN_VALUE_CHECKER_MODE: CHECKER\nfun box() = \"OK\"\n";
-        assert_eq!(arguments(src), Vec::<String>::new());
+    fn the_return_value_checker_mode_reaches_both_compilers() {
         for (mode, argument) in [
             ("FULL", "-Xreturn-value-checker=full"),
             ("CHECKER", "-Xreturn-value-checker=check"),
             ("DISABLED", "-Xreturn-value-checker=disable"),
         ] {
-            assert_eq!(
-                reference_only_kotlinc_arguments(&format!(
-                    "// RETURN_VALUE_CHECKER_MODE: {mode}\nfun box() = \"OK\"\n"
-                )),
-                Ok(vec![argument.to_string()])
-            );
+            let src = format!("// RETURN_VALUE_CHECKER_MODE: {mode}\nfun box() = \"OK\"\n");
+            assert_eq!(arguments(&src), [argument]);
+            assert_eq!(reference_only_kotlinc_arguments(&src), Ok(Vec::new()));
         }
-        assert_eq!(
-            reference_only_kotlinc_arguments("fun box() = \"OK\"\n"),
-            Ok(Vec::new())
-        );
+        assert_eq!(arguments("fun box() = \"OK\"\n"), Vec::<String>::new());
     }
 
     #[test]
@@ -558,7 +554,7 @@ mod tests {
     #[test]
     fn an_unknown_mode_fails_closed() {
         assert_eq!(
-            reference_only_kotlinc_arguments("// RETURN_VALUE_CHECKER_MODE: SOMETIMES\n"),
+            case_kotlinc_arguments("// RETURN_VALUE_CHECKER_MODE: SOMETIMES\n"),
             Err(
                 "box directive `// RETURN_VALUE_CHECKER_MODE: SOMETIMES` names no mode".to_string()
             )
