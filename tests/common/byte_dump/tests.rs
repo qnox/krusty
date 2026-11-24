@@ -1703,6 +1703,66 @@ fn dumps_stay_in_memory_until_the_process_publishes_the_archive() {
 }
 
 #[test]
+fn a_backlog_older_than_the_publication_age_is_published_by_the_next_store() {
+    let root = temp_root("aged");
+    let release = version("2.4.20");
+    let first = fingerprint_parts(&[b"aged-one"]);
+    let second = fingerprint_parts(&[b"aged-two"]);
+    store_files(
+        &root,
+        "mod",
+        "case|A|default|plain",
+        release,
+        first,
+        &files(b"a"),
+    );
+    assert!(
+        !archive_path(&root).exists(),
+        "a fresh backlog stays in memory"
+    );
+    {
+        let mut cache = dump_cache().lock().expect("class-dump cache");
+        let slot = cache.get_mut(&archive_path(&root)).expect("recorded slot");
+        for record in &mut slot.pending {
+            record.stored_at -= PUBLICATION_AGE;
+        }
+    }
+    store_files(
+        &root,
+        "mod",
+        "case|B|default|plain",
+        release,
+        second,
+        &files(b"b"),
+    );
+    assert!(
+        dump_cache()
+            .lock()
+            .expect("class-dump cache")
+            .get(&archive_path(&root))
+            .is_some_and(|slot| slot.pending.is_empty()),
+        "publication leaves nothing pending"
+    );
+    let published = read_archive(&archive_path(&root)).expect("published archive");
+    for (key, fingerprint, bytes) in [
+        ("case|A|default|plain", first, b"a"),
+        ("case|B|default|plain", second, b"b"),
+    ] {
+        let entry = published.modules["mod"][key]
+            .iter()
+            .find(|entry| entry.fingerprint == fingerprint)
+            .expect("published entry");
+        let raw = published.blob(entry.blob).expect("published blob").to_vec();
+        assert_eq!(
+            decode_raw(&raw).unwrap().get("pkg/A").unwrap(),
+            bytes,
+            "the aged backlog and the store that found it are both on disk"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn concurrent_versions_under_one_key_survive_publication_replay() {
     let root = temp_root("concurrent-version");
     let foreign_root = temp_root("concurrent-version-foreign");
