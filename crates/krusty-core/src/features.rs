@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
-use crate::types::{AssertionCompilation, AssertionMode};
+use crate::assertions::{AssertionCompilation, AssertionMode};
 
 pub mod deprecation_cycle_messages;
 
