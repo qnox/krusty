@@ -565,21 +565,21 @@ impl Checker<'_> {
             .filter(|(_, _, identity, class_receiver)| {
                 !*class_receiver && !scope.implicit_receiver_is_singleton(*identity)
             })
-            .map(|(ty, extension, identity, class_receiver)| {
+            .and_then(|(ty, extension, identity, class_receiver)| {
                 let receiver_role = scope.implicit_receiver_role(identity);
                 let receiver_capture =
                     self.implicit_receiver_capture_id(class_receiver, receiver_role);
-                (
+                Some((
                     ty,
                     self.captured_receiver(
                         scope,
                         identity,
                         extension,
                         class_receiver.then_some(ty),
-                    ),
+                    )?,
                     receiver_capture,
                     receiver_role,
-                )
+                ))
             });
         let innermost_label = self.this_labels.last();
         // Class labels carry source labels, not closure identities. Keep the selected current

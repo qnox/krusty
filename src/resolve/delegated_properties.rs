@@ -1720,6 +1720,17 @@ impl Checker<'_> {
                             .expect("a selected source delegate convention must retain its shape"),
                         _ => selected.declared_params.clone(),
                     };
+                    let Some(dispatch_receiver_role) = self.captured_receiver(
+                        scope,
+                        selected.dispatch_receiver.identity,
+                        selected.dispatch_receiver.extension_receiver,
+                        selected
+                            .dispatch_receiver
+                            .class_receiver
+                            .then_some(selected.dispatch_receiver.declared_ty),
+                    ) else {
+                        return DelegateOperatorSelection::None;
+                    };
                     return DelegateOperatorSelection::Selected(Box::new(
                         DelegateGetValueTarget::MemberExtension {
                             stable_declaration: selected.stable_declaration,
@@ -1730,15 +1741,7 @@ impl Checker<'_> {
                             extension_receiver: selected.extension_receiver,
                             dispatch_receiver: self
                                 .implicit_receiver_selection(selected.dispatch_receiver),
-                            dispatch_receiver_role: self.captured_receiver(
-                                scope,
-                                selected.dispatch_receiver.identity,
-                                selected.dispatch_receiver.extension_receiver,
-                                selected
-                                    .dispatch_receiver
-                                    .class_receiver
-                                    .then_some(selected.dispatch_receiver.declared_ty),
-                            ),
+                            dispatch_receiver_role,
                             dispatch_declaration: scope
                                 .implicit_receiver_role(selected.dispatch_receiver.identity),
                             context_count: selected.context_count,
