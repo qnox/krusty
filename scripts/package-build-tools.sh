@@ -38,9 +38,6 @@ name=krusty-build-tools-$version-kotlin-$kotlin
 built=$project/build/libs/$name.jar
 gradle=("$project/gradlew" --no-daemon -p "$project"
   -PkrustyBuildToolsVersion="$version" -PkotlinVersion="$kotlin" -Pkrusty.binary="$krusty")
-# CI fills the Gradle cache once beforehand (the build-tools-deps job) and sets this, so a row that
-# needs a dependency the cache lacks fails by name instead of fetching from Maven Central.
-[ -z "${KRUSTY_GRADLE_OFFLINE:-}" ] || gradle+=(--offline)
 
 "${gradle[@]}" clean test kotlinGradlePluginTest jar
 first=$(mktemp)
