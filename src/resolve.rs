@@ -202,6 +202,7 @@ mod declaration_rules;
 mod declaration_usage;
 mod dependency_platform;
 mod deprecation_phase;
+mod java_class_property_reference;
 use deprecation_phase::DeprecationNames;
 mod critical_section_suspension;
 mod deprecation_usage;
@@ -31959,6 +31960,7 @@ impl<'a> Checker<'a> {
             property.getter_visibility,
             property.setter_visibility,
         );
+        self.report_java_class_property_reference(expression, &property);
         if !self.property_reference_exposes_setter(&property, receiver) {
             property.setter = None;
         }

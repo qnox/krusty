@@ -128,6 +128,12 @@ pub struct FileLanguagePolicy {
     pub type_arguments_not_allowed_warning: Option<String>,
     /// Exact warning text when the same transition applies to a standalone singleton value.
     pub explicit_type_arguments_in_property_access_warning: Option<String>,
+    /// `+ForbidJavaClassPropertyReferences`: a reference to the stdlib `javaClass` extension
+    /// property is an error rather than a deprecation warning.
+    pub forbid_java_class_property_references: bool,
+    /// Exact warning text for that reference before the transition; `None` for a release that
+    /// predates the diagnostic, which reports nothing.
+    pub java_class_property_reference_warning: Option<String>,
     /// `+ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose generated `copy()` exposes its
     /// non-public primary constructor, and a use of that `copy()`, are errors rather than warnings.
     pub error_about_data_class_copy_visibility_change: bool,
