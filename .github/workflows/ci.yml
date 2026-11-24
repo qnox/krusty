@@ -1428,75 +1428,20 @@ jobs:
             dist-gradle/*-SHA256SUMS
           if-no-files-found: error
 
-  # Fills the Gradle cache the build-tools matrix reads. Every matrix job resolves the Build Tools
-  # API of its own Kotlin release from Maven Central, and a release no master run has resolved yet
-  # (a new one under test) is in no restored cache, so all rows fetched at once and Central answered
-  # 429. This job resolves every release's dependencies serially, without retrying a refusal (Central
-  # extends a block for every request made during it), and saves the cache for the rows that follow. Unlike the other Gradle caches it saves on a queue
-  # branch too: the rows are in the same run, so they see an entry their own branch saved.
-  build-tools-deps:
-    needs: [build-tool-bins]
-    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['build-tools-deps'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
-    permissions:
-      contents: read
-      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
-      id-token: write
-    outputs:
-      # The entry that holds every release's dependencies: the one this job saved, or the one it
-      # restored when resolving added nothing.
-      gradle-key: ${{ steps.gradle-grown.outputs.save == 'true' && steps.gradle-deps.outputs.cache-primary-key || steps.gradle-deps.outputs.cache-matched-key }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - *just-on-path
-      - *install-just
-      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
-        with:
-          distribution: zulu
-          java-version: '17.0.21+0.3.1'
-      - name: select the Gradle user home
-        id: gradle-home
-        run: |
-          echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
-          echo "version=$(sed -n 's/^distributionUrl=.*gradle-\(.*\)-bin\.zip$/\1/p' tools/krusty-build-tools/gradle/wrapper/gradle-wrapper.properties)" >> "$GITHUB_OUTPUT"
-      - *restore-gradle-home
-      - *count-gradle-home
-      - *setup-gradle
-      - *package-cache
-      - name: resolve the dependencies of every Kotlin release
-        run: |
-          set -euo pipefail
-          while read -r kotlin; do
-            tools/krusty-build-tools/gradlew --no-daemon -p tools/krusty-build-tools -PkotlinVersion="$kotlin" resolveDependencies
-          done < <(just kotlin-versions)
-      - name: check for new Gradle files
-        id: gradle-grown
-        env:
-          RESTORED: ${{ steps.gradle-restored.outputs.files }}
-        run: |
-          now=$(find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" "$GRADLE_USER_HOME"/caches/modules-2/metadata-*/descriptors "$GRADLE_USER_HOME/wrapper/dists" -type f 2> /dev/null | wc -l)
-          echo "Gradle ${{ steps.gradle-home.outputs.version }}: $RESTORED restored files, $now now"
-          if [ "$now" -gt "$RESTORED" ]; then echo "save=true" >> "$GITHUB_OUTPUT"; fi
-      - *save-gradle-home
-      # A refused save is only a warning; fail here instead of in every row that reads the entry.
-      - name: check the saved Gradle ${{ steps.gradle-home.outputs.version }} dependencies
-        if: steps.gradle-grown.outputs.save == 'true'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: *gradle-home-paths
-          key: ${{ steps.gradle-deps.outputs.cache-primary-key }}
-          lookup-only: true
-          fail-on-cache-miss: true
-
   # Build, test and package the Kotlin Build Tools API implementation once per exact supported
   # Kotlin version, driving the shared krusty binary. Release publishes these bytes unchanged.
   build-tools:
     name: build-tools (${{ matrix.kotlin }})
-    needs: [build-tool-bins, build-tools-deps]
+    needs: [build-tool-bins]
     strategy:
       fail-fast: false
       matrix:
         kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['build-tools'][matrix.kotlin] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1515,24 +1460,14 @@ jobs:
         run: |
           echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
           echo "version=$(sed -n 's/^distributionUrl=.*gradle-\(.*\)-bin\.zip$/\1/p' tools/krusty-build-tools/gradle/wrapper/gradle-wrapper.properties)" >> "$GITHUB_OUTPUT"
-      # Exactly the entry build-tools-deps filled: the newest entry for this Gradle version can be
-      # another job's, which lacks the Build Tools API dependencies.
-      - name: restore Gradle ${{ steps.gradle-home.outputs.version }} dependencies
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: *gradle-home-paths
-          key: ${{ needs.build-tools-deps.outputs.gradle-key }}
-          fail-on-cache-miss: true
       - *setup-gradle
-      # No package-cache step: this job runs offline, and its TestKit build gets a clean
-      # environment, where the cache's init script would find no token.
+      # No Actions cache: each row downloads its dependencies through the package cache, which
+      # answers the rows side by side, and its TestKit build shares this Gradle user home.
+      - *package-cache
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
       - name: build, test and package for Kotlin ${{ matrix.kotlin }}
-        env:
-          # The dependencies came from the build-tools-deps job's cache; never fetch from Central here.
-          KRUSTY_GRADLE_OFFLINE: "1"
         run: |
           set -euo pipefail
           chmod +x krusty
