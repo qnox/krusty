@@ -125,7 +125,8 @@ impl CallArgKind {
     /// applicability is decided: an omitted default always, an unchecked lambda literal when the
     /// parameter can host a function value, a function-shaped argument by SAM conversion, and
     /// otherwise the argument's type for that parameter (an integer literal adapts) by
-    /// assignability.
+    /// assignability. A nested generic call also fits a parameter that can complete its result:
+    /// `consume(produce())` takes `T` of `fun <T> produce(): T` from `consume`'s parameter.
     pub(crate) fn fits_parameter(
         &self,
         lib: &dyn SemanticPlatform,
@@ -142,6 +143,7 @@ impl CallArgKind {
         let sam = (self.is_lambda_literal() || self.function_type().is_some())
             && super::sam_arg_matches(lib, src, parameter, function);
         sam || super::arg_fits_source(lib, src, &parameter, &self.type_for(parameter))
+            || self.binds_result_to(src, parameter)
     }
 
     pub(crate) fn type_for(&self, parameter: Ty) -> Ty {
