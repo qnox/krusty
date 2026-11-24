@@ -412,6 +412,26 @@ fn native_library_suspend_coroutine_runs() {
     expect_native_klib_box(source, "nativeLibrarySuspendCoroutine");
 }
 
+/// PLATFORM-SPECIFIC: the Native stdlib KLIB's own `CharArray` to `String` bodies. `concatToString`
+/// ends in the external `unsafeStringFromCharArray`, which Native realizes from its runtime; the
+/// JVM and Wasm targets read other declarations. The JVM oracle runs first, so the expectation is
+/// kotlinc's, including a surrogate pair that arrives as two `Char`s.
+#[test]
+fn native_char_array_ranges_become_the_text_of_their_units() {
+    let source = "\
+fun box(): String {
+    val chars = CharArray(4) { 'a' + it }
+    if (chars.concatToString() != \"abcd\") return \"FAIL: concatToString\"
+    if (chars.concatToString(1, 3) != \"bc\") return \"FAIL: concatToString range\"
+    val pair = charArrayOf('\\uD83D', '\\uDE00', 'k')
+    if (pair.concatToString() != \"\\uD83D\\uDE00k\") return \"FAIL: surrogate pair\"
+    if (pair.concatToString().length != 3) return \"FAIL: surrogate pair length\"
+    return \"OK\"
+}
+";
+    expect_native_klib_box(source, "nativeCharArrayText");
+}
+
 fn expect_native_klib_box(source: &str, stem: &str) {
     super::common::expect_box_ok_with_stdlib(source, &format!("{stem}Oracle"));
     let target = host().expect("Native KLIB/runtime is required for this test");

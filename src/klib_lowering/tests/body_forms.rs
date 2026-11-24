@@ -784,7 +784,7 @@ fn unmodelled_local_variables_decline_by_form() {
             "it uses a compiler-introduced variable",
         ),
         (
-            0b10,
+            0b1,
             "IR_TEMPORARY_VARIABLE",
             true,
             "it uses a mutable or annotated compiler temporary",
@@ -823,6 +823,28 @@ fn a_compiler_temporary_lowers_as_an_unnamed_local() {
     assert_eq!(
         lowered_body(&unit, function),
         "scope {scope {temp v1: Int = v0!: Int; return@Some(0) v1!: Int: Nothing}: Nothing}"
+    );
+}
+
+/// An inlined loop's induction counter is a compiler `var`: an unnamed reassignable local.
+#[test]
+fn a_mutable_compiler_temporary_lowers_as_an_unnamed_reassignable_local() {
+    let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
+        let a = body.param(0);
+        let (declaration, x) = body.variable_with(T::Int, Some(a), 0b10, "IR_TEMPORARY_VARIABLE");
+        let value = body.param(0);
+        let assign = body.set(&x, value);
+        let read = body.get(&x, T::Int);
+        Some(vec![declaration, assign, body.ret(read)])
+    });
+    let mut unit = DependencyBodyUnit::default();
+    let function = demo
+        .lower(&mut unit, "f", &[])
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    assert_eq!(
+        lowered_body(&unit, function),
+        "scope {scope {temp v1: Int = v0!: Int; v1 = v0!: Int: Unit; return@Some(0) v1~: Int: Nothing}: Nothing}"
     );
 }
 

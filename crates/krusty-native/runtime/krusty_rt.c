@@ -1484,6 +1484,22 @@ static KRef kt_string_builder_to_string(KRef self) {
     return kt_string_of((KRef)copied, kt_bytes_of(copied), length);
 }
 
+/* `kotlin.text.unsafeStringFromCharArray`: the text of `size` code units of `array` from `start`.
+   The callers (`concatToString`, `String(chars)`) have checked the range, so none is rechecked. Each
+   unit is rendered as `Char` renders and the builder joins a surrogate pair into the character it
+   spells, so the answer is the same text the `Char` appends of a `StringBuilder` would make. */
+KRef kt_string_from_char_array(KRef array, kt_int start, kt_int size) {
+    /* `array` stays live in this parameter, and the builder in this local, across the allocations. */
+    KRef builder = kt_string_builder_with_capacity(size);
+    for (kt_int index = 0; index < size; index++) {
+        char encoded[3];
+        kt_char unit = ((const kt_char *)(((const KArray *)array) + 1))[start + index];
+        kt_int width = kt_render_char(unit, encoded);
+        kt_string_builder_append_bytes(builder, encoded, width);
+    }
+    return kt_string_builder_to_string(builder);
+}
+
 kt_boolean kt_is_string_builder(KRef value) {
     return value != NULL && value->header.type == &kt_type_string_builder;
 }

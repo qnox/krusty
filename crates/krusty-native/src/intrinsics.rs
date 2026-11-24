@@ -459,6 +459,23 @@ pub(super) fn runtime_function(signature: FunctionSignature<'_>) -> Option<Strin
             _ => None,
         };
     }
+    if signature.owner.package_matches("kotlin/text") {
+        // The declaration `concatToString` and `String(chars)` end in: the String of a range of a
+        // `CharArray`, whose bounds those callers have already checked.
+        return match (
+            signature.name,
+            signature.params,
+            signature.ret.canonical_semantic(),
+        ) {
+            ("unsafeStringFromCharArray", [array, Ty::Int, Ty::Int], string)
+                if classifier_is(*array, "kotlin/CharArray")
+                    && classifier_is(string, "kotlin/String") =>
+            {
+                Some("kt_string_from_char_array".to_string())
+            }
+            _ => None,
+        };
+    }
     if signature.owner.package_matches("kotlin/collections") {
         // The overflow guard `forEachIndexed` and its relatives carry. A jar provider presents
         // those as INLINE declarations, so their bodies are spliced into the caller and this call

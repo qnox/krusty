@@ -1314,7 +1314,7 @@ impl<'a> BodyLowering<'a> {
         // A compiler temporary, such as the cast `other` of a data class's `equals`, is an unnamed
         // immutable local the source never names.
         if variable.base.origin == "IR_TEMPORARY_VARIABLE" {
-            return self.unnamed_local(id);
+            return self.unnamed_variable(id);
         }
         let ty = self.semantic(variable.ty)?;
         let Some(initializer) = variable.initializer else {

@@ -983,6 +983,9 @@ KRef kt_string_builder_with_capacity(kt_int capacity);
    `CharSequence` and its `length` or `get` throws, no builder is made: NULL, exception pending. */
 KRef kt_string_builder_with_text(KRef text);
 
+/* `kotlin.text.unsafeStringFromCharArray(array, start, size)`: the String of those code units. */
+KRef kt_string_from_char_array(KRef array, kt_int start, kt_int size);
+
 /* `sb.append(value)`, answering the RECEIVER so a chain of them reads as one expression. The value
    is rendered the way `"$value"` would render it, through its own `toString`. */
 KRef kt_string_builder_append(KRef self, KRef value);

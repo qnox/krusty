@@ -33,7 +33,13 @@ impl BodyLowering<'_> {
         } else {
             "WHILE_LOOP"
         };
-        if serialized.origin.as_deref() != Some(expected) {
+        // A loop with no origin is one an inlined declaration's own body wrote (an array
+        // constructor's fill loop); it is an ordinary loop of its condition and body.
+        if serialized
+            .origin
+            .as_deref()
+            .is_some_and(|origin| origin != expected)
+        {
             return unsupported("a loop the compiler introduced");
         }
         let Some(body) = serialized.body else {
@@ -450,7 +456,7 @@ impl BodyLowering<'_> {
         };
         let symbol = variable.base.symbol.clone();
         if destructured {
-            let local = self.locals.temporary(&symbol, ty)?;
+            let local = self.locals.temporary(&symbol, ty, false)?;
             return Ok(self.ir.add_expr(IrExpr::Variable {
                 index: local.index,
                 ty,
