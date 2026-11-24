@@ -7,6 +7,7 @@ XeagerLambdaAnalysis/executorSubmitDefault.args
 XeagerLambdaAnalysis/executorSubmitEnabled.args
 XeagerLambdaAnalysis/unitConversionWithEla.args
 XexplicitApi/explicitApiAndExplicitReturnTypesAtTheSameTime.args
+XjdkRelease/jdkRelease20WithCorruptedClass.args
 XjdkRelease/jdkRelease6WithJvmTarget8Jdk11.args
 XjdkRelease/jdkRelease6WithJvmTarget8Jdk8.args
 XjdkRelease/jdkRelease6WithJvmTarget9.args
@@ -76,6 +77,7 @@ diagnosticTests/classAndFileClassClash.args
 diagnosticTests/classAndOtherFileClassClash.args
 diagnosticTests/classAndPartClash.args
 diagnosticTests/classAndTraitClash.args
+diagnosticTests/classpath.args
 diagnosticTests/conflictingJvmDeclarationsK2.args
 diagnosticTests/conflictingOverloads.args
 diagnosticTests/conflictingProjection.args
@@ -98,6 +100,7 @@ diagnosticTests/instanceAccessBeforeSuperCall.args
 diagnosticTests/javaSealedClass.args
 diagnosticTests/javaSrcWrongPackage.args
 diagnosticTests/kotlinPackage.args
+diagnosticTests/kt19628_13.args
 diagnosticTests/multipleTextRangesInDiagnosticsOrder.args
 diagnosticTests/recordAsSingleFileRoot.args
 diagnosticTests/requireKotlinCompilerVersion.args
@@ -154,6 +157,7 @@ k2SimpleMultiplatformGenericClass.args
 kmpDifferentAnnotationsSuppressed.args
 kmpMissingActual.args
 kotlinHomeWithoutStdlib.args
+kt19628_progressive.args
 kt48833_doNotSuppressVersionErrors.args
 kt51846_backendThreadsValidation1.args
 kt51846_backendThreadsValidation2.args
