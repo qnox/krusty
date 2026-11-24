@@ -23,13 +23,25 @@ struct Discarded {
 }
 
 impl Checker<'_> {
+    /// Called once `expression` is typed, under the policies its own annotations opened: remember
+    /// that it suppresses the report, and report it when its value is discarded.
+    pub(super) fn finish_return_value_check(&mut self, expression: ExprId, ty: Ty) {
+        if self.file.return_value_checker == ReturnValueCheckerMode::Disabled {
+            return;
+        }
+        if self.suppresses_diagnostic("RETURN_VALUE_NOT_USED") {
+            self.return_value_suppressed.insert(expression);
+        }
+        if self.discarded_exprs.contains(&expression) {
+            self.check_unused_return_value(expression, ty);
+        }
+    }
+
     /// Report the unused return values of the discarded expression `expression`, whose type is
-    /// `ty`.
-    pub(super) fn check_unused_return_value(&mut self, expression: ExprId, ty: Ty) {
-        if self.discover_anonymous_captures
-            || self.file.return_value_checker == ReturnValueCheckerMode::Disabled
-            || self.suppresses_diagnostic("RETURN_VALUE_NOT_USED")
-        {
+    /// `ty`. An operand of a wrapper keeps the suppression its own annotations opened, which is
+    /// no longer active once its wrapper is checked.
+    fn check_unused_return_value(&mut self, expression: ExprId, ty: Ty) {
+        if self.discover_anonymous_captures || self.return_value_suppressed.contains(&expression) {
             return;
         }
         match self.file.expr(expression).clone() {

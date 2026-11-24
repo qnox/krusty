@@ -23659,6 +23659,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         stmt_return_targets: HashMap::default(),
         expr_return_targets: HashMap::default(),
         discarded_exprs: crate::fx_hash::HashSet::default(),
+        return_value_suppressed: crate::fx_hash::HashSet::default(),
         narrowed_read_base: HashMap::default(),
         declined_read_targets: HashMap::default(),
         silent_error_exprs: crate::fx_hash::HashSet::default(),
@@ -25761,6 +25762,7 @@ struct Checker<'a> {
     stmt_return_targets: HashMap<StmtId, ReturnTarget>,
     expr_return_targets: HashMap<ExprId, ReturnTarget>,
     discarded_exprs: crate::fx_hash::HashSet<ExprId>,
+    return_value_suppressed: crate::fx_hash::HashSet<ExprId>,
     /// Declared type of a local read whose type a narrowing shadow replaced (a `t = null` write
     /// narrows the flow type to `Nothing?`). kotlinc still resolves a member against the DECLARED
     /// type before rejecting the access on the narrowed nullable receiver, so the nullable-receiver
@@ -39115,10 +39117,7 @@ impl<'a> Checker<'a> {
             self.expr_inner(scope, e, expected, value_required)
         });
         expression_finalization::finalize(self, scope, e, t);
-        // Under the policies the expression's own annotations opened.
-        if self.discarded_exprs.contains(&e) {
-            self.check_unused_return_value(e, t);
-        }
+        self.finish_return_value_check(e, t);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
         self.expr_depth -= 1;

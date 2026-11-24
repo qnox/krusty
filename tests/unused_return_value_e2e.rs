@@ -236,3 +236,20 @@ fn a_suppressed_warning_is_not_reported() {
         &[],
     );
 }
+
+/// A suppression written on the operand of `!!`, a cast or an elvis expression covers only that
+/// operand.
+#[test]
+fn a_suppression_on_a_wrapped_operand_covers_only_that_operand() {
+    assert_like_kotlinc(
+        "@MustUseReturnValues object M {\n\
+         \x20   fun nullable(): String? = \"\"\n\
+         \x20   fun other(): String? = \"\"\n\
+         }\n\
+         fun suppressed() { (@Suppress(\"RETURN_VALUE_NOT_USED\") M.nullable())!! }\n\
+         fun cast() { (@Suppress(\"RETURN_VALUE_NOT_USED\") M.nullable()) as String }\n\
+         fun elvis() { (@Suppress(\"RETURN_VALUE_NOT_USED\") M.nullable()) ?: M.other() }\n\
+         fun reported() { M.nullable()!! }\n",
+        &[],
+    );
+}
