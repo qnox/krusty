@@ -1,4 +1,4 @@
-// KOTLINC_VERSION: [2.4.20,)
+// KOTLINC_VERSION: [2.5.0,)
 // Earlier JVM reference compilers fail during IR lowering of the consumer module.
 // MODULE: lib
 // FILE: Lib.kt
