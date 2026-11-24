@@ -680,7 +680,10 @@ void Kotlin_Internal_GC_GCInfoBuilder_Fill(void *builder, int32_t id) {
     if (id != 0 || kt_last_collection.epoch == 0) {
         return;
     }
-    const struct KCollectionStats *last = &kt_last_collection;
+    /* A setter is Kotlin and may allocate, which may collect and replace the statistics. The report
+       describes the one collection that was current when it began. */
+    const struct KCollectionStats snapshot = kt_last_collection;
+    const struct KCollectionStats *last = &snapshot;
     Kotlin_Internal_GC_GCInfoBuilder_setEpoch(builder, last->epoch);
     Kotlin_Internal_GC_GCInfoBuilder_setStartTime(builder, last->start_ns);
     Kotlin_Internal_GC_GCInfoBuilder_setEndTime(builder, last->end_ns);
