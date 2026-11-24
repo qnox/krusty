@@ -1,0 +1,31 @@
+# Kotlin 2.5.0-RC parcelize box cases that be not-applicable on jvm, relative to
+# the upstream corpus directory. Later releases with no file of their own read this one.
+# Regenerate with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local run.
+additionalAnnotationTrigger.kt
+binder.kt
+bundle.kt
+changingBaseClassProperty.kt
+charSequence.kt
+customSerializerSimple.kt
+kt19747.kt
+kt19747Deprecated.kt
+kt26221.kt
+listKinds.kt
+listSimplePersistent.kt
+listSimplePersistentBinderNullable.kt
+listSimplePersistentNullable.kt
+mapKinds.kt
+mapSimplePersistent.kt
+mppAdditionalAnnotations_k1.kt
+mppAdditionalAnnotations_k2.kt
+mppWithExpectParcelable_k1.kt
+mppWithExpectParcelable_k2.kt
+nestedSparseArrays.kt
+nestedSparseArrays2.kt
+nullableSparseArrays.kt
+objectWriteParcelable.kt
+persistableBundle.kt
+spannableString.kt
+sparseArrays.kt
+sparseBooleanArray.kt
+typeParameters.kt
