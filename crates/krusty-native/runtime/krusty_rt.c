@@ -164,7 +164,6 @@ KT_REFLECT_TYPE(kt_type_kmutable_property2, "KMutableProperty2")
 static const KType *const kt_number_interfaces[] = {&kt_type_number, &kt_type_comparable};
 static const KType *const kt_comparable_interfaces[] = {&kt_type_comparable};
 static const KType *const kt_text_interfaces[] = {&kt_type_comparable, &kt_type_char_sequence};
-static const KType *const kt_char_sequence_interfaces[] = {&kt_type_char_sequence};
 static const KType *const kt_string_builder_interfaces[] = {&kt_type_char_sequence,
                                                             &kt_type_appendable};
 
