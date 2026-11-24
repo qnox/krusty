@@ -1,6 +1,7 @@
 //! Checking annotation argument values and their contextual array syntax.
 //! Constructor selection and generic inference remain ordinary checked-call operations.
 
+use super::deprecation_phase::DeprecationNames;
 use super::*;
 
 type AnnotationElements = Vec<(String, Ty)>;
@@ -108,6 +109,37 @@ impl Checker<'_> {
         }
     }
 
+    /// kotlinc's `POSITIONED_VALUE_ARGUMENT_FOR_JAVA_ANNOTATION` for a Java annotation written as a
+    /// constructor call: a warning until `EnforceMissingNamedArgumentsOnJavaAnnotation`, an error
+    /// after, and nothing in a release that predates the diagnostic. Returns whether it is an error.
+    fn report_positional_java_annotation_call_argument(&mut self, argument: ExprId) -> bool {
+        let forbidden = self
+            .file
+            .language
+            .enforce_missing_named_arguments_on_java_annotation;
+        let warning = self
+            .file
+            .language
+            .positional_java_annotation_call_argument_warning
+            .clone();
+        if !forbidden && (warning.is_none() || self.fragment.publishes_annotation_metadata()) {
+            // The metadata-publication pass keeps a class's own annotation diagnostics, and the
+            // body pass that follows reports the same warning, so only that pass emits it.
+            return false;
+        }
+        self.report_deprecation_error(
+            self.span(argument),
+            forbidden,
+            warning.as_deref(),
+            DeprecationNames {
+                error: crate::diag::names::POSITIONED_VALUE_ARGUMENT_FOR_JAVA_ANNOTATION,
+                warning: crate::diag::names::POSITIONED_VALUE_ARGUMENT_FOR_JAVA_ANNOTATION_WARNING,
+            },
+            "only named arguments are available for Java annotations.",
+        );
+        forbidden
+    }
+
     pub(super) fn check_annotation_arguments(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -160,11 +192,15 @@ impl Checker<'_> {
                 }
             };
             if name.is_none() && !permitted {
-                self.diags.error(
-                    self.span(argument),
-                    "only named arguments are available for Java annotations.".to_string(),
-                );
-                forbidden_positional = true;
+                if nested_call.is_none() {
+                    self.diags.error(
+                        self.span(argument),
+                        "only named arguments are available for Java annotations.".to_string(),
+                    );
+                    forbidden_positional = true;
+                } else if self.report_positional_java_annotation_call_argument(argument) {
+                    forbidden_positional = true;
+                }
             }
         }
         if forbidden_positional {
