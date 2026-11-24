@@ -1253,25 +1253,26 @@ fn explicit_array_checks_share_metadata_with_the_reference_compiler() {
     }
 }
 
-/// A reference library recorded once is replayed byte for byte, with its status and diagnostics,
-/// into a different work directory: the recording's identity is the source name and text, never
-/// the scratch directory.
+/// A reference library recorded once is replayed with its status, diagnostics and complete entry
+/// layout into a different work directory: the recording's identity is the source name and text,
+/// never the scratch directory. The entry bytes are not compared: the compiler writes the source
+/// file's absolute path into the library, so two live runs in different directories differ there
+/// while a replay repeats the first run's bytes.
 #[test]
 fn a_recorded_reference_library_replays_into_another_work_directory() {
     use krusty::backend::Backend;
-    fn files(dir: &std::path::Path, root: &std::path::Path, found: &mut Vec<(String, Vec<u8>)>) {
+    fn files(dir: &std::path::Path, root: &std::path::Path, found: &mut Vec<String>) {
         for entry in std::fs::read_dir(dir).expect("list a reference library") {
             let path = entry.expect("read a reference library entry").path();
             if path.is_dir() {
                 files(&path, root, found);
             } else {
-                found.push((
+                found.push(
                     path.strip_prefix(root)
                         .unwrap()
                         .to_string_lossy()
                         .into_owned(),
-                    std::fs::read(&path).unwrap(),
-                ));
+                );
             }
         }
     }
